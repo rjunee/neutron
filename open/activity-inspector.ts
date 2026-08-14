@@ -335,6 +335,17 @@ export class ActivityInspector {
     if (b.turns_in_flight > 0) b.turns_in_flight -= 1
   }
 
+  /**
+   * O(1) evidence read for the board's derived inline activity
+   * (`work-board/inline-activity.ts`). Deliberately NOT `snapshot()`: that copies
+   * the whole event ring (~200 rows) and this runs on the rail/board read path per
+   * project per refresh. Returns 0 when the scope has never recorded a
+   * non-synthetic event (including after restart — the buffer is live-only).
+   */
+  lastRealActivityAt(scope: InspectorScopeKey): number {
+    return this.scopes.get(scope)?.last_real_activity_at ?? 0
+  }
+
   /** Point-in-time view for the HTTP snapshot the panel fetches on open. This is
    *  load-bearing for the WEDGE case: a wedged session emits nothing, so without a
    *  snapshot the panel would open blank and could not say how long ago the last

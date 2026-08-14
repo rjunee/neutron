@@ -270,6 +270,42 @@ describe('ActivityInspector — the two clocks', () => {
   })
 })
 
+describe('lastRealActivityAt', () => {
+  it('returns 0 for an unknown scope', () => {
+    expect(new ActivityInspector().lastRealActivityAt('unknown')).toBe(0)
+  })
+
+  it('tracks the latest real row using the injected clock', () => {
+    const t = { v: 1_000 }
+    const inspector = new ActivityInspector({ now: () => t.v })
+    inspector.record('p1', { kind: 'tool_start', label: 'Bash' })
+    expect(inspector.lastRealActivityAt('p1')).toBe(1_000)
+    t.v = 2_000
+    inspector.record('p1', { kind: 'tool_end', label: 'Bash' })
+    expect(inspector.lastRealActivityAt('p1')).toBe(2_000)
+  })
+
+  it('synthetic keepalives never create or advance real-activity evidence', () => {
+    // KEEPALIVE MUTANT (#386): making the clock advance unconditional latches cards active.
+    const t = { v: 1_000 }
+    const inspector = new ActivityInspector({ now: () => t.v })
+    inspector.record('fresh', { kind: 'keepalive', label: 'alive', synthetic: true })
+    expect(inspector.lastRealActivityAt('fresh')).toBe(0)
+
+    inspector.record('existing', { kind: 'tool_start', label: 'Bash' })
+    t.v = 2_000
+    inspector.record('existing', { kind: 'keepalive', label: 'alive', synthetic: true })
+    expect(inspector.lastRealActivityAt('existing')).toBe(1_000)
+  })
+
+  it('keeps scope evidence isolated', () => {
+    const inspector = new ActivityInspector({ now: () => 1_000 })
+    inspector.record('scope-a', { kind: 'tool_start', label: 'Read' })
+    expect(inspector.lastRealActivityAt('scope-a')).toBe(1_000)
+    expect(inspector.lastRealActivityAt('scope-b')).toBe(0)
+  })
+})
+
 describe('activityRowFromSubstrateEvent — mapping the raw stream', () => {
   it('marks the keepalive status SYNTHETIC and leaves a real status alone', () => {
     expect(activityRowFromSubstrateEvent({ kind: 'status', message: 'working', keepalive: true }))
