@@ -58,7 +58,7 @@ describe('TridentRunStore', () => {
     expect(got?.channel_kind).toBe('telegram')
   })
 
-  test('the checkpoint OID + findings start NULL and round-trip through update (0121)', async () => {
+  test('the checkpoint OID + findings start NULL and round-trip through update (0122)', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({
       slug: 'resume-columns',

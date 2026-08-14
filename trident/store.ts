@@ -103,7 +103,7 @@ export interface TridentRun {
    */
   inner_checkpoint: string | null
   /**
-   * MID-LOOP RESUME (migration 0121) — the branch head OID the checkpoint above
+   * MID-LOOP RESUME (migration 0122) — the branch head OID the checkpoint above
    * was RECORDED AGAINST, written by the inner workflow in the SAME
    * `trident/checkpoint.sh` UPDATE as the checkpoint name, so the pair is atomic
    * and can never drift apart. A relaunched run compares it with the LIVE branch
@@ -115,7 +115,7 @@ export interface TridentRun {
    */
   inner_checkpoint_head: string | null
   /**
-   * MID-LOOP RESUME (migration 0121) — the synthesised findings the
+   * MID-LOOP RESUME (migration 0122) — the synthesised findings the
    * `argus-request-changes` checkpoint was recorded with, as compact JSON. A
    * resume that skips forward to the fix round fixes THESE; absent/unparseable →
    * the run re-reviews rather than sending Forge in with nothing to act on.
@@ -198,9 +198,9 @@ export interface TridentRunUpdate {
   failure_reason?: string | null
   workflow_run_id?: string | null
   inner_checkpoint?: string | null
-  /** Workflow-owned (0121); patchable for the workflow-sim writes in tests. */
+  /** Workflow-owned (0122); patchable for the workflow-sim writes in tests. */
   inner_checkpoint_head?: string | null
-  /** Workflow-owned (0121); patchable for the workflow-sim writes in tests. */
+  /** Workflow-owned (0122); patchable for the workflow-sim writes in tests. */
   inner_checkpoint_findings?: string | null
   inner_verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
   /** Phase 2a (0091) — the inner workflow's typed terminal result (compact JSON). */
@@ -609,7 +609,7 @@ export class TridentRunStore {
    * result the detached workflow wrote out-of-band. Use `update({inner_result})`
    * for the workflow-sim write in tests.
    *
-   * `inner_checkpoint_head`/`inner_checkpoint_findings` (0121) are excluded for the
+   * `inner_checkpoint_head`/`inner_checkpoint_findings` (0122) are excluded for the
    * same reason AND a sharper one: they are only meaningful PAIRED with the
    * `inner_checkpoint` they were written beside. The workflow writes all three in
    * ONE atomic UPDATE; an outer-loop snapshot that carried a checkpoint name

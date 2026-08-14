@@ -10440,7 +10440,7 @@ genuinely could not tell A from B, which is precisely why failing closed was rig
 
 **The fix, in the order it has to be built.**
 - `checkpoint()` now records the branch head OID the checkpoint APPLIES TO
-  (`code_trident_runs.inner_checkpoint_head`, migration `0121`) in the SAME
+  (`code_trident_runs.inner_checkpoint_head`, migration `0122`) in the SAME
   `trident/checkpoint.sh` UPDATE as the name, so the pair is atomic and can never drift. It is
   written on EVERY checkpoint — including as an empty string when a phase reported no sha,
   because a skipped write would leave the PREVIOUS phase's OID sitting next to the new name.

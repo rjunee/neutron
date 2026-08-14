@@ -1,4 +1,4 @@
--- 0121_trident_checkpoint_head.sql
+-- 0122_trident_checkpoint_head.sql
 --
 -- A CHECKPOINT LEARNS WHICH COMMIT IT APPLIED TO.
 --

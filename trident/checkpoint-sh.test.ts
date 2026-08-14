@@ -187,7 +187,7 @@ describe('checkpoint.sh — terminal-result write (legacy writeTerminalResult() 
   })
 })
 
-describe('checkpoint.sh — the checkpoint records WHICH COMMIT it applied to (0121)', () => {
+describe('checkpoint.sh — the checkpoint records WHICH COMMIT it applied to (0122)', () => {
   // The name alone could not tell a resumed run whether the branch still holds the
   // code the checkpoint was about, which is why every relaunch had to rebuild. The
   // OID lands in the SAME UPDATE as the name, so the pair is atomic.

@@ -5907,7 +5907,7 @@ deleted, no dual path):
   (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`
   / `fix-round-N`; timestamps via `date -u +%FT%TZ` since `Date.now` is
   unavailable in a workflow). Each checkpoint also records the branch head OID it
-  APPLIES TO (`inner_checkpoint_head`, migration `0121`) in the SAME atomic
+  APPLIES TO (`inner_checkpoint_head`, migration `0122`) in the SAME atomic
   UPDATE, plus the findings an `argus-request-changes` was recorded with
   (`inner_checkpoint_findings`) — see MID-LOOP RESUME below. A workflow is session-bound (`resumeFromRunId` is
   same-session only) and the background workflow does NOT survive a process exit,
