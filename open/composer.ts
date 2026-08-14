@@ -384,7 +384,7 @@ import {
   resolveHostDeployConfig,
   type HostDeployService,
 } from './host-deploy.ts'
-import { createHostDeployDispatch, createHostDeployGit } from './host-deploy-runtime.ts'
+import { createHostDeployDispatch, createHostDeployRemoteGit } from './host-deploy-runtime.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
 import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
@@ -2582,23 +2582,34 @@ export function buildOpenGraphComposer(
     // register either way, and an LLM-less box simply has nothing to call them.
     let hostDeployService: HostDeployService | null = null
     const hostDeployInstall = ({ approvals }: { approvals: ApprovalManager }): void => {
+      // CALL TIME, every time. Reading the endpoint + credential once here
+      // would bake in whatever the store held at boot — the
+      // failure the Decisions Log records on 2026-08-07.
+      //
+      // ONE resolver, shared by the git view and the service. They are two halves
+      // of a single conversation with the same control plane, and a git view
+      // pointed somewhere else would resolve a ref against a checkout that is not
+      // the one about to be deployed.
+      const resolveHostDeploy = (): ReturnType<typeof resolveHostDeployConfig> => {
+        const owner = asOwnerHandle(owner_handle)
+        return resolveHostDeployConfig({
+          url:
+            projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_URL_SERVICE)?.plaintext ??
+            null,
+          token:
+            projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_TOKEN_SERVICE)?.plaintext ??
+            null,
+        })
+      }
       hostDeployService = createHostDeployService({
         approvals,
-        git: createHostDeployGit({ repo_dir: env['NEUTRON_REPO_ROOT'] ?? process.cwd() }),
-        // CALL TIME, every time. Reading the endpoint + credential once here
-        // would bake in whatever the store held at boot — the
-        // failure the Decisions Log records on 2026-08-07.
-        resolveConfig: () => {
-          const owner = asOwnerHandle(owner_handle)
-          return resolveHostDeployConfig({
-            url:
-              projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_URL_SERVICE)?.plaintext ??
-              null,
-            token:
-              projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_TOKEN_SERVICE)?.plaintext ??
-              null,
-          })
-        },
+        // THE CONTROL PLANE RESOLVES THE REF, not this process. Resolving a
+        // remote ref means fetching, a fetch writes into the host checkout's git
+        // directory, and this service is deliberately unprivileged there — which
+        // is why the local implementation refused with `Permission denied` and
+        // the owner could not deploy at all.
+        git: createHostDeployRemoteGit({ resolveConfig: resolveHostDeploy }),
+        resolveConfig: resolveHostDeploy,
         dispatch: createHostDeployDispatch(),
         project_slug,
         owner_user_id: OWNER_USER_ID,

@@ -5,10 +5,9 @@
  * two narrow seams so every guard in it is testable without a repo or a network.
  * This module supplies the production implementations of those seams:
  *
- *   - {@link createHostDeployGit} — a view of the checkout the host runs, over
- *     the shared, bounded `execFile` git wrapper (`gateway/git/git-exec.ts`). A
- *     remote target is fetched so its objects can be rendered in the approval;
- *     no operation changes the working tree, HEAD, or deployed state.
+ *   - {@link createHostDeployRemoteGit} — the control plane's view of the
+ *     checkout it deploys, asked for over HTTP. **It used to be local git, and
+ *     that is exactly why the owner could not deploy at all.**
  *   - {@link createHostDeployDispatch} — the ONE authenticated call to the
  *     configured control-plane endpoint. The credential goes in the
  *     `Authorization` header and NOWHERE else — not the body, not the URL, not
@@ -20,9 +19,25 @@
  * the owner should read as a sentence, so it comes back as `ok:false` with a
  * short detail. Only a genuinely unreachable endpoint produces a throw, and the
  * service catches that too.
+ *
+ * ── WHY RESOLVING MOVED OFF THIS BOX ────────────────────────────────────────
+ * The git view here ran `git fetch` against the host checkout — deliberately, so
+ * the approval renders the real commits rather than a name. **But a fetch always
+ * writes `FETCH_HEAD`, and this process is not allowed to write there.** The
+ * checkout belongs to the host and this service runs unprivileged, which is the
+ * whole point: it may ASK for a deploy and may never perform one. So the resolve
+ * failed with `Permission denied` and the owner could not deploy at all — while
+ * the control plane's own endpoint, correctly, would only accept a sha this
+ * process had no way to produce.
+ *
+ * Neither of those rules was wrong. **The resolve step was simply on the side of
+ * the boundary with no write access**, so it moved across to join the deploy it
+ * informs. 📌 The lesson generalises: when a privilege boundary is drawn, every
+ * step that NEEDS the privilege has to move — not just the obviously dangerous
+ * one. The innocuous-looking read ("what does this ref point at?") had a hidden
+ * write inside it, which is why it was left behind and why nothing noticed until
+ * a real deploy was attempted.
  */
-
-import { createGitExec, errStdout, type GitExecFn } from '@neutronai/gateway/git/git-exec.ts'
 
 import {
   HOST_DEPLOY_CALL_TIMEOUT_MS,
@@ -31,130 +46,10 @@ import {
   scrubHostDeploySecrets,
   type HostDeployCommit,
   type HostDeployCommitRange,
+  type HostDeployConfigState,
   type HostDeployDispatch,
   type HostDeployGit,
 } from './host-deploy.ts'
-
-/**
- * A read-only {@link HostDeployGit} over `repo_dir` — the checkout the host
- * runs (`NEUTRON_REPO_ROOT`, the same root `open/composer.ts:1890` resolves the
- * public doc root from). `HEAD` is the CURRENT PIN: the sha this box is on.
- */
-export function createHostDeployGit(opts: {
-  repo_dir: string
-  git_binary?: string
-  exec?: GitExecFn
-  remote_timeout_ms?: number
-}): HostDeployGit {
-  const { repo_dir } = opts
-  const remote_timeout_ms = opts.remote_timeout_ms ?? HOST_DEPLOY_REMOTE_TIMEOUT_MS
-  const gitExec = opts.exec ?? createGitExec(opts.git_binary ?? 'git')
-
-  async function revParse(ref: string): Promise<string | null> {
-    // `--verify --quiet` exits 1 with empty stdout for an unknown ref;
-    // `^{commit}` makes an annotated tag resolve to the commit it points at,
-    // so the sha the approval binds to is the sha that would be deployed.
-    //
-    // NOT `allowNonZero` — that flag routes through `isExecChildError`, which
-    // is `err instanceof Error` (`gateway/git/git-exec.ts:135`) and therefore
-    // swallows a MISSING git binary, a timeout and a maxBuffer overrun into
-    // the same empty stdout an unknown ref produces. Under it a broken
-    // checkout was indistinguishable from "this ref does not exist" (Argus r1
-    // major). Only the one exit status `--quiet` documents becomes null; every
-    // other failure propagates and the service refuses.
-    let stdout: string
-    try {
-      ;({ stdout } = await gitExec(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
-        cwd: repo_dir,
-      }))
-    } catch (err) {
-      if (isUnknownRefExit(err)) return null
-      throw err
-    }
-    const sha = stdout.trim()
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : null
-  }
-
-  return {
-    revParse,
-
-    async resolveTarget(ref: string): Promise<string | null> {
-      const remotes = (await gitExec(['remote'], { cwd: repo_dir })).stdout
-        .split('\n')
-        .map((remote) => remote.trim())
-        .filter((remote) => remote.length > 0)
-      const parts = ref.split('/')
-      const explicit = parts[0] === 'refs' && parts[1] === 'remotes'
-      const remote = explicit ? parts[2] : parts[0]
-      const branch = explicit ? parts.slice(3).join('/') : parts.slice(1).join('/')
-      if (remote !== undefined && branch.length > 0 && remotes.includes(remote)) {
-        // Fetch, rather than ls-remote, because the approval must render the
-        // actual commits. `--force` keeps a rewritten remote branch truthful;
-        // the destination is metadata only and cannot move HEAD or the tree.
-        await gitExec(
-          ['fetch', '--no-tags', '--force', remote, `refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
-          { cwd: repo_dir, timeout_ms: remote_timeout_ms },
-        )
-        return revParse(`refs/remotes/${remote}/${branch}`)
-      }
-      return revParse(ref)
-    },
-
-    async commitsBetween(from: string, to: string, limit: number): Promise<HostDeployCommitRange> {
-      // TWO calls on purpose: the render is capped, the COUNT is not. "40
-      // commits would land" when 300 would is a lie the owner cannot detect.
-      //
-      // Neither call passes `allowNonZero`. THE COMMIT LIST IS THE APPROVAL: if
-      // git cannot produce it, the only correct answer is the refusal
-      // `open/host-deploy.ts` already writes — not an empty list rendered under
-      // the "SIDEWAYS or BACKWARD" warning, which is what swallowing the failure
-      // showed the owner instead (Argus r1 major).
-      const counted = await gitExec(['rev-list', '--count', `${from}..${to}`], {
-        cwd: repo_dir,
-      })
-      const parsedTotal = Number.parseInt(counted.stdout.trim(), 10)
-      const total = Number.isFinite(parsedTotal) && parsedTotal >= 0 ? parsedTotal : 0
-
-      const logged = await gitExec(
-        [
-          'log',
-          '--no-color',
-          `--max-count=${Math.max(1, Math.trunc(limit))}`,
-          '--format=%H %s',
-          `${from}..${to}`,
-        ],
-        { cwd: repo_dir },
-      )
-      const commits: HostDeployCommit[] = []
-      for (const line of logged.stdout.split('\n')) {
-        const trimmed = line.trimEnd()
-        if (trimmed.length === 0) continue
-        const space = trimmed.indexOf(' ')
-        const sha = space === -1 ? trimmed : trimmed.slice(0, space)
-        if (!/^[0-9a-f]{40}$/.test(sha)) continue
-        commits.push({ sha, subject: space === -1 ? '' : trimmed.slice(space + 1) })
-      }
-      // `rev-list --count` and `log` are two invocations, so a ref that moved
-      // between them could make the count SMALLER than the rendered list. Never
-      // report fewer commits than are shown.
-      return { commits, total: Math.max(total, commits.length) }
-    },
-  }
-}
-
-/**
- * True only for the ONE failure `git rev-parse --verify --quiet` uses to say
- * "this checkout does not know that ref": exit status 1 with no stdout. A
- * missing binary (`ENOENT`), a timeout (`SIGTERM`), a maxBuffer overrun and
- * git's own `fatal:` exits (128) all fail this test and stay thrown, so a broken
- * checkout can never be reported to the owner as a merely unknown ref.
- */
-function isUnknownRefExit(err: unknown): boolean {
-  if (!(err instanceof Error)) return false
-  const { code } = err as { code?: unknown }
-  if (code !== 1 && code !== '1') return false
-  return errStdout(err).trim().length === 0
-}
 
 /**
  * The narrow slice of `fetch` this module calls — declared as its own type
@@ -162,6 +57,136 @@ function isUnknownRefExit(err: unknown): boolean {
  * object that also has to carry the runtime's `fetch.preconnect`.
  */
 export type HostDeployFetch = (input: string, init: RequestInit) => Promise<Response>
+
+/**
+ * A {@link HostDeployGit} answered by the control plane instead of by local git.
+ *
+ * ── EVERY CALL RESOLVES ITS OWN CONFIG ──────────────────────────────────────
+ * `resolveConfig` is invoked per request, never captured, for the same reason the
+ * service resolves it per request: reading the endpoint and credential once at
+ * construction bakes in whatever the store held at boot.
+ *
+ * ── ONE CONFIGURED URL, NOT TWO ─────────────────────────────────────────────
+ * The preview lives at `<the configured deploy url>/preview`. Asking the owner to
+ * configure a second URL adds a way for the pair to be half-set — an instance
+ * that can deploy but not resolve, or the reverse, both of which surface as an
+ * unexplainable refusal. One value cannot disagree with itself.
+ *
+ * ── AN UNCONFIGURED INSTANCE NEVER GETS HERE, AND STILL FAILS LOUDLY ────────
+ * `host-deploy.ts` checks `configured` before it touches this seam, so a missing
+ * endpoint is already answered as "disabled, and here is why". If that order ever
+ * changes, a throw is the correct outcome: silently returning `null` would read
+ * as "this checkout does not know that ref", which is a lie about the owner's
+ * input rather than the truth about our own configuration.
+ */
+export function createHostDeployRemoteGit(opts: {
+  resolveConfig: () => HostDeployConfigState
+  timeout_ms?: number
+  fetchImpl?: HostDeployFetch
+}): HostDeployGit {
+  const timeout_ms = opts.timeout_ms ?? HOST_DEPLOY_REMOTE_TIMEOUT_MS
+  const doFetch = opts.fetchImpl ?? fetch
+
+  async function ask(body: Record<string, unknown>): Promise<{ status: number; json: unknown }> {
+    const cfg = opts.resolveConfig()
+    if (!cfg.configured) throw new Error(`host deploy is not configured: ${cfg.reason}`)
+    const { url, token } = cfg.endpoint
+    const res = await doFetch(previewUrl(url), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        // The credential appears HERE and nowhere else — not the body, not the
+        // URL, not anything this function returns or throws.
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeout_ms),
+    })
+    let parsed: unknown = null
+    try {
+      const text = (await res.text()).trim()
+      parsed = text.length > 0 ? JSON.parse(text) : null
+    } catch {
+      parsed = null
+    }
+    return { status: res.status, json: parsed }
+  }
+
+  /**
+   * A refusal that means "this checkout does not know that ref" is `null`, which
+   * is what the interface documents. **Everything else throws**, and the
+   * distinction is load-bearing: `host-deploy.ts` renders `null` as the owner's
+   * ref being wrong and a throw as the machinery being wrong. Collapsing them
+   * sends him hunting for a typo that is not there.
+   */
+  function shaOrNull(status: number, json: unknown, what: string): string | null {
+    if (status === 404) return null
+    if (status !== 200) throw new Error(`${what} failed (${status}): ${detailOf(json)}`)
+    const sha = typeof json === 'object' && json !== null ? (json as { target_sha?: unknown }).target_sha : null
+    return typeof sha === 'string' && /^[0-9a-f]{40}$/.test(sha) ? sha : null
+  }
+
+  return {
+    async revParse(ref: string): Promise<string | null> {
+      // `HEAD` is a ref like any other to the control plane — it rev-parses its
+      // own checkout, which is the pin this instance is running.
+      const { status, json } = await ask({ ref })
+      if (ref === 'HEAD' && status === 200) {
+        const cur =
+          typeof json === 'object' && json !== null ? (json as { current_sha?: unknown }).current_sha : null
+        if (typeof cur === 'string' && /^[0-9a-f]{40}$/.test(cur)) return cur
+      }
+      return shaOrNull(status, json, `resolving ${JSON.stringify(ref)}`)
+    },
+
+    async resolveTarget(ref: string): Promise<string | null> {
+      const { status, json } = await ask({ ref })
+      return shaOrNull(status, json, `resolving ${JSON.stringify(ref)}`)
+    },
+
+    async commitsBetween(from: string, to: string, limit: number): Promise<HostDeployCommitRange> {
+      // BOTH ENDS ARE SENT. The control plane answers the range directly rather
+      // than slicing a cached preview, so the REVERSED range — the check that
+      // says a deploy would move sideways or backward — is a first-class answer
+      // and not something reconstructed here.
+      const { status, json } = await ask({ from, to, limit })
+      if (status !== 200) {
+        // NOT an empty range. An empty list renders as "nothing would change",
+        // which is the opposite of the truth when the call merely failed — and
+        // the owner would approve a deploy on the strength of it.
+        throw new Error(`listing ${from}..${to} failed (${status}): ${detailOf(json)}`)
+      }
+      const body = (json ?? {}) as { commits?: unknown; total?: unknown }
+      const commits: HostDeployCommit[] = Array.isArray(body.commits)
+        ? body.commits.flatMap((c) => {
+            const sha = typeof c === 'object' && c !== null ? (c as { sha?: unknown }).sha : null
+            const subject = typeof c === 'object' && c !== null ? (c as { subject?: unknown }).subject : null
+            if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) return []
+            return [{ sha, subject: typeof subject === 'string' ? subject : '' }]
+          })
+        : []
+      const total = typeof body.total === 'number' && Number.isFinite(body.total) ? body.total : 0
+      // Never claim fewer commits than are rendered — the same rule the control
+      // plane applies, restated here because a malformed body must not break it.
+      return { commits, total: Math.max(total, commits.length) }
+    },
+  }
+}
+
+/**
+ * `<deploy url>/preview`. A trailing slash on the configured value is the
+ * likeliest way for this to be written by hand, so it is normalised rather than
+ * producing a `//preview` that 404s with no clue why.
+ */
+function previewUrl(url: string): string {
+  return `${url.replace(/\/+$/, '')}/preview`
+}
+
+/** The control plane's `error` sentence when it sent one; never the raw body. */
+function detailOf(json: unknown): string {
+  const err = typeof json === 'object' && json !== null ? (json as { error?: unknown }).error : null
+  return typeof err === 'string' && err.length > 0 ? err.slice(0, HOST_DEPLOY_DETAIL_CAP) : 'no detail'
+}
 
 /**
  * The ONE authenticated control-plane call. `POST { ref, sha }` with the

@@ -4,10 +4,14 @@
  *
  * The service suite (`host-deploy.test.ts`) proves every guard against injected
  * seams. That leaves the two things which can only ever be wrong in production
- * asserted by nothing: whether `createHostDeployGit` looks in the right place
- * and reports the right shas, and whether `createHostDeployDispatch` puts the
- * credential where it claims to. Both are exercised here through the default
- * wiring, with no deps passed except the ones a caller must supply.
+ * asserted by nothing: whether `createHostDeployRemoteGit` asks the CONTROL
+ * PLANE the right question and reads its answer correctly, and whether
+ * `createHostDeployDispatch` puts the credential where it claims to.
+ *
+ * The git view is no longer local, so these tests drive a recording `fetch`
+ * rather than a temp repo: what can be wrong in production now is the URL it
+ * derives, where the credential lands, and whether a refusal is read as the
+ * owner's typo or as the machinery breaking.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -16,8 +20,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createHostDeployDispatch, createHostDeployGit } from '../host-deploy-runtime.ts'
-import { HOST_DEPLOY_DETAIL_CAP } from '../host-deploy.ts'
+import {
+  createHostDeployDispatch,
+  createHostDeployRemoteGit,
+  type HostDeployFetch,
+} from '../host-deploy-runtime.ts'
+import { HOST_DEPLOY_DETAIL_CAP, type HostDeployConfigState } from '../host-deploy.ts'
 
 let repo: string
 
@@ -52,138 +60,154 @@ afterEach(() => {
   rmSync(repo, { recursive: true, force: true })
 })
 
-describe('createHostDeployGit — the read-only view of the host checkout', () => {
-  test('a remote target is fetched, while HEAD and local targets never use the network', async () => {
-    // `timeout_ms` is recorded as `number | undefined` rather than optional: the test
-    // ASSERTS on the absence of a timeout for local reads, so the key must always be
-    // present and explicitly undefined. Under `exactOptionalPropertyTypes` an optional
-    // key and a key holding `undefined` are different types, and only the latter can
-    // carry "this call passed no timeout" as an observation.
-    const calls: Array<{ args: string[]; timeout_ms: number | undefined }> = []
-    const localSha = 'a'.repeat(40)
-    const remoteSha = 'b'.repeat(40)
-    const g = createHostDeployGit({
-      repo_dir: repo,
-      remote_timeout_ms: 1_234,
-      exec: async (args, opts) => {
-        calls.push({ args, timeout_ms: opts?.timeout_ms })
-        if (args[0] === 'remote') return { stdout: 'origin\n', stderr: '' }
-        if (args[0] === 'fetch') return { stdout: '', stderr: '' }
-        const named = args.at(-1)
-        return { stdout: named?.includes('refs/remotes/origin/main') ? `${remoteSha}\n` : `${localSha}\n`, stderr: '' }
-      },
+describe('createHostDeployRemoteGit — the control plane answers, not local git', () => {
+  const URL_ = 'https://control.example.com/v1/deploy'
+  const TOKEN = 'tok-secret-value'
+  const SHA_A = 'a'.repeat(40)
+  const SHA_B = 'b'.repeat(40)
+
+  const configured = (): HostDeployConfigState => ({
+    configured: true,
+    endpoint: { url: URL_, token: TOKEN },
+  })
+
+  /** Records every request so a test can assert the URL, headers and body. */
+  function recorder(reply: (body: Record<string, unknown>) => { status: number; json: unknown }) {
+    const seen: { url: string; init: RequestInit }[] = []
+    const fetchImpl: HostDeployFetch = async (url, init) => {
+      seen.push({ url, init })
+      const parsed = JSON.parse(String(init.body)) as Record<string, unknown>
+      const { status, json } = reply(parsed)
+      return new Response(JSON.stringify(json), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    return { seen, fetchImpl }
+  }
+
+  const happy = () =>
+    recorder((body) => {
+      if (typeof body['from'] === 'string' && typeof body['to'] === 'string') {
+        return { status: 200, json: { commits: [{ sha: 'c'.repeat(40), subject: 'one' }], total: 7 } }
+      }
+      return {
+        status: 200,
+        json: { target_sha: SHA_B, current_sha: SHA_A, commits: [], total: 0 },
+      }
     })
 
-    expect(await g.resolveTarget('origin/main')).toBe(remoteSha)
-    expect(await g.revParse('HEAD')).toBe(localSha)
-    expect(await g.resolveTarget('release')).toBe(localSha)
-    expect(await g.resolveTarget(localSha)).toBe(localSha)
+  test('resolves a ref against the CONTROL PLANE, with the credential in the header only', async () => {
+    const { seen, fetchImpl } = happy()
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
 
-    expect(calls.filter(({ args }) => args[0] === 'fetch')).toEqual([
-      {
-        args: ['fetch', '--no-tags', '--force', 'origin', 'refs/heads/main:refs/remotes/origin/main'],
-        timeout_ms: 1_234,
+    expect(await g.resolveTarget('origin/main')).toBe(SHA_B)
+    expect(seen).toHaveLength(1)
+    // The preview hangs off the ONE configured deploy url — a second configured
+    // value could be half-set, and one value cannot disagree with itself.
+    expect(seen[0]?.url).toBe('https://control.example.com/v1/deploy/preview')
+    expect((seen[0]?.init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${TOKEN}`)
+    // The credential appears in the header and NOWHERE else.
+    expect(String(seen[0]?.init.body)).not.toContain(TOKEN)
+    expect(seen[0]?.url).not.toContain(TOKEN)
+  })
+
+  test('a trailing slash on the configured url does not produce a //preview that 404s', async () => {
+    const { seen, fetchImpl } = happy()
+    const g = createHostDeployRemoteGit({
+      resolveConfig: () => ({ configured: true, endpoint: { url: `${URL_}/`, token: TOKEN } }),
+      fetchImpl,
+    })
+    await g.resolveTarget('origin/main')
+    expect(seen[0]?.url).toBe('https://control.example.com/v1/deploy/preview')
+  })
+
+  test('HEAD reports the pin the host is ON, not the ref that was asked about', async () => {
+    const { fetchImpl } = happy()
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    expect(await g.revParse('HEAD')).toBe(SHA_A)
+  })
+
+  test('an UNKNOWN ref is null — the interface says so, and the service renders it as the owner\'s typo', async () => {
+    const { fetchImpl } = recorder(() => ({ status: 404, json: { error: 'does not know the ref' } }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    expect(await g.resolveTarget('v9.9.9')).toBeNull()
+  })
+
+  test('the control plane FAILING throws — it is never reported as an unknown ref', async () => {
+    // Collapsing these sends the owner hunting for a typo that is not there.
+    const { fetchImpl } = recorder(() => ({ status: 500, json: { error: 'git exploded' } }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    await expect(g.resolveTarget('origin/main')).rejects.toThrow(/git exploded/)
+  })
+
+  test('a 401 throws rather than reading as an unknown ref', async () => {
+    const { fetchImpl } = recorder(() => ({ status: 401, json: { error: 'bearer token required' } }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    await expect(g.resolveTarget('origin/main')).rejects.toThrow()
+  })
+
+  test('a range sends BOTH ends, so the reversed one is a real answer and not a cached slice', async () => {
+    const { seen, fetchImpl } = happy()
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+
+    const range = await g.commitsBetween(SHA_B, SHA_A, 5)
+    expect(range.total).toBe(7)
+    expect(range.commits).toEqual([{ sha: 'c'.repeat(40), subject: 'one' }])
+    const body = JSON.parse(String(seen[0]?.init.body)) as Record<string, unknown>
+    expect(body).toEqual({ from: SHA_B, to: SHA_A, limit: 5 })
+  })
+
+  test('a failed range THROWS — an empty list would render as "nothing would change"', async () => {
+    const { fetchImpl } = recorder(() => ({ status: 500, json: { error: 'bad revision' } }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    await expect(g.commitsBetween(SHA_A, SHA_B, 5)).rejects.toThrow(/bad revision/)
+  })
+
+  test('total is never reported below the number of commits actually returned', async () => {
+    const { fetchImpl } = recorder(() => ({
+      status: 200,
+      json: { commits: [{ sha: 'c'.repeat(40), subject: 'one' }, { sha: 'd'.repeat(40), subject: 'two' }], total: 1 },
+    }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    expect((await g.commitsBetween(SHA_A, SHA_B, 5)).total).toBe(2)
+  })
+
+  test('a malformed commit entry is dropped rather than rendered', async () => {
+    const { fetchImpl } = recorder(() => ({
+      status: 200,
+      json: { commits: [{ sha: 'nope' }, { sha: 'e'.repeat(40), subject: 'real' }], total: 2 },
+    }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    expect((await g.commitsBetween(SHA_A, SHA_B, 5)).commits).toEqual([
+      { sha: 'e'.repeat(40), subject: 'real' },
+    ])
+  })
+
+  test('an UNCONFIGURED instance throws rather than answering null', async () => {
+    // null would read as "this checkout does not know that ref" — a lie about the
+    // owner's input rather than the truth about our own configuration.
+    const { fetchImpl } = happy()
+    const g = createHostDeployRemoteGit({
+      resolveConfig: () => ({ configured: false, reason: 'no control plane url is set' }),
+      fetchImpl,
+    })
+    await expect(g.resolveTarget('origin/main')).rejects.toThrow(/not configured/)
+  })
+
+  test('config is resolved on EVERY call, never captured at construction', async () => {
+    let calls = 0
+    const { fetchImpl } = happy()
+    const g = createHostDeployRemoteGit({
+      resolveConfig: () => {
+        calls += 1
+        return configured()
       },
-    ])
-    expect(calls.filter(({ args }) => args[0] === 'rev-parse').map(({ args }) => args.at(-1))).toContain(
-      'HEAD^{commit}',
-    )
-  })
-
-  test('resolves HEAD and a named ref, and lists the commits between them', async () => {
-    const base = commit('a.txt', 'base: the sha the host runs')
-    git('branch', 'deployed')
-    const one = commit('b.txt', 'fix(deploy): name the sha in the refusal')
-    const two = commit('c.txt', 'feat(usage): one screen for every account')
-
-    const g = createHostDeployGit({ repo_dir: repo })
-
-    expect(await g.revParse('HEAD')).toBe(two)
-    expect(await g.revParse('deployed')).toBe(base)
-    expect(await g.revParse('main')).toBe(two)
-
-    const range = await g.commitsBetween(base, two, 40)
-    expect(range.total).toBe(2)
-    expect(range.commits.map((c) => c.sha)).toEqual([two, one])
-    expect(range.commits.map((c) => c.subject)).toEqual([
-      'feat(usage): one screen for every account',
-      'fix(deploy): name the sha in the refusal',
-    ])
-  })
-
-  test('an unknown ref is null, not a throw and not a bogus sha', async () => {
-    commit('a.txt', 'base')
-    const g = createHostDeployGit({ repo_dir: repo })
-    expect(await g.revParse('origin/never-existed')).toBeNull()
-    // POSITIVE control on the same instance: the tool CAN return a sha, so the
-    // null above is a real answer rather than a resolver that always fails.
-    expect(await g.revParse('HEAD')).toMatch(/^[0-9a-f]{40}$/)
-  })
-
-  test('an annotated tag resolves to the COMMIT it points at', async () => {
-    const sha = commit('a.txt', 'base')
-    git('tag', '-a', 'v1.0.0', '-m', 'release')
-    const g = createHostDeployGit({ repo_dir: repo })
-    expect(await g.revParse('v1.0.0')).toBe(sha)
-  })
-
-  test('the TOTAL is the true count even when the rendered list is capped', async () => {
-    const base = commit('a.txt', 'base')
-    for (let i = 0; i < 5; i += 1) commit(`f${i}.txt`, `chore: step ${i}`)
-    const head = git('rev-parse', 'HEAD')
-
-    const g = createHostDeployGit({ repo_dir: repo })
-    const range = await g.commitsBetween(base, head, 2)
-    expect(range.commits).toHaveLength(2)
-    // "2 commits would land" when 5 would is a lie the owner cannot detect.
-    expect(range.total).toBe(5)
-  })
-
-  test('an empty range reports zero rather than throwing', async () => {
-    const sha = commit('a.txt', 'base')
-    const g = createHostDeployGit({ repo_dir: repo })
-    expect(await g.commitsBetween(sha, sha, 40)).toEqual({ commits: [], total: 0 })
-  })
-
-  test('a BROKEN checkout throws — it is never reported as "no commits" or "unknown ref"', async () => {
-    // Argus r1 major, reproduced: `allowNonZero` routes through `isExecChildError`,
-    // which is `err instanceof Error` (`gateway/git/git-exec.ts:135`), so a
-    // missing git binary, a timeout and a maxBuffer overrun all collapsed into
-    // the SAME empty stdout an unknown ref produces. `commitsBetween` then
-    // returned `{commits:[],total:0}` with no throw, the refusal in
-    // `open/host-deploy.ts` never fired, and the owner was shown the
-    // "SIDEWAYS or BACKWARD" warning above an empty fence instead of being told
-    // the checkout could not be read.
-    const sha = commit('a.txt', 'base')
-    const broken = createHostDeployGit({ repo_dir: repo, git_binary: '/nonexistent/git' })
-
-    expect(broken.commitsBetween(sha, sha, 40)).rejects.toThrow()
-    expect(broken.revParse('HEAD')).rejects.toThrow()
-
-    // POSITIVE CONTROL: the same two calls against a working binary answer
-    // normally, so the rejections above are about the broken binary and not about
-    // a helper that always throws.
-    const ok = createHostDeployGit({ repo_dir: repo })
-    expect(await ok.revParse('HEAD')).toBe(sha)
-    expect(await ok.commitsBetween(sha, sha, 40)).toEqual({ commits: [], total: 0 })
-  })
-
-  test('a range naming a sha this checkout does not have throws rather than reporting zero', async () => {
-    const sha = commit('a.txt', 'base')
-    const g = createHostDeployGit({ repo_dir: repo })
-    const absent = 'ff00112233445566778899aabbccddeeff001122'
-    // "0 commits would land" for a range git cannot even parse is the same lie in
-    // a different costume.
-    expect(g.commitsBetween(sha, absent, 40)).rejects.toThrow()
-  })
-
-  test('an unknown ref is still just null — the one failure that IS an answer', async () => {
-    // The precise boundary of the change above: exit 1 with no stdout, which is
-    // what `--verify --quiet` documents, stays a null. Everything else throws.
-    commit('a.txt', 'base')
-    const g = createHostDeployGit({ repo_dir: repo })
-    expect(await g.revParse('origin/never-existed')).toBeNull()
-    expect(await g.revParse('HEAD')).toMatch(/^[0-9a-f]{40}$/)
+      fetchImpl,
+    })
+    await g.resolveTarget('origin/main')
+    await g.revParse('HEAD')
+    expect(calls).toBe(2)
   })
 })
 

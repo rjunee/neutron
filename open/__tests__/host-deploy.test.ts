@@ -47,7 +47,7 @@ import {
   type HostDeployRequestResult,
   type HostDeployService,
 } from '../host-deploy.ts'
-import { createHostDeployGit } from '../host-deploy-runtime.ts'
+import { createHostDeployRemoteGit } from '../host-deploy-runtime.ts'
 
 const OWNER = 'owner'
 const AGENT = 'agent-7'
@@ -206,42 +206,41 @@ function answer(h: Harness, user_text: string, user_id = OWNER) {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('a request without an approval deploys NOTHING', () => {
   test('a remote ahead of the host pin is never reported as up to date', async () => {
-    const remote = join(tmp, 'remote.git')
-    const source = join(tmp, 'source')
-    const host = join(tmp, 'host')
-    const env = {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'fixture',
-      GIT_AUTHOR_EMAIL: 'fixture@example.test',
-      GIT_COMMITTER_NAME: 'fixture',
-      GIT_COMMITTER_EMAIL: 'fixture@example.test',
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-    }
-    const run = (cwd: string, ...args: string[]): string =>
-      execFileSync('git', args, { cwd, env, encoding: 'utf8' }).trim()
-
-    run(tmp, 'init', '--bare', '--initial-branch=main', remote)
-    run(tmp, 'clone', remote, source)
-    writeFileSync(join(source, 'release.txt'), 'pinned\n')
-    run(source, 'add', 'release.txt')
-    run(source, 'commit', '-m', 'base')
-    run(source, 'push', 'origin', 'main')
-    run(tmp, 'clone', remote, host)
-    const pinned = run(host, 'rev-parse', 'HEAD')
-    writeFileSync(join(source, 'release.txt'), 'remote ahead\n')
-    run(source, 'commit', '-am', 'fix: remote release')
-    run(source, 'push', 'origin', 'main')
-    const remoteHead = run(source, 'rev-parse', 'HEAD')
-
-    expect(() => run(host, 'cat-file', '-e', `${remoteHead}^{commit}`)).toThrow()
-    expect(run(host, 'cat-file', '-t', `${pinned}^{commit}`)).toBe('commit')
-    const h = harness({ git: createHostDeployGit({ repo_dir: host }) })
+    // THE #245 REGRESSION, now split across the boundary. Resolving a remote ref
+    // is the CONTROL PLANE's job — it is the only side that may write the
+    // `FETCH_HEAD` a fetch produces — so the half that proves a real fetch beats a
+    // stale local mirror lives with the git, in Managed's `deploy-preview` suite.
+    //
+    // What remains OURS, and is asserted here, is that a control plane reporting a
+    // target ahead of the pin is never flattened into `up_to_date` on the way
+    // through this service.
+    const g = createHostDeployRemoteGit({
+      resolveConfig: () => ({
+        configured: true,
+        endpoint: { url: 'https://control.example.com/v1/deploy', token: 'tok' },
+      }),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>
+        const json =
+          typeof body['from'] === 'string'
+            ? { commits: [{ sha: TARGET_SHA, subject: 'fix: remote release' }], total: 1 }
+            : { target_sha: TARGET_SHA, current_sha: HEAD_SHA, commits: [], total: 0 }
+        return new Response(JSON.stringify(json), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+    })
+    const h = harness({ git: g })
     const result = await h.service.request({ ref: 'origin/main' })
 
-    expect(remoteHead).not.toBe(pinned)
+    expect(TARGET_SHA).not.toBe(HEAD_SHA)
     expect(result.status).not.toBe('up_to_date')
-    expect(result).toMatchObject({ status: 'pending_approval', target_sha: remoteHead, current_sha: pinned })
+    expect(result).toMatchObject({
+      status: 'pending_approval',
+      target_sha: TARGET_SHA,
+      current_sha: HEAD_SHA,
+    })
     expect(h.emits[0]!.body).toContain('fix: remote release')
   })
 
