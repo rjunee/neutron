@@ -490,12 +490,34 @@ export function buildTridentOrchestrator(
     return null
   }
 
-  async function publishBuiltCommit(run: TridentRun, requestedHead: string): Promise<{ pr: number; head: string }> {
+  /**
+   * A COMMIT OID IS READ, NOT REPORTED. `claimedHead` is whatever the build SAID it
+   * committed — possibly abbreviated, possibly absent. The head that actually gets
+   * published is the one git resolves for the branch the inner loop named (a name a
+   * model cannot plausibly mangle). A claim is only ever a CHECK against that.
+   */
+  async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
     const branch = run.branch ?? `trident/${run.slug}`
-    const local = await opts.run_host(['git', '-C', run.repo_path, 'rev-parse', `refs/heads/${branch}`], run.repo_path)
-    if (!local.ok || local.stdout.trim() !== requestedHead) {
-      throw new Error(`outer publisher refused: branch ${branch} no longer points at the commit produced by the build`)
+    // `--verify` so a missing/ambiguous ref is an ERROR rather than an echoed argument.
+    const local = await opts.run_host(
+      ['git', '-C', run.repo_path, 'rev-parse', '--verify', `refs/heads/${branch}`],
+      run.repo_path,
+    )
+    const resolvedHead = local.stdout.trim()
+    if (!local.ok || !/^[0-9a-f]{40}$/.test(resolvedHead)) {
+      const detail = local.stderr.trim()
+      throw new Error(
+        `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
+      )
+    }
+    // THE CLAIM IS A CHECK, NEVER THE SOURCE. `startsWith` makes a full 40-char claim an
+    // equality test and a 7-char one a prefix test. A disagreement is a real signal (wrong
+    // branch, wrong worktree) and names BOTH values — neither is silently preferred.
+    if (claimedHead !== null && !resolvedHead.startsWith(claimedHead.toLowerCase())) {
+      throw new Error(
+        `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
+      )
     }
     const runWithRetries = async (command: string[], attempts = 3) => {
       let result = await opts.run_host(command, run.repo_path)
@@ -531,6 +553,15 @@ export function buildTridentOrchestrator(
     // not exist, so a first push of a new card stays correct — and is still refused if the branch
     // appeared underneath us between this read and the push.
     const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
+    // NOTHING BUILT IS A REAL OUTCOME. With the head read from git rather than relayed by a
+    // model, a run that committed nothing would otherwise publish its own remote back to
+    // itself and read as a success. Zero commits ahead fails; an EMPTY `expected` means the
+    // remote branch does not exist yet (first push) and stays publishable.
+    if (expected === resolvedHead) {
+      throw new Error(
+        `outer publisher refused: branch ${branch} is already at ${resolvedHead} on origin — the build left no new commits to publish`,
+      )
+    }
     const pushed = await runWithRetries([
       'git',
       '-C',
@@ -548,8 +579,8 @@ export function buildTridentOrchestrator(
       ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
     )
     const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
-    if (remoteHead !== requestedHead) {
-      throw new Error(`outer publisher could not confirm commit ${requestedHead} on origin`)
+    if (remoteHead !== resolvedHead) {
+      throw new Error(`outer publisher could not confirm commit ${resolvedHead} on origin`)
     }
 
     let pr = await detectExistingPr({ ...run, branch })
@@ -566,18 +597,18 @@ export function buildTridentOrchestrator(
     const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
     const base = await resolveBase(run)
     const changed = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${requestedHead}`],
+      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${resolvedHead}`],
       run.repo_path,
     )
     if (!changed.ok || changed.stdout.trim() === '') {
       throw new Error('outer publisher refused to dispatch reviewers for an empty diff')
     }
     const diff = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${requestedHead}`],
+      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${resolvedHead}`],
       run.repo_path,
     )
     if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
-    return { pr, head: requestedHead }
+    return { pr, head: resolvedHead }
   }
 
   function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {
@@ -840,16 +871,10 @@ export function buildTridentOrchestrator(
     }
 
     if (result.publish_requested) {
-      if (result.publish_head === null || result.publish_head === undefined) {
-        return {
-          run: failedRun(run, 'inner workflow requested outer publishing without a full commit OID', true),
-          changed: true,
-          waiting: false,
-          note: 'publish handoff → failed (missing commit OID)',
-        }
-      }
       try {
-        const published = await publishBuiltCommit(run, result.publish_head)
+        // The handoff is the BRANCH NAME; a relayed sha is only a check. A build that
+        // reported no OID is still published — `publishBuiltCommit` reads the head from git.
+        const published = await publishBuiltCommit(run, result.publish_head ?? null)
         const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}`
         const resetPatch: TridentRunUpdate = {
           inner_result: null,

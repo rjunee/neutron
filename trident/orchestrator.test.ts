@@ -140,8 +140,12 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    // The remote must be BEHIND the local head, or the zero-ahead gate ("nothing was built")
+    // correctly refuses to publish a branch that is already fully pushed.
+    const stale = '9'.repeat(40)
     let fires = 0
     let prLists = 0
+    let lsRemotes = 0
     const h = buildHarness({
       plan: () => {
         fires += 1
@@ -151,8 +155,11 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       },
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
-        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
-        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
         if (joined.includes('diff --name-only')) return ok('changed.ts')
         if (joined.includes('gh pr list')) {
           prLists += 1
@@ -167,7 +174,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.phase).toBe('done')
     const calls = h.hostCalls.map((c) => c.join(' '))
     expect(calls).toContain(
-      `git -C /repo push --force-with-lease=refs/heads/feat-x:${head} origin refs/heads/feat-x:refs/heads/feat-x`,
+      `git -C /repo push --force-with-lease=refs/heads/feat-x:${stale} origin refs/heads/feat-x:refs/heads/feat-x`,
     )
     const pushAt = calls.findIndex((c) => c.includes(' push '))
     // The WITNESS is the ls-remote AFTER the push. There is now also one BEFORE it (the lease
@@ -185,7 +192,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
-        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${other}\trefs/heads/feat-x`)
         return ok()
       },
@@ -199,18 +206,24 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('gh pr create'))).toBe(false)
   })
 
-  test('the outer publisher refuses a commit that is not the local branch tip', async () => {
+  test('the outer publisher refuses a commit that is not the local branch tip — naming BOTH values', async () => {
     const requested = 'abcdef0123456789abcdef0123456789abcdef01'
+    const resolved = '1111111111111111111111111111111111111111'
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: requested } }),
-      hostResponder: (cmd) => cmd.join(' ').includes('rev-parse refs/heads/feat-x')
-        ? ok('1111111111111111111111111111111111111111')
+      hostResponder: (cmd) => cmd.join(' ').includes('rev-parse --verify refs/heads/feat-x')
+        ? ok(resolved)
         : ok(),
     })
     const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
     expect(final.phase).toBe('failed')
-    expect(final.failure_reason).toContain('no longer points at')
-    expect(h.hostCalls.some((c) => c.includes('push'))).toBe(false)
+    // A disagreement is a real signal (wrong branch/worktree). Neither value may be
+    // silently preferred, so the reason has to carry both verbatim to be actionable.
+    expect(final.failure_reason).toContain(requested)
+    expect(final.failure_reason).toContain(resolved)
+    // …and it must not blame a review that never ran.
+    expect(final.failure_reason).not.toContain('Argus')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(' push '))).toBe(false)
     expect(h.inputs).toHaveLength(1)
   })
 
@@ -243,7 +256,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       },
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
-        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
           lsRemotes += 1
           // Before the push the remote still holds the PRE-REBASE tip; after it, the new one.
@@ -278,7 +291,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
-        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${theirs}\trefs/heads/feat-x`)
         if (joined.includes(' push ')) {
           return failWith('! [rejected]   feat-x -> feat-x (stale info)\nerror: failed to push some refs')
@@ -312,7 +325,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       },
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
-        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
           lsRemotes += 1
           return ok(lsRemotes === 1 ? '' : `${head}\trefs/heads/feat-x`)
@@ -334,12 +347,18 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // never measured; this one MEASURED the cause and threw it away. Recovering that one line
     // cost a DB read, a hand merge-base comparison and a credentialed dry-run push.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const stale = '9'.repeat(40)
+    let lsRemotes = 0
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
-        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
-        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          // Stale first so the run gets PAST the zero-ahead gate and reaches the push.
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
         if (joined.includes(' push ')) return failWith('! [rejected] feat-x -> feat-x (non-fast-forward)')
         return ok()
       },
@@ -355,12 +374,18 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
   test('an empty base-to-head diff terminates before review re-fire', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const stale = '9'.repeat(40)
+    let lsRemotes = 0
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
-        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
-        if (joined.includes('ls-remote --heads')) return ok(`${head}\trefs/heads/feat-x`)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads')) {
+          // Stale first so the run gets PAST the zero-ahead gate and reaches the diff check.
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
         if (joined.includes('gh pr list')) return ok('42')
         if (joined.includes('diff --name-only')) return ok('')
         return ok()
@@ -369,6 +394,119 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('empty diff')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  /**
+   * A COMMIT OID IS READ, NOT REPORTED (defect 2026-08-14, run `3d2696c3`).
+   *
+   * The build succeeded, committed, and the branch is one commit ahead of its PR — and the
+   * run was filed REQUEST_CHANGES because a 40-character hex string did not survive being
+   * relayed through a bookkeeping model. The head the publisher pins now comes from
+   * `rev-parse --verify` on the branch the inner loop NAMES (a value a model cannot plausibly
+   * mangle); an agent-supplied sha is only ever a CHECK against it.
+   */
+  const publishFixture = (over: { publishHead?: string | null }, remoteAlwaysHead = false) => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const stale = '9'.repeat(40)
+    let fires = 0
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? {
+              result: {
+                verdict: 'REQUEST_CHANGES',
+                branch: 'feat-x',
+                checkpoint: 'forge-done',
+                publishRequested: true,
+                ...over,
+              },
+            }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(
+            !remoteAlwaysHead && lsRemotes === 1
+              ? `${stale}\trefs/heads/feat-x`
+              : `${head}\trefs/heads/feat-x`,
+          )
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    return { h, head }
+  }
+
+  test('a build that reports NO sha still publishes — the head is read from git', async () => {
+    const { h, head } = publishFixture({ publishHead: null })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls.some((c) => c.includes(' push '))).toBe(true)
+    // The checkpoint pins the FULL OID `rev-parse` produced — nothing about it came from the result.
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('an abbreviated 7-char sha publishes, and the checkpoint pins the FULL resolved OID', async () => {
+    const abbreviated = 'abcdef0123456789abcdef0123456789abcdef01'.slice(0, 7)
+    const { h, head } = publishFixture({ publishHead: abbreviated })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('done')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(' push '))).toBe(true)
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a claimed sha that disagrees with rev-parse FAILS, naming both values', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    // Full-length and abbreviated: the prefix check must catch BOTH, or an abbreviation
+    // silently becomes "accept anything".
+    for (const claimed of ['f'.repeat(40), 'baddad1']) {
+      const h = buildHarness({
+        plan: () => ({
+          result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: claimed },
+        }),
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+          return ok()
+        },
+      })
+      const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+      const calls = h.hostCalls.map((c) => c.join(' '))
+
+      expect(final.phase).toBe('failed')
+      expect(final.failure_reason).toContain(claimed)
+      expect(final.failure_reason).toContain(head)
+      expect(final.failure_reason).not.toContain('Argus')
+      expect(calls.some((c) => c.includes(' push '))).toBe(false)
+      expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+      expect(h.inputs).toHaveLength(1)
+    }
+  })
+
+  test('zero commits ahead of the remote still fails — "nothing was built" is a real outcome', async () => {
+    // Reading the head from git must not convert a build that committed nothing into a
+    // publish of the remote back onto itself.
+    const { h } = publishFixture({ publishHead: null }, true)
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('no new commits')
+    expect(final.failure_reason).toContain('feat-x')
+    expect(final.failure_reason).not.toContain('Argus')
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
     expect(h.inputs).toHaveLength(1)
   })
 
