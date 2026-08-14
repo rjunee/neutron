@@ -10913,3 +10913,46 @@ Mutation checks (each production guard was removed independently and restored):
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
+## 2026-08-14 — Work Board card removal runs through one chokepoint
+
+`work-board/removal.ts` is now the only implementation of "remove a card".
+`WorkBoardRemovalService.remove(scope, docs_project_id, item_id, { reason,
+plan_doc? })` performs a fixed sequence: resolve the card in scope, cancel a live
+bound run, dispose the card's plan doc, then hard-delete the row. The HTTP
+`DELETE /api/app/projects/<id>/work-board/<item_id>` — the UI's X — was rewired
+through it and the inline cancel logic was removed from `handleDelete`; the
+composer at `open/composer.ts` constructs one service and passes it in, so the
+agent tool (T2) can ride the same object.
+
+Cancellation stays first because deleting the row first orphans the work: a
+trident build keeps running headless, an Atlas research subprocess is never
+stopped. The moved logic is behaviour-identical to the old inline block,
+including the §F6a `terminate()` routing that fires the terminal-observer chain
+and the Codex-r3 rule that a lost atomic transition reports no `cancelled_run`.
+The DELETE response still carries `deleted` and `cancelled_run` unchanged.
+
+Removal now takes a reason. `?reason=shipped|cancelled|moved` defaults to
+`cancelled`, which is what the X has always meant. The card's own `plans/` doc is
+MOVED to `plans/<reason>/<basename>` via `DocStore.moveDoc`, so it stays under the
+docs root and remains readable in the Documents tab. Only an in-app ref under
+`plans/` is touched — an `https:` ref or a doc elsewhere in the vault is left
+alone, because relocating an owner-authored doc is not part of removing a card.
+A doc is destroyed by exactly one path, the explicit `?plan_doc=delete`; every
+failure (including `doc_destination_exists`) logs and reports
+`disposition: 'left_in_place'` and never falls through to a delete. The layering
+holds: `work-board` gained no trident dependency — the run access, the
+`is_terminal_phase` predicate and the doc store are all structural parameters.
+
+Tests pin the order, not just the membership: `work-board/removal.test.ts` drives
+every stub through one shared event array and asserts the sequence equals
+`['terminate', 'delete']`. `work-board/store.test.ts` and the full existing
+`gateway/http/work-board-surface.test.ts` delete cases pass unmodified, which is
+the behaviour-preservation proof for the refactor.
+
+Mutation checks (each applied to `removal.ts`, then restored):
+
+| Mutant | Result |
+| --- | --- |
+| `skip-cancellation`: never call `cancelBoundRun` | RED — order test saw `['delete']`; 4 tests failed |
+| `delete-first`: hard-delete before cancelling | RED — order test saw `['delete', 'terminate']`; 10 tests failed |

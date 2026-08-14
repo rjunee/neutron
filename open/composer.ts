@@ -485,6 +485,7 @@ import {
   type PreviewFrom,
 } from './project-rail.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
+import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
 import {
   dispatchBoardBoundBuild,
   type TridentBoardBinder,
@@ -3921,9 +3922,28 @@ export function buildOpenGraphComposer(
       llmCallSubstrate !== null
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })
         : null
+    // The ONE card-removal chokepoint: cancel a live bound run (trident via the
+    // §F6a terminate chokepoint, research via the dispatch stop) → dispose the
+    // card's own `plans/` doc into a folder named for the removal REASON → hard-
+    // delete the row. Built ONCE here and handed to the HTTP surface (the UI's X)
+    // — and, once T2 lands, to the agent's remove tool — so a human removal and
+    // an agent removal run the SAME path, run-cancellation and all. `docStore` is
+    // the same instance the spec-doc service writes the doc with, so the move
+    // lands where the Documents tab reads.
+    const workBoardRemoval = new WorkBoardRemovalService({
+      store: workBoardStore,
+      trident_runs: boardRunAccess,
+      is_terminal_phase: (phase) => isTerminalPhase(phase as TridentRun['phase']),
+      ...(dispatchService !== null
+        ? { cancel_dispatch: async (id: string) => void (await dispatchService.stop(id)) }
+        : {}),
+      docs: docStore,
+    })
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
+      // The shared removal chokepoint (above) — the X's DELETE runs through it.
+      removal: workBoardRemoval,
       // #429 task 3 — no manual Build/Research picker; an omitted task_type is
       // FAST_MODEL-classified with keyword fallback (LLM-less boots classify by
       // keyword only). Explicit task_type from any caller always wins.

@@ -6,6 +6,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { WorkBoardStore, workBoardScopeKey } from '@neutronai/work-board/store.ts'
+import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
 import {
   createWorkBoardSurface,
   type TridentRunAccess,
@@ -347,6 +348,127 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(res?.status).toBe(200)
     expect(updates).toEqual([])
     expect(store.get(SCOPE, item.id)).toBeNull()
+  })
+})
+
+describe('work-board HTTP surface — DELETE reason + plan-doc disposition', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  /** A `RemovalDocStore` spy + the removal chokepoint the composer wires. */
+  function withDocs(): {
+    removal: WorkBoardRemovalService
+    moves: Array<{ project_id: string; from: string; to: string }>
+    deletes: Array<{ project_id: string; path: string }>
+  } {
+    const moves: Array<{ project_id: string; from: string; to: string }> = []
+    const deletes: Array<{ project_id: string; path: string }> = []
+    const removal = new WorkBoardRemovalService({
+      store,
+      docs: {
+        moveDoc: async (project_id, from, to) => {
+          moves.push({ project_id, from, to })
+          return null
+        },
+        deleteDoc: async (project_id, path) => {
+          deletes.push({ project_id, path })
+          return null
+        },
+      },
+    })
+    return { removal, moves, deletes }
+  }
+
+  test('no ?reason → the X default (cancelled): the plan doc lands in plans/cancelled/', async () => {
+    const item = await store.create(SCOPE, {
+      title: 'Dropped',
+      design_doc_ref: 'neutron-docs:plans/dropped-abc123.md',
+    })
+    const { removal, moves, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as {
+      deleted: string
+      plan_doc?: { disposition: string; to?: string }
+    }
+    expect(body.deleted).toBe(item.id)
+    expect(body.plan_doc).toEqual({
+      path: 'plans/dropped-abc123.md',
+      disposition: 'moved',
+      to: 'plans/cancelled/dropped-abc123.md',
+    })
+    // The DOCS project id is the URL segment, not the board scope key.
+    expect(moves).toEqual([
+      { project_id: 'proj1', from: 'plans/dropped-abc123.md', to: 'plans/cancelled/dropped-abc123.md' },
+    ])
+    expect(deletes).toEqual([])
+    expect(store.get(SCOPE, item.id)).toBeNull()
+  })
+
+  test('?reason=shipped files the plan doc under plans/shipped/', async () => {
+    const item = await store.create(SCOPE, {
+      title: 'Shipped',
+      design_doc_ref: 'neutron-docs:plans/shipped-abc123.md',
+    })
+    const { removal, moves, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?reason=shipped`),
+    )
+    expect(res?.status).toBe(200)
+    expect(moves).toEqual([
+      { project_id: 'proj1', from: 'plans/shipped-abc123.md', to: 'plans/shipped/shipped-abc123.md' },
+    ])
+    expect(deletes).toEqual([])
+  })
+
+  test('?reason=bogus → 400 invalid_reason, and nothing is removed', async () => {
+    const item = await store.create(SCOPE, { title: 'Safe' })
+    const { removal } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?reason=bogus`),
+    )
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { code: string }
+    expect(body.code).toBe('invalid_reason')
+    expect(store.get(SCOPE, item.id)).not.toBeNull()
+  })
+
+  test('?plan_doc=delete is the ONLY way the doc is destroyed', async () => {
+    const item = await store.create(SCOPE, {
+      title: 'Scrap it',
+      design_doc_ref: 'neutron-docs:plans/scrap-abc123.md',
+    })
+    const { removal, moves, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?plan_doc=delete`),
+    )
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { plan_doc?: { disposition: string } }
+    expect(body.plan_doc?.disposition).toBe('deleted')
+    expect(deletes).toEqual([{ project_id: 'proj1', path: 'plans/scrap-abc123.md' }])
+    expect(moves).toEqual([])
+  })
+
+  test('?plan_doc=anything-else → 400 invalid_plan_doc (a destroy must be spelled out)', async () => {
+    const item = await store.create(SCOPE, { title: 'Safe' })
+    const { removal, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?plan_doc=yes`),
+    )
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { code: string }
+    expect(body.code).toBe('invalid_plan_doc')
+    expect(deletes).toEqual([])
+    expect(store.get(SCOPE, item.id)).not.toBeNull()
   })
 })
 
