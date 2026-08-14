@@ -91,7 +91,7 @@ export interface TridentBuildToolDeps {
   repo_path: string
   /** Resolve the per-project git workspace; defaults to `ensureProjectBuildWorkspace`. */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-  resolveMergeMode?: () => Promise<MergeMode>
+  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
   resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
   max_rounds?: number

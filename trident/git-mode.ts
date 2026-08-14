@@ -32,30 +32,38 @@ export interface HostCommandResult {
 export interface GitModeProbe {
   /** Whether `repoPath` has an `origin` remote pointing at GitHub. */
   hasGithubOrigin(repoPath: string): Promise<boolean>
-  /** Whether the `gh` CLI is installed + on PATH. */
-  ghAvailable(): Promise<boolean>
+  /** Whether the outer publisher can authenticate to GitHub. */
+  publisherAvailable(): Promise<boolean>
 }
 
 /**
- * Auto-detect the merge mode for a repo. `'pr'` requires BOTH a GitHub
- * origin remote AND `gh`; anything else (no remote, a non-GitHub remote,
- * or `gh` missing) is `'local'`. A probe that throws is treated as the
- * capability being absent, so detection degrades to `'local'` rather than
- * erroring a run at creation time.
+ * Auto-detect the merge mode for a repo. A non-GitHub repo uses local mode.
+ * A GitHub origin requires a publisher that can authenticate; absence or a
+ * failed capability probe throws loudly because silently selecting local mode
+ * would remove the PR and CI gates.
  */
 export async function detectMergeMode(
   repoPath: string,
   probe: GitModeProbe,
 ): Promise<MergeMode> {
+  let hasOrigin: boolean
   try {
-    const [hasOrigin, hasGh] = await Promise.all([
-      probe.hasGithubOrigin(repoPath),
-      probe.ghAvailable(),
-    ])
-    return hasOrigin && hasGh ? 'pr' : 'local'
+    hasOrigin = await probe.hasGithubOrigin(repoPath)
   } catch {
     return 'local'
   }
+  if (!hasOrigin) return 'local'
+  let canPublish = false
+  try {
+    canPublish = await probe.publisherAvailable()
+  } catch {
+    // A GitHub-backed run must fail loudly below. Treating a broken capability
+    // probe as permission to merge locally would silently remove the PR gate.
+  }
+  if (!canPublish) {
+    throw new Error('GitHub origin detected but the outer publisher cannot authenticate; refusing to silently weaken the PR merge gate')
+  }
+  return 'pr'
 }
 
 /** True when the URL is a GitHub remote (https or ssh form). */
@@ -66,10 +74,9 @@ export function isGithubRemoteUrl(url: string): boolean {
 }
 
 /**
- * Default production probe: shells `git -C <repo> remote get-url origin`
- * and `gh --version` via `Bun.spawn`. Any spawn/exec failure resolves to
- * `false` (capability absent) — never throws — so `detectMergeMode`
- * always yields a concrete mode.
+ * Default probe: measures the origin and asks `gh auth status`, via the supplied
+ * host runner. Callers that own the GitHub credential must inject that runner;
+ * the credential is added only at this outer process boundary.
  */
 export function defaultGitModeProbe(
   run: (cmd: string[], cwd?: string) => Promise<HostCommandResult> = spawnCapture,
@@ -79,8 +86,8 @@ export function defaultGitModeProbe(
       const res = await run(['git', '-C', repoPath, 'remote', 'get-url', 'origin'], repoPath)
       return res.ok && isGithubRemoteUrl(res.stdout)
     },
-    ghAvailable: async () => {
-      const res = await run(['gh', '--version'])
+    publisherAvailable: async () => {
+      const res = await run(['gh', 'auth', 'status'])
       return res.ok
     },
   }
@@ -176,11 +183,15 @@ export async function spawnCapture(
       stdout: 'pipe',
       stderr: 'pipe',
     })
+    // Host network and credential-helper calls must not wedge run creation or
+    // publication forever. This kills only the exact child started above.
+    const timeout = setTimeout(() => proc.kill(), 60_000)
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ])
     const exit_code = await proc.exited
+    clearTimeout(timeout)
     return { ok: exit_code === 0, stdout: stdout.trim(), stderr: stderr.trim(), exit_code }
   } catch (err) {
     return { ok: false, stdout: '', stderr: String(err), exit_code: -1 }

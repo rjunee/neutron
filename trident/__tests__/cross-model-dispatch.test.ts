@@ -208,6 +208,7 @@ async function runWorkflow(
   // cannot pass a test by dispatching nothing. `buildProduces` is the one case that
   // is SUPPOSED to stop before the panel, and it asserts that itself.
   if (
+    args.mergeMode !== 'pr' &&
     opts.buildProduces === undefined &&
     opts.remainingTasks === undefined &&
     opts.buildBranch === undefined &&
@@ -841,17 +842,17 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(result['verdict']).toBe('APPROVE')
   })
 
-  test('the bridge reads the PUSHED sha in pr mode and the local one otherwise', async () => {
+  test('the bridge reports the local build sha for the outer publisher', async () => {
     // Two different questions, and pinning a merge to the wrong one certifies a
     // commit no reviewer or merge will ever see. `productionArgs` is local-mode.
     const local = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
     expect(local).toContain('NEUTRON_CODEX_BUILD_HEAD=')
-    expect(local).toContain('local mode has no remote')
+    expect(local).toContain('the build commit')
 
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
     const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
-    expect(pr).toContain('NEUTRON_CODEX_BUILD_REMOTE_HEAD=')
-    expect(pr).toContain("the build's own commit, confirmed pushed")
+    expect(pr).toContain('NEUTRON_CODEX_BUILD_HEAD=')
+    expect(pr).toContain('outer loop independently publishes and confirms it')
   })
 
   test('the run\'s MERGE MODE is handed to the wrapper as an argument, not re-derived', async () => {
@@ -870,6 +871,16 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // The two really are different commands, so neither assertion is passing on a
     // constant that happens to contain both.
     expect(local).not.toContain("'main' 'pr'")
+  })
+
+  test('the composed wrapper invocation carries no GitHub credential', async () => {
+    const prompt = promptFor((await runWorkflow({ ...productionArgs(CODEX_BUILD), mergeMode: 'pr' })).captured, 'forge:build')
+    const invocation = prompt.split('THEN run this ONE command:')[1]!.split('\n\nThen WAIT')[0]!
+    expect(invocation).not.toContain('GH_TOKEN=')
+    expect(invocation).not.toContain('GITHUB_TOKEN=')
+    expect(invocation).not.toContain('GIT_CONFIG_KEY_')
+    // Positive control: the slice is the real invocation, not an empty string.
+    expect(invocation).toContain("bash '/repo/trident/codex-build.sh'")
   })
 
   test('the trailer is read from ITS OWN FILE, never from the codex transcript', async () => {
@@ -908,7 +919,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(prompt).toContain('REPLACES steps 5 and 6 above')
   })
 
-  test('the codex brief STANDS DOWN the push and the PR — the host publishes them', async () => {
+  test('every pr-mode Forge brief stands down publishing for the outer loop', async () => {
     // THE PUBLISH BOUNDARY, on the composing side. The codex build holds no GitHub
     // credential and is never going to: `gh` authenticates from `GH_TOKEN` and the
     // child shell's environment filter strips it, deliberately (widening that filter is
@@ -916,26 +927,23 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // shell the one time it was tried). A build ordered to push and open a PR anyway
     // did exactly what that implies — wrote the whole feature, could not deliver it,
     // and came back indistinguishable from a build that produced nothing. So the
-    // wrapper publishes and the brief says so.
+    // outer loop publishes and the brief says so.
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
     const codexPr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
     expect(codexPr).toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
     expect(codexPr).toContain('COMMIT LOCALLY')
     expect(codexPr).toContain('Do NOT run `git push`')
 
-    // THE CONTROL THAT MAKES THAT MEAN SOMETHING. The Claude builder on the SAME
-    // pr-mode run still owns its own push and PR — the brief is one text for both
-    // executors and only the coda differs, so an assertion about the coda has to be
-    // read against a brief that still carries step 4.
+    // The Claude builder obeys the same boundary; credentials must be absent from
+    // every inner executor, not merely from codex.
     const claudePr = promptFor(
       (await runWorkflow({ ...productionArgs(null), mergeMode: 'pr' })).captured,
       'forge:build',
     )
-    expect(claudePr).toContain('open a PR with `gh pr create`')
+    expect(claudePr).toContain('durable outer loop publishes')
+    expect(claudePr).not.toContain('open a PR with `gh pr create`')
     expect(claudePr).not.toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
-    // …and the codex brief still carries step 4's own text, which is exactly why the
-    // coda has to supersede it out loud rather than by omission.
-    expect(codexPr).toContain('open a PR with `gh pr create`')
+    expect(codexPr).not.toContain('open a PR with `gh pr create`')
 
     // LOCAL MODE STANDS NOTHING DOWN, because there was never anything to publish:
     // step 4 already says "commit on the branch, do NOT push".

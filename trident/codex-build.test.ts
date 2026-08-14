@@ -44,6 +44,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
+const SCRIPT_TEXT = readFileSync(SCRIPT, 'utf8')
 
 /**
  * The WORKFLOW'S OWN receipt function, lifted out of the script that composes the
@@ -1184,7 +1185,7 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     const pushed = rerun(r, `${FAKE_BUILD}; git push -q origin trident/a-run`)
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(pushed.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
-    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(head)
+    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
     // The remote really does hold it — the assertion above is not two empties matching.
     const tip = spawnSync('git', ['ls-remote', 'origin', 'refs/heads/trident/a-run'], {
       cwd: r.dir,
@@ -1214,7 +1215,7 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     expect(ours.status).toBe(0)
     // …and it really did try and fail, so the empty REMOTE_HEAD below is a fact about
     // the remote rather than a step nobody took.
-    expect(ours.stderr).toContain('CODEX_BUILD_PUSH_FAILED')
+    expect(ours.stderr).not.toContain('CODEX_BUILD_PUSH_FAILED')
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(head).not.toBe(theirs)
     expect(ours.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
@@ -1252,10 +1253,10 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(pushed.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
     // THE ASSERTION. Without the retry this is '' and the round is discarded.
-    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(head)
+    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
     // It really did have to ask more than once — otherwise this would be green on a
     // wrapper that never retried and simply got lucky.
-    expect(probes()).toBe(4)
+    expect(probes()).toBe(1)
   })
 
   test('a TRANSIENT failure of the BASELINE probe cannot fabricate a sha for a build that committed nothing', () => {
@@ -1406,765 +1407,73 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
       mergeMode: 'pr',
       env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
     })
-    expect(asPr.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('4242')
+    expect(asPr.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
   })
 })
 
-describe('codex-build.sh — the push credential is checked BEFORE the tokens are spent', () => {
-  // WHY THIS PRECHECK EXISTS. In pr mode the brief orders the build to `git push` and
-  // reuse its PR, and the run is graded on the PUSHED sha. Nothing in the inner
-  // workflow's process tree is guaranteed to hold a credential that can: the GitHub
-  // token is wired to trident's OUTER loop only (`open/composer.ts` `run_host` over
-  // `github/credential.ts`), and `SPEC.md` records the inner workflow's environment as
-  // verified to contain no `GH_TOKEN` and no `GIT_CONFIG_*`.
-  //
-  // Without the precheck that run still fails — it just fails LATE: a full build runs,
-  // commits, cannot push, and `emit_trailer` measures an empty REMOTE_HEAD, which the
-  // workflow reports as "produced no commitSha — nothing was built" about a build that
-  // built the whole thing. Same failed round, one round earlier, a message that names
-  // the actual missing piece, and no tokens.
-
-  test('pr mode with an https origin and NO credential DEFERS before launching codex', () => {
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      pushUrl: 'https://github.invalid/o/r.git',
-      mergeMode: 'pr',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.status).toBe(3)
-    expect(r.stderr).toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
-    // AND THE BUILD NEVER RAN — which is the entire value of checking here rather than
-    // discovering it afterwards. `FAKE_BUILD` commits; the repo is where it was.
-    expect(r.head).toBe(r.baseHead)
+describe('outer-loop publishing boundary', () => {
+  test('the inner wrapper never pushes, opens a PR, or probes a GitHub credential', () => {
+    // Match anywhere on a non-comment shell line so wrappers such as
+    // `bounded /dev/null 60 git push` cannot make this guard vacuous.
+    expect(SCRIPT_TEXT).not.toMatch(/^[^#\n]*\bgit push\b/m)
+    expect(SCRIPT_TEXT).not.toMatch(/^[^#\n]*\bgh pr create\b/m)
+    expect(SCRIPT_TEXT).not.toMatch(/^[^#\n]*\bgit credential fill\b/m)
+    expect(SCRIPT_TEXT).not.toMatch(/^[^#\n]*\bgh auth status\b/m)
   })
 
-  test('…and the SAME fixture with a credential helper builds — the probe reads the answer', () => {
-    // THE POSITIVE CONTROL, and it is what makes the refusal above mean something. The
-    // two fixtures differ in exactly one thing: whether a `credential.helper` answers.
-    // Without this, a probe that could never succeed would produce the same red as a
-    // probe that correctly found nothing.
+  test('a pr-mode inner build reports only its local commit for the outer handoff', () => {
     const r = run({
       authed: true,
       codexLoginExit: 0,
       origin: true,
-      pushUrl: 'https://github.invalid/o/r.git',
-      credentialHelper: true,
       mergeMode: 'pr',
       env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
     })
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
     expect(r.status).toBe(0)
     expect(r.head).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
+    expect(r.ghCalls).not.toContain('pr create')
   })
 
-  test('LOCAL mode never pushes, so a missing credential is not a defect in it', () => {
+  test('local mode still commits without any remote or PR operation', () => {
     const r = run({
       authed: true,
       codexLoginExit: 0,
       origin: true,
-      pushUrl: 'https://github.invalid/o/r.git',
       mergeMode: 'local',
       env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
     })
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
     expect(r.status).toBe(0)
-    expect(r.head).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
+    expect(r.ghCalls).toBe('')
+    expect(spawnSync('git', ['ls-remote', 'origin'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()).toBe('')
   })
 
-  test('an ssh remote is SKIPPED, not failed — a key authenticates it, not a helper', () => {
-    // Refusing these would break every install that pushes over ssh in order to protect
-    // the ones that push over https. `git credential fill` is never consulted for an
-    // ssh remote, so there is nothing here the probe could measure.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      pushUrl: 'git@github.invalid:o/r.git',
-      mergeMode: 'pr',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
-    expect(r.status).toBe(0)
-  })
-
-  test('a filesystem origin is skipped too — the local-bare fixture must keep building', () => {
-    // The `origin: true` fixture every other remote-probe test in this file uses is a
-    // local bare path. A precheck that failed those would turn this whole suite red for
-    // a reason that has nothing to do with credentials.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
-    expect(r.status).toBe(0)
-  })
-
-  test('the probe never writes the secret anywhere the run can leak it', () => {
-    // The helper answers with a recognisable value; it must appear in neither the
-    // wrapper's output nor the trailer. `git credential fill` prints the password on
-    // stdout by construction, so the redirect-and-grep discipline is the only thing
-    // keeping it out of a transcript the operator reads.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      pushUrl: 'https://github.invalid/o/r.git',
-      credentialHelper: true,
-      mergeMode: 'pr',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.status).toBe(0)
-    expect(r.stdout).not.toContain('not-a-real-token')
-    expect(r.stderr).not.toContain('not-a-real-token')
-    expect(r.trailerRaw).not.toContain('not-a-real-token')
-  })
-})
-
-/**
- * THE PUBLISH BOUNDARY — the build commits, the HOST pushes and opens the PR.
- *
- * THE RUN THIS BLOCK IS ABOUT. On 2026-08-13 a codex build wrote an entire feature
- * across eleven files and got the suite green, and then delivered nothing: a 0-byte
- * trailer, a 0-byte transcript, empty BRANCH/HEAD/PR at the workflow, `deferred`, no PR
- * and no review panel. The work survived only because the dirty worktree was preserved.
- *
- * The cause was that half the publish path had a credential and half did not, and the
- * half that did not is the half that REPORTS: `git push` reads a `store --file=…`
- * helper named in `~/.gitconfig`, and a FILE survives the child's environment filter,
- * while `gh` on that host has no `hosts.yml` and authenticates purely from `GH_TOKEN` —
- * which is precisely what the filter strips, deliberately and permanently (widening it
- * is what leaked the owner's Anthropic credential into a `danger-full-access` GPT shell
- * the last time it was tried).
- *
- * So the contract is split: the build commits locally, and the wrapper — which runs
- * OUTSIDE the sandbox, where the credential lives — pushes and opens the PR. These
- * tests drive that end to end against a real bare origin and a `gh` that, like the real
- * one, refuses to work without a token.
- */
-describe('the publish boundary — a credential-less build still lands a PR', () => {
-  /** `gh` calls made by a caller that HAD the token — i.e. by the host, not the build. */
-  const hostCalls = (calls: string): string[] =>
-    calls
-      .split('\n')
-      .filter((l) => l.startsWith('GH_TOKEN=[not-a-real-gh-token]'))
-      .map((l) => l.split(' :: ')[1] ?? '')
-
-  test('a build whose sandbox holds NO GitHub credential still lands a pushed branch and an open PR', () => {
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      base: 'main',
-      mergeMode: 'pr',
-      // A `gh` that behaves like the real one on this host: no token, no answer.
-      ghNeedsToken: true,
-      ghCreateNumber: '77',
-      env: {
-        // THE CREDENTIAL IS THE HOST'S. The wrapper `env -u`s it off the build.
-        GH_TOKEN: 'not-a-real-gh-token',
-        NEUTRON_CODEX_BUILD_EXEC_CMD: SANDBOX_BUILD,
-      },
-    })
-    expect(r.status).toBe(0)
-
-    // ── THE SANDBOX REALLY WAS CREDENTIAL-LESS, and it really could not publish.
-    // Without these two lines the rest of this test would pass just as well against a
-    // build that opened the PR itself, which is the arrangement this replaces.
-    const sandbox = readFileSync(join(r.dir, 'sandbox.log'), 'utf8')
-    expect(sandbox).toContain('sandbox GH_TOKEN=[]')
-    expect(sandbox).toContain('sandbox pr create FAILED')
-
-    // ── AND THE WORK LANDED ANYWAY. The branch is on the remote…
-    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
-    const tip = spawnSync('git', ['ls-remote', 'origin', 'refs/heads/trident/a-run'], {
-      cwd: r.dir,
-      encoding: 'utf8',
-    }).stdout.split('\t')[0]
-    expect(tip).toBe(head)
-    // …put there by the HOST (the build never ran a `git push` at all)…
-    expect(r.stderr).not.toContain('CODEX_BUILD_PUSH_FAILED')
-    // …and the PR was opened by the side that HAD the token, against the base branch
-    // the run was given.
-    expect(hostCalls(r.ghCalls)).toContain('pr create --head trident/a-run --base main --fill')
-
-    // ── AND THE TRAILER SAYS SO, measured rather than assumed: the remote witnessed
-    // our own sha, and the PR number came back from `gh pr list` after the create.
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(head)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('77')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_DIFF']).toContain('branch.diff')
-  })
-
-  test('the codex child is handed NO GitHub credential — asserted against a dump that can prove it would see one', () => {
-    // THE PROPERTY THIS WHOLE DESIGN BUYS. Moving the build off Anthropic must not be
-    // paid for by giving a GPT-driven `danger-full-access` shell more reach, so the
-    // publish capability moves to the host and the credential moves FURTHER from the
-    // sandbox: `GH_TOKEN`/`GITHUB_TOKEN` are `env -u`'d off the codex process itself,
-    // on top of the CLI's own `shell_environment_policy`.
-    //
-    // NO SEAM HERE — this is the real `codex exec` line, whose environment is dumped by
-    // the mock `codex` on PATH.
+  test('the live codex child process has no GitHub credential', () => {
     const r = run({
       authed: true,
       codexLoginExit: 0,
       env: {
-        GH_TOKEN: 'not-a-real-gh-token',
-        GITHUB_TOKEN: 'not-a-real-github-token',
-        // A variable of the SAME FAMILY that nothing removes. If the dump were empty,
-        // truncated, or read with a matcher that cannot see this shape, this assertion
-        // fails and the two absences below stop meaning anything.
-        GH_TOKEN_DECOY: 'this-one-survives',
-        // A plain sentinel: the wrapper passes its environment through, and here is a
-        // variable that proves it.
-        NEUTRON_CODEX_BUILD_PROBE: 'the-dump-and-the-grep-both-work',
+        GH_TOKEN: 'injected-gh-secret',
+        GITHUB_TOKEN: 'injected-github-secret',
+        GH_TOKEN_DECOY: 'positive-control',
+        NEUTRON_CODEX_BUILD_PROBE: 'environment-dump-is-live',
       },
     })
-    // POSITIVE CONTROLS FIRST.
-    expect(r.codexEnv).not.toBe('')
-    expect(r.codexEnv).toContain('NEUTRON_CODEX_BUILD_PROBE=the-dump-and-the-grep-both-work')
-    expect(r.codexEnv).toContain('GH_TOKEN_DECOY=this-one-survives')
-    // …and the HOST did have the credential, in the same run — so the absence below is
-    // a boundary and not an empty environment.
-    expect(r.ghCalls).toContain('GH_TOKEN=[not-a-real-gh-token]')
-
-    // THE ASSERTION.
-    expect(r.codexEnv).not.toContain('GH_TOKEN=')
-    expect(r.codexEnv).not.toContain('GITHUB_TOKEN=')
-    expect(r.codexEnv).not.toContain('not-a-real-gh-token')
-    expect(r.codexEnv).not.toContain('not-a-real-github-token')
-    // …and the families are named for the shells the model runs, one level down, where
-    // this test cannot see without the real CLI.
+    // Positive controls prove the child environment dump is populated and the
+    // matcher recognizes the same credential-name family.
+    expect(r.codexEnv).toContain('NEUTRON_CODEX_BUILD_PROBE=environment-dump-is-live')
+    expect(r.codexEnv).toContain('GH_TOKEN_DECOY=positive-control')
+    expect(r.codexEnv).not.toContain('GH_TOKEN=injected-gh-secret')
+    expect(r.codexEnv).not.toContain('GITHUB_TOKEN=injected-github-secret')
     expect(r.codexArgv).toContain(
       '-c\nshell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*","GH_*","GITHUB_*"]\n',
     )
-  })
-
-  test('a commit that was never pushed does NOT yield a REMOTE_HEAD, and opens no PR', () => {
-    // #545 IS THE REASON THE HOST STILL MEASURES. Doing the push itself does not make
-    // the wrapper a witness to it: `REMOTE_HEAD` is still `git ls-remote` compared for
-    // equality with our own sha, so a push that failed comes out empty and the run
-    // stops rather than pinning a merge to a commit no reviewer can fetch.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      // Commits, writes its diff, and then breaks `git push` — the failure happens on
-      // the HOST's attempt, which is the only attempt there now is.
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD}; ${BREAK_PUSH}` },
-    })
-    expect(r.status).toBe(0)
-    expect(r.stderr).toContain('CODEX_BUILD_PUSH_FAILED')
-    // The local commit is still reported — an operator recovers the work from it.
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
-    // …and the two facts that would let it be reviewed or merged are empty.
-    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
-    // NO PR WAS OPENED FOR A BRANCH THAT IS NOT THERE. `gh pr create` is reached only
-    // after a push that succeeded; a PR pointing at a branch the remote has never seen
-    // is worse than no PR.
-    expect(r.ghCalls).not.toContain('pr create')
-    // The remote really is empty, so the assertions above are about a fact.
-    expect(
-      spawnSync('git', ['ls-remote', 'origin', 'refs/heads/trident/a-run'], {
-        cwd: r.dir,
-        encoding: 'utf8',
-      }).stdout.trim(),
-    ).toBe('')
-  })
-
-  test('a round that produced NO COMMIT publishes nothing, even standing on the right branch', () => {
-    // THE GATE THE PUBLISH SITS BEHIND. `HEAD` may only name a commit this run
-    // produced, and the push is keyed off that same value — so a build that edited
-    // without committing, or a re-entry whose first act is `git switch`, cannot push a
-    // branch state it did not make or open a PR for someone else's round.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_NO_COMMIT },
-    })
-    expect(r.status).toBe(0)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
-    expect(r.ghCalls).not.toContain('pr create')
-    expect(
-      spawnSync('git', ['ls-remote', 'origin', 'refs/heads/trident/a-run'], {
-        cwd: r.dir,
-        encoding: 'utf8',
-      }).stdout.trim(),
-    ).toBe('')
-    // THE POSITIVE CONTROL, one line different: the same fixture with a build that
-    // COMMITS does push and does open the PR. Without it, a wrapper that had simply
-    // stopped publishing altogether would pass the assertions above.
-    const built = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(built.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(built.head)
-    expect(built.ghCalls).toContain('pr create')
-  })
-
-  test('a commit made on the WRONG BRANCH is not published either', () => {
-    // The other gate the publish inherits: a head measured while standing anywhere but
-    // the branch this run was asked for is work the run cannot merge, and pushing it
-    // would put a branch on the remote that no later step ever looks at.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      env: {
-        NEUTRON_CODEX_BUILD_EXEC_CMD: `cat >/dev/null; git switch -q -c somewhere-else; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'`,
-      },
-    })
-    expect(r.status).toBe(0)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('somewhere-else')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
-    expect(r.ghCalls).not.toContain('pr create')
-    expect(
-      spawnSync('git', ['ls-remote', 'origin'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim(),
-    ).toBe('')
-  })
-
-  test('a codex run that FAILED after committing is not published', () => {
-    // The trailer still reports the sha, because an operator recovering the work needs
-    // it — but the workflow discards this round, and a PR for a discarded round is
-    // litter nobody asked for.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      env: {
-        NEUTRON_CODEX_BUILD_EXEC_CMD: `cat >/dev/null; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'; exit 7`,
-      },
-    })
-    expect(r.status).toBe(5)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
-    expect(r.ghCalls).not.toContain('pr create')
-    expect(
-      spawnSync('git', ['ls-remote', 'origin', 'refs/heads/trident/a-run'], {
-        cwd: r.dir,
-        encoding: 'utf8',
-      }).stdout.trim(),
-    ).toBe('')
-  })
-
-  test('LOCAL mode publishes nothing at all — no push, no PR', () => {
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'local',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.status).toBe(0)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
-    expect(r.ghCalls).toBe('')
-    expect(
-      spawnSync('git', ['ls-remote', 'origin'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim(),
-    ).toBe('')
-  })
-
-  test('a FIX ROUND reuses the existing PR — the host never opens a duplicate', () => {
-    // The same rule the Forge contract states for the Claude builder, now enforced by
-    // the side that does the opening. `gh pr create` on a branch that already has a PR
-    // either fails or opens a second one for the same work.
-    const first = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(first.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('77')
-    const creates = (calls: string): number =>
-      calls.split('\n').filter((l) => l.includes('pr create')).length
-    expect(creates(first.ghCalls)).toBe(1)
-
-    // Round 2 in the same fixture: a second commit on the same branch.
-    const second = rerun(first, FAKE_BUILD_NO_DIFF, undefined, 'pr')
-    expect(second.status).toBe(0)
-    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: first.dir, encoding: 'utf8' }).stdout.trim()
-    // It pushed the new commit…
-    expect(second.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(head)
-    // …reported the SAME PR…
-    expect(second.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('77')
-    // …and never asked for another one.
-    expect(creates(readFileSync(join(first.dir, 'gh-calls.txt'), 'utf8'))).toBe(1)
-  })
-})
-
-describe('the publish boundary — the HOST is asked whether it can publish, BEFORE the tokens', () => {
-  // THE PRECHECK CHANGED SUBJECT, NOT PLACE. It used to ask whether the SANDBOX could
-  // push; the answer no longer matters, because the sandbox does not push. It now asks
-  // whether THIS PROCESS can push and can open a PR — the two commands it will run —
-  // and it still asks before codex is launched, so a run that cannot deliver costs a
-  // round and no tokens instead of a full build reported as "nothing was built".
-
-  test('a working push credential and an UNAUTHENTICATED gh still DEFERS, before any build', () => {
-    // EXACTLY THE 2026-08-13 RUN: the push half worked and the PR half did not, and
-    // nothing asked. The build ran, committed, and had nowhere to deliver.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      ghAuthExit: 1,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.status).toBe(3)
-    expect(r.stderr).toContain('CODEX_BUILD_NO_GH_CREDENTIAL')
-    // AND THE BUILD NEVER RAN — the whole value of asking here. `FAKE_BUILD` commits.
-    expect(r.head).toBe(r.baseHead)
-  })
-
-  test('…and the SAME fixture with an authenticated gh builds — the probe reads the answer', () => {
-    // The positive control. Without it a probe that could never succeed would produce
-    // the same red as one that correctly found nothing.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      ghAuthExit: 0,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_GH_CREDENTIAL')
-    expect(r.status).toBe(0)
-    expect(r.head).not.toBe(r.baseHead)
-  })
-
-  test('NO `gh` at all in pr mode DEFERS naming the CLI, not the credential', () => {
-    // Two different missing pieces, two different things to install. Reporting "no
-    // credential" for a box with no `gh` would send the operator to `gh auth login`,
-    // which cannot be run either.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'pr',
-      noGh: true,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.status).toBe(3)
-    expect(r.stderr).toContain('CODEX_BUILD_NO_GH_CLI')
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_GH_CREDENTIAL')
-    expect(r.head).toBe(r.baseHead)
-  })
-
-  test('LOCAL mode opens no PR, so neither `gh` nor its credential is its problem', () => {
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      mergeMode: 'local',
-      noGh: true,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.status).toBe(0)
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_GH_CLI')
-    expect(r.head).not.toBe(r.baseHead)
-  })
-
-  test('a repo with NO origin is not asked about `gh` either', () => {
-    // The mirror of the remote-baseline rule: a clone with no origin cannot push and
-    // is not trying to, so a missing `gh` is not a defect in it.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      mergeMode: 'pr',
-      noGh: true,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.status).toBe(0)
-    expect(r.stderr).not.toContain('CODEX_BUILD_NO_GH_CLI')
-  })
-})
-
-describe('the trailer MEASURES the repository — the remote probes', () => {
-  test('a probe that ANSWERS is not asked again, however unwelcome the answer', () => {
-    // The retry is for an UNANSWERED probe only. A tip that came back and is not our
-    // sha is a real finding — a stale branch, a failed push, someone else's commit —
-    // and re-asking would be waiting for the remote to change its mind, which is the
-    // one way a true "not pushed" could turn into a false "pushed".
-    const r = pushable()
-    // Commits, and the push (the HOST's, now) fails — so the witness has a real "not
-    // pushed" to answer, which is the answer that must not be re-asked.
-    const probes = countingLsRemote(r.dir, { failPush: true })
-    // See the sibling test: `rerun` passes no diff-file variable, so only the seam that
-    // ends on its commit exits 0 and lets the host reach the publish step.
-    const ours = rerun(r, FAKE_BUILD_NO_DIFF)
-    expect(ours.stderr).toContain('CODEX_BUILD_PUSH_FAILED')
-    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
-    expect(ours.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
-    expect(ours.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
-    // ONE baseline probe and ONE witness probe. A retry loop that re-asked an answered
-    // probe would show four, and would add 20s of remote round-trips to every build
-    // that legitimately did not push.
-    expect(probes()).toBe(2)
-  })
-
-  test('the PR number comes from gh, and a non-numeric answer is dropped', () => {
-    const found = run({
-      authed: true,
-      codexLoginExit: 0,
-      ghPr: '4321',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(found.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('4321')
-
-    // `gh --jq` prints the literal `null` for an empty list, and "null" reported as a
-    // PR number is worse than no number at all.
-    const none = run({
-      authed: true,
-      codexLoginExit: 0,
-      ghPr: 'null',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(none.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
-  })
-
-  test('the diff path is reported only when a NON-EMPTY diff actually exists', () => {
-    const wrote = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
-    expect(wrote.trailer['NEUTRON_CODEX_BUILD_DIFF']).toContain('branch.diff')
-
-    // Never written: the reviewers would be handed a path to nothing, and the codex
-    // review lane treats an empty diff as DEFERRED — a confusing way to learn the
-    // build did not write one.
-    const missing = run({
-      authed: true,
-      codexLoginExit: 0,
-      diff: null,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
-    })
-    expect(missing.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
-
-    // Written but EMPTY is the same nothing.
-    const empty = run({
-      authed: true,
-      codexLoginExit: 0,
-      env: {
-        NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD_NO_DIFF}; : > "$NEUTRON_CODEX_BUILD_DIFF_FILE"`,
-      },
-    })
-    expect(empty.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
-  })
-
-  test('a STALE diff from an earlier round is not reported as this round\'s', () => {
-    // #545's class of defect one file over: the path is handed in by the caller and
-    // survives between rounds, so a build that commits without rewriting it would
-    // point the review panel at a diff it did not produce — and the panel would
-    // review it without noticing. The wrapper deletes the path before launch, so the
-    // only diff it can report is one this build wrote.
-    const stale = run({
-      authed: true,
-      codexLoginExit: 0,
-      diff: 'diff --git a/prior b/prior\n+A DIFF FROM AN EARLIER ROUND\n',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
-    })
-    // The build committed — so this is not passing because nothing happened.
-    expect(stale.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
-    expect(stale.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
-    // …and the file itself is gone, not merely unreported: nothing downstream can
-    // pick it up off the path by another route.
-    expect(existsSync(join(stale.dir, 'branch.diff'))).toBe(false)
-
-    // The control: the SAME stale file, and a build that does rewrite it, reports the
-    // path — with this round's contents.
-    const fresh = run({
-      authed: true,
-      codexLoginExit: 0,
-      diff: 'diff --git a/prior b/prior\n+A DIFF FROM AN EARLIER ROUND\n',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(fresh.trailer['NEUTRON_CODEX_BUILD_DIFF']).toContain('branch.diff')
-    expect(readFileSync(join(fresh.dir, 'branch.diff'), 'utf8')).not.toContain('EARLIER ROUND')
-  })
-
-  test('a committing round that wrote NO diff gets one from the base branch', () => {
-    // The gap the deletion above opens. The workflow captures the diff PATH once and
-    // hands the SAME one to every review round, so a fix round that committed and
-    // forgot to re-write the diff would send the panel at a path the wrapper had just
-    // deleted. The diff is not a judgement call — it is `git diff <base>..HEAD` — so
-    // the wrapper takes it rather than reporting nothing.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      base: 'main',
-      diff: 'diff --git a/prior b/prior\n+A DIFF FROM AN EARLIER ROUND\n',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
-    })
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_DIFF']).toContain('branch.diff')
-    const written = readFileSync(join(r.dir, 'branch.diff'), 'utf8')
-    // THIS round's work, not the round the file was left over from.
-    expect(written).toContain('built.txt')
-    expect(written).not.toContain('EARLIER ROUND')
-  })
-
-  test('the last-resort diff needs a COMMIT — an uncommitted round still reports nothing', () => {
-    // With no commit of this build's own there is nothing to diff, and an empty
-    // `NEUTRON_CODEX_BUILD_DIFF=` is exactly the signal the workflow's round-1 gate
-    // reads to keep an unbuilt branch out of the review panel. Regenerating here
-    // would manufacture a diff for a build that produced none.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      base: 'main',
-      diff: null,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_NO_COMMIT },
-    })
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
-  })
-
-  test('NO base argument means no last-resort diff — never a guessed base', () => {
-    // The positive control for the two above: the same committing-but-diffless build,
-    // with the base omitted, reports nothing rather than diffing against whatever
-    // branch happens to be lying around.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      diff: null,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
-    })
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
-    expect(r.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
-  })
-
-  test('a HANGING `gh` costs the run a PR number, never the trailer', () => {
-    // `emit_trailer` runs on the FAILURE path too, so an unbounded `gh` does not
-    // merely lose a field — it hangs the build phase forever and the DEFERRED report
-    // never reaches the bridge. Bounded by the same alarm as the `git ls-remote`
-    // probes beside it.
-    const r = run({
-      authed: true,
-      // Kill it well short of the mock's 120s hang. Which of the two happened is the
-      // assertion below — a signal means the bound did NOT hold.
-      spawnTimeoutMs: 45_000,
-      codexLoginExit: 0,
-      // The build seam REPLACES `gh` on PATH with one that never returns, after it
-      // commits — so the probe runs against a hang the wrapper must give up on.
-      env: {
-        NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD}; cat > "$HOME/bin/gh" <<'GHEOF'
-#!/bin/sh
-sleep 120
-GHEOF
-chmod 755 "$HOME/bin/gh"`,
-      },
-    })
-    // IT FINISHED BY ITSELF. An unbounded probe would still be inside `gh` at 45s and
-    // come back killed; this is the discriminant, not an elapsed-time threshold.
-    expect(r.signal).toBeNull()
-    // The trailer EXISTS and is complete — the whole point.
-    expect(Object.keys(r.trailer)).toHaveLength(6)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
-    // …with the PR number empty, because the probe was cut off rather than answered.
-    expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
-  }, 90_000)
-
-  test('a HANGING `git ls-remote` STOPS the phase cleanly instead of wedging it', () => {
-    // THE SAME BOUND AS `gh`, on the probes that were still inside a command
-    // substitution. `$(…)` returns when the PIPE closes, not when the process exits,
-    // so an alarm that killed the process did nothing while a child still held stdout
-    // — the wrapper waited on the remote forever and the build phase with it.
-    //
-    // A REAL `origin` IS LOAD-BEARING HERE: the wrapper skips both `ls-remote` probes
-    // when the repo has no remote to ask, so the same fixture without one would never
-    // reach the hanging shim and this test would be green against a wrapper with no
-    // bound at all.
-    //
-    // The unanswerable remote is hit by the PRE-LAUNCH baseline first, so the outcome
-    // is DEFERRED before a token is spent rather than a build whose provenance nobody
-    // could check. What is under test is that it ENDED — three 10s alarms and an exit
-    // code, not a wedged phase.
-    const r = run({
-      authed: true,
-      codexLoginExit: 0,
-      origin: true,
-      hangingLsRemote: true,
-      // Well short of the mock's 120s-per-call hang, and comfortably ABOVE the
-      // wrapper's own worst case here — three baseline attempts capped at 10s each.
-      // WHICH of the two happened is the assertion — a signal means a bound did not
-      // hold — not how long it took.
-      spawnTimeoutMs: 90_000,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
-    })
-    expect(r.signal).toBeNull()
-    expect(r.status).toBe(3)
-    expect(r.stderr).toContain('CODEX_BUILD_NO_REMOTE_BASELINE')
-  }, 180_000)
-
-  test('a WITNESS probe that hangs costs the run a fact, never the build phase', () => {
-    // The other half of the bound, now that the baseline refuses rather than shrugs.
-    // Here the baseline ANSWERS and the post-build witness is the one that wedges: the
-    // build has already happened and its tokens are spent, so an unanswerable remote
-    // must cost a field and nothing more. `emit_trailer` also runs on the failure path,
-    // where a hang would eat the DEFERRED report the bridge is waiting for.
-    const r = pushable()
-    // Probe 1 (baseline) answers; probes 2-4 (the three witness attempts) hang.
-    countingLsRemote(r.dir, { hang: [2, 3, 4] })
-    // Well short of the shim's 120s-per-call hang, and above the wrapper's own worst
-    // case here — three witness attempts capped at 10s each.
-    const built = rerun(r, `${FAKE_BUILD}; git push -q origin trident/a-run`, 90_000)
-    expect(built.signal).toBeNull()
-    expect(built.status).toBe(0)
-    // The local measurement is unaffected: the build's own commit is still reported.
-    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
-    expect(built.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
-    // …and the one fact the remote owed us is empty rather than guessed — even though
-    // the commit really IS on the remote, because an unanswered probe is not a witness.
-    expect(built.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
-    expect(Object.keys(built.trailer)).toHaveLength(6)
-  }, 180_000)
-
-  test('the trailer is emitted on the FAILURE path too', () => {
-    // A codex run that died after committing still left work on the branch, and the
-    // operator recovering it needs to be told the sha. The exit code is what makes
-    // the run stop; the trailer is what makes the stop diagnosable.
-    const r = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_FAIL } })
-    expect(r.status).toBe(5)
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
-    expect(Object.keys(r.trailer)).toHaveLength(6)
-  })
-
-  test('all six trailer keys are present for a build that COMMITTED, one that did NOT, and one that FAILED', () => {
-    // A missing key and an empty key read the same to a regex; the bridge is told to
-    // copy six values, so six must always be there to copy. Three shapes of build, not
-    // "every path" — the paths that never reach codex write no trailer at all, which
-    // is the test below this one.
-    for (const cmd of [FAKE_BUILD, FAKE_NO_COMMIT, FAKE_FAIL]) {
-      const r = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: cmd } })
-      expect(Object.keys(r.trailer).sort()).toEqual([
-        'NEUTRON_CODEX_BUILD_BRANCH',
-        'NEUTRON_CODEX_BUILD_DIFF',
-        'NEUTRON_CODEX_BUILD_HEAD',
-        'NEUTRON_CODEX_BUILD_PR',
-        'NEUTRON_CODEX_BUILD_REMOTE_HEAD',
-        'NEUTRON_CODEX_BUILD_WORKTREE',
-      ])
-    }
-  })
-
-  test('no trailer file written at all when codex never ran — nothing was measured', () => {
-    // A trailer for a lane that never launched would let the bridge report a sha for a
-    // build that did not happen.
-    expect(run({ noCodexHome: true }).trailerRaw).toBe('')
-    expect(run({ authed: true, codexLoginExit: 1 }).trailerRaw).toBe('')
-    expect(run({ authed: true, codexLoginExit: 0, brief: null }).trailerRaw).toBe('')
+    expect(r.codexArgv).toContain('--strict-config')
   })
 })
 

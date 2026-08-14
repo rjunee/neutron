@@ -264,8 +264,9 @@ describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
   })
 
   test('an existing PR is REUSED, never duplicated', () => {
-    expect(SRC).toContain('gh pr list --head')
-    expect(SRC).toContain('NEVER open a duplicate PR')
+    expect(SRC).toContain('outer loop reuses the PR')
+    expect(SRC).toContain('Do NOT push and do NOT run')
+    expect(SRC).toContain('outer loop already owns PR')
   })
 })
 
@@ -312,20 +313,18 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
     }
   })
 
-  test("every fix round re-pins to the sha THAT round's fix agent reported committing", () => {
-    const rePin = SRC.indexOf('reviewedHead = typeof fix?.commitSha')
-    // `lastIndexOf`: the FIRST call is round 1's pre-loop review, which of course
-    // precedes the re-pin. The one that must follow it is the in-loop RE-review.
-    const loopReview = SRC.lastIndexOf('reviewAndSynthesize(diffFile, round, pr)')
-    expect(rePin).toBeGreaterThan(-1)
-    expect(loopReview).toBeGreaterThan(rePin)
+  test("every pr-mode fix hands its own commit back to the outer publisher before re-review", () => {
+    const handoff = SRC.indexOf("typeof fix?.commitSha === 'string'")
+    const returned = SRC.indexOf('return publishResult', handoff)
+    expect(handoff).toBeGreaterThan(-1)
+    expect(returned).toBeGreaterThan(handoff)
     // The fix agent is asked for that sha under the same schema round 1 uses —
     // asserted as "through the SAME dispatch helper", which is the property that
     // matters now that a build has two possible executors. Round 1 and every fix
     // round going through one function is what stops a fix round from silently
     // landing on a different builder than the one that opened the branch.
     expect(SRC).toContain('const fix = await forgeAgent(')
-    expect(SRC).toContain('const forge = await forgeAgent(')
+    expect(SRC).toContain(': await forgeAgent(')
   })
 
   test('the terminal result carries `reviewedHead` (the field merge.ts pins on)', () => {

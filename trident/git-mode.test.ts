@@ -59,17 +59,17 @@ describe('isGithubRemoteUrl', () => {
 })
 
 describe('detectMergeMode', () => {
-  const probe = (hasOrigin: boolean, hasGh: boolean): GitModeProbe => ({
+  const probe = (hasOrigin: boolean, canPublish: boolean): GitModeProbe => ({
     hasGithubOrigin: async () => hasOrigin,
-    ghAvailable: async () => hasGh,
+    publisherAvailable: async () => canPublish,
   })
 
   test("returns 'pr' when a github origin AND gh are both present", async () => {
     expect(await detectMergeMode('/repo', probe(true, true))).toBe('pr')
   })
 
-  test("returns 'local' when gh is missing", async () => {
-    expect(await detectMergeMode('/repo', probe(true, false))).toBe('local')
+  test('a GitHub origin without a capable publisher fails loudly', async () => {
+    await expect(detectMergeMode('/repo', probe(true, false))).rejects.toThrow('refusing to silently weaken')
   })
 
   test("returns 'local' when there is no github origin", async () => {
@@ -85,9 +85,16 @@ describe('detectMergeMode', () => {
       hasGithubOrigin: async () => {
         throw new Error('git missing')
       },
-      ghAvailable: async () => true,
+      publisherAvailable: async () => true,
     }
     expect(await detectMergeMode('/repo', boom)).toBe('local')
+  })
+
+  test('a throwing publisher probe on a GitHub repo fails loudly', async () => {
+    await expect(detectMergeMode('/repo', {
+      hasGithubOrigin: async () => true,
+      publisherAvailable: async () => { throw new Error('secret store unavailable') },
+    })).rejects.toThrow('refusing to silently weaken')
   })
 })
 
@@ -101,7 +108,7 @@ describe('defaultGitModeProbe (injected runner)', () => {
       return ok('gh version 2.0')
     })
     expect(await probe.hasGithubOrigin('/repo')).toBe(true)
-    expect(await probe.ghAvailable()).toBe(true)
+    expect(await probe.publisherAvailable()).toBe(true)
     expect(await detectMergeMode('/repo', probe)).toBe('pr')
   })
 
@@ -114,13 +121,13 @@ describe('defaultGitModeProbe (injected runner)', () => {
     expect(await detectMergeMode('/repo', probe)).toBe('local')
   })
 
-  test('gh missing → ghAvailable false → local', async () => {
+  test('publisher authentication missing on a GitHub repo fails loudly', async () => {
     const probe = defaultGitModeProbe(async (cmd) => {
       if (cmd[0] === 'git') return ok('git@github.com:rjunee/neutron.git')
       return fail()
     })
-    expect(await probe.ghAvailable()).toBe(false)
-    expect(await detectMergeMode('/repo', probe)).toBe('local')
+    expect(await probe.publisherAvailable()).toBe(false)
+    await expect(detectMergeMode('/repo', probe)).rejects.toThrow('outer publisher cannot authenticate')
   })
 })
 

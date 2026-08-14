@@ -417,6 +417,61 @@ export function buildTridentOrchestrator(
     return null
   }
 
+  async function publishBuiltCommit(run: TridentRun, requestedHead: string): Promise<{ pr: number; head: string }> {
+    if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
+    const branch = run.branch ?? `trident/${run.slug}`
+    const local = await opts.run_host(['git', '-C', run.repo_path, 'rev-parse', `refs/heads/${branch}`], run.repo_path)
+    if (!local.ok || local.stdout.trim() !== requestedHead) {
+      throw new Error(`outer publisher refused: branch ${branch} no longer points at the commit produced by the build`)
+    }
+    const runWithRetries = async (command: string[], attempts = 3) => {
+      let result = await opts.run_host(command, run.repo_path)
+      for (let attempt = 1; !result.ok && attempt < attempts; attempt++) {
+        result = await opts.run_host(command, run.repo_path)
+      }
+      return result
+    }
+    const pushed = await runWithRetries(
+      ['git', '-C', run.repo_path, 'push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+    )
+    if (!pushed.ok) throw new Error(`outer publisher could not push branch ${branch}`)
+
+    const witnessed = await runWithRetries(
+      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+    )
+    const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
+    if (remoteHead !== requestedHead) {
+      throw new Error(`outer publisher could not confirm commit ${requestedHead} on origin`)
+    }
+
+    let pr = await detectExistingPr({ ...run, branch })
+    if (pr === null) {
+      const base = await resolveBase(run)
+      const created = await runWithRetries(
+        ['gh', 'pr', 'create', '--head', branch, '--base', base, '--fill'],
+      )
+      if (!created.ok) throw new Error(`outer publisher could not open a PR for branch ${branch}`)
+      pr = await detectExistingPr({ ...run, branch })
+    }
+    if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
+
+    const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
+    const base = await resolveBase(run)
+    const changed = await opts.run_host(
+      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${requestedHead}`],
+      run.repo_path,
+    )
+    if (!changed.ok || changed.stdout.trim() === '') {
+      throw new Error('outer publisher refused to dispatch reviewers for an empty diff')
+    }
+    const diff = await opts.run_host(
+      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${requestedHead}`],
+      run.repo_path,
+    )
+    if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
+    return { pr, head: requestedHead }
+  }
+
   function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {
     return {
       ...run,
@@ -643,6 +698,63 @@ export function buildTridentOrchestrator(
   async function applyResult(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
+
+    // A merged PR is terminal even if the inner process was about to request a
+    // publish. Do not recreate its deleted branch or open a replacement PR.
+    if (result.pr_merged) {
+      const mergedRun: TridentRun = {
+        ...run,
+        harvested_at: nowMs(),
+        phase: 'done',
+        pr: result.pr_number ?? run.pr,
+        branch: result.branch ?? run.branch,
+        inner_checkpoint: result.checkpoint ?? 'pr-merged',
+        inner_verdict: 'APPROVE',
+        subagent_status: 'completed',
+        failure_reason: null,
+        last_advanced_at: now(),
+      }
+      return { run: mergedRun, changed: true, waiting: false, note: `PR #${mergedRun.pr ?? '?'} already merged → done (no publish)` }
+    }
+
+    if (result.publish_requested) {
+      if (result.publish_head === null || result.publish_head === undefined) {
+        return {
+          run: failedRun(run, 'inner workflow requested outer publishing without a full commit OID', true),
+          changed: true,
+          waiting: false,
+          note: 'publish handoff → failed (missing commit OID)',
+        }
+      }
+      try {
+        const published = await publishBuiltCommit(run, result.publish_head)
+        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}`
+        const resetPatch: TridentRunUpdate = {
+          inner_result: null,
+          subagent_run_id: null,
+          subagent_status: null,
+          inner_checkpoint: checkpoint,
+          inner_verdict: null,
+          pr: published.pr,
+          branch: result.branch ?? run.branch,
+        }
+        await persistRefireReset(run.id, resetPatch)
+        return {
+          run: { ...run, ...resetPatch, last_advanced_at: now() },
+          changed: true,
+          waiting: false,
+          note: `outer publisher confirmed ${published.head} and PR #${published.pr} → re-fire review`,
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        return {
+          run: failedRun(run, `publish failed: ${reason}`, true),
+          changed: true,
+          waiting: false,
+          note: `publish handoff → failed (${reason})`,
+        }
+      }
+    }
 
     // A MERGE IS TERMINAL (ISSUES #563) — checked before EVERY other branch,
     // including the Ralph re-fire, because a merged PR outranks every other reading

@@ -398,12 +398,10 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
 // See docs/research/legacy-neutron-fix-reconciliation-2026-06-24.md.
 // ---------------------------------------------------------------------------
 describe('FIX 9 — fleet premature-completion / cross-model-review wedge', () => {
-  test('(a) the live Forge contract orders PR-FIRST, best-effort review, never gate/yield', () => {
-    // The inlined forgePushStep in inner-workflow.mjs (the single live source).
-    expect(INNER_WORKFLOW_SRC).toContain('OPEN THE PR FIRST')
-    expect(INNER_WORKFLOW_SRC).toMatch(/best-effort/i)
-    expect(INNER_WORKFLOW_SRC).toContain('NEVER gate the PR')
-    expect(INNER_WORKFLOW_SRC).toMatch(/yield your turn/i)
+  test('(a) the live Forge contract leaves PR publication to the durable outer loop', () => {
+    expect(INNER_WORKFLOW_SRC).toContain('durable outer loop publishes')
+    expect(INNER_WORKFLOW_SRC).toContain('Do NOT push')
+    expect(INNER_WORKFLOW_SRC).toContain('publishRequested: true')
   })
 
   test('(b) a fire turn that ends without a completion event → failed (paused ≠ finished)', async () => {

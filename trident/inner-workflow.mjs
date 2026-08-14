@@ -799,18 +799,14 @@ function forgeStep1(reenter) {
 // on the branch only (no remote, no `gh pr create`).
 function forgePushStep(reenter) {
   return isPr
-    ? `Commit, then push the branch to origin, then ${
-        reenter
-          ? `REUSE the existing PR (confirm with \`gh pr list --head ${forgeBranch}\`) — NEVER open a duplicate`
-          : 'open a PR with `gh pr create`'
-      }. OPEN THE PR FIRST; any cross-model review is best-effort and must NEVER gate the PR or be a reason to yield your turn.`
+    ? `Commit on ${forgeBranch} and stop. Do NOT push and do NOT run \`gh\`; the durable outer loop publishes and confirms the commit before review.`
     : `Commit on ${forgeBranch}. This repo has NO GitHub remote — do NOT push or run \`gh pr create\`; the OUTER loop merges the local branch.`
 }
-const FORGE_PR_LINE = isPr ? 'PR_NUMBER=<integer>' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
+const FORGE_PR_LINE = isPr ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
 // `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
 function forgeBuildContract(reenter) {
-  return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, ${isPr ? 'push, and open a PR' : 'and commit'} without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+  return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
 ${NO_PATTERN_KILL_RULE}
@@ -819,6 +815,7 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.
 4. ${forgePushStep(reenter)}
+   Any cross-model review is best-effort and must NEVER gate publication or make you yield your turn.
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
 6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
@@ -927,21 +924,21 @@ function briefIntegrity(text) {
  * ordered to push and open a PR anyway did exactly what the order implied: it wrote the
  * whole feature, could not deliver it, and the round came back indistinguishable from
  * one that produced nothing. So the contract is split at the publish boundary — the
- * build commits locally, and the WRAPPER, which runs outside the sandbox where the
- * credential lives, pushes and opens the PR. Telling the build to attempt it anyway
+ * build commits locally, and the durable outer loop publishes with its host-only
+ * credential. Telling the build to attempt it anyway
  * would burn tokens on a command that cannot succeed and end in a report of a PR that
  * does not exist.
  */
 function codexBuildCoda() {
   const publish = isPr
     ? `
-- STEP 4'S PUSH AND PR ARE NOT YOURS, and this REPLACES that step: COMMIT LOCALLY on ${forgeBranch} and stop there. Do NOT run \`git push\` and do NOT run \`gh\` at all. You are running without a GitHub credential — that is deliberate, not an oversight to work around — so a push or a \`gh pr create\` from here cannot authenticate and will fail. The wrapper that launched you does both from OUTSIDE this sandbox after you exit, and then measures what actually landed. Your commit is the deliverable; publishing it is someone else's step.`
+- STEP 4'S PUSH AND PR ARE NOT YOURS, and this REPLACES that step: COMMIT LOCALLY on ${forgeBranch} and stop there. Do NOT run \`git push\` and do NOT run \`gh\` at all. The durable outer loop publishes after this process tree exits, then independently measures \`origin\`. Your commit is the deliverable; publishing it is someone else's step.`
     : ''
   return `
 
 HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from you — this REPLACES steps 5 and 6 above):
 - There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
-- Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
+- Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\` after you exit and reports the local commit to the durable outer loop. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
 - Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
 - Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
 }
@@ -1157,9 +1154,7 @@ function codexBuildPrompt(slot, brief, route) {
   // In pr mode the sha that matters is the PUSHED one — it is what a reviewer reads
   // and what `--match-head-commit` pins the merge to. In local mode there is no
   // remote, so the local head is the authority. Same split as `readBranchHead`.
-  const shaLine = isPr
-    ? 'commitSha    = the value after NEUTRON_CODEX_BUILD_REMOTE_HEAD= (the build\'s own commit, confirmed pushed — NOT the local one; an unpushed commit is one no reviewer and no merge will ever see)'
-    : 'commitSha    = the value after NEUTRON_CODEX_BUILD_HEAD= (local mode has no remote)'
+  const shaLine = 'commitSha    = the value after NEUTRON_CODEX_BUILD_HEAD= (the build commit; in pr mode the outer loop independently publishes and confirms it before review)'
   return `You are the CODEX BUILD bridge for trident. The BUILD ITSELF runs in a codex subprocess; YOUR job is to launch it and report the six values its wrapper measures. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 DO NOT BUILD ANYTHING YOURSELF. Do not edit a file, do not run the tests, do not commit, and do not "finish the job" if the subprocess falls short — this phase was deliberately moved off Claude, and work you do here defeats that. Run the command, read the output, fill the schema.
 Work from your CURRENT WORKING DIRECTORY (your isolated worktree — do NOT \`cd\` anywhere).
@@ -2956,7 +2951,7 @@ try {
   // explicit reminder. Only meaningful in pr-mode — local mode has no PR.)
   const reuseNote =
     isPr && (pr !== null || resumeCheckpoint !== null)
-      ? `\n\nRESUME: a prior run already opened PR #${pr ?? '?'} on branch ${forgeBranch}. REUSE it — confirm with \`gh pr list --head ${forgeBranch}\` and push to the SAME branch. NEVER open a duplicate PR.`
+      ? `\n\nRESUME: the durable outer loop already owns PR #${pr ?? '?'} and branch ${forgeBranch}. Commit to that SAME local branch. Do NOT push and do NOT run \`gh\`; the outer loop reuses the PR.`
       : ''
   // P-F2 — the Fable ORCHESTRATOR plans FIRST (once per Ralph iteration): it
   // regenerates the plan, picks the single top task, and emits its execution spec
@@ -2970,43 +2965,79 @@ try {
   // for the next task instead of merging after task 1 (the bug this fixes). Stays 0
   // for non-Ralph (single-task) runs, which never re-fire.
   let ralphRemaining = 0
+  const publishedResume = typeof resumeCheckpoint === 'string'
+    ? resumeCheckpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
+    : null
+  if (publishedResume !== null) round = Number(publishedResume[3])
   if (ralph === true) {
-    const plan = await agent(
+    if (publishedResume !== null) {
+      ralphRemaining = Number(publishedResume[2])
+    } else {
+      const plan = await agent(
       planFablePrompt(resuming),
       withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
-    )
+      )
     // NEVER continue Ralph without a plan (Codex [P2]). The old in-Forge
     // RALPH_NOTE is gone, so a null plan (planner terminal error) would run
     // forge:build with NO plan + NO one-task discipline — an unplanned build.
     // Fail loudly; the catch{} persists a terminal failure result promptly.
-    if (!plan) {
-      throw new Error('plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode')
+      if (!plan) {
+        throw new Error('plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode')
+      }
+      complexityTag = plan.complexity
+      ralphNote = ralphExecuteNote(plan)
+      ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
+      log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
     }
-    complexityTag = plan.complexity
-    ralphNote = ralphExecuteNote(plan)
-    ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
-    log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
   }
 
   // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
   // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
   // planner's complexity tag.
-  const forge = await forgeAgent(
-    { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
-    complexityTag,
-    `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
+  const forge = publishedResume !== null
+    ? {
+        commitSha: publishedResume[1],
+        diffFile: `/tmp/trident-outer-published-${runId}.diff`,
+        prNumber: pr,
+        branch: forgeBranch,
+        testsPassed: true,
+      }
+    : await forgeAgent(
+      { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
+      complexityTag,
+      `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
 ${task}${reflectionGuidance}`,
-    'r1',
-  )
+      'r1',
+    )
 
   if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
 
   if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
 
   // C1 checkpoint — Forge done (PR + branch persisted).
-  await checkpoint('forge-done', { pr })
+  if (publishedResume === null) await checkpoint('forge-done', { pr })
+
+  if (isPr && publishedResume === null) {
+    const publishHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
+    if (!/^[0-9a-f]{40}$/.test(publishHead)) {
+      throw new Error('forge:build completed without a full local commit OID for the outer publisher')
+    }
+    const publishResult = {
+      ok: true,
+      prNumber: null,
+      branch: forgeBranch,
+      verdict: 'REQUEST_CHANGES',
+      round,
+      checkpoint: 'forge-done',
+      publishRequested: true,
+      publishHead,
+      remainingTasks: ralphRemaining,
+    }
+    await writeTerminalResult(publishResult)
+    return publishResult
+  }
 
   // ── A MERGE IS TERMINAL (ISSUES #563) ────────────────────────────────────────
   // ASKED HERE, THE INSTANT THE BUILD RETURNS, because this is the first moment a
@@ -3160,7 +3191,7 @@ ${task}${reflectionGuidance}`,
       complexityTag,
       `${forgeBuildContract(true)}
 
-You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
+You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). Commit on the SAME local branch; ${isPr ? 'the durable outer loop publishes after you exit, so do not push or run `gh`.' : 'there is no remote and no PR.'} Address every BLOCKER + important finding, run tests until green, commit locally, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):
 ${JSON.stringify(synthesis.findings)}
 
@@ -3169,6 +3200,25 @@ ${task}${reflectionGuidance}`,
       `r${round}`,
     )
     await checkpoint(`fix-round-${round}`, { pr })
+    if (isPr) {
+      const publishHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
+      if (!/^[0-9a-f]{40}$/.test(publishHead)) {
+        throw new Error(`forge:fix-round-${round} completed without a full local commit OID for the outer publisher`)
+      }
+      const publishResult = {
+        ok: true,
+        prNumber: pr,
+        branch: forgeBranch,
+        verdict: 'REQUEST_CHANGES',
+        round,
+        checkpoint: `fix-round-${round}`,
+        publishRequested: true,
+        publishHead,
+        remainingTasks: ralphRemaining,
+      }
+      await writeTerminalResult(publishResult)
+      return publishResult
+    }
     // DID IT LAND — OR DID THE PR MERGE? A fix round runs in a throwaway worktree,
     // so edits that were never committed+pushed are already gone, and reviewing
     // again would re-report the previous round's findings against unchanged code.

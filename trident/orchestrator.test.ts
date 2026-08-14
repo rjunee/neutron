@@ -138,6 +138,97 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
 }
 
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
+  test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    let fires = 0
+    let prLists = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes('gh pr list')) {
+          prLists += 1
+          return ok(prLists > 1 ? '42' : '')
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls).toContain('git -C /repo push origin refs/heads/feat-x:refs/heads/feat-x')
+    const pushAt = calls.findIndex((c) => c.includes(' push origin '))
+    const witnessAt = calls.findIndex((c) => c.includes('ls-remote --heads origin'))
+    expect(witnessAt).toBeGreaterThan(pushAt)
+    expect(h.inputs).toHaveLength(2)
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a successful push without a matching origin witness fails closed', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const other = '1111111111111111111111111111111111111111'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${other}\trefs/heads/feat-x`)
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('could not confirm')
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('gh pr create'))).toBe(false)
+  })
+
+  test('the outer publisher refuses a commit that is not the local branch tip', async () => {
+    const requested = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: requested } }),
+      hostResponder: (cmd) => cmd.join(' ').includes('rev-parse refs/heads/feat-x')
+        ? ok('1111111111111111111111111111111111111111')
+        : ok(),
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('no longer points at')
+    expect(h.hostCalls.some((c) => c.includes('push'))).toBe(false)
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('an empty base-to-head diff terminates before review re-fire', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads')) return ok(`${head}\trefs/heads/feat-x`)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('empty diff')
+    expect(h.inputs).toHaveLength(1)
+  })
+
   test('pr mode: fires, harvests inner_result, merges PR, persists inner_verdict', async () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),

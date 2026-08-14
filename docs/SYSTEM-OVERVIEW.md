@@ -2862,36 +2862,16 @@ generation"), mobile `app/app/codegen.tsx`, both over
   twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
   goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
   a build needs to fetch a base branch or install a dependency.
-  - **THE PUBLISH BOUNDARY: the build COMMITS, the WRAPPER pushes and opens the PR —
-    and the credential is on the wrapper's side of that line.** On 2026-08-13 a codex
-    build wrote a whole feature across eleven files, got 1046 tests green, and delivered
-    nothing: a 0-byte trailer, empty branch/sha/PR at the workflow, `deferred`, no PR and
-    no panel. A build that cannot publish is indistinguishable from a build that produced
-    nothing. The cause was that half the publish path had a credential and half did not,
-    and the half that did not is the half that REPORTS: `git push` reads a
-    `store --file=…` helper named in `~/.gitconfig`, and a FILE survives the child's
-    environment filter, while `gh` on that host has no `hosts.yml` and authenticates
-    purely from `GH_TOKEN` — exactly what the filter strips, permanently (see the next
-    bullet for what happened the one time it was widened). So the Forge contract is split
-    at the publish boundary, which is what `SPEC.md` records the owner asking for: the
-    codex build creates the branch, writes the code, runs the tests, COMMITS LOCALLY and
-    writes the diff, and `trident/codex-build.sh` — running outside the sandbox, in the
-    process tree that holds the credential — does the `git push` and the `gh pr create`.
-    `codexBuildCoda` in `trident/inner-workflow.mjs` stands step 4 down in words, so the
-    build does not spend tokens on a command that cannot succeed. Nothing sensitive
-    crosses INTO the sandbox to make this work; the movement is the other way.
-    - **Publishing does not make the wrapper a witness to itself.** The push happens
-      inside `emit_trailer`, BEHIND the same `$head` the pre-existing-sha and
-      wrong-branch gates just established — so the only thing it can ever push is a
-      commit this run produced on the branch this run was asked for. `REMOTE_HEAD` is
-      still `git ls-remote` compared for equality with that sha, never "the push exited
-      0", and the PR number still comes from `gh pr list` after the create, never from
-      the create's own output (#545: a verdict may not land on a base the review never
-      saw). A failed publish is an empty `REMOTE_HEAD` in a trailer that still names the
-      branch, the local sha and the diff — not a non-zero exit, which would blank every
-      field and throw away what an operator recovers the work from. A codex run that
-      FAILED after committing is not published at all: the round is discarded, and a PR
-      for a discarded round is litter.
+  - **THE PUBLISH BOUNDARY: the inner tree commits; the durable outer loop publishes.**
+    `trident/codex-build.sh` contains no push, PR-create, or GitHub-authentication command.
+    A pr-mode workflow hands its measured local commit to `trident/orchestrator.ts`, then
+    stops. The outer loop verifies the named local branch still points at that commit,
+    pushes an explicit refspec through its credentialed host runner, and independently
+    runs `git ls-remote --heads origin` before it accepts `REMOTE_HEAD`. It similarly
+    reads an existing PR or creates one and reads it back. Only after both facts exist
+    does it re-fire the workflow from `outer-published:<sha>` for review. The credential
+    is injected at the host-command boundary in `open/composer.ts`; it never enters the
+    wrapper command, the Forge transcript, or any process below the inner workflow.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
     MAY reach the network; it says nothing about what environment it is handed.
     `codex exec` filters that (`shell_environment_policy`), defaulting to

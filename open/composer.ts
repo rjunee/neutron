@@ -465,7 +465,7 @@ import {
   CodexCredentialService,
   codexExecutorAvailability,
 } from '@neutronai/trident/codex-credential.ts'
-import { makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
+import { defaultGitModeProbe, detectMergeMode, makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
@@ -2003,6 +2003,11 @@ export function buildOpenGraphComposer(
     // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
+    const tridentHostRunner = makeLazyCredentialedHostRunner(async () =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
+    )
+    const resolveTridentMergeMode = (repoPath: string) =>
+      detectMergeMode(repoPath, defaultGitModeProbe(tridentHostRunner))
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
         // No credential → no substrate → the tick loop can never advance a run
@@ -2023,6 +2028,7 @@ export function buildOpenGraphComposer(
           // `<home>/Projects/<project_slug>/code` under it (git-init-ing on first
           // use), so a project with no repo yet still builds.
           repo_path: owner_home,
+          resolveMergeMode: resolveTridentMergeMode,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -3840,6 +3846,7 @@ export function buildOpenGraphComposer(
                 channel_kind: 'app_socket',
                 chat_id: chatId,
                 thread_id: null,
+                resolveMergeMode: resolveTridentMergeMode,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -5915,9 +5922,7 @@ export function buildOpenGraphComposer(
               //
               // Not connected → `githubProcessEnv(null)` is `{}` → byte-for-byte
               // today's behaviour, so an instance that never connects is unchanged.
-              run_host: makeLazyCredentialedHostRunner(async () =>
-                githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
-              ),
+              run_host: tridentHostRunner,
               // M1 UX REDESIGN — the LIVE-PROGRESS fan. Fired by the tick loop for
               // every run whose observable progress advanced (a checkpoint crossing
               // building→reviewing→fixing→merging, a launch, or a terminal
@@ -6044,6 +6049,7 @@ export function buildOpenGraphComposer(
               work_board: workBoardStore,
               repo_path: owner_home,
               channel_kind: 'app_socket' as const,
+              resolveMergeMode: resolveTridentMergeMode,
               // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.
