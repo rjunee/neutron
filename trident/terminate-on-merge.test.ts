@@ -292,7 +292,11 @@ describe('the loop terminates ON the merge, not on a later observation of it', (
     // Same contract as the head and CI probes: run one thing, transcribe it. "Is the
     // PR merged?" asked of a model is a question it can answer plausibly and wrongly,
     // and a wrong yes ends a live run.
-    expect(SRC).toContain('gh pr view ${String(prForProbe)} --json state,mergedAt')
+    // The command is composed through `ghReadCommand`, which is how the read
+    // carries the instance GitHub credential (2026-08-14 — an unauthenticated
+    // probe made every review defer). The QUESTION asked is unchanged: one
+    // command, transcribed.
+    expect(SRC).toContain('ghReadCommand(`pr view ${String(prForProbe)} --json state,mergedAt`)')
     expect(SRC).toContain('do NOT decide whether the PR is merged')
   })
 

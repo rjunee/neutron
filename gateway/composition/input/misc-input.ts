@@ -122,6 +122,13 @@ export interface MiscCompositionInput {
     resolve_codex_home?: (
       run: import('@neutronai/trident/store.ts').TridentRun,
     ) => string | null
+    /** Owner data dir (the `SecretsStore` keyfile's home) the inner loop's
+     *  credentialed-`gh` runner resolves the instance GitHub token from, per
+     *  command — the READ-side sibling of `run_host`'s credential. */
+    gh_data_dir?: string
+    /** Frozen `owner_handle` the GitHub token is filed under; a handle, never a
+     *  secret (these values transit the launcher prompt as workflow args). */
+    gh_owner_handle?: string
     /**
      * Is a Kimi K3 key configured? Called PER LAUNCH (not captured at boot) so a
      * key added later is honoured on the next run rather than the next restart.

@@ -159,6 +159,23 @@ const {
   // threads the absolute one. A legacy caller that doesn't thread it falls back
   // to the repo-of-record copy.
   worktreeCleanupScript = null,
+  // CREDENTIALED-`gh` RUNNER (2026-08-14 card). Same threading contract as
+  // `checkpointScript`: a checked-in script this file cannot resolve the path of,
+  // so the launcher (`buildWorkflowArgs`) threads the absolute one — plus the
+  // `SecretsStore` coordinates it resolves the instance GitHub token from and the
+  // absolute bun binary that runs it (a subagent's Bash PATH need not have `bun`).
+  //
+  // PATHS AND A HANDLE, NEVER A TOKEN. These args are serialised into the fire
+  // launcher's PROMPT; the secret is read by `gh-authed.ts` in its own process, on
+  // each command, and lives only in the `gh` child's environment.
+  //
+  // ANY of them absent → `ghReadCommand` returns a bare `gh …`, byte-identical to
+  // what this workflow composed before the runner existed (local mode, a legacy
+  // caller, a dry source check).
+  ghAuthedScript = null,
+  ghDataDir = null,
+  ghOwnerHandle = null,
+  bunBin = null,
   // FABLE-ORCHESTRATOR model routing (model routing per the refactor plan protocol,
   // `docs/plans/2026-07-02-world-class-refactor-plan.md` § 1.5).
   // The per-role model IDS, resolved from the single-source-of-truth registry
@@ -2630,6 +2647,42 @@ ${cmd}`,
 }
 
 /**
+ * COMPOSE A GITHUB READ SO IT CARRIES THE INSTANCE CREDENTIAL.
+ *
+ * Every `gh` read in this file goes through here. `ghArgs` is the already-composed
+ * tail (e.g. `pr view 261 --json mergeable,statusCheckRollup`); the result is a
+ * shell command the subagent's Bash tool runs.
+ *
+ * WHY. These probes are executed by an `agent(...)`'s Bash tool, which inherits the
+ * warm trident-fire REPL's environment — and that REPL has no `GH_TOKEN`. The
+ * WRITES (the outer publisher's push) carry the credential through `run_host`; the
+ * READS carried nothing. Measured 2026-08-14 on run `8417b277`: the readiness probe
+ * answered "To get started with GitHub CLI, please run: gh auth login", the round
+ * deferred, and the build was recorded as REQUEST_CHANGES for code no review seat
+ * ever opened. `trident/gh-authed.ts` resolves the token from the SecretsStore per
+ * command and puts it in the `gh` child's environment only — never on disk, never
+ * in argv, never in a line this workflow logs.
+ *
+ * FALLS BACK TO BARE `gh` when any coordinate is missing (local mode, a legacy
+ * caller, a dry source check), so behaviour without the new args is unchanged.
+ */
+function ghReadCommand(ghArgs) {
+  const threaded =
+    typeof ghAuthedScript === 'string' &&
+    ghAuthedScript.length > 0 &&
+    typeof ghDataDir === 'string' &&
+    ghDataDir.length > 0 &&
+    typeof ghOwnerHandle === 'string' &&
+    ghOwnerHandle.length > 0 &&
+    typeof dbPath === 'string' &&
+    dbPath.length > 0 &&
+    typeof bunBin === 'string' &&
+    bunBin.length > 0
+  if (!threaded) return `gh ${ghArgs}`
+  return `${shSingleQuote(bunBin)} ${shSingleQuote(ghAuthedScript)} --db ${shSingleQuote(dbPath)} --data-dir ${shSingleQuote(ghDataDir)} --owner ${shSingleQuote(ghOwnerHandle)} -- ${ghArgs}`
+}
+
+/**
  * Ask GitHub what the PR's checks are doing. One command, output reported verbatim.
  *
  * LOCAL MODE HAS NO CHECKS TO READ, so it reports `none` without spending an agent —
@@ -2638,7 +2691,7 @@ ${cmd}`,
  */
 async function probeCi(prForCi, round) {
   if (!isPr || prForCi === null || prForCi === undefined) return { status: 'none', failing: [] }
-  const cmd = `cd ${shSingleQuote(repoPath)} && gh pr checks ${String(prForCi)} --json name,state,link 2>&1; echo "___EXIT=$?"`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(`pr checks ${String(prForCi)} --json name,state,link`)} 2>&1; echo "___EXIT=$?"`
   // THE PROBE IS A SEAT TOO — its agent can die exactly as a reviewer's can, and an
   // unguarded rejection here ended the whole lane. Through `seatAttempt` it becomes
   // `null`, which `classifyCi` already reads as 'unknown': a deferred CI peer, so the
@@ -2659,7 +2712,7 @@ async function probeReviewReadiness(prForReview, round, attempt) {
   if (!isPr || prForReview === null || prForReview === undefined) {
     return { status: 'passed', reason: '', failed: [] }
   }
-  const cmd = `cd ${shSingleQuote(repoPath)} && gh pr view ${String(prForReview)} --json mergeable,statusCheckRollup 2>&1; echo "___EXIT=$?"`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(`pr view ${String(prForReview)} --json mergeable,statusCheckRollup`)} 2>&1; echo "___EXIT=$?"`
   const res = await seatAttempt(`review-readiness-r${round}-attempt-${attempt}`, () =>
     agent(
       `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret mergeability or checks, do NOT run anything else, do NOT modify any file.\n${cmd}`,
@@ -2723,7 +2776,7 @@ async function runReviewRound(diffFile, round, prForReview, paidReview = null) {
  */
 async function probePrMerged(prForProbe, roundTag) {
   if (!isPr || prForProbe === null || prForProbe === undefined) return 'not-merged'
-  const cmd = `cd ${shSingleQuote(repoPath)} && gh pr view ${String(prForProbe)} --json state,mergedAt 2>&1; echo "___EXIT=$?"`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(`pr view ${String(prForProbe)} --json state,mergedAt`)} 2>&1; echo "___EXIT=$?"`
   const res = await agent(
     `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether the PR is merged, do NOT run anything else, do NOT modify any file.
 ${cmd}`,

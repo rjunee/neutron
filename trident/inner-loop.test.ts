@@ -23,6 +23,7 @@ import {
   buildSubstrateWorkflowFire,
   parseCheckpointFindings,
   parseInnerResult,
+  GH_AUTHED_SCRIPT_PATH,
   WORKFLOW_FIRE_TOOL_NAMES,
   type FireInnerWorkflow,
   type FireInnerWorkflowInput,
@@ -359,6 +360,45 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     const firer = buildWorkflowFirer({ fire })
     await firer(input())
     expect(calls[0]!.prompt).toContain('"codexHome":null')
+  })
+
+  // THE INNER LOOP'S GITHUB READS — the credentialed-`gh` runner's path + store
+  // COORDINATES ride the args (paths and a handle), and the token never does.
+  test('args thread the credentialed-`gh` runner + the store coordinates it resolves the token from', () => {
+    const args = buildWorkflowArgs(
+      input({ gh_data_dir: '/home/owner/projects/acme', gh_owner_handle: 'acme' }),
+    )
+    expect(args['ghAuthedScript']).toBe(GH_AUTHED_SCRIPT_PATH)
+    expect(String(args['ghAuthedScript']).startsWith('/')).toBe(true)
+    expect(String(args['ghAuthedScript']).endsWith('trident/gh-authed.ts')).toBe(true)
+    expect(args['ghDataDir']).toBe('/home/owner/projects/acme')
+    expect(args['ghOwnerHandle']).toBe('acme')
+    // The ABSOLUTE bun binary: the probe runs in a subagent's Bash, whose PATH
+    // need not carry `bun`.
+    expect(args['bunBin']).toBe(process.execPath)
+  })
+
+  test('args carry null coordinates when GitHub is not wired → the probes fall back to bare `gh`', () => {
+    const args = buildWorkflowArgs(input())
+    expect(args['ghDataDir']).toBeNull()
+    expect(args['ghOwnerHandle']).toBeNull()
+    // The script path is always threaded; it is the coordinates that gate the
+    // fallback, so a legacy caller composes exactly the command it always did.
+    expect(args['ghAuthedScript']).toBe(GH_AUTHED_SCRIPT_PATH)
+  })
+
+  test('NO CREDENTIAL TRANSITS THE LAUNCHER PROMPT — the args JSON never mentions GH_TOKEN', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input({ gh_data_dir: '/home/owner/projects/acme', gh_owner_handle: 'acme' }))
+    const serialized = JSON.stringify(
+      buildWorkflowArgs(input({ gh_data_dir: '/home/owner/projects/acme', gh_owner_handle: 'acme' })),
+    )
+    expect(serialized).not.toContain('GH_TOKEN')
+    expect(serialized).not.toContain('ghp_')
+    // …and neither does the prompt those args are embedded in.
+    expect(calls[0]!.prompt).not.toContain('GH_TOKEN')
+    expect(calls[0]!.prompt).toContain('"ghOwnerHandle":"acme"')
   })
 
   // RB2 (b) — the owner's reflection corrections/diary reach the Forge builder (not

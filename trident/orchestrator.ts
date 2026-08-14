@@ -128,6 +128,20 @@ export interface BuildTridentOrchestratorOptions {
    *  blocker), and a build routed to codex stops and says so. */
   resolve_codex_home?: (run: TridentRun) => string | null
   /**
+   * The `SecretsStore` COORDINATES the inner workflow's credentialed-`gh` runner
+   * (`trident/gh-authed.ts`) resolves the instance GitHub token from: the owner's
+   * data dir (which holds the keyfile) and the frozen `owner_handle`. This is the
+   * READ-side sibling of the `run_host` credential — same store, resolved per
+   * command, never baked in at boot and never written to disk.
+   *
+   * COORDINATES, NOT A CREDENTIAL: they are threaded on into the workflow args (a
+   * launcher prompt), so only paths/handles may ride here. Both absent → the
+   * probes fall back to bare `gh`, i.e. the pre-2026-08-14 behaviour exactly.
+   */
+  gh_data_dir?: string | null
+  /** The frozen `owner_handle` the GitHub token is filed under — see `gh_data_dir`. */
+  gh_owner_handle?: string | null
+  /**
    * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
    * launching run, threaded into the inner workflow so the FORGE BUILDER (forge:build
    * + fix rounds) re-grounds on owner corrections (reflection was chat-only before
@@ -627,6 +641,11 @@ export function buildTridentOrchestrator(
         (opts.resolve_codex_home ? opts.resolve_codex_home(launchRun) : null) ??
         opts.codex_home ??
         null,
+      // The credentialed-`gh` runner's store coordinates, so the inner loop's
+      // GitHub READS carry the instance token the same way its writes do. Paths
+      // and a handle only; `gh-authed.ts` resolves the token itself, per command.
+      gh_data_dir: opts.gh_data_dir ?? null,
+      gh_owner_handle: opts.gh_owner_handle ?? null,
       // Whether the KIMI K3 cross-model panelist runs this launch. Resolved PER
       // LAUNCH (not captured at composition) for the same reason the codex home
       // is: a key added after boot must take effect on the next run, not the next

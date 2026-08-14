@@ -92,6 +92,23 @@ export interface InnerLoopInput {
    *  review runs Claude-only + a "codex not connected" note (never a blocker). */
   codex_home?: string | null
   /**
+   * The credentialed-`gh` runner's STORE COORDINATES: the owner's data dir (the
+   * `SecretsStore` keyfile lives there) and the frozen `owner_handle` the GitHub
+   * token is filed under. Threaded so `trident/gh-authed.ts` can resolve the
+   * token itself, in its own process, on each probe.
+   *
+   * PATHS AND HANDLES ONLY — NEVER THE TOKEN. These args are serialised into the
+   * fire LAUNCHER'S PROMPT (see `buildFireWorkflowPrompt`), so anything here can
+   * end up in a transcript. Same rule as `kimi_configured` (a boolean, never the
+   * key) and `codex_home` (a directory, never the credential in it). Null/absent
+   * → the workflow's probes fall back to bare `gh`, i.e. today's behaviour
+   * exactly.
+   */
+  gh_data_dir?: string | null
+  /** The frozen `owner_handle` the GitHub token is filed under — see
+   *  `gh_data_dir`. Not a secret; the token itself must NEVER be an arg. */
+  gh_owner_handle?: string | null
+  /**
    * Is a Kimi K3 API key configured for this deployment? A BOOLEAN — the key
    * itself must never transit the workflow args, because those are serialised
    * into a launcher PROMPT (see the transit note below). Absent → the Kimi
@@ -229,6 +246,16 @@ export const DEFAULT_INNER_WORKFLOW_PATH = fileURLToPath(new URL('./inner-workfl
  *  resolution and the TARGET repo need not contain trident/). */
 export const CHECKPOINT_SCRIPT_PATH = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 
+/** The abs path of the sibling credentialed-`gh` runner. The workflow's three
+ *  GitHub READ probes (CI / review-readiness / PR-merged) shell into this
+ *  instead of bare `gh`, so a read carries the instance token the same way the
+ *  outer publisher's writes do — resolved PER COMMAND from the SecretsStore, in
+ *  the child's environment only, never on disk (`trident/gh-authed.ts`).
+ *  Threaded via args for the same reason as CHECKPOINT_SCRIPT_PATH: the workflow
+ *  script has no module resolution and the TARGET repo need not contain
+ *  trident/. */
+export const GH_AUTHED_SCRIPT_PATH = fileURLToPath(new URL('./gh-authed.ts', import.meta.url))
+
 /** The abs path of the sibling worktree-cleanup script (ISSUES #541). The
  *  workflow's `finally{}` invokes it instead of asking a cheap-model agent to
  *  `git worktree remove --force` + `git branch -D`: it PRESERVES a dirty
@@ -301,6 +328,18 @@ export function buildWorkflowArgs(
     // runs on every path — dirty worktrees are preserved, never force-removed
     // (#541).
     worktreeCleanupScript: WORKTREE_CLEANUP_SCRIPT_PATH,
+    // The checked-in credentialed-`gh` runner the three GitHub READ probes shell
+    // into, plus the STORE COORDINATES it resolves the token from. Paths and a
+    // handle — never the token, which these args (a launcher prompt) could not
+    // carry safely and which `gh-authed.ts` reads itself, per command.
+    ghAuthedScript: GH_AUTHED_SCRIPT_PATH,
+    ghDataDir: input.gh_data_dir ?? null,
+    ghOwnerHandle: input.gh_owner_handle ?? null,
+    // The ABSOLUTE bun binary that runs the runner. The launcher itself runs
+    // under bun, but the probe command is executed by a SUBAGENT'S Bash tool
+    // whose PATH need not contain `bun` — a bare `bun` there is the same class of
+    // failure this card is fixing, one layer down.
+    bunBin: process.execPath,
     resumeCheckpoint: input.resume_checkpoint ?? null,
     // MID-LOOP RESUME — the OID that checkpoint was recorded against, and the
     // findings recorded with it. The workflow uses the OID to decide whether the
