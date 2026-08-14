@@ -5,6 +5,10 @@
  *
  *   - `GET    /api/cores/integrations`        → unified status: per-Core
  *       Google OAuth accounts + standalone API-key slots (no secrets).
+ *   - `POST   /api/cores/integrations/migrate-orphaned` → move credential rows
+ *       scoped to a PREVIOUS owner handle onto this one (collision-guarded;
+ *       returns counts only). The UI twin of the `integrations_migrate_orphaned`
+ *       chat tool — both call the same brain.
  *   - `POST   /api/cores/api-keys/<label>`    → store/rotate a `byo_api_key`.
  *   - `DELETE /api/cores/api-keys/<label>`    → clear a stored key.
  *
@@ -31,6 +35,7 @@ import { jsonResponse, ownerSlugMismatch, resolveBearer } from './surface-kit.ts
 import {
   buildIntegrationsStatus,
   deleteApiKey,
+  migrateOrphanedCredentials,
   setApiKey,
   IntegrationsError,
   type IntegrationsRegistryView,
@@ -38,6 +43,7 @@ import {
 import type { OAuthTokenManager } from '../cores/oauth-token-manager.ts'
 
 const INTEGRATIONS_PATH = '/api/cores/integrations'
+const MIGRATE_PATH = '/api/cores/integrations/migrate-orphaned'
 const API_KEYS_BASE = '/api/cores/api-keys'
 
 export interface CoresIntegrationsSurfaceOptions {
@@ -69,6 +75,10 @@ export interface CoresIntegrationsSurface {
 function ownsPath(pathname: string): boolean {
   return (
     pathname === INTEGRATIONS_PATH ||
+    // Explicit: the migrate route is a SUB-path of INTEGRATIONS_PATH (an exact
+    // match above) and shares no prefix with API_KEYS_BASE, so without this
+    // clause it falls straight through to the other surfaces and 404s.
+    pathname === MIGRATE_PATH ||
     pathname === API_KEYS_BASE ||
     pathname.startsWith(`${API_KEYS_BASE}/`)
   )
@@ -98,6 +108,29 @@ export function createCoresIntegrationsSurface(
           code: 'project_mismatch',
           message: `bearer project '${resolved.project_slug}' does not match gateway project '${project_slug}'`,
         })
+      }
+
+      if (pathname === MIGRATE_PATH) {
+        if (req.method !== 'POST') {
+          return jsonResponse(405, {
+            ok: false,
+            code: 'method_not_allowed',
+            message: `${req.method} not allowed on ${pathname}`,
+          })
+        }
+        if (db === undefined) {
+          return jsonResponse(409, {
+            ok: false,
+            code: 'db_unavailable',
+            message:
+              'credential migration requires the project DB; this deployment did not wire one',
+          })
+        }
+        // The migration is a metadata move over the credential tables' scope
+        // columns — same brain the chat tool calls; the result already carries
+        // `ok: true` and counts only (never a secret value).
+        const result = await migrateOrphanedCredentials({ db, project_slug })
+        return jsonResponse(200, result)
       }
 
       if (pathname === INTEGRATIONS_PATH) {

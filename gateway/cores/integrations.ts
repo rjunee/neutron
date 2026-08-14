@@ -38,11 +38,19 @@
  */
 
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
-import { asOwnerHandle, type ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  asOwnerHandle,
+  emitSystemEventSafe,
+  resolveSystemEventSink,
+  type ProjectDb,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { ApiKeyStore, ApiKeyStoreError, type ApiKeyProvider } from '@neutronai/auth/api-key-store.ts'
 import {
   censusCredentialScope,
   listOrphanedSecretSlots,
+  migrateOrphanedCredentialScope,
+  type CredentialScopeMove,
   type CredentialScopeOrphanCount,
 } from '@neutronai/auth/credential-scope-reconcile.ts'
 import { metaLabel, parseGrantLabel, refreshLabel } from './oauth-token-manager.ts'
@@ -80,6 +88,11 @@ export interface IntegrationsRegistryView {
  * owner handle onto the boot handle. Named HERE (rather than in the tool module)
  * so the status surface can point at it: a summary that says "orphaned" without
  * naming the way out has fixed the cheap half of the card.
+ *
+ * A REAL action, not a promissory note: this const IS the registered tool name
+ * (`integrations-tools.ts` builds its registration from this very binding, so
+ * the two can never drift), and the same brain — {@link migrateOrphanedCredentials}
+ * — backs `POST /api/cores/integrations/migrate-orphaned`.
  */
 export const MIGRATE_ORPHANED_ACTION = 'integrations_migrate_orphaned'
 
@@ -442,6 +455,93 @@ export async function buildIntegrationsStatus(
   return { oauth, api_keys, orphaned_credentials: orphans.summary }
 }
 
+/** Outcome of one explicit migrate action. Counts and handles only. */
+export interface MigrateOrphanedCredentialsResult {
+  ok: true
+  boot_handle: string
+  stale_handles: string[]
+  moved: CredentialScopeMove[]
+  skipped: CredentialScopeOrphanCount[]
+  total_moved: number
+  total_skipped: number
+  /** One sentence, safe to print verbatim — never a secret value. */
+  message: string
+}
+
+export interface MigrateOrphanedCredentialsInput {
+  db: ProjectDb
+  /** The frozen boot owner handle rows are moved ONTO. */
+  project_slug: string
+  /**
+   * System-events sink. Omitted ⇒ the ambient sink (`resolveSystemEventSink`),
+   * which the gateway registers once at boot. Pass `null` to journal nothing;
+   * tests pass a fake to assert exactly one row landed.
+   */
+  sink?: SystemEventSink | null
+}
+
+/**
+ * SHARED migrate brain — the ONE path behind the `integrations_migrate_orphaned`
+ * chat tool AND `POST /api/cores/integrations/migrate-orphaned`, so the two
+ * surfaces cannot diverge (same pattern as `disconnectOAuth`).
+ *
+ * Boot auto-migrates only the UNAMBIGUOUS case; this is the owner-driven way out
+ * of the ambiguous leftovers. It is still collision-guarded: a row whose slot is
+ * already occupied under the boot handle is SKIPPED and reported rather than
+ * overwriting a freshly-connected credential (the rotation hazard — an explicit
+ * request does not make silent data loss acceptable).
+ *
+ * The audit row carries handles, table names and counts ONLY, matching the boot
+ * path's payload discipline (acceptance (d)); `emitSystemEventSafe` never throws,
+ * so awaiting it cannot turn a completed migration into a failed call.
+ */
+export async function migrateOrphanedCredentials(
+  input: MigrateOrphanedCredentialsInput,
+): Promise<MigrateOrphanedCredentialsResult> {
+  const r = await migrateOrphanedCredentialScope(input.db, input.project_slug)
+  const total_moved = r.moved.reduce((sum, m) => sum + m.rows, 0)
+  const total_skipped = r.skipped.reduce((sum, s) => sum + s.rows, 0)
+
+  if (total_moved > 0) {
+    await emitSystemEventSafe(
+      input.sink !== undefined ? input.sink : resolveSystemEventSink(),
+      {
+        event: 'credential_scope_migrated',
+        module: 'gateway',
+        level: 'warn',
+        project_slug: input.project_slug,
+        payload: { from: r.stale_handles, tables: r.moved, skipped: r.skipped },
+      },
+    )
+  }
+
+  let message: string
+  if (r.stale_handles.length === 0) {
+    message = 'No credential rows are scoped to a previous owner handle.'
+  } else {
+    message =
+      `Moved ${total_moved} credential row(s) from ${r.stale_handles.join(', ')} ` +
+      `to '${r.boot_handle}'.`
+    if (total_skipped > 0) {
+      message +=
+        ` Skipped ${total_skipped} row(s) that would collide with an existing ` +
+        `credential under '${r.boot_handle}' — reconnect or disconnect those ` +
+        `slots instead of migrating.`
+    }
+  }
+
+  return {
+    ok: true,
+    boot_handle: r.boot_handle,
+    stale_handles: r.stale_handles,
+    moved: r.moved,
+    skipped: r.skipped,
+    total_moved,
+    total_skipped,
+    message,
+  }
+}
+
 export interface SetApiKeyInput {
   registry: IntegrationsRegistryView
   secretsStore: SecretsStore
@@ -648,6 +748,6 @@ export async function disconnectOAuth(
 // Re-export the suffix helpers so callers constructing oauth row shapes
 // (tests, surfaces) don't have to import from oauth-token-manager too.
 export { metaLabel, refreshLabel }
-// Re-exported so consumers of `orphaned_credentials.tables` can type it without
-// reaching into the auth package.
-export type { CredentialScopeOrphanCount }
+// Re-exported so consumers of `orphaned_credentials.tables` / the migrate
+// result can type them without reaching into the auth package.
+export type { CredentialScopeMove, CredentialScopeOrphanCount }

@@ -43,6 +43,20 @@
  * boot on any throw (contrast #451, which fails loud). This box is headless;
  * refusing to boot removes the only surface that could explain why.
  *
+ * ── THE EXPLICIT ACTION FOR THE AMBIGUOUS CASE ─────────────────────────────
+ * {@link migrateOrphanedCredentialScope} is the OTHER half: boot deliberately
+ * touches nothing in the ambiguous case, so the leftovers need an owner-driven
+ * way out (the `integrations_migrate_orphaned` tool / `POST
+ * /api/cores/integrations/migrate-orphaned`). An EXPLICIT action still may not
+ * overwrite a fresh credential — the rotation hazard does not stop being a
+ * data-loss bug because a human asked for it. So the explicit move is
+ * COLLISION-GUARDED: every orphaned row whose UNIQUE slot is FREE under the
+ * boot handle moves; every row that would land on an occupied slot is SKIPPED
+ * and reported, so the owner reconnects or disconnects it deliberately. The
+ * per-table UNIQUE keys live in {@link CREDENTIAL_SCOPE_COLLISION_KEYS} (and
+ * the companion entries' `collision_keys`). Still a pure metadata move: nothing
+ * is decrypted, and the ciphertext bytes never change.
+ *
  * ── WHY THE MOVE IS SAFE ───────────────────────────────────────────────────
  * `encrypt` in `auth/secrets-store.ts` binds NO AAD — the envelope is
  * `{v,iv_b64,ct_b64,tag_b64}` over the plaintext alone. The scope column is
@@ -79,6 +93,31 @@ export const CREDENTIAL_SCOPE_COLUMNS: Record<
 }
 
 /**
+ * The remaining columns of each shared-key table's UNIQUE constraint — the
+ * "slot" a credential occupies once its scope column is fixed.
+ *
+ * Read straight off the schema: `secrets` UNIQUE(project_slug, kind, label)
+ * (migration 0009) and `project_credentials` UNIQUE(owner_slug, project_id,
+ * service) (migration 0092). Every listed column is NOT NULL, so the collision
+ * probe can compare with plain `=` — no NULL-safe operator needed.
+ *
+ * A PARALLEL `Record` rather than a field on {@link CREDENTIAL_SCOPE_COLUMNS}
+ * (which is a `Record<table, string>` the boot path reads as a bare column
+ * name): keeping them separate leaves the boot path's shape untouched while
+ * still failing to COMPILE if a table joins {@link SHARED_KEY_ENCRYPTED_TABLES}
+ * without declaring its collision key. Companion tables carry theirs inline on
+ * {@link CREDENTIAL_SCOPE_COMPANION_TABLES} instead, since that list is a plain
+ * array with no tuple-union to guard.
+ */
+export const CREDENTIAL_SCOPE_COLLISION_KEYS: Record<
+  (typeof SHARED_KEY_ENCRYPTED_TABLES)[number],
+  readonly string[]
+> = {
+  secrets: ['kind', 'label'],
+  project_credentials: ['project_id', 'service'],
+}
+
+/**
  * Tables that are NOT shared-key-encrypted themselves but whose scope column
  * must move WITH one that is.
  *
@@ -93,12 +132,20 @@ export const CREDENTIAL_SCOPE_COLUMNS: Record<
 export const CREDENTIAL_SCOPE_COMPANION_TABLES: readonly {
   table: string
   column: string
-}[] = [{ table: 'api_keys', column: 'project_slug' }]
+  /** See {@link CREDENTIAL_SCOPE_COLLISION_KEYS}: `api_keys` UNIQUE(project_slug, provider, label). */
+  collision_keys: readonly string[]
+}[] = [{ table: 'api_keys', column: 'project_slug', collision_keys: ['provider', 'label'] }]
 
 /** One `(table, column)` pair this reconciler sweeps. */
 export interface CredentialScopeColumn {
   table: string
   column: string
+  /**
+   * The rest of the table's UNIQUE key. Only the EXPLICIT migrate action reads
+   * these (to skip a row that would clobber a fresh credential); the boot path's
+   * unambiguous precondition already guarantees nothing to collide with.
+   */
+  collision_keys: readonly string[]
 }
 
 /** Rows moved onto the boot handle in one table. */
@@ -135,6 +182,21 @@ export type CredentialScopeReconcileResult =
     }
 
 /**
+ * What one EXPLICIT (owner-driven) migration did. Like the boot result, this
+ * carries ONLY table names, handles and counts — never a `kind`/`label`/
+ * `service` VALUE, never ciphertext, never plaintext (acceptance (d)).
+ */
+export interface CredentialScopeMigrateResult {
+  boot_handle: string
+  /** Every non-boot handle seen in the census (whether or not anything moved). */
+  stale_handles: string[]
+  /** Rows actually re-scoped, one entry per table with a non-zero move. */
+  moved: CredentialScopeMove[]
+  /** Rows left behind because their slot is already taken under the boot handle. */
+  skipped: CredentialScopeOrphanCount[]
+}
+
+/**
  * SQLite identifiers are not parameterisable, so table/column names are
  * interpolated. They come from the frozen lists above, but the assertion is
  * kept (same shape as `scope-rekey.ts:assertIdent`) so a future entry with a
@@ -160,6 +222,7 @@ export function credentialScopeSweepColumns(): CredentialScopeColumn[] {
     ...SHARED_KEY_ENCRYPTED_TABLES.map((table) => ({
       table,
       column: CREDENTIAL_SCOPE_COLUMNS[table],
+      collision_keys: CREDENTIAL_SCOPE_COLLISION_KEYS[table],
     })),
     ...CREDENTIAL_SCOPE_COMPANION_TABLES,
   ]
@@ -187,7 +250,7 @@ interface HandleCountRow {
 /** Per-table `handle → row count` maps plus the derived handle partition. */
 interface CredentialScopeCensus {
   /** One entry per SWEPT (existing) table, in `credentialScopeSweepColumns` order. */
-  tables: Array<{ table: string; column: string; counts: Map<string, number> }>
+  tables: Array<CredentialScopeColumn & { counts: Map<string, number> }>
   /** Distinct non-boot handles seen anywhere, sorted. */
   stale_handles: string[]
   /** Total rows already sitting under the boot handle, across every swept table. */
@@ -210,7 +273,7 @@ function censusCredentialScopeTables(
   const staleHandles = new Set<string>()
   let boot_handle_rows = 0
 
-  for (const { table, column } of swept) {
+  for (const { table, column, collision_keys } of swept) {
     const t = assertIdent(table, 'table')
     const c = assertIdent(column, 'column')
     const rows = db.all<HandleCountRow, []>(
@@ -224,7 +287,7 @@ function censusCredentialScopeTables(
       if (row.handle === boot_handle) boot_handle_rows += row.n
       else staleHandles.add(row.handle)
     }
-    tables.push({ table, column, counts })
+    tables.push({ table, column, collision_keys, counts })
   }
 
   return { tables, stale_handles: [...staleHandles].sort(), boot_handle_rows }
@@ -344,4 +407,65 @@ export async function reconcileCredentialScope(
   })
 
   return { action: 'migrated', boot_handle, stale_handles, moved }
+}
+
+/**
+ * EXPLICIT, COLLISION-GUARDED migration — the way out of the AMBIGUOUS case
+ * boot deliberately refuses to touch (card 2026-08-14). Moves every orphaned
+ * row whose UNIQUE slot is FREE under `boot_handle`, and SKIPS (and counts)
+ * every row that would land on a slot already occupied by a boot-handle row.
+ *
+ * The `NOT EXISTS` probe IS the rotation hazard, quoting the card: "if a stale
+ * `dev` row and a freshly-connected `juno` row both exist for the same service,
+ * rewriting the stale one overwrites the new one. The owner reconnects codex,
+ * boot 'repairs' it, and the instance is silently back on yesterday's expired
+ * token." An explicit action does not get to do that either — a skipped row is
+ * reported so the owner reconnects or disconnects that slot deliberately.
+ *
+ * Nothing is decrypted, the ciphertext column is never even SELECTed, and the
+ * result carries counts/handles/table-names only.
+ */
+export async function migrateOrphanedCredentialScope(
+  db: ProjectDb,
+  boot_handle: string,
+): Promise<CredentialScopeMigrateResult> {
+  const census = censusCredentialScopeTables(db, boot_handle)
+  const { stale_handles } = census
+  if (stale_handles.length === 0) {
+    return { boot_handle, stale_handles: [], moved: [], skipped: [] }
+  }
+
+  // ONE transaction for the whole move, same as the boot path: a partial
+  // repair is worse than none.
+  return await db.transaction(async (tx) => {
+    const moved: CredentialScopeMove[] = []
+    const skipped: CredentialScopeOrphanCount[] = []
+    for (const { table, column, collision_keys, counts } of census.tables) {
+      const t = assertIdent(table, 'table')
+      const c = assertIdent(column, 'column')
+      // `fresh.<k> = <t>.<k>` — every key column is NOT NULL in the schema, so
+      // plain `=` is exact (see CREDENTIAL_SCOPE_COLLISION_KEYS).
+      const match = collision_keys
+        .map((key) => {
+          const k = assertIdent(key, 'collision key')
+          return `fresh.${k} = ${t}.${k}`
+        })
+        .join(' AND ')
+      let movedRows = 0
+      for (const handle of stale_handles) {
+        const rows = counts.get(handle)
+        if (rows === undefined || rows === 0) continue
+        const result = tx.runSync<[string, string, string]>(
+          `UPDATE ${t} SET ${c} = ? WHERE ${c} = ? AND NOT EXISTS (` +
+            `SELECT 1 FROM ${t} AS fresh WHERE fresh.${c} = ? AND ${match})`,
+          [boot_handle, handle, boot_handle],
+        )
+        movedRows += result.changes
+        const skippedRows = rows - result.changes
+        if (skippedRows > 0) skipped.push({ table, handle, rows: skippedRows })
+      }
+      if (movedRows > 0) moved.push({ table, rows: movedRows })
+    }
+    return { boot_handle, stale_handles, moved, skipped }
+  })
 }
