@@ -5,7 +5,7 @@
  * thin fetch wrapper for the gateway's per-instance integrations surface
  * (`gateway/http/cores-integrations-surface.ts`):
  *
- *   GET    /api/cores/integrations          → { ok, oauth[], api_keys[] }
+ *   GET    /api/cores/integrations          → { ok, scope, oauth[], api_keys[] }
  *   POST   /api/cores/api-keys/<label>       → store/rotate a BYO API key
  *   DELETE /api/cores/api-keys/<label>       → clear a stored API key
  *
@@ -76,6 +76,10 @@ export interface ApiKeyIntegration {
 
 export interface IntegrationsResponse {
   ok: boolean
+  scope: {
+    kind: 'cores'
+    description: string
+  }
   oauth: OAuthAccountIntegration[]
   api_keys: ApiKeyIntegration[]
 }

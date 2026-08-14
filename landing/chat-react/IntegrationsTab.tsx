@@ -181,6 +181,7 @@ export function IntegrationsTab({
   )
 
   const [oauth, setOauth] = useState<OAuthAccountIntegration[]>([])
+  const [scopeDescription, setScopeDescription] = useState<string | null>(null)
   const [apiKeys, setApiKeys] = useState<ApiKeyIntegration[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -535,12 +536,14 @@ export function IntegrationsTab({
         if (cancelled || !mountedRef.current) return
         setOauth(res.oauth)
         setApiKeys(res.api_keys)
+        setScopeDescription(res.scope?.description ?? null)
         setLoading(false)
       })
       .catch((err: unknown) => {
         if (cancelled || !mountedRef.current) return
         setOauth([])
         setApiKeys([])
+        setScopeDescription(null)
         setLoading(false)
         setError(err instanceof Error ? err.message : 'failed to load integrations')
       })
@@ -804,6 +807,9 @@ export function IntegrationsTab({
           <div className="cdoc-empty">Loading…</div>
         ) : (
           <>
+            {scopeDescription !== null ? (
+              <p className="cint-row-sub" role="note">{scopeDescription}</p>
+            ) : null}
             {/* ── OAuth accounts ── one block per SERVICE, one row per account. */}
             <section className="cint-section" aria-label="Connected accounts">
               <h3 className="cint-section-title">Connected accounts</h3>

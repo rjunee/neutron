@@ -10848,3 +10848,17 @@ obsolete inner-publisher tests were removed instead of remaining skipped.
   argv assertion (5 pass, 1 fail), and `remove-quiet-turn-prompt-rule` failed the
   behavioral prompt assertion (0 pass, 1 fail). Both guards were restored before
   the green verification run.
+
+## Integrations surface scope declaration (ISSUES #572)
+
+`gateway/http/cores-integrations-surface.ts` now declares in its response that
+the enumerated credential slots belong to bundled Cores. The web client in
+`landing/chat-react/IntegrationsTab.tsx` renders that server-provided scope.
+`gateway/__tests__/cores-integrations-surface.test.ts` uses a connected GitHub
+credential to prove the partial view is explicit, existing Core slots remain,
+and secret plaintext never enters the response. No credential store or registry
+was added; the change makes the existing view boundary legible.
+
+Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
+tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
+after its expected red run.

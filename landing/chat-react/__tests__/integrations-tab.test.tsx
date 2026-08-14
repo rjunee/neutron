@@ -77,6 +77,10 @@ function account(
 
 const STATUS = {
   ok: true,
+  scope: {
+    kind: 'cores',
+    description: 'This list covers bundled Core credential slots only.',
+  },
   oauth: [account('google_calendar#a1b2c3d4', 'sam@example.com')],
   api_keys: [
     {
@@ -214,6 +218,7 @@ describe('IntegrationsTab render (happy-dom)', () => {
     )
     // Humanised SERVICE title — never the raw composite label, whose account
     // key is a hex digest.
+    expect(container.textContent).toContain('This list covers bundled Core credential slots only.')
     expect(container.textContent).toContain('Google Calendar')
     expect(container.textContent).not.toContain('a1b2c3d4')
     expect(container.textContent).toContain('sam@example.com')

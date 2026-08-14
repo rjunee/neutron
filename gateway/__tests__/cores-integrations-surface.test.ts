@@ -140,6 +140,35 @@ test('GET /api/cores/integrations lists OAuth + API-key slots with status (no Go
   expect(JSON.stringify(body)).not.toContain('tvly-1')
 })
 
+test('GET /api/cores/integrations declares that a connected GitHub credential is outside its Core-only scope', async () => {
+  const b = await makeBench()
+  const githubSecret = 'github-secret-positive-control'
+  await b.secrets.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: 'github',
+    plaintext: githubSecret,
+  })
+
+  const res = await authed(b.base, '/api/cores/integrations')
+  const body = (await res.json()) as {
+    scope: { kind: string; description: string }
+    oauth: Array<{ label: string; connected: boolean }>
+    api_keys: Array<{ label: string; connected: boolean }>
+  }
+  const serialized = JSON.stringify(body)
+
+  expect(body.scope.kind).toBe('cores')
+  expect(body.scope.description).toContain('bundled Core credential slots only')
+  expect(body.scope.description).toContain('Other connected credentials are not included')
+  expect(body.oauth.some(({ label }) => label === 'github')).toBe(false)
+  expect(body.oauth.some(({ label }) => label === 'gmail_compose')).toBe(true)
+  expect(body.oauth.some(({ label }) => label === 'google_calendar')).toBe(true)
+  expect(body.api_keys.some(({ label }) => label === 'tavily')).toBe(true)
+  expect(JSON.stringify({ value: githubSecret })).toContain(githubSecret)
+  expect(serialized).not.toContain(githubSecret)
+})
+
 test('POST then DELETE /api/cores/api-keys/tavily mutates stored state (no Google client wired)', async () => {
   const b = await makeBench()
   const setRes = await authed(b.base, '/api/cores/api-keys/tavily', {
