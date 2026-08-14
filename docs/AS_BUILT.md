@@ -93,6 +93,47 @@ phrased strictly as measurements rather than an asserted cause, per #240. And
 harvest-before-reap is preserved: a crashed row that already carries a terminal
 `inner_result` still harvests on the next tick, with zero relaunches spent.
 
+## 2026-08-14 — inline activity is derived from evidence; the stored flag is a hint
+
+A Work Board card's `inline_active` used to be a promise the agent had to both make
+and retract. It now reads the world: every read boundary maps its items through
+`withDerivedInlineActive` (`work-board/inline-activity.ts`) before they leave the
+server — the project-rail extras, the WS `work_board_changed` frame, the HTTP list /
+reorder / create / update / complete responses (`gateway/http/work-board-surface.ts`),
+the per-turn `<work_board>` fragment the agent is grounded on, and the agent's own
+`work_board_list` tool. The stored column is untouched by any read; where the flag
+and the evidence disagree, the evidence wins. Clients (`app/`, `landing/`) are
+unchanged — they keep reading the wire field, which is now the derived value, so the
+old `canPlay` staleness caveat is retired rather than worked around.
+
+Evidence is TIER 1 ONLY: one O(1) in-memory `ActivityInspector` Map read per board
+render, keyed by `inspectorScopeKey(project_id)`, fed by the PreToolUse/PostToolUse
+tap that was already running. Never per row, never a shell-out, no I/O on the read
+path — the helper is BATCH-shaped precisely so the reader cannot be called inside the
+per-item loop. Tiers 2 and 3 of the card (commits on the card's branch, a dirty
+worktree) are recorded non-goals; they would shell out per row per render. The
+freshness window is `INLINE_EVIDENCE_WINDOW_MS = 90_000`, aligned with the inspector's
+`WEDGE_AFTER_MS`, and synthetic keepalives are excluded from the clock, so a stalled
+session cannot hold the signal on.
+
+The crashed-session heal is by construction, not by a reconciler: the inspector's
+buffer dies with the process, so after a restart evidence reads 0 and every stale
+flag reads not-active. A late-bound `inlineEvidenceReader` holder in `open/composer.ts`
+gives the same fail-soft answer before the inspector exists (unset ⇒ evidence 0 ⇒ not
+active), which is why construction order does not matter at any of the five call sites.
+
+Nothing here blocks, denies, delays or gates a tool call — this is the display-only
+salvage of the cancelled PreToolUse-gate plan, and the agent-tool dep is threaded as
+an optional opt (absent ⇒ byte-identical raw passthrough on legacy boxes). Mutant
+pins: `work-board/inline-activity.test.ts` (unconditional-true, the latch, the
+keepalive, the exact window boundary), `work-board/agent-tool.test.ts`
+(activation with no `work_board_update` in the path, the stale-flag heal, the
+no-latch expiry, dep-absent passthrough, the General scope id, and an
+`inline_active` write still returning `ok`), `gateway/http/work-board-surface.test.ts`
+(acceptance a–e per response shape) and `open/__tests__/inline-activity-wiring.test.ts`
+(the five composer call sites, the fragment site by name, the late binding, and the
+`build-core-modules.ts` threading).
+
 ## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
 
 `trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex

@@ -287,10 +287,13 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
  * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): the spec's
  * two-clause form (`!isLinkedRunning && status !== 'done'`) does not mention
  * inline_active. This extension prevents launching a competing Trident build
- * while an inline agent action is already executing. STALENESS CAVEAT: if the
- * agent dies mid-inline-work without clearing the flag, the card enters a
- * permanent pulse+no-▶ state — the same unrecoverable-card defect on a
- * narrower path. Acceptable until an inline-action heartbeat/reconciler lands.
+ * while an inline agent action is already executing. The old staleness caveat is
+ * RESOLVED: the SERVER now derives `inline_active` from inspector evidence at
+ * every read boundary (WS `work_board_changed` frame, HTTP list + echoes, rail
+ * extras, per-turn fragment, agent `work_board_list`), so a crashed session's
+ * stale flag heals on the wire within `INLINE_EVIDENCE_WINDOW_MS` (90 s) and the
+ * permanent pulse+no-▶ state can no longer occur. This client keeps reading the
+ * wire field unchanged.
  */
 export function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;

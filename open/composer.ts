@@ -5001,9 +5001,21 @@ export function buildOpenGraphComposer(
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
+            //
+            // The injected board carries the DERIVED inline activity (T4): the
+            // fragment's `·inline` marker now reads inspector evidence, so the
+            // agent cannot be lied to by its OWN stale flag — a crashed session's
+            // stuck `inline_active` reads not-active, and live inline work reads
+            // active with no `work_board_update` anywhere in the path. ONE O(1)
+            // evidence read per turn; display-only, it gates nothing.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
-                workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                withDerivedInlineActive(
+                  workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                  inlineEvidenceReader,
+                  inspectorScopeKey(project_id),
+                  Date.now(),
+                ),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the
@@ -5856,7 +5868,18 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc, chat_ack: workBoardChatAck },
+      // `derive_inline_active` (T4) gives the agent's `work_board_list` the SAME
+      // evidence-derived `inline_active` the HTTP surface serves (~:3959, same
+      // closure shape). The holder deref happens at CALL time, so this input
+      // being built before the ActivityInspector is irrelevant. Display-only:
+      // one O(1) evidence read per list, never a write, never a gate.
+      work_board: {
+        store: workBoardStore,
+        spec_doc: workBoardSpecDoc,
+        chat_ack: workBoardChatAck,
+        derive_inline_active: (items, project_id) =>
+          withDerivedInlineActive(items, inlineEvidenceReader, inspectorScopeKey(project_id), Date.now()),
+      },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).

@@ -57,16 +57,26 @@ describe('inline activity wiring — real inspector evidence', () => {
 })
 
 describe('inline activity wiring — composer source mutant pin', () => {
-  test('all three read boundaries and the late binding remain wired', () => {
-    // Cheapest honest pin: both closures require a full gateway boot to execute.
-    const src = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), '..', 'composer.ts'),
+  test('all four read boundaries and the late binding remain wired', () => {
+    // Cheapest honest pin: every closure requires a full gateway boot to execute.
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(join(here, '..', 'composer.ts'), 'utf8')
+    // Five composer call sites: the rail extras, the WS `work_board_changed`
+    // frame, the HTTP surface dep (T3), the per-turn `<work_board>` fragment and
+    // the `work_board` agent-tools dep (T4). Deleting any one drops the count.
+    expect((src.match(/withDerivedInlineActive\(/g) ?? []).length).toBeGreaterThanOrEqual(5)
+    // …and the fragment site specifically: the injected board the AGENT reads
+    // must be derived, not the stored flag (count alone would not catch this one).
+    expect(/formatWorkBoardFragment\(\s*withDerivedInlineActive\(/.test(src)).toBe(true)
+    expect(src.includes('inlineEvidenceReader.lastRealActivityAt =')).toBe(true)
+    // Two `derive_inline_active:` deps: the HTTP surface (T3) and the
+    // `work_board` tools input (T4). Deleting either turns this red.
+    expect((src.match(/derive_inline_active:/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    // …and the gateway must still thread the tools dep through to the surface.
+    const coreModules = readFileSync(
+      join(here, '..', '..', 'gateway', 'composition', 'build-core-modules.ts'),
       'utf8',
     )
-    // Rail extras + the WS frame + the HTTP surface dep (T3) = three call sites.
-    expect((src.match(/withDerivedInlineActive\(/g) ?? []).length).toBeGreaterThanOrEqual(3)
-    expect(src.includes('inlineEvidenceReader.lastRealActivityAt =')).toBe(true)
-    // Deleting the HTTP surface's dep wiring turns this red.
-    expect(src.includes('derive_inline_active:')).toBe(true)
+    expect(coreModules.includes('deriveInlineActive')).toBe(true)
   })
 })

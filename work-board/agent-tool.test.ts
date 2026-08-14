@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
-import { WorkBoardStore } from './store.ts'
+import { GENERAL_WORK_BOARD_PROJECT_ID, WorkBoardStore, type WorkBoardItem } from './store.ts'
+import { INLINE_EVIDENCE_WINDOW_MS, withDerivedInlineActive } from './inline-activity.ts'
 import {
   registerWorkBoardToolSurface,
   WORK_BOARD_ADD_TOOL,
@@ -348,5 +349,114 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     )) as { ok: boolean; item?: { id: string } }
     expect(out.ok).toBe(true)
     expect(out.item?.id).toBeDefined()
+  })
+})
+
+describe('work_board_list derived inline activity', () => {
+  // Controllable evidence + clock: the real derivation, a stub reader. The dep is
+  // BATCH (one evidence read per call) exactly like the composer's closure.
+  let evidenceAt = 0
+  let now = 1_000_000
+  let seenProjectIds: string[] = []
+  const dep = (items: WorkBoardItem[], project_id: string): WorkBoardItem[] => {
+    seenProjectIds.push(project_id)
+    return withDerivedInlineActive(items, { lastRealActivityAt: () => evidenceAt }, project_id, now)
+  }
+
+  function wired(): ToolRegistry {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store, { deriveInlineActive: dep })
+    return reg
+  }
+
+  beforeEach(() => {
+    evidenceAt = 0
+    now = 1_000_000
+    seenProjectIds = []
+  })
+
+  test('(a) fresh evidence activates a card with NO work_board_update in the path', async () => {
+    const reg = wired()
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Inline edit', status: 'in_progress' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string; inline_active: boolean } }
+    expect(created.item.inline_active).toBe(false)
+
+    evidenceAt = now - 1
+    const listed = (await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))) as {
+      items: { id: string; inline_active: boolean }[]
+    }
+    expect(listed.items.find((i) => i.id === created.item.id)!.inline_active).toBe(true)
+    // The derivation NEVER writes: the stored row is still the false hint.
+    expect(store.list('acme').find((i) => i.id === created.item.id)!.inline_active).toBe(false)
+  })
+
+  test('(b) a crashed session stale flag reads NOT active', async () => {
+    const reg = wired()
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Died mid-work', status: 'in_progress' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    await store.update('acme', created.item.id, { inline_active: true })
+    expect(store.list('acme')[0]!.inline_active).toBe(true)
+
+    evidenceAt = 0
+    const listed = (await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))) as {
+      items: { inline_active: boolean }[]
+    }
+    expect(listed.items[0]!.inline_active).toBe(false)
+  })
+
+  test('(c) the derivation cannot latch on — quiet means quiet', async () => {
+    const reg = wired()
+    await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Goes quiet', status: 'in_progress' },
+      ctx('owner', 'acme'),
+    )
+    evidenceAt = now - 1
+    const active = (await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))) as {
+      items: { inline_active: boolean }[]
+    }
+    expect(active.items[0]!.inline_active).toBe(true)
+
+    now += INLINE_EVIDENCE_WINDOW_MS
+    const quiet = (await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))) as {
+      items: { inline_active: boolean }[]
+    }
+    expect(quiet.items[0]!.inline_active).toBe(false)
+  })
+
+  test('an absent dep is a byte-identical raw stored-flag passthrough', async () => {
+    // `registry` is the default beforeEach registration: NO deriveInlineActive.
+    const created = (await registry.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Legacy box', status: 'in_progress' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    await store.update('acme', created.item.id, { inline_active: true })
+    const listed = (await registry.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))) as {
+      items: { inline_active: boolean }[]
+    }
+    expect(listed.items[0]!.inline_active).toBe(true)
+  })
+
+  test('a General turn feeds the dep the General project id (inspector scope)', async () => {
+    const reg = wired()
+    await reg.get(WORK_BOARD_ADD_TOOL)!.handler({ title: 'General card' }, ctx('owner', null))
+    await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', null))
+    expect(seenProjectIds).toEqual([GENERAL_WORK_BOARD_PROJECT_ID])
+  })
+
+  test('(d) the derivation gates NOTHING — an inline_active update still succeeds', async () => {
+    const reg = wired()
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Still writable' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const out = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id: created.item.id, inline_active: true },
+      ctx('owner', 'acme'),
+    )) as { ok: boolean }
+    expect(out.ok).toBe(true)
   })
 })
