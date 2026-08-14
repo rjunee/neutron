@@ -306,12 +306,19 @@ describe('ChatApp render (happy-dom)', () => {
       deviceId: 'dev-test',
       token: 'dev:sam',
     }
+    const openedActivity: Array<string | null> = []
     function Harness(): React.JSX.Element {
       const draft = useAttachmentDraft({ token: config.token })
       const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
       return (
         <AssistantRuntimeProvider runtime={runtime}>
-          <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+          <ChatApp
+            vm={vm}
+            controller={controller}
+            config={config}
+            draft={draft}
+            onOpenActivity={(projectId) => openedActivity.push(projectId)}
+          />
         </AssistantRuntimeProvider>
       )
     }
@@ -335,6 +342,10 @@ describe('ChatApp render (happy-dom)', () => {
     // The typing indicator is up …
     const typing = container.querySelectorAll('.car-bubble-agent.car-typing')
     expect(typing.length).toBe(1)
+    // Match native's gesture with a real-control probe: the dots themselves open
+    // the inspector for the conversation that owns this mounted surface.
+    ;(typing[0] as HTMLButtonElement).click()
+    expect(openedActivity).toEqual([null])
     // … and there is NO empty (non-typing) agent bubble stacked above it.
     const nonTypingAgentBubbles = Array.from(
       container.querySelectorAll('.car-bubble-agent'),

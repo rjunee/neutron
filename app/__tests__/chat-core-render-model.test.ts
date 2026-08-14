@@ -237,6 +237,17 @@ describe('agent_typing — the TURN-ACTIVITY signal, not the text-stream signal'
     expect(Object.keys(next.buffers)).toHaveLength(0);
   });
 
+  it('a five-minute tool-only turn stays visible without a single text partial', () => {
+    const started = foldStreamFrame(emptyStreamState(), {
+      type: 'agent_typing', state: 'start', ts: 1,
+    });
+    const afterFiveMinutes = foldStreamFrame(started, {
+      type: 'activity_event', kind: 'tool', ts: 5 * 60_000 + 1,
+    });
+    expect(afterFiveMinutes.typing).toBe(true);
+    expect(Object.keys(afterFiveMinutes.buffers)).toHaveLength(0);
+  });
+
   it('end turns typing OFF when nothing is streaming', () => {
     const started = foldStreamFrame(emptyStreamState(), { type: 'agent_typing', state: 'start' });
     // Assert the PRECONDITION, not just the result. Without this line the test

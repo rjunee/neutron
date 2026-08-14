@@ -825,6 +825,10 @@ export function ProjectShell({
                 draft={draft}
                 onOpenDocLink={onOpenDocLink}
                 paneEligible={paneEligible}
+                onOpenActivity={(id) => {
+                  setActivityScope(id)
+                  setActivityOpen(true)
+                }}
                 {...(workOpenDoc !== undefined ? { paneOnOpenDoc: workOpenDoc } : {})}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
               />

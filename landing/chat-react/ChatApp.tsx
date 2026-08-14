@@ -916,8 +916,10 @@ function buildEditIndex(
 
 function TypingIndicator({
   activity,
+  onOpenActivity,
 }: {
   activity?: { label: string } | null
+  onOpenActivity: () => void
 }): React.JSX.Element {
   // SAY WHAT IT IS DOING, not just that it is doing something. Three dots for
   // four minutes is indistinguishable from a hang — the owner watched exactly
@@ -933,7 +935,12 @@ function TypingIndicator({
       <div className="car-avatar" aria-hidden="true">
         N
       </div>
-      <div className="car-bubble car-bubble-agent car-typing">
+      <button
+        type="button"
+        className="car-bubble car-bubble-agent car-typing"
+        aria-label="Show activity"
+        onClick={onOpenActivity}
+      >
         <span className="car-dot" />
         <span className="car-dot" />
         <span className="car-dot" />
@@ -942,7 +949,7 @@ function TypingIndicator({
           // second line in the transcript on it.
           <span className="car-typing-label">{label}</span>
         ) : null}
-      </div>
+      </button>
     </div>
   )
 }
@@ -1681,6 +1688,7 @@ function ChatSurface({
   paneProjectId,
   paneOnOpenDoc,
   fetchImpl,
+  onOpenActivity,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -1695,6 +1703,8 @@ function ChatSurface({
   /** Open a Work card's spec-doc in the Documents tab; undefined = static label. */
   paneOnOpenDoc?: (projectId: string, path: string) => void
   fetchImpl?: FetchImpl
+  /** Match mobile: tapping the live-turn indicator opens this scope's inspector. */
+  onOpenActivity: () => void
 }): React.JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
@@ -1876,7 +1886,9 @@ function ChatSurface({
               incoming message. Board work has its own progress affordance, and
               conflating them makes the dots lie. `hasActiveWork` stays on the view
               model — the Work-tab dot uses it — it just no longer drives this. */}
-          {vm.awaitingFirstToken ? <TypingIndicator activity={vm.liveActivity} /> : null}
+          {vm.awaitingFirstToken ? (
+            <TypingIndicator activity={vm.liveActivity} onOpenActivity={onOpenActivity} />
+          ) : null}
         </ThreadPrimitive.Viewport>
         <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
           ↓
@@ -1999,6 +2011,7 @@ function MountedConversation({
   showPane,
   paneProjectId,
   paneOnOpenDoc,
+  onOpenActivity,
 }: {
   hostVm: ChatViewModel
   active: boolean
@@ -2010,6 +2023,7 @@ function MountedConversation({
   showPane: boolean
   paneProjectId: string
   paneOnOpenDoc?: (projectId: string, path: string) => void
+  onOpenActivity: (projectId: string | null) => void
 }): React.JSX.Element {
   const messages = hostVm.messages
   // Indexes are pure over `messages`; memoize on the message-list identity so an
@@ -2091,6 +2105,7 @@ function MountedConversation({
           // still shown, mid-flight, when they switch back.
           showPane={showPane}
           paneProjectId={paneProjectId}
+          onOpenActivity={() => onOpenActivity(hostVm.projectId)}
           {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           {...(fetchImpl !== undefined ? { fetchImpl } : {})}
         />
@@ -2115,6 +2130,7 @@ export function ChatApp({
   onOpenDocLink,
   paneEligible,
   paneOnOpenDoc,
+  onOpenActivity,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -2135,6 +2151,8 @@ export function ChatApp({
   /** Open a Work card's spec-doc in the Documents tab; undefined = static label
    *  (e.g. General, which has no Documents tab). */
   paneOnOpenDoc?: (projectId: string, path: string) => void
+  /** Open the Activity Inspector for the tapped conversation scope. */
+  onOpenActivity?: (projectId: string | null) => void
 }): React.JSX.Element {
   // FIX #343 — keep the chat surface MOUNTED across project switches instead of
   // remounting it on every switch (the old `key={convId}` on the sole
@@ -2250,6 +2268,7 @@ export function ChatApp({
             // (`GENERAL_CONV_ID`) is now collision-proof, but `hostVm.projectId` is
             // still the single source of truth for which board this surface owns.
             paneProjectId={hostVm.projectId ?? ''}
+            onOpenActivity={onOpenActivity ?? ((): void => {})}
             {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           />
         )

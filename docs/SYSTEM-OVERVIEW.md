@@ -5573,9 +5573,11 @@ indicator. No feature flags — one live path.
   a real "replying…" affordance for their full duration. The legacy `web:` path's
   `agent_typing_start`/`agent_typing_end` is the prior art; this collapses it into
   one app-ws envelope with a `state` discriminator.
-  Typing is level-triggered when a socket connects and edge-triggered thereafter:
+  Typing tracks the live TURN, not the presence of streamed text. It is
+  level-triggered when a socket connects and edge-triggered thereafter:
   `on_session_open` reads the same `activeChatProjects` set as the project rail and
-  sends a catch-up `start` only to that socket when its scope is working. The
+  sends a catch-up `start` only to that socket when its scope is working, so turn
+  state is resynchronised on connect even when no text partial has arrived. The
   catch-up is a read, not a refcount transition, so it neither changes nesting nor
   extends the fail-safe. It still bypasses the durable adapter: typing describes
   only the live present and must never enter history or a `resume` replay.
