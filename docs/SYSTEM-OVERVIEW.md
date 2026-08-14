@@ -5875,6 +5875,16 @@ deleted, no dual path):
   Claude-family model). Before this, one dying reviewer ended the whole lane at
   `checkpoint: 'inner-error'` with no verdict, discarding a finished build and every
   review already paid for.
+- **A REVIEW ROUND HAS PRECONDITIONS:** before any Argus seat is dispatched,
+  `trident/inner-workflow.mjs` reads the PR's mergeability and the named `test`,
+  `lint`, and `typecheck` jobs. A branch conflicting with its base is deferred
+  immediately. An absent job is UNKNOWN rather than passed or failed; a queued or
+  running job is retried three times by the readiness probe, without incrementing
+  or dispatching the review round. Exhausted retries defer with the exact conflict
+  or check name and recovery. Only a mergeable PR where every named job has a
+  terminal result enters the existing panel. A terminal failure still enters the
+  panel and then follows the existing red-CI fix path: "ran and failed" is distinct
+  from "never ran". Local mode remains unchanged because it has no PR checks.
 - **SERVER-GATED verdict provenance:** a merge-eligible `APPROVE` is honoured ONLY
   when the Argus phase's OWN recorded `inner_checkpoint = 'argus-approved'` (written
   by the synthesis-phase Bash step) backs it — a self-asserted `APPROVE` in the

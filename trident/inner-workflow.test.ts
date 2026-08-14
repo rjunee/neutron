@@ -297,7 +297,7 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
   // been caught by twice already.
   test("round 1 pins to Forge's reported commit sha, fixed BEFORE the review that judges it", () => {
     const decl = SRC.indexOf('let reviewedHead = branchHead')
-    const firstReview = SRC.indexOf('reviewAndSynthesize(diffFile, round, pr)')
+    const firstReview = SRC.indexOf('runReviewRound(diffFile, round, pr)')
     expect(decl).toBeGreaterThan(-1)
     expect(firstReview).toBeGreaterThan(decl)
   })
@@ -318,6 +318,15 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
     const returned = SRC.indexOf('return publishResult', handoff)
     expect(handoff).toBeGreaterThan(-1)
     expect(returned).toBeGreaterThan(handoff)
+  })
+
+  test("every fix round re-pins to the sha THAT round's fix agent reported committing", () => {
+    const rePin = SRC.indexOf('reviewedHead = typeof fix?.commitSha')
+    // `lastIndexOf`: the FIRST call is round 1's pre-loop review, which of course
+    // precedes the re-pin. The one that must follow it is the in-loop RE-review.
+    const loopReview = SRC.lastIndexOf('runReviewRound(diffFile, round, pr)')
+    expect(rePin).toBeGreaterThan(-1)
+    expect(loopReview).toBeGreaterThan(rePin)
     // The fix agent is asked for that sha under the same schema round 1 uses —
     // asserted as "through the SAME dispatch helper", which is the property that
     // matters now that a build has two possible executors. Round 1 and every fix

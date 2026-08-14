@@ -2,6 +2,27 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-14 — review-round readiness is checked before reviewer spend
+
+`trident/inner-workflow.mjs` now refuses to dispatch a review panel when GitHub
+reports the PR as conflicting with its base or when any of the named `test`, `lint`,
+or `typecheck` jobs is absent or unfinished. It reads check names, not a count of
+green rows: absent, passed, and failed are separate states. Absent or in-flight jobs
+receive three bounded readiness probes without incrementing the review round; if
+they still cannot produce a terminal result, the finding names the exact job and
+the action that unblocks it. A mergeable PR with terminal check results continues
+through the existing review and red-CI behavior unchanged.
+
+The behavioral coverage is in `trident/__tests__/ci-gate.test.ts`. It asserts that
+the review callback is never entered for conflicts or absent jobs, that queued work
+is retried without review spend, and that healthy and terminal-failure cases each
+enter review exactly once. The mutation cases delete the conflict guard and collapse
+absent into passed and failed; each changes the asserted observable state.
+The canonical assertion goes RED for all three named mutants. Conflict auto-repair
+is deliberately not included: proving append-only keep-both resolution without ever
+touching a code conflict would expand this precondition gate beyond its narrow,
+fail-closed purpose; the deferral instead names the conflict and its repair.
+
 ## 2026-08-13 — generic named credentials configure host deploy without a public slot
 
 The existing `ProjectCredentialStore` and its Settings → Integrations free-form

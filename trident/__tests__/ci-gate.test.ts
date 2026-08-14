@@ -287,3 +287,102 @@ describe('the gate is WIRED, not merely written', () => {
     expect(block).toContain('do NOT decide whether CI passed')
   })
 })
+
+interface Readiness {
+  status: string
+  reason: string
+  failed?: string[]
+}
+
+function loadReadiness(source = SRC): {
+  classifyReviewReadiness: (probe: unknown) => Readiness
+  reviewWithPreconditions: (args: {
+    probe: (attempt: number) => Promise<Readiness>
+    spend: () => Promise<unknown>
+    wait: () => Promise<void>
+    attempts?: number
+  }) => Promise<{ deferred: boolean; readiness: Readiness; value: unknown }>
+} {
+  const required = source.slice(
+    source.indexOf('const REVIEW_REQUIRED_CHECKS'),
+    source.indexOf('/** Classify the fixed', source.indexOf('const REVIEW_REQUIRED_CHECKS')),
+  )
+  const classifyAt = source.indexOf('function classifyReviewReadiness(')
+  const classifySource = source.slice(classifyAt, source.indexOf('/**\n * Retry only readiness', classifyAt))
+  const reviewAt = source.indexOf('async function reviewWithPreconditions(')
+  const reviewSource = source.slice(reviewAt, source.indexOf('/**\n * CI findings', reviewAt))
+  const factory = new Function(
+    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, reviewWithPreconditions }`,
+  ) as () => ReturnType<typeof loadReadiness>
+  return factory()
+}
+
+const readinessProbe = (
+  mergeable: string,
+  rows: Array<{ name: string; status: string; conclusion: string | null }>,
+) => ({ raw: JSON.stringify({ mergeable, statusCheckRollup: rows }), exit_code: 0 })
+
+const completedChecks = (conclusion: string) =>
+  ['test', 'lint', 'typecheck'].map((name) => ({ name, status: 'COMPLETED', conclusion }))
+
+describe('review-round preconditions — refuse before spending', () => {
+  test('HEADLINE: a conflicting PR consumes zero review rounds and names the repair', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS'))),
+      spend: async () => { spent += 1 },
+      wait: async () => {},
+    })
+    expect(out.deferred).toBe(true)
+    expect(spent).toBe(0)
+    expect(out.readiness.reason).toContain('conflicting with base')
+  })
+
+  test('absent, passed, and failed are three explicit states; absent spends nothing', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    const absent = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').filter((r) => r.name !== 'test')))
+    const passed = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS')))
+    const failed = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, conclusion: 'FAILURE' } : r)))
+    expect([absent.status, passed.status, failed.status]).toEqual(['absent', 'passed', 'failed'])
+    expect(absent.reason).toContain('required check test has not run')
+    expect(classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, conclusion: 'SKIPPED' } : r))).status).toBe('absent')
+    let spent = 0
+    await reviewWithPreconditions({ probe: async () => absent, spend: async () => { spent += 1 }, wait: async () => {}, attempts: 1 })
+    expect(spent).toBe(0)
+  })
+
+  test('a queued check retries without spending or incrementing a round, then reviews once', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    const queuedRows = completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, status: 'QUEUED', conclusion: null } : r)
+    const answers = [classifyReviewReadiness(readinessProbe('MERGEABLE', queuedRows)), classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS')))]
+    let probes = 0
+    let waits = 0
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => answers[probes++]!,
+      spend: async () => { spent += 1; return 'healthy-review' },
+      wait: async () => { waits += 1 },
+    })
+    expect({ probes, waits, spent, value: out.value }).toEqual({ probes: 2, waits: 1, spent: 1, value: 'healthy-review' })
+  })
+
+  test('healthy and failed-check PRs enter the existing review path exactly once', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    for (const rows of [completedChecks('SUCCESS'), completedChecks('SUCCESS').map((r) => r.name === 'lint' ? { ...r, conclusion: 'FAILURE' } : r)]) {
+      let spent = 0
+      const out = await reviewWithPreconditions({ probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', rows)), spend: async () => ++spent, wait: async () => {} })
+      expect(out.deferred).toBe(false)
+      expect(spent).toBe(1)
+    }
+  })
+
+  test('MUTANTS: delete conflict guard, absent→passed, and absent→failed all go RED', () => {
+    const conflictMutant = SRC.replace("if (mergeable === 'CONFLICTING') {", "if (false) {")
+    expect(() => expect(loadReadiness(conflictMutant).classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS'))).status).toBe('conflicting')).toThrow()
+    const absentPassedMutant = SRC.replace("return { status: 'absent', reason: `required check ${name} has not run` }", "return { status: 'passed', reason: '' }")
+    expect(() => expect(loadReadiness(absentPassedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1))).status).toBe('absent')).toThrow()
+    const absentFailedMutant = SRC.replace("return { status: 'absent', reason: `required check ${name} has not run` }", "return { status: 'failed', reason: '', failed: [name] }")
+    expect(() => expect(loadReadiness(absentFailedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1))).status).toBe('absent')).toThrow()
+  })
+})

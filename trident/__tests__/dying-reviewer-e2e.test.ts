@@ -98,6 +98,19 @@ async function runWorkflow(script: Script): Promise<RunOut> {
         ? { raw: '[{"name":"test","state":"SUCCESS","link":"x"}]\n___EXIT=0', exit_code: 0 }
         : script.ciProbe(n)
     }
+    if (label.startsWith('review-readiness-r')) {
+      return {
+        raw: JSON.stringify({
+          mergeable: 'MERGEABLE',
+          statusCheckRollup: ['test', 'lint', 'typecheck'].map((name) => ({
+            name,
+            status: 'COMPLETED',
+            conclusion: 'SUCCESS',
+          })),
+        }),
+        exit_code: 0,
+      }
+    }
     // The branch moved iff a Forge round ran, so a fix round LANDS and the loop can
     // reach its second review (`roundLanded`).
     if (label.startsWith('head-probe-round-')) return { head: `sha-${calls['forge'] ?? 0}` }

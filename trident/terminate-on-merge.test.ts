@@ -253,7 +253,7 @@ describe('the loop terminates ON the merge, not on a later observation of it', (
   test('round 1 asks BEFORE the review panel is dispatched', () => {
     // The panel is the expensive half (five reviewers, one of them an 18-minute
     // subprocess). Asking after it has already bought most of what is being saved.
-    expect(at(R1_PROBE)).toBeLessThan(at('let synthesis = await reviewRoundOrInfraBlock('))
+    expect(at(R1_PROBE)).toBeLessThan(at('let synthesis = await runReviewRound('))
   })
 
   test('round 1 asks BEFORE the Ralph re-fire and BEFORE the empty-build throw', () => {
@@ -267,7 +267,7 @@ describe('the loop terminates ON the merge, not on a later observation of it', (
 
   test('the fix loop asks BEFORE it re-reviews and BEFORE it blames the round', () => {
     const probeAt = lastAt('await probePrMerged(pr, `r${round}`)')
-    expect(probeAt).toBeLessThan(lastAt('reviewAndSynthesize(diffFile, round, pr)'))
+    expect(probeAt).toBeLessThan(lastAt('runReviewRound(diffFile, round, pr)'))
     expect(probeAt).toBeLessThan(lastAt("if (outcome === 'round-lost')"))
   })
 
