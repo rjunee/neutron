@@ -322,10 +322,18 @@ describe('the HTTP surface', () => {
     const build = phases.find((p) => p.key === 'build')!
     expect(build.group).toBe('claude')
     expect(build.groups).toEqual(['claude', 'codex'])
-    // A single-executor row still says exactly one thing, and always includes its
-    // own default: a row that omitted it could not offer the model it already runs.
-    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['codex'])
+    // A REVIEW SEAT IS A SLOT THE OWNER CAN EMPTY, so it offers `none` alongside
+    // the executors that can fill it. A synthesis row is not a slot — the run
+    // cannot proceed without it — so it offers exactly its own executor and no
+    // `none`. **That asymmetry is the product decision, and it is why these two
+    // rows are asserted separately rather than under one "single-executor" rule:**
+    // an earlier version of this test predated `none` and read the two as the same
+    // shape, which made it assert that a review seat could not be switched off.
+    // Every row still includes its own default — a row that omitted it could not
+    // offer the model it already runs (pinned by the loop below).
+    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['none', 'codex', 'kimi'])
     expect(phases.find((p) => p.key === 'synthesis')!.groups).toEqual(['claude'])
+    expect(phases.find((p) => p.key === 'synthesis')!.groups).not.toContain('none')
     for (const p of phases) expect(p.groups).toContain(p.group)
   })
 
