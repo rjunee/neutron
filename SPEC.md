@@ -310,6 +310,22 @@ Each carries an acceptance criterion; all in `neutron-open`.
 - [ ] **Native-crash visibility for the mobile app.** App remote diagnostics (2026-07-27) covers JS errors
       only; a crash before the JS bundle runs produces nothing. Acceptance: a native process-start crash on
       the owner's device is diagnosable without a USB cable.
+- [ ] **The agent can create Work Board items but cannot remove them — the UI can do something the
+      agent cannot** (owner-asked 2026-08-14: *"are you sure you don't have a delete endpoint? I can
+      just click the X in the UI, but I'm surprised you can't"*). He is right to be surprised: the
+      capability EXISTS and is simply not exposed to the agent. `work-board/store.ts` has `delete()`,
+      and `gateway/http/work-board-surface.ts` calls it behind the UI's X — including the careful part,
+      cancelling an in-flight trident run before removing the row. The agent tool surface
+      (`work-board/agent-tool.ts`) is `add` / `list` / `update` / `reorder` / `complete`, plus `start`
+      and `dispatch_build`. There is no `delete`, and no archive lane either.
+      THE COST IS NOT HYPOTHETICAL: asked on 2026-08-14 to take four deprioritised cards off the board,
+      the only lever available was `complete`, so four unshipped items now read `done` — the agent had to
+      MISREPORT state to carry out a routine instruction, and then explain the misreport. An agent whose
+      only way to obey is to lie about status will keep producing boards that cannot be trusted.
+      Acceptance: the agent can remove an item through the same path the UI uses (run-cancellation
+      included, not a bare row delete), AND a deprioritise/archive lane exists that is distinct from
+      `done` — so "shipped" and "shelved" stop sharing one word. A test pins that removing an item with a
+      live run cancels that run first.
 - [ ] **A deploy request must resolve the ref against the REMOTE, not the host's frozen mirror**
       (observed 2026-08-14, first real use of the host-deploy tool). `host_deploy_request` is wired and
       `enabled: true`. Asked to deploy `origin/main` two minutes after a merge, it answered
@@ -583,6 +599,34 @@ host-agnostic. Classification runs on the substrate one-shot LLM
 **The two capabilities that must survive** are the owner's twice-daily briefs and
 escalated important-email notifications. Everything else must justify itself
 against one of those or be deleted.
+
+> **BOARD STATE for P2 / P2.5 / P3 / P4 — READ BEFORE RE-CARDING THEM.**
+> These four are DEPRIORITISED, not unstarted and not shipped (owner-directed
+> 2026-08-14: *"we will come back to them later"*). **Their Work Board cards already
+> exist and their plan docs are already written** — do NOT create new cards, or the
+> board grows a duplicate of every one of them.
+>
+> They currently read `done` on the board. **That is a fudge, not a fact**: the Work
+> Board has no archive or remove lane, so `done` was the only way to clear them off
+> the active list. Nothing in P2–P4 has shipped. To start one, flip its card back to
+> `upcoming` (which clears the completion datestamp) — a single call, nothing lost,
+> the linked plan doc still attached.
+>
+> The plan docs are PROJECT docs, not files in this repo — each card carries a
+> `design_doc_ref` of the form `neutron-docs:plans/<slug>.md`, which resolves in the
+> app's Documents tab. Do not look for them under this repo's `docs/plans/`; they
+> are not there, and concluding "no plan doc exists" is how a duplicate gets written.
+>
+> | Step | Card | `design_doc_ref` slug |
+> |---|---|---|
+> | P2   | `01KZSAPQNRVA1QBTKB2048XZVP` | `p2-twice-daily-brief-delivered-as-email-digest-on-off-settin-48xzvp` |
+> | P2.5 | `01KZSAQ0MXZN4AWG1VG99TZC8N` | `p2-5-classification-setup-by-inbox-survey-owner-interview-ze-9tzc8n` |
+> | P3   | `01KZSAQ971TCM7EF7D9WS7CSJZ` | `p3-retire-the-dead-scheduled-digest-scribe-fan-out-rides-the-s7csjz` |
+> | P4   | `01KZSAQG4SJXQBQ8JN9CA3STEX` | `p4-owner-cutover-decommission-the-standalone-service-manual-a3stex` |
+>
+> P1 and P1.5 read `done` because they ARE done — same word, two meanings, which is
+> exactly why this note exists. A real archive lane would retire the ambiguity.
+> P4 stays owner-gated and is never auto-dispatched, whatever its card says.
 
 - [ ] **P1 — pipeline store + poller + classification + escalation.** The
       escalation half end to end. **THE PIPELINE IS OPT-IN PER MAILBOX** (owner
