@@ -62,6 +62,129 @@ describe('buildBoardReconcileObserver', () => {
   })
 })
 
+describe('durable PR provenance — the number survives the detach that kills the binding', () => {
+  const WEB = 'https://github.com/acme/widget'
+
+  test('a done run writes pr/pr_url onto the ITEM; the re-read after detach still has it', async () => {
+    // NOTE: no `run_progress` anywhere in this test, and nothing hand-builds an
+    // item. That is the point — a completed card's number must come off the
+    // ITEM, because the detach below removes the only binding it could be
+    // derived from. Drop migration 0122's columns (or detachRun's write) and
+    // this goes red.
+    const repos: string[] = []
+    const obs = buildBoardReconcileObserver(board, {
+      resolveRepoWebUrl: async (repo_path) => {
+        repos.push(repo_path)
+        return WEB
+      },
+    })!
+    const a = await board.create('proj-1', { title: 'ship the export button' })
+    await board.attachRun('proj-1', a.id, 'run-a')
+
+    await obs({
+      project_slug: 'proj-1',
+      id: 'run-a',
+      phase: 'done',
+      pr: 265,
+      repo_path: '/srv/repos/widget',
+    } as never)
+
+    const reread = board.get('proj-1', a.id)!
+    expect(reread.status).toBe('done')
+    expect(reread.linked_run_id).toBeNull()
+    expect(reread.completed_at).not.toBeNull()
+    expect(reread.pr).toBe(265)
+    expect(reread.pr_url).toBe('https://github.com/acme/widget/pull/265')
+    // The repo came from the RUN's own path — never a hardcoded one.
+    expect(repos).toEqual(['/srv/repos/widget'])
+  })
+
+  test('a failed run writes pr/pr_url too, and keeps its binding (#340)', async () => {
+    const obs = buildBoardReconcileObserver(board, { resolveRepoWebUrl: async () => WEB })!
+    const b = await board.create('proj-1', { title: 'the one that broke' })
+    await board.attachRun('proj-1', b.id, 'run-b')
+
+    await obs({
+      project_slug: 'proj-1',
+      id: 'run-b',
+      phase: 'failed',
+      pr: 261,
+      repo_path: '/srv/repos/widget',
+    } as never)
+
+    const reread = board.get('proj-1', b.id)!
+    expect(reread.status).toBe('failed')
+    expect(reread.linked_run_id).toBe('run-b')
+    expect(reread.pr).toBe(261)
+    expect(reread.pr_url).toBe('https://github.com/acme/widget/pull/261')
+  })
+
+  test('a resolver that THROWS still lands the reconcile, with a null url', async () => {
+    const obs = buildBoardReconcileObserver(board, {
+      resolveRepoWebUrl: async () => {
+        throw new Error('git exploded')
+      },
+    })!
+    const a = await board.create('proj-1', { title: 'broken remote' })
+    await board.attachRun('proj-1', a.id, 'run-a')
+
+    await obs({
+      project_slug: 'proj-1',
+      id: 'run-a',
+      phase: 'done',
+      pr: 12,
+      repo_path: '/srv/repos/widget',
+    } as never)
+
+    const reread = board.get('proj-1', a.id)!
+    expect(reread.status).toBe('done') // the reconcile is NOT gated on the link
+    expect(reread.linked_run_id).toBeNull()
+    expect(reread.pr).toBe(12)
+    expect(reread.pr_url).toBeNull() // plain text, never a guessed link
+  })
+
+  test('a non-GitHub repo resolves no url — the number still lands', async () => {
+    const obs = buildBoardReconcileObserver(board, { resolveRepoWebUrl: async () => null })!
+    const a = await board.create('proj-1', { title: 'gitlab shop' })
+    await board.attachRun('proj-1', a.id, 'run-a')
+    await obs({
+      project_slug: 'proj-1',
+      id: 'run-a',
+      phase: 'done',
+      pr: 9,
+      repo_path: '/srv/repos/widget',
+    } as never)
+    const reread = board.get('proj-1', a.id)!
+    expect(reread.pr).toBe(9)
+    expect(reread.pr_url).toBeNull()
+  })
+
+  test('a PR-less run never touches the resolver and leaves both columns NULL', async () => {
+    let shells = 0
+    const obs = buildBoardReconcileObserver(board, {
+      resolveRepoWebUrl: async () => {
+        shells++
+        return WEB
+      },
+    })!
+    const a = await board.create('proj-1', { title: 'local merge, no PR' })
+    await board.attachRun('proj-1', a.id, 'run-a')
+    await obs({
+      project_slug: 'proj-1',
+      id: 'run-a',
+      phase: 'done',
+      pr: null,
+      repo_path: '/srv/repos/widget',
+    } as never)
+    const reread = board.get('proj-1', a.id)!
+    expect(reread.status).toBe('done')
+    expect(reread.linked_run_id).toBeNull()
+    expect(reread.pr).toBeNull()
+    expect(reread.pr_url).toBeNull()
+    expect(shells).toBe(0)
+  })
+})
+
 describe('end-to-end — the tick loop reconciles the board on a terminal run', () => {
   test('a board-bound /code build drives to done AND completes its Plan item', async () => {
     // 1. Create a ready Plan item + a board-bound run (the dispatch chokepoint).
@@ -106,7 +229,9 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
-    const reconcile = buildBoardReconcileObserver(board)!
+    const reconcile = buildBoardReconcileObserver(board, {
+      resolveRepoWebUrl: async () => 'https://github.com/acme/widget',
+    })!
     const loop = new TridentTickLoop({
       store,
       step: orch.step,
@@ -127,6 +252,12 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     expect(reconciled.status).toBe('done')
     expect(reconciled.linked_run_id).toBe(run_id)
     expect(reconciled.completed_at).not.toBeNull()
+    // Main's assertion: the recovered alert still derives from the RETAINED binding.
     expect(runProgressForItem(reconciled, (id) => store.get(id), Date.now())?.brief_alert).toBe(alert)
+    // ...and this branch's: the run's PR number is DURABLE on the item, written by the
+    // same reconcile. Both hold now — the binding is kept on `done` AND the number is
+    // copied onto the card, so neither assertion is the other's precondition.
+    expect(reconciled.pr).toBe(7)
+    expect(reconciled.pr_url).toBe('https://github.com/acme/widget/pull/7')
   })
 })

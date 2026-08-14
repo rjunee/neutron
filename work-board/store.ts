@@ -78,6 +78,22 @@ export interface WorkBoardItem {
   updated_at: string
   /** ISO-8601 UTC; null until status='done'. */
   completed_at: string | null
+  /**
+   * DURABLE PR provenance (migration 0122) — the bound run's PR number, written
+   * ONLY by the terminal reconcile (`detachRun`) in the same UPDATE as
+   * `status`/`completed_at`. It has to be stored rather than derived because
+   * `run_progress` dies with the binding: `detachRun('done')` NULLs
+   * `linked_run_id`, so a COMPLETED card has no path back to `run.pr`.
+   * NULL when the run had no PR (inline/local-merge/hand-completed work).
+   */
+  pr: number | null
+  /**
+   * The composed `https://github.com/<owner>/<repo>/pull/<n>` link for {@link pr},
+   * resolved from the RUN's own `repo_path` remote at reconcile time (never a
+   * hardcoded repo). NULL when the repo could not be resolved or is not GitHub —
+   * the client then renders the number as PLAIN TEXT rather than a dead link.
+   */
+  pr_url: string | null
 }
 
 export interface CreateWorkBoardItemInput {
@@ -108,6 +124,17 @@ export interface WorkBoardItemUpdate {
 
 /** Outcome of a bound run reaching a terminal phase (drives the reconcile). */
 export type RunReconcileOutcome = 'done' | 'failed'
+
+/**
+ * The terminal run's PR provenance, handed to {@link WorkBoardStore.detachRun}
+ * so the number lands on the item in the SAME write as the terminal status.
+ * `pr: null` (or an absent `pr_info`) leaves the stored columns untouched — a
+ * PR-less terminal run must not erase a number an earlier one wrote.
+ */
+export interface RunPrInfo {
+  pr: number | null
+  pr_url: string | null
+}
 
 /** Where to drop the moved item relative to a sibling. */
 export interface ReorderTarget {
@@ -231,6 +258,7 @@ const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
   'blocked_by, declared_surfaces'
+  'pr, pr_url'
 
 interface WorkBoardItemDbRow {
   id: string
@@ -247,6 +275,8 @@ interface WorkBoardItemDbRow {
   task_type: WorkBoardTaskType
   blocked_by: string | null
   declared_surfaces: string | null
+  pr: number | null
+  pr_url: string | null
 }
 
 /**
@@ -485,6 +515,8 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     task_type: row.task_type,
     blocked_by: parseStoredStringArray(row.blocked_by) ?? [],
     declared_surfaces: parseStoredStringArray(row.declared_surfaces),
+    pr: row.pr,
+    pr_url: row.pr_url,
   }
 }
 
@@ -572,6 +604,9 @@ export class WorkBoardStore {
       // Empty and undeclared are deliberately the same fail-safe state: callers
       // get an incentive to declare real paths instead of claiming an empty set.
       declared_surfaces: declared_surfaces.length === 0 ? null : declared_surfaces,
+      // Durable PR provenance is written ONLY by the terminal reconcile.
+      pr: null,
+      pr_url: null,
     }
 
     await this.db.transaction(async (tx) => {
@@ -604,6 +639,8 @@ export class WorkBoardStore {
           item.task_type,
           serializeStringArray(item.blocked_by),
           item.declared_surfaces === null ? null : JSON.stringify(item.declared_surfaces),
+          item.pr,
+          item.pr_url,
         ],
       )
     })
@@ -1011,6 +1048,10 @@ export class WorkBoardStore {
    * (re-dispatch) nulls `completed_at` + re-appends it to the active lane so
    * its stale completed-row `sort_order` can't collide. Returns the bound row
    * (or null if the id no longer exists).
+   *
+   * A fresh binding also CLEARS the durable PR provenance (`pr`/`pr_url`): a
+   * re-dispatched or retried card must not wear the PREVIOUS run's number while
+   * the new run is still building. The terminal reconcile rewrites it.
    */
   async attachRun(
     project_slug: string,
@@ -1020,7 +1061,14 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.get(project_slug, id)
       if (current === null) return null
-      const sets = ['linked_run_id = ?', 'inline_active = 0', "status = 'in_progress'"]
+      const sets = [
+        'linked_run_id = ?',
+        'inline_active = 0',
+        "status = 'in_progress'",
+        // A new binding supersedes the old run's PR (see the header).
+        'pr = NULL',
+        'pr_url = NULL',
+      ]
       const params: (string | number | null)[] = [run_id]
       if (current.status === 'done') {
         // Re-open OFF done: clear the datestamp + re-append to the active lane.
@@ -1061,11 +1109,20 @@ export class WorkBoardStore {
    *               failure) and do NOT null `linked_run_id`.
    * One transaction, one push. No-op (returns null) when no item is bound to the
    * run — terminal reconcile is idempotent + safe for unbound dispatches.
+   *
+   * `pr_info` carries the terminal run's DURABLE PR provenance and is written in
+   * the SAME UPDATE as the terminal status, for BOTH outcomes (a failed card
+   * wants "#261 Failed" as much as a merged one wants "Merged #265"). It has to
+   * happen here: the `done` path NULLs `linked_run_id`, so after this write there
+   * is no run left to derive a number from. A `pr_info` that is absent or whose
+   * `pr` is null leaves both columns UNTOUCHED — a PR-less terminal run must not
+   * erase a number an earlier run already wrote.
    */
   async detachRun(
     project_slug: string,
     run_id: string,
     outcome: RunReconcileOutcome,
+    pr_info?: RunPrInfo,
   ): Promise<WorkBoardItem | null> {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.getByRunId(project_slug, run_id)
@@ -1085,6 +1142,11 @@ export class WorkBoardStore {
         // Failed — FAILED lane, KEEP the run link (see the header). The retry
         // path (`attachRun`) overwrites the link + flips back to in_progress.
         sets.push("status = 'failed'", 'completed_at = NULL')
+      }
+      // Durable PR provenance — same write as the terminal status, both outcomes.
+      if (pr_info !== undefined && pr_info.pr !== null) {
+        sets.push('pr = ?', 'pr_url = ?')
+        params.push(pr_info.pr, pr_info.pr_url)
       }
       sets.push('updated_at = ?')
       params.push(this.now(), project_slug, current.id)
