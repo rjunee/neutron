@@ -171,8 +171,20 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
     const projectQuery = 'token=dev:owner&platform=web&device_id=devA&project_id=typing-project'
     const first = await openSocket(harness.base, projectQuery)
     await waitFor(() => framesOfType(first.frames, 'session_ready').length > 0)
-    // Negative case: a quiet topic does not manufacture typing on connect.
-    expect(framesOfType(first.frames, 'agent_typing')).toEqual([])
+    // Negative case: a quiet topic does not manufacture a typing INDICATOR on
+    // connect. It DOES now answer explicitly, and the distinction is the whole
+    // point of the reconnect snapshot: `end` turns an indicator off, `start`
+    // turns one on. This assertion used to demand silence, which was correct
+    // only while silence was the sole way to avoid a spurious indicator — and
+    // silence is exactly what strands a client that missed the real `end` while
+    // disconnected, because nothing ever contradicts its stale belief.
+    //
+    // So the property is asserted rather than the old spelling: NO `start` for a
+    // quiet topic, and the explicit idle answer present and scoped to this topic.
+    const connectFrames = framesOfType(first.frames, 'agent_typing')
+    expect(connectFrames.filter((f) => f['state'] === 'start')).toEqual([])
+    expect(connectFrames.map((f) => f['state'])).toEqual(['end'])
+    expect(connectFrames[0]?.['project_id']).toBe('typing-project')
 
     first.ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'long turn', client_msg_id: 'catchup-1' }))
     await waitFor(() => framesOfType(first.frames, 'agent_typing').some((f) => f['state'] === 'start'))
@@ -201,7 +213,14 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
     await waitFor(() => framesOfType(replay.frames, 'session_ready').length > 0)
     replay.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0 }))
     await waitFor(() => framesOfType(replay.frames, 'agent_message').length > 0)
-    expect(framesOfType(replay.frames, 'agent_typing')).toEqual([])
+    // The property is that typing is EPHEMERAL — never stored, never replayed.
+    // The connect-time snapshot below is a LIVE frame answering "is a turn
+    // running right now", so it is not a counter-example to that; the durable
+    // check immediately after is the one that proves it, straight off the table.
+    // Asserting silence here would now fail on the snapshot and say nothing about
+    // durability, which is the thing worth guarding.
+    const replayTyping = framesOfType(replay.frames, 'agent_typing')
+    expect(replayTyping.map((f) => f['state'])).toEqual(['end'])
     const durableTyping = harness.db.raw()
       .query("SELECT count(*) c FROM app_chat_messages WHERE topic_id = 'app:owner:typing-project' AND body LIKE '%agent_typing%'")
       .get() as { c: number }

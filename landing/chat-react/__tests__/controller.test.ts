@@ -915,6 +915,40 @@ describe('NeutronChatController — BUG 7 (no empty bubble above the typing indi
 })
 
 describe('NeutronChatController — server-authoritative typing (agent_typing)', () => {
+  it('HEADLINE: adopts an idle reconnect snapshot and can send after a missed terminal edge', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('turn whose terminal edge will be missed')
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+
+    // The reconnect's targeted snapshot enters through the same production
+    // frame sink; transport retry timing is independently owned by chat-core.
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'end', ts: 2 })
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(false)
+
+    await controller.send('send immediately after reconnect')
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+    expect(controller.getViewModel().messages.some((m) => m.text === 'send immediately after reconnect')).toBe(true)
+  })
+
+  it('adopts a running reconnect snapshot while a legitimate turn is still live', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 2 })
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+    expect(controller.getViewModel().awaitingFirstToken).toBe(true)
+  })
+
   it('shows typing on a start frame and clears it on an end frame', async () => {
     const { controller, sockets } = setup()
     controller.start()
