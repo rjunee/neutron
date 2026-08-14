@@ -297,6 +297,15 @@ export interface MiscCompositionInput {
      * silent until the turn's single reply() lands. Omitted → no post.
      */
     chat_ack?: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck
+    /**
+     * The composer-built card-removal chokepoint (cancel a live bound run →
+     * dispose the card's `plans/` doc by reason → hard-delete the row) — the
+     * SAME instance the HTTP DELETE behind the UI's X uses. When supplied, the
+     * `work_board_remove` agent tool registers, so an agent removal and a human
+     * removal share one path. Omitted → the tool is absent (legacy boots
+     * unchanged).
+     */
+    removal?: import('@neutronai/work-board/removal.ts').WorkBoardRemovalService
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the

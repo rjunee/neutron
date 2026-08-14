@@ -390,7 +390,7 @@ describe('work-board HTTP surface — DELETE reason + plan-doc disposition', () 
     expect(res?.status).toBe(200)
     const body = (await res!.json()) as {
       deleted: string
-      plan_doc?: { disposition: string; to?: string }
+      plan_doc?: { path: string; disposition: string; to?: string }
     }
     expect(body.deleted).toBe(item.id)
     expect(body.plan_doc).toEqual({

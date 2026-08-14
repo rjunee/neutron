@@ -10956,3 +10956,51 @@ Mutation checks (each applied to `removal.ts`, then restored):
 | --- | --- |
 | `skip-cancellation`: never call `cancelBoundRun` | RED — order test saw `['delete']`; 4 tests failed |
 | `delete-first`: hard-delete before cancelling | RED — order test saw `['delete', 'terminate']`; 10 tests failed |
+
+## 2026-08-14 — the agent can remove a Work Board card, through the human's path
+
+`work_board_remove` is registered on the agent tool surface. It takes the item
+`id`, a required `reason` (`shipped` | `cancelled` | `moved`, each value
+described in the schema so the model picks honestly) and an optional
+`delete_plan_doc` boolean. It calls `WorkBoardRemovalService.remove` — the SAME
+instance `open/composer.ts` builds and hands the HTTP surface behind the UI's X.
+There is no second removal implementation and the handler never touches
+`store.delete` directly, so run-cancellation, doc disposition and the hard row
+delete cannot drift between the human path and the agent path.
+
+Why it exists: the agent's only removal lever was `work_board_complete`, so
+taking four deprioritised cards off the board on 2026-08-14 marked four unshipped
+items `done`. The tool description says this out loud — remove is NOT complete,
+never mark unshipped work `done` just to clear it.
+
+Registration is gated on a wired `opts.removal`. A boot that does not supply one
+registers the same five tools as before, in the same order, and
+`registry.get('work_board_remove')` is undefined; the returned names array gains
+`work_board_remove` only when the chokepoint is present. The wiring runs
+composer → `misc-input.ts` `work_board.removal` → `build-core-modules.ts`, spelled
+exactly like the existing `spec_doc` / `chat_ack` threading.
+
+Scope handling mirrors `work_board_add`: the BOARD is keyed by
+`workBoardScopeKey(ctx.project_slug, ctx.project_id)` and the DOCS project id is
+`ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID` — the two arguments stay
+separate, which is the conflation hazard documented in `spec-doc-service.ts`.
+`project_slug` is never an agent-supplied argument.
+
+The tool reports what happened rather than just `ok`: `cancelled_run` when a
+cancellation actually landed, and `plan_doc` with its `disposition` and the new
+`to` path under `plans/<reason>/`. `delete_plan_doc: true` is the only input that
+can produce `disposition: 'deleted'`.
+
+The acceptance's named test is pinned through the AGENT surface, not just the
+service: `work-board/agent-tool.test.ts` creates a real card, binds a live run
+with `store.bindRun`, calls the tool handler, and asserts the shared event array
+contains BOTH `terminate` and `delete` with `terminate` first. Skipping
+cancellation drops `terminate` and deleting first inverts the indices, so both
+mutants go RED. `store.delete` is wrapped, not faked, so the ordering is observed
+against the real row delete. A follow-up `work_board_list` through the same
+registry proves the card is really gone; unknown id, an out-of-enum reason and a
+missing reason all return `{ ok: false, error }` with no throw and no side effect.
+
+One drive-by: `gateway/http/work-board-surface.test.ts` declared its `plan_doc`
+body type without `path` while asserting on it, which `tsc -p gateway` rejected.
+The annotation now matches the response.

@@ -5,12 +5,14 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
-import { WorkBoardStore } from './store.ts'
+import { GENERAL_WORK_BOARD_PROJECT_ID, WorkBoardStore } from './store.ts'
+import { WorkBoardRemovalService } from './removal.ts'
 import {
   registerWorkBoardToolSurface,
   WORK_BOARD_ADD_TOOL,
   WORK_BOARD_COMPLETE_TOOL,
   WORK_BOARD_LIST_TOOL,
+  WORK_BOARD_REMOVE_TOOL,
   WORK_BOARD_REORDER_TOOL,
   WORK_BOARD_UPDATE_TOOL,
 } from './agent-tool.ts'
@@ -348,5 +350,226 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     )) as { ok: boolean; item?: { id: string } }
     expect(out.ok).toBe(true)
     expect(out.item?.id).toBeDefined()
+  })
+})
+
+describe('work_board_remove', () => {
+  interface RemoveHarness {
+    reg: ToolRegistry
+    names: string[]
+    events: string[]
+    moves: Array<{ project_id: string; from: string; to: string }>
+    deletedDocs: Array<{ project_id: string; path: string }>
+  }
+
+  /**
+   * A registry with the removal chokepoint wired — a REAL `WorkBoardRemovalService`
+   * over the SAME store the other tools use, with structural stubs recording into
+   * ONE shared `events` array (the ordering pin). `store.delete` is wrapped rather
+   * than faked, so the sequence is observed against the REAL row delete.
+   */
+  function withRemoval(): RemoveHarness {
+    const reg = new ToolRegistry()
+    const events: string[] = []
+    const moves: Array<{ project_id: string; from: string; to: string }> = []
+    const deletedDocs: Array<{ project_id: string; path: string }> = []
+    const removal = new WorkBoardRemovalService({
+      store: {
+        get: (scope, id) => store.get(scope, id),
+        delete: async (scope, id) => {
+          events.push('delete')
+          await store.delete(scope, id)
+        },
+      },
+      trident_runs: {
+        get: () => ({ phase: 'forge' }),
+        update: async () => null,
+        terminate: async () => {
+          events.push('terminate')
+          return { won: true }
+        },
+      },
+      is_terminal_phase: () => false,
+      docs: {
+        moveDoc: async (project_id, from, to) => {
+          events.push('moveDoc')
+          moves.push({ project_id, from, to })
+          return null
+        },
+        deleteDoc: async (project_id, path) => {
+          events.push('deleteDoc')
+          deletedDocs.push({ project_id, path })
+          return null
+        },
+      },
+    })
+    const names = registerWorkBoardToolSurface(reg, store, { removal })
+    return { reg, names, events, moves, deletedDocs }
+  }
+
+  test('registers only when a removal chokepoint is wired', () => {
+    // The default beforeEach registry has no `removal` — legacy boots unchanged.
+    expect(registry.get(WORK_BOARD_REMOVE_TOOL)).toBeUndefined()
+
+    const h = withRemoval()
+    const tool = h.reg.get(WORK_BOARD_REMOVE_TOOL)
+    expect(tool).toBeDefined()
+    expect(tool!.approval_policy).toBe('auto')
+    expect(tool!.capability_required).toBe('write:project_data')
+    const schema = tool!.input_schema as {
+      properties: Record<string, { enum?: string[] }>
+      required: string[]
+    }
+    expect(schema.required).toEqual(['id', 'reason'])
+    expect(schema.properties.reason!.enum).toEqual(['shipped', 'cancelled', 'moved'])
+    expect(Object.keys(schema.properties)).not.toContain('project_slug')
+    expect(schema.properties.delete_plan_doc).toBeDefined()
+    expect(h.names).toContain(WORK_BOARD_REMOVE_TOOL)
+  })
+
+  test('the five legacy tools register unchanged when `removal` is absent', () => {
+    const reg = new ToolRegistry()
+    const names = registerWorkBoardToolSurface(reg, store)
+    expect(names).toEqual([
+      WORK_BOARD_LIST_TOOL,
+      WORK_BOARD_ADD_TOOL,
+      WORK_BOARD_UPDATE_TOOL,
+      WORK_BOARD_COMPLETE_TOOL,
+      WORK_BOARD_REORDER_TOOL,
+    ])
+    expect(reg.get(WORK_BOARD_REMOVE_TOOL)).toBeUndefined()
+  })
+
+  test('removing a card with a LIVE bound run CANCELS the run before the row delete', async () => {
+    // The acceptance's named test (guard against a fake test): the card HAS a
+    // live run, and the assertion is the ORDERED event sequence through the AGENT
+    // surface. Two mutants go RED: skipping cancellation (no 'terminate') and
+    // deleting first (['delete','terminate']).
+    const h = withRemoval()
+    const item = await store.create('owner', { title: 'live build' })
+    await store.bindRun('owner', item.id, 'run-9')
+
+    const res = (await h.reg.get(WORK_BOARD_REMOVE_TOOL)!.handler(
+      { id: item.id, reason: 'cancelled' },
+      ctx('owner'),
+    )) as { ok: boolean; cancelled_run?: string }
+
+    expect(res.ok).toBe(true)
+    expect(res.cancelled_run).toBe('run-9')
+    expect(h.events).toContain('terminate')
+    expect(h.events).toContain('delete')
+    expect(h.events.indexOf('terminate')).toBeLessThan(h.events.indexOf('delete'))
+  })
+
+  test("the plan doc is MOVED to a folder named for the reason (docs id ≠ board scope)", async () => {
+    const h = withRemoval()
+    const item = await store.create('owner', {
+      title: 'has a spec',
+      design_doc_ref: 'neutron-docs:plans/has-a-spec-abc123.md',
+    })
+
+    const res = (await h.reg.get(WORK_BOARD_REMOVE_TOOL)!.handler(
+      { id: item.id, reason: 'moved' },
+      ctx('owner'),
+    )) as { ok: boolean; plan_doc?: { path: string; disposition: string; to?: string } }
+
+    expect(res.ok).toBe(true)
+    expect(res.plan_doc?.disposition).toBe('moved')
+    expect(res.plan_doc?.to).toBe('plans/moved/has-a-spec-abc123.md')
+    // The BOARD keyed on the owner slug; the DOCS id is `general` — the
+    // conflation hazard from spec-doc-service.ts, pinned on the removal path too.
+    expect(h.moves).toEqual([
+      {
+        project_id: GENERAL_WORK_BOARD_PROJECT_ID,
+        from: 'plans/has-a-spec-abc123.md',
+        to: 'plans/moved/has-a-spec-abc123.md',
+      },
+    ])
+    expect(h.deletedDocs).toEqual([])
+  })
+
+  test('delete_plan_doc:true is the ONLY tool input that destroys the doc', async () => {
+    const h = withRemoval()
+    const doomed = await store.create('owner', {
+      title: 'destroy the doc',
+      design_doc_ref: 'neutron-docs:plans/doomed-abc123.md',
+    })
+
+    const res = (await h.reg.get(WORK_BOARD_REMOVE_TOOL)!.handler(
+      { id: doomed.id, reason: 'cancelled', delete_plan_doc: true },
+      ctx('owner'),
+    )) as { ok: boolean; plan_doc?: { disposition: string } }
+
+    expect(res.plan_doc?.disposition).toBe('deleted')
+    expect(h.deletedDocs).toEqual([
+      { project_id: GENERAL_WORK_BOARD_PROJECT_ID, path: 'plans/doomed-abc123.md' },
+    ])
+    expect(h.moves).toEqual([])
+  })
+
+  test('WITHOUT the flag, no reason ever destroys a doc', async () => {
+    for (const reason of ['shipped', 'cancelled', 'moved']) {
+      const h = withRemoval()
+      const item = await store.create('owner', {
+        title: `card ${reason}`,
+        design_doc_ref: `neutron-docs:plans/card-${reason}.md`,
+      })
+      const res = (await h.reg.get(WORK_BOARD_REMOVE_TOOL)!.handler(
+        { id: item.id, reason },
+        ctx('owner'),
+      )) as { ok: boolean; plan_doc?: { disposition: string; to?: string } }
+      expect(res.plan_doc?.disposition).toBe('moved')
+      expect(res.plan_doc?.to).toBe(`plans/${reason}/card-${reason}.md`)
+      expect(h.deletedDocs).toEqual([])
+    }
+  })
+
+  test('the removed card is REALLY gone from a subsequent work_board_list', async () => {
+    const h = withRemoval()
+    const doomed = await store.create('owner', { title: 'remove me' })
+    const survivor = await store.create('owner', { title: 'keep me' })
+
+    const res = (await h.reg.get(WORK_BOARD_REMOVE_TOOL)!.handler(
+      { id: doomed.id, reason: 'shipped' },
+      ctx('owner'),
+    )) as { ok: boolean }
+    expect(res.ok).toBe(true)
+
+    const listed = (await h.reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner'))) as {
+      items: Array<{ id: string }>
+    }
+    expect(listed.items.map((i) => i.id)).toEqual([survivor.id])
+  })
+
+  test('bad input is an ANSWER, not a throw: unknown id / bad reason / missing reason', async () => {
+    const h = withRemoval()
+    const remove = h.reg.get(WORK_BOARD_REMOVE_TOOL)!
+    const item = await store.create('owner', { title: 'still here' })
+
+    const unknown = (await remove.handler({ id: 'nope-1', reason: 'cancelled' }, ctx('owner'))) as {
+      ok: boolean
+      error?: string
+    }
+    expect(unknown.ok).toBe(false)
+    expect(unknown.error).toContain('nope-1')
+
+    const badReason = (await remove.handler({ id: item.id, reason: 'archived' }, ctx('owner'))) as {
+      ok: boolean
+      error?: string
+    }
+    expect(badReason.ok).toBe(false)
+
+    const noReason = (await remove.handler({ id: item.id }, ctx('owner'))) as {
+      ok: boolean
+      error?: string
+    }
+    expect(noReason.ok).toBe(false)
+
+    const noId = (await remove.handler({ reason: 'cancelled' }, ctx('owner'))) as { ok: boolean }
+    expect(noId.ok).toBe(false)
+
+    // Nothing was removed, and no doc/run side effect fired.
+    expect(store.get('owner', item.id)).not.toBeNull()
+    expect(h.events).toEqual([])
   })
 })

@@ -3926,7 +3926,7 @@ export function buildOpenGraphComposer(
     // §F6a terminate chokepoint, research via the dispatch stop) → dispose the
     // card's own `plans/` doc into a folder named for the removal REASON → hard-
     // delete the row. Built ONCE here and handed to the HTTP surface (the UI's X)
-    // — and, once T2 lands, to the agent's remove tool — so a human removal and
+    // AND to the agent's `work_board_remove` tool (T2), so a human removal and
     // an agent removal run the SAME path, run-cancellation and all. `docStore` is
     // the same instance the spec-doc service writes the doc with, so the move
     // lands where the Documents tab reads.
@@ -5810,7 +5810,14 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc, chat_ack: workBoardChatAck },
+      // `removal` is the SAME chokepoint the UI's X runs (built above, handed to
+      // the HTTP surface) — agent removal and human removal share one path.
+      work_board: {
+        store: workBoardStore,
+        spec_doc: workBoardSpecDoc,
+        chat_ack: workBoardChatAck,
+        removal: workBoardRemoval,
+      },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).

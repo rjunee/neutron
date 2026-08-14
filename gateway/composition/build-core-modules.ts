@@ -229,6 +229,9 @@ export function buildCoreModules(
           // #429 task 4 — thread the deterministic chat ack (composer-built,
           // durable+live app-ws seam). Absent → no post (unchanged behaviour).
           ...(input.work_board.chat_ack !== undefined ? { chatAck: input.work_board.chat_ack } : {}),
+          // The composer-built removal chokepoint — the SAME one the UI's X
+          // runs. Present → `work_board_remove` registers; absent → it does not.
+          ...(input.work_board.removal !== undefined ? { removal: input.work_board.removal } : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
