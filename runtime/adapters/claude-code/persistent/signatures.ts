@@ -48,16 +48,16 @@ export const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
  * so an ACTIVELY-working turn keeps resetting the idle clock and runs as long as it
  * needs (a long-but-live build no longer dies at an arbitrary 180s). Only a
  * GENUINELY frozen turn — no PTY output for `DEFAULT_TURN_INACTIVITY_MS` — trips the
- * timeout. Kept modest (~90s) so a truly wedged warm turn still fails reasonably
- * fast; the composer auto-retries a freeze once and surfaces a Retry affordance.
+ * timeout. Chat uses the same 30-minute inactivity window as warm fire; the
+ * separate 45-minute absolute ceiling remains the terminal authority.
  *
  * Historical note: this constant used to be `DEFAULT_TURN_TIMEOUT_MS = 180_000`, a
- * FIXED wall-clock cap that hard-failed a slow-but-active turn (Ryan live-test
+ * FIXED wall-clock cap that hard-failed a slow-but-active turn (live test
  * 2026-07-01: a "weave timer+tracker together then do full e2e testing" turn was
  * killed at elapsed_ms=180009 while the agent was still working). Now it is the
  * idle window; `turnTimeoutMs` / `spec.turn_timeout_ms` override it per-turn.
  */
-export const DEFAULT_TURN_INACTIVITY_MS = 90_000
+export const DEFAULT_TURN_INACTIVITY_MS = 30 * 60_000
 /**
  * ABSOLUTE-CEILING backstop for a single turn (2026-07-01). Even the
  * activity-based watchdog keeps a hard upper bound so a live-but-livelocked child

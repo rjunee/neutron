@@ -84,28 +84,16 @@ const moduleLog = createLogger('live-agent-turn')
  * wall clock. The substrate abandons a turn only after `turn_timeout_ms` with NO
  * PTY activity from the `claude` child (an actively-working turn resets that idle
  * clock on every spinner tick / streamed token / tool-output byte), so a
- * long-but-live turn runs as long as it needs. `TURN_INACTIVITY_MS` is the warm
+ * long-but-live turn runs as long as it needs. `CHAT_TURN_INACTIVITY_MS` is the
  * steady-state idle window sent as `spec.turn_timeout_ms`.
  *
  * Historical note: this fix replaced a fixed 180s (substrate) / 240s (composer)
- * wall clock that hard-failed a slow-but-active turn — Ryan live-test 2026-07-01:
+ * wall clock that hard-failed a slow-but-active turn — live test 2026-07-01:
  * a "weave timer+tracker together then do full e2e testing" turn died at
  * elapsed_ms=180009 while the agent was still working, then showed a misleading
  * "your AI connection may need attention in settings" dead-end.
  */
-const TURN_INACTIVITY_MS = 90_000
-
-/**
- * Larger inactivity window for a COLD first turn / onboarding turn. Those turns
- * carry a heavier initial payload (a large system / onboarding prompt) whose first
- * silent think — before the TUI starts rendering — can run longer under machine
- * load. A more generous idle tolerance keeps a slow-but-progressing cold turn
- * alive; the absolute ceiling below still bounds a genuinely hung one. (The cold
- * SPAWN itself — REPL fork, MCP/dev-channel bind, plugin load — happens BEFORE the
- * substrate's per-turn watchdog starts, so it is covered by the composer's
- * absolute-ceiling AbortController, not this idle window.)
- */
-const COLD_TURN_INACTIVITY_MS = 180_000
+export const CHAT_TURN_INACTIVITY_MS = 30 * 60_000
 
 /**
  * Absolute-ceiling backstop (ms) for a single turn — the hard upper bound, wired
@@ -912,6 +900,10 @@ export function buildLiveAgentTurn(
    * seconds-to-minutes flow.
    */
   const lastUserText = new Map<string, string>()
+  // A Retry control can arrive after the original long turn completed (for
+  // example, from a stale client render). Remember that completion before
+  // dispatching the sentinel so a delayed tap cannot redo already-finished work.
+  const completedUserText = new Map<string, string>()
 
   /**
    * Retry affordance, attachments companion — the last REAL turn's attachment
@@ -1085,6 +1077,13 @@ export function buildLiveAgentTurn(
     const attemptId = randomUUID()
     if (turn.user_text === RETRY_TURN_VALUE) {
       const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
+      if (completedUserText.get(topicKey) === recovered) {
+        moduleLog.info('retry_tap_already_completed', {
+          project: turn.project_slug,
+          topic: turn.topic_id,
+        })
+        return { outcome: 'replied', reply_prompt_id: null }
+      }
       const recoveredAttachments = lastAttachments.get(topicKey)
       moduleLog.info('retry_tap', {
         project: turn.project_slug,
@@ -1105,6 +1104,7 @@ export function buildLiveAgentTurn(
     // empty body.
     if (turn.seed_turn !== true && turn.user_text.length > 0) {
       lastUserText.set(topicKey, turn.user_text)
+      completedUserText.delete(topicKey)
       if (turn.attachments !== undefined && turn.attachments.length > 0) {
         lastAttachments.set(topicKey, turn.attachments)
       } else {
@@ -1538,8 +1538,7 @@ export function buildLiveAgentTurn(
         // projectIdResolver is wired on this substrate (build-llm-call-
         // substrate.ts). Per-dispatch ⇒ race-free across concurrent topics.
         metering_context: { project_id: scope },
-        turn_timeout_ms:
-          effectiveCold || onboardingActive ? COLD_TURN_INACTIVITY_MS : TURN_INACTIVITY_MS,
+        turn_timeout_ms: CHAT_TURN_INACTIVITY_MS,
         turn_absolute_ceiling_ms: absoluteCeilingMs,
       }
       if (input.max_tokens !== undefined) s.max_tokens = input.max_tokens
@@ -1712,6 +1711,7 @@ export function buildLiveAgentTurn(
       }
       return { outcome: 'failed', reply_prompt_id: null }
     }
+    if (turn.seed_turn !== true) completedUserText.set(topicKey, turn.user_text)
     // Only mark the context as delivered once a turn actually completed on
     // the warm session — a failed first turn retries with full context.
     //

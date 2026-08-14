@@ -161,7 +161,7 @@ test('the fire window is BELOW the absolute ceiling, so the ceiling stays the te
   // while removing the one it does.
   expect(PROFILE_WARM_FIRE.turn_inactivity_ms).toBeLessThan(DEFAULT_TURN_ABSOLUTE_CEILING_MS)
   // ...and comfortably ABOVE the default, or it would not fix anything.
-  expect(PROFILE_WARM_FIRE.turn_inactivity_ms).toBeGreaterThan(DEFAULT_TURN_INACTIVITY_MS)
+  expect(PROFILE_WARM_FIRE.turn_inactivity_ms).toBe(DEFAULT_TURN_INACTIVITY_MS)
 })
 
 // ---------------------------------------------------------------------------

@@ -42,8 +42,8 @@ import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
 // Mirrors the production constants (build-live-agent-turn.ts): the activity-based
 // inactivity windows + the absolute-ceiling backstop.
-const TURN_INACTIVITY_MS = 90_000
-const COLD_TURN_INACTIVITY_MS = 180_000
+const TURN_INACTIVITY_MS = 30 * 60_000
+const COLD_TURN_INACTIVITY_MS = TURN_INACTIVITY_MS
 const TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 
 let tmp: string

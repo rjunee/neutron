@@ -66,6 +66,18 @@ describe('buildSettings — behaviour-preserving atomic write', () => {
     expect(parsed.hooks.PostToolUse).toBeUndefined()
     expect(parsed.hooks.Stop).toBeDefined()
   })
+
+  test('wires the chat pipeline guard as a Bash PreToolUse hook', () => {
+    const settingsPath = join(freshDir(), 'settings.json')
+    buildSettings({
+      settingsPath,
+      pipelineGuard: { hookPath: '/abs/pipeline-guard.ts' },
+    })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.hooks.PreToolUse).toEqual([
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'bun /abs/pipeline-guard.ts' }] },
+    ])
+  })
 })
 
 describe('buildSettings — WAVE 3.5 task B TodoWrite→Work Board PostToolUse hook', () => {

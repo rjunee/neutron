@@ -336,7 +336,7 @@ export interface PersistentReplSubstrateOptions {
   /** Per-turn INACTIVITY window (ms) — the turn is abandoned with a retryable
    *  `turn timeout` error only after this long with NO PTY activity from the
    *  child (an actively-working turn resets it on every byte). Default
-   *  `DEFAULT_TURN_INACTIVITY_MS` (90s). Overridable per-turn via
+   *  `DEFAULT_TURN_INACTIVITY_MS` (30min). Overridable per-turn via
    *  `spec.turn_timeout_ms`. NOT a fixed wall clock — see the constant's doc. */
   turnTimeoutMs?: number
   /** Per-turn ABSOLUTE-CEILING backstop (ms) — the hard upper bound a single turn

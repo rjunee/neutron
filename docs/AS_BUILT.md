@@ -10601,6 +10601,45 @@ a deferred, unavailable, or dead Codex adversarial run as incomplete, so
 `enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
 the panel gate.
 
+## 2026-08-14 — chat turn lifecycle survives silent work
+
+Chat dispatch now uses a 30-minute inactivity window in
+`gateway/wiring/build-live-agent-turn.ts:96`, matching the warm-fire profile while
+remaining below the 45-minute absolute ceiling in
+`runtime/adapters/claude-code/persistent/signatures.ts:68`. The substrate default
+matches at `runtime/adapters/claude-code/persistent/signatures.ts:60`. A completed
+turn is recorded before delivery; a delayed Retry tap is acknowledged without a
+second substrate dispatch, preserving completed work.
+
+The owner's conversational REPL settings now attach the Bash `PreToolUse` guard in
+`runtime/adapters/claude-code/persistent/spawn.ts:141`. The guard at
+`runtime/adapters/claude-code/persistent/hooks/pipeline-guard.ts:10` refuses a pipe
+into `tail` or `sort`, names the offending consumer, and permits streaming
+pipelines. This prevents a full-buffering command from hiding all child output
+until EOF from the activity watchdog.
+
+Every persistent REPL argv now carries `--autocompact 300000` at
+`runtime/adapters/claude-code/persistent/build-repl-argv.ts:115`. Claude Code
+2.1.198 does not print this hidden option in `--help`; the installed binary itself
+contains the exact `--autocompact` option and accepts the option/value probe.
+
+Typing required no new implementation: `open/wiring/app-ws.ts:709` maintains the
+active-turn set at the same start/end seam that emits typing, and
+`open/wiring/app-ws.ts:1161` sends level-triggered catch-up to a socket connecting
+mid-turn. `open/__tests__/typing-refcount.test.ts:70` already pins active and quiet
+catch-up behavior.
+
+Mutation results (each mutation was applied to the shipped source, its focused
+test was run, and the source was restored immediately):
+
+| mutant | result |
+|---|---|
+| chat window restored to the old 90 seconds | RED — chat spec assertions |
+| absolute-ceiling branch disabled | RED — livelock test remained unsettled past its bound |
+| completed-work Retry suppression disabled | RED — second dispatch observed |
+| full-buffering pipeline detector removed | RED — `tail` and `sort` refusals failed |
+| `--autocompact 300000` removed | RED — spawned argv assertion failed |
+
 ## 2026-08-13 — typing catches up on connect and explains the live step
 
 Typing is now level-triggered for a socket opening during a turn and remains
