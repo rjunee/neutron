@@ -72,8 +72,6 @@ export interface BuildReplArgvInput {
    * `reply` tool is a development-channel tool, exempt from the permission gate).
    */
   allowedMcpTools?: ReadonlyArray<string>
-  /** Token budget to pass when the installed CLI advertises `--autocompact`. */
-  autocompactTokens?: number
 }
 
 /** Required upstream context budget for every persistent REPL child. */

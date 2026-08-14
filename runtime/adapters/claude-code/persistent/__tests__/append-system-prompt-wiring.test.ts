@@ -145,14 +145,6 @@ function appendPromptValue(argv: string[]): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined
 }
 
-function fakeClaudeHelp(help: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'neutron-claude-help-'))
-  const bin = join(dir, 'claude')
-  writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' '${help}'\n`)
-  chmodSync(bin, 0o700)
-  return bin
-}
-
 // ---------------------------------------------------------------------------
 // 1. The spawned REPL argv carries the prompt file end-to-end.
 // ---------------------------------------------------------------------------

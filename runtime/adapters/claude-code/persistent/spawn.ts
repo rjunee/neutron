@@ -9,7 +9,6 @@ import { join } from 'node:path'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
 import { buildReplArgv } from './build-repl-argv.ts'
-import { supportsAutocompact } from './autocompact-support.ts'
 import { buildSettings } from './build-settings.ts'
 import { bunTerminalHost } from './bun-terminal-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
@@ -156,9 +155,8 @@ async function spawnSession(
   // whose surface differs from the warm REPL's, so a less-privileged (e.g. import)
   // turn can never bleed onto a more-privileged warm session.
   const toolSurface = spec.tools.map((t) => t.name)
-  const claudeBin = options.claude_bin ?? process.env['CLAUDE_BIN'] ?? 'claude'
   const argv = buildReplArgv({
-    claudeBin,
+    ...(options.claude_bin !== undefined ? { claudeBin: options.claude_bin } : {}),
     sessionId,
     resume: resume !== undefined,
     channelName,
@@ -168,8 +166,6 @@ async function spawnSession(
     model,
     addDir: cwd,
     tools: toolSurface,
-    // Token budget upstream; omit it for older CLIs that reject the option.
-    ...(supportsAutocompact(claudeBin) ? { autocompactTokens: 300000 } : {}),
     // P0-1 — when the tool bridge is attached, permit its MCP namespace so the
     // agent can invoke the Neutron tools without a per-call approval prompt.
     // `--tools` only gates the BUILT-IN set, so the security-critical
