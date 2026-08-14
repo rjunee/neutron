@@ -75,3 +75,62 @@ export function makeRepoWebUrlResolver(
     return pending
   }
 }
+
+/**
+ * A SYNC view over {@link makeRepoWebUrlResolver} — the shape the board's
+ * `run_progress` attachment sites need.
+ */
+export interface RepoWebUrlCache {
+  /**
+   * The repo's GitHub web url if it has already SETTLED, else null (and a
+   * background warm is kicked on the first miss). Never throws, never awaits.
+   */
+  peek(repo_path: string): string | null
+}
+
+/**
+ * Build a process-wide sync-peek cache over the promise-memoized resolver.
+ *
+ * Both places that attach `run_progress` to a board item — `withRunProgress`
+ * (the HTTP GET in `gateway/http/work-board-surface.ts`) and the composer's
+ * `fanWorkBoardChanged` ws literal — are SYNCHRONOUS, and the resolver has to
+ * shell `git remote get-url`. So `peek` returns what has already SETTLED and
+ * warms everything else in the background.
+ *
+ * CONSEQUENCE, accepted by the plan: the FIRST peek for a repo after boot
+ * returns null, so that one snapshot renders the `#NNN` tag as plain text. The
+ * warm lands within a shell-out, and the next push (a checkpoint) or poll (15s)
+ * carries the url. Nothing blocks, and a resolver failure settles to null rather
+ * than re-shelling on every frame.
+ */
+export function makeRepoWebUrlCache(
+  run_host: (cmd: string[], cwd?: string) => Promise<HostCommandResult> = spawnCapture,
+): RepoWebUrlCache {
+  const resolve = makeRepoWebUrlResolver(run_host)
+  const settled = new Map<string, string | null>()
+  // Guards the `.then` attachment, NOT the shell — the resolver already memoizes
+  // the in-flight promise; this keeps N peeks from stacking N continuations.
+  const warming = new Set<string>()
+  return {
+    peek(repo_path: string): string | null {
+      const hit = settled.get(repo_path)
+      if (hit !== undefined) return hit
+      if (!warming.has(repo_path)) {
+        warming.add(repo_path)
+        try {
+          void resolve(repo_path)
+            .then((v) => {
+              settled.set(repo_path, v)
+            })
+            .catch(() => {
+              settled.set(repo_path, null)
+            })
+        } catch {
+          // A synchronously-throwing run_host must not take down a board render.
+          settled.set(repo_path, null)
+        }
+      }
+      return null
+    },
+  }
+}

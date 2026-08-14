@@ -119,6 +119,9 @@ export interface RunProgress {
   stalled: boolean
   stalled_ms: number | null
   pr: number | null
+  /** `<repo web url>/pull/<pr>` — null when there is no PR or the repo could not
+   *  be resolved, in which case the `#NNN` tag renders as plain text. */
+  pr_url: string | null
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   failure_reason: string | null
   /** Added after the base progress shape; optional for rolling-deploy frames. */
@@ -431,6 +434,9 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     stalled: r['stalled'] === true,
     stalled_ms: typeof r['stalled_ms'] === 'number' ? (r['stalled_ms'] as number) : null,
     pr: typeof r['pr'] === 'number' ? (r['pr'] as number) : null,
+    // Absent/malformed → null: an older gateway's frame stays valid and the tag
+    // simply renders as plain text.
+    pr_url: typeof r['pr_url'] === 'string' ? (r['pr_url'] as string) : null,
     verdict: verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' ? verdict : null,
     failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
     brief_alert: typeof r['brief_alert'] === 'string' ? (r['brief_alert'] as string) : null,

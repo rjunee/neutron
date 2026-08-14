@@ -78,7 +78,12 @@ export type {
 
 // The run's own GitHub web url (owner/repo from its remote) — the source of the
 // board's clickable `#NNN` PR link. Never a hardcoded repo.
-export { githubWebUrlFromRemote, makeRepoWebUrlResolver } from './repo-web-url.ts'
+export {
+  githubWebUrlFromRemote,
+  makeRepoWebUrlResolver,
+  makeRepoWebUrlCache,
+  type RepoWebUrlCache,
+} from './repo-web-url.ts'
 
 // The one surviving Forge/Argus prompt constant. The v1 render/parse half of
 // `prompts.ts` (and its `session.ts` / `substrate-dispatch.ts` consumers) was

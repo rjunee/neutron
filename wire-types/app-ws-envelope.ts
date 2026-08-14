@@ -512,6 +512,16 @@ export interface AppWsRunProgress {
   stalled: boolean
   stalled_ms: number | null
   pr: number | null
+  // REBASE NOTE — the branch's `pr_url` is kept, but the verdict union is MAIN'S
+  // three-member one. `'REVIEW_NOT_RUN'` landed with #454 after this branch forked;
+  // taking the branch's two-member union would delete it from the wire type and
+  // silently un-model a verdict the server now emits.
+  /**
+   * `<repo web url>/pull/<pr>` for a LIVE card's clickable `#NNN`. The server
+   * always emits the field; null = no PR yet, or the run's repo is not a
+   * resolvable GitHub remote → the client renders the tag as plain text.
+   */
+  pr_url: string | null
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null
   failure_reason: string | null
   /** Durable brief-integrity refusal, retained even when a later retry recovers. */

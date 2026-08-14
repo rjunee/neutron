@@ -182,6 +182,57 @@ describe('runProgressForItem', () => {
     const p = runProgressForItem({ linked_run_id: 'run-x', project_slug: 'owner' }, lookup(r), T0)
     expect(p).toBeNull()
   })
+
+  test('peeks the RUN\'S OWN repo_path and composes pr_url from it', () => {
+    const r = run({ id: 'run-x', pr: 265, repo_path: '/repos/x' })
+    const asked: string[] = []
+    const p = runProgressForItem(
+      { linked_run_id: 'run-x', project_slug: 'owner' },
+      lookup(r),
+      T0,
+      (repo_path) => {
+        asked.push(repo_path)
+        return 'https://github.com/acme/widget'
+      },
+    )
+    expect(asked).toEqual(['/repos/x'])
+    expect(p?.pr_url).toBe('https://github.com/acme/widget/pull/265')
+  })
+
+  test('no peek argument → pr_url null (the field still exists)', () => {
+    const r = run({ id: 'run-x', pr: 265, repo_path: '/repos/x' })
+    const p = runProgressForItem({ linked_run_id: 'run-x', project_slug: 'owner' }, lookup(r), T0)
+    expect(p?.pr).toBe(265)
+    expect(p?.pr_url).toBeNull()
+  })
+
+  test('a peek that has not warmed yet (null) → pr_url null, plain text', () => {
+    const r = run({ id: 'run-x', pr: 265, repo_path: '/repos/x' })
+    const p = runProgressForItem(
+      { linked_run_id: 'run-x', project_slug: 'owner' },
+      lookup(r),
+      T0,
+      () => null,
+    )
+    expect(p?.pr_url).toBeNull()
+  })
+})
+
+describe('deriveRunProgress — pr_url', () => {
+  test('a PR + a resolved repo url composes <url>/pull/<pr>', () => {
+    const p = deriveRunProgress(run({ pr: 265 }), T0, 'https://github.com/acme/widget')
+    expect(p.pr_url).toBe('https://github.com/acme/widget/pull/265')
+  })
+
+  test('no PR + a resolved url → null (nothing to link)', () => {
+    const p = deriveRunProgress(run({ pr: null }), T0, 'https://github.com/acme/widget')
+    expect(p.pr_url).toBeNull()
+  })
+
+  test('a PR but an unresolvable repo → null (plain text, never a guessed repo)', () => {
+    expect(deriveRunProgress(run({ pr: 265 }), T0, null).pr_url).toBeNull()
+    expect(deriveRunProgress(run({ pr: 265 }), T0).pr_url).toBeNull()
+  })
 })
 
 describe('deriveStepLabel — M1 UX REDESIGN inner-step vocabulary', () => {

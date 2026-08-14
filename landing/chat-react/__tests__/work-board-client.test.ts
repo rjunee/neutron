@@ -273,6 +273,47 @@ describe('parseWorkBoardItems', () => {
     expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     expect(out[1]!.run_progress).toBeUndefined()
   })
+
+  it('parses run_progress.pr_url through, and null when the gateway omits it', () => {
+    const base = {
+      run_id: 'run-1',
+      phase_label: 'building',
+      round: 1,
+      started_at: '2026-08-14T00:00:00Z',
+      last_advanced_at: '2026-08-14T00:01:00Z',
+      elapsed_ms: 60000,
+      stalled: false,
+      stalled_ms: null,
+      pr: 265,
+      verdict: null,
+      failure_reason: null,
+    }
+    const out = parseWorkBoardItems([
+      {
+        id: 'a',
+        title: 'Linked',
+        status: 'in_progress',
+        linked_run_id: 'run-1',
+        run_progress: { ...base, pr_url: 'https://github.com/acme/widget/pull/265' },
+      },
+      // An older gateway omits the field entirely — the frame stays valid and the
+      // card renders the tag as plain text.
+      { id: 'b', title: 'Plain', status: 'in_progress', linked_run_id: 'run-1', run_progress: base },
+      // Malformed (non-string) → null, never rendered as an href.
+      {
+        id: 'c',
+        title: 'Bogus',
+        status: 'in_progress',
+        linked_run_id: 'run-1',
+        run_progress: { ...base, pr_url: 42 },
+      },
+    ])
+    expect(out.map((i) => i.run_progress?.pr_url)).toEqual([
+      'https://github.com/acme/widget/pull/265',
+      null,
+      null,
+    ])
+  })
 })
 
 describe('doc-ref helpers (card ▸ spec-doc link)', () => {
