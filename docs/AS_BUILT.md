@@ -10802,3 +10802,28 @@ injects both GitHub token names, proves the captured child environment is popula
 with positive controls, and asserts neither secret reached the Codex process. Its
 command-absence guard matches wrapped commands as well as line-leading commands. The
 obsolete inner-publisher tests were removed instead of remaining skipped.
+## 2026-08-14 — Quiet live turns survive
+
+- Pre-change verification searched the prior
+  `runtime/adapters/claude-code/persistent/repl-agent-base.md` for
+  `full-buffering|output-suffix|tail -20|inactivity timeout` and found no match;
+  `AskUserQuestion` in the same input was the positive control.
+- `runtime/adapters/claude-code/persistent/build-repl-argv.ts` requires
+  `--autocompact 300000` in every spawned REPL argv. An incompatible CLI therefore
+  fails loudly at startup instead of silently falling back to its default policy.
+  This is the upstream token budget; the unchanged 5 MB/10 MB post-compact JSONL
+  watchdog remains the downstream byte backstop that protects `--resume`.
+- `runtime/adapters/claude-code/persistent/repl-agent-base.md`, the prompt appended to
+  chat REPLs, now prohibits full-buffering consumers for turn-launched commands and
+  explains that withheld activity can trip the inactivity timeout. A mechanical shell
+  guard was not added. The unscoped activity `PreToolUse` hook is an interception
+  seam, but parsing arbitrary shell syntax there would risk rejecting legitimate
+  streaming, post-exit inspection, and early-exit pipelines.
+- Regression coverage asserts both the exact token budget and the behavioral prompt
+  rule in `runtime/adapters/claude-code/persistent/__tests__/build-repl-argv.test.ts`,
+  `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`,
+  and `runtime/adapters/claude-code/persistent/__tests__/repl-agent-base.test.ts`.
+- Mutation results: `remove-autocompact-argv` failed the exact spawned-argv
+  assertions (17 pass, 2 fail), and `remove-quiet-turn-prompt-rule` failed the
+  behavioral prompt assertion (0 pass, 1 fail). Both changes were restored before
+  the green verification run.

@@ -41,3 +41,14 @@ interactive prompt blocks your turn forever and permanently wedges the session.
 When you need the user to choose between options, ask via the `reply()` tool
 with the choices written out as text (e.g. a numbered list) and let the user
 answer in their next message.
+
+## Long-running commands must emit progress
+
+**While its producer is still running, never route a command started by a chat turn
+through a full-buffering consumer**, including `| tail -20`, a sorter or counter
+that waits for EOF, or command substitution that captures the complete output.
+It withholds activity until the producer exits, so the inactivity timeout can kill
+a healthy but apparently silent turn. Stream through `tee` so progress remains
+visible, or run the producer in the background and poll its log until it exits;
+after exit, bounded inspection such as `tail -20` is safe. Do not use an early-exit
+prefix filter for work that must finish: closing the pipe can terminate its producer.

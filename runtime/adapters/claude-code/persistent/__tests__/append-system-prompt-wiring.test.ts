@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -41,8 +41,11 @@ import {
 import { supervisedBySessionKey } from '../pool-state.ts'
 import { DEFAULT_AGENT_BASE_PROMPT } from '../signatures.ts'
 
+const tempDirs: string[] = []
+
 afterEach(async () => {
   await shutdownAllPersistentRepls()
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
 /** Echo host that captures the argv of every spawn (for `--append-system-prompt-file`). */
@@ -147,6 +150,21 @@ function appendPromptValue(argv: string[]): string | undefined {
 // ---------------------------------------------------------------------------
 
 describe('persistent REPL — --append-system-prompt-file reaches the spawned argv', () => {
+  it('passes the exact autocompact budget to the spawned child', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        user_id: 'u-autocompact',
+        project_id: 'default',
+        credential_identity: 'cred-1',
+      }),
+    )
+    await drain(sub.start(spec('hi')))
+    const flag = argvs[0]!.indexOf('--autocompact')
+    expect(flag).toBeGreaterThanOrEqual(0)
+    expect(argvs[0]![flag + 1]).toBe('300000')
+  })
+
   it('a ritual caller spawns the REPL with its executor prompt file (not the chat default)', async () => {
     const { host, argvs } = makeCapturingHost()
     const ritualPrompt = '/pkg/reminders/ritual-agent-base.md'
@@ -191,6 +209,7 @@ describe('createClaudeCodeSubstrateAuto forwards appendSystemPromptFile', () => 
 
   it('maps ClaudeCodeSubstrateOptions.appendSystemPromptFile onto the persistent options', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'neutron-append-fwd-'))
+    tempDirs.push(cwd)
     const ritualPrompt = '/pkg/reminders/ritual-agent-base.md'
     const instanceId = `cc-ritual-fwd-${Date.now()}`
     createClaudeCodeSubstrateAuto({
@@ -205,6 +224,7 @@ describe('createClaudeCodeSubstrateAuto forwards appendSystemPromptFile', () => 
 
   it('leaves appendSystemPromptFile unset when the caller omits it (chat default)', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'neutron-append-fwd-'))
+    tempDirs.push(cwd)
     const instanceId = `cc-chat-fwd-${Date.now()}`
     createClaudeCodeSubstrateAuto({ substrate_instance_id: instanceId, cwd })
     const reg = registeredFor(instanceId)
