@@ -12,12 +12,15 @@
  * indirect reviewer leak (e.g. aliasing `reflectionGuidance`) that source-text checks
  * could miss.
  */
-import { describe, expect, test, beforeAll } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { describe, expect, test, afterAll, beforeAll } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { buildReflectionGuidance } from './reflection-guidance.ts'
-import { briefIntegrity } from './brief-parts.ts'
+import { briefIntegrity, writeBriefParts } from './brief-parts.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -240,6 +243,162 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
       briefParts: { ...manifest, reflectionFile: null },
     })
     expect(`${JSON.stringify(result)} ${logs.join('\n')}`).toContain('CODEX_BUILD_BRIEF_ARGS_CORRUPT')
+  })
+})
+
+/**
+ * END-TO-END LOCKSTEP — the prompt's OWN emitted transport must assemble to the
+ * prompt's OWN receipt.
+ *
+ * Every other by-path test checks one half against a test-built counterpart: the
+ * workflow's slicing against hand-written expectations, or the wrapper's assembly
+ * against a hand-written parts list. Both halves can be self-consistently wrong.
+ * A one-byte slicing error — say the `\n` between the coda tail and the receipt
+ * taken over `${brief}\n` — passes every existing suite and then turns EVERY live
+ * build into `CODEX_BUILD_BRIEF_CORRUPT` exit 3 at deploy, which is precisely the
+ * failure the pipeline cannot repair because the pipeline is what it breaks.
+ *
+ * So this runs the real thing: the REAL `writeBriefParts` writes the host-held part
+ * files, the real workflow composes the forge:build prompt from that manifest, and
+ * the prompt's chunk blocks are handed to REAL `bash`. Then the files named by the
+ * prompt's own `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are concatenated in the order the
+ * prompt itself lists and measured against the prompt's own
+ * `NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — byte count AND fnv32, the identical
+ * comparison `codex-build.sh` makes before it will spend a token.
+ *
+ * The far side of the chain is already closed by `trident/codex-build.test.ts`
+ * ("a >30 KB brief assembled by path reaches codex byte-identical"): ANY parts list
+ * matching the receipt yields exit 0 with codex stdin byte-identical. Proving
+ * prompt-emitted parts ⇒ receipt here joins launcher → prompt → wrapper → codex with
+ * no agent retyping anywhere in it, so the wrapper harness is deliberately NOT
+ * duplicated into this file.
+ */
+describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run through real bash)', () => {
+  /**
+   * Execute the forge:build prompt's chunk blocks and assemble exactly as the wrapper
+   * will, returning the assembled brief beside the receipt the prompt itself carries.
+   */
+  const runEmittedTransport = (
+    prompt: string,
+    dir: string,
+  ): { assembled: string; receipt: string; partsList: string[] } => {
+    const partsMatch = /NEUTRON_CODEX_BUILD_BRIEF_PARTS='([^']*)'/.exec(prompt)
+    expect(partsMatch).not.toBeNull()
+    // LITERAL embedded newlines separate the ordered absolute paths.
+    const partsList = String(partsMatch?.[1]).split('\n')
+    const receiptMatch = /NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY='([^']*)'/.exec(prompt)
+    expect(receiptMatch).not.toBeNull()
+    const receipt = String(receiptMatch?.[1])
+
+    // The two workflow-composed segments live under /tmp in the emitted prompt; the
+    // host-written task/reflection parts already live in `dir`.
+    const local = (p: string): string =>
+      p.startsWith('/tmp/trident-codex-build-') ? join(dir, basename(p)) : p
+
+    // Carve out the chunk-block region: from `CALL 1 of N:` up to the run command.
+    const start = /^CALL 1 of (\d+):$/m.exec(prompt)
+    expect(start).not.toBeNull()
+    const declared = Number(start?.[1])
+    const startIndex = Number(start?.index)
+    const end = prompt.indexOf('\nTHEN run this ONE command', startIndex)
+    expect(end).toBeGreaterThan(startIndex)
+    const region = prompt.slice(startIndex, end)
+
+    // Split on the CALL headers, NOT on blank lines — heredoc bodies contain them.
+    const headers = [...region.matchAll(/^CALL \d+ of \d+:\n/gm)]
+    // If a heredoc body ever contained a line that looked like a header, this parse
+    // would silently mangle the transport; the prompt's own count is the check.
+    expect(headers.length).toBe(declared)
+    const blocks = headers.map((h, i) =>
+      region.slice(
+        Number(h.index) + h[0].length,
+        i + 1 < headers.length ? Number(headers[i + 1]?.index) : region.length,
+      ),
+    )
+    expect(blocks.length).toBeGreaterThanOrEqual(2)
+    for (const block of blocks) {
+      expect(block.startsWith('cat ') || block.startsWith('printf ')).toBe(true)
+    }
+
+    for (const block of blocks) {
+      // REMAP ONLY THE QUOTED REDIRECT TARGETS, never the block wholesale. The coda
+      // that forms the `.a2` segment names `/tmp/trident-codex-build-<run>.diff` as
+      // BRIEF TEXT, so a blanket path rewrite would alter the very bytes the receipt
+      // covers and fail this test for a bug it does not have. The `.a1`/`.a2` paths
+      // appear only as `shSingleQuote`d redirect targets, and the assembled brief is
+      // asserted below to mention neither — so nothing but a target can be rewritten.
+      let command = block
+      for (const p of partsList) {
+        if (local(p) !== p) command = command.split(`'${p}'`).join(`'${local(p)}'`)
+      }
+      // A chunk write that fails must fail the test loudly, not leave an empty file
+      // for the receipt to blame.
+      const run = spawnSync('bash', ['-c', command.endsWith('\n') ? command : `${command}\n`])
+      expect(run.status).toBe(0)
+    }
+
+    const assembled = new TextDecoder().decode(
+      Buffer.concat(partsList.map((p) => readFileSync(local(p)))),
+    )
+    // The remap could only have touched brief content if a segment path appeared
+    // inside the brief; it does not, and this is what says so.
+    expect(assembled).not.toContain('.brief.a1')
+    expect(assembled).not.toContain('.brief.a2')
+    return { assembled, receipt, partsList }
+  }
+
+  let dir = ''
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'trident-lockstep-'))
+  })
+  afterAll(() => {
+    if (dir !== '') rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('the emitted by-path transport assembles to the prompt’s own receipt (>30 KB, task only)', async () => {
+    expect(new TextEncoder().encode(LARGE_TASK).length).toBeGreaterThan(30_000)
+    // The launcher's REAL fs transport, not a stand-in for it.
+    const parts = writeBriefParts({ runId: 'lockstep-e2e', task: LARGE_TASK, reflectionGuidance: '', dir })
+    expect(parts).not.toBeNull()
+
+    const { captured } = await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: parts })
+    const prompt = forgeBuildPrompt(captured)
+    const { assembled, receipt, partsList } = runEmittedTransport(prompt, dir)
+
+    expect(partsList.length).toBe(3)
+    expect(partsList[0]?.endsWith('.brief.a1')).toBe(true)
+    expect(partsList[1]).toBe(String(parts?.taskFile))
+    expect(partsList[2]?.endsWith('.brief.a2')).toBe(true)
+
+    // THE CANONICAL ASSERTION: byte count AND fnv32, the comparison the wrapper makes.
+    expect(briefIntegrity(assembled)).toBe(receipt)
+    expect(assembled).toContain('TASKBYTES_MARKER_Q9')
+    expect(assembled.endsWith('\n')).toBe(true)
+  })
+
+  test('the same lockstep holds with reflection guidance carried by path', async () => {
+    const parts = writeBriefParts({
+      runId: 'lockstep-e2e-r',
+      task: LARGE_TASK,
+      reflectionGuidance: GUIDANCE,
+      dir,
+    })
+    expect(parts).not.toBeNull()
+
+    const { captured } = await runWorkflow(GUIDANCE, { codexBuild: true, task: LARGE_TASK, briefParts: parts })
+    const prompt = forgeBuildPrompt(captured)
+    const { assembled, receipt, partsList } = runEmittedTransport(prompt, dir)
+
+    expect(partsList.length).toBe(4)
+    expect(partsList[0]?.endsWith('.brief.a1')).toBe(true)
+    expect(partsList[1]).toBe(String(parts?.taskFile))
+    expect(partsList[2]).toBe(String(parts?.reflectionFile))
+    expect(partsList[3]?.endsWith('.brief.a2')).toBe(true)
+
+    expect(briefIntegrity(assembled)).toBe(receipt)
+    expect(assembled).toContain('TASKBYTES_MARKER_Q9')
+    expect(assembled).toContain(REFLECT_MARKER)
+    expect(assembled.endsWith('\n')).toBe(true)
   })
 })
 
