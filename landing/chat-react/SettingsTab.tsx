@@ -1091,7 +1091,9 @@ export function SettingsTab({
           property of your subscriptions, not of the thing being built. Changes apply to
           the next build — nothing restarts. Each option names the model it resolves to
           today; choosing the one marked default clears the override, so the step keeps
-          following that default if it ever moves.
+          following that default if it ever moves. Any tier can occupy either cross-model
+          review seat. A panel whose enabled seats all use one model family is allowed,
+          but provides less independent review diversity.
         </p>
 
         {phaseError !== null ? (

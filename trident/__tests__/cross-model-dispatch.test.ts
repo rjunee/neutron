@@ -97,6 +97,14 @@ async function runWorkflow(
     fixLands?: boolean
     /** Make the codex-backed adversarial core seat fail closed. */
     deferredAdversarial?: boolean
+    /** Make the first generic Claude seat attempt fail so its retry route is exercised. */
+    deferredClaudeSeatOnce?: boolean
+    /** Make every generic Claude-seat attempt fail, including its bounded retry. */
+    deferredClaudeSeat?: boolean
+    /** Simulate a configured Codex wrapper reporting that its CLI is unavailable. */
+    unavailableCodexCli?: boolean
+    /** Optional model marker used by dispatch-focused cases. */
+    model?: string
     /** Simulate a wrapper death before either trailer-writing branch. */
     missingBuildTrailer?: boolean
     /** The preserved build worktree contains changes after that death. */
@@ -106,6 +114,7 @@ async function runWorkflow(
   const captured: Captured[] = []
   const logs: string[] = []
   let synthCount = 0
+  let deferredClaudeSeat = false
 
   const agent = async (prompt: string, o?: Record<string, unknown>): Promise<unknown> => {
     const label = o?.['label'] as string | undefined
@@ -173,9 +182,20 @@ async function runWorkflow(
       return { verdict: 'APPROVE', findings: [] }
     }
     if (label === 'argus:codex' || label === 'argus:codex-retry') {
+      if (o?.['model'] !== undefined) {
+        if (opts.deferredClaudeSeat === true || (opts.deferredClaudeSeatOnce === true && !deferredClaudeSeat)) {
+          deferredClaudeSeat = true
+          return null
+        }
+        return { verdict: 'APPROVE', findings: [] }
+      }
+      if (opts.unavailableCodexCli === true) {
+        return { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected', codexTruncated: false }
+      }
       return { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
     }
     if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
+      if (opts.model !== undefined) return { verdict: 'APPROVE', findings: [] }
       return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
     }
     if (label === 'argus:synthesis') {
@@ -330,6 +350,46 @@ describe('THE DEFAULT PATH — an install that never opened the pane', () => {
 })
 
 describe('AN OVERRIDE REACHES THE DISPATCH', () => {
+  test('both generic seats dispatch every executor family they declare', async () => {
+    const cases = [
+      { tier: 'none', group: 'none' },
+      { tier: 'opus', group: 'claude' },
+      { tier: 'terra', group: 'codex' },
+      { tier: 'k3', group: 'kimi' },
+    ] as const
+
+    for (const [phase, label] of [
+      ['review_codex', 'argus:codex'],
+      ['review_kimi', 'argus:kimi'],
+    ] as const) {
+      for (const { tier, group } of cases) {
+        const { captured } = await runWorkflow(productionArgs({ [phase]: { model: tier } }))
+        const seat = captured.find((call) => call.label === label)
+        if (group === 'none') {
+          expect({ phase, group, dispatched: seat !== undefined }).toEqual({
+            phase,
+            group,
+            dispatched: false,
+          })
+        } else if (group === 'claude') {
+          expect({ phase, group, model: seat?.opts['model'], effort: seat?.opts['effort'], cli: seat?.prompt.includes('REVIEW bridge') }).toEqual({
+            phase,
+            group,
+            model: getBestModel(),
+            effort: 'high',
+            cli: false,
+          })
+        } else {
+          expect({ phase, group, cli: seat?.prompt.includes(group === 'kimi' ? 'KIMI K3 CROSS-MODEL REVIEW bridge' : 'CODEX CROSS-MODEL REVIEW bridge') }).toEqual({
+            phase,
+            group,
+            cli: true,
+          })
+        }
+      }
+    }
+  })
+
   test('choosing the `terra` tier puts gpt-5.6-terra on the codex command line', async () => {
     const stored = { review_codex: { model: 'terra' } }
     // Through the production launcher: if `buildWorkflowArgs` dropped it, or the
@@ -364,6 +424,66 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
       model: SONNET_MODEL,
       effort: 'max',
     })
+  })
+
+  test('a GPT build with Opus in cross-model seat 1 dispatches that seat on Opus', async () => {
+    const args = productionArgs({ build: { model: 'terra' }, review_codex: { model: 'opus', effort: 'max' } })
+    const { captured, logs } = await runWorkflow(args)
+    const build = captured.find((c) => c.label === 'forge:build')!
+    const seat = captured.find((c) => c.label === 'argus:codex')!
+
+    expect(build.prompt).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
+    expect({ model: seat.opts['model'], effort: seat.opts['effort'] }).toEqual({
+      model: getBestModel(),
+      effort: 'max',
+    })
+    expect(seat.prompt).toContain('an independent, read-only reviewer')
+    expect(seat.prompt).toContain('file:line or a concrete reproduction')
+    expect(seat.prompt).not.toContain('CODEX CROSS-MODEL REVIEW bridge')
+    expect(seat.opts['schema']).toMatchObject({ required: ['verdict', 'findings'] })
+    expect(logs.filter((line) => line.includes('trident.agent label=argus:codex') && line.includes(`model=${getBestModel()}`))).toHaveLength(1)
+    expect(logs.some((line) => line.includes('panel-single-family'))).toBe(false)
+  })
+
+  test('a configured Codex seat whose CLI is unavailable never falls back to Claude', async () => {
+    const args = productionArgs({ review_codex: { model: 'sol' } })
+    const { captured } = await runWorkflow(args, { unavailableCodexCli: true })
+    const seat = captured.find((c) => c.label === 'argus:codex')!
+    expect(seat.prompt).toContain('CODEX CROSS-MODEL REVIEW bridge')
+    expect(seat.opts['model']).toBeUndefined()
+    expect(captured.some((c) => c.label === 'argus:codex-retry')).toBe(false)
+  })
+
+  test('a deferred Claude seat retries with its chosen model and Claude verdict schema', async () => {
+    const { captured } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'sonnet', effort: 'medium' } }),
+      { deferredClaudeSeatOnce: true },
+    )
+    const retry = captured.find((c) => c.label === 'argus:codex-retry')!
+    expect(retry.opts).toMatchObject({ model: SONNET_MODEL, effort: 'medium' })
+    expect(retry.opts['schema']).toMatchObject({ required: ['verdict', 'findings'] })
+    expect(retry.prompt).toContain('an independent, read-only reviewer')
+    expect(retry.prompt).not.toContain('CODEX CROSS-MODEL REVIEW bridge')
+  })
+
+  test('a Claude seat that exhausts its retry is blocked as Claude, not misreported as Codex', async () => {
+    const { result, logs } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'opus' } }),
+      { deferredClaudeSeat: true },
+    )
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(result['blockKind']).toBe('infra-only')
+    expect(logs.some((line) => line.includes('trident.lane-retry argus:codex'))).toBe(true)
+    expect(logs.some((line) => line.includes('trident.lane-retry codex '))).toBe(false)
+  })
+
+  test('a deliberately same-family review panel is warned about, never refused', async () => {
+    const { captured, logs } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'opus' }, review_kimi: { model: 'sonnet' } }),
+    )
+    expect(captured.some((c) => c.label === 'argus:codex')).toBe(true)
+    expect(captured.some((c) => c.label === 'argus:kimi')).toBe(true)
+    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=4 configuration-accepted=true'))).toBe(true)
   })
 })
 

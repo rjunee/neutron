@@ -15,6 +15,8 @@
  * it. Storing `opus` for a phase already defaulting to `opus` would freeze it against
  * a future change to that default — the owner would have pinned something they only
  * meant to leave alone. It also makes "reset" fall out for free: choose the default.
+ * Cross-model seats accept every tier. A same-family panel is valid, though it offers
+ * less independent review diversity than a mixed-family panel.
  *
  * ── A rejected save changes nothing, and says everything ────────────────────
  * The server validates the whole set and rejects it entire, naming every problem. The

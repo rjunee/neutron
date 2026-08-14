@@ -2884,6 +2884,10 @@ deferral. All four seats may be NONE; synthesis and the terminal result then sta
 no review ran and that merge relied on build and CI gates alone.
 
 Each phase declares its complete `dispatchGroups` once in `trident/phase-models.ts`.
+The generic cross-model review seats accept every executor family. Claude choices
+dispatch directly with the selected tier; Codex and Kimi choices use their CLI bridges
+and never fall back to Claude when unavailable. A panel whose available review seats
+all resolve to one family is accepted with a run warning.
 The settings payload uses that set verbatim, validation accepts exactly its tiers, and
 the workflow route carries the same set. A deliberately Claude-only phase carries an
 actionable `dispatchConstraint` describing the wrapper or executor required to widen it.

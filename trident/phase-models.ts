@@ -231,23 +231,34 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     key: 'review_codex',
     label: 'Cross-model review 1',
     description:
-      'A provider-agnostic cross-model review slot. Choose any non-Claude tier, or NONE to turn the seat off.',
+      'A second-opinion review seat. Any tier — including a Claude one when the build is on another family — or NONE to turn the seat off.',
     labels: [{ label: 'argus:codex' }, { label: 'argus:codex-retry' }],
     // `sol` is the flagship GPT 5.6 tier and matches the wrapper's own standing pin,
     // so an install that never opens the pane dispatches exactly what it dispatched
-    // before this phase existed. The effort below is INERT — a CLI chooses its own
-    // reasoning effort, and no dispatch reads this value (see `phaseSupportsEffort`).
+    // before this phase existed. The effort below is INERT WHILE THE SEAT IS ON A CLI
+    // TIER — a CLI chooses its own reasoning effort, and no dispatch reads this value
+    // (see `phaseSupportsEffort`); a Claude tier on this seat dispatches at it.
     default: { tier: 'sol', effort: 'high' },
-    dispatchGroups: ['none', 'codex', 'kimi'],
+    // A CLAUDE TIER IS SELECTABLE HERE, AND IT IS NOT A FALLBACK. The rule these
+    // seats enforce (`trident/kimi-review.ts`) forbids a seat SILENTLY degrading to
+    // Claude when its CLI fails while still reporting a cross-model review happened —
+    // it is not a per-slot ban on one vendor. The property the panel protects is that
+    // it is not ALL ONE FAMILY, which is a function of the SELECTED SET: with the
+    // build on a GPT tier, Opus on this seat is exactly the cross-family panel the
+    // design wants. The owner composes the panel; a single-family one is warned about
+    // at dispatch (`inner-workflow.mjs`, `trident.panel-single-family`), never vetoed.
+    dispatchGroups: ['none', 'claude', 'codex', 'kimi'],
   },
   {
     key: 'review_kimi',
     label: 'Cross-model review 2',
     description:
-      'A provider-agnostic cross-model review slot. Choose any non-Claude tier, or NONE to turn the seat off.',
+      'A second-opinion review seat. Any tier — including a Claude one when the build is on another family — or NONE to turn the seat off.',
     labels: [{ label: 'argus:kimi' }, { label: 'argus:kimi-retry' }],
     default: { tier: 'k3', effort: 'high' },
-    dispatchGroups: ['none', 'codex', 'kimi'],
+    // Same as `review_codex` above — see the note there for why a Claude tier on a
+    // cross-model seat is a stated choice and not the banned silent fallback.
+    dispatchGroups: ['none', 'claude', 'codex', 'kimi'],
   },
   {
     key: 'synthesis',
@@ -385,8 +396,7 @@ export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean 
  *
  * Only for `agent` transport. A `cli` lane's reasoning effort is the CLI's own
  * setting, which the wrapper does not expose — so the pane renders that cell disabled
- * with the reason instead of offering a dropdown that changes nothing. (A phase's
- * stored `default.effort` is inert for those rows and never reaches a dispatch.)
+ * and config parsing drops a stale effort paired with a newly selected CLI tier.
  *
  * THIS ANSWERS FOR THE PHASE'S DEFAULT TIER — "could this row ever have an effort
  * control", not "does it have one right now". A phase with a second executor
@@ -396,7 +406,7 @@ export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean 
  * effort when the chosen tier cannot use it.
  */
 export function phaseSupportsEffort(phase: TridentPhase): boolean {
-  return phaseTransport(phase) === 'agent'
+  return phaseGroups(phase).includes('claude')
 }
 
 const PHASE_KEYS: ReadonlySet<string> = new Set(TRIDENT_PHASES.map((p) => p.key))
@@ -592,7 +602,11 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           )
           continue
         }
-        if (!phaseSupportsEffort(phase)) {
+        const requestedModel = (value as Record<string, unknown>)['model']
+        const selectedTier = typeof requestedModel === 'string' && isModelTier(requestedModel)
+          ? modelTier(requestedModel)
+          : modelTier(phase.default.tier)
+        if (!phaseSupportsEffort(phase) || (requestedModel === undefined && (selectedTier?.transport === 'cli' || selectedTier?.group === 'none'))) {
           // Storing an effort no dispatch reads would be a control the owner sets and
           // nothing honours — the exact shape this module exists to prevent.
           errors.push(
