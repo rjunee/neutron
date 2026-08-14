@@ -33,6 +33,7 @@ interface Captured {
 }
 
 interface RunOpts {
+  phaseModels?: Record<string, { model: string }>
   /**
    * Labels whose agent returns NOTHING — the seat was DISPATCHED and its agent died.
    * This is the case the panel-completeness gate exists for, and the only way to
@@ -84,7 +85,7 @@ async function runWorkflow(
         remainingTasks: 0,
       }
     }
-    if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
+    if ((label === 'argus:kimi' || label === 'argus:kimi-retry' || label === 'argus:codex' || label === 'argus:codex-retry') && prompt.includes('KIMI K3 CROSS-MODEL REVIEW')) {
       return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
     }
     if (label === 'argus:codex' || label === 'argus:codex-retry') {
@@ -127,6 +128,12 @@ async function runWorkflow(
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance,
+    phaseModels: opts.phaseModels ?? null,
+    modelTiers: {
+      none: { model_id: 'none', transport: 'agent', env_var: null, group: 'none' },
+      sol: { model_id: 'gpt', transport: 'cli', env_var: 'CODEX_REVIEW_MODEL', group: 'codex' },
+      k3: { model_id: 'kimi', transport: 'cli', env_var: 'KIMI_MODEL', group: 'kimi' },
+    },
   }
 
   // Strip the single `export` so the module body is legal inside an AsyncFunction
@@ -266,11 +273,46 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
     expect(result['verdict']).toBe('REQUEST_CHANGES')
     expect(result['blockKind']).toBe('infra-only')
     const synth = captured.find((c) => c.label === 'argus:synthesis')
-    expect(synth?.prompt).toContain('Verdict C (codex cross-model): DEFERRED')
+    expect(synth?.prompt).toContain('Verdict C (Cross-model review 1, codex): DEFERRED')
     // NOT the graceful never-set-up path, which does not block.
-    expect(synth?.prompt).not.toContain('Verdict C (codex cross-model): NOT CONNECTED')
+    expect(synth?.prompt).not.toContain('Verdict C (Cross-model review 1, codex): NOT CONNECTED')
     // The core seats answered, so only codex is hedged.
     expect(synth?.prompt).not.toContain('DID NOT COMPLETE')
+  })
+
+  test('NONE seats dispatch nothing and do not block, while a configured dead seat beside them does', async () => {
+    const allOff = {
+      review_rubric: { model: 'none' },
+      review_adversarial: { model: 'none' },
+      review_codex: { model: 'none' },
+      review_kimi: { model: 'none' },
+    }
+    const { captured, result } = await runWorkflow(GUIDANCE, { approveAll: true, phaseModels: allOff })
+    for (const label of ['argus:claude', 'argus:adversarial', 'argus:codex', 'argus:kimi']) {
+      expect(captured.some((call) => call.label === label)).toBe(false)
+    }
+    expect(result['verdict']).toBe('APPROVE')
+    expect(result['reviewRecord']).toContain('NO REVIEW RAN')
+
+    const configuredButDead = { ...allOff, review_rubric: { model: 'opus' } }
+    const dead = await runWorkflow(GUIDANCE, {
+      approveAll: true,
+      phaseModels: configuredButDead,
+      dead: ['argus:claude'],
+    })
+    expect(dead.result['verdict']).toBe('REQUEST_CHANGES')
+    expect(dead.result['reviewRecord']).toContain('1 seat(s) ran')
+  })
+
+  test('both generic cross-model slots can dispatch through the same non-Claude family', async () => {
+    const { captured, result } = await runWorkflow(GUIDANCE, {
+      approveAll: true,
+      phaseModels: { review_codex: { model: 'k3' }, review_kimi: { model: 'k3' } },
+    })
+    expect(result['verdict']).toBe('APPROVE')
+    for (const label of ['argus:codex', 'argus:kimi']) {
+      expect(captured.find((call) => call.label === label)?.prompt).toContain('KIMI K3 CROSS-MODEL REVIEW')
+    }
   })
 })
 

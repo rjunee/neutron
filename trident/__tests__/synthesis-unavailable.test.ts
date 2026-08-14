@@ -180,7 +180,13 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
   })
 
   test('the source really does end in that single spread `return`', () => {
-    expect(SRC).toContain('return { ...gated, blockKind: classifyBlock(gated, peers) }')
+    // The property, stated as two halves rather than one literal: the return SPREADS
+    // `gated` (so no field of the gated verdict can be silently dropped by rebuilding
+    // the object by hand) and derives `blockKind` from it. The branch appended
+    // `reviewRecord` to the same return, which is why the old exact-string assertion
+    // broke while everything it actually protected stayed true. The single-`return`
+    // check below is what guarantees there is no other exit handing back a bare null.
+    expect(SRC).toContain('return { ...gated, blockKind: classifyBlock(gated, peers)')
     // One `return`, so there is no other exit that could hand back a bare null.
     const body = grabFn('reviewAndSynthesize')
     expect(body.split('\n').filter((l) => /^ {2}return /.test(l))).toHaveLength(1)

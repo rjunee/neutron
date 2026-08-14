@@ -65,13 +65,13 @@
  * where the owner is present to read why, rather than being discovered as a run that
  * used the wrong model.
  *
- * ── A PHASE MAY HAVE MORE THAN ONE DISPATCH ({@link TridentPhase.alsoRunsOn}) ─
+ * ── A PHASE DECLARES ITS COMPLETE DISPATCH SET ─────────────────────────────
  * The rule above used to be stated as "every phase has exactly one executor, derived
  * from its default tier", which was true only because nothing had ever been wired to a
  * second one. The BUILD phase now has two: the Claude `agent()` builder it defaults to,
  * and the codex executor (`trident/codex-build.sh`, dispatched by the workflow's
  * `forge:*` bridge). So the phase DECLARES the extra groups its dispatch can reach and
- * `phaseAcceptsTier` answers from that list.
+ * `phaseAcceptsTier` answers from that complete list.
  *
  * THE LIST IS A CLAIM ABOUT WIRING, NOT A WISH. Adding a group here un-greys those
  * tiers in the settings pane, so a group listed without a dispatch behind it ships a
@@ -127,7 +127,9 @@ export interface TridentPhase {
    * header: an entry here un-greys those tiers in the pane, so it is a statement that
    * the dispatch exists and is tested, not that it would be nice to have.
    */
-  alsoRunsOn?: ReadonlyArray<TierGroup>
+  dispatchGroups: ReadonlyArray<TierGroup>
+  /** Actionable explanation when this phase deliberately has one executor. */
+  dispatchConstraint?: string
   /**
    * This phase takes another phase's setting when it has none of its own — and is
    * therefore NOT an owner-facing row.
@@ -166,6 +168,8 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Reads the task and the spec, then breaks the work into ordered steps.',
     labels: [{ label: 'plan:fable' }],
     default: { tier: 'fable', effort: 'max' },
+    dispatchGroups: ['claude'],
+    dispatchConstraint: 'This step stays on Claude until the planner protocol has a CLI decomposition wrapper.',
   },
   {
     key: 'build',
@@ -181,7 +185,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     // thin bridge agent running on the launcher's own default, because a workflow step
     // has no other way to reach a shell; that agent runs one command and copies six
     // measured values, and the build itself never touches Anthropic.)
-    alsoRunsOn: ['codex'],
+    dispatchGroups: ['claude', 'codex'],
   },
   {
     key: 'build_mechanical',
@@ -195,7 +199,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     default: { tier: 'sonnet', effort: 'medium' },
     // The SAME dispatch as `build` — same labels, same forge bridge — so it reaches
     // the codex executor for free.
-    alsoRunsOn: ['codex'],
+    dispatchGroups: ['claude', 'codex'],
     // …AND IT IS NOT A SEPARATE ROW. The owner moves "Build" to codex; a task the
     // planner happened to tag `[mechanical]` must not stay on Claude and keep spending
     // the quota the move existed to protect. So this key follows `build`, and the pane
@@ -210,6 +214,8 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Reviews the diff against the fixed criteria — correctness, security, test quality.',
     labels: [{ label: 'argus:claude' }],
     default: { tier: 'opus', effort: 'high' },
+    dispatchGroups: ['none', 'claude'],
+    dispatchConstraint: 'This seat gains another executor when its rubric prompt is wired to a CLI review wrapper.',
   },
   {
     key: 'review_adversarial',
@@ -219,27 +225,29 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     default: { tier: 'opus', effort: 'high' },
     // The adversarial contract is passed explicitly to `trident/codex-review.sh`;
     // selecting this executor changes the model family, not the review's purpose.
-    alsoRunsOn: ['codex'],
+    dispatchGroups: ['none', 'claude', 'codex'],
   },
   {
     key: 'review_codex',
-    label: 'Cross-model review (Codex)',
+    label: 'Cross-model review 1',
     description:
-      'A second opinion from a GPT model, run as a Codex CLI subprocess — a different model family than the rest of the panel.',
+      'A provider-agnostic cross-model review slot. Choose any non-Claude tier, or NONE to turn the seat off.',
     labels: [{ label: 'argus:codex' }, { label: 'argus:codex-retry' }],
     // `sol` is the flagship GPT 5.6 tier and matches the wrapper's own standing pin,
     // so an install that never opens the pane dispatches exactly what it dispatched
     // before this phase existed. The effort below is INERT — a CLI chooses its own
     // reasoning effort, and no dispatch reads this value (see `phaseSupportsEffort`).
     default: { tier: 'sol', effort: 'high' },
+    dispatchGroups: ['none', 'codex', 'kimi'],
   },
   {
     key: 'review_kimi',
-    label: 'Cross-model review (Kimi)',
+    label: 'Cross-model review 2',
     description:
-      'A second opinion from Kimi K3, run as a CLI subprocess — a third model family, so the panel is not two copies of one set of blind spots.',
+      'A provider-agnostic cross-model review slot. Choose any non-Claude tier, or NONE to turn the seat off.',
     labels: [{ label: 'argus:kimi' }, { label: 'argus:kimi-retry' }],
     default: { tier: 'k3', effort: 'high' },
+    dispatchGroups: ['none', 'codex', 'kimi'],
   },
   {
     key: 'synthesis',
@@ -247,6 +255,8 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Merges every reviewer’s verdict into one, and decides what blocks a merge.',
     labels: [{ label: 'argus:synthesis' }],
     default: { tier: 'fable', effort: 'high' },
+    dispatchGroups: ['claude'],
+    dispatchConstraint: 'This step stays on Claude until the structured synthesis schema has a CLI arbitration wrapper.',
   },
   {
     key: 'bookkeeping',
@@ -263,6 +273,8 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'merge-probe-round-', dynamic: true },
     ],
     default: { tier: 'fast', effort: 'low' },
+    dispatchGroups: ['claude'],
+    dispatchConstraint: 'These steps stay on Claude until checkpoint and probe commands have a non-agent executor.',
   },
 ])
 
@@ -342,12 +354,10 @@ export function phaseGroup(phase: TridentPhase): TierGroup {
  *
  * The one question a settings row needs answered: a row may offer exactly the tiers in
  * these groups, because those are the only ones its dispatch can reach. Most phases
- * have one; see {@link TridentPhase.alsoRunsOn} for why `build` has two.
+ * have one; `build` has two because both dispatches are wired.
  */
 export function phaseGroups(phase: TridentPhase): ReadonlyArray<TierGroup> {
-  const primary = phaseGroup(phase)
-  const extra = (phase.alsoRunsOn ?? []).filter((g) => g !== primary)
-  return [primary, ...extra]
+  return phase.dispatchGroups
 }
 
 /**
@@ -374,7 +384,7 @@ export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean 
  *
  * THIS ANSWERS FOR THE PHASE'S DEFAULT TIER — "could this row ever have an effort
  * control", not "does it have one right now". A phase with a second executor
- * ({@link TridentPhase.alsoRunsOn}) can be moved to a tier whose effort is inert while
+ * with multiple dispatch groups can be moved to a tier whose effort is inert while
  * this still returns true, so a pane must ALSO ask the chosen tier (the surface ships
  * `effort_supported` per tier for exactly that) and `parsePhaseModelConfig` drops the
  * effort when the chosen tier cannot use it.
@@ -620,7 +630,7 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
     // the dispatch could not use. Here it is a local record of what this pass dropped.
     if (entry.effort !== undefined && entry.model !== undefined) {
       const chosen = modelTier(entry.model)
-      if (chosen?.transport === 'cli') {
+      if (chosen?.transport === 'cli' || chosen?.group === 'none') {
         reject(key, { effort: entry.effort })
         delete entry.effort
       }

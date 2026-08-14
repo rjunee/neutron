@@ -229,44 +229,29 @@ describe('the workflow reads the argument this module produces', () => {
     }
   })
 
-  it('implements every `alsoRunsOn` the table declares, and no other', () => {
+  it('offers exactly every dispatch group the workflow accepts, for every phase', () => {
     // THE SECOND RULE THAT LIVES IN TWO PLACES, and it had no guard while the module
     // header claimed one. `alsoRunsOn` is what makes a tier from another executor
     // SELECTABLE for a phase; the workflow's route for that phase has to carry the
     // same list, or `applyPhaseOverride` logs IGNORED and the owner's pick dispatches
     // nowhere — a settable option that does nothing, which is worse than a greyed one.
-    const declared = TRIDENT_PHASES.filter((p) => (p.alsoRunsOn?.length ?? 0) > 0)
-    // Not vacuous: the table declares these today.
-    expect(declared.map((p) => p.key).sort()).toEqual([
-      'build',
-      'build_mechanical',
-      'review_adversarial',
-    ])
-    for (const phase of declared) {
-      // The route carrying this phase key must list the same groups.
+    for (const phase of TRIDENT_PHASES) {
       const route = new RegExp(
-        `phaseKey: '${phase.key}'[^}]*alsoRunsOn: \\[([^\\]]*)\\]`,
+        `phaseKey: '${phase.key}'[^\\n]*dispatchGroups: \\[([^\\]]*)\\]`,
       ).exec(WORKFLOW_SRC)
       expect({ key: phase.key, routed: route !== null }).toEqual({ key: phase.key, routed: true })
       const groups = route![1]!
         .split(',')
         .map((g) => g.trim().replace(/^'|'$/g, ''))
         .filter((g) => g.length > 0)
-      expect({ key: phase.key, groups }).toEqual({ key: phase.key, groups: [...phase.alsoRunsOn!] })
+      expect({ key: phase.key, groups }).toEqual({ key: phase.key, groups: [...phase.dispatchGroups] })
       // …and every group named is one the workflow can actually DISPATCH: it needs a
       // route of its own carrying that group, or the move lands on nothing.
-      for (const group of phase.alsoRunsOn!) {
+      for (const group of phase.dispatchGroups) {
         expect(TIER_GROUPS).toContain(group)
-        expect(new RegExp(`group: '${group}'`).test(WORKFLOW_SRC)).toBe(true)
+        if (group !== 'none') expect(new RegExp(`group: '${group}'`).test(WORKFLOW_SRC)).toBe(true)
       }
     }
-    // A phase the table does NOT widen must not be widened in the workflow either —
-    // that direction un-greys nothing, but it would let an override past the group
-    // check that the pane would never have offered.
-    const widenedInWorkflow = [...WORKFLOW_SRC.matchAll(/phaseKey: '([a-z_]+)'[^}]*alsoRunsOn:/g)]
-      .map((m) => m[1]!)
-      .sort()
-    expect([...new Set(widenedInWorkflow)]).toEqual(declared.map((p) => p.key).sort())
   })
 })
 
@@ -369,7 +354,7 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
     expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
     // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
-    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toHaveLength(1)
+    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toEqual([])
     // …and the build's SECOND executor is codex, not "any CLI": a Kimi tier on the
     // build row is still refused, because nothing dispatches it there.
     expect(parsePhaseModelConfig({ build: { model: 'k3' } }).errors).toHaveLength(1)
@@ -395,6 +380,27 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(
       parsePhaseModelConfig({ review_adversarial: { model: 'terra', effort: 'max' } }).config,
     ).toEqual({ review_adversarial: { model: 'terra' } })
+  })
+
+  it('offers NONE on every review row and every non-Claude tier on either generic slot', () => {
+    const reviewRows = TRIDENT_PHASES.filter((phase) => phase.key.startsWith('review_'))
+    expect(reviewRows).toHaveLength(4)
+    for (const phase of reviewRows) {
+      expect(phase.dispatchGroups).toContain('none')
+      expect(parsePhaseModelConfig({ [phase.key]: { model: 'none' } }).errors).toEqual([])
+    }
+    for (const key of ['review_codex', 'review_kimi']) {
+      for (const tier of ['sol', 'terra', 'luna', 'k3']) {
+        expect(parsePhaseModelConfig({ [key]: { model: tier } }).errors).toEqual([])
+      }
+    }
+  })
+
+  it('records an actionable reason on every phase that remains Claude-only', () => {
+    for (const phase of TRIDENT_PHASES.filter((item) => item.dispatchGroups.length === 1)) {
+      expect(phase.dispatchGroups).toEqual(['claude'])
+      expect(phase.dispatchConstraint).toMatch(/until .*(wrapper|executor)/i)
+    }
   })
 
   it('REFUSES a follower phase outright, and DROPS one that was already stored', () => {
