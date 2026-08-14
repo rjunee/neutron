@@ -83,6 +83,12 @@ export type SystemEventName =
   // pre-repair snapshot lives. Emitted at most once per boot, and only when
   // something actually moved.
   | 'instance_scope_rekeyed'
+  // Defect 2026-08-14 — the mirror of the row above: the reconciler REFUSED to
+  // migrate, because the boot slug was the bare `'dev'` FALLBACK and the
+  // database already carried rows under an explicit handle. Nothing moved; the
+  // durable record is that an anonymous process was pointed at a real
+  // instance's database. Emitted at most once per boot.
+  | 'instance_scope_rekey_refused'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'gbrain_unavailable',
@@ -99,6 +105,7 @@ export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'session_size_alert',
   'rate_limit_banner',
   'instance_scope_rekeyed',
+  'instance_scope_rekey_refused',
 ]
 
 /** What a degrade site passes to {@link emitSystemEventSafe}. */
