@@ -249,6 +249,16 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
     expect(isRetry(failed)).toBe(true);
   });
 
+  it('a failed card that KEPT its #340 binding with NO run_progress (dispatch run / missing run row) is not linked-running and offers ↻', () => {
+    const failed = item({ status: 'failed', linked_run_id: 'r-dead' });
+    // Mutation killed: deleting the status=failed short-circuit makes missing
+    // run_progress linked-running, which hides the retry control.
+    expect(isLinkedRunning(failed)).toBe(false);
+    expect(canPlay(failed)).toBe(true);
+    expect(isRetry(failed)).toBe(true);
+    expect(dotState(failed)).toEqual({ colorKey: 'failed', pulse: false });
+  });
+
   it('a durable status=failed card with no linked_run_id and no run_progress retries (↻, not ▶)', () => {
     const runless = item({ status: 'failed', linked_run_id: null });
     expect(canPlay(runless)).toBe(true);
