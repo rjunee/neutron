@@ -2,6 +2,29 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — generic named credentials configure host deploy without a public slot
+
+The existing `ProjectCredentialStore` and its Settings → Integrations free-form
+name/value form are now the only configuration path for host deploy. An empty install
+still lists no credentials; an owner-created `host_deploy_url` / `host_deploy_token`
+pair is data, not a product-defined row. `gateway/http/project-credentials-surface.ts`
+refuses values shorter than the scrubber's 16-character floor and returns metadata
+only. `open/host-deploy.ts:109` resolves both names at call time through the canonical
+store. The former environment variables cannot enable the capability.
+
+Credential values remain write-only across create and list responses. The endpoint
+URL shares the named-value store to avoid a hosting-specific settings slot, but it is
+not treated as a secret: useful failure diagnostics retain it while the token is
+redacted. With either value absent, the tools remain visible and disabled and point
+to Settings → Integrations.
+
+Mutation checks: removing the surface minimum-length return made the short-value test
+RED; changing the boundary to reject 16 characters made the positive boundary RED;
+returning the submitted body from POST made the non-vacuous response absence test RED;
+putting the old environment lookup back made the legacy-environment test RED; caching
+the named values made the after-composition and removal-between-approval tests RED;
+removing the missing-config guard made the visible-disabled tests RED.
+
 ## 2026-08-13 — the codex builder stops holding a credential it never had: the HOST publishes
 
 **What happened, measured from the run's own artifacts.** A codex build on `gpt-5.6-sol`

@@ -36,8 +36,8 @@ import {
   HOST_DEPLOY_APPROVAL_TOOL_NAME,
   HOST_DEPLOY_APPROVAL_TTL_MS,
   HOST_DEPLOY_MIN_SECRET_CHARS,
-  HOST_DEPLOY_TOKEN_ENV,
-  HOST_DEPLOY_URL_ENV,
+  HOST_DEPLOY_TOKEN_SERVICE,
+  HOST_DEPLOY_URL_SERVICE,
   type HostDeployCommit,
   type HostDeployDispatchInput,
   type HostDeployDispatchResult,
@@ -141,11 +141,11 @@ interface Harness {
 function harness(
   opts: {
     git?: HostDeployGit
-    env?: Record<string, string | undefined>
+    values?: { url?: string; token?: string }
     dispatch?: (i: HostDeployDispatchInput) => Promise<HostDeployDispatchResult>
     emitThrows?: boolean
-    /** Mutable so a test can move the environment BETWEEN calls. */
-    envRef?: { current: Record<string, string | undefined> }
+    /** Mutable so a test can move the stored values BETWEEN calls. */
+    valuesRef?: { current: { url?: string; token?: string } }
     /** Share the suite's logical clock so the grant-age gate is testable. */
     now?: () => number
   } = {},
@@ -153,13 +153,13 @@ function harness(
   const emits: HostDeployEmit[] = []
   const dispatchCalls: HostDeployDispatchInput[] = []
   const logs: string[] = []
-  const envRef = opts.envRef ?? {
-    current: opts.env ?? { [HOST_DEPLOY_URL_ENV]: URL, [HOST_DEPLOY_TOKEN_ENV]: TOKEN },
+  const valuesRef = opts.valuesRef ?? {
+    current: opts.values ?? { url: URL, token: TOKEN },
   }
   const service = createHostDeployService({
     approvals,
     git: opts.git ?? fakeGit({ head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }),
-    resolveConfig: () => resolveHostDeployConfig(envRef.current),
+    resolveConfig: () => resolveHostDeployConfig(valuesRef.current),
     dispatch: async (i) => {
       dispatchCalls.push(i)
       if (opts.dispatch !== undefined) return opts.dispatch(i)
@@ -568,23 +568,23 @@ describe('approval is an EXPLICIT AFFIRMATIVE ACT by the owner', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('no control plane configured → VISIBLE and DISABLED with a reason', () => {
   test('status() is answerable and names what would enable it', () => {
-    const h = harness({ env: {} })
+    const h = harness({ values: {} })
     const s = h.service.status()
     expect(s.enabled).toBe(false)
     expect(s.default_ref).toBe('origin/main')
     // Assert the REASON, not merely the flag.
     expect(s.reason).toContain('No host-deploy endpoint is configured on this instance')
-    expect(s.reason).toContain(HOST_DEPLOY_URL_ENV)
-    expect(s.reason).toContain(HOST_DEPLOY_TOKEN_ENV)
+    expect(s.reason).toContain(HOST_DEPLOY_URL_SERVICE)
+    expect(s.reason).toContain(HOST_DEPLOY_TOKEN_SERVICE)
     expect(s.reason).toContain('A self-hosted box has no endpoint to call')
   })
 
   test('request() refuses with that same reason and mints no approval', async () => {
-    const h = harness({ env: {} })
+    const h = harness({ values: {} })
     const result = await h.service.request({})
     expect(result.status).toBe('unavailable')
     expect(result).toHaveProperty('reason')
-    expect((result as { reason: string }).reason).toContain(HOST_DEPLOY_URL_ENV)
+    expect((result as { reason: string }).reason).toContain(HOST_DEPLOY_URL_SERVICE)
     expect(h.emits).toEqual([])
     expect(h.dispatchCalls).toEqual([])
     await settle()
@@ -592,10 +592,10 @@ describe('no control plane configured → VISIBLE and DISABLED with a reason', (
   })
 
   test('a URL with no credential is disabled for THAT reason, not the missing-URL one', () => {
-    const h = harness({ env: { [HOST_DEPLOY_URL_ENV]: URL } })
+    const h = harness({ values: { url: URL } })
     const s = h.service.status()
     expect(s.enabled).toBe(false)
-    expect(s.reason).toContain(`${HOST_DEPLOY_TOKEN_ENV} is empty`)
+    expect(s.reason).toContain(`${HOST_DEPLOY_TOKEN_SERVICE} is missing`)
     expect(s.reason).not.toContain('No host-deploy endpoint is configured')
     // And the reason never leaks the endpoint it is talking about.
     expect(s.reason).not.toContain(URL)
@@ -603,8 +603,8 @@ describe('no control plane configured → VISIBLE and DISABLED with a reason', (
 
   test('a plaintext endpoint is refused — the credential rides that call', () => {
     const state = resolveHostDeployConfig({
-      [HOST_DEPLOY_URL_ENV]: 'http://control.example.test/v1/deploy',
-      [HOST_DEPLOY_TOKEN_ENV]: TOKEN,
+      url: 'http://control.example.test/v1/deploy',
+      token: TOKEN,
     })
     expect(state.configured).toBe(false)
     expect((state as { reason: string }).reason).toContain('must be an https:// URL')
@@ -613,45 +613,53 @@ describe('no control plane configured → VISIBLE and DISABLED with a reason', (
   test('there is no fabricated default endpoint', () => {
     expect(resolveHostDeployConfig({}).configured).toBe(false)
   })
+
+  test('legacy environment values do not enable the capability', () => {
+    process.env['NEUTRON_HOST_DEPLOY_URL'] = URL
+    process.env['NEUTRON_HOST_DEPLOY_TOKEN'] = TOKEN
+    try {
+      expect(resolveHostDeployConfig({}).configured).toBe(false)
+    } finally {
+      delete process.env['NEUTRON_HOST_DEPLOY_URL']
+      delete process.env['NEUTRON_HOST_DEPLOY_TOKEN']
+    }
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('the endpoint + credential are resolved at CALL time', () => {
   test('configuration that arrives AFTER composition is picked up', async () => {
-    const envRef = { current: {} as Record<string, string | undefined> }
-    const h = harness({ envRef })
+    const valuesRef = { current: {} as { url?: string; token?: string } }
+    const h = harness({ valuesRef })
 
     // Nothing configured at "composition" — the capability says so.
     expect(h.service.status().enabled).toBe(false)
     expect((await h.service.request({})).status).toBe('unavailable')
 
     // The operator sets it later, without a restart.
-    envRef.current = { [HOST_DEPLOY_URL_ENV]: URL, [HOST_DEPLOY_TOKEN_ENV]: TOKEN }
+    valuesRef.current = { url: URL, token: TOKEN }
     expect(h.service.status().enabled).toBe(true)
     expect((await h.service.request({})).status).toBe('pending_approval')
   })
 
   test('configuration removed between ask and approve deploys nothing, and says why', async () => {
-    const envRef = {
-      current: { [HOST_DEPLOY_URL_ENV]: URL, [HOST_DEPLOY_TOKEN_ENV]: TOKEN } as Record<
-        string,
-        string | undefined
-      >,
+    const valuesRef = {
+      current: { url: URL, token: TOKEN } as { url?: string; token?: string },
     }
-    const h = harness({ envRef })
+    const h = harness({ valuesRef })
     await h.service.request({})
     await settle()
-    envRef.current = {}
+    valuesRef.current = {}
 
     const out = await answer(h, h.approveValue())
     expect(h.dispatchCalls).toEqual([])
     expect(out!.body).toContain('Approved, but nothing was deployed')
-    expect(out!.body).toContain(HOST_DEPLOY_URL_ENV)
+    expect(out!.body).toContain(HOST_DEPLOY_URL_SERVICE)
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('no credential or endpoint appears in a prompt, a log line, or a chat message', () => {
+describe('the credential is hidden while the non-secret endpoint remains useful', () => {
   test('a control plane that echoes its own Authorization header cannot leak it', async () => {
     const h = harness({
       dispatch: async () => ({
@@ -669,16 +677,16 @@ describe('no credential or endpoint appears in a prompt, a log line, or a chat m
     // Positive: the owner is told what actually went wrong.
     expect(out!.body).toContain('boom')
     expect(out!.body).toContain('upstream')
-    // Negative: neither secret survived into the chat message.
+    // Negative: the secret is gone; positive: the ordinary URL remains useful.
     expect(out!.body).not.toContain(TOKEN)
-    expect(out!.body).not.toContain(URL)
+    expect(out!.body).toContain(URL)
     expect(out!.body).toContain('[redacted]')
 
     // Nor into any log line.
     const logs = h.logs.join('\n')
     expect(logs).toContain('host-deploy call refused')
     expect(logs).not.toContain(TOKEN)
-    expect(logs).not.toContain(URL)
+    expect(logs).toContain(URL)
   })
 
   test('a thrown transport error is scrubbed the same way', async () => {
@@ -692,7 +700,7 @@ describe('no credential or endpoint appears in a prompt, a log line, or a chat m
     const out = await answer(h, h.approveValue())
     expect(out!.body).toContain('ECONNREFUSED')
     expect(out!.body).not.toContain(TOKEN)
-    expect(out!.body).not.toContain(URL)
+    expect(out!.body).toContain(URL)
   })
 
   test('the approval prompt, its persisted args and its notifier line carry no secrets', async () => {
@@ -734,13 +742,13 @@ describe('no credential or endpoint appears in a prompt, a log line, or a chat m
 
   test('a credential too short to scrub is REFUSED as configuration, not printed', async () => {
     // Argus r1 major: the scrubber skipped values under its floor while the config
-    // accepted any non-empty token, so a five-character NEUTRON_HOST_DEPLOY_TOKEN
+    // accepted any non-empty token, so a five-character deploy token
     // was live AND unredactable — 'Bearer hunt2' went straight into the owner's
     // chat and the log.
     const tiny = 'hunt2'
     const state = resolveHostDeployConfig({
-      [HOST_DEPLOY_URL_ENV]: URL,
-      [HOST_DEPLOY_TOKEN_ENV]: tiny,
+      url: URL,
+      token: tiny,
     })
     expect(state.configured).toBe(false)
     expect((state as { reason: string }).reason).toContain(
@@ -752,7 +760,7 @@ describe('no credential or endpoint appears in a prompt, a log line, or a chat m
     // End to end: nothing dispatches, and the token appears in no chat message
     // and no log line.
     const h = harness({
-      env: { [HOST_DEPLOY_URL_ENV]: URL, [HOST_DEPLOY_TOKEN_ENV]: tiny },
+      values: { url: URL, token: tiny },
       dispatch: async () => ({ ok: false, detail: `rejected Bearer ${tiny}` }),
     })
     const result = await h.service.request({})
@@ -766,7 +774,7 @@ describe('no credential or endpoint appears in a prompt, a log line, or a chat m
     // real boundary, not a resolver that refuses everything.
     const ok = 'h'.repeat(HOST_DEPLOY_MIN_SECRET_CHARS)
     expect(
-      resolveHostDeployConfig({ [HOST_DEPLOY_URL_ENV]: URL, [HOST_DEPLOY_TOKEN_ENV]: ok }).configured,
+      resolveHostDeployConfig({ url: URL, token: ok }).configured,
     ).toBe(true)
   })
 })

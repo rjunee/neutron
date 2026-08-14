@@ -379,6 +379,8 @@ import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-
 import type { ApprovalManager } from '@neutronai/tools/approval.ts'
 import {
   createHostDeployService,
+  HOST_DEPLOY_TOKEN_SERVICE,
+  HOST_DEPLOY_URL_SERVICE,
   resolveHostDeployConfig,
   type HostDeployService,
 } from './host-deploy.ts'
@@ -2572,9 +2574,19 @@ export function buildOpenGraphComposer(
         approvals,
         git: createHostDeployGit({ repo_dir: env['NEUTRON_REPO_ROOT'] ?? process.cwd() }),
         // CALL TIME, every time. Reading the endpoint + credential once here
-        // would bake in whatever the environment looked like at boot — the
+        // would bake in whatever the store held at boot — the
         // failure the Decisions Log records on 2026-08-07.
-        resolveConfig: () => resolveHostDeployConfig(env),
+        resolveConfig: () => {
+          const owner = asOwnerHandle(owner_handle)
+          return resolveHostDeployConfig({
+            url:
+              projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_URL_SERVICE)?.plaintext ??
+              null,
+            token:
+              projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_TOKEN_SERVICE)?.plaintext ??
+              null,
+          })
+        },
         dispatch: createHostDeployDispatch(),
         project_slug,
         owner_user_id: OWNER_USER_ID,
