@@ -209,6 +209,25 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(400)}  ` }))
     expect(out?.terminal_cause?.length).toBe(300)
   })
+  // A COMMIT OID IS READ, NOT REPORTED (defect 2026-08-14). `publishHead` is the build's
+  // CLAIM, kept only so the outer publisher can CHECK it against `rev-parse`. Requiring a
+  // full 40-hex string here silently dropped an abbreviated sha, which then read downstream
+  // as "the build produced no commit" — and discarded a finished build.
+  test('decodes publishHead as a CLAIM: any 7-40 hex string survives verbatim; anything else → null', () => {
+    const full = 'abcdef0123456789abcdef0123456789abcdef01'
+    expect(parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: full }))?.publish_head).toBe(full)
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'abc1234' }))?.publish_head,
+    ).toBe('abc1234')
+    // Below the 7-char floor is not a plausible OID — no claim at all (still publishable).
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'abc123' }))?.publish_head,
+    ).toBeNull()
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'not-a-sha' }))?.publish_head,
+    ).toBeNull()
+    expect(parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES' }))?.publish_head).toBeNull()
+  })
   test('null/empty/garbage → null (still in flight)', () => {
     expect(parseInnerResult(null)).toBeNull()
     expect(parseInnerResult(undefined)).toBeNull()

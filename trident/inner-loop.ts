@@ -190,7 +190,13 @@ export interface InnerResult {
   terminal_cause: string | null
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
   publish_requested?: boolean
-  /** Local commit measured by the inner build; the outer publisher verifies it independently. */
+  /**
+   * The build's CLAIMED commit — possibly ABBREVIATED. It is NOT the value that gets
+   * published: the outer publisher resolves the head itself with `rev-parse` on the
+   * branch the inner loop names, and uses this claim only as a CHECK against it (a
+   * disagreement fails loudly, naming both values). Git, not the model, is the source
+   * of truth for an OID. `null` = no plausible claim arrived — still publishable.
+   */
   publish_head?: string | null
 }
 
@@ -524,8 +530,12 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // silently strand an unmerged PR as "done".
     pr_merged: p.prMerged === true,
     publish_requested: p.publishRequested === true,
-    publish_head: typeof p.publishHead === 'string' && /^[0-9a-f]{40}$/.test(p.publishHead)
-      ? p.publishHead
+    // A CLAIM, NOT THE SOURCE. Anything that could plausibly be an OID — 7 to 40 hex
+    // chars, either case — is kept VERBATIM for the outer publisher to CHECK against
+    // `rev-parse`. Requiring full 40-hex here silently dropped abbreviated shas, which
+    // then read as "no commit at all"; the publisher resolves the real head from git.
+    publish_head: typeof p.publishHead === 'string' && /^[0-9a-fA-F]{7,40}$/.test(p.publishHead.trim())
+      ? p.publishHead.trim()
       : null,
     // WHY IT STOPPED — parsed FAIL-CLOSED: only the four strings the workflow writes
     // decode, anything else is null. The orchestrator keys a specific failure reason off
