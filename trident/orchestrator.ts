@@ -60,7 +60,7 @@
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
-import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -537,18 +537,92 @@ export async function rebaseOntoObservedBase(
   // (e) The branch's own changes, from a source with an HONEST merge-base. Never a local
   //     three-dot diff — that is exactly the computation the shallow boundary corrupts.
   const diffFile = `/tmp/trident-rebase-${branch.replace(/[^A-Za-z0-9._-]/g, '-')}.diff`
-  const patch =
-    pr !== null
-      ? await run_host(['gh', 'pr', 'diff', String(pr)], repoPath)
-      : await run_host(['git', '-C', repoPath, 'diff', `refs/heads/${base}..refs/heads/${branch}`], repoPath)
-  if (!patch.ok) throw new Error(publishFailureReason('read the diff of', branch, patch.stderr))
-  if (patch.stdout.trim() === '') throw new Error('outer publisher refused to rebase an empty diff')
-  // RESTORE THE TRAILING NEWLINE. `spawnCapture` TRIMS command output, which is harmless for every
-  // other reader — and fatal here: a patch whose last hunk line lost its newline is not a patch,
-  // and `git apply` rejects the whole thing with `corrupt patch at line N` (exit 128). That is
-  // indistinguishable, upstream, from a genuine conflict, so EVERY rebase would have been reported
-  // as an attention state. Caught by the real-git suite; the stubbed host never wrote a file.
-  writeFileSync(diffFile, patch.stdout.endsWith('\n') ? patch.stdout : `${patch.stdout}\n`)
+  // THE BRANCH'S OWN WORK IS `<fork point>..<branch>`, AND THE FORK POINT IS THE MERGE-BASE —
+  // not either ref's tip. Both tips are wrong, in opposite directions:
+  //
+  //   `refs/heads/<base>..<branch>`  — the local ref, which step (d) NEVER moves (it fetches into
+  //       `refs/remotes/origin/<base>`). MEASURED 2026-08-15: `refs/heads/main` sat at d8324cc
+  //       while the observed tip was d5ba62b, so the diff carried 103 files instead of the
+  //       branch's own 22 — 236 commits of already-merged work. Applied onto the observed tip,
+  //       every already-present hunk fails, `git apply` stages NOTHING as conflicted, and the
+  //       caller reports `conflicts with main in: (paths unreadable)` — naming a conflict that
+  //       does not exist. Five builds died on this in one day, across two projects.
+  //
+  //   `<baseSha>..<branch>`  — the observed tip. A two-dot diff is "how to turn A into B", so
+  //       this also REVERSES everything the base gained since the fork: replaying it DELETES
+  //       main's own new files, and a genuine conflict applies cleanly as a revert instead of
+  //       raising. `publish-rebase-realgit.test.ts` catches both (a lost `docs.txt`, and a
+  //       conflict that returned null). Do not "simplify" back to it.
+  //
+  // The merge-base is what `gh pr diff` computes server-side, which is why the PR path above has
+  // never had this bug.
+  //
+  // NO FALLBACK TO `refs/heads/<base>` — IT FAILS CLOSED. CODEX REVIEW [Blocker]: the first cut
+  // fell back to the local ref when merge-base could not answer, which is EXACTLY the shallow
+  // checkout this function expects. That reinstated the defective base in precisely the condition
+  // that produced it, and would have shipped a fix that silently does the broken thing whenever it
+  // matters most. A fork point that cannot be established is an INFRASTRUCTURE fault about the
+  // checkout — deepen it (see the shallow-provisioning card) — not a licence to replay a diff we
+  // know to be wrong. Better a named refusal than a false conflict nobody can read.
+  //
+  // COMPUTED ONLY ON THE PATH THAT NEEDS IT. `gh pr diff` already resolves the fork point
+  // server-side against a full history, so a PR-mode replay must not be made to depend on — or be
+  // refused by — the local checkout's depth.
+  const localForkPoint = async (): Promise<string> => {
+    const read = async () =>
+      run_host(['git', '-C', repoPath, 'merge-base', baseSha, `refs/heads/${branch}`], repoPath)
+    let forkPoint = await read()
+    if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
+      // One bounded deepen, then re-ask. `--unshallow` on an already-complete repo is a cheap
+      // no-op; on a shallow one it is the only thing that can make the fork point exist locally.
+      await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
+      forkPoint = await read()
+    }
+    if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
+      throw new Error(
+        publishFailureReason(
+          'establish the fork point of',
+          branch,
+          `no merge-base between ${baseSha} and refs/heads/${branch} even after deepening — the build checkout cannot describe this branch's own changes, so replaying it would send already-merged work through review`,
+        ),
+      )
+    }
+    return forkPoint.stdout.trim()
+  }
+  // PATCH BYTES ARE NOT TEXT TO BE TIDIED — `--output` WRITES THEM, NOTHING ROUND-TRIPS A STRING.
+  //
+  // `spawnCapture` returns `stdout.trim()`. That is harmless for every other reader and FATAL for
+  // a patch: a unified diff whose final line is a context line for a BLANK line ends `" \n"` —
+  // space, newline. `.trim()` removes BOTH, and restoring only the newline cannot put the space
+  // back. The last hunk is then one line short of its `@@` count, `git apply` exits 128 with
+  // `corrupt patch at line N`, and — because nothing was ever staged — `--diff-filter=U` names no
+  // files, so the caller reported `REBASE CONFLICT … (paths unreadable)`.
+  //
+  // MEASURED by neutron-enterprise on run 578fa30e against deployed trident d5ba62b7: the real
+  // patch was 19,222 bytes ending `…each other.\n \n`; trimmed it was 19,220 ending
+  // `…each other.\n`. Untrimmed it applied cleanly against four separate bases; trimmed it gave
+  // `corrupt patch at line 42, rc=128, unmerged=[]`. A plain `git rebase` of the same branch
+  // succeeded with no intervention — the patch was never in conflict at all.
+  //
+  // The previous comment here believed the trailing-newline restore had closed this. It had not:
+  // it addressed a missing `\n` and could never address a stripped `" "`. The existing real-git
+  // fixture's last line is non-blank, which is exactly why the half-fix looked complete.
+  if (pr !== null) {
+    const patch = await run_host(['gh', 'pr', 'diff', String(pr)], repoPath)
+    if (!patch.ok) throw new Error(publishFailureReason('read the diff of', branch, patch.stderr))
+    if (patch.stdout.trim() === '') throw new Error('outer publisher refused to rebase an empty diff')
+    writeFileSync(diffFile, patch.stdout.endsWith('\n') ? patch.stdout : `${patch.stdout}\n`)
+  } else {
+    // `--output` hands the bytes to git, which writes them verbatim. No capture, no trim, no
+    // reconstruction. Do not "simplify" this back to reading stdout.
+    const written = await run_host(
+      ['git', '-C', repoPath, 'diff', `--output=${diffFile}`, `${await localForkPoint()}..refs/heads/${branch}`],
+      repoPath,
+    )
+    if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
+    if (!existsSync(diffFile) || readFileSync(diffFile, 'utf8').trim() === '')
+      throw new Error('outer publisher refused to rebase an empty diff')
+  }
 
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
   //     poison every other lane's build.
@@ -575,6 +649,25 @@ export async function rebaseOntoObservedBase(
         if (unmerged.ok) paths = unmerged.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
       } catch {
         // paths stay empty; the message says so.
+      }
+      // A FAILED APPLY WITH NOTHING UNMERGED IS NOT A CONFLICT. `git apply` refuses a malformed or
+      // unappliable patch WHOLESALE (`corrupt patch at line N`, exit 128) without staging anything,
+      // so `--diff-filter=U` legitimately names no files. Reporting that as a conflict produced the
+      // single most expensive message of 2026-08-15: `conflicts with main in: (paths unreadable)`,
+      // which sent two projects hunting for a merge conflict that did not exist while the actual
+      // cause — a truncated patch, and separately a stale diff base — sat in git's own stderr,
+      // discarded. The empty path list WAS the diagnosis and it read like a footnote.
+      //
+      // So: `TridentRebaseConflict` is reserved for the case where at least one file is genuinely
+      // unmerged. Anything else surfaces git's own words.
+      if (paths.length === 0) {
+        throw new Error(
+          publishFailureReason(
+            'apply the replay patch for',
+            branch,
+            `${applied.stderr || 'git apply failed with no output'} — the apply failed WHOLESALE and left nothing unmerged, so this is NOT a merge conflict; the patch or its base is wrong`,
+          ),
+        )
       }
       throw new TridentRebaseConflict(branch, base, paths)
     }
