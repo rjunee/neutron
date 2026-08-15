@@ -36,8 +36,11 @@ const DISABLED_REASON =
 
 function stub(
   overrides: Partial<HostDeployToolService> = {},
-): { service: HostDeployToolService; requests: Array<{ ref?: string }> } {
-  const requests: Array<{ ref?: string }> = []
+): {
+  service: HostDeployToolService
+  requests: Array<{ ref?: string; topic_id?: string | null }>
+} {
+  const requests: Array<{ ref?: string; topic_id?: string | null }> = []
   const service: HostDeployToolService = {
     status: () => ({ enabled: true, reason: null, default_ref: 'origin/main' }),
     request: async (input) => {
@@ -49,6 +52,7 @@ function stub(
         target_sha: 'ff00112233445566778899aabbccddeeff001122',
         current_sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
         commit_count: 3,
+        approval_topic_id: input.topic_id ?? 'app:owner',
       }
     },
     ...overrides,
@@ -120,7 +124,47 @@ describe('handler behaviour', () => {
     await tool.handler({ ref: '   ' }, CTX)
     await tool.handler({}, CTX)
     await tool.handler({ ref: 42 }, CTX)
-    expect(requests).toEqual([{ ref: 'release/2026-08' }, {}, {}, {}])
+    expect(requests).toEqual([
+      { ref: 'release/2026-08', topic_id: 'app:owner' },
+      { topic_id: 'app:owner' },
+      { topic_id: 'app:owner' },
+      { topic_id: 'app:owner' },
+    ])
+  })
+
+  // THE CARD, 2026-08-15: the owner asked for a deploy from his project topic
+  // and was told to tap a button that had been posted to General. The tool used
+  // to ignore its ctx entirely; the topic the call came from is the topic the
+  // Approve/Deny prompt has to land on, so it must reach the service.
+  test('the CALLING topic is threaded into the service request', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = stub()
+    registerHostDeployToolSurface(reg, () => service)
+
+    await reg.get(HOST_DEPLOY_REQUEST_TOOL)!.handler(
+      { ref: 'origin/main' },
+      { ...CTX, topic_id: 'app:owner:proj-x' },
+    )
+    expect(requests).toEqual([{ ref: 'origin/main', topic_id: 'app:owner:proj-x' }])
+  })
+
+  test('a null calling topic is passed through — the SERVICE picks the fallback', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = stub()
+    registerHostDeployToolSurface(reg, () => service)
+
+    // Cron/system callers have no conversation. The tool does not invent one:
+    // choosing the fallback destination is the service's single decision.
+    await reg.get(HOST_DEPLOY_REQUEST_TOOL)!.handler({}, { ...CTX, topic_id: null })
+    expect(requests).toEqual([{ topic_id: null }])
+  })
+
+  test('the description tells the agent to name the topic carrying the prompt', () => {
+    const reg = new ToolRegistry()
+    registerHostDeployToolSurface(reg, () => stub().service)
+    const description = reg.get(HOST_DEPLOY_REQUEST_TOOL)?.description ?? ''
+    expect(description).toContain('approval_topic_id')
+    expect(description).toContain('Never say a button is waiting without saying where it is.')
   })
 
   test('the late-bound getter returning null reads as unavailable, not a crash', async () => {

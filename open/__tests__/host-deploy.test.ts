@@ -307,6 +307,89 @@ describe('a request without an approval deploys NOTHING', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+describe('the button is raised WHERE the deploy was asked for', () => {
+  // 2026-08-15: the owner asked for a host deploy from `app:owner:neutron-open`,
+  // was told an Approve button was waiting, and there was none — the prompt had
+  // been posted to General, the ONE topic the service captured at composition
+  // time. `TOPIC` here is that install fallback; the requesting topic is the
+  // destination now.
+  const PROJECT_TOPIC = 'app:owner:neutron-open'
+
+  test('a request from a project topic raises its prompt on THAT topic', async () => {
+    const h = harness()
+    const result = await h.service.request({ ref: 'origin/main', topic_id: PROJECT_TOPIC })
+    await settle()
+
+    // TWO INDEPENDENT SEAMS, asserted separately on purpose: the grant row and
+    // the tappable prompt are written by different calls, and re-hard-coding
+    // EITHER one back to the owner topic has to turn this test red on its own.
+    const pending = approvals.listPending(PROJECT)
+    expect(pending).toHaveLength(1)
+    expect(pending[0]!.topic_id).toBe(PROJECT_TOPIC)
+
+    expect(h.emits).toHaveLength(1)
+    expect(h.emits[0]!.topic_id).toBe(PROJECT_TOPIC)
+
+    // …and neither is the fallback.
+    expect(pending[0]!.topic_id).not.toBe(TOPIC)
+    expect(h.emits[0]!.topic_id).not.toBe(TOPIC)
+
+    // The result NAMES the destination, so the agent can never say "a button is
+    // waiting" without saying where. No note: it landed where it was asked for.
+    expect(result).toMatchObject({
+      status: 'pending_approval',
+      approval_topic_id: PROJECT_TOPIC,
+    })
+    expect((result as { note?: string }).note).toBeUndefined()
+  })
+
+  test('no calling topic → the install fallback, and the result SAYS so', async () => {
+    for (const input of [{ ref: 'origin/main' }, { ref: 'origin/main', topic_id: null }]) {
+      const h = harness()
+      const result = await h.service.request(input)
+      await settle()
+
+      const pending = approvals.listPending(PROJECT)
+      expect(pending[pending.length - 1]!.topic_id).toBe(TOPIC)
+      expect(h.emits[0]!.topic_id).toBe(TOPIC)
+
+      // A cron/system caller has no conversation to post into, so the prompt
+      // goes to the owner's General topic — which is only acceptable because
+      // the result says which topic that is.
+      const note = (result as { note?: string }).note ?? ''
+      expect(result).toMatchObject({ status: 'pending_approval', approval_topic_id: TOPIC })
+      expect(note).toContain(TOPIC)
+      expect(note.length).toBeGreaterThan(0)
+    }
+  })
+
+  test('an empty-string topic is not a topic — it falls back', async () => {
+    const h = harness()
+    const result = await h.service.request({ topic_id: '' })
+    await settle()
+    expect(h.emits[0]!.topic_id).toBe(TOPIC)
+    expect(approvals.listPending(PROJECT)[0]!.topic_id).toBe(TOPIC)
+    expect(result).toMatchObject({ approval_topic_id: TOPIC })
+  })
+
+  test('the tap resolves on the topic that carries the prompt — no second mechanism', async () => {
+    // The capture seam windows on the tap's OWN topic, so raising the prompt on
+    // the requesting topic is enough for Approve to work there.
+    const h = harness()
+    await h.service.request({ topic_id: PROJECT_TOPIC })
+    await settle()
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: h.approveValue(),
+      topic_id: PROJECT_TOPIC,
+      prior_option_values: h.options(),
+    })
+    expect(out).not.toBeNull()
+    expect(h.dispatchCalls).toHaveLength(1)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe('the approval body carries the ACTUAL commit list', () => {
   test('every commit, the current pin and the target sha are in the body', async () => {
     const h = harness()

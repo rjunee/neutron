@@ -46,7 +46,7 @@ export interface HostDeployToolService {
     reason: string | null
     default_ref: string
   }
-  request(input: { ref?: string }): Promise<
+  request(input: { ref?: string; topic_id?: string | null }): Promise<
     | {
         status: 'pending_approval'
         request_id: string
@@ -54,6 +54,8 @@ export interface HostDeployToolService {
         target_sha: string
         current_sha: string
         commit_count: number
+        approval_topic_id: string
+        note?: string
       }
     | { status: 'unavailable'; reason: string }
     | { status: 'up_to_date'; ref: string; target_sha: string }
@@ -89,6 +91,11 @@ const requestOutputSchema: JsonSchemaDocument = {
     target_sha: { type: 'string' },
     current_sha: { type: 'string' },
     commit_count: { type: 'integer' },
+    approval_topic_id: {
+      type: 'string',
+      description: 'The chat topic the Approve/Deny prompt was posted to.',
+    },
+    note: { type: 'string' },
     reason: { type: 'string' },
   },
   required: ['status'],
@@ -140,12 +147,15 @@ export function registerHostDeployToolSurface(
       'Approve, and the approval is bound to the exact target sha — if the ref moves before he ' +
       'answers, it is refused as stale and you must ask again. You cannot approve this yourself. ' +
       'Returns status "unavailable" with a reason when no control-plane endpoint is configured (a ' +
-      'self-hosted box), "up_to_date" when the host already runs that sha, or "refused" with a reason.',
+      'self-hosted box), "up_to_date" when the host already runs that sha, or "refused" with a reason. ' +
+      'When you relay "pending_approval" you MUST tell the owner WHICH topic carries the Approve/Deny ' +
+      'prompt: it is in "approval_topic_id" and is normally this very conversation, and the "note" field ' +
+      'says so when it is somewhere else. Never say a button is waiting without saying where it is.',
     input_schema: requestInputSchema,
     output_schema: requestOutputSchema,
     capability_required: 'write:project_data',
     approval_policy: 'auto',
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const svc = service()
       if (svc === null) {
         return {
@@ -155,7 +165,13 @@ export function registerHostDeployToolSurface(
       }
       const a = (args ?? {}) as RequestArgs
       const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
-      return await svc.request(ref.length > 0 ? { ref } : {})
+      // THE CALLING TOPIC IS THE DESTINATION. `ToolCallContext.topic_id` is null
+      // for cron/system calls; pass it through as-is and let the service pick
+      // the install fallback — the tool does not decide where the button goes.
+      return await svc.request({
+        ...(ref.length > 0 ? { ref } : {}),
+        topic_id: ctx.topic_id,
+      })
     },
   })
 

@@ -2593,6 +2593,12 @@ export function buildOpenGraphComposer(
     // the one authenticated control-plane call, and only if the target sha has
     // not moved since he was asked.
     //
+    // WHERE THE PROMPT LANDS (this card, 2026-08-15): the topic that REQUESTED
+    // the deploy. `approval_topic_id` below is the FALLBACK, used only when the
+    // request carries no calling topic (cron/system). It used to be the sole
+    // destination, so every prompt went to the owner's General topic and the
+    // owner was told to tap a button in a conversation he was not in.
+    //
     // LATE-BOUND for the same reason `ritualRegistration` is: the service needs
     // the graph's ApprovalManager, which does not exist here. `install` is
     // called from the approval module's init. NOT gated on `llmPool` — the tools
@@ -2630,9 +2636,12 @@ export function buildOpenGraphComposer(
         dispatch: createHostDeployDispatch(),
         project_slug,
         owner_user_id: OWNER_USER_ID,
+        // FALLBACK ONLY (2026-08-15). The prompt is raised on the topic that
+        // requested the deploy; this owner General topic is used only when a
+        // request carries no calling topic (cron/system).
         approval_topic_id: resolveAppWsReminderTopic(null),
         emit: async (p) => {
-          const result = await deliver(resolveAppWsReminderTopic(null), {
+          const result = await deliver(p.topic_id, {
             body: p.body,
             durability: 'reply',
             options: p.options,

@@ -232,6 +232,13 @@ export type HostDeployDispatch = (
 
 /** The button prompt emission seam — the composer's durable `deliver`. */
 export interface HostDeployEmit {
+  /**
+   * The chat topic the prompt MUST be delivered to — the topic that asked for
+   * the deploy, or the install's fallback topic when there is no calling topic.
+   * The emitter delivers HERE; a destination hard-coded in the emitter is the
+   * defect this field exists to prevent (2026-08-15).
+   */
+  topic_id: string
   body: string
   options: ButtonOption[]
   idempotency_key: string
@@ -259,6 +266,17 @@ export type HostDeployRequestResult =
       target_sha: string
       current_sha: string
       commit_count: number
+      /**
+       * The topic the Approve/Deny prompt ACTUALLY landed on. Always present so
+       * the agent can never say "a button is waiting" without saying where.
+       */
+      approval_topic_id: string
+      /**
+       * Set ONLY when the prompt could not be raised on the requesting topic
+       * (no calling topic — cron/system callers) and fell back to the install's
+       * owner topic. Absent when the prompt landed where it was asked for.
+       */
+      note?: string
     }
   | { status: 'unavailable'; reason: string }
   | { status: 'up_to_date'; ref: string; target_sha: string }
@@ -453,6 +471,12 @@ export interface HostDeployServiceOptions {
   dispatch: HostDeployDispatch
   project_slug: string
   owner_user_id: string
+  /**
+   * FALLBACK approval destination, used ONLY when a request carries no calling
+   * topic (cron/system callers). A request that names its topic raises the
+   * prompt THERE — the owner asked from a project topic and was sent to General
+   * to find a button, which is the defect fixed on 2026-08-15.
+   */
   approval_topic_id: string
   emit: (p: HostDeployEmit) => Promise<void>
   log?: (msg: string) => void
@@ -476,8 +500,13 @@ export interface HostDeployOwnerAnswerInput {
 export interface HostDeployService {
   /** Present ALWAYS; `enabled:false` carries the reason. */
   status(): HostDeployStatus
-  /** Resolve + raise an approval. Deploys NOTHING. */
-  request(input: { ref?: string }): Promise<HostDeployRequestResult>
+  /**
+   * Resolve + raise an approval. Deploys NOTHING. `topic_id` is the topic the
+   * request came from (`ToolCallContext.topic_id`); the prompt is raised there.
+   * Null/omitted — a cron or system caller — falls back to the install's
+   * `approval_topic_id`.
+   */
+  request(input: { ref?: string; topic_id?: string | null }): Promise<HostDeployRequestResult>
   /** The owner's affirmative act. Returns null when the reply is not one. */
   handleOwnerButtonAnswer(
     input: HostDeployOwnerAnswerInput,
@@ -519,7 +548,17 @@ export function createHostDeployService(
     }
   }
 
-  async function request(input: { ref?: string }): Promise<HostDeployRequestResult> {
+  async function request(
+    input: { ref?: string; topic_id?: string | null },
+  ): Promise<HostDeployRequestResult> {
+    // ── WHERE THE BUTTON GOES. The topic that asked for the deploy, every time
+    // it named one. `approval_topic_id` is the FALLBACK for callers with no
+    // conversation (cron/system) — it used to be the only destination, which is
+    // how the owner was told to tap a button in a topic he was not in.
+    const requested_topic =
+      typeof input.topic_id === 'string' && input.topic_id.length > 0 ? input.topic_id : null
+    const approval_topic = requested_topic ?? approval_topic_id
+
     // ── (a) NO CONTROL PLANE → visible, disabled, WITH THE REASON. Checked
     // FIRST so an unconfigured box never mints an approval the owner could tap
     // into a guaranteed failure. Not a throw: "disabled with a reason" is a
@@ -595,7 +634,7 @@ export function createHostDeployService(
     const decision = approvals.requestApproval({
       id: approval_id,
       project_slug,
-      topic_id: approval_topic_id,
+      topic_id: approval_topic,
       tool_name: HOST_DEPLOY_APPROVAL_TOOL_NAME,
       policy: 'prompt-user',
       args: {
@@ -630,6 +669,7 @@ export function createHostDeployService(
         },
       ]
       await emit({
+        topic_id: approval_topic,
         body: renderHostDeployApprovalBody({
           ref,
           current_sha,
@@ -657,7 +697,9 @@ export function createHostDeployService(
       }
     }
 
-    log(`host-deploy pending_approval ref=${ref} target=${shortSha(target_sha)} commits=${range.total}`)
+    log(
+      `host-deploy pending_approval ref=${ref} target=${shortSha(target_sha)} commits=${range.total} topic=${approval_topic}`,
+    )
     return {
       status: 'pending_approval',
       request_id: uuidToToken(approval_id),
@@ -665,6 +707,17 @@ export function createHostDeployService(
       target_sha,
       current_sha,
       commit_count: range.total,
+      approval_topic_id: approval_topic,
+      // Only the fallback needs saying out loud: the prompt is somewhere other
+      // than the conversation this was asked in, and the owner has to be told
+      // where or he is hunting for a button that is not on his screen.
+      ...(requested_topic === null
+        ? {
+            note:
+              `The Approve/Deny prompt was posted to the owner's General chat topic (${approval_topic}). ` +
+              'Tell the owner where to find it.',
+          }
+        : {}),
     }
   }
 
