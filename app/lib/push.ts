@@ -32,6 +32,11 @@ import { DevicesClient, type DevicePlatform } from './devices-client';
 import { resolvePushRoute, type PushPayload } from './push-deep-link-dispatch';
 import { reportPushEnableOutcome } from './push-observability';
 import {
+  decideForegroundPresentation,
+  getOpenConversation,
+  readNotificationProject,
+} from './push-foreground-policy';
+import {
   pushTapDedupeStore,
   type PushTapDedupeStore,
 } from './push-tap-dedupe-store';
@@ -55,20 +60,40 @@ export function isPushSupported(): boolean {
 }
 
 /**
- * Configure the in-foreground handler so the user sees the
- * notification even when the app is open. Expo's default is to
- * suppress in-foreground banners. Idempotent — re-setting is harmless.
+ * Configure the in-foreground handler.
+ *
+ * IT USED TO SHOW EVERYTHING, AND THAT WAS DELIBERATE — the comment here read
+ * *"so the user sees the notification even when the app is open"*, overriding
+ * Expo's default of suppressing foreground banners. The owner reversed it
+ * (2026-08-15): *"I get notified for any and all chat messages if I'm not
+ * actively in the app. Same way notifications work for every single other chat
+ * app in existence."*
+ *
+ * BUT NOT BACK TO EXPO'S DEFAULT EITHER, because "the app is open" is the wrong
+ * question. Foregrounded in project A while a message lands in project B should
+ * still tell him — that is what every other chat app does. The question is
+ * whether he is looking at THE CONVERSATION THAT PRODUCED THE MESSAGE, and that
+ * is `decideForegroundPresentation`'s to answer.
+ *
+ * The decision lives in `push-foreground-policy.ts` rather than in this closure
+ * because the app test suite cannot import THIS module (`expo-notifications` /
+ * `react-native` do not load under bun test), and a notification rule nothing
+ * can test is one that quietly stops matching what he asked for. This function
+ * stays the thin shell: read the payload, ask the policy, obey it.
+ *
+ * Idempotent — re-setting is harmless.
  */
 let foregroundHandlerInstalled = false;
 export function installForegroundNotificationHandler(): void {
   if (foregroundHandlerInstalled) return;
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: true,
-    }),
+    handleNotification: async (notification) => {
+      const data = notification?.request?.content?.data;
+      return decideForegroundPresentation(
+        readNotificationProject(data),
+        getOpenConversation(),
+      );
+    },
   });
   foregroundHandlerInstalled = true;
 }

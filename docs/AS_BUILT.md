@@ -2,6 +2,83 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — the device stops interrupting the conversation he is reading
+
+`app/lib/push-foreground-policy.ts` (new) + `app/lib/push.ts` + `ChatSyncSurface`.
+
+**Owner:** *"Everything should be a chat message, and I get notified for any and
+all chat messages if I'm not actively in the app. Same way notifications work
+for every single other chat app in existence."*
+
+The handler had been showing every foreground notification ON PURPOSE — its
+comment said so, *"so the user sees the notification even when the app is
+open"*, overriding Expo's default. That is now wrong, but the fix is NOT Expo's
+default either: "is the app open" is the wrong question. Foregrounded in project
+A while a message lands in project B should still tell him. The question is
+whether he is looking at THE CONVERSATION THAT PRODUCED IT, which is what
+`decideForegroundPresentation` answers.
+
+**This is the half that makes the server half safe.** The server-side change —
+notifying for in-turn replies, which `open/composer.ts` currently excludes
+deliberately — only stops being an interruption because the device now declines
+to interrupt. If this policy is ever weakened, that server rule has to be
+revisited in the same change.
+
+Suppression is of the INTERRUPTION only: `shouldShowList` and `shouldSetBadge`
+stay true, so a message that arrives while he scrolls past still leaves a trace
+outside the transcript. An unregistered screen FAILS OPEN — he gets a banner he
+did not need, never silence, because silence is the failure nobody notices.
+
+📌 **A REPRESENTATION BUG LIVED FOR THE LENGTH OF ONE DRAFT.** The policy modelled
+General as `null`; the push payload always sends `GENERAL_RAIL_ID` (`~general`).
+Those compare unequal, so a General message would have buzzed him while he read
+it — the exact interruption the module exists to prevent, in the one scope that
+has three names. Normalised through a `scopeKey`, with tests pinning all three
+spellings. `app/lib/general-scope.ts` already warned this is how #410/#411
+happened; this was that hazard one layer out.
+
+⚠️ **AND THE TEST HARNESS HID A FIFTH OF ITSELF.** `ChatSyncSurface` began
+importing `useFocusEffect`, the expo-router STUB did not export it, and every
+file mounting that surface stopped LOADING — so the local suite ran **122 fewer
+tests and reported FEWER failures than before the change**. A falling failure
+count read as an improvement while a fifth of the suite silently stopped
+running. Stub extended; suite back to 1916 tests with a failure set IDENTICAL to
+untouched main. ⇒ **count the tests that RAN, not just the ones that failed.**
+
+Mutation-verified three ways with a control on each: dropping scope
+normalisation fails the General-spelling tests, silencing an unreadable payload
+fails the fail-open tests, and making SILENT drop the list/badge fails the
+record test.
+
+## 2026-08-15 — deployed to the owner's instance
+
+Vendor `cbcfb655` → `d08555e1` (#294 diagnostics instrument + chat CSS, and
+#296). `juno` restarted healthy in one wave, `uptime_ms: 12230`. Control plane
+needed no restart and that was CHECKED (`git diff --name-only HEAD origin/main
+-- src/` empty), not assumed. Verified SERVED against the specific changes with
+controls in both directions: the served tree carries `min(72ch, 88%)`,
+`font-size: 0.95em` and the last-child margin fix, with the old `min(60ch, 80%)`
+GONE; the served JS bundle carries the new diagnostics failure path against a
+control string proving the grep works.
+
+⚠️ The first verification attempt returned ZERO for everything **including the
+control**, because `/chat` 302s to auth — a tool that cannot read its input
+returning a negative that looks like an answer. Without the control it would
+have been reported as a broken deploy.
+
+## 2026-08-15 — #294: a rejected diagnostics report was invisible on both sides
+
+The owner asked for switch timings to reach the diagnostics queue so he would
+stop pasting console output. Measured on his instance: four reports on disk, all
+mobile `push_registration_failed`, **not one web switch timing**, while he spent
+the day hand-pasting exactly those. Three stacked silencers — the client
+discarded its Response, the emitter wrapped the send in `.catch(() =>
+undefined)`, and the server's only operator-visible artefact is a file that stays
+EMPTY on refusal, which reads exactly like "nothing to report". Writing the test
+found a fourth: a wrong-slug bearer takes a different branch, so instrumenting
+only the first would have left the most likely real refusal just as silent.
+
+
 
 Measured on PR #284's card (the #283 build), 2026-08-15, one inner workflow, fully
 serial — the sum of agent time equals wall clock exactly: head probe 5 s, `plan:fable`
