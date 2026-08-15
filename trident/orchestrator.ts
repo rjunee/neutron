@@ -607,11 +607,27 @@ export async function rebaseOntoObservedBase(
   // The previous comment here believed the trailing-newline restore had closed this. It had not:
   // it addressed a missing `\n` and could never address a stripped `" "`. The existing real-git
   // fixture's last line is non-blank, which is exactly why the half-fix looked complete.
+  // AND THE FIX ABOVE LANDED ON ONLY ONE BRANCH OF THIS `if`. #292 converted the `pr === null`
+  // path to `--output` and left the PR path — the COMMON one, taken on every round after the first
+  // — still doing `writeFileSync(diffFile, patch.stdout…)` over a TRIMMED capture. It failed
+  // exactly as the comment above predicts, six hours later: run 63b16fb1 (PR #295, 2026-08-15
+  // 20:36Z) died with `corrupt patch at line 746`, and its replay patch cbcfb65..26c19dd is 746
+  // lines whose final line is `" \n"`. Regenerated through `--output` the same patch applies
+  // CLEANLY onto both its fork point and the observed tip. The comment was right and the code
+  // under it was still wrong; the reason it read as fixed is that the diff of #292 showed the
+  // comment and the `else` together.
+  //
+  // So there is NO STRING PATH LEFT ON EITHER BRANCH. The PR path keeps `gh pr diff` — it resolves
+  // the fork point server-side against a full history, which is deliberately independent of this
+  // checkout's depth — but REDIRECTS it to the file instead of capturing it. `spawnCapture` never
+  // sees the bytes, so it cannot trim them. Nothing here may pass patch bytes through a JS string
+  // again; if a future reader needs the diff's content, read it back off disk.
   if (pr !== null) {
-    const patch = await run_host(['gh', 'pr', 'diff', String(pr)], repoPath)
-    if (!patch.ok) throw new Error(publishFailureReason('read the diff of', branch, patch.stderr))
-    if (patch.stdout.trim() === '') throw new Error('outer publisher refused to rebase an empty diff')
-    writeFileSync(diffFile, patch.stdout.endsWith('\n') ? patch.stdout : `${patch.stdout}\n`)
+    const written = await run_host(
+      ['sh', '-c', `gh pr diff ${Number(pr)} > ${JSON.stringify(diffFile)}`],
+      repoPath,
+    )
+    if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
   } else {
     // `--output` hands the bytes to git, which writes them verbatim. No capture, no trim, no
     // reconstruction. Do not "simplify" this back to reading stdout.
@@ -620,9 +636,9 @@ export async function rebaseOntoObservedBase(
       repoPath,
     )
     if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
-    if (!existsSync(diffFile) || readFileSync(diffFile, 'utf8').trim() === '')
-      throw new Error('outer publisher refused to rebase an empty diff')
   }
+  if (!existsSync(diffFile) || readFileSync(diffFile, 'utf8').trim() === '')
+    throw new Error('outer publisher refused to rebase an empty diff')
 
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
   //     poison every other lane's build.

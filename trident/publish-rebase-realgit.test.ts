@@ -27,7 +27,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -95,7 +95,7 @@ interface World {
  * A real origin, a real full author clone, and a real SHALLOW build checkout holding a branch
  * that is genuinely behind a `main` which moved after the branch was cut.
  */
-async function seedWorld(opts: { conflicting: boolean }): Promise<World> {
+async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean }): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), 'trident-rebase-'))
   created.push(root)
   const origin = join(root, 'origin.git')
@@ -113,7 +113,12 @@ async function seedWorld(opts: { conflicting: boolean }): Promise<World> {
   await identify(author)
   await git(author, 'remote', 'add', 'origin', `file://${origin}`)
   writeFileSync(join(author, 'README.md'), 'base\n')
-  writeFileSync(join(author, 'lib.txt'), 'line1\nline2\nline3\n')
+  // A FILE THAT ENDS ON A BLANK LINE is the whole point of the `trailingBlank` fixture: the last
+  // line of a diff over it is a context line for that blank line, i.e. the two bytes `" \n"`. Any
+  // trim on the way to disk eats the space, the final hunk comes up one line short of its `@@`
+  // count, and `git apply` exits 128 with `corrupt patch at line N`. Run 63b16fb1 died exactly
+  // this way on a 746-line patch (2026-08-15).
+  writeFileSync(join(author, 'lib.txt'), opts.trailingBlank ? 'line1\nline2\nline3\n\n' : 'line1\nline2\nline3\n')
   await git(author, 'add', '.')
   await git(author, ...GIT_ID, 'commit', '-q', '-m', 'init')
   await git(author, 'push', '-q', 'origin', 'main')
@@ -134,6 +139,10 @@ async function seedWorld(opts: { conflicting: boolean }): Promise<World> {
   await git(checkout, 'worktree', 'add', '-q', tmp, BRANCH)
   if (opts.conflicting) {
     writeFileSync(join(tmp, 'lib.txt'), 'line1\nline2-from-branch\nline3\n')
+  } else if (opts.trailingBlank) {
+    // Edit the MIDDLE of the blank-terminated file so the hunk's trailing context runs all the way
+    // to the final blank line. Adding a new file would not — its hunk ends on the added line.
+    writeFileSync(join(tmp, 'lib.txt'), 'line1\nline2-from-branch\nline3\n\n')
   } else {
     writeFileSync(join(tmp, 'feature.txt'), 'feature\n')
   }
@@ -225,6 +234,31 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     expect(again.rebased).toBe(false)
     expect(again.head).toBe(res.head)
     expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(res.head)
+  }, 60_000)
+
+  test('a branch whose diff ENDS ON A BLANK-LINE CONTEXT LINE replays cleanly — the patch bytes never round-trip a string', async () => {
+    const world = await seedWorld({ conflicting: false, trailingBlank: true })
+    const scratchDir = scratch(world.checkout, 't-blank')
+
+    // THE ANTI-FAKE GUARD. If the fixture's patch does not end in `" \n"` this test cannot fail
+    // for the reason it exists, and a trimming regression would sail through it — which is exactly
+    // what happened twice: the pre-existing fixture's last line is non-blank, so the half-fix in
+    // #292 looked complete while the PR path was still trimming.
+    // Written to a FILE, not captured: `spawnCapture` trims, so a captured probe could never see
+    // the byte this test is about.
+    const patchFile = join(world.root, 'blank.patch')
+    await git(world.checkout, 'diff', `--output=${patchFile}`, `main..refs/heads/${world.branch}`)
+    expect(readFileSync(patchFile, 'utf8').endsWith('\n \n')).toBe(true)
+
+    // AND THE REBASE SUCCEEDS. A trimmed patch fails here with `corrupt patch at line N` and
+    // NOTHING unmerged — which is why this asserts success, not a particular error.
+    const res = await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir)
+    expect(res.rebased).toBe(true)
+    const tree = await gitOut(world.checkout, 'ls-tree', '--name-only', res.head)
+    expect(tree).toContain('docs.txt')
+    const replayed = await gitOut(world.checkout, 'show', `${res.head}:lib.txt`)
+    expect(replayed).toContain('line2-from-branch')
+    expect(existsSync(scratchDir)).toBe(false)
   }, 60_000)
 
   test('a genuine conflict is an ATTENTION state naming the path — never REQUEST_CHANGES, never auto-resolved (acceptance b)', async () => {

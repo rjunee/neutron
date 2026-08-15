@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -47,6 +47,18 @@ afterEach(() => {
 })
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+
+/** The PR-mode replay runs `sh -c 'gh pr diff <n> > "<file>"'` — the bytes go to DISK, never
+ *  through a captured string, because `spawnCapture` trims and a trim silently truncates a patch
+ *  whose last line is context for a blank line (run 63b16fb1, `corrupt patch at line 746`). The
+ *  stub therefore has to honour the redirect: returning the diff as stdout would fake a contract
+ *  the production path deliberately no longer uses. */
+const ghPrDiffTo = (joined: string, body: string): HostCommandResult => {
+  const target = joined.match(/>\s*"([^"]+)"\s*$/)?.[1]
+  if (target === undefined) throw new Error(`gh pr diff was not redirected to a file: ${joined}`)
+  writeFileSync(target, body)
+  return ok('')
+}
 
 interface Harness {
   loop: TridentTickLoop
@@ -553,7 +565,8 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(oldHead)
         if (joined.includes('gh pr list')) return ok('42')
         // The merge-base that is HONEST on a shallow checkout: the forge's, not ours.
-        if (joined.includes('gh pr diff')) return ok('diff --git a/changed.ts b/changed.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('gh pr diff'))
+          return ghPrDiffTo(joined, 'diff --git a/changed.ts b/changed.ts\n@@ -1 +1 @@\n-a\n+b\n')
         if (joined.includes('diff --name-only')) return ok('changed.ts')
         return ok()
       },
@@ -782,7 +795,8 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
         if (joined.includes('gh pr list')) return ok('42')
-        if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('gh pr diff'))
+          return ghPrDiffTo(joined, 'diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
         if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
         if (joined.includes('diff --name-only --diff-filter=U')) return ok('shared.ts\nother.ts')
         return ok()
