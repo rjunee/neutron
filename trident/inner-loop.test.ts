@@ -209,6 +209,25 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(400)}  ` }))
     expect(out?.terminal_cause?.length).toBe(300)
   })
+  // A COMMIT OID IS READ, NOT REPORTED (defect 2026-08-14). `publishHead` is the build's
+  // CLAIM, kept only so the outer publisher can CHECK it against `rev-parse`. Requiring a
+  // full 40-hex string here silently dropped an abbreviated sha, which then read downstream
+  // as "the build produced no commit" — and discarded a finished build.
+  test('decodes publishHead as a CLAIM: any 7-40 hex string survives verbatim; anything else → null', () => {
+    const full = 'abcdef0123456789abcdef0123456789abcdef01'
+    expect(parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: full }))?.publish_head).toBe(full)
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'abc1234' }))?.publish_head,
+    ).toBe('abc1234')
+    // Below the 7-char floor is not a plausible OID — no claim at all (still publishable).
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'abc123' }))?.publish_head,
+    ).toBeNull()
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'not-a-sha' }))?.publish_head,
+    ).toBeNull()
+    expect(parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES' }))?.publish_head).toBeNull()
+  })
   test('null/empty/garbage → null (still in flight)', () => {
     expect(parseInnerResult(null)).toBeNull()
     expect(parseInnerResult(undefined)).toBeNull()
@@ -246,6 +265,22 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       reflectionIntegrity: '5:87654321',
     }
     expect(buildWorkflowArgs(input(), parts).briefParts).toBe(parts)
+  })
+
+  /**
+   * The live head the launcher READ from git (never a model's report of it). The key's
+   * PRESENCE is the signal that a code-read answer exists, so it must be absent — not
+   * null — when the launcher did not read one, or the workflow could not tell an old
+   * launcher apart from an unreadable head.
+   */
+  test('the launcher-read resume head is threaded verbatim, and omitted when there is none', () => {
+    const HEAD = 'a'.repeat(40)
+    expect(buildWorkflowArgs(input({ resume_live_head: HEAD })).resumeLiveHead).toBe(HEAD)
+    expect('resumeLiveHead' in buildWorkflowArgs(input())).toBe(false)
+    // '' ("could not read") and 'absent' ("the authority says it is gone") are DIFFERENT
+    // facts with different consequences — neither may be normalised into the other.
+    expect(buildWorkflowArgs(input({ resume_live_head: '' })).resumeLiveHead).toBe('')
+    expect(buildWorkflowArgs(input({ resume_live_head: 'absent' })).resumeLiveHead).toBe('absent')
   })
 
   test('writes launcher-held strings and threads the returned manifest into the prompt', async () => {

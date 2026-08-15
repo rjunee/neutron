@@ -62,6 +62,9 @@ interface ResumeOpts {
   recordedHead?: string | null
   /** What the branch-head probe reports. Defaults to the recorded OID (unchanged). */
   currentHead?: string
+  /** The live head the LAUNCHER read from git. Supplied → the probe seat must not be
+   *  dispatched at all. Omitted → an old launcher, and the probe still runs. */
+  resumeLiveHead?: string
   findings?: unknown[] | null
   /** Synthesised verdicts, consumed one per review round. Defaults to APPROVE. */
   verdicts?: Array<'APPROVE' | 'REQUEST_CHANGES'>
@@ -155,6 +158,7 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
     runId: 'run-resume-1',
     resumeCheckpoint: opts.checkpoint ?? null,
     resumeCheckpointHead: opts.recordedHead ?? null,
+    ...(opts.resumeLiveHead !== undefined ? { resumeLiveHead: opts.resumeLiveHead } : {}),
     resumeFindings: opts.findings ?? null,
     codexHome: null,
     checkpointScript: '/repo/trident/checkpoint.sh',
@@ -494,6 +498,12 @@ describe('classifyResume — the boundaries, executed', () => {
     expect(at(null, RECORDED, RECORDED)).toEqual({ mode: 'rebuild', reason: 'no-checkpoint' })
     expect(at('forge-done', null, RECORDED)).toEqual({ mode: 'rebuild', reason: 'no-recorded-head' })
     expect(at('forge-done', RECORDED, '')).toEqual({ mode: 'rebuild', reason: 'head-unreadable' })
+    // 'absent' is a SUCCESSFUL read saying the branch is gone from the authority — a
+    // different fact from '' ("could not read"), and named as such.
+    expect(at('forge-done', RECORDED, 'absent')).toEqual({
+      mode: 'rebuild',
+      reason: 'head-branch-absent',
+    })
     expect(at('forge-done', RECORDED, MOVED)).toEqual({ mode: 'rebuild', reason: 'head-moved' })
     expect(at('who-knows', RECORDED, RECORDED)).toEqual({ mode: 'rebuild', reason: 'unknown-checkpoint' })
   })
@@ -537,5 +547,56 @@ describe('classifyResume — the boundaries, executed', () => {
     expect(fns.parseResumeRound('argus-request-changes', 8)).toBe(0)
     expect(fns.parseResumeRound(null, 8)).toBe(0)
     expect(fns.parseResumeRound('fix-round-x', 8)).toBe(0)
+  })
+})
+
+/**
+ * A GIT FACT IS READ BY CODE, NEVER RELAYED BY A MODEL (Part 2a).
+ *
+ * The live head used to come from a haiku PROBE AGENT in this file
+ * (`head-probe-round-resume`). When the launcher reads it instead — at the
+ * credentialed host boundary, with `git ls-remote`/`rev-parse` — the seat must not be
+ * dispatched at all, for ANY of the three answers it can carry.
+ */
+describe('mid-loop resume — the launcher-read head replaces the probe agent', () => {
+  const probed = (labels: string[]): boolean =>
+    labels.some((l) => l.startsWith('head-probe-round-resume'))
+
+  test('a launcher-read head that MATCHES takes the fast path with no probe agent', async () => {
+    const out = await runResume({
+      checkpoint: 'forge-done',
+      recordedHead: RECORDED,
+      resumeLiveHead: RECORDED,
+    })
+    expect(probed(out.labels)).toBe(false)
+    expect(built(out.labels)).toBe(false)
+    expect(out.labels).toContain('resume-diff')
+    expect(out.result.reviewedHead).toBe(RECORDED)
+  })
+
+  test('a launcher-read head that MOVED rebuilds, still with no probe agent', async () => {
+    const out = await runResume({
+      checkpoint: 'forge-done',
+      recordedHead: RECORDED,
+      resumeLiveHead: MOVED,
+    })
+    expect(probed(out.labels)).toBe(false)
+    expect(built(out.labels)).toBe(true)
+    expect(out.labels).not.toContain('resume-diff')
+  })
+
+  test("'absent' — the authority says the branch is gone — is a REAL read, and rebuilds", async () => {
+    const out = await runResume({
+      checkpoint: 'forge-done',
+      recordedHead: RECORDED,
+      resumeLiveHead: 'absent',
+    })
+    expect(probed(out.labels)).toBe(false)
+    expect(built(out.labels)).toBe(true)
+  })
+
+  test('a launcher that predates the arg still probes — the fallback is pinned', async () => {
+    const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED })
+    expect(out.labels).toContain('head-probe-round-resume')
   })
 })

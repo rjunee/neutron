@@ -125,6 +125,18 @@ const {
   // thread it) → the prior work is treated as being about DIFFERENT code and the
   // run rebuilds + re-reviews, exactly as it did before this existed.
   resumeCheckpointHead = null,
+  // MID-LOOP RESUME — the LIVE head of `branch`, READ IN CODE by the launcher at fire
+  // time (`resolveResumeLiveHead` in orchestrator.ts) at the credentialed host
+  // boundary, rather than reported by a probe AGENT. Tri-state, and the three values
+  // are NOT interchangeable:
+  //   - a full 40-hex OID → the authority's answer for the branch head.
+  //   - 'absent'          → the authority answered SUCCESSFULLY that the branch does
+  //                         not exist; the recorded work is gone from it → rebuild.
+  //   - ''                → the launcher tried and COULD NOT READ it. Exclusively
+  //                         "could not tell", never "not there".
+  // Null/absent (an OLD LAUNCHER, or not a resume with a recorded head) → fall back to
+  // the `head-probe-round-resume` agent seat, exactly as this ran before.
+  resumeLiveHead = null,
   // MID-LOOP RESUME — the synthesised findings the resumed `argus-request-changes`
   // checkpoint was recorded with (`code_trident_runs.inner_checkpoint_findings`,
   // already decoded to an array by the launcher). They are what a resumed fix
@@ -2042,6 +2054,18 @@ function normalizeOid(value) {
   return FULL_OID.test(s) ? s : ''
 }
 
+/** A plausible OID CLAIM from the build agent (7–40 hex, either case), trimmed —
+ *  else null. The outer publisher resolves the REAL head with `rev-parse --verify`
+ *  on the branch this workflow NAMES; this value is only a cross-check there, so an
+ *  abbreviated sha is carried verbatim and a missing one is NOT an error — a thrown
+ *  handoff here is how run 3d2696c3 discarded a finished, committed build
+ *  (defect 2026-08-14). Mirrors the `publish_head` decode in inner-loop.ts. */
+const OID_CLAIM = /^[0-9a-fA-F]{7,40}$/
+function oidClaim(value) {
+  const s = typeof value === 'string' ? value.trim() : ''
+  return OID_CLAIM.test(s) ? s : null
+}
+
 /**
  * WHAT A RESUMED CHECKPOINT MAY UNLOCK — decided from the COMMIT it was recorded
  * against, never from its name.
@@ -2089,6 +2113,12 @@ function classifyResume(input) {
   if (name === 'pr-merged') return { mode: 'merged', reason: 'already-merged' }
   const recorded = normalizeOid(input.recordedHead)
   if (recorded.length === 0) return { mode: 'rebuild', reason: 'no-recorded-head' }
+  // The launcher's tri-state: a branch the AUTHORITY says does not exist is a real
+  // READ, not a failed one — the recorded work is gone from the authority, so a
+  // rebuild is correct here and can be named truthfully. Checked BEFORE normalizeOid,
+  // which would flatten this to '' — and '' is reserved exclusively for "could not
+  // read the head", the case Part 2b of this card gives a bounded-STOP consequence.
+  if (input.currentHead === 'absent') return { mode: 'rebuild', reason: 'head-branch-absent' }
   const current = normalizeOid(input.currentHead)
   if (current.length === 0) return { mode: 'rebuild', reason: 'head-unreadable' }
   if (current !== recorded) return { mode: 'rebuild', reason: 'head-moved' }
@@ -3552,8 +3582,18 @@ try {
   // The head probe is skipped entirely when there is no recorded OID to compare
   // it against — with nothing to compare, the answer is 'rebuild' whatever the
   // branch head says, and the probe would only cost an agent.
+  //
+  // AND it is skipped when the LAUNCHER already read the head from git. Whenever
+  // `resumeLiveHead` is a string — INCLUDING '' and 'absent' — the
+  // `head-probe-round-resume` agent seat is NOT dispatched: a git fact is read at the
+  // credentialed boundary, not relayed by a model. The probe survives only as the
+  // fallback for launchers that predate this arg. No normalisation happens here
+  // ('absent' is passed through verbatim); `classifyResume` owns interpretation.
+  const launcherLiveHead = typeof resumeLiveHead === 'string' ? resumeLiveHead.trim() : null
   const currentHeadAtResume =
-    resumeCheckpoint !== null && recordedResumeHead.length > 0 ? await readBranchHead('resume') : ''
+    resumeCheckpoint !== null && recordedResumeHead.length > 0
+      ? (launcherLiveHead !== null ? launcherLiveHead : await readBranchHead('resume'))
+      : ''
   const resumePlan = classifyResume({
     checkpoint: resumeCheckpoint,
     recordedHead: recordedResumeHead,
@@ -3564,7 +3604,7 @@ try {
   let resumeMode = resumePlan.mode
   if (resumeCheckpoint !== null) {
     log(
-      `trident-v2 resume: checkpoint=${resumeCheckpoint} recorded=${recordedResumeHead || '(none)'} head=${currentHeadAtResume || '(unread)'} → ${resumeMode} (${resumePlan.reason})`,
+      `trident-v2 resume: checkpoint=${resumeCheckpoint} recorded=${recordedResumeHead || '(none)'} head=${currentHeadAtResume || '(unread)'} src=${launcherLiveHead !== null ? 'launcher' : 'probe'} → ${resumeMode} (${resumePlan.reason})`,
     )
   }
 
@@ -3761,8 +3801,12 @@ ${task}${reflectionGuidance}`,
     // code on the branch.
     await checkpoint('forge-done', { pr, head: branchHead })
     if (isPr) {
-      if (!FULL_OID.test(branchHead)) throw new Error('forge:build completed without a full local commit OID for the outer publisher')
-      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: branchHead, remainingTasks: ralphRemaining }
+      // NO THROW ON SHA SHAPE. What this handoff actually carries is the BRANCH
+      // NAME (`branch: forgeBranch`) — a value no model can plausibly mangle —
+      // which the outer publisher `rev-parse --verify`s to get the real head.
+      // `publishHead` is a best-effort CROSS-CHECK only, so a missing or
+      // abbreviated claim must never discard a build that is already committed.
+      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: oidClaim(branchHead), remainingTasks: ralphRemaining }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -3902,8 +3946,9 @@ ${task}${reflectionGuidance}`,
       head: typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : '',
     })
     if (isPr) {
-      const publishHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-      if (!FULL_OID.test(publishHead)) throw new Error(`forge:fix-round-${round} completed without a full local commit OID for the outer publisher`)
+      // Best-effort claim, same as the build handoff: the branch name is the
+      // handoff, `publishHead` is only a cross-check for the publisher.
+      const publishHead = oidClaim(fix?.commitSha)
       const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead, remainingTasks: ralphRemaining }
       await writeTerminalResult(publishResult)
       return publishResult
