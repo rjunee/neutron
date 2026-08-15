@@ -67,6 +67,7 @@ newline; the sensitivity check therefore uses mutations that move a real byte. U
 one-character head-slice shift and under a one-character tail edit, both new tests go
 RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
 gap this task existed to close.
+
 ## 2026-08-15 — a pr-mode build rebases onto observed main before review
 
 `trident/orchestrator.ts` `publishBuiltCommit` now rebases the built branch onto
@@ -105,6 +106,32 @@ proves a conflicting seed throws the attention error naming the path without
 moving the ref, and proves a third-party advance makes the pinned lease push
 refuse against a real remote.
 
+## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
+
+`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
+build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
+>30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
+the host-held part files into a temp dir, the real workflow composes the forge:build
+prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
+by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
+then concatenated in the listed order and measured against the prompt's
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
+recomputes before it spends a token. Chained with the by-path suite in
+`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
+reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
+agent retyping anywhere in the path. Test-only; no production file changed.
+
+Two findings from building it. First, the chunk blocks may NOT have their paths
+rewritten wholesale: the coda forming the `.a2` segment names
+`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
+bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
+the assembled brief is asserted to mention neither segment path. Second, dropping the
+trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
+`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
+newline; the sensitivity check therefore uses mutations that move a real byte. Under a
+one-character head-slice shift and under a one-character tail edit, both new tests go
+RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
+gap this task existed to close.
 ## 2026-08-14 — review-round readiness is checked before reviewer spend
 
 `trident/inner-workflow.mjs` now refuses to dispatch a review panel when GitHub
