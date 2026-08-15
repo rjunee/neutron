@@ -211,6 +211,16 @@ export interface InnerResult {
    * of truth for an OID. `null` = no plausible claim arrived — still publishable.
    */
   publish_head?: string | null
+  /**
+   * Forge reported that it MATERIALLY deviated from the Ralph exec spec it was given,
+   * so the IMPLEMENTATION_PLAN.md it committed may no longer describe the code. In pr
+   * mode the orchestrator suffixes the `outer-published:` checkpoint with `:deviated`,
+   * the resumed invocation writes the `ralph-task-built-deviated` checkpoint variant,
+   * and the NEXT iteration pays for the full `plan:fable` survey instead of the cheap
+   * continuation planner. The EXACT boolean only — absent/garbled → false, because a
+   * false positive here costs ~5 minutes of re-planning per iteration.
+   */
+  deviated_from_spec: boolean
 }
 
 /** The terminal outcome of FIRING the workflow (NOT the build result). */
@@ -343,6 +353,12 @@ export function buildWorkflowArgs(
     slug: run.slug,
     maxRounds: input.max_rounds,
     ralph: run.ralph,
+    // WHICH Ralph iteration this is (0 on the first, bumped per re-fire). The
+    // workflow gates its cheap `plan:next` continuation planner on it, along with
+    // the every-Kth full re-plan cadence; a missing value reads there as "always
+    // run the full planner", so a launcher that does not thread it is slower,
+    // never wrong.
+    ralphRound: run.ralph_round,
     // Thread the run's git-mode so the workflow's Forge prompt matches it: a
     // `local` run (no GitHub origin / no `gh`) must NOT be told to push to
     // origin + `gh pr create` (that would fail Forge); it commits on the branch
@@ -546,6 +562,10 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // workflow writes, and this flag SKIPS the merge — so an accidental true would
     // silently strand an unmerged PR as "done".
     pr_merged: p.prMerged === true,
+    // Same exact-boolean rule, for the same reason in the opposite direction: a
+    // truthy stand-in read as a deviation forces the next Ralph iteration back onto
+    // the whole-repo survey this card exists to stop paying for.
+    deviated_from_spec: p.deviatedFromSpec === true,
     publish_requested: p.publishRequested === true,
     // A CLAIM, NOT THE SOURCE. Anything that could plausibly be an OID — 7 to 40 hex
     // chars, either case — is kept VERBATIM for the outer publisher to CHECK against

@@ -961,7 +961,7 @@ export function buildTridentOrchestrator(
     // `outer-published:<oid>:r:t` capture takes precedence over the checkpoint column.
     const published =
       typeof resume_checkpoint === 'string'
-        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
+        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)(:deviated)?$/)
         : null
     const recorded = (published?.[1] ?? resume_checkpoint_head ?? '').trim().toLowerCase()
     // Only read when the answer can change a decision: no checkpoint, no recorded OID
@@ -1220,7 +1220,13 @@ export function buildTridentOrchestrator(
         // The handoff is the BRANCH NAME; a relayed sha is only a check. A build that
         // reported no OID is still published — `publishBuiltCommit` reads the head from git.
         const published = await publishBuiltCommit(run, result.publish_head ?? null)
-        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}`
+        // FORMAT OWNED IN LOCKSTEP by this builder and three readers — the
+        // resume-launch regex below, `inner-workflow.mjs`'s resume parse, and its
+        // `classifyResume`. The optional `:deviated` suffix carries the previous
+        // Forge's deviation across the process boundary so the resumed invocation
+        // writes the `ralph-task-built-deviated` checkpoint and the NEXT iteration
+        // full-plans; without it the string is byte-identical to the old format.
+        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}${result.deviated_from_spec ? ':deviated' : ''}`
         const resetPatch: TridentRunUpdate = {
           inner_result: null,
           subagent_run_id: null,

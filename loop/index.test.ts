@@ -271,6 +271,87 @@ describe('SupervisedLoop', () => {
   })
 })
 
+describe('SupervisedLoop.wake', () => {
+  /** Let queued microtasks + fire-and-forget re-runs settle. */
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0))
+  }
+
+  test('wake() before start() runs nothing', async () => {
+    let ran = 0
+    const loop = manualLoop({ tick: async () => void ran++ })
+    loop.wake() // never started — no tick may run before start()
+    await flush()
+    expect(ran).toBe(0)
+    expect(loop.stats().ticks).toBe(0)
+  })
+
+  test('wake() while idle fires exactly one supervised tick', async () => {
+    let ran = 0
+    const loop = manualLoop({ tick: async () => void ran++ })
+    loop.start()
+    loop.wake()
+    await flush()
+    expect(ran).toBe(1)
+    expect(loop.stats().ticks).toBe(1)
+    expect(loop.stats().skipped).toBe(0)
+    await loop.stop()
+  })
+
+  test('wake() mid-tick is not lost and coalesces: exactly one re-run after settle', async () => {
+    const gates = [deferred(), deferred()]
+    let calls = 0
+    const loop = manualLoop({ tick: () => gates[calls++]!.promise })
+    loop.start()
+    const t1 = loop.runOnce() // in-flight, blocked on gates[0]
+    // Two wakes land mid-flight — they coalesce into ONE re-run, and neither
+    // goes through the single-flight SKIP path.
+    loop.wake()
+    loop.wake()
+    gates[0]!.resolve()
+    await t1
+    await flush()
+    expect(calls).toBe(2)
+    gates[1]!.resolve()
+    await flush()
+    expect(calls).toBe(2)
+    expect(loop.stats().ticks).toBe(2)
+    expect(loop.stats().skipped).toBe(0)
+    await loop.stop()
+  })
+
+  test('wake() after stop() runs nothing', async () => {
+    let ran = 0
+    const loop = manualLoop({ tick: async () => void ran++ })
+    loop.start()
+    await loop.stop()
+    loop.wake()
+    await flush()
+    expect(ran).toBe(0)
+  })
+
+  test('stop() during an in-flight tick drops a pending wake', async () => {
+    const gate = deferred()
+    let calls = 0
+    const loop = manualLoop({
+      tick: async () => {
+        calls++
+        await gate.promise
+      },
+    })
+    loop.start()
+    const t1 = loop.runOnce()
+    loop.wake() // pending — the tick is in flight
+    const stopping = loop.stop() // clears `started`, awaits the in-flight tick
+    gate.resolve()
+    await stopping
+    await t1
+    await flush()
+    expect(calls).toBe(1) // the pending wake was dropped by stop()
+    expect(loop.stats().ticks).toBe(1)
+  })
+})
+
 describe('guardedFire', () => {
   test('resolves true on success', async () => {
     expect(await guardedFire('x', () => Promise.resolve(1))).toBe(true)

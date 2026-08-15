@@ -188,6 +188,13 @@ export class SupervisedLoop {
   private running = false
   private inflight: Promise<void> | null = null
   /**
+   * Set by a `wake()` that lands while a tick is IN FLIGHT; consumed (cleared +
+   * one re-fire) when that tick settles. A flag, not a counter: N mid-flight
+   * wakes coalesce into ONE re-run — the re-run observes all the state those
+   * wakes were signalling.
+   */
+  private pendingWake = false
+  /**
    * Marks the async context of the currently-executing tick. `stop()` reads it
    * to detect a SELF-STOP — a tick that calls `loop.stop()` on its own loop.
    * Without this, `stop()` would `await this.inflight` (the very tick that is
@@ -308,7 +315,34 @@ export class SupervisedLoop {
         }
       }
     }
+    // Consume a wake that landed while this tick was in flight: re-fire exactly
+    // once (fire-and-forget, still supervised + single-flighted). Checked AFTER
+    // `started` so a stop() issued during the tick (external or self-stop) drops
+    // the pending wake — no tick may outlive stop().
+    if (this.pendingWake) {
+      this.pendingWake = false
+      if (this.started) void this.runOnce()
+    }
     return { ran: ok, skipped: false }
+  }
+
+  /**
+   * Fire one tick NOW, out of band, without touching the interval (the periodic
+   * backstop stays armed; wake is an accelerator, not a replacement). Idle →
+   * an immediate supervised `runOnce()`. If a tick is already in flight, a
+   * plain `runOnce()` would be single-flight-SKIPPED and the change that
+   * triggered the wake would wait a full interval — so instead set
+   * `pendingWake`, which the in-flight tick consumes on settle by re-firing
+   * exactly once. Dropped when the loop is not started: no tick may run before
+   * `start()` or after `stop()`.
+   */
+  wake(): void {
+    if (!this.started) return
+    if (this.running) {
+      this.pendingWake = true
+      return
+    }
+    void this.runOnce()
   }
 
   /**

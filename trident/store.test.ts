@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { COLS, TridentRunStore } from './store.ts'
+import { changeSignatureEntries, COLS, TridentRunStore } from './store.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -695,5 +695,103 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
     })
 
     expect(store.get(run.id)).toEqual(run)
+  })
+
+  /**
+   * `changeSignature()` is the wake-on-change watcher's ENTIRE detector: one query,
+   * one `<stamp>\t<id>` line per non-terminal run, compared against the last
+   * observation. Anything it cannot see waits out the 90 s backstop — which is the
+   * latency the watcher exists to remove — so the cases below are about what MOVES
+   * it, not about the string it happens to produce.
+   */
+  describe('changeSignature', () => {
+    /** Write `last_advanced_at` directly: the point is the shape a foreign writer
+     *  (trident/checkpoint.sh) puts in the column, which `update()` cannot express. */
+    const stamp = (id: string, at: string): void => {
+      db.raw().run(`UPDATE code_trident_runs SET last_advanced_at = ? WHERE id = ?`, [at, id])
+    }
+
+    test('a LATER millisecond stamp on one run is not masked by a whole-second stamp on another', async () => {
+      // THE MIXED-PRECISION BUG, which needs TWO runs to show itself because the
+      // first shape of this signature took MAX ACROSS the active set. `store.now()`
+      // writes `…T03:15:45.900Z`; checkpoint.sh writes `…T03:15:45Z`. SQLite compares
+      // them as TEXT and 'Z' (0x5A) sorts ABOVE '.' (0x2E), so run A's whole-second
+      // stamp read as GREATER than run B's later millisecond one: the raw MAX never
+      // moved, the watcher saw no change, and B's advance waited out the 90 s
+      // backstop. Per-run equality has no ordering in it at all, so the case is now
+      // structurally impossible — kept as the regression guard for the class.
+      const store = new TridentRunStore(db)
+      const a = await store.create({ slug: 'cs1a', project_slug: 't1', repo_path: '/r', task: 't' })
+      const b = await store.create({ slug: 'cs1b', project_slug: 't1', repo_path: '/r', task: 't' })
+
+      // A checkpointed at :45 (whole seconds); B is behind it.
+      stamp(a.id, '2026-08-15T03:15:45Z')
+      stamp(b.id, '2026-08-15T03:15:44.100Z')
+      const before = store.changeSignature()
+
+      // B then advances at :45.900 — LATER than A's stamp by 900 ms.
+      stamp(b.id, '2026-08-15T03:15:45.900Z')
+
+      expect(store.changeSignature()).not.toBe(before)
+    })
+
+    test('the count moves when a run is created and when one leaves the active set', async () => {
+      const store = new TridentRunStore(db)
+      const empty = store.changeSignature()
+      const run = await store.create({ slug: 'cs2', project_slug: 't1', repo_path: '/r', task: 't' })
+      const one = store.changeSignature()
+      expect(one).not.toBe(empty)
+
+      // A terminal run is not in the watched set at all, so its transition is itself
+      // a change — the sweep needs to fire to drop it from the live rail.
+      await store.save({ ...run, phase: 'done' })
+      expect(store.changeSignature()).not.toBe(one)
+    })
+
+    test('an unchanged active set produces the SAME signature every call', async () => {
+      // The other half of the contract: the detector must be quiet when nothing
+      // happens, or it is just a 2 s tick loop wearing a disguise.
+      const store = new TridentRunStore(db)
+      await store.create({ slug: 'cs3', project_slug: 't1', repo_path: '/r', task: 't' })
+      const a = store.changeSignature()
+      expect(store.changeSignature()).toBe(a)
+      expect(store.changeSignature()).toBe(a)
+    })
+
+    test('a re-stamp that does NOT move the newest stamp is still a change', async () => {
+      // WHY THE DETECTOR IS PER-RUN (Argus r2). A checkpoint on run B while run A
+      // already holds a later stamp moves neither COUNT nor MAX — the aggregate
+      // signature was identical before and after, so the sweep's settle could not
+      // tell that checkpoint apart from its own writes and the handoff fell back to
+      // the 90 s backstop. Under the sweep's own timing (it stamps the run it
+      // advanced LAST, after seconds of git/gh work) this is the ordinary case, not
+      // a contrived one.
+      const store = new TridentRunStore(db)
+      const a = await store.create({ slug: 'cs4a', project_slug: 't1', repo_path: '/r', task: 't' })
+      const b = await store.create({ slug: 'cs4b', project_slug: 't1', repo_path: '/r', task: 't' })
+      stamp(a.id, '2026-08-15T03:15:50.000Z') // A is the newest — MAX is pinned here
+      stamp(b.id, '2026-08-15T03:15:40.000Z')
+      const before = store.changeSignature()
+
+      stamp(b.id, '2026-08-15T03:15:45.000Z') // B advances, still behind A
+      expect(store.changeSignature()).not.toBe(before)
+    })
+
+    test('changeSignatureEntries reads the signature back as run id → stamp', async () => {
+      // The settle's ONE structural dependency on the format: it must be able to ask
+      // WHICH run moved, not just whether something did.
+      const store = new TridentRunStore(db)
+      const a = await store.create({ slug: 'cs5a', project_slug: 't1', repo_path: '/r', task: 't' })
+      const b = await store.create({ slug: 'cs5b', project_slug: 't1', repo_path: '/r', task: 't' })
+      stamp(a.id, '2026-08-15T03:15:50.000Z')
+      stamp(b.id, '2026-08-15T03:15:40Z') // checkpoint.sh's whole-second shape
+
+      const entries = changeSignatureEntries(store.changeSignature())
+      expect(entries.size).toBe(2)
+      expect(entries.get(a.id)).toBe('2026-08-15T03:15:50.000Z')
+      expect(entries.get(b.id)).toBe('2026-08-15T03:15:40Z')
+      // The empty active set is the empty signature, and reads back as no entries.
+      expect(changeSignatureEntries('').size).toBe(0)
+    })
   })
 })

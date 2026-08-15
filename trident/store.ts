@@ -281,6 +281,27 @@ const INSERT_PLACEHOLDERS = COLS.split(', ')
 /** Phases the tick driver never loads — see `state-machine.ts`. */
 const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
 
+/**
+ * Split a {@link TridentRunStore.changeSignature} into `run id → last_advanced_at`.
+ *
+ * The watcher only ever needs string equality on the whole signature; this is for
+ * the ONE caller that needs to know WHICH run moved — `tick.ts`'s settle, which
+ * must tell its own sweep writes apart from an out-of-process checkpoint that
+ * landed during the same sweep. The separator is a TAB, which neither an ISO
+ * timestamp nor a run id can contain, so the split is unambiguous; a line without
+ * one is skipped rather than guessed at.
+ */
+export function changeSignatureEntries(signature: string): Map<string, string> {
+  const entries = new Map<string, string>()
+  if (signature === '') return entries
+  for (const line of signature.split('\n')) {
+    const cut = line.indexOf('\t')
+    if (cut < 0) continue
+    entries.set(line.slice(cut + 1), line.slice(0, cut))
+  }
+  return entries
+}
+
 export class TridentRunStore {
   constructor(
     private readonly db: ProjectDb,
@@ -452,6 +473,50 @@ export class TridentRunStore {
       )
       .all(limit)
       .map(rowToRun)
+  }
+
+  /**
+   * A signature of "did anything a tick would care about change?" — the
+   * wake-on-change watcher's ONE query, and the thing the sweep's own settle
+   * compares against. One `<last_advanced_at>\t<id>` line per NON-TERMINAL run,
+   * ordered by id; the empty active set is the empty string. No git, no gh, no
+   * joins — a single indexed scan of the live set, safe to run every ~2 s.
+   *
+   * PER-RUN, NOT AGGREGATE, AND THAT IS THE WHOLE POINT (Argus r2, confirmed by two
+   * independent repros). The first shape of this was `COUNT(*)|MAX(last_advanced_at)`,
+   * which cannot distinguish "the sweep re-stamped the run it advanced" from "an
+   * out-of-process checkpoint landed while the sweep was reading" — MAX moves the
+   * same way for both, so the tick could only choose between absorbing its own
+   * writes (and swallowing the external checkpoint, which then waited out the 90 s
+   * backstop — the exact latency this card removes) and not absorbing them (and
+   * re-firing a full 50-run git/gh sweep on every 2 s cadence). Per-run stamps make
+   * that a decidable question: {@link changeSignatureEntries} + the sweep's record
+   * of what IT wrote (`tick.ts`) tells the two apart exactly, with no window in
+   * which a wake is lost.
+   *
+   * MIXED-PRECISION STAMPS NEED NO NORMALISATION HERE. `store.now()` writes
+   * milliseconds (`…T03:15:45.900Z`) and `trident/checkpoint.sh` whole seconds
+   * (`…T03:15:45Z`); the old MAX compared them as TEXT, where 'Z' (0x5A) sorts above
+   * '.' (0x2E) and a whole-second stamp could mask a LATER millisecond one on
+   * another run. Comparison here is per-run EQUALITY, so any re-stamp in any shape
+   * — earlier, later, same second — is a difference. Ordering never enters into it.
+   *
+   * Unbounded on purpose: the row set is the LIVE runs (terminal rows are excluded
+   * by the same predicate `listNonTerminal` uses), and a cap would create a blind
+   * window in which a checkpoint is invisible to the detector — the failure mode
+   * this method exists to prevent. Tens of rows in practice; the sweep it gates
+   * does per-run git/gh work on up to 50 of them.
+   */
+  changeSignature(): string {
+    const rows = this.db
+      .prepare<{ id: string; at: string }, []>(
+        `SELECT id AS id, COALESCE(last_advanced_at, '') AS at
+           FROM code_trident_runs
+          WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
+          ORDER BY id`,
+      )
+      .all()
+    return rows.map((r) => `${r.at}\t${r.id}`).join('\n')
   }
 
   /** Durably latch one dead launcher generation and crash only its workflows. */

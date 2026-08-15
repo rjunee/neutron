@@ -136,6 +136,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: 'argus-approved',
       remaining_tasks: 0,
       pr_merged: false,
+      deviated_from_spec: false,
       publish_requested: false,
       publish_head: null,
       block_kind: null,
@@ -160,6 +161,28 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', prMerged: false }))?.pr_merged).toBe(
       false,
     )
+  })
+  // The deviation flag decides whether the NEXT Ralph iteration pays for the full
+  // whole-repo survey (~287 s) or takes the cheap `plan:next` continuation. It is
+  // fail-closed in the direction that costs money, not correctness: a truthy
+  // stand-in read as `true` would re-plan from scratch every iteration forever,
+  // silently undoing the saving this card exists for.
+  test('decodes deviatedFromSpec; absent or any non-boolean → false', () => {
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', deviatedFromSpec: true }))
+        ?.deviated_from_spec,
+    ).toBe(true)
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.deviated_from_spec).toBe(false)
+    for (const bogus of ['true', 1, 'yes', {}, [], null]) {
+      expect(
+        parseInnerResult(JSON.stringify({ verdict: 'APPROVE', deviatedFromSpec: bogus }))
+          ?.deviated_from_spec,
+      ).toBe(false)
+    }
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'APPROVE', deviatedFromSpec: false }))
+        ?.deviated_from_spec,
+    ).toBe(false)
   })
   test('decodes remainingTasks (the #362 Ralph re-fire signal); absent → null', () => {
     const withRemaining = parseInnerResult(
@@ -246,6 +269,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: null,
       remaining_tasks: null,
       pr_merged: false,
+      deviated_from_spec: false,
       publish_requested: false,
       publish_head: null,
       block_kind: null,
@@ -265,6 +289,17 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       reflectionIntegrity: '5:87654321',
     }
     expect(buildWorkflowArgs(input(), parts).briefParts).toBe(parts)
+  })
+
+  /**
+   * The durable re-fire counter. The workflow gates its cheap `plan:next`
+   * continuation planner (and the every-Kth full re-plan) on it, so a launcher that
+   * dropped it would silently pay the full whole-repo survey on every Ralph task —
+   * exactly the waste that planner exists to remove, and invisible from either side.
+   */
+  test('the Ralph round counter is threaded from the run row', () => {
+    expect(buildWorkflowArgs(input()).ralphRound).toBe(0)
+    expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
   })
 
   /**

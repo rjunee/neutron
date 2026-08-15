@@ -174,6 +174,17 @@ export interface MiscCompositionInput {
      * fans live to any open socket). Absent → the module falls back to the router.
      */
     delivery_sink?: import('@neutronai/trident/delivery.ts').OutboundSink
+    /**
+     * Wake-on-change watcher cadence, in ms (`TridentTickOptions.watch_interval_ms`;
+     * default 2_000, `<= 0` disables it). The watcher runs ONE cheap
+     * `changeSignature()` query per cadence and wakes the 90 s sweep only when a run
+     * actually advanced, so an out-of-process checkpoint is picked up in seconds.
+     *
+     * Plumbed here because "2 s default, CONFIGURABLE" is only true if a production
+     * composition can set it (Argus r3): a knob that exists on the options type and
+     * nowhere on the wiring is a knob no operator has. Absent → the 2 s default.
+     */
+    watch_interval_ms?: number
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
