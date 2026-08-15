@@ -528,3 +528,124 @@ describe('TridentTickLoop.wake', () => {
     await loop.stop() // safe pre-start
   })
 })
+
+describe('TridentTickLoop — change watcher (wake-on-change)', () => {
+  /** Poll until `done()` or the bound elapses (the wake path is fire-and-forget). */
+  async function waitFor(done: () => boolean, budgetMs = 2_000): Promise<void> {
+    const deadline = Date.now() + budgetMs
+    while (!done() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
+  }
+
+  /** Every tick-body execution is observable as a `stepped` entry. */
+  function recordingStep(stepped: string[]) {
+    return async (run: TridentRun): Promise<AdvanceOutcome> => {
+      stepped.push(run.id)
+      return { run, changed: false, waiting: true, note: 'waiting' }
+    }
+  }
+
+  test('an out-of-band checkpoint bump causes a full tick within one watcher cadence', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cw1', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+
+    // The 90 s-class backstop can NEVER fire in-test, so any tick observed
+    // here came from the watcher's wake().
+    const loop = new TridentTickLoop({
+      store,
+      step: recordingStep(stepped),
+      tick_interval_ms: 600_000,
+      watch_interval_ms: 25,
+    })
+    loop.start()
+    // Several cadences: the FIRST observation has definitely been recorded.
+    await new Promise((r) => setTimeout(r, 150))
+    expect(stepped.length).toBe(0) // the boot observation never wakes
+
+    // Simulate checkpoint.sh: `update` re-stamps `last_advanced_at`, exactly
+    // what the shell UPDATE does.
+    await store.update(run.id, { inner_checkpoint: 'building' })
+
+    await waitFor(() => stepped.length >= 1)
+    expect(stepped[0]).toBe(run.id)
+    await loop.stop()
+  })
+
+  test('a quiet interval fires zero extra tick bodies', async () => {
+    const store = new TridentRunStore(db)
+    await store.create({ slug: 'cw2', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+
+    const loop = new TridentTickLoop({
+      store,
+      step: recordingStep(stepped),
+      tick_interval_ms: 600_000,
+      watch_interval_ms: 25,
+    })
+    loop.start()
+    await new Promise((r) => setTimeout(r, 300)) // ~12 cadences
+    expect(stepped.length).toBe(0) // a detector, not a faster sweep
+    await loop.stop()
+  })
+
+  test('a throwing changeSignature never stops the interval backstop', async () => {
+    class ThrowingStore extends TridentRunStore {
+      changeSignature(): string {
+        throw new Error('database is locked')
+      }
+    }
+    const store = new ThrowingStore(db)
+    await store.create({ slug: 'cw3', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+
+    const loop = new TridentTickLoop({
+      store,
+      step: recordingStep(stepped),
+      tick_interval_ms: 50,
+      watch_interval_ms: 10,
+    })
+    loop.start()
+    // The interval backstop still ticks while the watcher throws every 10 ms.
+    await waitFor(() => stepped.length >= 1)
+    expect(stepped.length).toBeGreaterThanOrEqual(1)
+    await loop.stop() // stop still quiesces a failing watcher
+  })
+
+  test('stop() quiesces the watcher — no wake after shutdown', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cw4', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+
+    const loop = new TridentTickLoop({
+      store,
+      step: recordingStep(stepped),
+      tick_interval_ms: 600_000,
+      watch_interval_ms: 25,
+    })
+    loop.start()
+    await new Promise((r) => setTimeout(r, 100))
+    await loop.stop()
+
+    await store.update(run.id, { inner_checkpoint: 'reviewing' })
+    await new Promise((r) => setTimeout(r, 150))
+    expect(stepped.length).toBe(0)
+  })
+
+  test('watch_interval_ms: 0 disables the watcher', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cw5', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+
+    const loop = new TridentTickLoop({
+      store,
+      step: recordingStep(stepped),
+      tick_interval_ms: 600_000,
+      watch_interval_ms: 0,
+    })
+    loop.start()
+    await store.update(run.id, { inner_checkpoint: 'building' })
+    await new Promise((r) => setTimeout(r, 150))
+    expect(stepped.length).toBe(0)
+    await loop.stop()
+  })
+})

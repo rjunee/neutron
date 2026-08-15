@@ -454,6 +454,25 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /**
+   * A compact signature of "did anything a tick would care about change?" —
+   * the wake-on-change watcher's ONE query. COUNT covers run creation and a
+   * run leaving the active set (terminal transition); MAX(last_advanced_at)
+   * covers every checkpoint/advance re-stamp (checkpoint.sh and the store
+   * both bump it). Deliberately cheap: no ORDER BY, no row materialisation,
+   * no git/gh — safe to run every ~2 s.
+   */
+  changeSignature(): string {
+    const row = this.db
+      .prepare<{ n: number; m: string }, []>(
+        `SELECT COUNT(*) AS n, COALESCE(MAX(last_advanced_at), '') AS m
+           FROM code_trident_runs
+          WHERE phase NOT IN ${TERMINAL_PHASE_SQL}`,
+      )
+      .get()
+    return row === null ? '0|' : `${row.n}|${row.m}`
+  }
+
   /** Durably latch one dead launcher generation and crash only its workflows. */
   async crashRunningByLauncher(session_key: string, failure_reason: string): Promise<void> {
     await this.db.transaction((tx) => {

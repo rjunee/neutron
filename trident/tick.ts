@@ -17,7 +17,11 @@
  *     each run up exactly where it left off (the in-flight sub-agent's
  *     id + status are persisted on the row, not in memory).
  *
- * Default interval is 90 s — matches the skill's ScheduleWakeup cadence.
+ * Default interval is 90 s — matches the skill's ScheduleWakeup cadence. A
+ * second, much cheaper internal loop ('trident-watch', 2 s) polls one
+ * `changeSignature()` query and `wake()`s the sweep only when a run actually
+ * advanced, so an out-of-process checkpoint is picked up in seconds; the 90 s
+ * interval stays armed unchanged as the backstop.
  */
 
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
@@ -139,6 +143,18 @@ export interface TridentTickOptions {
   step?: TridentStepFn
   /** Default 90 s — matches the skill's ScheduleWakeup cadence. */
   tick_interval_ms?: number
+  /**
+   * Wake-on-change watcher cadence (Part 2 of the wall-clock card). Every
+   * `watch_interval_ms` the loop runs ONE cheap store query
+   * (`changeSignature()`) and fires `wake()` on the main loop ONLY when the
+   * signature differs from the last observation — so an out-of-process
+   * checkpoint (checkpoint.sh stamping `last_advanced_at`) triggers a full
+   * tick within seconds instead of waiting out the 90 s interval. The 90 s
+   * interval stays armed unchanged as the backstop: if the watcher fails or
+   * is disabled, behaviour is exactly today's. `<= 0` disables the watcher.
+   * Default 2_000.
+   */
+  watch_interval_ms?: number
   /** Per-tick max runs to advance. Default 50. */
   per_tick_limit?: number
   /**
@@ -177,6 +193,10 @@ export class TridentTickLoop {
   private readonly lastSig = new Map<string, string>()
   /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
   private readonly loop: SupervisedLoop
+  /** null when disabled (`watch_interval_ms <= 0`). */
+  private readonly watchLoop: SupervisedLoop | null
+  /** Last observed change signature; null = nothing observed yet (first observation records, never wakes). */
+  private lastChangeSig: string | null = null
   private advancedCount = 0
   private deliveredCount = 0
   private transitionCount = 0
@@ -201,11 +221,27 @@ export class TridentTickLoop {
       intervalMs: this.interval_ms,
       tick: () => this.tickBody(),
     })
+    const watchIntervalMs = options.watch_interval_ms ?? 2_000
+    this.watchLoop =
+      watchIntervalMs <= 0
+        ? null
+        : new SupervisedLoop({
+            name: 'trident-watch',
+            intervalMs: watchIntervalMs,
+            tick: async () => this.watchBody(),
+            onError: (name, err) => {
+              log.error('watch_failed', {
+                loop: name,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
+            },
+          })
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
   start(): void {
     this.loop.start()
+    this.watchLoop?.start()
   }
 
   /**
@@ -227,6 +263,7 @@ export class TridentTickLoop {
   /** Stop + quiesce: awaits the in-flight tick so the composer can
    *  `await loop.stop()` (then `drain()`) before `db.close()`. */
   async stop(): Promise<void> {
+    if (this.watchLoop !== null) await this.watchLoop.stop()
     await this.loop.stop()
   }
 
@@ -244,6 +281,21 @@ export class TridentTickLoop {
     const { skipped } = await this.loop.runOnce()
     if (skipped) return { advanced: 0, skipped_due_to_overlap: true }
     return { advanced: this.advancedCount - before, skipped_due_to_overlap: false }
+  }
+
+  /**
+   * The change-watcher tick: ONE store query, compare, maybe wake. It never
+   * calls `step`, never touches git/gh/network — it is a cheap detector
+   * gating the expensive sweep, not a faster sweep. The FIRST observation
+   * only records the signature (no wake): waking on boot would duplicate the
+   * interval's own first pass for no information. A throw (locked DB, closed
+   * handle) is contained by the watcher SupervisedLoop's guardedFire and
+   * routed to `watch_failed`; the 90 s backstop is untouched either way.
+   */
+  private async watchBody(): Promise<void> {
+    const sig = this.store.changeSignature()
+    if (this.lastChangeSig !== null && sig !== this.lastChangeSig) this.loop.wake()
+    this.lastChangeSig = sig
   }
 
   /**
