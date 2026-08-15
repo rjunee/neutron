@@ -38,14 +38,16 @@ describe('SwitchTimer', () => {
     t.mark('vm_published')
     clock.advance(300)
     t.mark('socket_open')
-    clock.advance(1_400)
+    clock.advance(1_000)
+    t.mark('transcript_read')
+    clock.advance(400)
     t.mark('transcript')
 
     expect(records).toHaveLength(1)
     const r = records[0]!
     expect(r.to).toBe('neutron-open')
     expect(r.from).toBe('general')
-    expect(r.marks).toEqual({ vm_published: 12, socket_open: 312, transcript: 1712 })
+    expect(r.marks).toEqual({ vm_published: 12, socket_open: 312, transcript_read: 1312, transcript: 1712 })
     // The number the owner feels is the LAST mark, not the sum of the gaps.
     expect(r.total).toBe(1712)
     expect(r.incomplete).toBe(false)
@@ -58,6 +60,8 @@ describe('SwitchTimer', () => {
     t.mark('vm_published')
     expect(records).toHaveLength(0)
     t.mark('socket_open')
+    expect(records).toHaveLength(0)
+    t.mark('transcript_read')
     expect(records).toHaveLength(0)
     t.mark('transcript')
     expect(records).toHaveLength(1)
@@ -108,6 +112,7 @@ describe('SwitchTimer', () => {
     clock.advance(900)
     t.mark('socket_open')
     t.mark('vm_published')
+    t.mark('transcript_read')
     t.mark('transcript')
 
     expect(records[0]!.marks.socket_open).toBe(5)
@@ -119,6 +124,7 @@ describe('SwitchTimer', () => {
     const t = new SwitchTimer('a', 'b', { now: clock.now, emit })
     t.mark('vm_published')
     t.mark('socket_open')
+    t.mark('transcript_read')
     t.mark('transcript')
     expect(records).toHaveLength(1)
 
@@ -152,7 +158,7 @@ describe('switch timing diagnostics', () => {
     } finally {
       console.info = original
     }
-    expect(line).toContain('vm=5ms socket=20ms transcript=10ms')
+    expect(line).toContain('vm=5ms socket=20ms transcript_read=- transcript=10ms')
     expect(line).not.toContain('gap_socket_to_transcript')
   })
 
@@ -175,5 +181,43 @@ describe('switch timing diagnostics', () => {
     await Promise.resolve()
     expect(called).toBe(true)
     await Promise.resolve()
+  })
+
+  test('A REUSED SOCKET COMPLETES THE SWITCH AND IS NOT REPORTED AS A FAILURE', async () => {
+    // The warm cache returns a session whose socket is ALREADY open, so
+    // `socket_open` never fires. That is the win. Reporting it as
+    // `never_arrived` sent the owner a line that reads exactly like the failure
+    // case — and did, once, before this test existed.
+    const clock = fakeClock()
+    const { emit, records } = collector()
+    const t = new SwitchTimer('a', 'b', { now: clock.now, emit })
+    clock.advance(1)
+    t.mark('vm_published')
+    clock.advance(800)
+    t.mark('transcript_read')
+    clock.advance(200)
+    t.mark('transcript')
+
+    // Completed WITHOUT socket_open — the optional mark must not hold it open
+    // until the deadline.
+    expect(records).toHaveLength(1)
+    const r = records[0]!
+    expect(r.incomplete).toBe(false)
+    expect(r.marks.socket_open).toBeUndefined()
+  })
+
+  test('a MISSING REQUIRED mark still reports as incomplete', async () => {
+    // The optional-mark change must not weaken the real failure case.
+    const clock = fakeClock()
+    const { emit, records } = collector()
+    const t = new SwitchTimer('a', 'b', { now: clock.now, emit, deadlineMs: 5 })
+    t.mark('vm_published')
+    t.mark('socket_open')
+
+    await new Promise((r) => setTimeout(r, 25))
+
+    expect(records).toHaveLength(1)
+    expect(records[0]!.incomplete).toBe(true)
+    expect(records[0]!.marks.transcript).toBeUndefined()
   })
 })
