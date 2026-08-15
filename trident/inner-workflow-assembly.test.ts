@@ -64,6 +64,13 @@ interface RunOpts {
    * the legacy-contract case (the workflow defaults it to '').
    */
   testStrategy?: string
+  /**
+   * What every forge build/fix round reports for `testsPassed`. Defaults to `true`
+   * (a healthy build). `false` is the case criterion 5 is about: the build says the
+   * required full suite did not pass, and nothing downstream must be allowed to
+   * shrug that off.
+   */
+  testsPassed?: boolean
 }
 
 async function runWorkflow(
@@ -86,10 +93,11 @@ async function runWorkflow(
     // seats this harness exists to measure are ever dispatched.
     if (String(label).startsWith('head-probe-round-built-')) return { head: 'a'.repeat(40) }
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
+      const testsPassed = opts.testsPassed ?? true
       if (opts.codexBuild) {
-        return { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, branch: 'trident/test-run', commitSha: 'a'.repeat(40), prNumber: null, diffFile: '/tmp/x.diff', worktreePath: '/wt', testsPassed: true }
+        return { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, branch: 'trident/test-run', commitSha: 'a'.repeat(40), prNumber: null, diffFile: '/tmp/x.diff', worktreePath: '/wt', testsPassed }
       }
-      return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed: true }
+      return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: opts.approveAll === true ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
@@ -743,5 +751,59 @@ describe('AS-BUILT: TEST EXECUTION strategy threading (executed prompt capture)'
     const prompt = forgeBuildPrompt((await runWorkflow('')).captured)
     expect(prompt).toContain(LEGACY_STEP_3)
     expect(prompt).not.toContain('TEST EXECUTION')
+  })
+
+  test('the block sits ABOVE the numbered CONTRACT, not after its verbatim last-lines list', () => {
+    // Step 6 ends in "emit the last lines, unfenced:" followed by three literal lines.
+    // A block appended below that list reads as more of the list.
+    const prompt = forgeBuildPrompt(captured)
+    expect(prompt.indexOf(MARKER)).toBeLessThan(prompt.indexOf('\nCONTRACT\n'))
+    expect(prompt.indexOf('WORKTREE=<your worktree pwd>')).toBeGreaterThan(prompt.indexOf(MARKER))
+  })
+})
+
+/**
+ * ACCEPTANCE CRITERION 5 — "No verdict is ever issued on a stage-1 pass alone. A test
+ * proves the full run is required."
+ *
+ * `testsPassed` is a REQUIRED field of FORGE_SCHEMA that, before this, no consumer
+ * anywhere read: a build that ran only the fast diff-scoped stage went straight to a
+ * panel of reviewers who read the DIFF and never run a test. These tests execute the
+ * REAL workflow body and assert on WHICH SEATS WERE DISPATCHED — a gate that merely
+ * added a finding while the panel still ran (and could still APPROVE) would pass a
+ * naive "the findings mention the suite" assertion.
+ */
+describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
+  const STRATEGY = 'TEST EXECUTION\n\nfull suite rules'
+  const argusLabels = (captured: Captured[]): string[] =>
+    captured.map((c) => String(c.label)).filter((l) => l.startsWith('argus:'))
+
+  test('a build that did NOT prove the full suite gets NO review panel at all', async () => {
+    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false })
+    expect(argusLabels(captured)).toEqual([])
+  })
+
+  test('…and is sent straight back to a fix round carrying the full-suite blocker', async () => {
+    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false })
+    const fix = captured.find((c) => String(c.label).startsWith('forge:fix-round-'))
+    expect(fix).toBeDefined()
+    expect(String(fix?.prompt)).toContain('FULL SUITE NOT PROVEN')
+  })
+
+  test('the run can NEVER end in APPROVE on an unproven suite, however many rounds it burns', async () => {
+    const { result } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false })
+    expect(result.verdict).toBe('REQUEST_CHANGES')
+  })
+
+  test('a build that DID prove it is untouched — the panel runs exactly as before', async () => {
+    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: true })
+    expect(argusLabels(captured).length).toBeGreaterThan(0)
+  })
+
+  test('the gate is INERT without a strategy — a legacy launcher behaves byte-identically', async () => {
+    // The gate keys off the block having been GIVEN: a build never told the full suite
+    // was mandatory must not be blocked for not proving it.
+    const { captured } = await runWorkflow('', { testsPassed: false })
+    expect(argusLabels(captured).length).toBeGreaterThan(0)
   })
 })

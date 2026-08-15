@@ -166,15 +166,17 @@ export interface BuildTridentOrchestratorOptions {
    */
   resolve_reflection_context?: (run: TridentRun) => string | null
   /**
-   * The count of NON-TERMINAL trident runs INCLUDING the one launching — the true live
-   * fan-out. Wired to `store.listNonTerminal(50).length` in
-   * `gateway/composition/build-core-modules.ts` (the orchestrator holds no store; the
-   * composer does).
+   * The count of trident runs currently IN A BUILD PHASE (`forge-init`/`forge-fix`),
+   * INCLUDING the one launching — the live test-running fan-out. Wired from the run
+   * store in `gateway/composition/build-core-modules.ts` (the orchestrator holds no
+   * store; the composer does).
    *
-   * Consumed by `computeTestJobs` so that N concurrent builds SPLIT the box's cores
-   * instead of each claiming all of them — four builds each asking for `JOBS=4` is
-   * sixteen bun processes on eight cores, which is slower than sequential and a
-   * plausible OOM.
+   * Consumed by `computeTestJobs` as its RAISE-ONLY term. The bound itself comes from
+   * the CONSTANT `DEFAULT_BUILD_FANOUT`, because a launch-time snapshot cannot bound a
+   * STAGGERED fan-out: the value is frozen into a prompt string, so the run that
+   * launched onto an idle box would keep all the cores for an hour while later runs
+   * divided the same box again (read `computeTestJobs`'s docblock). This count only
+   * shrinks the budget FURTHER, when more builds than planned are genuinely running.
    *
    * BEST-EFFORT: a throwing resolver or a non-finite result degrades to 1
    * (sequential-safe) and NEVER fails the launch. And it must actually be WIRED —
@@ -1573,10 +1575,12 @@ export function buildTridentOrchestrator(
           const n = opts.resolve_active_runs()
           if (Number.isFinite(n) && n >= 1) active = Math.floor(n)
         } catch {
-          // A store hiccup costs the DIVISOR, not the whole block: 1 is the
-          // sequential-safe assumption, and the build still gets its stage-1 gate
-          // and its full-suite rule. The outer catch below is the last-resort
-          // backstop that keeps ANY failure here from failing the launch.
+          // A store hiccup costs the RAISE-ONLY term, not the whole block, and not the
+          // bound: `computeTestJobs` still divides by the constant fan-out, so a lost
+          // count means "assume the planned fan-out" rather than "assume an idle box".
+          // The build also still gets its stage-1 gate and its full-suite rule. The
+          // outer catch below is the last-resort backstop that keeps ANY failure here
+          // from failing the launch.
           active = 1
         }
       }

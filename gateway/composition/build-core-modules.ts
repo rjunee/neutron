@@ -605,13 +605,21 @@ export function buildCoreModules(
         if (tridentWiring.resolve_reflection_context !== undefined) {
           orchestratorOpts.resolve_reflection_context = tridentWiring.resolve_reflection_context
         }
-        // THE LIVE FAN-OUT the TEST EXECUTION budget divides the box by. Counts the
-        // launching run's OWN non-terminal row too, so the divisor is the true number
-        // of builds sharing these cores. Without this line the whole chain is inert:
-        // the budget always assumes an idle box and every concurrent build asks for
-        // all of it (the `resolve_phase_models` lesson — an unwired producer ships a
-        // feature whose every part works and which as a whole does nothing).
-        orchestratorOpts.resolve_active_runs = () => store.listNonTerminal(50).length
+        // THE LIVE FAN-OUT the TEST EXECUTION budget divides the box by, when it
+        // exceeds the planned fan-out (`DEFAULT_BUILD_FANOUT`, which is the constant
+        // that carries the guarantee — see `computeTestJobs`). Counts the launching
+        // run's OWN row too, so the divisor is the true number of builds sharing these
+        // cores. Without this line the whole chain is inert (the `resolve_phase_models`
+        // lesson — an unwired producer ships a feature whose every part works and which
+        // as a whole does nothing).
+        //
+        // ONLY THE BUILD PHASES COUNT. `forge-init` and `forge-fix` are the phases that
+        // actually run a suite; a run parked in `ralph-plan`/`ralph-task` (planning) or
+        // `argus` (review) is burning tokens, not cores, and counting it would starve
+        // the one build that IS running tests. The row limit is generous (a cap that
+        // clipped the count would silently pin every budget at its floor).
+        orchestratorOpts.resolve_active_runs = () =>
+          store.listNonTerminal(200).filter((r) => r.phase === 'forge-init' || r.phase === 'forge-fix').length
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome

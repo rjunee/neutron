@@ -226,6 +226,14 @@ const {
   // coda` and is untouched by this: the contract is the brief's HEAD, not its suffix.
   // Never given to argus:* (same trust boundary as reflectionGuidance). Absent/'' →
   // the contract is byte-identical to before this existed.
+  //
+  // POSITION IS LOAD-BEARING: it goes ABOVE the numbered CONTRACT, not after it. Step 6
+  // ends in a VERBATIM last-lines list ("emit the last lines, unfenced: …"), and a block
+  // appended below that list reads as more of the list.
+  //
+  // It also ARMS `fullSuiteBlock`: a non-empty strategy means the build was told the
+  // full suite is mandatory, so its `testsPassed` claim becomes a gate rather than a
+  // decoration (see that function).
   testStrategy = '',
   // OWNER PER-PHASE MODEL OVERRIDES — phase key → {model?, effort?}, ALREADY
   // validated in TypeScript at the settings boundary (`trident/phase-models.ts`
@@ -1163,17 +1171,17 @@ function forgeBuildContract(reenter) {
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
-${NO_PATTERN_KILL_RULE}
+${NO_PATTERN_KILL_RULE}${testStrategy === '' ? '' : `\n${testStrategy}\n`}
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
-3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block below — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
+3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
 6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
-   WORKTREE=<your worktree pwd>${testStrategy === '' ? '' : `\n\n${testStrategy}`}`
+   WORKTREE=<your worktree pwd>`
 }
 
 // ── THE BUILD, ON THE CODEX EXECUTOR ─────────────────────────────────────────
@@ -3579,6 +3587,64 @@ function reviewPreconditionDeferred(readiness) {
   }
 }
 
+/**
+ * THE FULL-SUITE GATE. `testsPassed` stops being a decoration.
+ *
+ * WHY. The TEST EXECUTION block tells the build that a stage-1 (diff-scoped) pass buys
+ * it nothing and that the FULL suite must complete before it may report
+ * `testsPassed=true`. That sentence was PROSE ONLY: `testsPassed` is a required field of
+ * FORGE_SCHEMA that no consumer anywhere read, so a build that ran the fast stage and
+ * stopped — or ran nothing at all — reported whatever it liked and went straight to a
+ * review panel that reads the DIFF and never runs a test. "No verdict is ever issued on
+ * a stage-1 pass alone" cannot be true of a claim nothing checks.
+ *
+ * WHAT IT DOES. Deterministic, in JS, exactly like the CI gate: if the build was GIVEN
+ * the block (`testStrategy !== ''`) and did not come back with `testsPassed === true`,
+ * the panel is not opened at all. The round returns a synthetic REQUEST_CHANGES whose
+ * single blocker is the missing suite, and the bounded fix loop re-Forges against it —
+ * the same shape as red CI, which also converts a mechanical fact into a code blocker
+ * rather than an opinion. No review budget is spent to be told the tests did not run.
+ *
+ * WHERE IT FIRES, AND WHAT ENFORCES THE RULE WHERE IT DOES NOT. In LOCAL mode this
+ * process runs build → review → fix in one piece, so the gate sits between the build
+ * and the panel in round 1 and in every fix round. In PR mode the build round ENDS at
+ * the publish handoff — the claim and the review live in different processes — and the
+ * full-suite requirement is enforced there by something stronger than a self-report:
+ * the `test` aggregator runs the WHOLE suite on GitHub, independently of anything the
+ * build says, and THE CI GATE below turns a red or unreadable result into a blocker /
+ * a deferred peer that cannot become an APPROVE. So the requirement holds in both
+ * modes, by CI where CI exists and by this gate where it does not — which is precisely
+ * the local-merge/self-hoster case the CI gate's own docblock calls out as having
+ * "nothing at all".
+ *
+ * SCOPE, DELIBERATE. It gates on the build's OWN claim, which it can still overstate;
+ * catching a LIE needs independent evidence, which is CI's job. This closes the case
+ * the review panel structurally cannot see: an HONEST report that the full suite did
+ * not pass, silently ignored. `testStrategy === ''` (a legacy launcher, or a test
+ * harness that passes no strategy) is inert — byte-identical old behaviour.
+ */
+function fullSuiteBlock(report) {
+  if (testStrategy === '') return null
+  if (report?.testsPassed === true) return null
+  return {
+    verdict: 'REQUEST_CHANGES',
+    blockKind: 'code',
+    findings: [
+      {
+        severity: 'blocker',
+        title: 'FULL SUITE NOT PROVEN — the build did not report testsPassed=true',
+        evidence:
+          `The build reported testsPassed=${JSON.stringify(report?.testsPassed ?? null)}. The TEST EXECUTION block makes the ` +
+          'FULL suite (stage 2) a precondition of testsPassed=true — a stage-1/diff-scoped pass, a skipped ' +
+          'run, or a run that never reached the runner\'s final summary line does not qualify. No review ' +
+          'panel was opened for this round. Run the full suite exactly as the TEST EXECUTION block ' +
+          'specifies, fix what it reds, and report testsPassed=true with the runner\'s own summary/coverage-audit ' +
+          'line in your log tail.',
+      },
+    ],
+  }
+}
+
 async function runReviewRound(diffFile, round, prForReview, paidReview = null) {
   // A matching recorded REQUEST_CHANGES checkpoint already paid for this panel.
   // Its findings are the input to the next fix, so neither readiness nor review
@@ -4435,6 +4501,11 @@ try {
     await writeTerminalResult(stop)
     return stop
   }
+  // ROUND 1'S BUILD REPORT, hoisted out of the build block for `fullSuiteBlock`.
+  // `null` means NO BUILD RAN IN THIS PROCESS (a resume reviewing a recorded head),
+  // and the full-suite gate must stay out of that case entirely: the suite belongs to
+  // the build that produced the commit, and there is no claim here to gate on.
+  let buildReport = null
 
   if (resumeMode === 'review' || resumeMode === 'fix') {
     // ── SKIP THE BUILD ────────────────────────────────────────────────────────
@@ -4675,6 +4746,7 @@ ${task}${reflectionGuidance}`,
     )
 
     if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
+    buildReport = forge
     if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
 
     const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
@@ -4895,10 +4967,19 @@ ${task}${reflectionGuidance}`,
   // anything: the fix round that follows re-reviews its own new head before any
   // APPROVE is possible.
   let synthesis
+  const round1SuiteBlock = buildReport === null ? null : fullSuiteBlock(buildReport)
   if (resumeMode === 'fix') {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
     const paidReview = { verdict: 'REQUEST_CHANGES', findings: resumeFindingsList, blockKind: 'code' }
     synthesis = await runReviewRound(diffFile, round, pr, paidReview)
+    finalVerdict = 'REQUEST_CHANGES'
+  } else if (round1SuiteBlock !== null) {
+    // No panel: the build itself says the required full suite did not pass. Straight to
+    // the fix round with that as the only finding. No checkpoint is written either —
+    // `argus-request-changes-round-N` means "a panel judged this commit", and no panel
+    // ran; a resume that read one would skip a review that never happened.
+    log(`trident-v2 full-suite gate: round=${round} build reported testsPassed=${JSON.stringify(buildReport?.testsPassed ?? null)} — no review panel, straight to the fix round`)
+    synthesis = await runReviewRound(diffFile, round, pr, round1SuiteBlock)
     finalVerdict = 'REQUEST_CHANGES'
   } else {
     synthesis = await runReviewRound(diffFile, round, pr)
@@ -5061,6 +5142,20 @@ ${task}${reflectionGuidance}`,
     // is the lie #545 is about. `''` is what every other site in this file says for
     // "no commit to pin", and it is what this one says now.
     reviewedHead = fixHead === 'absent' ? '' : fixHead
+    // THE SAME FULL-SUITE GATE AS ROUND 1, and it belongs here for a stronger reason:
+    // a fix round is where the temptation to run only the files just touched is
+    // greatest, and it is also the round whose APPROVE ships the change.
+    const fixSuiteBlock = fullSuiteBlock(fix)
+    if (fixSuiteBlock !== null) {
+      log(`trident-v2 full-suite gate: round=${round} fix reported testsPassed=${JSON.stringify(fix?.testsPassed ?? null)} — no review panel, straight to the next fix round`)
+      // Through `runReviewRound` like every other assignment to `synthesis` (its
+      // `paidReview` short-circuit returns this object untouched, dispatching nothing).
+      // Assigning the block directly would work and would also be the first unguarded
+      // write in the loop — `synthesis-unavailable.test.ts` holds that line.
+      synthesis = await runReviewRound(diffFile, round, pr, fixSuiteBlock)
+      finalVerdict = 'REQUEST_CHANGES'
+      continue
+    }
     synthesis = await runReviewRound(diffFile, round, pr)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)

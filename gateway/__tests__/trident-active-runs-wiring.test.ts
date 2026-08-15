@@ -30,9 +30,18 @@ describe('the COMPOSER supplies the live-run-count resolver', () => {
     const src = strip(
       await Bun.file(new URL('../composition/build-core-modules.ts', import.meta.url)).text(),
     )
-    expect(src.includes('orchestratorOpts.resolve_active_runs = () => store.listNonTerminal(')).toBe(
-      true,
+    expect(src.includes('orchestratorOpts.resolve_active_runs = () =>')).toBe(true)
+    expect(src.includes('store.listNonTerminal(')).toBe(true)
+  })
+
+  it('counts only the BUILD phases — a run parked in planning or review burns tokens, not cores', async () => {
+    const src = strip(
+      await Bun.file(new URL('../composition/build-core-modules.ts', import.meta.url)).text(),
     )
+    const wiring = src.slice(src.indexOf('orchestratorOpts.resolve_active_runs'))
+    const line = wiring.slice(0, wiring.indexOf('\n', wiring.indexOf('.filter(')))
+    expect(line).toContain("'forge-init'")
+    expect(line).toContain("'forge-fix'")
   })
 
   it('wires it UNCONDITIONALLY — the store is always constructed in that scope', async () => {
