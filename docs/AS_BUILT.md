@@ -11792,3 +11792,524 @@ re-run rebuilds, because there is no resume-a-terminal-run path (see above). Wid
 window trades a longer stall on every genuinely-dead branch for a rarer manual re-run; the
 numbers live in one exported constant so that trade can be made with evidence rather than
 by guess.
+## 2026-08-09 — A ritual post is a chat message, and so is its notification
+
+The owner's phone said `ritual:kaizen`, and tapping it opened the app but not the
+conversation. One root cause under both: the push was composed from the reminder ROW
+on the tick's `on_fired` hook, and a ritual row's `message` IS that dispatch token —
+so the notification could never carry the posted text, and its project field was the
+instance slug, which resolves to no project.
+
+Composition moved into the ONE out-of-turn delivery seam — `createDeliver` now takes a
+`notify` sink and fires it for every post that got a durable row
+(`gateway/http/deliver.ts` → `gateway/push/chat-message-push.ts`), never for a
+transient `'none'` pill. So a fired reminder, a ritual, the morning brief, the idle
+nudge and a system notice all notify identically, because they are all one thing.
+Composing it in the reminder outbound instead — the first version of this change —
+cured the reported message and left every other producer silent, which is the
+per-producer mistake `deliver` exists to have ended. `pushReminder`, `onFired`,
+`ReminderTickLoop.on_fired` and the `push_dispatcher` composition field are DELETED —
+the tick can only see the row, so it was never a place this could be built correctly.
+
+`agent_message` joined `PUSH_KINDS` (it was a resolver branch with no sender, kept out
+of the list precisely so the exhaustiveness test could not be padded); `reminder` left
+it, because nothing sends it — but its RESOLVER branch stays, because a store app and
+a self-hosted gateway do not upgrade together and undismissed notifications still
+carry that kind. General names itself with `GENERAL_RAIL_ID`, now defined once in
+`wire-types/topic-id.ts` and pinned to the client's copies: encoding it by ABSENCE
+(the first version) is malformed to every already-installed bundle, which would have
+preserved the exact symptom the change was for.
+
+`?message_id=` is finally consumed. It reached the chat route since 2026-05 with no
+reader. The frozen #505 anchor and a new once-per-target imperative `scrollToIndex`
+now ask ONE function, so a cold open cannot land in two places, and a tap into an
+already-mounted project can be re-anchored at all. With no pushed id, nothing scrolls
+and the anchor is byte-identical — asserted, because this is the #505/#511 blast
+radius.
+
+Detail: `docs/as-built/2026-08-09-notification-is-a-chat-message.md`.
+
+## 2026-08-10 — Two guards in that change were decorative; review found both
+
+Follow-up on the entry above, and the interesting part is not the fixes — it is that
+both defects were guards that READ a value nothing WROTE, and both were covered by
+passing tests.
+
+The re-emit suppression was INERT. `deliver` asked the ButtonStore whether the owner
+had already been shown a row, and the store answers from `delivered_at` — but
+`markDelivered`'s only callers were the onboarding engines, so no row `deliver` created
+was ever stamped, `was_delivered` was structurally false, and the double-buzz the guard
+was added to stop still happened on every idempotent re-emit (the ritual-approval
+prompt, the credential-lapse notice). The test that "proved" the suppression used a fake
+whose `emit` returned `was_delivered: true` from a literal, so it asserted the branch
+and assumed the write. `deliver` now stamps the row after the owner has ACTUALLY been
+reached — a device notification the transport accepted, or a live socket — and the
+suppression is asserted against the REAL `ButtonStore` on a real migrated DB, which is
+the only harness where "the answer was written" is a fact rather than a fixture. Not
+stamping on failure is load-bearing: a row that persisted while every transport failed
+must still buzz on the retry, so `ChatMessagePushSink` now RESOLVES a boolean and reads
+`PushResult.ok` — `pushAll` catches an Expo outage and resolves rather than throwing, so
+a sink watching only for a throw would have called an outage a delivered notification.
+
+A legacy General reminder tap 400ed. `resolvePushRoute` emits the mobile RAIL spelling
+`~general`, and `reminders-client.ts` interpolated it raw into
+`/api/app/projects/<id>/reminders`, which `sanitizeProjectId` rejects — so the tap
+opened `invalid_project_id` where the reminders should be, on the rail's General
+Reminders tab as well as on the push tap. It now maps through `general-scope.ts` like
+`docs-client` and `tabs-client` do; that module exists because the fifth client to talk
+to a project-scoped surface was the fifth to forget. The regression test walks the real
+resolver's output into the real client, because both modules' own suites were green —
+the same sender/resolver seam this whole change was about. It asserts the raw sentinel
+rather than `%7E`: `~` is UNRESERVED, so `encodeURIComponent` leaves it intact, which is
+why every existing "does it encode the segment?" test was blind to it.
+
+Also: the notification can no longer hold a delivery open (`POST
+/api/app/system-notice` awaits `deliver`, and the only bound underneath was Expo's 10 s
+per batch), bounded at 3 s and asserted as an ORDERING rather than elapsed wall-clock
+time; `chatPushExcerpt` clamps a non-positive budget so it cannot return a bare
+ellipsis; and five in-code pointers that sent readers to `reminder-outbound.ts` for the
+notification — contradicted by that file's own header — now name the seam that has it.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — resolving what review left unverified on the notification lane
+
+`createDeliver` now validates `notify_timeout_ms` at construction, the way
+`ExpoPushClient` validates `timeout_ms` and `batch_size`. `??` defaults `undefined` only,
+so a literal `0` or a `NaN` from a parsed setting reached `withTimeout` intact, and
+`setTimeout(0)` settles the bound on the next macrotask — before the notification can
+answer. Every notification would have reported not-sent, no row would ever have been
+stamped, and the re-emit suppression would have been silently OFF while every other test
+on this path still passed. Unreachable from the sole live call site, which omits the
+field; guarded because that failure mode is invisible at runtime rather than loud.
+
+The stamp condition `notified || delivered` is unchanged, and the seam in it is now named
+where it is decided. A backgrounded phone holding an open socket while Expo is down gives
+`delivered: true, notified: false`, so the row is stamped and the ALERT for that key is
+gone for good — an approval prompt then waits until the app is next opened. Accepted: the
+socket handed the message to the client and it is in the transcript, so this delays an
+alert rather than dropping information, whereas requiring `notified` makes the stamp
+unreachable on any install with no registered device (every fresh one) and the re-emit
+would then re-notify forever with nothing able to buzz.
+
+The zero-width guard and its test were both written with the LITERAL invisible characters
+pasted in, and both are now escape sequences. The guard's own character class was
+unreadable — a reviewer could not tell which codepoints it held or count them, and any
+tool that re-encodes the file could drop one silently. The test was worse, because it could
+be DEFANGED WITHOUT GOING RED: strip the invisibles from its fixtures and every case
+degrades to `chatPushExcerpt('')`, which returns `''` and passes for the wrong reason,
+so the test would stop exercising zero-width handling at all while still reporting green.
+Mutation-tested after the rewrite — dropping U+200B from the class still reds the
+budget-accounting case, so the escapes are load-bearing and not decoration.
+
+The two docblocks about `[id]`-route param staleness contradicted each other, and the
+inaccurate one was the child screen's: it claimed its OWN param had been observed to go
+stale. The recorded incident is the opposite — `useLocalSearchParams` is sticky in a
+component that stays MOUNTED, so the LAYOUT kept reporting the old id while the
+freshly-rendered chat screen already saw the new one. That matters beyond tidiness: the
+child being the fresh side is the reason re-entering a scope without `?message_id=` cannot
+resurrect a previous tap's target and re-anchor an ordinary open onto an old row. The
+screen reads the path for AGREEMENT with the shell, not because its params lag, and the
+comment now says so.
+
+## 2026-08-10 — the fail-closed delivery guard was reading a fail-open number
+
+The previous entry made `gateway/push/chat-message-push.ts` require `delivered >= 1` before
+a durable row is stamped `delivered_at`. Review then found that `delivered` itself was
+computed as `messages.length - errored.length` in `gateway/push/dispatcher.ts`. Those two
+are equal only when Expo returns one ticket per message; on a 200 carrying fewer tickets —
+`{data: []}`, a body with no `data` key at all, anything that parses as JSON — subtraction
+reported EVERY message as delivered on a response that accepted nothing. Measured
+`{attempted: 2, delivered: 2, errored: 0, ok: true}` for an empty ticket array, and the
+sink answered `true`. The zero-delivery stamp the guard exists to prevent was therefore
+reachable again, by a second route, through the guard itself. `delivered` now COUNTS
+`status: 'ok'` tickets, so a short batch reads honestly as `delivered + errored < attempted`.
+
+The invariant `chatPushExcerpt` documents — never a buzz with no words — did not hold for
+bodies that are invisible or punctuation-only. `\s` does not match U+200B/U+2060/U+FEFF, so
+neither does `trim()`: a zero-width body survived normalization at full length, cleared the
+sink's `length === 0` check and pushed a notification with no visible characters. Wordless
+bodies now excerpt to the empty string, checked on the OUTPUT as well as the input because
+a budget landing inside a leading run of punctuation manufactures the same thing from a good
+message. The guard is scoped by `\p{L}`/`\p{N}`/`\p{Extended_Pictographic}` rather than
+`\w`, so CJK-only, Cyrillic-only and emoji-only messages still count as content.
+
+`timeout_ms` is now validated at construction beside `batch_size`. `AbortSignal.timeout`
+rejects a non-finite argument rather than coercing it, and it is reached per batch, so an
+unvalidated deadline would have surfaced a permanent config mistake as a transient Expo
+outage on every fire.
+
+Two things review raised are recorded as deliberate rather than fixed, both in the code that
+decides them. `deliver`'s 3 s notification bound ABANDONS the send instead of cancelling it,
+so a merely-slow notification can land after being reported not-sent and the next re-emit
+buzzes again — chosen over stamping on no evidence, which silences a message forever. And
+there is no atomic claim between `emit` and `markDelivered`, so two deliveries sharing an
+idempotency key that overlap in flight can both notify; the reachable producers do not race
+(the reminder tick claims its row first, and the live keys are per-artifact), and closing it
+would put a claim-on-emit into the ButtonStore contract every caller inherits.
+
+The union hazard `wire-types/push-kind.ts` is named after recurred here and is now covered
+the same way: `gateway/push/dispatcher.test.ts` drives the REAL sink against the REAL
+dispatcher, because a hand-written `{ok, delivered}` fake on either side is exactly what let
+the two halves be independently green and jointly wrong. Every guard is mutation-tested —
+each reverts to red on its own negative cases while the positive controls keep passing.
+
+## 2026-08-10 — `ok: true` is not a delivery; a ritual row must never fall through to a nudge
+
+Two adversarial-review blockers on the notification lane. `gateway/push/chat-message-push.ts`
+treated `PushResult.ok` as proof of delivery, but `ok` is `true` with `delivered: 0` both
+when no device is registered (the state of a fresh install, short-circuited before Expo is
+called) and when every ticket errored — so `gateway/http/deliver.ts` stamped `delivered_at`
+and silenced the idempotent re-emit forever for a message nobody received. The sink now
+requires `delivered >= 1` and fails closed on a result that reports no count.
+
+Separately, `ritual_planner` is null on an LLM-less box, and `reminders/dispatcher.ts` then
+classified every row as a nudge — so a ritual row composed from its stored `message`, which
+is the dispatch token, and the owner's lock screen read `ritual:kaizen` by a second route.
+The dispatcher now refuses a ritual row it cannot plan, keyed on `reminder.ritual_id`.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — refusing to compose is only half of a refusal
+
+The round-3 refusal above stopped the dispatch token reaching the owner and then returned
+normally with one debug-level line. `reminders/tick.ts` claims an occurrence BEFORE
+dispatch and reverts only in its `catch`, so a normal return RETIRES it: a scheduled
+ritual on an instance whose model credential expired vanished with no post, no ledger
+row, and no journal line at the default level, which `reminders/AGENTS.md` forbids for a
+ritual (a failure is recorded AND noticed). `reminders/dispatcher.ts` now logs at error
+level and posts one plain-language notice (`formatRitualUnplannableNotice`,
+`reminders/ritual-delivery.ts`) — and THROWS if that notice is refused, because consuming
+the occurrence is only defensible when the owner was told. It deliberately does not throw
+on the ordinary path (a missing credential cannot resolve by the next tick, so that would
+re-fire every 30 s) and writes no `code_ritual_runs` row (the ledger writer and run-id
+mint live inside the absent planner, and `skip_reason` is a closed set in
+`migrations/0106_ritual_schema.sql`).
+
+`gateway/push/chat-message-push.ts` `hasVisibleContent` claimed emoji-only posts count,
+but a regional-indicator pair carries no `\p{L}`, `\p{N}` or `\p{Extended_Pictographic}`
+— so a flag-only body sent NO notification while `✅` sent one. `\p{Regional_Indicator}`
+joins the class; bare symbols (`→`, `✓`, `★`) stay deliberately silent.
+
+Four comments that a reader would have been right to trust were corrected rather than
+left: the "untrimmed clip cannot be empty" invariant (it can, at budget 1 behind a
+dropped surrogate), the `ritual_planner` docblock and `ritual-fire.ts` header that still
+described the nudge fall-through as the design, and `gateway/push/expo-push-client.ts`,
+which still documented the retired `{ kind: 'reminder' }` payload and "the reminder's
+stored `message`" as the notification body — the exact sentence the reported defect was.
+`gateway/http/deliver.ts`'s 3 s bound still does not CANCEL the send; that is named in
+place as a possible duplicate buzz, not silently.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`
+(§ Round-4 review fixes).
+
+## 2026-08-10 — the push-tap latch is released when the tap's target goes away
+
+`ChatSyncSurface`'s imperative re-anchor latched the honoured `message_id` and never
+cleared it, which made a per-tap instruction behave as a per-process one.
+
+⚠️ **THE SEQUENCE THIS ENTRY ORIGINALLY GAVE AS THE MOTIVATION IS REFUTED — see the
+2026-08-11 entry below.** It read: *"tap the notification for a message, rail-tap to another
+project (a chat route with no `?message_id=`), then tap the SAME notification again — and the
+transcript did not move: the equality check had already spent the target."* The premise is
+true and the conclusion is not. A real second tap never reaches the equality check, because
+`app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
+`?message_id=` — it is
+swallowed one layer up, and that dedupe gap is filed as **#182**. The latch-release fix
+described below is correct by inspection and stands; only this motivating sequence was wrong.
+
+The COMPONENT is not remounted along that path — the shell is a single root-stack screen
+named `projects/[id]` and expo-router only diverges on a route named exactly `[id]`, so a
+rail tap re-renders it and the ref outlives the switch. The LIST is remounted, though:
+`useMobileChat`'s attach effect is keyed on `projectId` and its cleanup drops `ready`
+(`app/lib/chat-core/use-mobile-chat.ts:447`), and the surface renders
+`!ready ? <spinner> : <FlashList/>`, so `isInitialScrollComplete` comes back fresh and the
+frozen anchor can act on the way back if it is populated in time. So: a latch with no exit
+is a defect by inspection and one line to close; whether it was owner-VISIBLE on the
+rail-switch path rests on that repaint race and is not claimed here. The imperative seam is
+the only path when the list is not remounted, which is what the new arm drives.
+
+A render with no target now clears the latch. Mutation-verified: restoring the bare
+early-return reds the new sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, and only that arm.
+
+Also caught in the same pass: `scrollToIndex` is typed `(params) => Promise<void>` and its
+executor calls `getLayout` synchronously, which throws before the layout manager exists — a
+rejection the call site was dropping. Now caught. The latch is deliberately NOT re-armed on
+a rejection: the only state that can reject is a pre-layout list, whose position the frozen
+`initialScrollIndex` already owns, and re-arming would let a later commit yank a transcript
+the owner was placed in correctly.
+
+Found by the cross-model (codex) review lane, in this change's own new code.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — five comments that asserted things the code does not do, and one P1 named not fixed
+
+Comment-only follow-up on the push-notification change, from the rubric review lane.
+
+Two of the five were COPIES of a sentence this branch had already corrected elsewhere:
+`gateway/composition/build-core-modules.ts` and `gateway/composition/input/notifier-input.ts`
+both still said an LLM-less box makes every reminder row compose as an ordinary nudge "which
+is fail-closed", the exact claim `reminders/dispatcher.ts` and `open/composer.ts` were fixed
+for — a ritual row's stored `message` IS the dispatch token, so nudging it is how that token
+reached the owner's lock screen. The same file also opened by describing the push dispatcher
+attached as the tick's `on_fired` hook and then said that hook was gone twenty-five lines
+later. `wire-types/push-kind.ts` said the legacy `reminder` kind was "gone from this list and
+from the resolver" — it is gone from the list, while the resolver keeps a decode-only branch
+deliberately, so a reader could have acted on that sentence by deleting a live compatibility
+path. And `ChatSyncSurface` said its deep-link latch is set after a successful jump when it is
+set when the jump is issued.
+
+Also NAMED AND DELIBERATELY NOT FIXED, at the site a reader hits it: the initial-anchor freeze
+can read the PREVIOUS scope's rows. `projectId` arrives as a prop, so the first render under a
+new scope still holds the old scope's `rows`/`selfDeviceId` — those are cleared in
+`useMobileChat`'s effect cleanup, which runs later (`app/lib/chat-core/use-mobile-chat.ts:447-451`)
+— so the freeze re-computes the OLD project's index under the NEW project's key, and the list
+remount consumes it. Byte-identical to `main` on this path, so this change neither introduces
+nor widens it. The fix is small (refuse to freeze while `ready` is false — verified not to be
+entered on a background/foreground transition) but belongs with a mounted test that drives
+`projectId`, `ready` and a real list remount, in the ISSUES #505/#511 hot path. Raised as a P1
+follow-up.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — the token prune was an index join nobody checked the index of
+
+Review round 2 on the notification lane. The two guards under review held on the tip, and
+re-deriving them found a third thing in the same file that did not.
+
+`PushDispatcher.dispatch` prunes the tokens Expo reports `DeviceNotRegistered`, by INDEX:
+ticket `i` names `messages[i]`. Its comment justified that with "tickets come back in
+submission order". True, and not sufficient — `ExpoPushClient` appends only the tickets Expo
+actually **returned** (`for (const t of data) tickets.push(t)`), so a chunk that comes back
+short shifts every later ticket left by one and the join silently identifies the wrong
+device. A `DeviceNotRegistered` for one token then deletes a **live** one, and push for that
+device stays dark until it next re-registers.
+
+The two comments in the file **contradicted each other**, which is how it surfaced: fifty
+lines up, the `delivered` tally had just been rewritten *because* a short response is real
+("a short batch now shows up honestly as `delivered + errored < attempted`"). One file, one
+mechanism, two opposite beliefs about it — and the prune held the wrong half.
+
+`pruneUnregistered` now checks `tickets.length === messages.length` before it trusts an
+index, prunes nothing on a mismatch, and logs the counts. Fail-closed in the same direction
+as the `delivered >= 1` guard beside it, and for the same asymmetry: a dead token left behind
+costs quota and one warning line per fire; a live token deleted costs the owner his
+notifications.
+
+Mutation-tested. Guard removed → exactly the new test reds (28 pass / 1 fail), and it reds on
+the assertion that BOTH tokens survive, asserted by name rather than by order because
+`listByProject` promises none.
+
+**Pre-existing gaps NAMED but deliberately not fixed here**, each because the honest fix is a
+migration or an API change rather than a rider on a push fix:
+
+* **`httpProjectSegment` maps the General sentinel onto a legal project id.** `~general` is
+  collision-proof on the client (#410); the segment it produces, `general`, is not — and the
+  owner's instance has a project whose id is exactly that. Both rail entries address one
+  server scope. Reads already shared it; this lane made reminders the first MUTATING surface
+  to. Closing it needs a distinct server route or `general` reserved, both migrations.
+* **Two `PUSH_KINDS` entries have a sender but no dispatcher.** `calendar_pre_meeting_brief`
+  and `email_daily_triage` are gated on `pushDispatcher !== null` and the only two assignment
+  sites in the repo pass `null`. They stay listed on purpose — the resolver must remain ready
+  or wiring the dispatcher would re-open the disjoint-lists defect — but the exhaustiveness
+  test proves the resolver is ready, not that anything is sent.
+* **`routedPush` collapses `app-ws:lost:*` and `app-ws:dropped:*` into one `false`**, so a
+  failed chat_log append plus a successful notification stamps `delivered_at` for a message
+  hydration cannot show. Needs the app target widened from `boolean` to the tri-state the
+  markers already carry.
+* **`fireRitual`'s settle-notice loops discard `post`'s boolean**, so a rejected settle notice
+  retires the occurrence with neither output nor notice (#506's shape, in one corner). The
+  unplannable guard added here does check its post; its comment no longer claims the loops do.
+
+📌 **Two comments in one file that contradict each other are a bug report already written
+down.** The reachable defect here was not found by hunting for it — it was found because the
+same file asserted "Expo can return fewer tickets than messages" in one place and "index i
+identifies message i's recipient" in another. When a diff teaches a file something new about
+its own failure mode, the next question is which OTHER paragraph was built on the old belief.
+
+## 2026-08-11 — the no-project scope was addressing a real project, and one comment claimed a tap that never arrives
+
+Landed via PR #171. Two review findings on the ritual-push branch, from a panel where two
+independent lanes converged on the first. Both are about the same failure shape from opposite
+ends: a name that means two things, and a comment that describes a path no code takes.
+
+**A SCOPE IS NOT AN ID, and `general` is a legal project id.** The mobile rail spells the
+no-project General scope `~general`, deliberately outside the gateway's `[A-Za-z0-9_.-]`
+alphabet so the sentinel cannot collide with a real project — that is what #410 bought, and
+`app/lib/project-rail-view.ts` says so at length. `app/lib/general-scope.ts` then mapped it back
+onto the literal HTTP segment `general`, which **is** inside that alphabet. So a rail-tap on
+General and a rail-tap on a project whose id is literally `general` produced a byte-identical
+request, and the reminders surface derived one `app-project:general` topic for both. Collision-proof
+by construction, then mapped onto something that is not.
+
+What made it worth a round rather than a note: **reminders was about to be the first MUTATING
+surface on that mapping.** The four other clients (docs, tabs, work-board, activity) have shared it
+for months. This branch routed `list`, `create`, `snooze`, `cancel` and `convert-to-task` through
+it, so two unrelated rail entries would have shared a pending list *and* its writes — a cancel
+aimed at General destroying a real project's row. Before the branch that path 400'd
+(`sanitizeProjectId` rejects `~`), which is loud and harmless; the branch would have converted it
+into a silent wrong-scope read AND write. **Quieter is worse.**
+
+**Fixed by reserving a segment on the server, not by renaming anything.** There is no value inside
+`[A-Za-z0-9_.-]` that can mean "no project" without also naming a project that might exist, so the
+fix had to come from outside the alphabet. `gateway/http/app-reminders-surface.ts`
+`resolveScopeSegment` accepts `GENERAL_RAIL_ID` — exact match, never a prefix — ahead of
+`sanitizeProjectId`, and the scope lands on `app-project:~general`. Deliberately **not** a new topic
+prefix: that string reuses the one shape every existing topic reader already decodes, and what they
+decode it back to (`~general`) is the rail id, which is the right answer for each of them —
+`push-deep-link-dispatch` builds `/projects/~general/reminders`, which is exactly where a General
+tap belongs. `reminders/dispatcher.ts` `deriveReminderProjectId` needed one addition: the
+sentinel resolves to `owner_slug`, as its `web:<user_id>` General twin already did, or the context
+source would go looking for a `Projects/~general/STATUS.md` that cannot exist.
+
+**TWO readers needed the sentinel, not one — corrected in round 3, and the sentence above said "the
+one addition" until it was.** Reserving a segment does not just create a new topic to decode; it
+creates a value that every consumer of `topic_id` must now recognise, and the second one was missed
+because it is a WRITE on a different substrate. `cores/free/reminders/src/backend.ts`
+`resolveTaskProjectId` — the convert-to-task path — resolved `~general` to itself, so promoting a
+General reminder would have created a task whose `project_id` is the sentinel and made
+`tasks/projection/write.ts` `mkdirSync` a `Projects/~general/` directory for a project that cannot
+exist. `tasks/store.ts` `create` does not re-validate the id, so the Core was the only guard.
+Normalised to `NO_PROJECT` (`''`) at a single exit rather than inline, because THREE paths carry the
+sentinel there: the caller's explicit override, the `app-project:~general` topic this entry's own
+change introduced, and the bare `~general` the Core's create path stores raw. `NO_PROJECT` rather
+than `owner_slug` because the destination differs — General IS the unprojected bucket, which is the
+bucket the General Tasks tab lists, whereas the dispatcher's consumer needs a real directory.
+
+Not reachable from the app today and fixed anyway: `open/composer.ts` leaves `convertReminderToTask`
+unwired so the HTTP route answers 501, but the Core's own `reminders_convert_to_task` tool reaches
+it, and this branch is what put the sentinel on that path. **`gateway/http/app-tasks-surface.ts`
+still gates on `sanitizeProjectId` and therefore still answers 400 for `~general`** — the tasks
+surface has NOT learned the reserved segment the way reminders has. That is the same shape as #183
+and is left to it rather than widened into a push fix.
+
+Client side, `httpScopeSegment` / `httpScopeSegmentEncoded` sit beside `httpProjectSegment` rather
+than replacing it. Two functions, not a flag: a server that has not learned the reservation answers
+`~general` with a 400, so the halves must agree, and different names are how that is enforced.
+`~` is RFC-3986 unreserved so `encodeURIComponent` leaves it alone — the same property that made it
+the right route sentinel after `#general` shipped and broke on-device (#411).
+
+**SCOPE OF THE FIX, STATED RATHER THAN IMPLIED: reminders ONLY.** Docs, tabs, work-board and
+activity still collapse General onto `general` and still alias. They pre-date this module, and
+closing them is a **data migration** — `Projects/general/docs` is a directory with files in it, and
+either way the split goes, one scope stops seeing content it can see today. Filed as **#183** with
+both fix directions, not ridden in on a push fix. Open has no root `ISSUES.md` (the purity gate
+reserves that path); its defect tracker is GitHub Issues.
+
+**AND THE RESIDUAL IS NOT READ-ONLY — corrected in round 2, because the first version of this
+entry, of `general-scope.ts`'s docblock, of the test comment and of #183 itself all called those
+four clients "read-only".** Two of them write: `docs-client.ts` (`writeFile`, `moveFile`,
+`createFolder`, `uploadBinary`, `deleteFile`, `deleteFolder`, `deleteBinary`,
+`deleteBinariesUnderPrefix`) and `work-board-client.ts` (`create`, `update`, `complete`, `reorder`,
+`delete`, `start`). Only `tabs-client.ts` and `activity-client.ts` are reads. So #183 is an **open
+wrong-scope write** on the same terms that made reminders worth closing first — a docs delete from
+one scope removes the other scope's file — and reminders was the surface worth closing FIRST, not
+the only mutating one. The sequencing behind a migration is unchanged; what changed is that it is no
+longer justified by a severity claim that was false.
+
+**THE SECOND FINDING IS A COMMENT, AND THE FIX IS TO CORRECT THE CLAIM.** The latch-release from the
+previous round is correct by inspection and stays. What was wrong is the sequence used to motivate
+it, in this file's own comment and in commit 93245925's message: *"tap the notification for X,
+rail-tap elsewhere, then tap the SAME notification again — it is still sitting in the shade"*. The
+premise is true and the conclusion is not. A real second tap never reaches the equality check,
+because `app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute` —
+so the re-tap produces no navigation at all and never re-supplies `?message_id=`. It is swallowed one
+layer up. The dedupe TTL is 7 days and warm taps pass `{dismiss:false}`, so the notification really
+does stay in the shade, which is precisely what made the false claim read as plausible.
+
+Corrected in `ChatSyncSurface.tsx` and in the sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, which now says what it actually drives:
+two `rerender` calls, proving the latch releases on a targetless visit — real, and still
+mutation-killed — and saying plainly that it proves nothing about tap-twice reachability. The dedupe
+gap itself is filed as **#182** rather than fixed here; a push-notification fix should not grow a
+navigation change on the way past.
+
+**Mutation-tested, each mutant named with the tests it reds:**
+
+* `resolveScopeSegment` → bare `sanitizeProjectId` (drop the reservation): **5 red** in
+  `gateway/__tests__/app-reminders-surface.test.ts` — accepts-the-sentinel, own-topic,
+  create-invisible-in-the-other, cannot-snooze-or-cancel, include_id-no-leak.
+* `resolveScopeSegment` → `startsWith` instead of `===`: **1 red** — the exact-match arm, which
+  is the one that would otherwise hand `~generalize` the General scope with a 200.
+* `reminders-client.ts` → back to `httpProjectSegmentEncoded`: **7 red** across
+  `general-scope.test.ts` + `legacy-reminder-push-tap-reaches-general.test.ts`.
+* `httpScopeSegment` → collapse the empty scope to `general`: **3 red**. Collapse the sentinel too
+  (i.e. make it identical to `httpProjectSegment`): **7 red**.
+* `deriveReminderProjectId` → drop the sentinel line: **1 red** in `reminders/dispatcher.test.ts`.
+* The latch release → back to the bare `if (deepLinkTarget.length === 0) return;`: still reds the
+  sixth arm and nothing else. Re-run rather than cited — the comment around it changed, so the
+  earlier round's evidence was not assumed to carry over.
+
+The comment corrections have **no mutant**, and that is stated rather than papered over: nothing
+executable changed, so there is no test to red. What they buy is that the next reader does not build
+on a reachability that does not hold.
+
+`legacy-reminder-push-tap-reaches-general.test.ts` needed its premise inverted, not just its
+literals: it existed to assert the tilde must NOT reach the wire, and now the tilde reaching the wire
+is the correct outcome. It pins the segment against `wire-types`, the one definition both sides
+import, so a drift in either copy reds here instead of 400ing on a device. `wire-types/topic-id.ts`
+also said the gateway "rejects `~general` … on every `/api/app/projects/<id>/…` route" — true when
+written, and now false of exactly one route, so it names the exception.
+
+📌 **A sentinel is only collision-proof at the layer that spells it.** `~general` was engineered to
+be unmistakable on the client and then translated, one function later, into a string a user can name
+their project. The property was real and it did not survive the mapping — and nothing failed, because
+both halves were individually correct. **When a value exists to be unforgeable, follow it to the last
+layer that reads it and check the guarantee is still true there.** The generalisation of the
+adjacent lesson from the same file: a comment describing a mode is a claim about reachability, and
+the way to check it is to walk the layer ABOVE the one the comment is written in.
+
+### Round 2 — the correction had itself carried the false claim, and one sentinel had escaped to the screen
+
+Same PR **#171**, second review round. Nothing about the reservation changed; four things that
+DESCRIBED it did, plus one user-visible leak the reservation created.
+
+**THE SEVERITY CLAIM WAS WRONG IN SIX PLACES AT ONCE.** "Read-only clients" was written into
+`app/lib/general-scope.ts` (twice), `app/lib/reminders-client.ts`,
+`gateway/http/app-reminders-surface.ts`, `app/__tests__/general-scope.test.ts`, this file, and the
+body of GitHub issue #183 — and it is false of two of the four. It survived a whole round because it
+was *plausible*: reminders genuinely was the surface being made to mutate in this branch, so "the
+mutating one" read as a description of the SET when it was only a description of the DIFF. All six now
+name the writing methods by symbol, and #183's title and table say WRITES. The reason to care is not
+tidiness — a residual filed as read-only gets scheduled like a cosmetic, and this one can delete a
+document.
+
+The count went from five to six *after* the first correction pass, and that is the finding, not a
+footnote: the sixth was in `reminders-client.ts` — the module whose entire purpose is to NOT use the
+aliased mapper — and the first pass missed it because the pass re-read the files it had already
+opened instead of searching for the sentence. 📌 **A claim that is wrong in one file is wrong wherever
+it was copied to. Grep the CLAIM, not the file** — this branch hit that same shape three times
+(`625d29d2`, `a2ab3a0e`, and here), which is twice more than a coincidence.
+
+**THE RESERVATION PUT `~general` ON THE FOCUS SCREEN.** `app-focus-surface.ts`'s
+`extractProjectIdFromTopic` decodes `app-project:<id>` back to whatever id it carries, so the moment
+General's reminders got their own topic, a General row's project chip rendered the literal string
+`~general` — an internal routing token displayed as though the owner had named a project that. It was
+unreachable before this branch (the surface 400'd on `~`), which is why no existing test could have
+caught it: `focus-row-formatters.test.ts` hand-builds its items, so it only ever sees values someone
+thought to type. `projectChipLabel` now maps the sentinel to `General`, and deliberately does NOT
+route it through `isInstanceLevel` — General is a routable scope with its own tabs, and flipping that
+predicate would have silently redirected the tap to the projects list.
+
+**TWO CITATIONS HAD GONE STALE INSIDE THEIR OWN BRANCH.** A prose edit in one commit cited
+`app-reminders-surface.ts:212` and `:247`; a later commit on the same branch added lines above both.
+Rather than repoint them at 271 and 307 — which the next commit would break again — they now name the
+call and the expression. 📌 **A `file:line` citation into a file the same branch is still editing is
+stale before it merges. Cite the symbol.**
+
+**THE BIDIRECTIONAL TEST WAS ONLY UNIDIRECTIONAL.** `"neither scope can snooze or cancel the other's
+row"` created a General row and attacked it through the project's URL — and never built the mirror.
+The two directions are not symmetric by inspection: the reserved segment is matched by an exact-match
+branch that runs *before* `sanitizeProjectId`, so the General-as-attacker path executes different
+code. Split into two named tests over one parameterised helper. Mutation-tested by aliasing the
+sentinel back to `general` **on the snooze/cancel branch only**, leaving list and create reserved: the
+new test reds, the original passes — which is the proof that it covered one half while reading as
+though it covered both.
+
+📌 **A test whose NAME quantifies over both directions ("neither", "either", "any") is asserting
+something its body may not reach.** The name is the claim; the fixtures are the coverage. When they
+disagree, the name is what everyone believes.

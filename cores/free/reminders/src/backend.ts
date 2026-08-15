@@ -76,6 +76,11 @@ import {
 } from '@neutronai/tasks'
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+// The app rail's no-project sentinel. Imported rather than re-declared: this is
+// the fourth module to need it, and `app/lib/general-scope.ts` only duplicates
+// it (behind a parity test) because it must stay import-free for RN. Nothing
+// forces that here.
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 
 import { CORE_PACKAGE_NAME } from './manifest.ts'
 
@@ -765,7 +770,52 @@ export function buildReminderStoreBackend(
   }
 }
 
+/**
+ * The task project_id for a reminder being converted.
+ *
+ * WHY THIS WRAPS A RAW RESOLVER INSTEAD OF CHECKING THE SENTINEL INLINE. The
+ * General scope reaches this function by THREE separate paths, and an inline
+ * check would have to be repeated at each of them: the caller's explicit
+ * `project_id` override, the `app-project:~general` topic the app's reminders
+ * surface now writes (`gateway/http/app-reminders-surface.ts`
+ * `resolveScopeSegment`), and the bare `~general` the Core's own create path
+ * stores as a raw `topic_id`. Normalising at the single exit covers all three,
+ * and covers the next one by construction.
+ *
+ * `~general` IS NOT A PROJECT ID — it is the app rail's spelling of the
+ * no-project scope, and `~` is deliberately outside the gateway's
+ * `[A-Za-z0-9_.-]` project-id alphabet so it can never name a real project.
+ * Let it through and the canonical task store — which does NOT re-validate the
+ * id (`tasks/store.ts` `create`) — writes a task whose project_id is the
+ * sentinel, and the projection then does `mkdirSync` on
+ * `<owner_home>/Projects/~general/` (`tasks/projection/write.ts`), creating a
+ * directory for a project that cannot exist. The General Tasks tab could not
+ * read it back either: `gateway/http/app-tasks-surface.ts` still gates on
+ * `sanitizeProjectId`, which rejects `~`, so that surface answers 400 — it has
+ * not learned the reserved segment the way the reminders surface has.
+ *
+ * `NO_PROJECT` (`''`) is the right target rather than `owner_slug`: General is
+ * the no-project scope, so the task belongs in the unprojected bucket, which is
+ * the same bucket the General Tasks tab lists. This is the task-store analogue
+ * of `reminders/dispatcher.ts` `deriveReminderProjectId`, which resolves the
+ * same sentinel to `owner_slug` because ITS consumer is a context-source path
+ * that needs a real directory; the two differ because the destinations differ,
+ * not because either is wrong.
+ *
+ * NOT REACHABLE FROM THE APP TODAY, and fixed anyway: `open/composer.ts` leaves
+ * `convertReminderToTask` unwired, so the HTTP route answers 501. The Core's own
+ * `reminders_convert_to_task` tool does reach it, and the branch that made the
+ * app write `app-project:~general` is what put the sentinel on this path.
+ */
 function resolveTaskProjectId(
+  reminder: Reminder,
+  override: string | undefined,
+): string {
+  const resolved = resolveRawTaskProjectId(reminder, override)
+  return resolved === GENERAL_RAIL_ID ? NO_PROJECT : resolved
+}
+
+function resolveRawTaskProjectId(
   reminder: Reminder,
   override: string | undefined,
 ): string {

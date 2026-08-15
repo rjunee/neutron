@@ -16,7 +16,7 @@
  *
  *   1. POST /api/app/devices/register   → row persists in the store
  *   2. POST /api/app/devices/unregister → row is removed
- *   3. PushDispatcher.pushReminder      → attempted=0, no client call
+ *   3. a PushDispatcher send             → attempted=0, no client call
  *
  * If any future change re-introduces a path where the device row outlives
  * sign-out, the dispatcher assertion fails the build.
@@ -38,7 +38,6 @@ import {
   type ExpoPushTicket,
 } from '../push/expo-push-client.ts'
 import { createPushDispatcher } from '../push/dispatcher.ts'
-import type { Reminder } from '@neutronai/reminders/store.ts'
 import { createAppDevicesSurface } from '../http/app-devices-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 
@@ -114,24 +113,6 @@ function fakeClient(tickets: ExpoPushTicket[]): FakeClient {
   }
 }
 
-function makeReminder(): Reminder {
-  return {
-    id: 'r-after-signout',
-    owner_slug: 'demo',
-    topic_id: 'app-project:demo',
-    fire_at: 1700000000,
-    message: 'walk the dog',
-    status: 'fired',
-    recurrence: null,
-    recurrence_spec: null,
-    ritual_id: null,
-    source: null,
-    created_at: 1699999000,
-    fired_at: 1700000005,
-    cancelled_at: null,
-  }
-}
-
 describe('sign-out flow — device push token regression (P5.6 round 2)', () => {
   let harness: Harness
   beforeEach(async () => {
@@ -141,7 +122,7 @@ describe('sign-out flow — device push token regression (P5.6 round 2)', () => 
     await harness.close()
   })
 
-  it('register → unregister leaves zero tokens for the project; pushReminder no-ops', async () => {
+  it('register → unregister leaves zero tokens for the project; a send no-ops', async () => {
     // Step 1 — Expo client login flow: POST register.
     const regRes = await authedFetch(
       harness.base,
@@ -184,12 +165,12 @@ describe('sign-out flow — device push token regression (P5.6 round 2)', () => 
       harness.store.getByDeviceToken('demo', 'ExponentPushToken[signout-regression]'),
     ).toBeNull()
 
-    // Step 3 — Reminder dispatch for this instance must yield zero
-    // attempts. If a future change re-introduces a path where the row
-    // outlives sign-out, this assertion fails.
+    // Step 3 — a send for this instance must yield zero attempts. If a future
+    // change re-introduces a path where the row outlives sign-out, this
+    // assertion fails.
     const client = fakeClient([])
     const dispatcher = createPushDispatcher({ store: harness.store, client })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('demo', { body: 'anything' })
     expect(result.attempted).toBe(0)
     expect(result.delivered).toBe(0)
     expect(result.errored).toBe(0)

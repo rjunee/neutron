@@ -34,6 +34,34 @@
  *
  * The composer wires deliver ONCE at the composition root (the sole place that
  * names the concrete registries) and injects it into every producer.
+ *
+ * ── 2026-08-09 — THE NATIVE NOTIFICATION IS A FOURTH THING DELIVER OWNS ──────
+ *
+ * The owner's report was about a ritual: his lock screen said `ritual:kaizen`
+ * instead of the text that got posted. The first fix composed the notification in
+ * the reminder OUTBOUND, which cured that message and left every other
+ * out-of-turn post silent — the morning brief, the idle nudge and the overnight
+ * report all reach the owner's chat through this same seam and none of them
+ * notified anybody. A per-producer notification is the same shape of mistake as
+ * the per-producer registry pick this module exists to have ended.
+ *
+ * So it lives HERE, once, and the rule is the one the owner stated: *"a ritual
+ * posting is just a chat message"* — and so is a brief, and so is a nudge. If a
+ * post got a DURABLE ROW, the owner is notified about it; a `durability: 'none'`
+ * transient pill is not notified, because there is no row for a tap to land on.
+ * A producer can no longer notify differently, or forget to.
+ *
+ * AND THE ROW IS STAMPED DELIVERED AFTERWARDS, which is what makes the re-emit
+ * suppression below real rather than decorative. `alreadySeen` asks the ButtonStore
+ * whether the owner has already been shown this row, and the store answers from
+ * `delivered_at`. For one round of review nothing on this path ever WROTE
+ * `delivered_at` — `markDelivered`'s only callers were the onboarding engines — so
+ * `was_delivered` was structurally false for every row deliver creates,
+ * `alreadySeen` could never be true, and the double-buzz the suppression was added
+ * to stop still happened on every idempotent re-emit. A guard whose input is never
+ * written is not a guard. `deliver.test.ts` now drives the REAL `ButtonStore`
+ * against a real DB for exactly this property, because the fake that stood in for
+ * it returned `was_delivered: true` from a literal and could not have caught it.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -44,6 +72,8 @@ import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { parseAnyTopicId } from '@neutronai/channels/topic-id.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import { createLogger } from '@neutronai/logger'
+
+import { chatMessagePushScope, type ChatMessagePushSink } from '../push/chat-message-push.ts'
 
 const moduleLog = createLogger('deliver')
 
@@ -120,10 +150,87 @@ export interface DeliverPushTargets {
 export interface CreateDeliverInput {
   buttonStore: ButtonStore
   push: DeliverPushTargets
+  /**
+   * The owner's DEVICES — the native notification for a message that just landed
+   * in chat. Fires for every post that got a durable row (`'reply'` and
+   * `'inert'`) and never for `'none'`, which has no row for a tap to open.
+   *
+   * Absent ⇒ posts are durable + live-pushed exactly as before and no device is
+   * notified: the state of a box with no registered device, and what every test
+   * that does not care about push wants.
+   */
+  notify?: ChatMessagePushSink
+  /**
+   * How long the device notification may hold a delivery before it is abandoned.
+   * Default 3 s.
+   *
+   * This is a REQUEST-PATH bound, not a tidiness one. `POST /api/app/system-notice`
+   * awaits `deliver` to answer the caller (`gateway/http/system-notice-surface.ts`),
+   * and the only limit underneath the notification is the Expo client's own
+   * per-batch `EXPO_PUSH_TIMEOUT_MS` of 10 s (`gateway/push/expo-push-client.ts`) —
+   * multiplied by however many batches the token list needs. A stalled `exp.host`
+   * would therefore stall an HTTP response for tens of seconds for the sake of a
+   * best-effort buzz. On timeout the notification is treated as NOT sent, so
+   * `delivered_at` stays NULL and the next re-emit tries again.
+   *
+   * WHAT THAT COSTS, STATED RATHER THAN IMPLIED: the bound ABANDONS the
+   * notification, it does not CANCEL it. The Expo POST underneath keeps running to
+   * its own 10 s deadline, so a send that is merely slow can be reported here as
+   * not-sent and still reach the device afterwards — and because the row was left
+   * unstamped, the next idempotent re-emit notifies again. The owner sees the same
+   * message buzz twice.
+   *
+   * That is the deliberate side to fail on. The alternative is stamping a row whose
+   * notification we have no evidence arrived, which silences the re-emit FOREVER for
+   * a message he may never have received. A duplicate buzz is a visible annoyance he
+   * can act on; a suppressed one is invisible, and that is the failure this seam was
+   * built to end. Cancelling for real needs a cancellation token threaded through
+   * the sink into the Expo client — worth doing when the sink has a second caller,
+   * not worth a bespoke abort path for one.
+   */
+  notify_timeout_ms?: number
   log?: (msg: string) => void
 }
 
+/** Default {@link CreateDeliverInput.notify_timeout_ms}. */
+export const DEFAULT_NOTIFY_TIMEOUT_MS = 3_000
+
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/**
+ * Resolve `work`, or `false` once `budget_ms` has passed — whichever is first.
+ *
+ * `unref()` on the timer so a pending bound can never hold the process open, and
+ * `clearTimeout` on the settle so a fast notification does not leave a live timer
+ * behind on every delivery. The abandoned promise is left to settle on its own with
+ * a no-op catch attached: dropping the reference without one would surface an Expo
+ * outage as an unhandled rejection AFTER we had already reported not-sent.
+ *
+ * IT DOES NOT CANCEL `work`, AND THAT COSTS A POSSIBLE DUPLICATE BUZZ. If Expo
+ * answers at 3.1 s the notification still goes out, but this call already reported
+ * not-sent, so the row was left unstamped and the next idempotent re-emit of the same
+ * key buzzes again — one message, two banners. Named rather than fixed, deliberately:
+ * cancellation would mean threading an `AbortSignal` through `ChatMessagePushSink`
+ * into the Expo client, and the failure it would buy back is a duplicate NOTIFICATION
+ * of a message that is correct and present in the transcript either way. The opposite
+ * default — treating a timeout as sent — is the one that loses information, because it
+ * stamps the row for a buzz that may never arrive and silences every retry (see
+ * `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`). Revisit only
+ * if the duplicate is ever observed, not on the strength of this paragraph.
+ */
+async function withTimeout(work: Promise<boolean>, budget_ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const bound = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), budget_ms)
+    timer.unref?.()
+  })
+  work.catch(() => undefined)
+  try {
+    return await Promise.race([work, bound])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
 
 /**
  * Build the {@link Deliver} seam every out-of-turn producer posts through.
@@ -131,6 +238,22 @@ const errMsg = (err: unknown): string => (err instanceof Error ? err.message : S
 export function createDeliver(input: CreateDeliverInput): Deliver {
   const { buttonStore, push } = input
   const log = input.log ?? ((msg: string): void => moduleLog.warn(msg))
+  const notify_timeout_ms = input.notify_timeout_ms ?? DEFAULT_NOTIFY_TIMEOUT_MS
+  // VALIDATED AT CONSTRUCTION, for the same reason `ExpoPushClient` validates its
+  // own `timeout_ms` and `batch_size` there: a bad deadline is a config mistake, and
+  // a config mistake should be one loud error at boot rather than a silent
+  // behaviour change on every fire.
+  //
+  // `??` only defaults `undefined`, so a literal `0` — or a `NaN` arriving from a
+  // parsed setting — passes straight through to `withTimeout`, where `setTimeout(0)`
+  // (Node clamps NaN to 0 too) resolves the bound on the very next macrotask. The
+  // race is then decided BEFORE the notification can possibly answer, so every
+  // notification reports not-sent, no row is ever stamped, and the re-emit
+  // suppression this whole seam exists for is silently off — the one failure mode
+  // that looks exactly like working code.
+  if (!Number.isFinite(notify_timeout_ms) || notify_timeout_ms <= 0) {
+    throw new Error('createDeliver: notify_timeout_ms must be a positive number')
+  }
 
   /**
    * Route the live push by topic grammar and swallow the sender's throw
@@ -152,6 +275,57 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       // the owner on the next hydration.
       log(`${LOG_TAG} live push failed (durable row is the guarantee) topic=${topic_id}: ${errMsg(err)}`)
       return false
+    }
+  }
+
+  /**
+   * Notify the owner's devices that this landed in chat. Best-effort in the same
+   * sense the live push is, and swallowed HERE rather than at the producer —
+   * because of what a throw would mean upstream. `buildButtonStoreReminderOutbound`
+   * reports `persisted` as "the post happened", and the reminder tick reads a false
+   * there as "revert the claim and fire again next tick" (`reminders/tick.ts` #319).
+   * An Expo outage that escaped this line would double-post every reminder.
+   */
+  const notifyDevices = async (
+    topic_id: string,
+    message_id: string,
+    body: string,
+  ): Promise<boolean> => {
+    if (input.notify === undefined) return false
+    try {
+      return await withTimeout(
+        input.notify({ ...chatMessagePushScope(topic_id), message_id, body }),
+        notify_timeout_ms,
+      )
+    } catch (err) {
+      log(
+        `${LOG_TAG} device notification failed (durable row is the guarantee) topic=${topic_id}: ${errMsg(err)}`,
+      )
+      return false
+    }
+  }
+
+  /**
+   * Stamp the durable row as shown to the owner, so the NEXT idempotent re-emit
+   * can suppress a second buzz.
+   *
+   * Only for `durability: 'reply'`: that is the one mode whose row is created by
+   * `ButtonStore.emit` with `delivered_at` NULL. `persistInertAgentTurn` stamps its
+   * own row at insert time (`channels/button-store.ts` — "delivered_at is stamped
+   * because the caller only persists what it already sent"), so an `inert` post has
+   * nothing left to record.
+   *
+   * Swallows its own failure. The stamp is an AUDIT write on a row that already
+   * exists and whose message the owner already has; letting a locked DB here
+   * surface would revert the reminder tick's claim and re-post the message
+   * (`reminders/tick.ts` #319) — trading a possible duplicate buzz for a certain
+   * duplicate post.
+   */
+  const stampDelivered = async (prompt_id: string): Promise<void> => {
+    try {
+      await buttonStore.markDelivered(prompt_id)
+    } catch (err) {
+      log(`${LOG_TAG} could not stamp delivered_at prompt=${prompt_id}: ${errMsg(err)}`)
     }
   }
 
@@ -206,6 +380,18 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
         // OR when it landed in the DB but never reached a client (a transient
         // send failure on the prior call). The same predicate the onboarding
         // engine uses (`engine.ts:1186`) — one idiom, not two.
+        //
+        // IT NOW GOVERNS THE BUZZ AS WELL AS THE BUBBLE, and it does so through
+        // the early return below rather than a second guard: an idempotent
+        // re-emit collapses onto a row the owner already has, and returning
+        // before `routedPush` means the notification is never reached either.
+        // The two questions turned out to be one — "does he already have this?"
+        // — so they get one predicate and one exit, not two flags that can
+        // drift apart.
+        //
+        // The `was_delivered` exception is load-bearing for BOTH: both false
+        // means the row landed in the DB but never reached him, so it still
+        // needs rendering AND still needs the notification.
         alreadyRendered = !emitted.was_new && emitted.was_delivered
       } else {
         const persisted = await buttonStore.persistInertAgentTurn({ topic_id, body })
@@ -238,18 +424,59 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       allow_freeform: true,
       prompt_id,
     })
-    // Record the render so a later re-emit can skip it. Without this write
-    // `was_delivered` is false forever and the guard above is dead code. Failure
-    // here is logged, never surfaced: the message HAS been delivered, and the
-    // worst consequence of a missed stamp is one duplicate bubble on a retry —
-    // strictly better than failing a delivery that already succeeded.
-    if (durability === 'reply' && delivered) {
-      try {
-        await buttonStore.markDelivered(prompt_id)
-      } catch (err) {
-        log(`${LOG_TAG} markDelivered failed topic=${topic_id} prompt=${prompt_id}: ${errMsg(err)}`)
-      }
-    }
+    // AFTER the live push, and UNCONDITIONALLY on its result. A live socket is not
+    // evidence the owner is looking: Android keeps the app-ws socket open while the
+    // app sits in the background, so gating the notification on `delivered_live`
+    // would silence exactly the case a notification exists for. `alreadySeen` is a
+    // different question and the only thing that suppresses it: an idempotent
+    // re-emit of a message he already has.
+    // NO `alreadySeen` GUARD HERE. It was in the branch this came from, and it
+    // is redundant against main's early return above, which fires on the same
+    // predicate and never reaches this code. Keeping both would be two flags
+    // for one fact — the shape that drifts.
+    const notified = await notifyDevices(topic_id, prompt_id, body)
+    // RECORD that he was shown it, so the next re-emit of the same
+    // `idempotency_key` reads `was_delivered: true` and stays quiet. Gated on the
+    // owner having ACTUALLY been reached — by a device notification or by a live
+    // socket — because the ButtonStore contract's exception is load-bearing: a row
+    // that persisted while every transport failed must still buzz on the retry,
+    // and stamping unconditionally would silence it forever.
+    //
+    // THE COST OF THE `|| delivered` ARM, NAMED RATHER THAN LEFT TO BE FOUND.
+    // Twenty lines up, a live socket is declared NOT to be evidence the owner is
+    // looking; here it is accepted as evidence he was REACHED. Both are meant, but
+    // the pair has a seam: a backgrounded phone holding an open socket while Expo
+    // is down gives `delivered: true, notified: false`, so the row is stamped and
+    // the ALERT for that key is gone for good — a `ritual-approval` or credential
+    // incident then waits silently until he next opens the app.
+    //
+    // Accepted, because the message itself is not lost: the socket handed it to the
+    // client and it is in the transcript, so this delays an alert rather than
+    // dropping information. The alternative — requiring `notified` — makes the
+    // stamp unreachable on any install with no registered device, which is every
+    // fresh one, and there the re-emit would re-notify forever with nothing able to
+    // buzz. Stamping on "reached by some transport" is the honest reading of
+    // `delivered_at`. Revisit if a key ever needs an alert guarantee STRONGER than
+    // the transcript, because that is a different contract and wants a different
+    // field, not a tweak to this condition.
+    //
+    // THE `notified` ARM HAS THE MIRROR-IMAGE SEAM, and "it is in the transcript"
+    // is the assumption that carries it. `routedPush` answers a BOOLEAN, so it
+    // collapses the app adapter's two not-delivered markers into one `false`:
+    // `app-ws:dropped:*` (persisted, no live socket) and `app-ws:lost:*` (the
+    // chat_log append FAILED, captured nowhere) — the distinction
+    // `recovered-reply-store.ts` keeps and this seam discards. On a `lost`, a
+    // successful device notification stamps the row, so the re-emit goes quiet for
+    // a message that hydration cannot show
+    // (`open/wiring/app-ws.ts` rebuilds the transcript from exactly those rows).
+    //
+    // Accepted on the same reasoning and with the same limit: the owner DID get the
+    // body in the notification, the ButtonStore row still resolves its buttons, and
+    // it needs a chat_log write failure to reach at all. Recovering it properly
+    // means widening `DeliverPushTargets.app` from `boolean` to the tri-state the
+    // markers already carry, which is an API change across `open/composer.ts` and
+    // the app-ws wiring — a separate lane, not a condition tweak here.
+    if (durability === 'reply' && (notified || delivered)) await stampDelivered(prompt_id)
     return { prompt_id, persisted: true, delivered_live: delivered }
   }
 }
