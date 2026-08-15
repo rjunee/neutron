@@ -34,7 +34,12 @@ import {
   View,
 } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
+
+import {
+  clearOpenConversation,
+  setOpenConversation,
+} from '../lib/push-foreground-policy';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { spentChoiceValue } from '@neutronai/chat-core';
@@ -176,6 +181,28 @@ export function ChatSyncSurface({
 
   // ISSUE #18 — single client-side consumer of the top-level `deep_link`.
   const seenDeepLinks = useRef<Set<string>>(new Set());
+  // Tell the notification handler which conversation is on screen, so a message
+  // for THIS chat does not buzz him while he is reading it. The server now
+  // notifies for every agent message including a reply to something he just
+  // sent (owner, 2026-08-15), and this registration is the only thing that
+  // keeps that from interrupting the conversation that produced it.
+  //
+  // `useFocusEffect`, not `useEffect`: this surface stays MOUNTED behind other
+  // tabs, so a mount-scoped effect would leave a backgrounded chat registered as
+  // "on screen" and silence its notifications from wherever he actually was. The
+  // cleanup runs on blur, which is the honest signal.
+  //
+  // The cleanup CLEARS rather than restores a previous value: two chat surfaces
+  // are never focused at once, and clearing fails toward notifying him.
+  useFocusEffect(
+    useCallback(() => {
+      setOpenConversation({ project_id: projectId });
+      return () => {
+        clearOpenConversation();
+      };
+    }, [projectId]),
+  );
+
   useEffect(() => {
     dispatchUnseenDeepLinks(messages, seenDeepLinks.current, (href) => {
       router.push(href as Parameters<typeof router.push>[0]);
