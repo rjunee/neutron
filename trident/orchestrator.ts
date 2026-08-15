@@ -80,6 +80,7 @@ import {
 } from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
+import { buildTestStrategy, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
@@ -164,6 +165,24 @@ export interface BuildTridentOrchestratorOptions {
    * resolver degrades to no context and never fails the launch (see `launch()`).
    */
   resolve_reflection_context?: (run: TridentRun) => string | null
+  /**
+   * The count of NON-TERMINAL trident runs INCLUDING the one launching — the true live
+   * fan-out. Wired to `store.listNonTerminal(50).length` in
+   * `gateway/composition/build-core-modules.ts` (the orchestrator holds no store; the
+   * composer does).
+   *
+   * Consumed by `computeTestJobs` so that N concurrent builds SPLIT the box's cores
+   * instead of each claiming all of them — four builds each asking for `JOBS=4` is
+   * sixteen bun processes on eight cores, which is slower than sequential and a
+   * plausible OOM.
+   *
+   * BEST-EFFORT: a throwing resolver or a non-finite result degrades to 1
+   * (sequential-safe) and NEVER fails the launch. And it must actually be WIRED —
+   * `resolve_phase_models` is the history here: a complete seam whose producer was
+   * missing shipped an inert feature that no test could catch, because every piece
+   * worked in isolation.
+   */
+  resolve_active_runs?: () => number
   /**
    * Is a Kimi K3 key configured? Called PER LAUNCH so a key added after boot is
    * honoured without a restart. Absent → the Kimi panelist never runs, which is
@@ -1541,6 +1560,37 @@ export function buildTridentOrchestrator(
       }
     }
 
+    // The TEST EXECUTION block, derived here for the same reason and with the same
+    // never-fails shape as the reflection resolve above: it needs the LIVE run count
+    // (the launcher does not hold one) and the host's core/RAM budget, and a build must
+    // never fail because the strategy could not be derived. Null → the workflow's
+    // contract is byte-identical legacy.
+    let test_strategy: string | null = null
+    try {
+      let active = 1
+      if (opts.resolve_active_runs) {
+        try {
+          const n = opts.resolve_active_runs()
+          if (Number.isFinite(n) && n >= 1) active = Math.floor(n)
+        } catch {
+          // A store hiccup costs the DIVISOR, not the whole block: 1 is the
+          // sequential-safe assumption, and the build still gets its stage-1 gate
+          // and its full-suite rule. The outer catch below is the last-resort
+          // backstop that keeps ANY failure here from failing the launch.
+          active = 1
+        }
+      }
+      const budget = readHostBudget()
+      test_strategy = buildTestStrategy(launchRun.repo_path, {
+        cores: budget.cores,
+        active_runs: active,
+        mem_available_bytes: budget.mem_available_bytes,
+        base_branch: base,
+      })
+    } catch {
+      test_strategy = null
+    }
+
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
@@ -1581,6 +1631,9 @@ export function buildTridentOrchestrator(
       // resolver / nothing learned / a
       // read failed.
       reflection_context,
+      // The rendered TEST EXECUTION block (derived best-effort above), spliced by the
+      // workflow into the FORGE build contract only — never the argus review gate.
+      test_strategy,
       // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
       // and OMITS the argument when nothing valid is configured, so an untouched
       // instance produces byte-identical workflow args.

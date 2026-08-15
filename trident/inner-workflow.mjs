@@ -217,6 +217,16 @@ const {
   // independent review gate (argus:*) — see the trust-boundary note below. Absent/''
   // → every prompt is byte-identical to pre-RB2.
   reflectionGuidance = '',
+  // The TEST EXECUTION block, ALREADY RENDERED launcher-side and deterministic
+  // (`trident/test-strategy.ts` `buildTestStrategy`, composed by the orchestrator,
+  // which is the only layer holding the live run count + host budget). Spliced into
+  // the FORGE CONTRACT ONLY — and because that one contract composes the round-1 build
+  // prompt, EVERY fix-round prompt and the HEAD of the codex build brief, one splice
+  // reaches all three. The codex byPath suffix check spans `task + reflectionGuidance +
+  // coda` and is untouched by this: the contract is the brief's HEAD, not its suffix.
+  // Never given to argus:* (same trust boundary as reflectionGuidance). Absent/'' →
+  // the contract is byte-identical to before this existed.
+  testStrategy = '',
   // OWNER PER-PHASE MODEL OVERRIDES — phase key → {model?, effort?}, ALREADY
   // validated in TypeScript at the settings boundary (`trident/phase-models.ts`
   // `parsePhaseModelConfig`). Absent/null → every phase keeps its default, so an
@@ -1157,13 +1167,13 @@ ${NO_PATTERN_KILL_RULE}
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
-3. Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.
+3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block below — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
 6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
-   WORKTREE=<your worktree pwd>`
+   WORKTREE=<your worktree pwd>${testStrategy === '' ? '' : `\n\n${testStrategy}`}`
 }
 
 // ── THE BUILD, ON THE CODEX EXECUTOR ─────────────────────────────────────────

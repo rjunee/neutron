@@ -59,6 +59,11 @@ interface RunOpts {
   task?: string
   briefParts?: unknown
   codexBuild?: boolean
+  /**
+   * The rendered TEST EXECUTION block. Undefined → the arg is not set at all, which is
+   * the legacy-contract case (the workflow defaults it to '').
+   */
+  testStrategy?: string
 }
 
 async function runWorkflow(
@@ -152,6 +157,7 @@ async function runWorkflow(
       k3: { model_id: 'kimi', transport: 'cli', env_var: 'KIMI_MODEL', group: 'kimi' },
     },
   }
+  if (opts.testStrategy !== undefined) args.testStrategy = opts.testStrategy
   if (opts.briefParts !== undefined) args.briefParts = opts.briefParts
   if (opts.codexBuild) {
     args.phaseModels = { build: { model: 'gpt' } }
@@ -686,5 +692,56 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
       expect(c.prompt).not.toContain('NEVER call AskUserQuestion')
       expect(c.prompt).not.toContain('redirect stdout+stderr to a log file')
     }
+  })
+})
+
+/**
+ * The TEST EXECUTION block rides the SAME trust boundary as `reflectionGuidance`: it
+ * belongs to the BUILDER (forge:build + every fix round) and must never reach the
+ * independent review gate — a reviewer told how to run the suite is a reviewer that can
+ * be steered by the thing it is reviewing. Asserted over the EXECUTED workflow rather
+ * than the source, because the leak this catches is an aliasing one.
+ */
+describe('AS-BUILT: TEST EXECUTION strategy threading (executed prompt capture)', () => {
+  const MARKER = 'TESTSTRAT_MARKER_Q4'
+  const STRATEGY = `TEST EXECUTION\n\n${MARKER} full suite rules`
+  const LEGACY_STEP_3 = 'Run the relevant tests (redirect verbose output to a log, read only the tail).'
+
+  let captured: Captured[] = []
+  beforeAll(async () => {
+    // The DEFAULT (non-approveAll) run: round 1 synthesises REQUEST_CHANGES, so a real
+    // forge:fix-round-* is dispatched and its prompt can be asserted.
+    captured = (await runWorkflow('', { testStrategy: STRATEGY })).captured
+  })
+
+  test('the block reaches forge:build', () => {
+    expect(forgeBuildPrompt(captured)).toContain(MARKER)
+  })
+
+  test('the block reaches EVERY fix round — the round that re-pays the suite', () => {
+    const fixRounds = captured.filter((c) => String(c.label).startsWith('forge:fix-round-'))
+    expect(fixRounds.length).toBeGreaterThan(0)
+    for (const c of fixRounds) expect(c.prompt).toContain(MARKER)
+  })
+
+  test('the block reaches NO reviewer or planner prompt (the trust boundary)', () => {
+    const reviewers = captured.filter(
+      (c) => String(c.label).startsWith('argus:') || c.label === 'plan:fable',
+    )
+    for (const c of reviewers) expect(c.prompt).not.toContain(MARKER)
+  })
+
+  test('step 3 points at the block and makes the FULL suite a precondition of testsPassed=true', () => {
+    const prompt = forgeBuildPrompt(captured)
+    expect(prompt).not.toContain(LEGACY_STEP_3)
+    expect(prompt).toContain('REQUIRED before you may report testsPassed=true')
+  })
+
+  test('with no strategy arg the contract is the LEGACY one, verbatim', async () => {
+    // The byte-identical-when-absent guarantee: an instance that never derives a
+    // strategy (or a repo where the derivation failed) builds exactly as before.
+    const prompt = forgeBuildPrompt((await runWorkflow('')).captured)
+    expect(prompt).toContain(LEGACY_STEP_3)
+    expect(prompt).not.toContain('TEST EXECUTION')
   })
 })

@@ -26,6 +26,7 @@ import {
   buildTestStrategy,
   computeTestJobs,
   probeParallelKnobs,
+  readHostBudget,
   renderTestStrategy,
   resolveTestCommand,
   FULL_SUITE_REQUIRED,
@@ -259,5 +260,48 @@ describe('buildTestStrategy', () => {
     expect(block).toContain('TEST EXECUTION')
     expect(block).toContain('could NOT be resolved')
     expect(block).toContain(NO_TIMEOUT_WRAPPER)
+  })
+})
+
+describe('readHostBudget — the live box capacity, never a throw', () => {
+  test('MemAvailable is parsed out of /proc/meminfo and returned in BYTES', () => {
+    // The unit is the whole point: procfs reports kB, `computeTestJobs` divides by a
+    // per-file RSS in bytes, and a 1024x error there is the difference between a
+    // sensible budget and one that always collapses to 1 (or never caps at all).
+    const budget = readHostBudget(() => 'MemTotal: 31000000 kB\nMemAvailable: 25000000 kB\n')
+    expect(budget.mem_available_bytes).toBe(25000000 * 1024)
+  })
+
+  test('a throwing read degrades to os.freemem() instead of failing the launch', () => {
+    const budget = readHostBudget(() => {
+      throw new Error('no procfs here (macOS, a container without /proc, …)')
+    })
+    expect(budget.mem_available_bytes).toBeGreaterThan(0)
+    expect(budget.cores).toBeGreaterThanOrEqual(1)
+  })
+
+  test('an unparseable /proc/meminfo also falls back rather than reporting nonsense', () => {
+    const budget = readHostBudget(() => 'MemTotal: 31000000 kB\n')
+    expect(budget.mem_available_bytes).toBeGreaterThan(0)
+  })
+
+  test('cores is always a positive integer', () => {
+    const budget = readHostBudget()
+    expect(Number.isInteger(budget.cores)).toBe(true)
+    expect(budget.cores).toBeGreaterThanOrEqual(1)
+  })
+
+  test('the real host budget feeds computeTestJobs without producing a bad value', () => {
+    // The end-to-end unit check: whatever this box reports, the derived job count is a
+    // positive integer no larger than the cores the budget claims.
+    const budget = readHostBudget()
+    const jobs = computeTestJobs({
+      cores: budget.cores,
+      active_runs: 1,
+      mem_available_bytes: budget.mem_available_bytes,
+    })
+    expect(Number.isInteger(jobs)).toBe(true)
+    expect(jobs).toBeGreaterThanOrEqual(1)
+    expect(jobs).toBeLessThanOrEqual(budget.cores)
   })
 })

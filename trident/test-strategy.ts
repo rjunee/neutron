@@ -29,6 +29,7 @@
  */
 
 import { readFileSync, statSync } from 'node:fs'
+import * as os from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,6 +216,69 @@ export function computeTestJobs(input: TestJobsInput): number {
   const byCores = Math.max(1, Math.floor(input.cores / Math.max(1, input.active_runs)))
   const byMem = Math.max(1, Math.floor((input.mem_available_bytes * MEM_HEADROOM) / (chunkSize * perFileRss)))
   return Math.min(byCores, byMem)
+}
+
+export interface HostBudget {
+  /** Usable CPUs, always an integer ≥ 1. */
+  cores: number
+  /** Available (not merely free) RAM in BYTES; `0` when it cannot be determined. */
+  mem_available_bytes: number
+}
+
+/** Where Linux publishes `MemAvailable`, in kB. */
+const MEMINFO_PATH = '/proc/meminfo'
+const MEM_AVAILABLE = /^MemAvailable:\s+(\d+)\s*kB/m
+
+/**
+ * The box's live capacity, read for `computeTestJobs`. Same contract as the rest of
+ * this module: NEVER throws and NEVER spawns — every probe is wrapped, and each
+ * failure falls to the next-weakest source rather than propagating.
+ *
+ * `cores`: `os.availableParallelism()` (which honours a cgroup/affinity limit, so a
+ * container gets its real share rather than the host's), falling back to
+ * `os.cpus().length`, then to 1.
+ *
+ * `mem_available_bytes`: `MemAvailable` from `/proc/meminfo` × 1024 — NOT `freemem()`,
+ * which counts only unallocated pages and so reads a healthy page-cached box as nearly
+ * out of memory. On any failure (unreadable, no match, non-positive — e.g. macOS, where
+ * there is no procfs) it falls back to `os.freemem()`, and to `0` if even that fails.
+ * Zero is a safe answer, not a broken one: `computeTestJobs` returns 1 (sequential, the
+ * runner's own default) for a non-positive memory figure.
+ *
+ * `readFile` is injected only so tests can drive the fixture and the failure paths.
+ */
+export function readHostBudget(readFile?: (path: string) => string): HostBudget {
+  let cores = 1
+  try {
+    const parallelism = os.availableParallelism?.()
+    if (isPositive(parallelism)) cores = Math.floor(parallelism)
+    else {
+      const cpuCount = os.cpus()?.length
+      if (isPositive(cpuCount)) cores = Math.floor(cpuCount)
+    }
+  } catch {
+    cores = 1
+  }
+
+  let mem_available_bytes = 0
+  try {
+    const read = readFile ?? ((path: string) => readFileSync(path, 'utf8'))
+    const match = MEM_AVAILABLE.exec(read(MEMINFO_PATH))
+    const kb = match ? Number(match[1]) : Number.NaN
+    if (isPositive(kb)) mem_available_bytes = kb * 1024
+  } catch {
+    mem_available_bytes = 0
+  }
+  if (!isPositive(mem_available_bytes)) {
+    try {
+      const free = os.freemem()
+      mem_available_bytes = isPositive(free) ? free : 0
+    } catch {
+      mem_available_bytes = 0
+    }
+  }
+
+  return { cores: Math.max(1, cores), mem_available_bytes }
 }
 
 function isPositive(value: unknown): value is number {
