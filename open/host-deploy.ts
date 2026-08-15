@@ -806,18 +806,21 @@ export function createHostDeployService(
     // any unrelated reply is not an approval and never reaches a row — the same
     // discipline as `onboarding/interview/button-backed-answer.ts:207-209`.
     //
-    // KNOWN SEAM, stated rather than implied: `prior_option_values` is the
-    // caller's recent-prompt window (four prompts on the topic, per
-    // `gateway/wiring/build-live-agent-turn.ts`), so after four further prompts
-    // the button stops being eligible and this returns null — the raw `hdp:`
-    // token then falls through to the LLM as ordinary text with no explanation to
-    // the owner. Inherited from the ritual-approval surface, and FAIL-SAFE in the
-    // direction that matters (an evicted button deploys nothing), but it is a
-    // silence the owner has to interpret. The grant-age gate below makes the same
-    // window explicit in time: a late tap on a STILL-eligible button is refused
-    // with a sentence AND a fresh grant raised on this topic, rather than dropped.
+    // ELIGIBILITY IS TWO CONDITIONS: the regex AND membership in
+    // `prior_option_values` (the caller's recent-prompt window — four prompts on
+    // the topic, per `gateway/wiring/build-live-agent-turn.ts`). They no longer
+    // have the same consequence. A value that FAILS THE REGEX is not ours:
+    // ordinary text and cross-service ritual tokens (`rap:`) still return null so
+    // the ritual service and the LLM keep their routing. A value that MATCHES the
+    // regex but FAILS MEMBERSHIP is an `hdp:` token whose prompt aged out of the
+    // window — it used to return null too, and the raw token then fell through to
+    // the LLM as unexplained text, a silence the owner had to interpret. It is
+    // now carried through the gates below as `evicted`: the tap is ANSWERED with
+    // an explanation and, for a still-pending grant, a claim-gated replacement
+    // prompt raised on the topic the owner just typed in. Still FAIL-SAFE in the
+    // direction that matters — an evicted button deploys nothing, on any path.
     if (!HOST_DEPLOY_VALUE_RE.test(value)) return null
-    if (!input.prior_option_values.includes(value)) return null
+    const evicted = !input.prior_option_values.includes(value)
 
     // ── (b) OWNER ONLY. This is the no-self-approval guard: the requester is
     // the agent, whose turns never carry the owner's user_id, so an agent can
@@ -874,6 +877,34 @@ export function createHostDeployService(
       }
       return {
         body: `That deploy request was already ${row.status} — nothing was deployed. Ask again to see the current commit list.`,
+      }
+    }
+
+    if (evicted) {
+      // The prompt aged out of the four-prompt answer window on this topic
+      // (or the token was typed in a different topic than carried the prompt).
+      // The grant is real and pending but its button can never be eligible
+      // again, so retire it and raise a replacement where the owner just
+      // typed. CLAIM-GATED like the age gate below: of two taps racing one
+      // evicted grant, exactly one re-raises; the loser reads the settled
+      // status. An evicted tap NEVER dispatches.
+      let claimed: boolean
+      try {
+        claimed = await approvals.cancelPending(id)
+      } catch {
+        claimed = false
+      }
+      if (!claimed) {
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return { body: `That deploy request was already ${settled} — nothing was deployed.` }
+      }
+      return {
+        body:
+          'That approval prompt has aged out of the answer window (newer prompts replaced it), ' +
+          'so it can no longer be answered — nothing was deployed. ' +
+          (pendingGrantForRef(ref)
+            ? 'A fresh approval is already waiting — tap Approve on the newest prompt.'
+            : await reraise(ref, input.topic_id)),
       }
     }
 

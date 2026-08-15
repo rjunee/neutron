@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { uuidToToken } from '@neutronai/reminders/index.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApprovalManager, type ApprovalRow } from '@neutronai/tools/approval.ts'
 
@@ -733,19 +734,138 @@ describe('approval is an EXPLICIT AFFIRMATIVE ACT by the owner', () => {
     })
   }
 
-  test('a well-formed token that was never an offered button is not eligible', async () => {
+  test('an EVICTED token gets a sentence and a fresh prompt, not silence', async () => {
     const h = harness()
     await h.service.request({})
     await settle()
-    const forged = h.approveValue()
+    const evicted = h.approveValue()
+    const row_id = approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)[0]!.id
+
+    // Four further prompts on the topic have pushed this one out of the answer
+    // window: the value is real, the grant is pending, but membership fails.
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: evicted,
+      topic_id: TOPIC,
+      prior_option_values: ['rap:AAAAAAAAAAAAAAAAAAAAAA:a'],
+    })
+    await settle()
+    // Not null, and nothing deployed.
+    expect(out).not.toBeNull()
+    expect(out!.body).toContain('answer window')
+    expect(h.dispatchCalls).toEqual([])
+    // The unanswerable grant is retired and a replacement raised where he typed.
+    expect(approvals.get(row_id)!.status).not.toBe('pending')
+    expect(h.emits).toHaveLength(2)
+    expect(h.emits[1]!.topic_id).toBe(TOPIC)
+  })
+
+  test('a forged hdp token that maps to no row gets a sentence, not a re-raise', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const forged = `hdp:${uuidToToken(crypto.randomUUID())}:a`
 
     const out = await h.service.handleOwnerButtonAnswer({
       user_id: OWNER,
       user_text: forged,
       topic_id: TOPIC,
-      prior_option_values: ['rap:AAAAAAAAAAAAAAAAAAAAAA:a'],
+      prior_option_values: [],
     })
-    expect(out).toBeNull()
+    await settle()
+    expect(out!.body).toContain('no longer valid')
+    expect(h.dispatchCalls).toEqual([])
+    // A token that was never a grant raises nothing.
+    expect(h.emits).toHaveLength(1)
+  })
+
+  test('an evicted tap when a fresh grant already waits points at it instead of raising a third', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const first = h.approveValue()
+    await h.service.request({})
+    await settle()
+    expect(h.emits).toHaveLength(2)
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: first,
+      topic_id: TOPIC,
+      prior_option_values: [],
+    })
+    await settle()
+    expect(out!.body).toContain('already waiting')
+    expect(h.emits).toHaveLength(2)
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('an evicted tap on an already-approved row says the deploy went out', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const approve = h.approveValue()
+
+    await answer(h, approve)
+    expect(h.dispatchCalls).toHaveLength(1)
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: approve,
+      topic_id: TOPIC,
+      prior_option_values: [],
+    })
+    await settle()
+    expect(out!.body).toContain('already approved')
+    expect(out!.body).toContain('already went out')
+    expect(h.dispatchCalls).toHaveLength(1)
+  })
+
+  test('a second evicted tap on the same token re-raises exactly once', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const evicted = h.approveValue()
+
+    const tap = () =>
+      h.service.handleOwnerButtonAnswer({
+        user_id: OWNER,
+        user_text: evicted,
+        topic_id: TOPIC,
+        prior_option_values: [],
+      })
+
+    const first = await tap()
+    await settle()
+    expect(first!.body).toContain('answer window')
+    expect(h.emits).toHaveLength(2)
+
+    // `cancelPending` is the claim: the second tap finds the row already
+    // retired, so it raises nothing and reads the settled status instead.
+    const second = await tap()
+    await settle()
+    expect(second!.body).toContain('nothing was deployed')
+    expect(second!.body).toContain('already waiting')
+    expect(h.emits).toHaveLength(2)
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('an evicted Deny token also gets the sentence and deploys/declines nothing', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: h.denyValue(),
+      topic_id: TOPIC,
+      prior_option_values: [],
+    })
+    await settle()
+    expect(out).not.toBeNull()
+    expect(out!.body).toContain('nothing was deployed')
+    // Decision-neutral: an evicted tap decided nothing, in either direction.
+    expect(out!.body).not.toContain('declined')
     expect(h.dispatchCalls).toEqual([])
   })
 
