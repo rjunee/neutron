@@ -190,6 +190,35 @@ describe('(b) recovery is BOUNDED, and the bound is DURABLE across restarts', ()
     expect(after.subagent_status).toBe('crashed')
   })
 
+  test('a measured gateway boot timestamp latched onto a crash reason survives into the budget-capped terminal failure_reason', async () => {
+    // #240 / T2 — `onChildCrash` (open/wiring/substrates.ts) composes the latched
+    // crash reason with a measured gateway boot timestamp. RED-mutation: delete the
+    // `Last crash: ${run.failure_reason ...}` embedding in orchestrator.ts (~line
+    // 1146-1149) and this assertion fails even though the run still fails for a
+    // budget reason.
+    const sentinel =
+      'inner workflow child crashed: pooled child exited (observed 2026-08-14T07:14:32.000Z; gateway process booted 2026-08-14T07:13:00.000Z)'
+    const counter = { fires: 0 }
+    const firer = async () => {
+      counter.fires += 1
+      const generation = `generation-${counter.fires}`
+      await store.crashRunningByLauncher(generation, sentinel)
+      return { status: 'fired' as const, launcher_session_key: generation }
+    }
+    const orch = orchestrator(firer, { max_crash_recoveries: 2 })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    const run = await store.create({
+      id: 'budget-sentinel', slug: 'bs', project_slug: 'p', repo_path: '/repo', task: 'build',
+    })
+
+    for (let i = 0; i < 8; i++) await loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason ?? '').toContain('crash-recovery budget')
+    expect(after.failure_reason ?? '').toContain('gateway process booted 2026-08-14T07:13:00.000Z')
+  })
+
   test('the budget survives a process restart — a fresh orchestrator continues the count', async () => {
     // THE LIVE CAUSE IS A DEPLOY LOOP (three gateway restarts in 53 min), and every
     // boot wipes in-memory state. RED-mutation: make the counter in-process (a Map in

@@ -427,9 +427,15 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // the Trident tick then performs the normal terminal transition + board
       // reconcile instead of leaving a durable `running` phantom until timeout.
       onChildCrash: async ({ generationKey, detail }) => {
+        // #240 — measure the cause rather than asserting one. Report what was
+        // actually observed (crash time, gateway process boot time) so a
+        // reader can correlate crashes with deploys/restarts, without
+        // claiming the restart caused this specific crash.
+        const observed = new Date()
+        const gatewayBooted = new Date(Date.now() - process.uptime() * 1000)
         await tridentRuns.crashRunningByLauncher(
           generationKey,
-          `inner workflow child crashed: ${detail}`,
+          `inner workflow child crashed: ${detail} (observed ${observed.toISOString()}; gateway process booted ${gatewayBooted.toISOString()})`,
         )
       },
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
