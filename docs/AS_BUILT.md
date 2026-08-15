@@ -2,6 +2,45 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — the review gate waits as long as GitHub actually takes
+
+`REVIEW_READINESS_ATTEMPTS = 3` x `REVIEW_READINESS_RETRY_MS = 15000` gave the
+review-readiness gate THIRTY SECONDS of patience. Measured on PR #275 commit
+`6ba7500`: pushed 00:55:56Z, required check `test` STARTED 01:01:24Z (+328 s of
+GitHub Actions queue time) and finished four seconds later. Essentially the whole
+delay is queueing, and until the workflow exists the check is ABSENT from
+`statusCheckRollup` — the gate was asking about a row that had not been created yet.
+
+That budget could not win, and it did not. Four consecutive builds of one card
+(`051bcf1f`, `b122ce3d`, `45400961`, `0d54d2a3`) died with `REVIEW DEFERRED —
+required check test has not run`. Each threw away a COMPLETE build — Forge, plan,
+publish — to avoid a wait of a few minutes, and each was reported to the owner as
+REQUEST_CHANGES on work no reviewer had read. It was deterministic rather than
+unlucky: a build's last act before this gate is pushing its closing commit, so it
+invalidates the CI it was green on and then asks about the new head seconds later.
+Any budget shorter than the queue time fails EVERY time, on EVERY build.
+
+The budget is now a duration — `REVIEW_READINESS_BUDGET_MS = 900000` at a 30 s
+cadence — and the attempt COUNT is derived from it, so the doc comment cannot
+describe a budget the loop does not have. Fifteen minutes is ~3x the measurement,
+deliberately generous rather than finely tuned; `trident/liveness.ts` records what a
+tuned threshold cost when a 25-minute reaper killed a healthy build. `conflicting`
+and `unknown` still break out immediately — only "not yet" waits.
+
+The deferral sentence now names the duration ("waited 15 minutes and the check never
+appeared"), because without it a real never-started workflow is indistinguishable
+from the 30-second version that gave up early, and only the first is the owner's to
+act on. `trident/__tests__/ci-gate.test.ts` keeps the measurement: one test replays
+the 328 s queue and requires a review to happen, its twin replays the same timeline
+under the old 3 x 15 s numbers and requires zero, and a third asserts the derived
+count really spends the budget. Shrinking it again turns those red first.
+
+One incident while writing it, worth recording: that file's tests reconstruct the
+`classifyCi` closure by slicing source from `const CI_FAILED_STATES` to the next
+JSDoc opener, so merely writing that character sequence in a nearby comment
+truncated the slice and four unrelated tests failed with a bare `ReferenceError`.
+Both extraction helpers now assert what they captured and name the cause.
+
 ## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
 
 `trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
