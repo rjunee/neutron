@@ -93,7 +93,7 @@ const CODEX = {
   description: 'A second opinion from a GPT model, run through the Codex CLI.',
   group: 'codex',
   groups: ['none', 'claude', 'codex', 'kimi'],
-  effort_supported: false,
+  effort_supported: true,
   default: { model: 'sol', effort: 'high' },
 }
 

@@ -3384,7 +3384,13 @@ TASK: ${task}`
       ),
     )
   }
-  const enabledPanelFamilies = [rubricRoute, adversarialRoute, slotOneRoute, slotTwoRoute]
+  // THE BUILD COUNTS AS A FAMILY. It is not a review seat, but the property this
+  // warning protects is "the reviewer is not the same family as what produced the
+  // code" — build on GPT with Opus reviewing IS the cross-family panel the design
+  // wants (SPEC Decisions Log 2026-08-14, "any tier in any slot"). Excluding the
+  // build would warn about a panel that is genuinely cross-family, and stay silent
+  // when a Claude build is reviewed only by Claude.
+  const enabledPanelFamilies = [routeModel('forge:build', 'reasoning'), rubricRoute, adversarialRoute, slotOneRoute, slotTwoRoute]
     .filter((route) => !route.disabled && routeAvailable(route))
     .map((route) => route.group || 'claude')
   if (enabledPanelFamilies.length > 1 && new Set(enabledPanelFamilies).size === 1) {
@@ -3453,14 +3459,15 @@ TASK: ${task}`
   // cross-model verdict is a full panelist when connected; a 'not_connected' codex
   // is noted + ignored; a 'deferred' codex is hard-gated below.
   phase('Synthesis')
+  const peerRouteLabel = (route) => route.group === 'claude' ? `${route.group}/${route.model}` : route.group
   const peerPanelLine = (letter, slot, status, review, route, off) =>
     off
       ? `Verdict ${letter} (Cross-model review ${slot}): OFF — deliberately set to NONE; no reviewer was dispatched.`
       : status === 'connected'
-        ? `Verdict ${letter} (Cross-model review ${slot}, ${route.group}): ${JSON.stringify(review)} — treat as a full panelist; an evidence-backed blocker VETOES APPROVE.`
+        ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): ${JSON.stringify(review)} — treat as a full panelist; an evidence-backed blocker VETOES APPROVE.`
         : status === 'deferred'
-          ? `Verdict ${letter} (Cross-model review ${slot}, ${route.group}): DEFERRED — configured but the review failed or returned no usable verdict. Do NOT return APPROVE.`
-          : `Verdict ${letter} (Cross-model review ${slot}, ${route.group}): NOT CONNECTED — its required credential is unavailable; note it and proceed.`
+          ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): DEFERRED — configured but the review failed or returned no usable verdict. Do NOT return APPROVE.`
+          : `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): NOT CONNECTED — its required credential is unavailable; note it and proceed.`
   const codexPanel = peerPanelLine('C', 1, codexStatus, codexReview, slotOneRoute, slotOneRoute.disabled)
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
