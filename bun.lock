@@ -231,6 +231,7 @@
         "@neutronai/persistence": "workspace:*",
         "@neutronai/reminders": "workspace:*",
         "@neutronai/tasks": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
       },
     },
     "cores/free/research": {
@@ -526,6 +527,7 @@
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
         "@neutronai/tools": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
       },
     },
     "runtime": {

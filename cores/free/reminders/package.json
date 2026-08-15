@@ -21,7 +21,8 @@
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/reminders": "workspace:*",
-    "@neutronai/tasks": "workspace:*"
+    "@neutronai/tasks": "workspace:*",
+    "@neutronai/wire-types": "workspace:*"
   },
   "neutron": {
     "capabilities": [

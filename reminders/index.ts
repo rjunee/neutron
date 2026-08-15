@@ -18,11 +18,7 @@ export type {
 } from './store.ts'
 
 export { ReminderTickLoop, REMINDER_FALLBACK_TIME_ZONE } from './tick.ts'
-export type {
-  ReminderDispatcher,
-  ReminderFiredHook,
-  ReminderTickOptions,
-} from './tick.ts'
+export type { ReminderDispatcher, ReminderTickOptions } from './tick.ts'
 
 // Executor-mode reminders — the ritual FIRE PLAN + its durable run-history
 // writer. A ritual is a REMINDER: the tick has no ritual branch, and the planner

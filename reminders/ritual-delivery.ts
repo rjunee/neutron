@@ -68,6 +68,33 @@ export function formatRitualCompletionFallback(i: { ritual_id: string; run_id: s
   return `Ritual '${i.ritual_id}' finished (run ${i.run_id}): no output.`
 }
 
+/**
+ * The notice for an occurrence that could not be PLANNED AT ALL: the row carries a
+ * `ritual_id` but no ritual planner is wired, which is the state of an instance
+ * with no model credential (`open/composer.ts` never runs `init_ritual_planner`).
+ *
+ * WHY THIS IS A SEPARATE FORMATTER, and it is not a cosmetic split. Every other
+ * notice cites a `run_id`, because every other outcome has a `code_ritual_runs`
+ * row behind it. This one cannot: the planner that mints run ids and writes that
+ * ledger IS the missing piece, so there is no row to cite and a fabricated id
+ * would send the owner to `rituals_status` hunting a run that was never written.
+ * The notice therefore names the CAUSE and the CONSEQUENCE instead, because the
+ * dispatcher consumes the occurrence rather than retrying it every 30 s forever
+ * (`reminders/dispatcher.ts`) and a consumed occurrence the owner is not told
+ * about is indistinguishable from a ritual that was never scheduled.
+ *
+ * The text deliberately contains no `ritual:<id>` token: this posts down the same
+ * chat path as any other message, so it becomes a push notification, and putting
+ * the dispatch token in front of the owner is the whole defect this lane removed.
+ */
+export function formatRitualUnplannableNotice(i: { ritual_id: string }): string {
+  return (
+    `Ritual '${i.ritual_id}' did not run: this instance has no model configured, ` +
+    'so its approved prompt could not be checked or composed. ' +
+    'This occurrence was skipped, not retried.'
+  )
+}
+
 /** The once-per-streak escalation notice (3 consecutive failures). */
 export function formatRitualEscalationNotice(i: { ritual_id: string; run_id: string }): string {
   return `Ritual '${i.ritual_id}' has failed 3 consecutive runs (latest run ${i.run_id}). Consider pausing it.`

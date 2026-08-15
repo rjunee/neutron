@@ -278,4 +278,23 @@ describe('deriveReminderProjectId', () => {
     expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner' })).toBe('instance-slug')
     expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner:' })).toBe('instance-slug')
   })
+
+  test('app-project:~general (the app General SCOPE) → instance, like its web twin', () => {
+    // `~general` is a SCOPE, not a project — the app reminders surface reserves it
+    // for the no-project case (`gateway/http/app-reminders-surface.ts`
+    // `resolveScopeSegment`) precisely because no project can be called that. Left
+    // to fall through, this would return the literal `~general` and the context
+    // source would go looking for `<owner_home>/Projects/~general/STATUS.md`, a
+    // directory that cannot exist. Same answer as `web:owner` above, for the same
+    // reason.
+    expect(deriveReminderProjectId({ ...base, topic_id: 'app-project:~general' })).toBe(
+      'instance-slug',
+    )
+    // And ONLY the exact sentinel — a project id that merely starts with it is a
+    // project. (It cannot reach here through the surface, which rejects `~`, but a
+    // prefix test would be wrong in the same way it is wrong on the client.)
+    expect(deriveReminderProjectId({ ...base, topic_id: 'app-project:~generalize' })).toBe(
+      '~generalize',
+    )
+  })
 })

@@ -50,6 +50,8 @@ import {
 import { dispatchUnseenDeepLinks } from '../lib/chat-core/deep-link-dispatch';
 import {
   anchorScrollProps,
+  chatDeepLinkAnchor,
+  chatDeepLinkScrollIndex,
   chatInitialAnchor,
   receiptEligibleMessageId,
   type ChatInitialAnchor,
@@ -109,6 +111,14 @@ export interface ChatSyncSurfaceProps {
   initialPrefill?: string;
   /** ISSUE #17 — launcher long-press `chat_send` one-shot autosend text. */
   initialAutosend?: string;
+  /**
+   * The message a PUSH TAP asked for (`?message_id=` on the chat route).
+   *
+   * Present only when the owner arrived from a notification. Absent — every
+   * ordinary open — leaves both anchor paths byte-identical to before, which is
+   * the property that keeps this away from the ISSUES #505/#511 blast radius.
+   */
+  targetMessageId?: string;
 }
 
 /** FlashList viewable-items payload (loosely typed — FlashList v2's callback
@@ -121,6 +131,7 @@ export function ChatSyncSurface({
   projectId,
   initialPrefill,
   initialAutosend,
+  targetMessageId,
 }: ChatSyncSurfaceProps): React.JSX.Element {
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
@@ -541,10 +552,56 @@ export function ChatSyncSurface({
   // anchor would arrive after the only moment it could be honoured. Writing the
   // ref here is safe because it is idempotent: the same rows always freeze the
   // same anchor, so a discarded or replayed render cannot change the outcome.
-  const anchorRef = useRef<{ scope: string; anchor: ChatInitialAnchor } | null>(null);
-  if (anchorRef.current !== null && anchorRef.current.scope !== projectId) anchorRef.current = null;
+  //
+  // A PUSH TAP PARTICIPATES IN THE FREEZE rather than fighting it. `deepLinkTarget`
+  // joins `projectId` in the freeze key, so arriving from a notification decides a
+  // fresh anchor even when the scope did not change — and `chatDeepLinkAnchor` is
+  // the SAME function the imperative re-anchor below uses, so a cold open cannot
+  // have the two land in different places.
+  //
+  // ⚠️ KNOWN, PRE-EXISTING, AND NOT FIXED HERE: THE FREEZE CAN READ THE PREVIOUS
+  // SCOPE'S ROWS. `projectId` arrives as a PROP, so the render that first sees the new
+  // scope still has the OLD scope's `rows` and `selfDeviceId` in state —
+  // `useMobileChat` clears them in its effect CLEANUP, which runs after that render
+  // (`app/lib/chat-core/use-mobile-chat.ts:447-451`). The clear-and-recompute above
+  // therefore drops project A's anchor and immediately re-freezes A's index under B's
+  // key. Cleanup then drops `ready`, the list unmounts, and when it remounts for B it
+  // consumes that stale index — so opening B can land at a position computed from A's
+  // transcript. With no deep-link target the imperative path only clears its latch and
+  // cannot correct it.
+  //
+  // Byte-identical to `main` on this path (`git show main:app/components/ChatSyncSurface.tsx`
+  // lines 540-543 — the same clear-and-recompute, keyed on scope alone), so this change
+  // neither introduces nor widens it: adding `target` to the key alters nothing when
+  // there is no target, which is every ordinary project switch.
+  //
+  // Left for its own change ON PURPOSE. The fix is small — refuse to freeze while
+  // `ready` is false, which is exactly the re-attach window and, verified, is NOT
+  // entered on a background/foreground transition (that path only toggles cache
+  // activity, `use-mobile-chat.ts` AppState effect) — but it belongs with a mounted
+  // regression test that actually drives `projectId`, `ready` and a list remount, and
+  // this is the ISSUES #505/#511 hot path where an untested anchor change is how the
+  // original defect got shipped. Reported as a P1 follow-up rather than smuggled in
+  // behind a green CI run about something else.
+  const deepLinkTarget = targetMessageId ?? '';
+  const anchorRef = useRef<{ scope: string; target: string; anchor: ChatInitialAnchor } | null>(
+    null,
+  );
+  if (
+    anchorRef.current !== null &&
+    (anchorRef.current.scope !== projectId || anchorRef.current.target !== deepLinkTarget)
+  ) {
+    anchorRef.current = null;
+  }
   if (anchorRef.current === null && rows.length > 0 && selfDeviceId.length > 0) {
-    anchorRef.current = { scope: projectId, anchor: chatInitialAnchor(rows, selfDeviceId) };
+    anchorRef.current = {
+      scope: projectId,
+      target: deepLinkTarget,
+      anchor:
+        deepLinkTarget.length > 0
+          ? chatDeepLinkAnchor(rows, selfDeviceId, deepLinkTarget)
+          : chatInitialAnchor(rows, selfDeviceId),
+    };
   }
   // The ROW COUNT is read LIVE even though the decision is frozen. `bottom` means
   // the last row plus the overscroll, and the resume replay appends rows after the
@@ -556,6 +613,131 @@ export function ChatSyncSurface({
   );
 
   const listRef = useRef<FlashListRef<RenderRow> | null>(null);
+
+  // THE PUSH TAP'S RE-ANCHOR — the half a computed anchor cannot do.
+  //
+  // A notification tap can land on a project whose transcript is ALREADY MOUNTED.
+  // FlashList applies its initial scroll ONCE and latches `isInitialScrollComplete`
+  // (`useRecyclerViewController.tsx:585-591`), so the frozen anchor above has
+  // already been spent and the owner stays exactly where he was — which is the
+  // complaint. This is the imperative seam that fixes that case, and it is
+  // deliberately NOT a second anchor rule: `chatDeepLinkScrollIndex` asks
+  // `chatDeepLinkAnchor` the same question the render path asks, so on a cold open
+  // both agree and neither has to win a race.
+  //
+  // ONCE PER TARGET, AND ONCE PER VISIT. The ref latches the id at the moment the
+  // jump is ISSUED — not after it completes — so a later `rows` change (a receipt
+  // landing, the resume replay appending) cannot yank the transcript back after the
+  // owner has started scrolling. And it only latches once the row is actually
+  // PRESENT and the list ref exists: a push arrives before the message syncs, so the
+  // effect re-runs on each `rows` update and jumps the first time it can resolve the
+  // id. If it never syncs, nothing moves.
+  //
+  // "Issued", not "succeeded", is the precise word and the difference is deliberate:
+  // the scroll is awaited by nobody and a REJECTED jump keeps the latch spent. See
+  // the note at the call below for why re-arming on a rejection would be worse.
+  //
+  // LEAVING THE DEEP-LINKED ROUTE RELEASES THE LATCH, and that release is what makes
+  // "once per target" mean "once per visit" instead of "once per app run". Without it:
+  // honour a target for X (X latched), rail-tap to another project
+  // (`/projects/<other>/chat`, no query ⇒ no target), then arrive at X's target again —
+  // and the equality check below swallowed it. The target is a PER-VISIT instruction,
+  // so a visit without one must not leave a spent instruction behind.
+  //
+  // WHAT DOES *NOT* REACH THIS CHECK — corrected 2026-08-11, and the earlier version of
+  // this comment (and commit 93245925's message) got it wrong. It said the motivating
+  // sequence was "tap the notification for X, rail-tap elsewhere, then tap the SAME
+  // notification again — it is still sitting in the shade". The premise is right and the
+  // conclusion is not: a real re-tap of the same notification never gets here at all. It
+  // is swallowed ONE LAYER UP, in `installPushTapHandler`'s `dispatch` helper
+  // (`app/lib/push.ts`): it reads `response.notification.request.identifier`, returns
+  // early on `store.has(id)`, and only THEN calls `resolvePushRoute`/`push(path)`. So the
+  // second tap produces no navigation whatsoever and never re-supplies `?message_id=`;
+  // nothing reaches this component to be swallowed by the equality check. The dedupe TTL
+  // is 7 DAYS (`push-tap-dedupe-store.ts` `PUSH_TAP_DEDUPE_TTL_MS`) and the warm listener
+  // passes `{dismiss:false}`, so the notification genuinely does stay in the shade —
+  // which is exactly what made the false claim read as plausible. Filed as its own
+  // defect (#182) rather than widened into this change.
+  //
+  // WHAT DOES REACH IT is any SECOND ARRIVAL of the same target at this live component:
+  // a fresh notification for the same message (a new `request.identifier`, so the dedupe
+  // passes it), or the route otherwise re-supplying the same `message_id` after a
+  // no-target render. That is the reachable form of the sequence above, and it is the one
+  // the sixth arm of the test drives.
+  //
+  // WHAT SURVIVES A PROJECT SWITCH AND WHAT DOES NOT, stated exactly, because the two
+  // halves point opposite ways and an earlier version of this comment got the second
+  // one backwards:
+  //
+  //   * THIS COMPONENT survives, so this ref does. The shell is a single root-stack
+  //     screen named `projects/[id]`, and expo-router only diverges on a route named
+  //     exactly `[id]`, so a rail tap RE-RENDERS the chat screen rather than replacing
+  //     it (`app/app/projects/[id]/_layout.tsx` carries the device-instrumented note).
+  //     The latch is therefore the longest-lived piece of state here — which is what
+  //     made the missing release matter at all.
+  //   * THE LIST DOES NOT survive. `useMobileChat`'s attach effect is keyed on
+  //     `projectId` and its cleanup sets `ready` false
+  //     (`app/lib/chat-core/use-mobile-chat.ts:447`), and this surface renders
+  //     `!ready ? <spinner> : <FlashList/>` — so every scope change unmounts the list
+  //     and it comes back with a FRESH `isInitialScrollComplete`. The frozen anchor
+  //     above CAN therefore act on the way back, if `anchorRef` is populated before the
+  //     new list's first paint.
+  //
+  // So the honest scope of this fix: the latch was a state machine with no exit, which
+  // is a defect by inspection and one line to close. What it is NOT is a fix for the
+  // re-tap the earlier comment claimed — that never arrives (see above). Whether the
+  // owner could SEE the latch on the rail-switch path depends on the frozen anchor
+  // winning that repaint race, and that is a device claim not made here. The imperative
+  // seam is the only path when the list is NOT remounted — a target arriving while the
+  // scope holds steady — and that is the sequence the sixth arm of
+  // `app/__tests__/chat-push-tap-lands-on-the-message.test.tsx` drives and mutation-kills.
+  const honouredDeepLink = useRef<string | null>(null);
+  useEffect(() => {
+    if (deepLinkTarget.length === 0) {
+      honouredDeepLink.current = null;
+      return;
+    }
+    if (honouredDeepLink.current === deepLinkTarget) return;
+    // THE SAME GUARD THE RENDER PATH APPLIES. Without a device id there is no read
+    // watermark, so `chatInitialAnchor` cannot tell an unread run from a read one —
+    // and the two halves of this surface would answer differently for the same
+    // rows, which is the one thing having two paths must never cost.
+    if (selfDeviceId.length === 0) return;
+    const index = chatDeepLinkScrollIndex(rows, selfDeviceId, deepLinkTarget);
+    if (index === null) return;
+    const scrollToIndex = listRef.current?.scrollToIndex;
+    // LATCH ONLY AFTER A SCROLL CAN ACTUALLY HAPPEN, and ORDER MATTERS HERE.
+    // Latching before the call meant an unresolved ref spent the target: the effect
+    // returned having moved nothing, and the `honouredDeepLink` check then swallowed
+    // every retry, so the tap silently did nothing for the rest of the session.
+    // Leaving the latch unset lets the next `rows` commit try again.
+    //
+    // HONEST STATUS: this is a latent ordering, not an observed failure — the ref is
+    // attached by the time this effect runs in every case reproduced so far, and the
+    // review that raised it could not prove reachability either. It is fixed because
+    // the correct order costs one line and the failure mode is silent, which is the
+    // worst kind to leave to chance in the #505/#511 blast radius.
+    if (typeof scrollToIndex !== 'function') return;
+    honouredDeepLink.current = deepLinkTarget;
+    // THE RETURNED PROMISE IS NOT OPTIONAL TO HANDLE. `scrollToIndex` is typed
+    // `(params) => Promise<void>` (`@shopify/flash-list/src/FlashListRef.ts:182`) and
+    // its executor calls `recyclerViewManager.getLayout(index)` SYNCHRONOUSLY
+    // (`useRecyclerViewController.tsx:383`), which THROWS when the layout manager is
+    // not initialised yet (`RecyclerViewManager.ts:138-141`). A throw inside a Promise
+    // executor is a rejection, and a dropped rejection is an UNHANDLED one — a red box
+    // in dev and log noise in production, for a call whose failure is already
+    // survivable. `Promise.resolve` wraps it because the test stub returns undefined.
+    //
+    // A REJECTED JUMP DELIBERATELY LEAVES THE LATCH SPENT. The only state that can
+    // reject is a list whose native layout has not landed, and that is exactly the
+    // COLD-OPEN case where the frozen `initialScrollIndex` above owns the position —
+    // FlashList applies it on its first layout, so nothing is lost. Re-arming here to
+    // retry would instead let a later `rows` commit yank a transcript the owner had
+    // already been placed in correctly.
+    void Promise.resolve(scrollToIndex.call(listRef.current, { index, animated: true })).catch(
+      () => {},
+    );
+  }, [deepLinkTarget, rows, selfDeviceId]);
 
   // The owner's jump-to-bottom affordance. Driven off scroll GEOMETRY rather than
   // viewability of the last row: a single agent reply is routinely taller than the
