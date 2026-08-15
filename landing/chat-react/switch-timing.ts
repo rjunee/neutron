@@ -236,11 +236,25 @@ export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebC
 export function createSwitchTimingEmitter(
   send: (report: WebClientReport) => Promise<unknown>,
 ): (record: SwitchRecord) => void {
+  // Latch: one console error per failing REASON, not one per switch. A broken
+  // ingest fails on every single switch, and a message repeated forty times
+  // reads as noise and gets scrolled past — which is the same invisibility this
+  // is here to end, one layer up.
+  let reported = ''
   return (record) => {
     defaultEmit(record)
     void Promise.resolve()
       .then(() => send(buildSwitchReport(record)))
-      .catch(() => undefined)
+      .catch((err: unknown) => {
+        // NEVER swallow. `.catch(() => undefined)` here, plus a client that
+        // discarded its Response, is why switch timings reached nobody for a
+        // day while the owner hand-pasted them into chat. The report itself is
+        // droppable; the fact that it dropped is not.
+        const reason = err instanceof Error ? err.message : String(err)
+        if (reason === reported) return
+        reported = reason
+        console.error(`[project-switch] timing report NOT delivered — ${reason}`)
+      })
   }
 }
 

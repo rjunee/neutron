@@ -172,3 +172,93 @@ describe('app-diagnostics-surface', () => {
     expect(body.code).toBe('diagnostics_failed')
   })
 })
+
+/**
+ * A refused ingest must leave a trace ON THE BOX.
+ *
+ * Both sides of this route were silent: the web client is fire-and-forget, and
+ * the operator's only view is the reports file — which stays EMPTY on refusal,
+ * and an empty file reads exactly like "nothing to report". Measured on the
+ * owner's instance 2026-08-15: four reports on disk, all mobile, not one web
+ * switch timing, while he spent the day pasting those timings into chat by hand.
+ * Nobody could tell the pipeline was rejecting everything, because rejecting
+ * everything and having nothing to say produce the identical artefact.
+ */
+describe('app-diagnostics-surface — a refused ingest is logged, not silent', () => {
+  const REPORTS_URL = `${URL_BASE.replace(/\/$/, '')}/reports`
+  function postReq(headers: Record<string, string> = {}, body = '{"reports":[{"schema":1}]}'): Request {
+    return new Request(REPORTS_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body,
+    })
+  }
+  function captureLogs(): { lines: string[]; restore: () => void } {
+    const lines: string[] = []
+    const origWarn = console.warn
+    const origErr = console.error
+    const origLog = console.log
+    const grab = (...args: unknown[]) => {
+      lines.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
+    }
+    console.warn = grab
+    console.error = grab
+    console.log = grab
+    return {
+      lines,
+      restore: () => {
+        console.warn = origWarn
+        console.error = origErr
+        console.log = origLog
+      },
+    }
+  }
+
+  it('logs report_ingest_refused when the bearer is missing (401)', async () => {
+    const cap = captureLogs()
+    let res: Response | null
+    try {
+      res = await surface().handler(postReq())
+    } finally {
+      cap.restore()
+    }
+    expect(res!.status).toBe(401)
+    expect(cap.lines.some((l) => l.includes('report_ingest_refused'))).toBe(true)
+  })
+
+  it('logs report_ingest_refused when the bearer belongs to another instance (403)', async () => {
+    const cap = captureLogs()
+    let res: Response | null
+    try {
+      res = await surface().handler(postReq({ authorization: 'Bearer other' }))
+    } finally {
+      cap.restore()
+    }
+    expect(res!.status).toBe(403)
+    expect(cap.lines.some((l) => l.includes('report_ingest_refused'))).toBe(true)
+  })
+
+  it('never writes the presented bearer into the log line', async () => {
+    const cap = captureLogs()
+    try {
+      await surface().handler(postReq({ authorization: 'Bearer super-secret-value' }))
+    } finally {
+      cap.restore()
+    }
+    expect(cap.lines.join('\n')).not.toContain('super-secret-value')
+  })
+
+  it('an ACCEPTED report logs no refusal', async () => {
+    const cap = captureLogs()
+    let res: Response | null
+    try {
+      res = await surface().handler(
+        postReq({ authorization: 'Bearer good' }, '{"reports":[{"schema":1,"reason":"perf"}]}'),
+      )
+    } finally {
+      cap.restore()
+    }
+    expect(res!.status).toBe(200)
+    expect(cap.lines.some((l) => l.includes('report_ingest_refused'))).toBe(false)
+  })
+})

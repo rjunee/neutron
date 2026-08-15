@@ -221,3 +221,89 @@ describe('switch timing diagnostics', () => {
     expect(records[0]!.marks.transcript).toBeUndefined()
   })
 })
+
+/**
+ * The emitter's `.catch(() => undefined)` was the second of two silencers (the
+ * first being a client that discarded its Response). Together they meant the
+ * switch-timing pipeline could reject every single report and look exactly like
+ * a system with nothing to say — which is what it did, for a day, while the
+ * owner hand-pasted the numbers it was supposed to be delivering.
+ */
+describe('createSwitchTimingEmitter — a failed send is never silent', () => {
+  const record = {
+    to: 'beta',
+    from: 'alpha',
+    marks: { vm_published: 1.5, transcript_read: 900, transcript: 901 },
+    total: 901,
+  } as never
+
+  function captureConsole(): { errs: string[]; restore: () => void } {
+    const errs: string[] = []
+    const orig = console.error
+    console.error = (...args: unknown[]) => {
+      errs.push(args.map(String).join(' '))
+    }
+    return { errs, restore: () => { console.error = orig } }
+  }
+
+  test('a rejected send is reported to the console with its reason', async () => {
+    const cap = captureConsole()
+    try {
+      const emit = createSwitchTimingEmitter(async () => {
+        throw new Error('diagnostics report rejected: HTTP 403 from /api/app/admin/diagnostics/reports')
+      })
+      emit(record)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(cap.errs.some((e) => e.includes('NOT delivered'))).toBe(true)
+      expect(cap.errs.some((e) => e.includes('403'))).toBe(true)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('a repeated identical failure is latched — one line, not one per switch', async () => {
+    // A broken ingest fails on EVERY switch. Forty identical lines is noise, and
+    // noise is scrolled past, which is the same invisibility one layer up.
+    const cap = captureConsole()
+    try {
+      const emit = createSwitchTimingEmitter(async () => {
+        throw new Error('HTTP 403')
+      })
+      for (let i = 0; i < 5; i++) emit(record)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(cap.errs.filter((e) => e.includes('NOT delivered')).length).toBe(1)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('a DIFFERENT failure reason still gets through the latch', async () => {
+    const cap = captureConsole()
+    try {
+      let reason = 'HTTP 403'
+      const emit = createSwitchTimingEmitter(async () => {
+        throw new Error(reason)
+      })
+      emit(record)
+      await new Promise((r) => setTimeout(r, 0))
+      reason = 'HTTP 500'
+      emit(record)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(cap.errs.filter((e) => e.includes('NOT delivered')).length).toBe(2)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('a successful send logs nothing', async () => {
+    const cap = captureConsole()
+    try {
+      const emit = createSwitchTimingEmitter(async () => undefined)
+      emit(record)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(cap.errs.filter((e) => e.includes('NOT delivered')).length).toBe(0)
+    } finally {
+      cap.restore()
+    }
+  })
+})
