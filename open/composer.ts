@@ -467,6 +467,7 @@ import {
 } from '@neutronai/trident/codex-credential.ts'
 import { defaultGitModeProbe, detectMergeMode, makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
+import { setGithubSpawnEnvResolver } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
 import {
@@ -978,26 +979,26 @@ export function buildOpenGraphComposer(
             store: recoveredReplyStore,
           })
         : undefined
+    // THE INSTANCE'S GITHUB CREDENTIAL, REGISTERED ONCE. Which substrates get it
+    // is decided on the PROFILES (`substrate-profiles.ts` `github_credential`),
+    // not here and not at the nine construction sites — so a new substrate
+    // inherits the trust decision of the profile it picks instead of silently
+    // getting nothing, which is how an agent came to answer a live GitHub
+    // question out of documentation (`ISSUES.md` #576) and how a private-repo
+    // trident build came to die at `fatal: could not read Username`.
+    //
+    // Resolved PER SPAWN: a credential connected after boot works, and a rotated
+    // one is never stale. ⚠️ `secretsStore` is constructed further down this same
+    // scope — safe only because this closure runs at spawn time, long after
+    // composition returns. Pinned by a test.
+    setGithubSpawnEnvResolver(async () =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
+    )
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,
       owner_home,
       project_slug,
-      // `gh` in the live-chat agent's Bash. The instance already held a working
-      // GitHub credential and only the trident paths could reach it, so an
-      // ordinary agent answered "what PRs are open" out of documentation
-      // (`ISSUES.md` #576) — a doc-derived answer to a live question, which reads
-      // exactly as authoritative as a real one.
-      //
-      // Resolved PER SPAWN, never captured: a token connected after boot must
-      // work, and a rotated one must not go stale until restart. Same discipline
-      // as `makeLazyCredentialedHostRunner` below.
-      //
-      // ⚠️ `secretsStore` is constructed further down this same scope. That is
-      // safe ONLY because this closure is invoked at spawn time, long after
-      // composition returns — never during it. Pinned by a test.
-      resolveAgentSpawnEnv: async () =>
-        githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
       env,
       db,
       prewarmSubstrate,

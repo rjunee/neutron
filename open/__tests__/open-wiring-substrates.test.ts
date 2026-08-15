@@ -26,6 +26,10 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import {
+  githubSpawnEnvRef,
+  setGithubSpawnEnvResolver,
+} from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -132,37 +136,46 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.skip_permissions).toBe(true)
   })
 
-  test('the spawn-env resolver reaches ONLY cc-agent-*, and is called at SPAWN not at wiring', async () => {
-    // The credential this carries (`GH_TOKEN`) must not reach a substrate whose
-    // input is user-controlled — that is the same escalation the tool-bridge
-    // invariant above refuses.
+  test('THE PROFILE DECIDES which substrates carry the GitHub credential', async () => {
+    // The decision is not made here and not at the construction sites — it is on
+    // the profile, so a substrate added later inherits whatever its profile
+    // already decided instead of silently getting nothing. That silence is what
+    // produced ISSUES #576 and a private-repo build dying at `could not read
+    // Username`.
     let calls = 0
-    const { ctx, captured } = makeCtx()
-    ctx.resolveAgentSpawnEnv = async () => {
+    setGithubSpawnEnvResolver(async () => {
       calls += 1
       return { GH_TOKEN: 'probe-value' }
+    })
+    try {
+      const { ctx, captured } = makeCtx()
+      const w = wireSubstrates(ctx)
+
+      // WIRING ALONE MUST NOT RESOLVE IT. The composer closes over a secrets
+      // store it builds later in its own scope, so an eager call would be a
+      // temporal-dead-zone crash at boot rather than a wrong token.
+      expect(calls).toBe(0)
+
+      // cc-agent-* runs on PROFILE_WARM_CHAT (github_credential: true).
+      await drain(w.liveAgentSubstrate!)
+      const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+      expect(agent!.env!['GH_TOKEN']).toBe('probe-value')
+      // …and the helper that makes raw `git` work, not just `gh`.
+      expect(agent!.env!['GIT_CONFIG_KEY_0']).toBeUndefined() // supplied by the real resolver, not this probe
+      expect(calls).toBeGreaterThan(0)
+
+      // cc-llm-* runs on PROFILE_PHASE_SPEC (github_credential: false) — its
+      // input is user-controlled onboarding text.
+      await drain(w.llmCallSubstrate!)
+      const llm = captured.find((o) => o.substrate_instance_id === 'cc-llm-owner')
+      expect(llm!.env!['GH_TOKEN']).toBeUndefined()
+    } finally {
+      githubSpawnEnvRef.resolve = undefined
     }
-    const w = wireSubstrates(ctx)
-
-    // WIRING ALONE MUST NOT CALL IT. The composer closes over state it builds
-    // later in its own scope, so an eager call would be a temporal-dead-zone
-    // crash at boot rather than a wrong token.
-    expect(calls).toBe(0)
-
-    await drain(w.liveAgentSubstrate!)
-    expect(calls).toBeGreaterThan(0)
-    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
-    expect(agent!.env!['GH_TOKEN']).toBe('probe-value')
-
-    // …and the phase-spec substrate, whose input is onboarding text, never sees it.
-    const before = calls
-    await drain(w.llmCallSubstrate!)
-    expect(calls).toBe(before)
-    const llm = captured.find((o) => o.substrate_instance_id === 'cc-llm-owner')
-    expect(llm!.env!['GH_TOKEN']).toBeUndefined()
   })
 
-  test('no resolver ⇒ the spawn env is byte-for-byte unchanged', async () => {
+  test('no registered resolver ⇒ every spawn env is byte-for-byte unchanged', async () => {
+    githubSpawnEnvRef.resolve = undefined
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)
     await drain(w.liveAgentSubstrate!)
