@@ -27,7 +27,12 @@
  */
 
 import { SwitchTimer, type SwitchTimingOptions } from './switch-timing.ts'
-import { groupReactions, isColdStartAck, spentChoiceValue } from '@neutronai/chat-core'
+import {
+  groupReactions,
+  isColdStartAck,
+  spentChoiceValue,
+  WarmSessionCache,
+} from '@neutronai/chat-core'
 
 import type { ProjectTab } from './config.ts'
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
@@ -275,8 +280,8 @@ export interface ControllerSinks {
  * The active conversation scope a session is bound to: the durable store key +
  * WS topic (`topicId`) and the project it represents (`projectId`, null =
  * General). The controller hands this to the session factory so each project
- * gets its OWN socket + transcript; switching projects recreates the session
- * with a new scope.
+ * gets its OWN socket + transcript; switching projects checks out that scope's
+ * session from the bounded warm cache.
  */
 export interface SessionScope {
   topicId: string
@@ -284,9 +289,7 @@ export interface SessionScope {
 }
 
 export interface NeutronChatControllerOptions {
-  /** Build a session bound to `scope` (its topic + project). Called once at
-   *  construction and again on every project switch (a fresh per-project
-   *  socket). */
+  /** Build a session bound to `scope` (its topic + project) on a cache miss. */
   createSession: (sinks: ControllerSinks, scope: SessionScope) => ControllerSession
   /** Map an active project (null = General) to its durable store key + WS topic
    *  (`app:<user>` for General, `app:<user>:<project>` for a project). Optional:
@@ -420,14 +423,12 @@ function sameUploadAffordance(
 }
 
 export class NeutronChatController {
-  /** The live session — REPLACED on every project switch (not readonly). */
+  /** The session checked out for the active project. */
   private session: ControllerSession
-  /** Factory + topic mapper retained so a project switch can stand up a fresh
-   *  per-project session bound to the new scope. */
+  /** Factory + topic mapper retained for cache misses on project switches. */
   private readonly createSessionFn: (sinks: ControllerSinks, scope: SessionScope) => ControllerSession
+  private readonly sessionCache = new WarmSessionCache<ControllerSession>()
   private readonly topicForProject: (projectId: string | null) => string
-  /** The observer sinks, built ONCE and reused across session recreations. */
-  private readonly sinks: ControllerSinks
   /** Lifecycle latches so a project switch revives the new session in the same
    *  started/active state as the one it replaced. */
   private started = false
@@ -460,9 +461,9 @@ export class NeutronChatController {
   private renderCache = new Map<string, RenderMessage>()
   private connStatus: ConnStatus = 'idle'
   /**
-   * Chat-rail stability — true while a project switch's fresh socket is doing its
-   * INITIAL `connecting` handshake. A switch tears down the outgoing per-project
-   * socket and stands up a new one, whose first status is `connecting` — but that
+   * Chat-rail stability — true while a project switch's cold socket is doing its
+   * INITIAL `connecting` handshake. A cache miss stands up a new per-project
+   * socket, whose first status is `connecting` — but that
    * is EXPECTED plumbing, not a network drop, so the connection banner must stay
    * hidden for it (a warm switch shouldn't flash "Connecting…"). Cleared the
    * moment the socket resolves (`open`) or genuinely degrades (`reconnecting` /
@@ -597,17 +598,7 @@ export class NeutronChatController {
       opts.topicForProject ??
       ((projectId) =>
         projectId !== null && projectId.length > 0 ? `app:${projectId}` : 'app')
-    this.sinks = {
-      onChange: () => {
-        void this.handleChange()
-      },
-      onStatus: (status) => this.handleStatus(status),
-      onFrame: (frame) => this.handleFrame(frame),
-    }
-    this.session = this.createSessionFn(this.sinks, {
-      projectId: this.projectId,
-      topicId: this.topicForProject(this.projectId),
-    })
+    this.session = this.sessionForProject(this.projectId)
     this.deviceId = this.session.device_id ?? ''
     this.vm = this.computeVm()
   }
@@ -637,12 +628,12 @@ export class NeutronChatController {
       clearTimeout(this.switchConnectingTimer)
       this.switchConnectingTimer = null
     }
-    this.session.stop()
+    this.sessionCache.clear()
   }
 
   setActive(active: boolean): void {
     this.activeState = active
-    this.session.setActive(active)
+    this.sessionCache.setActive(active)
   }
 
   /**
@@ -691,8 +682,10 @@ export class NeutronChatController {
     this.switchTimer = new SwitchTimer(this.projectId, projectId, {
       ...(this.switchTimingEmit !== undefined ? { emit: this.switchTimingEmit } : {}),
     })
-    // Tear down the outgoing per-project socket.
-    this.session.stop()
+    // Keep the outgoing session warm; the bounded cache stops it on eviction.
+    // NOT `session.stop()` — tearing the socket down here is the 1-3.1s the
+    // owner measured, and once it never came back up at all.
+    this.sessionCache.release(this.topicForProject(this.projectId))
     this.projectId = projectId
     // Chat-rail stability (unread badge) — VIEWING a project marks it read, so
     // drop its cached unread count NOW. Without this the badge is permanent: the
@@ -727,11 +720,9 @@ export class NeutronChatController {
       this.systemNoticeTimer = null
     }
     this.systemNotice = null
-    // Stand up the session bound to the new scope, mirroring the current
-    // started/active lifecycle so the new socket opens iff the controller is
-    // running. Arm the switch latch FIRST (after the old socket's `stop()` →
-    // `closed` has already fired) so the fresh socket's initial `connecting` is
-    // recognised as switch plumbing and the banner stays hidden for it.
+    // Check out the session bound to the new scope, mirroring the current
+    // started/active lifecycle. Arm the switch latch before a possible cache
+    // miss starts its initial connection, so that handshake stays banner-free.
     this.switchConnecting = true
     // Time-box the suppression (Codex P2): if the fresh socket is STILL
     // `connecting` after the grace window, drop the latch so a genuinely stalled
@@ -744,10 +735,7 @@ export class NeutronChatController {
         this.publish()
       }
     }, this.switchConnectingGraceMs)
-    this.session = this.createSessionFn(this.sinks, {
-      projectId,
-      topicId: this.topicForProject(projectId),
-    })
+    this.session = this.sessionForProject(projectId)
     if (this.started) {
       this.session.start()
       this.session.setActive(this.activeState)
@@ -759,6 +747,26 @@ export class NeutronChatController {
     // problem is the paint, not the data — the opposite fix.
     this.switchTimer?.mark('vm_published')
     void this.handleChange()
+  }
+
+  private sessionForProject(projectId: string | null): ControllerSession {
+    const topicId = this.topicForProject(projectId)
+    return this.sessionCache.acquire(topicId, () => {
+      let candidate: ControllerSession
+      const sinks: ControllerSinks = {
+        onChange: () => {
+          if (this.session === candidate) void this.handleChange()
+        },
+        onStatus: (status) => {
+          if (this.session === candidate) this.handleStatus(status)
+        },
+        onFrame: (frame) => {
+          if (this.session === candidate) this.handleFrame(frame)
+        },
+      }
+      candidate = this.createSessionFn(sinks, { projectId, topicId })
+      return candidate
+    })
   }
 
   subscribe(fn: (vm: ChatViewModel) => void): () => void {

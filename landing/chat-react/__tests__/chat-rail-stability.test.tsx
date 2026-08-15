@@ -414,7 +414,7 @@ describe('chat-rail stability — project switch never crashes the thread', () =
     })
   })
 
-  it('Codex P2 — accepts an authoritative EMPTY transcript after the grace window (no permanent stale mask, no crash)', async () => {
+  it('keeps a warm session transcript after the switch grace window (no stale mask or crash)', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
     const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
@@ -444,8 +444,8 @@ describe('chat-rail stability — project switch never crashes the thread', () =
       return s as never
     }
 
-    // Fresh per-scope store, so returning to General re-hydrates EMPTY — a stand-in
-    // for a transcript that was cleared/expired server-side.
+    // Each cache miss gets a fresh store. Returning to General must be a cache HIT,
+    // so its already-hydrated transcript remains authoritative.
     const controller = new NeutronChatController({
       projectId: null,
       projects: [{ id: 'meditation', label: 'Meditation', emoji: '🧘' }],
@@ -501,14 +501,12 @@ describe('chat-rail stability — project switch never crashes the thread', () =
     })
     expect(visibleText(container)).toContain('second msg')
 
-    // Wait past the grace window: the still-empty transcript is now accepted as
-    // authoritative — the surface remounts onto the empty vm (no in-place shrink),
-    // shows the empty state, and nothing throws (boundary absent).
+    // Wait past the old grace window: a warm checkout must still retain the live
+    // session's transcript rather than silently replacing it with a fresh store.
     await act(async () => {
       await new Promise((r) => setTimeout(r, 750))
     })
-    expect(visibleText(container)).not.toContain('second msg')
-    expect(visibleText(container)).toContain('Send a message to begin.')
+    expect(visibleText(container)).toContain('second msg')
     expect(container.textContent).not.toContain('This conversation hit a snag')
 
     await act(async () => {
