@@ -132,6 +132,55 @@ describe('buildForgeConflictResolver', () => {
     expect(f.specs[0]!.model_preference.length).toBeGreaterThan(0)
   })
 
+  /**
+   * THE PROMPT MUST DESCRIBE THE TREE THE RESOLVER IS ACTUALLY STANDING IN.
+   *
+   * The publish-path call site (`rebaseOntoObservedBase`) hands the resolver a DETACHED throwaway
+   * worktree that `git apply --3way` conflicted in — no rebase in progress, no `node_modules`, and
+   * the outer publisher commits. Telling that agent it is "PART-WAY THROUGH `git rebase`" and
+   * ordering it to run the tests until they pass is not a harmless imprecision: `rebase --continue`
+   * fails there, and the test run resolves its imports out of whatever checkout sits ABOVE the
+   * worktree — a tree other build lanes are using — so "green" would be measured against code the
+   * resolver never touched.
+   */
+  test("mode 'replay' describes the DETACHED replay worktree — no rebase to continue, no test run, no wandering out of cwd", async () => {
+    const f = scriptedFactory('...work...\nRESOLVED')
+    const resolve = buildForgeConflictResolver({ build_substrate: f.build })
+    const out = await resolve({ ...input(), repo_path: '/repo/.trident-worktrees/rebase-r1', mode: 'replay' })
+    expect(out).toEqual({ resolved: true })
+    const prompt = f.specs[0]!.prompt
+
+    // What the tree IS.
+    expect(prompt).toContain('THROWAWAY, DETACHED git worktree')
+    expect(prompt).toContain('git apply --3way --index')
+    // What it is NOT — the claim the rebase-mode prompt makes, which is false here.
+    expect(prompt).not.toContain('PART-WAY THROUGH')
+    expect(prompt).toContain('There is NO rebase, merge or cherry-pick in progress')
+    // NO TEST RUN: there is nothing installed to test against.
+    expect(prompt).toContain("Do NOT run the project's test suite")
+    expect(prompt).toContain('node_modules')
+    expect(prompt).not.toContain('iterate until they pass')
+    // NO COMMIT: the outer publisher owns that.
+    expect(prompt).toContain('the outer publisher commits this tree itself')
+    // AND STAY PUT — the Edit/Write/Bash grant is unsandboxed and other lanes share this box.
+    expect(prompt).toContain('STAY INSIDE YOUR CWD')
+    expect(prompt).toContain('/repo/.trident-worktrees/rebase-r1')
+    // Partial staging is a failure, not a partial success (the caller scans the staged bytes).
+    expect(prompt).toContain('PARTIAL RESOLUTION IS THE FAILURE MODE')
+  })
+
+  test("mode defaults to 'rebase' — the local-merge contract is unchanged", async () => {
+    const f = scriptedFactory('RESOLVED')
+    const resolve = buildForgeConflictResolver({ build_substrate: f.build })
+    await resolve(input())
+    const prompt = f.specs[0]!.prompt
+    expect(prompt).toContain('PART-WAY THROUGH')
+    expect(prompt).toContain('so the rebase can continue')
+    expect(prompt).toContain('iterate until they pass')
+    expect(prompt).not.toContain('THROWAWAY, DETACHED')
+    expect(prompt).not.toContain('STAY INSIDE YOUR CWD')
+  })
+
   // THE regression guard for #361 — DO NOT MOCK PAST THE SEAM. A spy substrate
   // records the AgentSpec it is launched with and runs the spec's declared tools
   // through the REAL `buildReplArgv` (the exact prod function that turns

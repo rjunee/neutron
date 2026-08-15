@@ -2,6 +2,87 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — a publish-path rebase conflict is resolved, not escalated
+
+`rebaseOntoObservedBase` (`trident/orchestrator.ts`) threw `TridentRebaseConflict`
+unconditionally whenever `git apply --3way --index` failed, while the bounded Forge
+conflict resolver (`trident/conflict-resolver.ts`) was wired only to the LOCAL merge
+path (`trident/merge.ts`) — the path where a human is present and could resolve it
+themselves. The autonomous publish path, where no human is present, escalated every
+conflict to the owner instead. Three builds died this way on 2026-08-15, all
+`publish failed: REBASE CONFLICT`: runs `25b2327d` (#290, 13:26Z), `5a17ec86` (#290,
+13:56Z), `9e813276` (#289, 14:07Z); a human resolved all three by hand. Root cause of
+the conflicts themselves: #291 merged at 13:07Z and rewrote `trident/inner-workflow.mjs`,
+the file all three branches were editing.
+
+What shipped: the same `resolve_conflict` resolver the composer already builds
+(`open/composer.ts`, gated on the live-credential predicate) is now threaded through
+`publishBuiltCommit` into `rebaseOntoObservedBase` and invoked at the throw site, IN
+the scratch worktree the failed apply left the conflict markers in — never the shared
+checkout. It is handed `mode: 'replay'`, which swaps the resolver's prompt for one that
+describes THAT tree: no rebase to `--continue`, no `node_modules` to test against (a
+test run there resolves its imports out of whatever checkout sits above the worktree —
+a tree other lanes are building in, so "green" would measure code the resolver never
+touched), the outer publisher commits, and every path it touches stays under its cwd.
+
+THE RESOLVER'S WORD IS NEVER THE EVIDENCE. A claimed RESOLVED is checked against git
+twice. First the unmerged set (`git diff -z --name-only --diff-filter=U`, read with
+`core.quotePath=false` so a non-ASCII filename arrives as a name the resolver can
+actually open). Then the STAGED BYTES (`git diff --cached -U0` over the paths that ever
+conflicted, scanned for added `<<<<<<<` / `>>>>>>>` lines) — because `git add` clears
+the unmerged bit for a whole path regardless of what is still inside the file, so the
+realistic failure (fix hunk 1 of 2, stage, report RESOLVED — precisely what the
+resolver's contract tells it to do) would otherwise commit and force-push marker text
+to the shared branch. Proven against real git in
+`trident/publish-rebase-realgit.test.ts`, not just against a stub.
+
+Bounded twice over: `MAX_CONFLICT_ROUNDS` (12, now exported from `trident/merge.ts`) is
+the ceiling, but EVERY ROUND MUST SHRINK the unresolved set or the loop bails at once.
+`rebaseBranchOntoBase` can afford 12 rounds because each one is a different commit that
+`git rebase --continue` advanced onto; here there is exactly one apply, so a round that
+changes nothing will change nothing twelve times — and each round is a real Forge turn
+bounded at 8 minutes, awaited inside the SERIAL tick sweep, so the bound ported
+unmodified would have blocked every other run in the process for ~96 minutes.
+
+Invariants kept: a conflict is still an ATTENTION state, never a `REQUEST_CHANGES`
+verdict — no reviewer read the code. `TridentRebaseConflict` keeps its exact message
+and remains the outcome when no resolver is configured, when the resolver declines,
+when a round makes no progress, when the bound is exhausted, and when a "resolution"
+empties the branch's delta (taking the base's side of every hunk leaves nothing to
+commit — git says so on STDOUT, which the failure reason now forwards alongside stderr
+instead of dropping). A resolved rebase is NOT an approved one: the
+replayed head still faces the full review gate (resolution is a mergeability
+operation, not a verdict — asserted by a stub-host test in
+`trident/orchestrator.test.ts` in which the run only reaches `done` through a second
+workflow fire's `outer-published:<head>` checkpoint plus APPROVE). The
+`update-ref <new> <old>` compare-and-swap and the pinned
+`--force-with-lease=<ref>:<sha>` lease are untouched.
+
+Proof: the stub-host suite (`trident/orchestrator.test.ts`) covers all six acceptance
+criteria; the real-git suite (`trident/publish-rebase-realgit.test.ts`) proves a
+resolver reading genuine `<<<<<<<` markers in the scratch worktree can stage a
+resolution that commits, lands in the CAS-moved head's tree (neither side's text
+verbatim), and leaves the checkout clean; that a declining resolver leaves the branch
+ref unmoved with the scratch worktree removed; and that a resolver which `git add`s a
+file with the markers STILL IN IT moves nothing at all.
+
+The hand-resolution of #290 is the worked example and the bar: five of six hunks were
+mechanical, one was subtle — main's `publishHead: oidClaim(branchHead)` and the
+branch's `oidClaim(forgeSha)` were identical on main but diverge once the branch's
+git-truth fix lands. Taking main's text verbatim would have silently converted a
+cross-check into a tautology. The resolver must reach that conclusion or correctly
+decline (declining is the escalation path, unchanged).
+
+**Fail-closed verification (codex Blocker, hand-fixed before merge).** Both post-resolution
+reads — `git diff --diff-filter=U` and the staged-marker scan — used to swallow a failed
+command and return an empty list, which the loop reads as "nothing unmerged, no markers
+staged". A `git diff` that never ran would have been accepted as git's own evidence that the
+tree is clean, and the run would have gone on to commit and force-push whatever the resolver
+left behind. The resolver's claim is the one thing here that is never evidence, so with no
+git to check it against the only safe answer is to refuse. Both now throw, naming git's own
+stderr, and both are mutation-proven: restoring the empty-list fallback turns the two new
+boundary tests RED.
+
 ## 2026-08-15 — the device stops interrupting the conversation he is reading
 
 `app/lib/push-foreground-policy.ts` (new) + `app/lib/push.ts` + `ChatSyncSurface`.

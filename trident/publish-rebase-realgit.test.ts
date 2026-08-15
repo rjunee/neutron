@@ -17,8 +17,11 @@
  * The shallow boundary of the shared build checkout is governance #574/#571.
  *
  * Also proven against real git rather than a stubbed host:
- *   (b) a genuine content conflict is an ATTENTION state naming the path — `TridentRebaseConflict`,
- *       never `REQUEST_CHANGES`, never auto-resolved, branch ref unmoved, scratch worktree gone.
+ *   (b) a genuine content conflict with NO resolver configured is an ATTENTION state naming the
+ *       path — `TridentRebaseConflict`, never `REQUEST_CHANGES`, branch ref unmoved, scratch
+ *       worktree gone. And with a CONFIGURED resolver the same conflict is resolved IN the scratch
+ *       worktree against real marker-bearing files, committed, and the branch moved by the
+ *       unchanged compare-and-swap.
  *   (c) the re-push uses `--force-with-lease` pinned to an OBSERVED sha, so a branch a third party
  *       genuinely advanced REFUSES the push instead of destroying their commit — asserted against
  *       a real remote, not a fake host.
@@ -32,7 +35,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
+import { type MergeConflictResolver } from './merge.ts'
 import { rebaseOntoObservedBase, TridentRebaseConflict } from './orchestrator.ts'
+import type { TridentRun } from './store.ts'
 
 const GIT_ID = ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false']
 const BRANCH = 'trident/card-realgit'
@@ -46,6 +51,23 @@ async function git(repo: string, ...args: string[]): Promise<void> {
 async function gitOut(repo: string, ...args: string[]): Promise<string> {
   const res = await spawnCapture(['git', '-C', repo, ...args], repo)
   return res.stdout
+}
+
+/**
+ * The run row the publish path forwards to the resolver seam. No store exists in this real-git
+ * world, so this stands in for one — but it carries `task`, because the PRODUCTION resolver
+ * (`conflict-resolver.ts`) interpolates `run.task` into its prompt. A cast that omitted it hid a
+ * field the real resolver depends on, and would have kept hiding it if the field were renamed.
+ */
+function resolverRun(id: string, world: { checkout: string; branch: string }): TridentRun {
+  return {
+    id,
+    slug: 'realgit',
+    repo_path: world.checkout,
+    branch: world.branch,
+    merge_mode: 'pr',
+    task: 'realgit fixture: reconcile lib.txt across the intervening main commit',
+  } as unknown as TridentRun
 }
 
 /** CI runners have NO ambient git identity (dev machines do). Every non-bare repo gets one. */
@@ -261,7 +283,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     expect(existsSync(scratchDir)).toBe(false)
   }, 60_000)
 
-  test('a genuine conflict is an ATTENTION state naming the path — never REQUEST_CHANGES, never auto-resolved (acceptance b)', async () => {
+  test('a genuine conflict with NO resolver configured is an ATTENTION state naming the path — never REQUEST_CHANGES (acceptance b)', async () => {
     const world = await seedWorld({ conflicting: true })
     const scratchDir = scratch(world.checkout, 't3')
 
@@ -281,6 +303,189 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
 
     // NOTHING MOVED AND NOTHING LEAKED: the branch is untouched and the shared checkout has no
     // half-applied worktree left in it.
+    expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
+    expect(existsSync(scratchDir)).toBe(false)
+    const worktrees = (await gitOut(world.checkout, 'worktree', 'list')).trim().split(/\n/).filter((l) => l !== '')
+    expect(worktrees.length).toBe(1)
+  }, 60_000)
+
+  test('a configured resolver resolves a REAL conflict in the scratch worktree; the resolution commits and the CAS moves the branch', async () => {
+    const world = await seedWorld({ conflicting: true })
+    const scratchDir = scratch(world.checkout, 't5')
+
+    const run = resolverRun('realgit-resolve', world)
+
+    const RESOLUTION = 'line1\nline2-merged-by-resolver\nline3\n'
+    let calls = 0
+    const resolve_conflict: MergeConflictResolver = async (input) => {
+      calls += 1
+      expect(input.repo_path).toBe(scratchDir)
+      expect(input.conflicted_files).toEqual(['lib.txt'])
+
+      // THE ANTI-FAKE GUARD: the markers are REAL, from a REAL 3-way apply, not synthesized here.
+      const raw = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+      expect(raw).toContain('<<<<<<<')
+      expect(raw).toContain('line2-from-branch')
+      expect(raw).toContain('line2-from-main')
+
+      writeFileSync(join(input.repo_path, 'lib.txt'), RESOLUTION)
+      await git(input.repo_path, 'add', 'lib.txt')
+      return { resolved: true }
+    }
+
+    const res = await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+      run,
+      resolve_conflict,
+    })
+
+    expect(calls).toBe(1)
+    expect(res.rebased).toBe(true)
+    expect(res.head).not.toBe(world.branchTip)
+
+    // The compare-and-swap really moved the ref.
+    expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(res.head)
+
+    // The committed tree holds the RESOLUTION and neither side's text. `spawnCapture` TRIMS
+    // output, so compare trimmed to trimmed.
+    const merged = await gitOut(world.checkout, 'show', `${res.head}:lib.txt`)
+    expect(merged.trim()).toBe(RESOLUTION.trim())
+    expect(merged).not.toContain('<<<<<<<')
+
+    // The replay sits ON the moved main.
+    expect((await gitOut(world.checkout, 'rev-parse', `${res.head}^`)).trim()).toBe(world.newMainTip)
+
+    expect(existsSync(scratchDir)).toBe(false)
+    const worktrees = (await gitOut(world.checkout, 'worktree', 'list')).trim().split(/\n/).filter((l) => l !== '')
+    expect(worktrees.length).toBe(1)
+
+    // Criterion 4 (a resolved conflict still faces the full review gate) is proven in the
+    // stub-host suite (`trident/orchestrator.test.ts`, second-fire test) — this real-git suite
+    // exercises `rebaseOntoObservedBase` directly, below the orchestrator.
+  }, 60_000)
+
+  test('a resolver that `git add`s a file with the markers STILL IN IT never gets `<<<<<<<` onto the branch', async () => {
+    // THE ONE THE INDEX CANNOT CATCH, against real git. `git add` clears the unmerged bit for the
+    // whole path regardless of what is left inside the file, so the realistic partial resolution
+    // — fix one hunk, stage, report RESOLVED, which is precisely what the resolver's contract
+    // tells it to do — looks CLEAN to `--diff-filter=U`. Checking only the index would commit the
+    // marker text and force-push `<<<<<<<` to the shared branch.
+    const world = await seedWorld({ conflicting: true })
+    const scratchDir = scratch(world.checkout, 't7')
+    const run = resolverRun('realgit-half-resolved', world)
+
+    let calls = 0
+    const resolve_conflict: MergeConflictResolver = async (input) => {
+      calls += 1
+      const raw = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+      expect(raw).toContain('<<<<<<<')
+      // Rewrite the file so it is SHORTER and tidier — and still carries a marker. Then stage it,
+      // which is what makes `git diff --diff-filter=U` come back empty.
+      writeFileSync(join(input.repo_path, 'lib.txt'), 'line1\n<<<<<<< ours\nline2-from-branch\n>>>>>>> theirs\nline3\n')
+      await git(input.repo_path, 'add', 'lib.txt')
+      return { resolved: true }
+    }
+
+    let caught: unknown = null
+    try {
+      await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+        run,
+        resolve_conflict,
+      })
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught).toBeInstanceOf(TridentRebaseConflict)
+    expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
+    // ONE ROUND. The re-read did not shrink, so there was nothing to gain from a second.
+    expect(calls).toBe(1)
+    // THE BRANCH NEVER MOVED — no commit, no compare-and-swap, no marker text anywhere in the ref.
+    expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
+    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<<<<<<<')
+    expect(existsSync(scratchDir)).toBe(false)
+    const worktrees = (await gitOut(world.checkout, 'worktree', 'list')).trim().split(/\n/).filter((l) => l !== '')
+    expect(worktrees.length).toBe(1)
+  }, 60_000)
+
+  test('a LONGER marker under `conflict-marker-size` is still caught — the gate matches seven OR MORE', async () => {
+    // `.gitattributes` can widen the markers git writes for a path. The staged-byte scan is the
+    // ONLY thing standing between a half-resolved file and a force-push to the shared branch, so a
+    // marker length it cannot see is a marker it waves through. An exact-seven pattern rejects a
+    // 32-character marker because the eighth character is another `<`, not the space it demands.
+    //
+    // git is asked to produce the long marker itself, via the attribute — hand-writing one would
+    // only prove the fixture. The resolver then stages the file with that marker still inside,
+    // which is the case the index cannot catch.
+    const world = await seedWorld({ conflicting: true })
+    writeFileSync(join(world.checkout, '.gitattributes'), 'lib.txt conflict-marker-size=32\n')
+    const scratchDir = scratch(world.checkout, 't7b')
+    const run = resolverRun('realgit-long-marker', world)
+
+    let seen = ''
+    const resolve_conflict: MergeConflictResolver = async (input) => {
+      writeFileSync(join(input.repo_path, '.gitattributes'), 'lib.txt conflict-marker-size=32\n')
+      // Re-run the merge for this path so git rewrites the markers at the attribute's width.
+      seen = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+      const wide = '<'.repeat(32)
+      writeFileSync(
+        join(input.repo_path, 'lib.txt'),
+        `line1\n${wide} ours\nline2-from-branch\n${'>'.repeat(32)} theirs\nline3\n`,
+      )
+      await git(input.repo_path, 'add', 'lib.txt')
+      return { resolved: true }
+    }
+
+    let caught: unknown = null
+    try {
+      await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+        run,
+        resolve_conflict,
+      })
+    } catch (err) {
+      caught = err
+    }
+
+    expect(seen).toContain('<<<<<<<')
+    expect(caught).toBeInstanceOf(TridentRebaseConflict)
+    expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
+    // THE BRANCH NEVER MOVED and no marker of ANY width reached it.
+    expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
+    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<<<<<<<')
+    expect(existsSync(scratchDir)).toBe(false)
+  }, 60_000)
+
+  test('a resolver that DECLINES leaves a REAL conflict an attention state — branch unmoved, scratch worktree gone', async () => {
+    const world = await seedWorld({ conflicting: true })
+    const scratchDir = scratch(world.checkout, 't6')
+
+    const run = resolverRun('realgit-decline', world)
+
+    let calls = 0
+    const resolve_conflict: MergeConflictResolver = async (input) => {
+      calls += 1
+      const raw = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+      expect(raw).toContain('<<<<<<<')
+      return { resolved: false, question: 'which line2 wins' }
+    }
+
+    let caught: unknown = null
+    try {
+      await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+        run,
+        resolve_conflict,
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(TridentRebaseConflict)
+    const err = caught as TridentRebaseConflict
+    expect(err.paths).toContain('lib.txt')
+    expect(err.message.startsWith('REBASE CONFLICT — needs attention:')).toBe(true)
+    // The attention state keeps its OWN message — the resolver's decline reason is not folded in.
+    expect(err.message.includes('REQUEST_CHANGES')).toBe(false)
+    expect(err.message.includes('which line2 wins')).toBe(false)
+
+    expect(calls).toBe(1)
     expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
     expect(existsSync(scratchDir)).toBe(false)
     const worktrees = (await gitOut(world.checkout, 'worktree', 'list')).trim().split(/\n/).filter((l) => l !== '')

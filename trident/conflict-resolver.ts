@@ -11,13 +11,25 @@
  * bounded Forge INTO the conflicted working tree to resolve it, so the build
  * still lands cleanly.
  *
- * The resolver runs ONE ephemeral CC-subprocess turn rooted at the repo's
- * working tree (mid-rebase, conflict markers present), reusing the SAME
- * `(cwd) => Substrate` factory the trident dispatch family uses
- * (`makeEphemeralSubstrate` in the composer). Its contract: resolve every
- * conflict keeping BOTH intents where possible, run the tests, `git add` the
- * resolutions — but NEVER `git rebase --continue` / commit / push (the OUTER
- * `mergeLocal` advances the rebase). It reports a terminal marker:
+ * TWO CALL SITES, ONE RESOLVER, TWO CONTRACTS (`input.mode`). The local merge
+ * above is `'rebase'`. The other is the AUTONOMOUS PUBLISH PATH —
+ * `rebaseOntoObservedBase` in `orchestrator.ts` — where a pr-mode build replays
+ * its diff onto the observed base tip in a throwaway DETACHED worktree and
+ * `git apply --3way --index` conflicts. That is the site that actually has
+ * nobody to escalate to (three builds died there on 2026-08-15 and a human
+ * reconciled all three by hand), and its tree is materially different: no rebase
+ * in progress, no installed dependencies, the outer publisher commits. So
+ * `mode: 'replay'` swaps the wording — see `conflictPrompt`. Describing the
+ * wrong tree is not cosmetic: it orders a test run that cannot pass and points
+ * an unsandboxed Edit/Bash surface at whatever checkout sits above the worktree.
+ *
+ * The resolver runs ONE ephemeral CC-subprocess turn rooted at the conflicted
+ * tree (conflict markers present), reusing the SAME `(cwd) => Substrate` factory
+ * the trident dispatch family uses (`makeEphemeralSubstrate` in the composer).
+ * Its contract: resolve every conflict keeping BOTH intents where possible,
+ * verify, `git add` the resolutions — but NEVER `git rebase --continue` /
+ * commit / push (the OUTER caller advances or commits). It reports a terminal
+ * marker:
  *   - `RESOLVED`         → conflicts staged, tests green → `{ resolved: true }`.
  *   - `ESCALATE: <q>`    → the conflict is genuinely ambiguous (two builds
  *                          changed the SAME behaviour incompatibly) → the merge
@@ -99,31 +111,59 @@ const REDIRECT_RULE =
 const NO_PATTERN_KILL_RULE =
   'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match the whole machine, not your worktree, and one such command has already SIGTERMed every concurrent lane on this box including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
 
-/** The Forge contract for a mid-rebase conflict resolution. */
+/**
+ * The Forge contract for a conflict resolution.
+ *
+ * THE TWO CALL SITES ARE DIFFERENT TREES AND THE CONTRACT SAYS SO. A prompt that describes a
+ * `git rebase` in progress to an agent standing in a detached replay worktree is not a harmless
+ * imprecision: `git rebase --continue` fails there, and "run the tests until they pass" is
+ * unsatisfiable in a tree with no `node_modules` — the resolver's module lookups escape upward
+ * into whatever checkout is above it, which is a tree OTHER BUILD LANES are using. So `mode`
+ * selects the wording for the tree the resolver is actually in.
+ */
 function conflictPrompt(input: {
   repo_path: string
   branch: string
   base_branch: string
   conflicted_files: string[]
   task: string
+  mode: 'rebase' | 'replay'
 }): string {
   const files = input.conflicted_files.length > 0 ? input.conflicted_files.join(', ') : '(run `git status` to find them)'
-  return `You are FORGE — Neutron's autonomous build sub-agent — resolving a git REBASE CONFLICT. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+  const replay = input.mode === 'replay'
+  const where = replay
+    ? `Your cwd (${input.repo_path}) is a THROWAWAY, DETACHED git worktree checked out at the tip of \`${input.base_branch}\`, onto which branch \`${input.branch}\`'s own diff was replayed with \`git apply --3way --index\`. That apply hit conflicts and left the markers in place. There is NO rebase, merge or cherry-pick in progress here — \`git rebase --continue\` has nothing to continue and will fail. Another build merged into \`${input.base_branch}\` after this branch was cut; you are reconciling the two.`
+    : `Your cwd (${input.repo_path}) is a git working tree PART-WAY THROUGH \`git rebase ${input.base_branch}\` of branch \`${input.branch}\`. Another build in this same project merged first; your branch is being replayed on top of it and hit conflicts.`
+  const verify = replay
+    ? `3. Do NOT run the project's test suite, and do NOT install dependencies. This throwaway worktree has NO \`node_modules\`: a test run here either fails for reasons that have nothing to do with your resolution, or resolves its imports out of a DIFFERENT checkout that other builds are using right now — green there would prove nothing about this tree. Verify by READING instead: every marker gone, both intents preserved, the file still valid in its own language. Reading a file and \`git diff\`ing your own work is the whole verification budget.`
+    : `3. Otherwise, once every marker is resolved: run the project's tests if it has any (redirect verbose output to a log, read the tail) and iterate until they pass.`
+  const stage = replay
+    ? `4. \`git add\` EVERY resolved file. Do NOT \`git commit\`, do NOT \`git rebase --continue\`, do NOT \`git push\` — the outer publisher commits this tree itself and moves the branch under a compare-and-swap.`
+    : `4. \`git add\` EVERY resolved file so the rebase can continue. Do NOT run \`git rebase --continue\`, do NOT \`git commit\`, do NOT \`git push\` — the outer loop advances the rebase.`
+  const done = replay
+    ? `   (only after every conflict is resolved and staged).`
+    : `   (only after every conflict is staged and tests pass).`
+  const confine = replay
+    ? `\n\nSTAY INSIDE YOUR CWD. Every path you Read, Edit, Write or touch from Bash must be under ${input.repo_path}. Other builds are running against other checkouts of this same repository on this machine; a stack trace, an import error, or a tool suggestion that points somewhere else is pointing at someone else's working tree — do not follow it, and never edit it.`
+    : ''
+  return `You are FORGE — Neutron's autonomous build sub-agent — resolving a git ${replay ? 'REPLAY' : 'REBASE'} CONFLICT. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 
-Your cwd (${input.repo_path}) is a git working tree PART-WAY THROUGH \`git rebase ${input.base_branch}\` of branch \`${input.branch}\`. Another build in this same project merged first; your branch is being replayed on top of it and hit conflicts.
+${where}${confine}
 
 CONFLICTED FILES: ${files}
 
 CONTRACT — do EXACTLY this, nothing more:
-1. For EACH conflicted file, open it and resolve every conflict marker (<<<<<<< / ======= / >>>>>>>). KEEP BOTH intents wherever they are compatible (two independent changes → include both). Preserve the code's conventions.
+1. For EACH conflicted file, open it and resolve every conflict marker (<<<<<<< / ======= / >>>>>>>). KEEP BOTH intents wherever they are compatible (two independent changes → include both). Preserve the code's conventions. Two sides whose text is IDENTICAL TODAY may still differ in meaning — taking one side verbatim can silently turn a cross-check into a tautology, so read what each side is FOR, not just what it says.
 2. If the two sides changed the SAME behaviour in INCOMPATIBLE ways so that no correct merge exists without a human decision, do NOT guess. Emit as your FINAL line exactly:
    ESCALATE: <one specific question naming the file + the exact conflicting behaviours>
    (e.g. "ESCALATE: ringbuf.ts and walstore.ts both redefined flush() — drop-oldest vs block-until-space; which do you want?")
-3. Otherwise, once every marker is resolved: run the project's tests if it has any (redirect verbose output to a log, read the tail) and iterate until they pass.
-4. \`git add\` EVERY resolved file so the rebase can continue. Do NOT run \`git rebase --continue\`, do NOT \`git commit\`, do NOT \`git push\` — the outer loop advances the rebase.
+${verify}
+${stage}
 5. Emit as your FINAL line exactly:
    RESOLVED
-   (only after every conflict is staged and tests pass).
+${done}
+
+PARTIAL RESOLUTION IS THE FAILURE MODE, NOT A PARTIAL SUCCESS. Staging a file that still contains a \`<<<<<<<\` is strictly worse than escalating: the caller scans your STAGED BYTES for markers and rejects the whole resolution, and \`git add\` alone would otherwise make an unresolved file look done. If you cannot finish a file, ESCALATE.
 
 BUILD TASK CONTEXT (what this branch was building):
 ${input.task}`
@@ -158,6 +198,7 @@ export function buildForgeConflictResolver(
         base_branch: input.base_branch,
         conflicted_files: input.conflicted_files,
         task: input.run.task,
+        mode: input.mode ?? 'rebase',
       }),
       tools: RESOLVER_TOOLS,
       model_preference: modelPreference,
