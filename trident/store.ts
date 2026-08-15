@@ -461,11 +461,24 @@ export class TridentRunStore {
    * covers every checkpoint/advance re-stamp (checkpoint.sh and the store
    * both bump it). Deliberately cheap: no ORDER BY, no row materialisation,
    * no git/gh — safe to run every ~2 s.
+   *
+   * THE `replace(…, 'Z', '')` IS LOAD-BEARING, not cosmetic. Two writers stamp this
+   * column in two different ISO shapes: `store.now()` writes millisecond precision
+   * (`…T03:15:45.900Z`) and `trident/checkpoint.sh` writes whole seconds
+   * (`…T03:15:45Z`). SQLite compares them as TEXT, and 'Z' (0x5A) sorts ABOVE '.'
+   * (0x2E) — so `…45Z` reads as GREATER than `…45.900Z`, and a MAX pinned by ONE
+   * run's whole-second stamp swallows a LATER millisecond stamp on another run
+   * inside that same second. Stripping the trailing 'Z' leaves two strings where
+   * the shorter is a prefix of the longer, which is chronological order again.
+   * Collisions below that are handled at the source: checkpoint.sh stamps
+   * milliseconds where the platform's `date` supports it. Both windows are under a
+   * second and cost only a fall back to the 90 s backstop — which is precisely the
+   * latency the watcher exists to remove.
    */
   changeSignature(): string {
     const row = this.db
       .prepare<{ n: number; m: string }, []>(
-        `SELECT COUNT(*) AS n, COALESCE(MAX(last_advanced_at), '') AS m
+        `SELECT COUNT(*) AS n, COALESCE(MAX(replace(last_advanced_at, 'Z', '')), '') AS m
            FROM code_trident_runs
           WHERE phase NOT IN ${TERMINAL_PHASE_SQL}`,
       )

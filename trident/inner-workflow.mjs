@@ -855,6 +855,18 @@ const CODEX_FORGE_SCHEMA = {
   additionalProperties: false,
   required: [...FORGE_SCHEMA.required, 'codexStatus', 'trailerComplete', 'wrapperExitCode', 'preservedWork'],
   properties: {
+    // `deviatedFromSpec` RIDES ALONG IN THE SPREAD BUT IS INERT ON THIS ROUTE, and
+    // that is deliberate rather than an oversight. The agent filling THIS schema is
+    // the codex BRIDGE — it launches a subprocess and copies the wrapper's measured
+    // trailer; it never sees the build's own reasoning, so it has no honest way to
+    // say whether the build deviated from its exec spec, and `codexBuildPrompt`
+    // correctly never asks it to. The field therefore stays absent here, which
+    // decodes as false: a deviated codex build writes the clean 'ralph-task-built'
+    // checkpoint and the NEXT iteration takes the cheap `plan:next`. That is the
+    // fail-toward-not-deviated direction on purpose — the periodic full re-plan
+    // (`PLAN_REFRESH_EVERY`) is what bounds the drift on this route. Carrying the
+    // signal out of a codex build needs a seventh trailer line from the wrapper,
+    // which is a change to `trident/codex-build.sh` and its own card.
     ...FORGE_SCHEMA.properties,
     codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
     trailerComplete: { type: 'boolean' },
@@ -904,6 +916,15 @@ const PLAN_REFRESH_EVERY = 5
 // committed IMPLEMENTATION_PLAN.md, how many '- [ ]' tasks are still unchecked in
 // it, and its VERBATIM body (which `plan:next` returns unchanged as
 // `implementationPlan`, so `ralphExecuteNote` keeps working untouched).
+//
+// `planLines` IS THE TRUNCATION GUARD, and it is why the seat can stay on the
+// cheapest tier. This probe is asked to relay an arbitrarily long file byte for
+// byte, and its body is what the workflow then treats as the authority for what
+// the branch actually committed — so "the model quietly stopped copying" must be
+// DETECTABLE, not assumed away. `wc -l` measures the file itself in the same
+// pipeline that produced the body; the workflow compares that number against the
+// relayed body's own newline count (`checkProbeBody`) and refuses the cheap path
+// on any disagreement. A measurement beats a tier.
 const PLAN_PROBE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -912,7 +933,28 @@ const PLAN_PROBE_SCHEMA = {
     planFound: { type: 'boolean' },
     uncheckedCount: { type: 'number' },
     planBody: { type: 'string' },
+    planLines: { type: ['number', 'null'] },
   },
+}
+
+// Does the relayed plan body still have every line the probe MEASURED?
+//
+// `wc -l` counts NEWLINES, and an agent relaying a file's content routinely drops
+// (or keeps) the trailing one, so the honest expectation is a two-value window,
+// not an equality: for a body of `n` split('\n') pieces, a faithful relay reports
+// `n` (trailing newline kept, or the file has none) or `n - 1` (trailing newline
+// dropped). Anything below that window means lines went missing between `git show`
+// and the schema — the exact failure that would otherwise be COMMITTED back over
+// IMPLEMENTATION_PLAN.md. A probe that reported no count at all (older shape,
+// absent/null) is not evidence of truncation, so it passes: this guard exists to
+// catch a measured contradiction, not to invent one.
+function probeBodyIntact(probe) {
+  if (probe === null || typeof probe.planBody !== 'string') return false
+  const lines = probe.planLines
+  if (lines === null || lines === undefined) return true
+  if (!Number.isFinite(lines)) return false
+  const pieces = probe.planBody.split('\n').length
+  return Math.trunc(lines) === pieces || Math.trunc(lines) === pieces - 1
 }
 
 // ── Inlined contracts (workflow agents are BARE workers — no CLAUDE.md / persona
@@ -1521,15 +1563,31 @@ ${task}`
 // the same shape as the head probe: ONE fixed command pair, a verbatim body and a
 // count back, no judgement about what any of it means — the selection is made in
 // code below, from these three fields.
+// THE PROBE READS THE SAME REF THE RESUME GATE JUDGED.
+//
+// `classifyResume`'s head comparison — the thing that makes 'unknown-checkpoint'
+// mean "the branch did not move under this handoff" — is fed by the launcher's
+// `resolveResumeLiveHead`, which in `pr` mode asks the REMOTE (`git ls-remote
+// origin`) and in `local` mode the local ref. A probe reading the plain local
+// branch name in pr mode would therefore read a DIFFERENT commit than the one the
+// gate cleared: `git show <branch>:…` resolves `refs/heads/<branch>` ahead of
+// `refs/remotes/origin/<branch>`, so a repo of record holding an unpublished local
+// commit (Forge commits locally in pr mode and is told not to push) would hand
+// `plan:next` a plan whose tasks nobody has published or reviewed. Same authority
+// split as `readBranchHead`, for the same reason.
+const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
+
 function planProbePrompt() {
+  const planPath = `${planProbeRef}:IMPLEMENTATION_PLAN.md`
   return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
 1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
-2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(`${forgeBranch}:IMPLEMENTATION_PLAN.md`)}\`
-If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": ""}\` — that is a normal answer, not an error to retry around.
+2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
+If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planLines": 0}\` — that is a normal answer, not an error to retry around.
 Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:
-\`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(`${forgeBranch}:IMPLEMENTATION_PLAN.md`)} | grep -c '^[[:space:]]*- \\[ \\]'\`
+\`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | grep -c '^[[:space:]]*- \\[ \\]'\`
 (\`grep -c\` exits 1 and prints 0 when nothing matches; that is \`uncheckedCount\` = 0, not a failure.)
+3. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | wc -l\` — report that number as \`planLines\`. It is checked against the \`planBody\` you report, so a body that lost lines on the way into the schema is DETECTED and the whole cheap path is abandoned. Do not compute it from what you copied; report what \`wc -l\` printed.
 NEVER EXIT SILENTLY.`
 }
 
@@ -3876,20 +3934,44 @@ try {
       // outer-published resume, no checkpoint at all — is a GENUINE crash-resume
       // (or the first iteration) and keeps the full planner and its verbatim
       // `resumeNote` path, unchanged.
+      //
+      // `ralphRound` IS ZERO-BASED — read it as "how many re-fires have happened",
+      // not "which iteration is this". `createRun` writes `ralph_round: 0`
+      // (trident/store.ts) and `refireNextRalphTask` bumps it by one per handoff
+      // (trident/orchestrator.ts), so ITERATION N ARRIVES HERE AS ralphRound N-1:
+      // iteration 1 → 0, iteration 2 → 1, iteration 6 → 5. Hence `>= 1` (not
+      // `>= 2`): iteration 2 is the FIRST continuation and the whole point of this
+      // card — gating on `>= 2` silently made iteration 2 pay the full 287 s
+      // survey. `% PLAN_REFRESH_EVERY !== 0` then lands the periodic full re-plan
+      // on iteration K+1 = 6 (ralphRound 5), 11 (10), … and also excludes
+      // ralphRound 0 a second time, which is iteration 1 and must always
+      // full-plan.
       const cleanContinuation =
         resumePlan.reason === 'unknown-checkpoint' &&
         typeof resumeCheckpoint === 'string' &&
         resumeCheckpoint.trim() === 'ralph-task-built' &&
         Number.isSafeInteger(ralphRound) &&
-        ralphRound >= 2 &&
+        ralphRound >= 1 &&
         ralphRound % PLAN_REFRESH_EVERY !== 0
       // The committed plan, read by the cheap probe seat — but ONLY when the cheap
       // planner could actually be used. On every other path this costs nothing,
       // because it is not dispatched.
+      //
+      // Through `seatAttempt`, for the same reason `head-probe`/`ci-probe` are: A
+      // PROBE AGENT THAT DIES MUST NOT END THE LANE. This seat is a pure
+      // OPTIMISATION — all it decides is whether the CHEAPER planner may run — so
+      // a transient dispatch failure (a 529, a killed session) crashing the whole
+      // workflow would make having the fast path strictly WORSE than not having
+      // it. Death collapses to `null`, which is already the "no usable probe"
+      // value the `usePlanNext` predicate below rejects, so the lane falls through
+      // to the full `plan:fable` exactly as it does for a branch that carries no
+      // committed plan at all.
       const planProbe = cleanContinuation
-        ? await agent(
-            planProbePrompt(),
-            withModel({ label: 'plan:probe', phase: 'Build', schema: PLAN_PROBE_SCHEMA }),
+        ? await seatAttempt(`plan-probe-round-${ralphRound}`, () =>
+            agent(
+              planProbePrompt(),
+              withModel({ label: 'plan:probe', phase: 'Build', schema: PLAN_PROBE_SCHEMA }),
+            ),
           )
         : null
       // THE DECISION IS MADE HERE, IN CODE, from the probe's three facts — the
@@ -3904,17 +3986,20 @@ try {
         Number.isSafeInteger(planProbe.uncheckedCount) &&
         planProbe.uncheckedCount >= 1 &&
         typeof planProbe.planBody === 'string' &&
-        planProbe.planBody.trim().length > 0
+        planProbe.planBody.trim().length > 0 &&
+        probeBodyIntact(planProbe)
       if (cleanContinuation && !usePlanNext) {
         log(
           `trident-v2 plan:next SKIPPED (round ${ralphRound}) — ${
             planProbe === null
               ? 'the plan probe returned nothing'
               : planProbe.planFound !== true
-                ? `no committed IMPLEMENTATION_PLAN.md on ${forgeBranch}`
+                ? `no committed IMPLEMENTATION_PLAN.md on ${planProbeRef}`
                 : typeof planProbe.planBody !== 'string' || planProbe.planBody.trim().length === 0
                   ? 'the committed plan is empty'
-                  : `the committed plan has ${JSON.stringify(planProbe.uncheckedCount)} unchecked task(s)`
+                  : planProbe.uncheckedCount < 1 || !Number.isSafeInteger(planProbe.uncheckedCount)
+                    ? `the committed plan has ${JSON.stringify(planProbe.uncheckedCount)} unchecked task(s)`
+                    : `the relayed plan body does not match the ${JSON.stringify(planProbe.planLines)} line(s) the probe measured — treating it as truncated`
           } → falling through to the full plan:fable`,
         )
       }
@@ -3940,6 +4025,39 @@ try {
             ? 'plan:next returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode'
             : 'plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode',
         )
+      }
+      // ── THE RELAYED PLAN IS VERIFIED, NOT TRUSTED ───────────────────────────
+      // `plan:next` is asked to do exactly two mechanical things — echo the
+      // committed body byte for byte, and report the probe's count minus one — and
+      // the probe ALREADY MEASURED BOTH (a verbatim `git show`, a `grep -c`). So
+      // neither is taken on the model's word, because both failure modes are
+      // silent and expensive: `ralphExecuteNote` tells Forge to write "EXACTLY
+      // this body" and COMMIT it, so a shortened echo rewrites the card's own plan
+      // and deletes tasks nobody decided to drop; and `remainingTasks` is the
+      // re-fire gate, so a hallucinated 0 declares a half-built card finished.
+      // The measurement wins over the relay, every time, and says so on the
+      // transcript. (Same discipline as `briefIntegrity()`: compare against what
+      // was measured, prefer the measurement, log the divergence.)
+      if (usePlanNext) {
+        if (plan.implementationPlan !== planProbe.planBody) {
+          const relayed = typeof plan.implementationPlan === 'string' ? plan.implementationPlan.length : -1
+          log(
+            `trident-v2 plan:next INTEGRITY — the relayed implementationPlan (${relayed} chars) is not the committed body ` +
+              `(${planProbe.planBody.length} chars); persisting the COMMITTED body instead`,
+          )
+          plan.implementationPlan = planProbe.planBody
+        }
+        // The probe counted the unchecked tasks INCLUDING the one being built now,
+        // so the truth after this iteration is exactly one fewer.
+        const measuredRemaining = planProbe.uncheckedCount - 1
+        const claimed = Number.isFinite(plan.remainingTasks) ? Math.trunc(plan.remainingTasks) : null
+        if (claimed !== measuredRemaining) {
+          log(
+            `trident-v2 plan:next INTEGRITY — remainingTasks=${JSON.stringify(plan.remainingTasks)} contradicts the probe's ` +
+              `grep -c count (${planProbe.uncheckedCount} unchecked − 1 = ${measuredRemaining}); using the measured count`,
+          )
+          plan.remainingTasks = measuredRemaining
+        }
       }
       complexityTag = plan.complexity
       ralphNote = ralphExecuteNote(plan)

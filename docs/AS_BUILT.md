@@ -26,13 +26,47 @@ reading SPEC.md or surveying the codebase. Selection is plain code over args + p
 output: `plan:next` fires only when `resumeCheckpoint === 'ralph-task-built'` and
 `resumeClass.reason === 'unknown-checkpoint'` (the recorded head matched the live head
 — any head-moved / unreadable / absent resume is a genuine crash-resume and gets the
-full planner), `ralphRound >= 2`, and `ralphRound % PLAN_REFRESH_EVERY !== 0` with
-`PLAN_REFRESH_EVERY = 5`. Fail-safes: a dead, unreadable, or zero-unchecked probe falls
-through to full `plan:fable` (zero-unchecked escalates so the full planner — not
-`plan:next` — decides whether the card is done); `plan:next` returning null is fatal
-exactly as a null `plan:fable` is — Forge never runs planless. `run.ralph_round` was
-threaded through `buildWorkflowArgs`; a missing round defaults to the full planner,
-the fail-safe for legacy callers.
+full planner), `ralphRound >= 1`, and `ralphRound % PLAN_REFRESH_EVERY !== 0` with
+`PLAN_REFRESH_EVERY = 5`. **`ralph_round` is ZERO-BASED** and the gate is written
+against that: `createRun` writes `ralph_round: 0` and `refireNextRalphTask` bumps it
+once per handoff, so iteration N arrives as `ralphRound` N-1 — iteration 1 → 0,
+iteration 2 → 1, iteration 6 → 5. `>= 1` is therefore "every continuation from the
+second iteration onward", and `% 5 !== 0` lands the periodic full re-plan on iteration
+6, 11, …. (The first cut of this gate said `>= 2`, which reads correctly and silently
+made iteration 2 — the first iteration that has a committed plan at all — pay the full
+survey anyway; the round matrix in the tests now covers 0-5 and 10 instead of skipping
+exactly the rounds where it mattered.) Fail-safes: a dead, unreadable, or
+zero-unchecked probe falls through to full `plan:fable` (zero-unchecked escalates so
+the full planner — not `plan:next` — decides whether the card is done); a probe whose
+DISPATCH THROWS is contained by `seatAttempt`, exactly like `head-probe`/`ci-probe`,
+because a pure-optimisation seat that dies must not end the lane; `plan:next` returning
+null is fatal exactly as a null `plan:fable` is — Forge never runs planless.
+`run.ralph_round` was threaded through `buildWorkflowArgs`; a missing round defaults to
+the full planner, the fail-safe for legacy callers.
+
+**The relayed plan is verified, not trusted.** `plan:next` is asked to do two
+mechanical things the probe ALREADY MEASURED, so neither is taken on the model's word:
+the echoed `implementationPlan` is compared against the probe's verbatim `git show`
+body (mismatch → the COMMITTED body is what Forge is told to persist, because
+`ralphExecuteNote` commits that body back over `IMPLEMENTATION_PLAN.md` and a shortened
+echo would delete tasks nobody decided to drop), and `remainingTasks` is compared
+against the probe's `grep -c` count minus one (mismatch → the measured count wins,
+because `remainingTasks` is the re-fire gate and a hallucinated `0` declares a
+half-built card finished). The probe carries its own truncation guard, which is what
+lets it stay on the cheapest tier: it reports `wc -l` alongside the body, and a body
+whose line count contradicts that measurement abandons the cheap path entirely. It also
+reads `origin/<branch>` in `pr` mode and the local ref in `local` mode — the same
+authority split as `readBranchHead` and `resolveResumeLiveHead` — so it can never plan
+from an unpublished local commit the resume gate never cleared.
+
+One deliberate gap, recorded rather than hidden: on the **codex forge route** the agent
+filling the schema is the codex BRIDGE, which launches a subprocess and copies the
+wrapper's measured trailer. It never sees the build's own reasoning, so it is not asked
+for `deviatedFromSpec` and the field stays absent → false. A deviated codex build
+therefore writes the clean `ralph-task-built` checkpoint and the next iteration takes
+`plan:next`; the periodic full re-plan is what bounds the drift on that route. Carrying
+the signal out needs a seventh trailer line from `trident/codex-build.sh` — its own
+card.
 
 The tradeoff, stated so no review round rediscovers it: re-planning every task is not
 pure waste — building task N can legitimately change task N+1. That is why the full
@@ -60,22 +94,56 @@ touches git/gh/network; a throw is contained and the 90 s interval stays armed
 unchanged as the backstop. The interval itself was NOT lowered — a full tick does
 per-run git/gh work for up to 50 runs; the point is a cheap detector gating an
 expensive sweep. An out-of-process checkpoint now triggers a full tick within roughly
-one watcher cadence instead of 90-180 s.
+one watcher cadence instead of 90-180 s. Both timers are registered with the
+`LoopRegistry` (`describeAll()`), so a persistently failing watcher shows up in the
+loop inventory instead of only as `watch_failed` log lines while the inventory reports
+one contented 90 s loop.
+
+**The detector must not count its own sweep as change.** The tick's `saveIfActive`
+re-stamps `last_advanced_at` on every run it advances, which is indistinguishable —
+inside one aggregate signature — from an out-of-process checkpoint. Left alone, one run
+reporting `changed` re-fired the whole `listNonTerminal(50)` × per-run git/gh sweep on
+EVERY 2 s cadence: burst amplification, converging only when the change stopped, and
+exactly the shape the card forbade. Two rules fix it, and both are about WHERE the
+baseline may move: the watcher takes no sample at all while a tick is in flight, and
+the baseline is settled at the tail of every tick body — the post-sweep signature when
+the tick wrote something (absorbing its own writes), the pre-sweep signature when it
+wrote nothing (so an external checkpoint that landed mid-sweep is still seen). One
+external change now produces exactly one sweep, and a second external change still
+wakes within a cadence. `stop()` drops the observed signature with the timers, so a
+`stop()` → `start()` re-arm does not compare against a dead lifetime.
+
+The signature's timestamps were also mixing precisions: `store.now()` writes
+milliseconds (`…T03:15:45.900Z`) while `trident/checkpoint.sh` wrote whole seconds
+(`…T03:15:45Z`), SQLite compares them as TEXT, and `'Z'` (0x5A) sorts above `'.'`
+(0x2E) — so a whole-second stamp could pin `MAX` above a LATER millisecond one inside
+the same second, and a checkpoint could miss its wake until the backstop. The MAX is
+now taken over `replace(last_advanced_at, 'Z', '')`, where the shorter string is a
+prefix of the longer and lexical order is chronological order again, and checkpoint.sh
+stamps milliseconds where the platform's `date` supports `%3N` (BSD `date` echoes it
+literally, so the result is validated and falls back to the whole-second stamp).
 
 **The honest after.** Do not read the projection below as a measured result — it is
-not. What each fix mechanically removes, per continuation task on a 5-task card:
-~4.8 min of planner survey on each of the 3-of-4 continuation iterations that skip the
-survey (round 5 still full-plans by design, and any deviated-from-spec iteration
-full-plans too), and ~1.5-3.8 min of tick latency per handoff. The card's own
-projection (~70 min → ~30-35 min) is a projection made at planning time; the
-after-numbers are to be measured on the next multi-task Ralph card and recorded here
-once they exist.
+not. What each fix mechanically removes on a 5-task card, which runs iterations 1-5 at
+`ralphRound` 0-4: iteration 1 pays the full survey, and all four continuation
+iterations skip it — ~4.8 min each — because the periodic full re-plan first lands at
+iteration 6 (`ralphRound` 5), which a 5-task card never reaches. A deviated-from-spec
+iteration full-plans regardless, on any card length. Plus ~1.5-3.8 min of tick latency
+per handoff. The card's own projection (~70 min → ~30-35 min) is a projection made at
+planning time; the after-numbers are to be measured on the next multi-task Ralph card
+and recorded here once they exist.
 
 Test coverage: selection is asserted over the REAL `inner-workflow.mjs` body via the
-assembly harness (which planner LABEL fires per scenario), and the watcher/wake
-behaviour over real timers in `tick.test.ts` / `loop/index.test.ts` (wake-mid-tick
-re-runs exactly once; a quiet interval fires zero extra tick bodies; a watcher throw
-leaves the backstop ticking; `stop()` leaves no live timer).
+assembly harness (which planner LABEL fires per scenario), across `ralphRound` 0-5 and
+10 so neither the first continuation nor the refresh boundary can regress unseen, plus
+a throwing probe dispatch, a truncated probe relay, an edited plan body and a
+contradicted `remainingTasks`. The watcher/wake behaviour is asserted over real timers
+in `tick.test.ts` / `loop/index.test.ts`: wake-mid-tick re-runs exactly once; a quiet
+interval fires zero extra tick bodies; a tick that WRITES produces exactly one sweep
+per external change (the amplification guard — the older test used a `changed: false`
+step and could not see it); a second external change still wakes promptly; a watcher
+throw leaves the backstop ticking; `stop()` leaves no live timer and no stale
+signature.
 
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 

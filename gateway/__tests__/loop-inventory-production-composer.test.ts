@@ -4,7 +4,8 @@
  *
  * SCOPE: this test boots `composeProductionGraph` DIRECTLY with a minimal input
  * and NO `loop_registry` threaded, so `graph.loopRegistry` holds exactly the
- * loops the production GRAPH starts itself — cron, reminders, trident, watchdog.
+ * loops the production GRAPH starts itself — cron, reminders, trident,
+ * trident-watch, watchdog.
  * It does NOT cover the loops the OPEN COMPOSER starts before the graph composes
  * (the `ChunkedUploadSweeper` + `dispatch-lifecycle-watchdog`) — the COMPLETE
  * Open running set is pinned end-to-end by
@@ -14,7 +15,11 @@
  * Open boot.
  *
  * What this pins:
- *   1. The gateway graph starts EXACTLY {cron, reminders, trident, watchdog}.
+ *   1. The gateway graph starts EXACTLY {cron, reminders, trident, trident-watch,
+ *      watchdog}. `trident-watch` is trident's 2 s wake-on-change detector: a
+ *      SECOND real timer on the same object, registered through
+ *      `TridentTickLoop.describeAll()` so a watcher that is failing every two
+ *      seconds appears in the inventory instead of only in `watch_failed` logs.
  *   2. The two D-7 DORMANT loops (`project-backup-scheduler`, comments
  *      `agent-watcher`) are NOT running — explicitly enumerated in
  *      `DORMANT_LOOPS`, never silently dead.
@@ -43,7 +48,7 @@ import { composeProductionGraph, DORMANT_LOOPS } from '../composition.ts'
 const OWNER = 'loop-inventory-composer-owner'
 
 /** The loops the GATEWAY GRAPH starts itself (no Open-composer loops here). */
-const EXPECTED_GATEWAY_LOOPS = ['cron', 'reminders', 'trident', 'watchdog'] as const
+const EXPECTED_GATEWAY_LOOPS = ['cron', 'reminders', 'trident', 'trident-watch', 'watchdog'] as const
 /** Loops the OPEN COMPOSER starts — absent from a gateway-only registry. */
 const OPEN_COMPOSER_LOOPS = ['chunked-upload-sweeper', 'dispatch-lifecycle-watchdog'] as const
 /** The exact set of D-7 dormant loops (built, never started). */
@@ -90,7 +95,7 @@ afterEach(async () => {
   await harness.close()
 })
 
-test('the gateway graph starts exactly its four loops (no Open-composer loops)', () => {
+test('the gateway graph starts exactly its five loops (no Open-composer loops)', () => {
   expect(harness.graph.loopRegistry.names()).toEqual([...EXPECTED_GATEWAY_LOOPS])
   // The sweeper + lifecycle watchdog are Open-composer loops — they only appear
   // when the composer threads them in via `loop_registry`, NOT from the graph
@@ -139,7 +144,7 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
 test('the ONE boot line names running loops (with cron jobs) + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine(OWNER, DORMANT_LOOPS)
   expect(line).toContain(`project=${OWNER}`)
-  expect(line).toContain('4 loop(s) running')
+  expect(line).toContain('5 loop(s) running')
   for (const name of EXPECTED_GATEWAY_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

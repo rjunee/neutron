@@ -607,7 +607,10 @@ export function buildCoreModules(
         loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
       }
       // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
-      loopRegistry.register(loop.describe())
+      // `describeAll`, not `describe`: trident owns TWO timers — the 90 s sweep and
+      // the 2 s wake-on-change watcher — and an unregistered timer is one the
+      // inventory reports as healthy by never mentioning it.
+      for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       loop.start()
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },

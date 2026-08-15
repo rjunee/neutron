@@ -174,7 +174,22 @@ done
 
 # Both legacy inline UPDATEs unconditionally re-stamped last_advanced_at. It is
 # the hang watchdog's heartbeat, so it is LIVENESS — frozen on a terminal row.
-sets+=("last_advanced_at=$(frozen last_advanced_at "'$(date -u +%FT%TZ)'")")
+#
+# MILLISECONDS, NOT WHOLE SECONDS, and the reason is the wake-on-change watcher.
+# `TridentRunStore.changeSignature()` detects an out-of-process checkpoint through
+# MAX(last_advanced_at) over the active runs, so two checkpoints inside the SAME
+# second used to collapse into one signature and the second one waited out the
+# 90 s backstop — the exact latency the watcher exists to remove. The store's own
+# writes have always been `toISOString()` (millisecond) precision; this makes the
+# two writers agree. `%3N` is a GNU `date` extension: BSD/macOS `date` echoes it
+# literally, so the result is validated and falls back to the original
+# whole-second stamp, which is still a correct (if coarser) ISO-8601 UTC instant.
+now_iso="$(date -u +%FT%T.%3NZ 2>/dev/null || true)"
+case "$now_iso" in
+  *[0-9].[0-9][0-9][0-9]Z) : ;;
+  *) now_iso="$(date -u +%FT%TZ)" ;;
+esac
+sets+=("last_advanced_at=$(frozen last_advanced_at "'${now_iso}'")")
 
 set_clause="$(printf '%s, ' "${sets[@]}")"
 set_clause="${set_clause%, }"

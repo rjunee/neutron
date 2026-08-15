@@ -45,8 +45,16 @@ interface Captured {
   prompt: string
 }
 
-/** What the `plan:probe` seat reports — or `null` for a seat that died. */
-type ProbeAnswer = { planFound: boolean; uncheckedCount: number; planBody: string } | null
+/** What the `plan:probe` seat reports — or `null` for a seat that died.
+ *  `planLines` is the probe's own `wc -l` measurement of the file it relayed; the
+ *  workflow checks the relayed body against it, so a test can express "the model
+ *  stopped copying half way" as a body that contradicts the count. */
+type ProbeAnswer = {
+  planFound: boolean
+  uncheckedCount: number
+  planBody: string
+  planLines?: number
+} | null
 
 interface Opts {
   ralph?: boolean
@@ -57,10 +65,19 @@ interface Opts {
   resumeLiveHead?: string
   prNumber?: number | null
   branch?: string | null
-  /** Scripted `plan:probe` answer. `undefined` → a healthy 2-unchecked plan. */
+  /** Scripted `plan:probe` answer. `undefined` → a healthy plan whose unchecked
+   *  count AGREES with what the planner will report as remaining. */
   probe?: ProbeAnswer
+  /** `true` → the `plan:probe` DISPATCH REJECTS (a 529, a killed session) rather
+   *  than returning null. A returned null and a throw are different code paths and
+   *  only one of them was ever covered. */
+  probeThrows?: boolean
   /** `true` → the `plan:next` seat returns nothing (planner terminal error). */
   planNextDead?: boolean
+  /** Overrides for what `plan:next` RELAYS BACK, so a test can express a planner
+   *  that edited, truncated or miscounted the committed plan it was told to echo
+   *  verbatim. Absent → a faithful relay. */
+  planNextRelay?: { implementationPlan?: string; remainingTasks?: number }
   /** `true` → the mocked `forge:build` reports `deviatedFromSpec: true`, i.e. it
    *  materially built something other than what its exec spec described. */
   forgeDeviates?: boolean
@@ -100,9 +117,22 @@ async function run(opts: Opts = {}): Promise<Out> {
     const label = o?.label ?? ''
     captured.push({ label, prompt })
     if (label === 'plan:probe') {
+      // A DISPATCH THAT REJECTS, not a seat that answers null: the workflow must
+      // survive this, and until the fix it did not.
+      if (opts.probeThrows === true) throw new Error('API Error 529 (overloaded)')
       const answer =
         opts.probe === undefined
-          ? { planFound: true, uncheckedCount: 2, planBody: COMMITTED_PLAN }
+          ? {
+              planFound: true,
+              // The probe's `grep -c` count INCLUDES the task about to be built, so
+              // the honest default is one more than what the planner then reports as
+              // remaining. The workflow now enforces exactly that relationship, so a
+              // harness that contradicted it would make every test exercise the
+              // integrity-correction path instead of the path it names.
+              uncheckedCount: (opts.remainingTasks ?? 0) + 1,
+              planBody: COMMITTED_PLAN,
+              planLines: COMMITTED_PLAN.split('\n').length,
+            }
           : opts.probe
       return answer
     }
@@ -111,7 +141,7 @@ async function run(opts: Opts = {}): Promise<Out> {
       // The contract the real prompt states: the committed body comes back
       // VERBATIM, so `ralphExecuteNote` hands Forge exactly what is on the branch.
       return {
-        implementationPlan: COMMITTED_PLAN,
+        implementationPlan: opts.planNextRelay?.implementationPlan ?? COMMITTED_PLAN,
         topTask: 'T2 — the task THIS iteration must pick up',
         executionSpec: 'TARGET FILES: t2.ts',
         complexity: 'reasoning',
@@ -119,7 +149,7 @@ async function run(opts: Opts = {}): Promise<Out> {
         // handing straight back to the outer loop for a re-fire — the planner choice
         // is what is under test, and the re-fire path would cut the run short. The
         // deviation tests set it >0, because the re-fire IS the path they exercise.
-        remainingTasks: opts.remainingTasks ?? 0,
+        remainingTasks: opts.planNextRelay?.remainingTasks ?? opts.remainingTasks ?? 0,
       }
     }
     if (label === 'plan:fable') {
@@ -313,6 +343,31 @@ describe('plan:next — a clean continuation plans from the committed plan', () 
     expect(out.result.ok).toBe(true)
   })
 
+  test('ITERATION 2 — ralphRound 1 — takes the cheap path, which is the whole card', async () => {
+    // THE OFF-BY-ONE THIS TEST EXISTS TO PIN. `ralph_round` is ZERO-BASED: the store
+    // creates a run at 0 and the orchestrator bumps it once per re-fire, so the
+    // SECOND iteration — the first one that has a committed plan to read, and the
+    // first one the card's acceptance criteria name — arrives here as ralphRound 1.
+    // A `>= 2` gate looks right and silently makes iteration 2 pay the full 287 s
+    // survey; nothing in the old round list (0, 2, 3, 5, 10) could see it.
+    const out = await run(cleanHandoff(1))
+
+    expect(out.labels).toContain('plan:probe')
+    expect(out.labels).toContain('plan:next')
+    expect(out.labels).not.toContain('plan:fable')
+    expect(promptFor(out, 'plan:next')).not.toContain(SURVEY_LINE)
+  })
+
+  for (const round of [1, 2, 3, 4]) {
+    test(`round ${round} (iteration ${round + 1}) is inside the refresh window → cheap path`, async () => {
+      // The whole window, end to end, so the boundary at either side is asserted
+      // rather than inferred: 1..4 cheap, 5 full (below), 6..9 cheap again.
+      const out = await run(cleanHandoff(round))
+      expect(out.labels).toContain('plan:next')
+      expect(out.labels).not.toContain('plan:fable')
+    })
+  }
+
   for (const round of [5, 10]) {
     test(`round ${round} takes the PERIODIC full re-plan regardless`, async () => {
       // DELIBERATE COST. Building task N can change what task N+1 should be, so the
@@ -359,6 +414,170 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
     expect(out.labels).not.toContain('plan:next')
     expect(out.labels).toContain('forge:build')
     expect(out.result.ok).toBe(true)
+  })
+
+  test('a probe whose DISPATCH THROWS does not end the lane — the build still happens', async () => {
+    // THE DIFFERENCE BETWEEN A SEAT THAT ANSWERS `null` AND A SEAT THAT REJECTS, and
+    // it is the whole finding: an unwrapped `await agent(...)` propagates the
+    // rejection out of the Ralph block, past `forge:build`, into the terminal
+    // handler — the card's ONE optimisation seat taking the lane down with it. The
+    // probe is an accelerator; the only correct response to its death is to pay the
+    // full price and build anyway.
+    const out = await run(cleanHandoff(2, { probeThrows: true }))
+
+    expect(out.labels).toContain('plan:probe')
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+    // The lane got its build and its verdict — not an `inner-error` checkpoint.
+    expect(out.labels).toContain('forge:build')
+    expect(out.result.ok).toBe(true)
+    expect(out.result.checkpoint).not.toBe('inner-error')
+    // …and the dead seat is NAMED on the transcript, so the operator can see the
+    // accelerator failing rather than only a slow build.
+    expect(out.logs.some((l) => l.includes('trident.seat-died') && l.includes('plan-probe-round-2'))).toBe(
+      true,
+    )
+  })
+
+  test('a TRUNCATED relay of the committed plan is caught by the probe’s own line count', async () => {
+    // The probe runs on the cheapest tier and is asked to copy an arbitrarily long
+    // file byte for byte. `wc -l` is the check that makes that safe: the body it
+    // reported is three lines, the file it measured was five, so the body is not the
+    // plan and the cheap path — whose output would be COMMITTED over
+    // IMPLEMENTATION_PLAN.md — is abandoned.
+    const out = await run(
+      cleanHandoff(2, {
+        probe: {
+          planFound: true,
+          uncheckedCount: 2,
+          planBody: COMMITTED_PLAN.split('\n').slice(0, 3).join('\n'),
+          planLines: 5,
+        },
+      }),
+    )
+
+    expect(out.labels).toContain('plan:probe')
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+    expect(out.logs.some((l) => l.includes('plan:next SKIPPED') && l.includes('truncated'))).toBe(true)
+  })
+
+  test('a probe that reports a MATCHING line count is trusted (the guard is not a veto on everything)', async () => {
+    // The contrast that stops the guard from being a way to disable the feature: a
+    // faithful relay that dropped only the file's trailing newline still passes.
+    const out = await run(
+      cleanHandoff(2, {
+        probe: {
+          planFound: true,
+          uncheckedCount: 1,
+          planBody: COMMITTED_PLAN,
+          planLines: COMMITTED_PLAN.split('\n').length - 1,
+        },
+      }),
+    )
+
+    expect(out.labels).toContain('plan:next')
+    expect(out.labels).not.toContain('plan:fable')
+  })
+})
+
+/**
+ * THE RELAYED PLAN IS VERIFIED AGAINST THE PROBE'S MEASUREMENTS, NOT TAKEN ON TRUST.
+ *
+ * `plan:next` is asked to do two mechanical things — echo the committed body
+ * verbatim, and report the probe's unchecked count minus one — and the probe already
+ * MEASURED both. Getting either wrong is silent and expensive: `ralphExecuteNote`
+ * tells Forge to write "EXACTLY this body" and commit it, so a shortened echo deletes
+ * tasks from the card's own plan; and `remainingTasks` is the re-fire gate, so a
+ * hallucinated 0 declares a half-built card finished.
+ */
+describe('plan:next — the measurement beats the relay', () => {
+  test('a planner that EDITED the body it was told to echo does not get to commit its edit', async () => {
+    const rewritten = ['# rewritten by the planner', '- [ ] something else entirely'].join('\n')
+    const out = await run(cleanHandoff(2, { planNextRelay: { implementationPlan: rewritten } }))
+
+    expect(out.labels).toContain('plan:next')
+    // WHAT FORGE IS TOLD TO PERSIST is the observable that matters — the committed
+    // body, not the planner's version of it.
+    const forge = promptFor(out, 'forge:build')
+    expect(forge).toContain(COMMITTED_PLAN)
+    expect(forge).not.toContain('# rewritten by the planner')
+    expect(out.logs.some((l) => l.includes('plan:next INTEGRITY') && l.includes('COMMITTED body'))).toBe(
+      true,
+    )
+  })
+
+  test('a faithful relay is left exactly alone (no correction, no log)', async () => {
+    const out = await run(cleanHandoff(2))
+
+    expect(promptFor(out, 'forge:build')).toContain(COMMITTED_PLAN)
+    expect(out.logs.some((l) => l.includes('plan:next INTEGRITY'))).toBe(false)
+  })
+
+  test('remainingTasks comes from the probe’s grep count, not the planner’s claim', async () => {
+    // The dangerous direction: a planner reporting 0 on a plan with three unchecked
+    // tasks left would end the card at the re-fire gate with two tasks unbuilt.
+    const out = await run(
+      cleanHandoff(2, {
+        withDb: true,
+        probe: {
+          planFound: true,
+          uncheckedCount: 4,
+          planBody: COMMITTED_PLAN,
+          planLines: COMMITTED_PLAN.split('\n').length,
+        },
+        planNextRelay: { remainingTasks: 0 },
+      }),
+    )
+
+    // 4 unchecked, one of them built this iteration → 3 remain, and the run hands
+    // back to the outer loop instead of declaring the card done.
+    expect(out.result.remainingTasks).toBe(3)
+    expect(out.result.checkpoint).toBe('ralph-task-built')
+    expect(out.logs.some((l) => l.includes('plan:next INTEGRITY') && l.includes('measured count'))).toBe(
+      true,
+    )
+  })
+
+  test('an OVER-count is corrected too — the probe is the authority in both directions', async () => {
+    const out = await run(
+      cleanHandoff(2, {
+        probe: {
+          planFound: true,
+          uncheckedCount: 1,
+          planBody: COMMITTED_PLAN,
+          planLines: COMMITTED_PLAN.split('\n').length,
+        },
+        planNextRelay: { remainingTasks: 9 },
+      }),
+    )
+
+    // 1 unchecked, built this iteration → 0 remain: the card really is finished, and
+    // a planner inventing nine more tasks must not buy itself nine more iterations.
+    expect(out.result.remainingTasks).toBe(0)
+  })
+})
+
+describe('plan:next — the probe reads the ref the resume gate judged', () => {
+  test('pr mode probes origin/<branch>, matching resolveResumeLiveHead', async () => {
+    // The resume gate that cleared this handoff read the REMOTE head
+    // (`git ls-remote origin`). `git show <branch>:…` would resolve the LOCAL
+    // refs/heads/<branch> first — and in pr mode Forge commits locally and is told
+    // not to push, so the local ref can hold an unpublished, unreviewed commit. The
+    // probe must read the same commit the gate cleared, or `plan:next` skips a task
+    // nobody has seen.
+    const out = await run(cleanHandoff(2, { mergeMode: 'pr', prNumber: 42 }))
+    const probe = promptFor(out, 'plan:probe')
+
+    expect(probe).toContain('origin/trident/plan-next-run:IMPLEMENTATION_PLAN.md')
+  })
+
+  test('local mode probes the local ref, which is the authority there', async () => {
+    const out = await run(cleanHandoff(2))
+    const probe = promptFor(out, 'plan:probe')
+
+    expect(probe).toContain("git show 'trident/plan-next-run:IMPLEMENTATION_PLAN.md'")
+    expect(probe).not.toContain('origin/trident/plan-next-run:IMPLEMENTATION_PLAN.md')
   })
 
   test('a DEAD plan:next is fatal BEFORE Forge, exactly as a dead plan:fable is', async () => {

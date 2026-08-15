@@ -260,11 +260,35 @@ export class TridentTickLoop {
     return this.loop.describe()
   }
 
+  /**
+   * §F2 — EVERY timer this object owns, for the LoopRegistry inventory.
+   *
+   * `describe()` returns only the 90 s sweep, which is what the composer used to
+   * register — so the 2 s 'trident-watch' loop was a live, self-restarting timer
+   * that the loop inventory could not see at all. A persistently failing watcher
+   * then showed up only as `watch_failed` log lines while the inventory reported
+   * one healthy loop: the accelerator can be dead for hours and every handoff back
+   * on the 90 s path, with nothing in the inventory saying so. Both descriptors are
+   * LIVE (the `SupervisedLoop` getters read current state), so registering them
+   * before `start()` is still correct. Single-loop callers keep `describe()`.
+   */
+  describeAll(): LoopDescriptor[] {
+    if (this.watchLoop === null) return [this.loop.describe()]
+    return [this.loop.describe(), this.watchLoop.describe()]
+  }
+
   /** Stop + quiesce: awaits the in-flight tick so the composer can
    *  `await loop.stop()` (then `drain()`) before `db.close()`. */
   async stop(): Promise<void> {
     if (this.watchLoop !== null) await this.watchLoop.stop()
     await this.loop.stop()
+    // DROP THE OBSERVED SIGNATURE WITH THE TIMERS. It is a comparison against a
+    // moment that ended at shutdown: a `stop()` → `start()` re-arm that kept it
+    // would compare the new process's first sample against pre-shutdown state and
+    // fire a wake for change some other lifetime already swept. Null re-arms the
+    // "first observation records, never wakes" rule, which is the right boot
+    // behaviour — the interval's own first pass covers whatever moved meanwhile.
+    this.lastChangeSig = null
   }
 
   /**
@@ -293,9 +317,46 @@ export class TridentTickLoop {
    * routed to `watch_failed`; the 90 s backstop is untouched either way.
    */
   private async watchBody(): Promise<void> {
+    // A TICK IN FLIGHT MAKES EVERY SAMPLE UNREADABLE, so do not take one.
+    //
+    // The sweep's own `saveIfActive` re-stamps `last_advanced_at` on every run it
+    // advances, and that is indistinguishable, in one aggregate signature, from an
+    // out-of-process checkpoint. Sampling mid-sweep therefore reads the tick's own
+    // writes as "new change" and wakes the sweep again — which writes again, which
+    // wakes again: one run reporting `changed` used to re-fire a full
+    // `listNonTerminal(50)` × per-run git/gh sweep on every 2 s watcher pass. The
+    // baseline is only ever moved at a point where it means something: here (no
+    // tick running) or at the settled end of `tickBody`.
+    if (this.loop.stats().running) return
     const sig = this.store.changeSignature()
     if (this.lastChangeSig !== null && sig !== this.lastChangeSig) this.loop.wake()
     this.lastChangeSig = sig
+  }
+
+  /**
+   * Adopt the signature a SETTLED tick leaves behind, so the tick's own writes are
+   * never mistaken for change the tick has not yet seen. Called from the tail of
+   * every tick body — interval-fired, wake-fired, or manually driven — and never
+   * allowed to fail one: a throwing `changeSignature()` (closed handle, locked DB)
+   * leaves the baseline where it was, which at worst costs one extra sweep, and is
+   * routed to the 90 s backstop like any other watcher outage.
+   *
+   * `sweptSig` is the signature sampled BEFORE the sweep read its rows. When the
+   * tick wrote nothing, that is still the truth — and keeping it (rather than
+   * re-sampling) preserves the wake for an external checkpoint that landed WHILE
+   * the sweep was reading, which is the one change a post-tick re-sample would
+   * otherwise swallow.
+   */
+  private settleChangeBaseline(sweptSig: string | null, wrote: number): void {
+    if (this.watchLoop === null) return
+    try {
+      const settled = wrote > 0 ? this.store.changeSignature() : sweptSig
+      // An unreadable signature is not a baseline — never overwrite a good one with
+      // `null`, which would silently re-arm the "first observation never wakes" rule.
+      if (settled !== null) this.lastChangeSig = settled
+    } catch {
+      /* a signature we cannot read is not a baseline; the backstop still ticks */
+    }
   }
 
   /**
@@ -307,9 +368,25 @@ export class TridentTickLoop {
    */
   private async tickBody(): Promise<void> {
     let advanced = 0
+    // The change signature AS OF THIS SWEEP'S OWN OBSERVATION POINT — sampled here,
+    // before a single row is read, and handed to `settleChangeBaseline` at the tail.
+    // Its only job is to keep the watcher's baseline honest across a tick (see
+    // `watchBody`). Read defensively: the watcher is an accelerator and must never
+    // be the reason a tick fails.
+    let sweptSig: string | null = null
+    if (this.watchLoop !== null) {
+      try {
+        sweptSig = this.store.changeSignature()
+      } catch {
+        sweptSig = null
+      }
+    }
     // Scoped block: the body below is lifted verbatim from the old `runOnce`
-    // (its `try` block); the brace keeps it byte-identical for review.
-    {
+    // (its `try` block); the brace keeps it byte-identical for review. The
+    // `finally` is the only addition — it settles the watcher's baseline whether
+    // the sweep completed or threw, so a failed tick cannot leave the detector
+    // comparing against a signature nothing will ever match again.
+    try {
       const runs = this.store.listNonTerminal(this.per_tick_limit)
       for (const run of runs) {
         try {
@@ -398,6 +475,8 @@ export class TridentTickLoop {
         }
       }
       this.advancedCount += advanced
+    } finally {
+      this.settleChangeBaseline(sweptSig, advanced)
     }
   }
 

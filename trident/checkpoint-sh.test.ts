@@ -126,8 +126,13 @@ describe('checkpoint.sh — C1 per-phase checkpoint write (legacy checkpoint() S
     expect(r.branch).toBe('trident/add-widget')
     expect(r.inner_checkpoint).toBe('forge-done')
     expect(r.subagent_status).toBe('running')
-    // Timestamp computed in-script (`date -u +%FT%TZ`), like the old Bash step.
-    expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+    // Timestamp computed in-script, like the old Bash step. MILLISECONDS are the
+    // preferred shape (`date -u +%FT%T.%3NZ`) because the wake-on-change watcher
+    // detects a checkpoint through MAX(last_advanced_at) and two writes inside one
+    // second used to collapse into one signature; the whole-second form is the
+    // documented fallback for a `date` without the GNU `%3N` extension, so BOTH are
+    // accepted here and the sub-second case is pinned separately below.
+    expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/)
     // Untouched columns stay untouched; other rows are never selected.
     expect(r.inner_result).toBeNull()
     expect(row('run-other')).toMatchObject({ subagent_status: 'pending', branch: null, inner_checkpoint: null })
@@ -396,9 +401,46 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
       const r = row('run-1')
       expect(r.inner_checkpoint).toBe('argus-approved')
       expect(r.subagent_status).toBe('running')
-      expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+      expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/)
     },
   )
+
+  test('two checkpoints inside ONE SECOND leave two DISTINCT last_advanced_at values', () => {
+    // THE WAKE THAT USED TO BE LOST. `TridentRunStore.changeSignature()` — the
+    // watcher's whole detector — is COUNT + MAX(last_advanced_at) over the active
+    // runs, so two whole-second stamps inside one second are ONE signature and the
+    // second checkpoint waits out the 90 s backstop: exactly the latency the watcher
+    // exists to remove. Two writes back to back is the ordinary case (a phase that
+    // checkpoints twice quickly), not a contrived one.
+    //
+    // Retried until the pair genuinely shares a second, because that is the case
+    // under test and a boundary crossing would otherwise assert nothing. Bounded, so
+    // a slow box cannot hang the suite.
+    let first = ''
+    let second = ''
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect(sh([dbPath, 'run-1', 'inner_checkpoint', 'forge-done']).code).toBe(0)
+      first = String(row('run-1').last_advanced_at)
+      expect(sh([dbPath, 'run-1', 'inner_checkpoint', 'argus-approved']).code).toBe(0)
+      second = String(row('run-1').last_advanced_at)
+      if (first.slice(0, 19) === second.slice(0, 19)) break
+    }
+
+    // The FALLBACK is a supported configuration (a `date` without the GNU `%3N`
+    // extension), so the assertion is keyed to what this platform actually produced
+    // rather than asserting a precision the script does not promise everywhere.
+    if (/\.\d{3}Z$/.test(first)) {
+      expect(first.slice(0, 19)).toBe(second.slice(0, 19))
+      expect(second).not.toBe(first)
+      // Chronological order survives the string comparison the signature relies on
+      // once the trailing 'Z' is stripped — which is exactly what the store's MAX
+      // does, because 'Z' sorts ABOVE '.' and the raw strings compare backwards.
+      expect(second.replace('Z', '') > first.replace('Z', '')).toBe(true)
+    } else {
+      expect(first).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+      expect(second.replace('Z', '') >= first.replace('Z', '')).toBe(true)
+    }
+  })
 
   // NOT TESTED HERE, deliberately, and worth saying why rather than leaving a gap that
   // looks like an oversight: the stderr branches parse sqlite3's list-mode 'N|state'
