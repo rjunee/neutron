@@ -395,6 +395,7 @@ import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-tel
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
+import { parseAppWsSendMarker } from './wiring/app-ws-marker.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
 import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
 import {
@@ -2519,8 +2520,18 @@ export function buildOpenGraphComposer(
     //     push was composed in the reminder tick, so nothing but a fired reminder ever
     //     notified at all), and routing it through `deliver` is a change to the Trident
     //     delivery seam rather than a line here.
-    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, which is
-    //     deliberate: the owner sent the message that caused it, so it is in-turn.
+    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, and
+    //     it NOW NOTIFIES TOO — see the push block in that function. This line
+    //     used to read "which is deliberate: the owner sent the message that
+    //     caused it, so it is in-turn", and that was true until 2026-08-15, when
+    //     the owner overruled it: "Everything should be a chat message, and I get
+    //     notified for any and all chat messages if I'm not actively in the app."
+    //     Kept as a correction rather than deleted, because the ORIGINAL reasoning
+    //     was sound and its replacement depends on a condition that did not exist
+    //     when it was written: "in-turn" was standing in for "he is looking at
+    //     this", and the device now answers that question directly
+    //     (`app/lib/push-foreground-policy.ts`). Remove that device policy and
+    //     this exclusion becomes right again.
     //
     // Written down because the previous wording here said "EVERY out-of-turn post",
     // which is the confidently-specific kind of comment that gets believed instead of
@@ -5207,10 +5218,48 @@ export function buildOpenGraphComposer(
         // is written before this resolves. The delivered_live boolean is returned at
         // the END (after the best-effort last_activity stamp below).
         const marker = await appWs.deref((adapter) => adapter.send(msg))
-        const deliveredLive =
-          typeof marker === 'string' &&
-          !marker.startsWith('app-ws:dropped:') &&
-          !marker.startsWith('app-ws:lost:')
+        const sent = parseAppWsSendMarker(marker)
+        const deliveredLive = sent.delivered_live
+        // NOTIFY HIS DEVICES FOR AN ORDINARY REPLY TOO (owner, 2026-08-15:
+        // "Everything should be a chat message, and I get notified for any and
+        // all chat messages if I'm not actively in the app").
+        //
+        // This path was excluded ON PURPOSE until now, and the reasoning was
+        // sound at the time: he sent the message that caused this reply, so it
+        // is in-turn, and buzzing someone about the answer to what they just
+        // typed is noise. What changed is the OTHER half — the device now
+        // declines to interrupt the conversation on screen
+        // (`app/lib/push-foreground-policy.ts`). With that in place, "in-turn"
+        // stops being a proxy for "he is looking": he can send a message, put
+        // the phone down, and the reply is news exactly the way it is in every
+        // other chat app.
+        //
+        // ⚠️ SO THE TWO HALVES ARE COUPLED. If that device policy is ever
+        // weakened, this notify has to be revisited in the SAME change, or his
+        // phone buzzes while he types into it.
+        //
+        // Gated on `durable`, not on `!delivered_live`: the id has to point at a
+        // row that exists. `app-ws:dropped:<id>` — persisted, nobody listening —
+        // is precisely the case worth notifying, while `app-ws:lost:<id>` has no
+        // row for the tap to open. The old `!startsWith` predicate could not tell
+        // those apart. A `system_notice` is live-only by construction and carries
+        // no row at all.
+        if (
+          out.system_notice !== true &&
+          sent.durable &&
+          sent.message_id !== null &&
+          chatMessagePush !== undefined
+        ) {
+          // Fire-and-forget: a push failure must never cost the reply. The sink
+          // already records its own outcome.
+          fireAndForget('composer.chat-message-push', (async (): Promise<void> => {
+            await chatMessagePush({
+              project_id: project_id ?? null,
+              message_id: sent.message_id as string,
+              body: out.body,
+            })
+          })())
+        }
         // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
         // stamp the project's `last_activity_at` and re-fan `projects_changed`
         // so every connected rail reorders (this project pops to the top) and
