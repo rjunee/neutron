@@ -356,6 +356,30 @@ describe('buildReminderDispatcher — the refused-body bounds', () => {
     expect(outbound.posts[0]!.body).toBe(composed)
   })
 
+  // A `>` NEEDS BOTH SIDES OF ITS EDGE. The test above pins the last accepted length and the
+  // 3,400-character test sits far past it — neither can tell a `>` from a `>=`. One character
+  // over is the only case that does, and reading the boundary wrong silently refuses a
+  // legitimate nudge that happens to land exactly on the limit. The degraded-intent limit
+  // already has both halves; this is the composed limit's missing half.
+  test('a composed body ONE character over MAX_NUDGE_BODY_CHARS is refused', async () => {
+    const outbound = recordingOutbound()
+    const lines: string[] = []
+    const composed = 'C'.repeat(MAX_NUDGE_BODY_CHARS + 1)
+    const d = buildReminderDispatcher({
+      outbound,
+      llm: recordingLlm(composed),
+      log: (m) => lines.push(m),
+    })
+
+    await d.dispatch(makeReminder({ message: 'take out the trash' }))
+
+    // Refused → the bounded degrade posts the short literal instead; the over-long body
+    // never reaches the topic, whole or cut.
+    expect(outbound.posts[0]!.body).toBe('take out the trash')
+    expect(outbound.posts[0]!.body).not.toBe(composed)
+    expect(lines.some((l) => l.includes('over MAX_NUDGE_BODY_CHARS'))).toBe(true)
+  })
+
   test('the short-literal degrade stays byte-identical when compose throws', async () => {
     const outbound = recordingOutbound()
     const llm: ReminderLlm = {
