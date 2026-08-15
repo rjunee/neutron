@@ -396,6 +396,7 @@ import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
+import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
 import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
@@ -1604,8 +1605,17 @@ export function buildOpenGraphComposer(
     // exist when the reminder DISPATCHER is built below. The dispatcher is handed a
     // stable seam that DEREFS this binding per fire, so a ritual and a nudge share
     // one dispatcher rather than one dispatcher plus one executor. `null` until
-    // `init_ritual_planner` runs (LLM-less box ⇒ never runs ⇒ every row composes as
-    // an ordinary nudge, which is fail-closed: nothing reads a ritual's prompt).
+    // `init_ritual_planner` runs (LLM-less box ⇒ never runs).
+    //
+    // ⚠️ WHAT THAT NULL MEANS WAS WRITTEN DOWN WRONG HERE. It said the fall-through
+    // was "fail-closed: nothing reads a ritual's prompt" — true about the prompt, and
+    // it made a null planner sound harmless. It was not: with no planner the
+    // dispatcher classified EVERY row as a nudge, so a ritual row composed from its
+    // stored `message`, which is the dispatch token `ritual:<id>`, and the owner's
+    // lock screen read `ritual:kaizen`. The dispatcher now refuses a ritual row
+    // outright when it cannot plan one (`reminders/dispatcher.ts`, keyed on
+    // `reminder.ritual_id`) — THAT is what makes this null fail-closed, not the
+    // absence of a prompt read.
     let ritualPlanner: RitualFirePlanner | null = null
     // ── THE canonical TaskStore — ONE instance for the whole box ────────────
     // Every task surface must be the SAME object, not merely the same table.
@@ -2472,8 +2482,69 @@ export function buildOpenGraphComposer(
     // `buildAppWsSendReply` / `landing.registry`, touched only at FIRE time (tick
     // loop / brief cron / notice edge), long after boot wires the adapter — never
     // during composition. NO feature flag.
+    // NATIVE PUSH — the transport. `/api/app/devices/{register,unregister}`
+    // (mounted further down over this SAME store) records the owner's device
+    // tokens; this is the half that sends to them.
+    //
+    // ALWAYS ON, and safe to be: every send reads the token table first and
+    // returns before any fetch when the list is empty, so the zero-device state a
+    // fresh install starts in makes no network call at all.
+    //
+    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
+    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
+    const devicePushTokens = new DevicePushTokenStore(db)
+    const pushTransport = createPushDispatcher({
+      store: devicePushTokens,
+      client: createExpoPushClient(
+        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
+          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
+          : {},
+      ),
+    })
+    // THE NOTIFICATION FOR A CHAT MESSAGE, composed from the chat message, and
+    // handed to `deliver` below so every out-of-turn post THAT GOES THROUGH
+    // `deliver` carries it — the fired reminder, the ritual, the morning brief, the
+    // idle nudge, the overnight report. Built here (above `deliver`) rather than
+    // beside the reminder dispatcher because it is no longer a reminder's concern.
+    //
+    // WHAT IS NOT COVERED, NAMED RATHER THAN LEFT TO BE DISCOVERED. `deliver` is not
+    // the only path a durable agent message reaches the app-ws topic by, so "every
+    // out-of-turn post" is a claim about this seam and not about the surface:
+    //
+    //   * a TRIDENT TERMINAL posts through the ChannelRouter
+    //     (`buildTridentDelivery({ sink: channelRouter })` below → `trident/delivery.ts`
+    //     `opts.sink.send`), so a build that finishes while the owner is elsewhere lands
+    //     in his chat with no buzz. This is genuinely out-of-turn and genuinely
+    //     uncovered — it is PRE-EXISTING, not a regression here (before this change the
+    //     push was composed in the reminder tick, so nothing but a fired reminder ever
+    //     notified at all), and routing it through `deliver` is a change to the Trident
+    //     delivery seam rather than a line here.
+    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, which is
+    //     deliberate: the owner sent the message that caused it, so it is in-turn.
+    //
+    // Written down because the previous wording here said "EVERY out-of-turn post",
+    // which is the confidently-specific kind of comment that gets believed instead of
+    // checked — and a reader would have concluded a completed build notifies.
+    //
+    // 2026-08-09, owner-reported: his phone said `ritual:kaizen`. The push was
+    // composed in the reminder TICK from the reminder ROW, and a ritual row's
+    // `message` IS that dispatch token — so the notification could never contain
+    // the text that got posted, and the payload carried the owner slug where the
+    // tap needed a project id. Both halves of his complaint were that one mistake.
+    //
+    // `project_slug` is the key `/api/app/devices/register` writes its rows under
+    // (`gateway/http/app-devices-surface.ts:206` — the resolved owner bearer's
+    // slug). Reading and writing under one key is what makes "a registered device
+    // is a notified device" true rather than aspirational.
+    const chatMessagePush = buildChatMessagePushSink({
+      fanOut: pushTransport,
+      project_slug,
+    })
     const deliver: Deliver = createDeliver({
       buttonStore: landing.buttonStore,
+      // Every durably-posted out-of-turn message notifies the owner's devices;
+      // a transient `durability: 'none'` pill does not (no row, nothing to tap).
+      notify: chatMessagePush,
       push: {
         // `buildAppWsSendReply` now AWAITS the app-ws adapter and classifies its real
         // result marker, so `delivered_live` reflects the TRUE fan-out (an offline
@@ -2550,8 +2621,15 @@ export function buildOpenGraphComposer(
       tool_names: LIVE_AGENT_TOOL_NAMES,
       // ISSUES #504 — the ritual fire planner, DEREFERENCED PER FIRE so the
       // late-bound `ritualPlanner` (installed once the graph's ApprovalManager
-      // exists) reaches the dispatcher that was built before it. Null planner ⇒
-      // 'nudge' ⇒ the row composes from its own stored message.
+      // exists) reaches the dispatcher that was built before it.
+      //
+      // A null planner answers 'nudge', and the dispatcher applies that answer ONLY
+      // to a row with no `ritual_id`. A RITUAL row is refused there instead: it
+      // composes nothing and the owner gets one plain-language notice saying the
+      // occurrence was skipped. This comment used to stop at "⇒ the row composes
+      // from its own stored message", which was the defect stated as if it were the
+      // design — a ritual row's stored message IS `ritual:<id>`, so that is exactly
+      // how the token reached his lock screen. See `reminders/dispatcher.ts`.
       ritual_planner: {
         plan: async (reminder) =>
           ritualPlanner !== null ? ritualPlanner.plan(reminder) : { kind: 'nudge' as const },
@@ -2807,6 +2885,15 @@ export function buildOpenGraphComposer(
     // contain a current-boot 'running' row (`code_ritual_runs` has no boot_id;
     // ordering IS the current-boot safety). The prune chains after the reap.
     // fireAndForget precedent: the boot dispatch sweep just above (composer:888).
+    //
+    // 2026-08-09 — this NOW NOTIFIES, and that is intended rather than incidental.
+    // The reap posts one chat message per run it found orphaned, through the same
+    // `reminderOutbound` → `deliver` path everything else uses, so those posts pick
+    // up the device notification like any other. A ritual that died mid-flight is
+    // exactly the kind of thing the owner should learn about without opening the
+    // app. It is bounded by design: the reap only speaks for runs left 'running' by
+    // a PRIOR boot, so the steady state is zero messages and a restart storm cannot
+    // manufacture new ones (a reaped row is settled, not re-reaped).
     fireAndForget(
       'composer.reapOrphanRitualRuns',
       reapOrphanRitualRuns({
@@ -3227,41 +3314,12 @@ export function buildOpenGraphComposer(
     // while this was unmounted NO device could ever register and the
     // `device_push_tokens` table stayed empty on every install.
     //
-    // ONE store instance, shared with the delivery half below, so the rows the
-    // register route writes are literally the rows the reminder push reads.
-    const devicePushTokens = new DevicePushTokenStore(db)
+    // ONE store instance, shared with the delivery half (the push transport is
+    // built earlier, above the reminder outbound that feeds it), so the rows the
+    // register route writes are literally the rows a notification is sent to.
     const appDevicesSurface = createAppDevicesSurface({
       store: devicePushTokens,
       auth: appOwnerAuth,
-    })
-    // The OTHER half of push. Registration on its own delivers nothing: the
-    // fan-out lives behind the `push_dispatcher` composition field, which
-    // `build-core-modules.ts:396-398` attaches to the reminder tick's `on_fired`
-    // hook — and until now NO composer set it, so `createPushDispatcher`
-    // (`gateway/push/dispatcher.ts:133`) had no non-test call site and the
-    // reminder deep link (`app/lib/push-deep-link-dispatch.ts:93-108`) could
-    // never be reached. It is not a route slot, so the route-slot coverage gate
-    // cannot see the gap; `tests/integration/reminders-tab-and-push.open.test.ts`
-    // is what holds this wiring down.
-    //
-    // ALWAYS ON, and safe to be: `pushReminder` reads the token table first and
-    // `dispatch` returns before any fetch when the message list is empty
-    // (`gateway/push/dispatcher.ts:145-147`), so the zero-device state every
-    // fresh install starts in makes no network call at all. Downstream of a
-    // SUCCESSFUL nudge dispatch only (`reminders/tick.ts:314-323`), so push
-    // never adds a notification for a reminder the owner was not already being
-    // told about, and its own failures are caught and logged without touching
-    // the fired row.
-    //
-    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
-    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
-    const push_dispatcher = createPushDispatcher({
-      store: devicePushTokens,
-      client: createExpoPushClient(
-        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
-          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
-          : {},
-      ),
     })
     // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
     // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
@@ -5690,10 +5748,6 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
-      // The reminder-fired PUSH hook. `build-core-modules.ts:396-398` attaches
-      // it to `ReminderTickLoop.on_fired`, so a fired reminder reaches the
-      // owner's registered devices instead of only the in-app chat topic.
-      push_dispatcher,
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.
@@ -5710,7 +5764,7 @@ export function buildOpenGraphComposer(
       //     owner's BARE `app:<user>` topic: the exact topic discipline the
       //     PR #105 deliver-to-nobody incident produced. Chat is the GUARANTEED
       //     surface.
-      //   - `push_dispatcher` (:3092) — best-effort mobile push ALONGSIDE chat,
+      //   - `pushTransport` (:2496) — best-effort mobile push ALONGSIDE chat,
       //     never instead of it. A zero-device box still gets the chat post.
       //   - the substrate one-shot LLM — the ONLY model seam (no provider dep,
       //     no new secret). Null on an LLM-less box, where the cascade
@@ -5723,7 +5777,11 @@ export function buildOpenGraphComposer(
         project_slug,
         deliver,
         escalation_topic_id: reminderGeneralTopic,
-        push: push_dispatcher,
+        // RENAMED, not rewired: #171 deleted the `push_dispatcher` composition
+        // field and renamed the local to `pushTransport` (:2496). The email
+        // pipeline's consumer was added on main AFTER that branch was cut, so the
+        // merge left a reference to a name that no longer exists. Same object.
+        push: pushTransport,
         llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
         resolveTimezone: (slug: string): string | undefined =>
           readOwnerTimezone(db, slug) ?? undefined,

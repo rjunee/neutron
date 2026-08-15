@@ -1,39 +1,40 @@
 /**
  * @neutronai/gateway/push — high-level push dispatcher.
  *
- * P5.6 — glues the device-token store to the Expo Push API client.
- * Exposes two operations:
+ * P5.6 — glues the device-token store to the Expo Push API client. It is a
+ * TRANSPORT, and as of 2026-08-09 that is all it is:
  *
- *   * `pushReminder(reminder)` — the reminder-fired hook. Reads every
- *     device token for the reminder's instance and POSTs a single push
- *     batch with `{ title: 'Reminder', body: reminder.message, data: {
- *     kind: PUSH_KIND_REMINDER, reminder_id, project_slug } }`. Web push was
- *     removed 2026-05-22 (migration 0042) — the dispatcher trusts the
- *     CHECK constraint to keep web rows out of the table.
+ *   * `pushAll(project_slug, message)` — fan one composed message to every
+ *     device registered for the instance. Web push was removed 2026-05-22
+ *     (migration 0042) — the dispatcher trusts the CHECK constraint to keep web
+ *     rows out of the table.
+ *   * `pushUser(project_slug, user_id, message)` — the same, narrowed to one
+ *     user's devices (ISSUE #39).
  *
- *   * `pushAll(project_slug, message)` — escape hatch for the future
- *     wow-moment / agent-initiated push surface. Not wired into the
- *     reminder loop today; lives here so the next sprint doesn't need
- *     to reach into the store + client primitives directly.
+ * WHAT WAS DELETED, AND WHY IT COULD NOT BE FIXED IN PLACE. There used to be a
+ * third operation, `pushReminder(reminder)`, wired into `ReminderTickLoop`'s
+ * `on_fired` hook, which composed `{ title: 'Reminder', body: reminder.message }`
+ * from the reminder ROW. The row is the wrong source and no amount of editing the
+ * title fixes it: a ritual's stored `message` is the dispatch token `ritual:<id>`
+ * (`reminders/ritual-registration.ts:982`), so the owner's notification read
+ * `ritual:kaizen`, and it carried the OWNER slug where the tap needed a project
+ * id. A notification for a chat message has to be composed from the CHAT MESSAGE,
+ * which this module never sees — so composition moved to the one place that does
+ * (`gateway/push/chat-message-push.ts`, driven by the shared out-of-turn delivery
+ * seam `gateway/http/deliver.ts`, which is what every producer posts through) and
+ * this file kept the transport.
  *
- * Failure semantics per the brief: "Hook is additive — gracefully
- * no-ops if no tokens registered or Expo API unreachable." We:
+ * Failure semantics, unchanged: "gracefully no-ops if no tokens registered or
+ * Expo API unreachable." We:
  *   * return early when there are zero tokens — no HTTP call at all, which
- *     is what makes the hook safe to leave ON from the first boot of a
+ *     is what makes push safe to leave ON from the first boot of a
  *     fresh install (nobody has registered a device yet)
  *   * catch ExpoPushError / network failures and log a warning
  *   * log a warning per error-status ticket, and DELETE the tokens Expo
  *     reported as `DeviceNotRegistered` so a dead device is retried at most
- *     once instead of on every reminder forever
- *
- * The reminder dispatcher (Telegram-side) runs FIRST in
- * `ReminderTickLoop`; this hook runs AFTER markFired via the new
- * `onFired` callback so a push failure cannot stop the row from
- * being marked fired.
+ *     once instead of on every send forever
  */
 
-import { PUSH_KIND_REMINDER } from '@neutronai/wire-types/push-kind.ts'
-import type { Reminder } from '@neutronai/reminders/store.ts'
 import type { DevicePushTokenStore } from './store.ts'
 import {
   ExpoPushError,
@@ -64,14 +65,6 @@ export interface PushDispatcherOptions {
   store: DevicePushTokenStore
   client: ExpoPushClient
   /**
-   * Optional title override for reminder pushes. The default 'Reminder'
-   * keeps the v1 notification surface anonymous; a later sprint may
-   * inject the project name once project metadata is reachable from
-   * the reminder row (today reminders only carry a stringly-typed
-   * `topic_id`).
-   */
-  reminder_title?: string
-  /**
    * Optional structured logger. Defaults to `console.warn` so a
    * production gateway captures the warning in journald without extra
    * wiring. Tests pass a recording logger.
@@ -89,7 +82,6 @@ export interface PushDispatcherLogger {
 }
 
 export interface PushDispatcher {
-  pushReminder(reminder: Reminder): Promise<PushResult>
   pushAll(
     project_slug: string,
     message: { title?: string; body: string; data?: Record<string, unknown> },
@@ -108,19 +100,22 @@ export interface PushDispatcher {
     user_id: string,
     message: { title?: string; body: string; data?: Record<string, unknown> },
   ): Promise<PushResult>
-  /**
-   * P5.6 — `ReminderFiredHook` adapter. Wired into
-   * `ReminderTickLoop.on_fired` via the composition's `push_dispatcher`
-   * slot. Delegates to `pushReminder` and discards the result so the
-   * tick loop's failure-safe wrapper sees a `Promise<void>`.
-   */
-  onFired(reminder: Reminder): Promise<void>
 }
 
 export interface PushResult {
   /** Tokens that were attempted (post web-filter). */
   attempted: number
-  /** Tickets that came back `ok`. */
+  /**
+   * Tickets that came back `ok` — COUNTED, never inferred by subtracting the
+   * errors from `attempted`. Expo is supposed to return one ticket per message but
+   * a 200 can carry fewer (or none), and subtraction turns such a response into
+   * "everything was delivered". `chat-message-push.ts` stamps a durable row
+   * `delivered_at` off this number and that stamp permanently silences the
+   * idempotent re-emit, so an over-count here loses a message silently.
+   *
+   * `delivered + errored < attempted` therefore means Expo returned fewer tickets
+   * than we sent messages, and the shortfall was NOT accepted.
+   */
   delivered: number
   /** Tickets that came back `error`. */
   errored: number
@@ -138,10 +133,7 @@ export interface PushResult {
   error: { name: string; message: string } | null
 }
 
-const DEFAULT_REMINDER_TITLE = 'Reminder'
-
 export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatcher {
-  const reminderTitle = opts.reminder_title ?? DEFAULT_REMINDER_TITLE
   const logger: PushDispatcherLogger = opts.logger ?? {
     warn(message, meta) {
       moduleLog.warn(message, coerceLogFields(meta))
@@ -161,6 +153,29 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
     try {
       const result = await opts.client.send(messages)
       const errored = result.tickets.filter((t) => t.status === 'error')
+      // `delivered` COUNTS ACCEPTED TICKETS. It must never be derived by
+      // subtracting the errors from the messages sent, which is what it used to do
+      // (`messages.length - errored.length`).
+      //
+      // The two are equal ONLY when Expo returns one ticket per message. When it
+      // returns FEWER — a 200 carrying `{data: []}`, a `{}` with no `data` key at
+      // all (`expo-push-client.ts` defaults a missing `data` to `[]`), a proxy or
+      // error page that parses as JSON — subtraction reports EVERY message as
+      // delivered on a response that accepted NOTHING: measured
+      // `{attempted: 2, delivered: 2, errored: 0, ok: true}` for an empty ticket
+      // array.
+      //
+      // That is not a cosmetic tally error. `chat-message-push.ts` was deliberately
+      // made to fail CLOSED on this field — it stamps the durable row `delivered_at`
+      // only when `delivered >= 1`, and that stamp permanently silences the
+      // idempotent re-emit. A fail-closed guard reading a fail-OPEN number is not a
+      // guard, so the zero-delivery stamp the guard exists to prevent came back by
+      // this route. Counting `status: 'ok'` is the only value that means "Expo
+      // accepted this for a device".
+      //
+      // A short batch now shows up honestly as `delivered + errored < attempted`,
+      // which is the signal that tickets went missing.
+      const delivered = result.tickets.filter((t) => t.status === 'ok').length
       if (errored.length > 0) {
         for (const ticket of errored) {
           logger.warn('expo push ticket error', {
@@ -168,18 +183,34 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
             error: ticket.details?.error ?? ticket.message ?? 'unknown',
           })
         }
-        // PRUNE the tokens Expo says are dead. Tickets come back in submission
-        // order (`expo-push-client.ts:173` appends per chunk in order, and the
-        // chunks are POSTed sequentially), so index i identifies message i's
-        // recipient.
+        // PRUNE the tokens Expo says are dead — BY INDEX, WHICH IS ONLY VALID WHEN
+        // THE TWO LISTS ARE THE SAME LENGTH. `pruneUnregistered` reads
+        // `messages[i]` for ticket `i`, and this comment used to justify that with
+        // "tickets come back in submission order, so index i identifies message i's
+        // recipient". Submission order is true and NOT sufficient: the client
+        // appends only the tickets Expo actually RETURNED, per chunk
+        // (`expo-push-client.ts` `for (const t of data) tickets.push(t)`), and the
+        // tally twenty lines up exists precisely because a chunk can come back
+        // SHORT. One short chunk shifts every later ticket left, so a
+        // `DeviceNotRegistered` for chunk 2's token deletes a chunk-1 token that is
+        // alive. The two comments contradicted each other and this one was the
+        // wrong half.
         //
-        // Without this the table only ever grows: every app reinstall or OS
-        // token rotation leaves a `DeviceNotRegistered` row behind, and each one
+        // So the alignment is now CHECKED rather than assumed, inside
+        // `pruneUnregistered`: a mismatch prunes NOTHING and says so. That is the
+        // fail-closed direction for the same reason the `delivered` count is —
+        // keeping a dead token costs quota and a warning line, while deleting a
+        // live one ends push for a real device until it next re-registers.
+        //
+        // Without pruning at all the table only ever grows: every app reinstall or
+        // OS token rotation leaves a `DeviceNotRegistered` row behind, and each one
         // is re-sent on EVERY subsequent reminder, forever, burning Expo quota
         // and emitting a warning line per fire. Expo's contract is to stop
-        // sending to these tokens; the client re-registers on every sign-in
-        // (`app/lib/push.ts:143`), so a wrongly-pruned live device heals itself
-        // at the next launch — which makes deleting strictly safer than keeping.
+        // sending to these tokens; the client re-registers on sign-in and on every
+        // return to the foreground (`app/lib/push-registration-sync.ts`
+        // `cameToForeground`), so a pruned live device does recover — but not until
+        // the owner next brings the app forward, which is why a wrong prune is not
+        // free.
         //
         // Only `DeviceNotRegistered` prunes. `MessageRateExceeded`,
         // `MessageTooBig`, `InvalidCredentials` and friends are transient or
@@ -200,12 +231,12 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
       logger.info?.('expo push sent', {
         project_slug,
         attempted: messages.length,
-        delivered: messages.length - errored.length,
+        delivered,
         errored: errored.length,
       })
       return {
         attempted: messages.length,
-        delivered: messages.length - errored.length,
+        delivered,
         errored: errored.length,
         ok: true,
         error: null,
@@ -239,12 +270,35 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
    * still attempted, because a pruning failure must never turn into a thrown
    * push (the reminder tick's `on_fired` catch would swallow it, but the
    * dispatch result would wrongly read as a network failure).
+   *
+   * THE INDEX IS THE WHOLE MECHANISM, SO IT IS CHECKED BEFORE IT IS USED. Ticket
+   * `i` names message `i` only while Expo returned exactly one ticket per message.
+   * The client appends what came back rather than padding the gaps
+   * (`expo-push-client.ts`), so a short chunk shifts every later ticket left by
+   * one and the identification silently becomes wrong — a `DeviceNotRegistered`
+   * for one owner's device deletes a DIFFERENT device's live token.
+   *
+   * On a mismatch, prune NOTHING and log it. There is no way to recover which
+   * token a ticket belonged to once the lists differ in length, and the two
+   * mistakes are not symmetric: a dead token left behind costs Expo quota and one
+   * warning line per fire, while a live token deleted ends notifications for a
+   * real device until it next re-registers. The short batch is already visible in
+   * the tally as `delivered + errored < attempted`; this line names the
+   * consequence.
    */
   async function pruneUnregistered(
     project_slug: string,
     messages: readonly ExpoPushMessage[],
     tickets: readonly ExpoPushTicket[],
   ): Promise<void> {
+    if (tickets.length !== messages.length) {
+      logger.warn('expo push ticket count does not match messages — skipping token prune', {
+        project_slug,
+        messages: messages.length,
+        tickets: tickets.length,
+      })
+      return
+    }
     for (let i = 0; i < tickets.length; i += 1) {
       const ticket = tickets[i]
       if (ticket === undefined || ticket.status !== 'error') continue
@@ -263,24 +317,7 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
     }
   }
 
-  async function pushReminder(reminder: Reminder): Promise<PushResult> {
-    const tokens = opts.store.listByOwner(reminder.owner_slug)
-    const messages: ExpoPushMessage[] = tokens.map((t) => ({
-      to: t.device_token,
-      title: reminderTitle,
-      body: reminder.message,
-      sound: 'default',
-      data: {
-        kind: 'reminder',
-        reminder_id: reminder.id,
-        project_slug: reminder.owner_slug,
-        ...(reminder.topic_id !== null ? { topic_id: reminder.topic_id } : {}),
-      },
-    }))
-    return await dispatch(reminder.owner_slug, messages)
-  }
   return {
-    pushReminder,
     async pushAll(project_slug, message) {
       const tokens = opts.store.listByOwner(project_slug)
       const messages: ExpoPushMessage[] = tokens.map((t) => ({
@@ -308,9 +345,6 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
         ...(message.data !== undefined ? { data: message.data } : {}),
       }))
       return await dispatch(project_slug, messages)
-    },
-    async onFired(reminder) {
-      await pushReminder(reminder)
     },
   }
 }

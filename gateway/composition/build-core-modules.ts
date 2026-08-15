@@ -382,11 +382,11 @@ export function buildCoreModules(
     deps: ['approval'],
     init: (ctx) => {
       const store = new ReminderStore(input.db)
-      // P5.6 — when a push dispatcher is wired, attach it as the
-      // tick loop's `on_fired` hook so every fired reminder also
-      // emits a native push to every registered Expo device for the
-      // instance. The hook is failure-safe inside the tick loop, so a
-      // push outage cannot stop reminders from being marked fired.
+      // (The P5.6 note that used to sit here described attaching the push
+      // dispatcher as the tick's `on_fired` hook. That wiring is GONE — see the
+      // "what is NOT here any more" note below, which is now the only account of
+      // it. Leaving both left one file describing the wiring and contradicting
+      // itself twenty-five lines later.)
       const loopOpts: ConstructorParameters<typeof ReminderTickLoop>[0] = {
         store,
         dispatcher: input.reminder_dispatcher,
@@ -409,16 +409,32 @@ export function buildCoreModules(
           return tz !== null && isValidIanaTimezone(tz) ? tz : null
         },
       }
-      if (input.push_dispatcher !== undefined) {
-        loopOpts.on_fired = input.push_dispatcher
-      }
+      // NOTE what is NOT here any more: a reminder-fired PUSH hook. Until
+      // 2026-08-09 the composition's `push_dispatcher` was attached to the tick's
+      // `on_fired` and composed a notification from the reminder ROW — which for a
+      // ritual is the dispatch token `ritual:<id>`, so the owner's lock screen read
+      // `ritual:kaizen`. The tick cannot see the message the fire posted, so it was
+      // never a place a truthful chat notification could be built. It is composed
+      // by the ONE out-of-turn delivery seam instead (`gateway/http/deliver.ts` →
+      // its `notify` sink), which knows the posted text and the durable row id AND
+      // is shared by every producer, so a brief and a nudge notify the same way a
+      // fired reminder does.
       // Rituals (ISSUES #504) — install the ritual fire PLANNER now that the
       // graph's ApprovalManager exists. NOTE what is NOT here: the tick loop gets
       // no ritual option, because a ritual is not a special kind of fire. The
       // planner installs into the ONE `reminder_dispatcher` the composer already
       // built, which composes a ritual and a nudge through the same substrate call
-      // and posts both through the same delivery seam. Absent (LLM-less box) →
-      // every row composes as an ordinary nudge, which is fail-closed.
+      // and posts both through the same delivery seam.
+      //
+      // Absent (LLM-less box) → a row with NO `ritual_id` composes as an ordinary
+      // nudge; a RITUAL row is refused outright — it composes nothing, logs at error
+      // level and posts one plain-language notice (`reminders/dispatcher.ts:508`).
+      // This sentence used to read "every row composes as an ordinary nudge, which is
+      // fail-closed", which was true of the approved PROMPT and false of the
+      // NOTIFICATION: a ritual row's stored `message` IS the dispatch token
+      // `ritual:<id>`, so nudging it is how `ritual:kaizen` reached the owner's lock
+      // screen. Corrected in `dispatcher.ts` and `open/composer.ts` first; this was
+      // the third copy of the same claim and it was missed.
       if (input.init_ritual_planner !== undefined) {
         input.init_ritual_planner({
           approvals: ctx.graph.get<ApprovalManager>('approval'),
