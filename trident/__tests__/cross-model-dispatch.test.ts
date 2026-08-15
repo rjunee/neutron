@@ -503,7 +503,15 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     )
     expect(captured.some((c) => c.label === 'argus:codex')).toBe(true)
     expect(captured.some((c) => c.label === 'argus:kimi')).toBe(true)
-    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=4 configuration-accepted=true'))).toBe(true)
+    // FIVE, not four: the BUILD counts as a panel family (owner-decided
+    // 2026-08-15). The property this warning protects is that the reviewer does
+    // not share the blind spots of whatever WROTE the code, so the producer is
+    // part of the set — build + rubric + adversarial + both cross-model seats.
+    // Counting reviewers alone got both real cases backwards: it stayed silent
+    // when a Claude build was reviewed only by Claude, and it warned about
+    // build-on-GPT + Opus-reviewing, which is the cross-family panel the design
+    // wants.
+    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=5 configuration-accepted=true'))).toBe(true)
   })
 
   test('the same-family warning describes the panel that actually dispatched', async () => {
