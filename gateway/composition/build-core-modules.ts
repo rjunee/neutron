@@ -514,6 +514,14 @@ export function buildCoreModules(
         runTransitionObserver === undefined
           ? {}
           : { on_transition: { onTransition: (run) => runTransitionObserver(run) } }
+      // The wake-on-change watcher's cadence, when the composition set one. Spread
+      // conditionally for the same reason as `on_transition`: absent means "the 2 s
+      // default", not "0". This is what makes the cadence CONFIGURABLE in production
+      // rather than only on the options type (Argus r3).
+      const watchOpt: { watch_interval_ms?: number } =
+        tridentWiring?.watch_interval_ms === undefined
+          ? {}
+          : { watch_interval_ms: tridentWiring.watch_interval_ms }
       let loop: TridentTickLoop
       // §F1 — the orchestrator's `drain()` (previously destructured away and
       // never called) settles every in-flight FIRE turn on shutdown. Captured
@@ -601,10 +609,22 @@ export function buildCoreModules(
         // branch/PR/checkpoint, bounded by the durable `crash_recoveries` budget.
         orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
-        loop = new TridentTickLoop({ store, step: orchestrator.step, on_terminal, ...transitionOpt })
+        loop = new TridentTickLoop({
+          store,
+          step: orchestrator.step,
+          on_terminal,
+          ...transitionOpt,
+          ...watchOpt,
+        })
         drain = orchestrator.drain
       } else {
-        loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
+        loop = new TridentTickLoop({
+          store,
+          deps: stubAdvanceDeps(),
+          on_terminal,
+          ...transitionOpt,
+          ...watchOpt,
+        })
       }
       // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
       // `describeAll`, not `describe`: trident owns TWO timers — the 90 s sweep and

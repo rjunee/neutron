@@ -917,15 +917,15 @@ const PLAN_REFRESH_EVERY = 5
 // it, and its VERBATIM body (which `plan:next` returns unchanged as
 // `implementationPlan`, so `ralphExecuteNote` keeps working untouched).
 //
-// `planLines` + `planBytes` ARE THE INTEGRITY GUARD, and they are why the seat can
-// stay on the cheapest tier. This probe is asked to relay an arbitrarily long file
-// byte for byte, and its body is what the workflow then treats as the authority for
-// what the branch actually committed — so "the model quietly stopped copying", and
-// "the model helpfully tidied the wording on the way through", must both be
-// DETECTABLE, not assumed away. `wc -l` and `wc -c` measure the file itself in the
-// same pipeline that produced the body; the workflow compares both numbers against
-// the relayed body (`probeBodyIntact`) and refuses the cheap path on any
-// disagreement. A measurement beats a tier.
+// `planCksum` IS THE INTEGRITY GUARD, and it is why the seat can stay on the
+// cheapest tier. This probe is asked to relay an arbitrarily long file byte for
+// byte, and its body is what the workflow then treats as the authority for what the
+// branch actually committed — so "the model quietly stopped copying", and "the model
+// helpfully tidied the wording on the way through", must both be DETECTABLE, not
+// assumed away. `cksum` CHECKSUMS the file itself in the same pipeline that produced
+// the body; the workflow recomputes that checksum over the relayed body
+// (`probeBodyIntact`) and refuses the cheap path on any disagreement. A measurement
+// beats a tier.
 const PLAN_PROBE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -934,47 +934,76 @@ const PLAN_PROBE_SCHEMA = {
     planFound: { type: 'boolean' },
     uncheckedCount: { type: 'number' },
     planBody: { type: 'string' },
-    planLines: { type: ['number', 'null'] },
+    planCksum: { type: ['number', 'null'] },
     planBytes: { type: ['number', 'null'] },
   },
 }
 
-// Does the relayed plan body still have every line — AND every byte — the probe
-// MEASURED?
+// Is the relayed plan body BYTE-FOR-BYTE the file the probe measured?
 //
-// LINE COUNT ALONE IS NOT AN INTEGRITY CHECK (Argus r2, confirmed by two
-// reviewers). The relay runs through a model, its body is then FORCED
-// authoritative (`plan.implementationPlan = planProbe.planBody`) and Forge is told
-// to write and COMMIT it verbatim — so a reword, a re-order, or a silently flipped
-// '- [ ]' → '- [x]' that preserves the newline count passes a `wc -l` guard and
-// rewrites the card's own plan. `wc -c` closes the whole class of intra-line
-// mangling for one extra number in the same pipeline: any edit that is not exactly
-// byte-neutral is caught, and one that is byte-neutral must also have been
-// line-neutral and character-count-neutral, which no paraphrase is. (A digest would
-// be stricter still, but the workflow runtime has no crypto and no filesystem —
-// `agent()` Bash steps are its only measuring instrument.)
+// COUNTING IS NOT AN INTEGRITY CHECK (Argus r3, confirmed by two reviewers; r2 made
+// the same finding of `wc -l` alone). The relay runs through a model, its body is
+// then FORCED authoritative (`plan.implementationPlan = planProbe.planBody`) and
+// Forge is told to write and COMMIT it verbatim — so any tamper the counters do not
+// see rewrites the card's own plan. `wc -lc` did not see three of them: a silent
+// '- [ ]' → '- [x]' flip is both line- AND byte-neutral, a re-order is too, and a
+// one-byte truncation slipped through the ±1 window the trailing newline needed.
+// Counts cannot close that class, because the class is "same size, different
+// bytes".
 //
-// Both counts use the SAME two-value window, and for the same reason: an agent
-// relaying a file's content routinely drops (or keeps) the trailing newline. For a
-// body of `n` split('\n') pieces the faithful answers are `n` and `n - 1`; for a
-// body of `b` UTF-8 bytes they are `b` and `b + 1`. A probe that reported no count
-// at all (older shape, absent/null) is not evidence of tampering, so it passes:
-// this guard exists to catch a measured contradiction, not to invent one.
+// A CHECKSUM CAN, and `cksum` is in the same POSIX toolbox as `wc`: one extra number
+// from the same pipeline, and any edit — reword, re-order, re-check, truncate,
+// extend — changes it. It is recomputed HERE, over the relayed body, by
+// `cksumOf()`, which is bit-for-bit GNU/BSD `cksum` (CRC-32/CKSUM over the UTF-8
+// bytes, length-terminated) and is cross-checked against the real tool in
+// `inner-workflow-plan-next.test.ts`. Hand-rolled because a Workflow script has NO
+// imports and no filesystem — `agent()` Bash steps are its only other measuring
+// instrument — and because a CRC is ~20 lines where a cryptographic digest is not.
+// This is a TAMPER-EVIDENCE check against a careless relay, not a defence against an
+// adversary choosing collisions.
+//
+// The two candidates are the trailing-newline window, kept for the same reason the
+// count windows had one: an agent relaying a file's content routinely drops the
+// final newline, and that relay is faithful. Everything else must match exactly.
+//
+// A probe that reports NO checksum fails this guard — which only means the lane
+// takes the full `plan:fable`, i.e. today's behaviour minus the saving. The earlier
+// "an absent count is not evidence of tampering, so it passes" rule is exactly how a
+// relay escapes the guard by omitting the number it was asked for, and there is no
+// older probe shape to be compatible with (the seat ships in this same change).
 function probeBodyIntact(probe) {
   if (probe === null || typeof probe.planBody !== 'string') return false
-  const lines = probe.planLines
-  if (lines !== null && lines !== undefined) {
-    if (!Number.isFinite(lines)) return false
-    const pieces = probe.planBody.split('\n').length
-    if (Math.trunc(lines) !== pieces && Math.trunc(lines) !== pieces - 1) return false
-  }
+  const claimed = probe.planCksum
+  if (claimed === null || claimed === undefined || !Number.isFinite(claimed)) return false
   const bytes = probe.planBytes
-  if (bytes !== null && bytes !== undefined) {
-    if (!Number.isFinite(bytes)) return false
-    const relayed = utf8ByteLength(probe.planBody)
-    if (Math.trunc(bytes) !== relayed && Math.trunc(bytes) !== relayed + 1) return false
+  for (const candidate of [probe.planBody, `${probe.planBody}\n`]) {
+    const measured = cksumOf(candidate)
+    if (measured.crc !== Math.trunc(claimed)) continue
+    // `cksum` prints the byte count next to the CRC, so it is free to check — and a
+    // relay that reported a matching CRC with a contradictory length has contradicted
+    // itself, which is exactly what this guard exists to catch.
+    if (bytes !== null && bytes !== undefined) {
+      if (!Number.isFinite(bytes) || Math.trunc(bytes) !== measured.bytes) continue
+    }
+    return true
   }
-  return true
+  return false
+}
+
+// How many '- [ ]' tasks are still unchecked in a plan body, counted the same way
+// the probe's `grep -c '^[[:space:]]*- \[ \]'` counts them on the file.
+//
+// THIS IS THE CROSS-CHECK BETWEEN THE PROBE'S TWO ANSWERS (Argus r3, confirmed by
+// two reviewers). `uncheckedCount` and `planBody` come back from the same seat and
+// were never compared: the count OVERRIDES `remainingTasks` (the re-fire gate, so a
+// low count ends a half-built card) while the body OVERWRITES the committed
+// IMPLEMENTATION_PLAN.md (so a body missing tasks deletes them). Two numbers
+// measured on the same file must agree; when they do not, the probe's answer is
+// incoherent and the lane must take the full planner rather than pick whichever half
+// it likes.
+function countUnchecked(body) {
+  if (typeof body !== 'string') return -1
+  return (body.match(/^[ \t]*- \[ \]/gm) ?? []).length
 }
 
 // The FIRST still-unchecked task line of a committed plan body, as literal text —
@@ -991,31 +1020,69 @@ function firstUncheckedTask(body) {
   return null
 }
 
-// UTF-8 byte length of a string, computed from code units alone.
+// GNU/BSD `cksum` of a string: the POSIX CRC-32 and the UTF-8 byte count, computed
+// from code units alone.
 //
-// `wc -c` counts BYTES; `String.length` counts UTF-16 code units, and the two differ
-// for every non-ASCII character a plan is likely to contain (the '—' this codebase
-// writes everywhere is 3 bytes, 1 unit). Hand-rolled because a Workflow script has
-// NO imports and only the globals the runtime injects — `TextEncoder`/`Buffer` are
-// not part of that contract, and a ReferenceError here would take down the very
-// gate that is supposed to fail safe. A lone surrogate counts as 3 (what a UTF-8
-// encoder's replacement character costs), which is the same answer `wc -c` gives
-// for the bytes such a body would have been written as.
-function utf8ByteLength(s) {
+// THE ONE PLACE THIS MUST BE EXACT is the comparison in `probeBodyIntact` against
+// what `cksum` printed for the file on the branch, so this is not "a CRC" — it is
+// CRC-32/CKSUM specifically: polynomial 0x04C11DB7, unreflected, initial value 0,
+// the message LENGTH appended low-byte-first, final one's complement. That is the
+// algorithm POSIX specifies for `cksum`, so GNU coreutils and BSD agree on it, and
+// `inner-workflow-plan-next.test.ts` cross-checks this implementation against the
+// real tool over ASCII, multi-byte and astral-plane fixtures rather than against a
+// second hand-written expectation.
+//
+// Hand-rolled, and byte-by-byte rather than via an encoder, because a Workflow
+// script has NO imports and only the globals the runtime injects —
+// `TextEncoder`/`Buffer`/`crypto` are not part of that contract, and a
+// ReferenceError here would take down the very gate that is supposed to fail safe.
+// `String.length` counts UTF-16 code units, which is not what `cksum` reads: the
+// '—' this codebase writes everywhere is 3 bytes and 1 unit. A lone surrogate is
+// encoded as U+FFFD (3 bytes), which is what a UTF-8 encoder would have written to
+// the file being measured.
+function cksumOf(s) {
+  let crc = 0
   let n = 0
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i)
-    if (c < 0x80) n += 1
-    else if (c < 0x800) n += 2
-    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
-      const next = s.charCodeAt(i + 1)
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        n += 4
-        i++
-      } else n += 3
-    } else n += 3
+  // One byte through the unreflected CRC-32 register, MSB first.
+  const feed = (byte) => {
+    crc = (crc ^ (byte << 24)) >>> 0
+    for (let k = 0; k < 8; k++) {
+      crc = crc & 0x80000000 ? (((crc << 1) >>> 0) ^ 0x04c11db7) >>> 0 : (crc << 1) >>> 0
+    }
   }
-  return n
+  for (let i = 0; i < s.length; i++) {
+    let c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      const lo = s.charCodeAt(i + 1)
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00)
+        i++
+      } else c = 0xfffd
+    } else if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd
+    if (c < 0x80) {
+      feed(c)
+      n += 1
+    } else if (c < 0x800) {
+      feed(0xc0 | (c >> 6))
+      feed(0x80 | (c & 0x3f))
+      n += 2
+    } else if (c < 0x10000) {
+      feed(0xe0 | (c >> 12))
+      feed(0x80 | ((c >> 6) & 0x3f))
+      feed(0x80 | (c & 0x3f))
+      n += 3
+    } else {
+      feed(0xf0 | (c >> 18))
+      feed(0x80 | ((c >> 12) & 0x3f))
+      feed(0x80 | ((c >> 6) & 0x3f))
+      feed(0x80 | (c & 0x3f))
+      n += 4
+    }
+  }
+  // The length terminator, low byte first (this is what makes `cksum` distinguish a
+  // message from the same message padded with NULs), then the final complement.
+  for (let len = n; len > 0; len = Math.floor(len / 256)) feed(len & 0xff)
+  return { crc: ~crc >>> 0, bytes: n }
 }
 
 // ── Inlined contracts (workflow agents are BARE workers — no CLAUDE.md / persona
@@ -1644,11 +1711,11 @@ function planProbePrompt() {
 Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
 1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
 2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
-If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planLines": 0, "planBytes": 0}\` — that is a normal answer, not an error to retry around.
+If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0}\` — that is a normal answer, not an error to retry around.
 Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:
 \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | grep -c '^[[:space:]]*- \\[ \\]'\`
 (\`grep -c\` exits 1 and prints 0 when nothing matches; that is \`uncheckedCount\` = 0, not a failure.)
-3. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | wc -lc\` — report the LINE count as \`planLines\` and the BYTE count as \`planBytes\` (\`wc -lc\` prints lines first, then bytes). BOTH are checked against the \`planBody\` you report, so a body that lost lines, or that was reworded/re-ordered/re-checked on the way into the schema, is DETECTED and the whole cheap path is abandoned. Do not compute either number from what you copied; report what \`wc\` printed.
+3. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | cksum\` — \`cksum\` prints TWO numbers, the CRC then the byte count: report them as \`planCksum\` and \`planBytes\`. The workflow RECOMPUTES that checksum over the \`planBody\` you report, so a body that lost a line, gained a word, re-ordered the checklist, or had a '- [ ] ' silently turned into '- [x] ' on the way into the schema is DETECTED and the whole cheap path is abandoned. Do not compute either number from what you copied, and do not omit them — report exactly what \`cksum\` printed.
 NEVER EXIT SILENTLY.`
 }
 
@@ -4035,11 +4102,15 @@ try {
             ),
           )
         : null
-      // THE DECISION IS MADE HERE, IN CODE, from the probe's three facts — the
-      // probe itself judges nothing. A dead probe, a branch with no committed
-      // plan, an empty body, or a plan with ZERO unchecked tasks all FALL THROUGH
-      // to the full planner: a branch whose plan is exhausted must ESCALATE to the
-      // planner that can decide the card is done, never silently build nothing.
+      // THE DECISION IS MADE HERE, IN CODE, from the probe's four facts — the probe
+      // itself judges nothing. A dead probe, a branch with no committed plan, an
+      // empty body, a plan with ZERO unchecked tasks, a body that fails its own
+      // checksum, or a body whose unchecked tasks CONTRADICT the probe's own grep
+      // count all FALL THROUGH to the full planner: a branch whose plan is exhausted
+      // must ESCALATE to the planner that can decide the card is done, never
+      // silently build nothing — and an incoherent probe answer must never get to
+      // pick which of its halves the workflow believes.
+      const bodyUnchecked = planProbe === null ? -1 : countUnchecked(planProbe.planBody)
       const usePlanNext =
         cleanContinuation &&
         planProbe !== null &&
@@ -4048,7 +4119,8 @@ try {
         planProbe.uncheckedCount >= 1 &&
         typeof planProbe.planBody === 'string' &&
         planProbe.planBody.trim().length > 0 &&
-        probeBodyIntact(planProbe)
+        probeBodyIntact(planProbe) &&
+        bodyUnchecked === planProbe.uncheckedCount
       if (cleanContinuation && !usePlanNext) {
         log(
           `trident-v2 plan:next SKIPPED (round ${ralphRound}) — ${
@@ -4060,8 +4132,11 @@ try {
                   ? 'the committed plan is empty'
                   : planProbe.uncheckedCount < 1 || !Number.isSafeInteger(planProbe.uncheckedCount)
                     ? `the committed plan has ${JSON.stringify(planProbe.uncheckedCount)} unchecked task(s)`
-                    : `the relayed plan body does not match what the probe measured on the file ` +
-                      `(${JSON.stringify(planProbe.planLines)} line(s), ${JSON.stringify(planProbe.planBytes)} byte(s)) — treating it as truncated or altered`
+                    : !probeBodyIntact(planProbe)
+                      ? `the relayed plan body does not match the checksum the probe measured on the file ` +
+                        `(cksum ${JSON.stringify(planProbe.planCksum)}, ${JSON.stringify(planProbe.planBytes)} byte(s)) — treating it as truncated or altered`
+                      : `the relayed plan body carries ${bodyUnchecked} unchecked task(s) but the probe's grep -c ` +
+                        `counted ${planProbe.uncheckedCount} on the file — the two halves of the probe's answer disagree`
           } → falling through to the full plan:fable`,
         )
       }
@@ -4123,9 +4198,10 @@ try {
         const relayedTop =
           typeof plan.topTask === 'string' ? plan.topTask.trim().replace(/^-\s*\[[ xX]\]\s*/, '') : ''
         if (measuredTop === null) {
-          // `grep -c` said there was at least one unchecked task (that is what let the
-          // cheap path run at all) but the relayed body has no '- [ ]' line to find.
-          // Loud on the transcript; the exec spec still carries the work.
+          // The selection gate already proved the body carries EXACTLY the unchecked
+          // count `grep -c` measured, so the only way here is a '- [ ]' marker with no
+          // task text after it — a plan line nobody can build. Loud on the transcript;
+          // the exec spec still carries the work.
           log(
             `trident-v2 plan:next INTEGRITY — the relayed body has NO '- [ ]' line although the probe's grep -c ` +
               `counted ${planProbe.uncheckedCount}; keeping topTask=${JSON.stringify(plan.topTask)} as-is`,

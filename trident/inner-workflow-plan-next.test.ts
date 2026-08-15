@@ -31,14 +31,56 @@ const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.me
 const HEAD = 'a1b2c3d4'.repeat(5)
 const OTHER_HEAD = 'f9e8d7c6'.repeat(5)
 
+/** A committed plan with task 1 done and `unchecked` tasks still open. Generated
+ *  rather than written out, because the workflow now CROSS-CHECKS the probe's
+ *  `uncheckedCount` against the body's own '- [ ]' lines: a fixture whose count and
+ *  body disagreed would silently exercise the escalation path instead of the path
+ *  its test names. */
+const planWith = (unchecked: number): string =>
+  [
+    '# IMPLEMENTATION_PLAN — the card',
+    '',
+    '- [x] T1 — the task the previous iteration built',
+    ...Array.from({ length: unchecked }, (_, i) =>
+      i === 0
+        ? '- [ ] T2 — the task THIS iteration must pick up'
+        : `- [ ] T${i + 2} — the one after that`,
+    ),
+  ].join('\n')
+
 /** The plan a previous iteration committed: task 1 done, two still open. */
-const COMMITTED_PLAN = [
-  '# IMPLEMENTATION_PLAN — the card',
-  '',
-  '- [x] T1 — the task the previous iteration built',
-  '- [ ] T2 — the task THIS iteration must pick up',
-  '- [ ] T3 — the one after that',
-].join('\n')
+const COMMITTED_PLAN = planWith(2)
+/** …and what a probe measuring it with `grep -c` must report. */
+const COMMITTED_UNCHECKED = 2
+
+/**
+ * THE WORKFLOW'S OWN `cksumOf`, lifted out of the script it lives in.
+ *
+ * The integrity guard is only as good as this function being REALLY `cksum` — a
+ * hand-rolled CRC that quietly disagreed with the tool would reject every honest
+ * relay and send every continuation back to the 287 s planner, i.e. delete the
+ * card's saving while all the selection tests still passed. So the tests below
+ * cross-check it against the actual binary, and every fixture probe answer is built
+ * with it rather than with a second hand-written expectation.
+ */
+const cksumOf = ((): ((s: string) => { crc: number; bytes: number }) => {
+  const start = SRC.indexOf('function cksumOf(s) {')
+  const end = SRC.indexOf('\n}\n', start) + 2
+  if (start < 0 || end < 2) throw new Error('cksumOf not found in inner-workflow.mjs')
+  return new Function(`${SRC.slice(start, end)}\nreturn cksumOf`)() as (s: string) => {
+    crc: number
+    bytes: number
+  }
+})()
+
+/** A probe answer that MEASURES the body it relays, the way the real seat does. */
+const measured = (body: string, uncheckedCount: number): ProbeAnswer => ({
+  planFound: true,
+  uncheckedCount,
+  planBody: body,
+  planCksum: cksumOf(body).crc,
+  planBytes: cksumOf(body).bytes,
+})
 
 interface Captured {
   label: string
@@ -46,16 +88,17 @@ interface Captured {
 }
 
 /** What the `plan:probe` seat reports — or `null` for a seat that died.
- *  `planLines`/`planBytes` are the probe's own `wc -lc` measurements of the file it
- *  relayed; the workflow checks the relayed body against BOTH, so a test can express
- *  "the model stopped copying half way" as a body that contradicts the line count,
- *  and "the model tidied the wording on the way through" as one that contradicts the
- *  byte count while keeping the lines. */
+ *  `planCksum`/`planBytes` are the probe's own `cksum` measurement of the FILE it
+ *  relayed; the workflow recomputes that checksum over the relayed body, so a test
+ *  can express "the model stopped copying half way", "the model tidied the wording
+ *  on the way through", "the model re-ordered the checklist" and "the model checked
+ *  a box that is not ticked on the branch" all the same way: a body that does not
+ *  hash to what the probe measured on the file. */
 type ProbeAnswer = {
   planFound: boolean
   uncheckedCount: number
   planBody: string
-  planLines?: number
+  planCksum?: number
   planBytes?: number
 } | null
 
@@ -116,6 +159,11 @@ async function run(opts: Opts = {}): Promise<Out> {
   const captured: Captured[] = []
   const logs: string[] = []
 
+  // What the probe actually answered this run — the `plan:next` mock relays THAT
+  // body back, because a faithful relay is the default and a fixture whose relay
+  // disagreed with its own probe would exercise the correction path everywhere.
+  let probeAnswer: ProbeAnswer = null
+
   const agent = async (prompt: string, o?: { label?: string }): Promise<unknown> => {
     const label = o?.label ?? ''
     captured.push({ label, prompt })
@@ -123,37 +171,29 @@ async function run(opts: Opts = {}): Promise<Out> {
       // A DISPATCH THAT REJECTS, not a seat that answers null: the workflow must
       // survive this, and until the fix it did not.
       if (opts.probeThrows === true) throw new Error('API Error 529 (overloaded)')
-      const answer =
-        opts.probe === undefined
-          ? {
-              planFound: true,
-              // The probe's `grep -c` count INCLUDES the task about to be built, so
-              // the honest default is one more than what the planner then reports as
-              // remaining. The workflow now enforces exactly that relationship, so a
-              // harness that contradicted it would make every test exercise the
-              // integrity-correction path instead of the path it names.
-              uncheckedCount: (opts.remainingTasks ?? 0) + 1,
-              planBody: COMMITTED_PLAN,
-              planLines: COMMITTED_PLAN.split('\n').length,
-              planBytes: Buffer.byteLength(COMMITTED_PLAN, 'utf8'),
-            }
-          : opts.probe
-      return answer
+      // The probe's `grep -c` count INCLUDES the task about to be built and MUST
+      // match the body's own unchecked lines — the workflow now cross-checks the
+      // two, so a harness that contradicted itself would make every test exercise
+      // the escalation path instead of the path it names.
+      probeAnswer = opts.probe === undefined ? measured(COMMITTED_PLAN, COMMITTED_UNCHECKED) : opts.probe
+      return probeAnswer
     }
     if (label === 'plan:next') {
       if (opts.planNextDead === true) return null
       // The contract the real prompt states: the committed body comes back
       // VERBATIM, so `ralphExecuteNote` hands Forge exactly what is on the branch.
       return {
-        implementationPlan: opts.planNextRelay?.implementationPlan ?? COMMITTED_PLAN,
+        implementationPlan: opts.planNextRelay?.implementationPlan ?? probeAnswer?.planBody ?? COMMITTED_PLAN,
         topTask: opts.planNextRelay?.topTask ?? 'T2 — the task THIS iteration must pick up',
         executionSpec: 'TARGET FILES: t2.ts',
         complexity: 'reasoning',
-        // 0 by default so the iteration flows into forge:build + review instead of
-        // handing straight back to the outer loop for a re-fire — the planner choice
-        // is what is under test, and the re-fire path would cut the run short. The
-        // deviation tests set it >0, because the re-fire IS the path they exercise.
-        remainingTasks: opts.planNextRelay?.remainingTasks ?? opts.remainingTasks ?? 0,
+        // The honest answer: the probe's count minus the one being built now. The
+        // default committed plan has two unchecked tasks, so a cheap-path run hands
+        // ONE remaining task back to the outer loop for a re-fire — which is what a
+        // mid-card continuation is. Tests that need a different shape say so through
+        // `probe`/`planNextRelay`.
+        remainingTasks:
+          opts.planNextRelay?.remainingTasks ?? Math.max(0, (probeAnswer?.uncheckedCount ?? 1) - 1),
       }
     }
     if (label === 'plan:fable') {
@@ -443,11 +483,11 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
     )
   })
 
-  test('a TRUNCATED relay of the committed plan is caught by the probe’s own line count', async () => {
+  test('a TRUNCATED relay of the committed plan is caught by the probe’s own checksum', async () => {
     // The probe runs on the cheapest tier and is asked to copy an arbitrarily long
-    // file byte for byte. `wc -l` is the check that makes that safe: the body it
-    // reported is three lines, the file it measured was five, so the body is not the
-    // plan and the cheap path — whose output would be COMMITTED over
+    // file byte for byte. The checksum is what makes that safe: the body it reported
+    // is three lines of a five-line file, so it does not hash to what `cksum` printed
+    // and the cheap path — whose output would be COMMITTED over
     // IMPLEMENTATION_PLAN.md — is abandoned.
     const out = await run(
       cleanHandoff(2, {
@@ -455,7 +495,8 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
           planFound: true,
           uncheckedCount: 2,
           planBody: COMMITTED_PLAN.split('\n').slice(0, 3).join('\n'),
-          planLines: 5,
+          planCksum: cksumOf(COMMITTED_PLAN).crc,
+          planBytes: cksumOf(COMMITTED_PLAN).bytes,
         },
       }),
     )
@@ -466,77 +507,156 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
     expect(out.logs.some((l) => l.includes('plan:next SKIPPED') && l.includes('truncated'))).toBe(true)
   })
 
-  test('a probe that reports a MATCHING line count is trusted (the guard is not a veto on everything)', async () => {
-    // The contrast that stops the guard from being a way to disable the feature: a
-    // faithful relay that dropped only the file's trailing newline still passes.
-    const out = await run(
-      cleanHandoff(2, {
-        probe: {
-          planFound: true,
-          uncheckedCount: 1,
-          planBody: COMMITTED_PLAN,
-          planLines: COMMITTED_PLAN.split('\n').length - 1,
-        },
-      }),
-    )
-
-    expect(out.labels).toContain('plan:next')
-    expect(out.labels).not.toContain('plan:fable')
-  })
-
-  test('a REWORDED relay that keeps the line count is caught by the probe’s byte count', async () => {
-    // ARGUS r2, THE CONFIRMED MAJOR. A line count is not an integrity check: the body
-    // is relayed THROUGH A MODEL, then forced authoritative and handed to Forge with
-    // "write EXACTLY this body and commit it". A reword, a re-order, or a silently
-    // flipped '- [ ]' → '- [x]' keeps `wc -l` intact and rewrites the card's plan.
-    // Here the relay checks off the task it was supposed to build and reworks its
-    // text, over the same five lines — same lines, different bytes.
-    const reworded = [
-      '# IMPLEMENTATION_PLAN — the card',
-      '',
-      '- [x] T1 — the task the previous iteration built',
-      '- [x] T2 — the task THIS iteration must pick up (already done, honest)',
-      '- [ ] T3 — the one after that',
-    ].join('\n')
-    expect(reworded.split('\n').length).toBe(COMMITTED_PLAN.split('\n').length) // the guard that WAS there
-    expect(Buffer.byteLength(reworded, 'utf8')).not.toBe(Buffer.byteLength(COMMITTED_PLAN, 'utf8'))
-
+  test('a ONE-BYTE truncation is caught — the ±1 window the counters needed was a hole', async () => {
+    // ARGUS r3, THE CONFIRMED MAJOR, reproduced. `wc -c` needed a two-value window
+    // because an honest relay may drop the file's trailing newline, and `body.slice(0,
+    // -1)` walked straight through it: one byte short of the file, one byte inside the
+    // window, committed over the plan. A checksum has no window to walk through — the
+    // trailing-newline case is a SECOND CANDIDATE (asserted below), not a tolerance.
+    const file = `${COMMITTED_PLAN}\n`
     const out = await run(
       cleanHandoff(2, {
         probe: {
           planFound: true,
           uncheckedCount: 2,
-          planBody: reworded,
-          planLines: COMMITTED_PLAN.split('\n').length,
-          planBytes: Buffer.byteLength(COMMITTED_PLAN, 'utf8'),
+          planBody: file.slice(0, -2), // the last byte of the last TASK, not the newline
+          planCksum: cksumOf(file).crc,
+          planBytes: cksumOf(file).bytes,
         },
       }),
     )
 
-    expect(out.labels).toContain('plan:probe')
     expect(out.labels).toContain('plan:fable')
     expect(out.labels).not.toContain('plan:next')
-    expect(out.logs.some((l) => l.includes('plan:next SKIPPED') && l.includes('byte(s)'))).toBe(true)
+    expect(out.logs.some((l) => l.includes('plan:next SKIPPED') && l.includes('checksum'))).toBe(true)
   })
 
-  test('a byte-faithful relay that dropped only the trailing newline still passes', async () => {
-    // The other half again: the guard may not become a way to disable the feature.
-    // `wc -c` counts the file's trailing newline; a relay that drops it is one byte
-    // short and still faithful, exactly as it is one line short and still faithful.
+  test('a relay that dropped only the file’s trailing newline still passes', async () => {
+    // The contrast that stops the guard from being a way to disable the feature: an
+    // agent relaying a file's content routinely drops the final newline, and that
+    // relay is faithful. The file has one, the body does not, and the checksum of
+    // `body + '\n'` is the one the probe reported.
+    const file = `${COMMITTED_PLAN}\n`
     const out = await run(
       cleanHandoff(2, {
         probe: {
           planFound: true,
-          uncheckedCount: 1,
+          uncheckedCount: COMMITTED_UNCHECKED,
           planBody: COMMITTED_PLAN,
-          planLines: COMMITTED_PLAN.split('\n').length,
-          planBytes: Buffer.byteLength(COMMITTED_PLAN, 'utf8') + 1,
+          planCksum: cksumOf(file).crc,
+          planBytes: cksumOf(file).bytes,
         },
       }),
     )
 
     expect(out.labels).toContain('plan:next')
     expect(out.labels).not.toContain('plan:fable')
+  })
+
+  test('a BYTE-NEUTRAL “- [ ]” → “- [x]” flip is caught, though it changes neither count', async () => {
+    // ARGUS r3, THE CONFIRMED MAJOR. The relay ticks a task that is NOT ticked on the
+    // branch: same lines, same bytes, and `ralphExecuteNote` would have Forge commit
+    // it — a task dropped from the card's own plan with nobody deciding to drop it.
+    // Counting cannot see this; a checksum cannot miss it.
+    const flipped = COMMITTED_PLAN.replace('- [ ] T2', '- [x] T2')
+    expect(flipped.split('\n').length).toBe(COMMITTED_PLAN.split('\n').length)
+    expect(Buffer.byteLength(flipped, 'utf8')).toBe(Buffer.byteLength(COMMITTED_PLAN, 'utf8'))
+
+    const out = await run(
+      cleanHandoff(2, {
+        probe: {
+          planFound: true,
+          uncheckedCount: COMMITTED_UNCHECKED,
+          planBody: flipped,
+          planCksum: cksumOf(COMMITTED_PLAN).crc,
+          planBytes: cksumOf(COMMITTED_PLAN).bytes,
+        },
+      }),
+    )
+
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+  })
+
+  test('a RE-ORDERED checklist is caught, though it changes neither count', async () => {
+    // The other byte-neutral tamper: the Ralph discipline builds the FIRST unchecked
+    // task, so swapping two lines silently re-prioritises the card and commits the new
+    // order over the plan.
+    const lines = COMMITTED_PLAN.split('\n')
+    const reordered = [lines[0], lines[1], lines[2], lines[4], lines[3]].join('\n')
+    expect(Buffer.byteLength(reordered, 'utf8')).toBe(Buffer.byteLength(COMMITTED_PLAN, 'utf8'))
+
+    const out = await run(
+      cleanHandoff(2, {
+        probe: {
+          planFound: true,
+          uncheckedCount: COMMITTED_UNCHECKED,
+          planBody: reordered,
+          planCksum: cksumOf(COMMITTED_PLAN).crc,
+          planBytes: cksumOf(COMMITTED_PLAN).bytes,
+        },
+      }),
+    )
+
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+  })
+
+  test('a probe that OMITS the checksum does not get to skip the guard', async () => {
+    // "An absent measurement is not evidence of tampering" is exactly how a relay
+    // escapes a guard: by not reporting the number it was asked for. The cost of
+    // refusing is one full `plan:fable` — today's behaviour, minus the saving.
+    const out = await run(
+      cleanHandoff(2, {
+        probe: { planFound: true, uncheckedCount: COMMITTED_UNCHECKED, planBody: COMMITTED_PLAN },
+      }),
+    )
+
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+    expect(out.logs.some((l) => l.includes('plan:next SKIPPED') && l.includes('checksum'))).toBe(true)
+  })
+
+  test('an unchecked COUNT that contradicts the relayed body falls through to the full planner', async () => {
+    // ARGUS r3, THE OTHER CONFIRMED MAJOR. The probe's two answers were never compared
+    // with each other, yet each overrides something expensive: the COUNT overrides
+    // `remainingTasks` (the re-fire gate — a low count ends a half-built card) and the
+    // BODY overwrites the committed IMPLEMENTATION_PLAN.md. Here the body is honest and
+    // intact, and the count says one unchecked task where the body carries two: believe
+    // either half and T3 is silently dropped. So believe neither.
+    const out = await run(
+      cleanHandoff(2, { probe: measured(COMMITTED_PLAN, 1), withDb: true }),
+    )
+
+    expect(out.labels).toContain('plan:probe')
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+    expect(out.logs.some((l) => l.includes('plan:next SKIPPED') && l.includes('disagree'))).toBe(true)
+  })
+
+  test('the checksum the guard recomputes IS `cksum` — cross-checked against the real tool', async () => {
+    // THE GUARD IS ONLY AS GOOD AS THIS. A hand-rolled CRC that disagreed with the
+    // tool the probe runs would reject every honest relay and send every continuation
+    // back to the 287 s planner — the card's saving deleted, with every selection test
+    // still green. Fixtures: ASCII, the trailing-newline pair, the em dash this
+    // codebase writes everywhere (3 bytes, 1 UTF-16 unit), an astral-plane pair
+    // (4 bytes, 2 units), the empty file, and a body long enough to wrap the register.
+    const fixtures = [
+      COMMITTED_PLAN,
+      `${COMMITTED_PLAN}\n`,
+      '',
+      'hello\n',
+      'hello',
+      '# plan — em dash and a 𝔸 (astral pair) in it\n- [ ] T1\n',
+      'é中文\n',
+      `${'- [ ] a task line that is quite long\n'.repeat(300)}`,
+    ]
+    for (const fixture of fixtures) {
+      const proc = Bun.spawnSync(['cksum'], { stdin: Buffer.from(fixture, 'utf8') })
+      expect(proc.exitCode).toBe(0)
+      const [crc, bytes] = new TextDecoder().decode(proc.stdout).trim().split(/\s+/)
+      expect({ crc: Number(crc), bytes: Number(bytes) }).toEqual(cksumOf(fixture))
+    }
   })
 })
 
@@ -614,12 +734,7 @@ describe('plan:next — the measurement beats the relay', () => {
     const out = await run(
       cleanHandoff(2, {
         withDb: true,
-        probe: {
-          planFound: true,
-          uncheckedCount: 4,
-          planBody: COMMITTED_PLAN,
-          planLines: COMMITTED_PLAN.split('\n').length,
-        },
+        probe: measured(planWith(4), 4),
         planNextRelay: { remainingTasks: 0 },
       }),
     )
@@ -636,12 +751,7 @@ describe('plan:next — the measurement beats the relay', () => {
   test('an OVER-count is corrected too — the probe is the authority in both directions', async () => {
     const out = await run(
       cleanHandoff(2, {
-        probe: {
-          planFound: true,
-          uncheckedCount: 1,
-          planBody: COMMITTED_PLAN,
-          planLines: COMMITTED_PLAN.split('\n').length,
-        },
+        probe: measured(planWith(1), 1),
         planNextRelay: { remainingTasks: 9 },
       }),
     )

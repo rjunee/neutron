@@ -804,6 +804,51 @@ describe('TridentTickLoop — change watcher (wake-on-change)', () => {
     await loop.stop()
   })
 
+  test('a sweep whose row read THROWS does not absorb the change it was woken for', async () => {
+    // ARGUS r3. The settle runs in a `finally`, and with an empty ledger it adopted
+    // `sweptSig` — the signature sampled AFTER the change landed but BEFORE any row
+    // was read. So a tick that threw out of `listNonTerminal` (locked DB, closed
+    // handle) recorded the pending change as "seen" while having seen nothing: the
+    // wake was consumed, no work happened, and the handoff waited out the 90 s
+    // backstop. A sweep that never read its rows may not move the baseline.
+    let failNextList = false
+    class FlakyStore extends TridentRunStore {
+      override listNonTerminal(limit?: number): TridentRun[] {
+        if (failNextList) {
+          failNextList = false
+          throw new Error('database is locked')
+        }
+        return super.listNonTerminal(limit)
+      }
+    }
+    const store = new FlakyStore(db)
+    const run = await store.create({ slug: 'cw12', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+
+    const loop = new TridentTickLoop({
+      store,
+      step: recordingStep(stepped),
+      tick_interval_ms: 600_000, // the backstop cannot fire in-test
+      watch_interval_ms: 25,
+    })
+    loop.start()
+    await new Promise((r) => setTimeout(r, 100)) // boot observation, no wake
+    expect(stepped.length).toBe(0)
+
+    // The next sweep dies on its row read. The checkpoint that woke it is still
+    // unswept, so the watcher must keep seeing it and re-fire — promptly, not in 90 s.
+    failNextList = true
+    await store.update(run.id, { inner_checkpoint: 'building' })
+    await waitFor(() => stepped.length >= 1)
+    expect(stepped[0]).toBe(run.id)
+
+    // …and once a sweep DOES read the rows, the retry stops: no spin.
+    const settled = stepped.length
+    await new Promise((r) => setTimeout(r, 300)) // ~12 cadences
+    expect(stepped.length).toBe(settled)
+    await loop.stop()
+  })
+
   test('watch_interval_ms: NaN disables the watcher instead of arming a ~1 ms timer', async () => {
     // `NaN <= 0` is FALSE, so a bare `<= 0` disable check let a NaN cadence through
     // to `setInterval(fn, NaN)`, which clamps to ~1 ms: a ~500 Hz signature query

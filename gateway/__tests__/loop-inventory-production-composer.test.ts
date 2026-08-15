@@ -150,6 +150,38 @@ test('the ONE boot line names running loops (with cron jobs) + the dormant set',
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
 })
 
+test('the watcher cadence is CONFIGURABLE from the production wiring, not just the type', async () => {
+  // ARGUS r3 (nit): the card asked for "2 s default, configurable", and the option
+  // existed only on `TridentTickOptions` — no production composition could set it,
+  // which is a knob no operator has. Asserted through the LIVE descriptor, so the
+  // value has to travel input → composer → `TridentTickLoop` → the real timer.
+  const tmp = mkdtempSync(join(tmpdir(), 'neutron-loop-watch-cadence-'))
+  const db = ProjectDb.open(join(tmp, 'owner.db'))
+  try {
+    applyMigrations(db.raw())
+    const graph = await composeProductionGraph({
+      db,
+      project_slug: OWNER,
+      ...noOpInputBase,
+      trident: {
+        // Never fired: the graph is shut down before the 90 s sweep's first tick.
+        fire_inner_workflow: async () => ({ status: 'fired' as const, error: null }),
+        watch_interval_ms: 7_000,
+      },
+    })
+    try {
+      expect(graph.loopRegistry.get('trident-watch')?.cadenceMs).toBe(7_000)
+      // …and the backstop is untouched by the accelerator's cadence.
+      expect(graph.loopRegistry.get('trident')?.cadenceMs).toBe(90_000)
+    } finally {
+      await graph.shutdown()
+    }
+  } finally {
+    db.close()
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 test('composing with a colliding pre-loaded registry throws + leaks no timer (defect #2)', async () => {
   // A caller-supplied registry that ALREADY holds 'reminders' — the reminders
   // module registers BEFORE it starts, so the collision throws before any timer

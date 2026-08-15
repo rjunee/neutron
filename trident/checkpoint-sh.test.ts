@@ -128,10 +128,11 @@ describe('checkpoint.sh — C1 per-phase checkpoint write (legacy checkpoint() S
     expect(r.subagent_status).toBe('running')
     // Timestamp computed in-script, like the old Bash step. MILLISECONDS are the
     // preferred shape (`date -u +%FT%T.%3NZ`) because the wake-on-change watcher
-    // detects a checkpoint through MAX(last_advanced_at) and two writes inside one
-    // second used to collapse into one signature; the whole-second form is the
-    // documented fallback for a `date` without the GNU `%3N` extension, so BOTH are
-    // accepted here and the sub-second case is pinned separately below.
+    // detects a checkpoint through that run's own `last_advanced_at` entry in
+    // `changeSignature()`, and two writes inside one second collapse into one
+    // signature; the whole-second form is the documented fallback for a `date`
+    // without the GNU `%3N` extension, so BOTH are accepted here and the sub-second
+    // case is pinned separately below.
     expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/)
     // Untouched columns stay untouched; other rows are never selected.
     expect(r.inner_result).toBeNull()
@@ -407,8 +408,8 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
 
   test('two checkpoints inside ONE SECOND leave two DISTINCT last_advanced_at values', () => {
     // THE WAKE THAT USED TO BE LOST. `TridentRunStore.changeSignature()` — the
-    // watcher's whole detector — is COUNT + MAX(last_advanced_at) over the active
-    // runs, so two whole-second stamps inside one second are ONE signature and the
+    // watcher's whole detector — is a PER-RUN list of `id:last_advanced_at`, so two
+    // whole-second stamps on the SAME row inside one second are ONE signature and the
     // second checkpoint waits out the 90 s backstop: exactly the latency the watcher
     // exists to remove. Two writes back to back is the ordinary case (a phase that
     // checkpoints twice quickly), not a contrived one.

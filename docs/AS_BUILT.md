@@ -24,7 +24,7 @@ planner that returns the SAME `PLAN_SCHEMA` — the committed body VERBATIM as
 `implementationPlan`, the first unchecked `- [ ]` as `topTask` — and is FORBIDDEN from
 reading SPEC.md or surveying the codebase. Selection is plain code over args + probe
 output: `plan:next` fires only when `resumeCheckpoint === 'ralph-task-built'` and
-`resumeClass.reason === 'unknown-checkpoint'` (the recorded head matched the live head
+`resumePlan.reason === 'unknown-checkpoint'` (the recorded head matched the live head
 — any head-moved / unreadable / absent resume is a genuine crash-resume and gets the
 full planner), `ralphRound >= 1`, and `ralphRound % PLAN_REFRESH_EVERY !== 0` with
 `PLAN_REFRESH_EVERY = 5`. **`ralph_round` is ZERO-BASED** and the gate is written
@@ -58,16 +58,30 @@ unchecked `- [ ]` line of that same body (mismatch → the committed line wins, 
 task leaves Forge nothing to check off: the same plan comes back, the next iteration
 picks the same task, and the checklist cannot converge until the periodic re-plan or
 `max_ralph_rounds` stops it). The probe carries its own integrity guard, which is what
-lets it stay on the cheapest tier: it reports `wc -lc` — lines AND bytes — alongside
-the body, and a body contradicting either measurement abandons the cheap path entirely.
-Line count alone was not enough: the body is relayed THROUGH a model and then forced
-authoritative, so a reword, a re-order, or a silently flipped `- [ ]` → `- [x]` passed
-a `wc -l` guard and rewrote the card's plan; `wc -c` closes that class for one extra
-number in the same pipeline (a digest would be stricter, but a Workflow script has no
-crypto and no filesystem — `agent()` Bash steps are its only instrument, and the
-UTF-8 byte length of the relayed body is computed from code units so it measures the
-same thing `wc -c` did). Both counts use the same ±1 window, because a relay routinely
-drops the file's trailing newline. It also reads `origin/<branch>` in `pr` mode and the
+lets it stay on the cheapest tier: it reports `cksum` — the POSIX CRC-32 and the byte
+count of the FILE — alongside the body, the workflow RECOMPUTES that checksum over the
+relayed body, and a body that does not hash to it abandons the cheap path entirely.
+COUNTING was not enough, in either shape it was tried: the body is relayed THROUGH a
+model and then forced authoritative, and a silently flipped `- [ ]` → `- [x]`, a
+re-ordered checklist, and a one-byte truncation riding the ±1 window `wc -c` needed for
+the trailing newline are all invisible to line and byte counts (Argus r2 found the
+first, r3 the rest — the class is "same size, different bytes", which no counter can
+close). A checksum closes it for one number from the same pipeline. `cksumOf()` is
+CRC-32/CKSUM hand-rolled over the body's UTF-8 bytes, because a Workflow script has no
+imports and no filesystem — `agent()` Bash steps are its only other instrument — and it
+is cross-checked against the real `cksum` binary in the tests over ASCII, multi-byte,
+astral-plane and empty fixtures, because a CRC that quietly disagreed with the tool
+would reject every honest relay and silently delete the card's saving. The trailing
+newline is a SECOND CANDIDATE (`body` or `body + '\n'`), not a tolerance; a probe that
+omits the checksum fails the guard, since "an absent measurement is not evidence of
+tampering" is exactly how a relay escapes one. The probe's TWO answers are also checked
+against EACH OTHER: the body's own `- [ ]` lines must equal the `grep -c` count the
+probe measured on the file (Argus r3, two reviewers). Each answer overrides something
+expensive — the count overrides `remainingTasks`, which is the re-fire gate, and the
+body overwrites the committed `IMPLEMENTATION_PLAN.md` — so an honest body with a count
+one too low silently drops the last task, and believing either half of a
+self-contradicting answer is worse than paying for the full planner. It also reads
+`origin/<branch>` in `pr` mode and the
 local ref in `local` mode — the same authority split as `readBranchHead` and
 `resolveResumeLiveHead` — so it can never plan from an unpublished local commit the
 resume gate never cleared.
@@ -104,6 +118,23 @@ checkpoint, no checkpoint at all — is a genuine crash-resume and keeps the ful
 planner and its verbatim `resumeNote` path, unchanged. That is a deviation from the
 words and a match to the reason they were written; it is recorded here rather than
 left for a reviewer to find.
+
+**A second acceptance criterion is recorded as a deviation, not implemented.** The
+card lists, among the escalations to the full planner, a committed plan with "no
+unchecked tasks left that match the recorded remaining count". The zero-unchecked half
+IS implemented (it escalates). The MATCH half is not: nothing durable carries the
+previous iteration's remaining count into the next one — `code_trident_runs` has
+`ralph_round` and no remaining-tasks column, `inner_result` is nulled by the re-fire
+reset, and the only other channel is the checkpoint NAME, which is a flag, not a data
+bus. Implementing it honestly means a migration and a new column written by the
+orchestrator's re-fire and read back through `buildWorkflowArgs`. What it would buy:
+detecting a Forge that built its task but failed to tick `- [x]`, which today makes the
+next iteration pick the SAME first unchecked task again. That is bounded — the periodic
+full re-plan caps the repeat at `PLAN_REFRESH_EVERY - 1 = 4` iterations and
+`max_ralph_rounds` (20) caps the card — and it is visible on the transcript (the same
+`topTask` twice). The other case this criterion was reached for, a truncated relay, is
+now closed properly by the checksum. So the column is deferred to its own card rather
+than added here, and the gap is written down instead of left for a reviewer to find.
 
 **Part 2 — the outer loop slept up to 90 s between handoffs.** The inner workflow runs
 detached, so a finished handoff waited one to two ticks of `tick_interval_ms ?? 90_000`
@@ -157,6 +188,22 @@ sweep's own write, leaves an identical stamp and reads as ours — a column-reso
 limit, and a strictly smaller window than the seconds-long one it replaced. Narrowing
 it further needs a monotonic row version the schema does not have.
 
+**A sweep that never read a row does not get to consume the wake.** The watcher
+records what it sampled the moment it wakes, so the wake and the baseline move
+together — right when the sweep then runs, wrong when that sweep dies on
+`listNonTerminal` (locked DB, closed handle): the change was marked observed, nothing
+observed it, and the handoff waited out the 90 s backstop with the watcher firing zero
+tick bodies until some NEW change landed (Argus r3). A tick that did not get its row
+list now leaves the baseline alone AND owes the watcher a re-fire, so the next cadence
+wakes on an unchanged signature. The retry is cheap (it dies on the same failing read,
+before any git/gh work) and self-clearing — the first sweep that reads its rows settles
+the baseline and clears the debt.
+
+The watcher's cadence is also plumbed through production wiring
+(`trident.watch_interval_ms` on the composition input → `TridentTickLoop`), because
+"2 s default, configurable" is only true if a composition can actually set it; a knob
+that exists on the options type and nowhere on the wiring is a knob no operator has.
+
 Per-run equality also retired a mixed-precision hazard rather than patching it:
 `store.now()` writes milliseconds (`…T03:15:45.900Z`) while `trident/checkpoint.sh`
 wrote whole seconds (`…T03:15:45Z`), SQLite compares them as TEXT, and `'Z'` (0x5A)
@@ -184,9 +231,13 @@ worse than owing them. The follow-up is a one-paragraph edit here, not a code ch
 Test coverage: selection is asserted over the REAL `inner-workflow.mjs` body via the
 assembly harness (which planner LABEL fires per scenario), across `ralphRound` 0-5 and
 10 so neither the first continuation nor the refresh boundary can regress unseen, plus
-a throwing probe dispatch, a truncated probe relay, a REWORDED relay that keeps the
-line count and is caught by the byte count, a paraphrased `topTask`, an edited plan
-body and a contradicted `remainingTasks`. The watcher/wake behaviour is asserted over
+a throwing probe dispatch, a truncated probe relay, a one-byte truncation, a
+byte-neutral `- [ ]` → `- [x]` flip, a re-ordered checklist, a probe that omits the
+checksum, a relay that dropped only the trailing newline (which must still pass), an
+unchecked count that contradicts the relayed body, a paraphrased `topTask`, an edited
+plan body and a contradicted `remainingTasks` — and the guard's own `cksumOf` is
+cross-checked against the real `cksum` binary, so a CRC that drifted from the tool
+cannot pass the selection tests while silently disabling the feature. The watcher/wake behaviour is asserted over
 real timers in `tick.test.ts` / `loop/index.test.ts`: wake-mid-tick re-runs exactly
 once; a quiet interval fires zero extra tick bodies; a tick that WRITES produces
 exactly one sweep per external change (the amplification guard — the older test used a
@@ -194,8 +245,10 @@ exactly one sweep per external change (the amplification guard — the older tes
 DURING an advancing sweep still wakes the next one, and a run re-stamped after the
 sweep committed it is not mistaken for the sweep's own write; a second external change
 still wakes promptly; a `NaN` cadence disables the watcher instead of arming a ~1 ms
-timer; a watcher throw leaves the backstop ticking; `stop()` leaves no live timer and
-no stale signature.
+timer; a watcher throw leaves the backstop ticking; a sweep whose row read
+THROWS still gets re-fired promptly and then stops retrying; the composed production
+graph honours a configured watcher cadence; `stop()` leaves no live timer and no stale
+signature.
 
 Two hygiene follow-ups are recorded rather than folded in, because neither is this
 card's code: `trident/gh-authed.test.ts` fails on any host with `GH_TOKEN` exported and
