@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { TridentRunStore } from './store.ts'
+import { COLS, TridentRunStore } from './store.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -645,5 +645,55 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
     await store.update(id, { subagent_status: 'completed' })
 
     expect(store.get(id)?.subagent_status).toBe('crashed')
+  })
+})
+
+describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
+  test('COLS matches the live table: 31 columns, same names as PRAGMA table_info', () => {
+    // The INSERT placeholder list is derived from COLS, so placeholder count =
+    // column count by construction. What is NOT free is COLS agreeing with the
+    // TABLE: a column added, dropped or renamed by a migration without touching
+    // COLS corrupts every insert silently (STRICT only catches affinity, not
+    // arity/order). The literal 31 is deliberate — adding a column must be a
+    // conscious edit here, not an invisible drift.
+    const cols = COLS.split(', ')
+    const pragma = db
+      .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
+      .all()
+
+    expect(cols).toHaveLength(31)
+    expect(cols).toHaveLength(pragma.length)
+    // Same members, order-independent: a rename or a drop goes red.
+    expect([...cols].sort()).toEqual([...pragma.map((c) => c.name)].sort())
+  })
+
+  test('bound-array order and length survive a distinct-value create()/get() round-trip', async () => {
+    // WHY THIS IS MUTATION-RED: create() returns the JS object it INTENDED to
+    // write; get() re-reads what the DB actually stored through COLS. Swapping
+    // any two entries of the bound array — or shortening it — makes the two
+    // disagree. STRICT typing catches cross-affinity swaps at insert time; the
+    // distinct, non-default value for EVERY input field catches the same-affinity
+    // swaps (slug/project_slug, chat_id/thread_id, repo_path/worktree/task)
+    // that no type or constraint would ever notice.
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      id: 'run-distinct-0001',
+      slug: 'slug-distinct',
+      project_slug: 'project-slug-distinct',
+      phase: 'ralph-plan',
+      max_rounds: 7,
+      ralph: true,
+      max_ralph_rounds: 13,
+      branch: 'branch-distinct',
+      merge_mode: 'pr',
+      repo_path: '/repo/path/distinct',
+      worktree: '/worktree/path/distinct',
+      task: 'task text distinct',
+      chat_id: 'chat-id-distinct',
+      thread_id: 'thread-id-distinct',
+      channel_kind: 'cli',
+    })
+
+    expect(store.get(run.id)).toEqual(run)
   })
 })

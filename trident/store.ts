@@ -262,13 +262,21 @@ interface TridentRunDbRow {
   crash_recoveries: number | null
 }
 
-const COLS =
+/** Exported solely so tests can pin the column-count invariant. */
+export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at, harvested_at, crash_recoveries'
+
+// Derived from COLS so placeholder-count = column-count BY CONSTRUCTION. A
+// hand-miscounted `?` list silently corrupts every insert and no type error
+// catches it — so the list is never typed by hand.
+const INSERT_PLACEHOLDERS = COLS.split(', ')
+  .map(() => '?')
+  .join(', ')
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
 const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
@@ -325,7 +333,7 @@ export class TridentRunStore {
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (${INSERT_PLACEHOLDERS})`,
       [
         run.id,
         run.slug,
