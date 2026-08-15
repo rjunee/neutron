@@ -706,8 +706,12 @@ export function innerTerminalFailureReason(
   // the one permitted specific message, gated on BOTH the block kind and a non-null cause.
   // Everything else — every inferred cause, every result carrying no measurement — still
   // gets the generic sentence above, for all the reasons R1/R2 record.
+  // …and ONLY when the cause survives redaction with something left to read. An
+  // over-redacted (or whitespace-only) cause is not a measurement, and appending a
+  // dangling colon to the sentence would report one where none exists.
   if (result.block_kind === 'infra-only' && result.terminal_cause !== null) {
-    return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${redactPushError(result.terminal_cause)}`
+    const cause = redactPushError(result.terminal_cause).trim()
+    if (cause !== '') return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${cause}`
   }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
@@ -990,7 +994,17 @@ export function buildTridentOrchestrator(
     // known at this boundary. `failedRun` spreads `run`, so inner_checkpoint /
     // inner_checkpoint_head / inner_checkpoint_findings survive untouched — a re-run
     // after the read recovers resumes at exactly this point.
-    if (resume_live_head === '' && (resume_checkpoint ?? '').trim() !== 'pr-merged') {
+    //
+    // TWO CHECKPOINT NAMES ARE EXEMPT, each because classifyResume answers them BEFORE
+    // it looks at the head, so this exit would pre-empt a decision it does not share:
+    // 'pr-merged' (resolved to `merged`) and the empty name (resolved to `rebuild`,
+    // reason 'no-checkpoint' — there is nothing recorded to preserve).
+    const resume_checkpoint_name = (resume_checkpoint ?? '').trim()
+    if (
+      resume_live_head === '' &&
+      resume_checkpoint_name !== 'pr-merged' &&
+      resume_checkpoint_name !== ''
+    ) {
       const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
       return {
         run: failedRun(

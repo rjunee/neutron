@@ -262,14 +262,40 @@ report `deviatedFromSpec` until `trident/codex-build.sh` grows a seventh trailer
 Both Forge completion sites now read the local branch ref with a retried, single-command
 `git rev-parse --verify` probe. That git-read OID is the source for checkpoints and
 `reviewedHead`; a Forge-reported OID is only an independent prefix cross-check. A
-disagreement stops as a typed infra-only result naming both values, while a permanently
-unreadable round-one local head stops boundedly and preserves the finished branch.
+disagreement stops as a typed infra-only result naming both values; a permanently
+unreadable local head — at round one OR at any fix round — stops boundedly and preserves
+the finished branch. The fix round is not the weaker half: without its own empty-head stop
+it approved with an empty `reviewedHead` and checkpointed `head: ''`, which
+`classifyResume` reads as no-recorded-head and REBUILDS — the exact path Part 2 exists to
+remove.
+
+**The probe is still relayed by a model seat, and that is a stated limitation, not an
+omission.** `inner-workflow.mjs` runs inside the Workflow runtime, whose only injected
+capability is `agent()`; there is no in-process exec at THIS point in the run, so the
+command is dispatched to a one-command probe seat that is told to copy one token. What
+changed is the SOURCE — the value is produced by `git rev-parse`, not composed by the
+builder. The failure mode is fail-closed at every step: a bad transcript is retried, then
+STOPS the run with the branch and its commit preserved; the outer publisher independently
+`rev-parse`s in real code at the credentialed boundary (Part 1); and `--match-head-commit`
+refuses a mismatched pin at merge. A mangled read can refuse finished work — it can never
+certify or publish the wrong commit.
+
+The probe is TRI-STATE, mirroring the launcher's `resolveResumeLiveHead`, because "not
+there" and "could not tell" earn opposite consequences. `absent` is git ANSWERING that the
+branch was never created (`rev-parse --verify` failed but `rev-parse --git-dir` succeeded)
+— a real outcome that keeps the honest "forge:build completed but produced no commit on
+`<branch>` — nothing was built" throw. `''` is a failed READ, and only that earns the
+infra-only stop whose advice is "re-run when the read succeeds". Collapsing them would
+emit re-run advice for a build that produced nothing, which can never succeed; for the
+same reason an unreadable head with NO diff is reported as "nothing was built" too.
 
 Reading the head ONCE IN CODE AT BUILD COMPLETION is not the same operation as re-probing
 it at publish time. `reviewedHead` keeps its meaning — read once, at build completion,
 never re-probed — so a later push cannot be certified as reviewed. `publishBuiltCommit`'s
 refusal remains correct and was not loosened; PR-mode handoffs still let that outer,
-in-code read remain the publishing authority.
+in-code read remain the publishing authority, which is why the empty-head stop carries an
+explicit `&& !isPr` carve-out (covered directly in
+`trident/inner-workflow-built-head.test.ts`).
 
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 

@@ -235,6 +235,17 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     expect(innerTerminalFailureReason(run({ round: 1 }), infraOnly(null))).toBe(GENERIC)
   })
 
+  test('a cause that is empty (or redacts away to nothing) is NOT a measurement — no dangling colon', () => {
+    // '' is not null, so the specific branch used to fire and emit
+    // "review never ran (infra-only) at round 1 of 10: " — a sentence that promises a
+    // cause and then names none. Reachable whenever the redactor eats the whole string.
+    for (const cause of ['', '   ', '\n']) {
+      const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly(cause))
+      expect(reason).toBe(GENERIC)
+      expect(reason.endsWith(': ')).toBe(false)
+    }
+  })
+
   test('a cause WITHOUT infra-only is still the generic sentence — the pair gates together', () => {
     // A code rejection carries findings too. Their titles describe the DIFF, and quoting
     // one as the terminal cause would re-invent the inference this function refuses to make.

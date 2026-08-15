@@ -13,10 +13,12 @@ interface Options {
   probes?: string[]
   verdicts?: Array<'APPROVE' | 'REQUEST_CHANGES'>
   fixClaim?: string
+  buildDiff?: string
 }
 
 async function runBuiltHead(opts: Options = {}) {
   const labels: string[] = []
+  const logs: string[] = []
   const prompts: Array<{ label: string; prompt: string }> = []
   const probes = [...(opts.probes ?? [H])]
   const verdicts = [...(opts.verdicts ?? ['APPROVE'])]
@@ -27,7 +29,7 @@ async function runBuiltHead(opts: Options = {}) {
     prompts.push({ label, prompt })
     if (label.startsWith('head-probe-round-built-')) return { head: probes.shift() ?? FIX }
     if (label.startsWith('head-probe-round-')) return { head: FIX }
-    if (label === 'forge:build') return { prNumber: null, branch: 'trident/built-head', diffFile: '/tmp/built.diff', worktreePath: '/wt', commitSha: opts.claim ?? '', testsPassed: true }
+    if (label === 'forge:build') return { prNumber: null, branch: 'trident/built-head', diffFile: opts.buildDiff ?? '/tmp/built.diff', worktreePath: '/wt', commitSha: opts.claim ?? '', testsPassed: true }
     if (label.startsWith('forge:fix-round-')) {
       round = Number(label.slice('forge:fix-round-'.length))
       return { prNumber: null, branch: 'trident/built-head', diffFile: '/tmp/fix.diff', worktreePath: '/wt', commitSha: opts.fixClaim ?? FIX, testsPassed: true }
@@ -49,9 +51,9 @@ async function runBuiltHead(opts: Options = {}) {
   }
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
   const result = await AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', SRC.replace('export const meta', 'const meta'))(
-    agent, parallel, () => {}, () => {}, { total: 0, spent: () => 0 }, args,
+    agent, parallel, () => {}, (...v: unknown[]) => { logs.push(v.map(String).join(' ')) }, { total: 0, spent: () => 0 }, args,
   )
-  return { labels, prompts, result, round }
+  return { labels, prompts, logs, result, round }
 }
 
 const checkpoint = (out: Awaited<ReturnType<typeof runBuiltHead>>, name: string) =>
@@ -119,5 +121,76 @@ describe('build-completion heads come from git', () => {
   test('fix checkpoint records the OID probed at that round completion', async () => {
     const out = await runBuiltHead({ probes: [H, FIX], verdicts: ['REQUEST_CHANGES'], fixClaim: FIX })
     expect(checkpoint(out, 'fix-round-2')).toContain(`inner_checkpoint_head '${FIX}'`)
+  })
+})
+
+/**
+ * "NOTHING WAS BUILT" AND "COULD NOT READ THE HEAD" ARE DIFFERENT OUTCOMES with
+ * different recoveries, and collapsing them emits re-run advice that can never
+ * succeed: re-running a build that produced nothing produces nothing again. The
+ * probe is tri-state for exactly this — `'absent'` is git ANSWERING that the branch
+ * was never created, `''` is a failed read.
+ */
+describe('an empty build is never reported as an unreadable head', () => {
+  test('a branch git says does NOT exist throws "nothing was built", with no re-run advice', async () => {
+    const out = await runBuiltHead({ probes: ['absent'] })
+    expect(out.result.ok).toBe(false)
+    expect(out.logs.some((l) => l.includes('inner THREW') && l.includes('nothing was built'))).toBe(true)
+    expect(out.logs.some((l) => l.includes('re-run when the read succeeds'))).toBe(false)
+    expect(out.logs.some((l) => l.includes(`no commit on trident/built-head`))).toBe(true)
+    expect(out.labels.some((l) => l.startsWith('argus:'))).toBe(false)
+  })
+
+  test('an unreadable head with NO diff is "nothing was built" too — the read is not what failed', async () => {
+    const out = await runBuiltHead({ probes: ['', ''], buildDiff: '' })
+    expect(out.result.ok).toBe(false)
+    expect(out.logs.some((l) => l.includes('inner THREW') && l.includes('nothing was built'))).toBe(true)
+    expect(out.result.terminalCause ?? '').not.toContain('re-run when the read succeeds')
+  })
+
+  test('the CONTROL: an unreadable head WITH a diff is the infra-only stop, not a throw', async () => {
+    const out = await runBuiltHead({ probes: ['', ''] })
+    expect(out.result.blockKind).toBe('infra-only')
+    expect(out.result.terminalCause).toContain('re-run when the read succeeds')
+    expect(out.logs.some((l) => l.includes('inner THREW'))).toBe(false)
+  })
+})
+
+describe('a fix round stops on an unreadable head, exactly as round 1 does', () => {
+  test('permanent unreadability at a fix round: no APPROVE, no empty reviewedHead, no empty checkpoint head', async () => {
+    const out = await runBuiltHead({ probes: [H, '', ''], verdicts: ['REQUEST_CHANGES'] })
+    expect(out.result.blockKind).toBe('infra-only')
+    expect(out.result.checkpoint).toBe('fix-round-2')
+    expect(out.result.terminalCause).toContain('refs/heads/trident/built-head')
+    expect(out.result.terminalCause).toContain('re-run when the read succeeds')
+    expect(out.result.verdict).not.toBe('APPROVE')
+    // The checkpoint that used to be written with head '' — which classifyResume maps
+    // to REBUILD (no recorded head), the rebuild-of-committed-work path Part 2 removes.
+    expect(checkpoint(out, 'fix-round-2')).toBe('')
+  })
+
+  test('PR mode does NOT stop on a PERMANENTLY unreadable head — the publisher rev-parses it (the `!isPr` carve-out)', async () => {
+    // The case the carve-out exists for, and the one the suite did not cover: BOTH
+    // reads failed, so this is not the transient path. In `pr` mode the workflow hands
+    // the BRANCH NAME to the outer publisher, which resolves the OID itself at the
+    // credentialed boundary — so an unread head here is not the run's problem. Delete
+    // `&& !isPr` and this test fails while every other one still passes.
+    const r1 = await runBuiltHead({ mode: 'pr', probes: ['', ''] })
+    expect(r1.result.publishRequested).toBe(true)
+    expect(r1.result.publishHead).toBeNull()
+    expect(r1.result.blockKind).toBeUndefined()
+    expect(r1.labels.filter((l) => l === 'head-probe-round-built-r1')).toHaveLength(2)
+    // …and the SAME probes in local mode DO stop, so the difference is the carve-out.
+    const local = await runBuiltHead({ probes: ['', ''] })
+    expect(local.result.blockKind).toBe('infra-only')
+  })
+})
+
+describe('the two bounded stops agree on `ok` — one failure class, one shape', () => {
+  test('a built-head stop reports ok:false, like the resume stop', async () => {
+    const out = await runBuiltHead({ probes: ['', ''] })
+    expect(out.result.ok).toBe(false)
+    expect(out.result.blockKind).toBe('infra-only')
+    expect(out.result.verdict).toBe('REQUEST_CHANGES')
   })
 })

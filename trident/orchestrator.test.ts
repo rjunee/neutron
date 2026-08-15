@@ -1944,6 +1944,23 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe('')
   })
 
+  // …and so is an EMPTY checkpoint name: `classifyResume` resolves that to `rebuild`
+  // (reason 'no-checkpoint') before it looks at the head, so there is no recorded work
+  // to preserve and nothing for the bounded stop to name.
+  test('an EMPTY checkpoint name is exempt too — no fast-exit, the fire still happens', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+          : ok(),
+    })
+    await resumeRun({ inner_checkpoint: '' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_live_head).toBe('')
+  })
+
   // Local mode reaches '' by a different route (a failed rev-parse under an UNHEALTHY
   // git); it takes the same exit.
   test('a local-mode unreadable head takes the same boundary exit — no fire', async () => {
