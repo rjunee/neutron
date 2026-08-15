@@ -47,6 +47,7 @@ export type ReportReason =
   | 'unhandled_rejection'
   | 'render_crash'
   | 'manual'
+  | 'perf'
   | 'push_registration_failed';
 
 /** Device / build context. Everything here is non-identifying build metadata. */

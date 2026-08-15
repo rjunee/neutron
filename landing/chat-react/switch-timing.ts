@@ -32,10 +32,12 @@
  * would only create a state where the data the owner asked for is missing.
  */
 
-/** The instants a switch passes through, in the order they should occur. */
+import type { WebClientReport } from './diagnostics-client.ts'
+
+/** Independently observed instants in a switch; their relative order is not assumed. */
 export type SwitchMark = 'vm_published' | 'socket_open' | 'transcript'
 
-/** Every mark a complete switch reaches. Used to decide "done" and to name gaps. */
+/** Every mark a complete switch reaches. Used to decide "done" and name missing marks. */
 const ALL_MARKS: readonly SwitchMark[] = ['vm_published', 'socket_open', 'transcript']
 
 export interface SwitchRecord {
@@ -152,9 +154,9 @@ export function setProjectSwitchHistoryLimit(n: number): void {
 /**
  * One line per switch, plus the record kept for retrieval.
  *
- * The line names the GAPS as well as the totals, because "which step was slow"
- * is the entire question — a single elapsed number would reproduce exactly the
- * ambiguity this module exists to remove.
+ * Every mark is reported as an absolute duration from the click. Transcript
+ * hydration is a local store read and may finish before the socket opens, so no
+ * cross-mark gap is derived from an ordering the switch does not guarantee.
  */
 function defaultEmit(r: SwitchRecord): void {
   recent.push(r)
@@ -169,18 +171,57 @@ function defaultEmit(r: SwitchRecord): void {
     `vm=${fmt(vm)}`,
     `socket=${fmt(sock)}`,
     `transcript=${fmt(tx)}`,
-    // The gaps are the diagnosis: a big `vm` means the paint is blocked, a big
-    // `socket→transcript` means the data is what the owner is waiting for.
-    `gap_vm_to_socket=${fmt(delta(vm, sock))}`,
-    `gap_socket_to_transcript=${fmt(delta(sock, tx))}`,
     `total=${fmt(r.total)}`,
   ]
   if (missing.length > 0) parts.push(`never_arrived=${missing.join(',')}`)
   console.info(`[project-switch] ${parts.join(' ')}`)
 }
 
-function delta(a: number | undefined, b: number | undefined): number | undefined {
-  return a === undefined || b === undefined ? undefined : round(b - a)
+/** Build the persisted perf report without ever accepting or embedding a bearer. */
+export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebClientReport {
+  return {
+    schema: 1,
+    report_id: `web-switch-${createdAt}-${randomId()}`,
+    created_at: createdAt,
+    origin: globalThis.location?.origin ?? '',
+    reason: 'perf',
+    app: { version: 'web', build: null, platform: 'web', os_version: null },
+    session: { signed_in: true },
+    events: [{
+      at: createdAt,
+      level: 'info',
+      kind: 'project_switch',
+      message: r.incomplete ? 'Project switch incomplete' : 'Project switch complete',
+      context: {
+        from: r.from,
+        to: r.to,
+        marks: { ...r.marks },
+        total: r.total,
+        incomplete: r.incomplete,
+      },
+    }],
+  }
+}
+
+/**
+ * Add best-effort remote reporting to the local console/history emitter.
+ * Delivery is deliberately non-blocking and non-durable: it starts in a
+ * microtask, a failed post is dropped without retry, and telemetry can never
+ * delay or break the project switch that produced it.
+ */
+export function createSwitchTimingEmitter(
+  send: (report: WebClientReport) => Promise<unknown>,
+): (record: SwitchRecord) => void {
+  return (record) => {
+    defaultEmit(record)
+    void Promise.resolve()
+      .then(() => send(buildSwitchReport(record)))
+      .catch(() => undefined)
+  }
+}
+
+function randomId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)
 }
 
 function fmt(v: number | undefined): string {

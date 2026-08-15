@@ -10,7 +10,12 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { SwitchTimer, type SwitchRecord } from '../switch-timing.ts'
+import {
+  SwitchTimer,
+  buildSwitchReport,
+  createSwitchTimingEmitter,
+  type SwitchRecord,
+} from '../switch-timing.ts'
 
 /** A clock the test drives by hand, so no assertion depends on real elapsed time. */
 function fakeClock(): { now: () => number; advance: (ms: number) => void } {
@@ -120,5 +125,55 @@ describe('SwitchTimer', () => {
     clock.advance(500)
     t.mark('transcript')
     expect(records).toHaveLength(1)
+  })
+})
+
+describe('switch timing diagnostics', () => {
+  test('vm → transcript → socket preserves absolute marks and invents no negative gap', () => {
+    const record: SwitchRecord = {
+      from: 'a',
+      to: 'b',
+      marks: { vm_published: 5, transcript: 10, socket_open: 20 },
+      total: 20,
+      incomplete: false,
+    }
+
+    const report = buildSwitchReport(record, 123)
+    const context = report.events[0]!.context
+    expect(context.marks).toEqual({ vm_published: 5, transcript: 10, socket_open: 20 })
+    expect(context).not.toHaveProperty('gap_socket_to_transcript')
+    expect(JSON.stringify(context)).not.toContain('-10')
+
+    let line = ''
+    const original = console.info
+    console.info = (value?: unknown): void => { line = String(value) }
+    try {
+      createSwitchTimingEmitter(async () => {})(record)
+    } finally {
+      console.info = original
+    }
+    expect(line).toContain('vm=5ms socket=20ms transcript=10ms')
+    expect(line).not.toContain('gap_socket_to_transcript')
+  })
+
+  test('a rejected post is deferred, dropped, and cannot block or break emit', async () => {
+    let called = false
+    const emit = createSwitchTimingEmitter(async () => {
+      called = true
+      throw new Error('offline')
+    })
+    const record: SwitchRecord = {
+      from: null,
+      to: 'b',
+      marks: { vm_published: 1 },
+      total: 1,
+      incomplete: true,
+    }
+
+    expect(() => emit(record)).not.toThrow()
+    expect(called).toBe(false)
+    await Promise.resolve()
+    expect(called).toBe(true)
+    await Promise.resolve()
   })
 })

@@ -26,7 +26,7 @@
  * over the chat-core contract without a DOM or a socket.
  */
 
-import { SwitchTimer } from './switch-timing.ts'
+import { SwitchTimer, type SwitchTimingOptions } from './switch-timing.ts'
 import { groupReactions, isColdStartAck, spentChoiceValue } from '@neutronai/chat-core'
 
 import type { ProjectTab } from './config.ts'
@@ -313,6 +313,8 @@ export interface NeutronChatControllerOptions {
    * Defaults to 2500. Injectable so tests don't wait on a real timer.
    */
   switchConnectingGraceMs?: number
+  /** Optional production diagnostics sink for completed switch records. */
+  switchTimingEmit?: SwitchTimingOptions['emit']
   /**
    * Managed post-onboarding claim redirect target (from the page bootstrap
    * config's {@link BootstrapConfig.postOnboardingClaimUrl}). When set, the
@@ -476,6 +478,7 @@ export class NeutronChatController {
    *  still `connecting` after {@link switchConnectingGraceMs}. */
   private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
   private readonly switchConnectingGraceMs: number
+  private readonly switchTimingEmit: SwitchTimingOptions['emit']
   /** Stopwatch for the in-flight project switch — see `switch-timing.ts`. */
   private switchTimer: SwitchTimer | null = null
   private awaitingReply = false
@@ -577,6 +580,7 @@ export class NeutronChatController {
     this.projects = opts.projects ?? []
     this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
     this.switchConnectingGraceMs = opts.switchConnectingGraceMs ?? 2_500
+    this.switchTimingEmit = opts.switchTimingEmit
     this.postOnboardingClaimUrl =
       typeof opts.postOnboardingClaimUrl === 'string' && opts.postOnboardingClaimUrl.length > 0
         ? opts.postOnboardingClaimUrl
@@ -684,7 +688,9 @@ export class NeutronChatController {
     // its partial marks are the record of a switch the user abandoned because it
     // was slow, which is the case most worth seeing.
     this.switchTimer?.supersede()
-    this.switchTimer = new SwitchTimer(this.projectId, projectId)
+    this.switchTimer = new SwitchTimer(this.projectId, projectId, {
+      ...(this.switchTimingEmit !== undefined ? { emit: this.switchTimingEmit } : {}),
+    })
     // Tear down the outgoing per-project socket.
     this.session.stop()
     this.projectId = projectId
