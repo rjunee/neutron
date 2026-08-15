@@ -41,6 +41,37 @@ JSDoc opener, so merely writing that character sequence in a nearby comment
 truncated the slice and four unrelated tests failed with a bare `ReferenceError`.
 Both extraction helpers now assert what they captured and name the cause.
 
+## 2026-08-15 — a gateway restart no longer kills an in-flight build
+
+`onChildCrash` latched every launcher-owned run `crashed`, and the tick reaped
+any `crashed` row straight to `failed` — a dead launcher was treated as a dead
+build. Measured evidence said otherwise: three gateway boots on 2026-08-14
+(06:19:56, 06:26:51, 07:13:00) each killed a healthy build about 90 seconds
+later, one watchdog tick. Run `8ddca917` had pushed PR #261 (+434/−17) nine
+minutes before its launcher died — the build was progressing; only its
+supervisor's process died with the gateway.
+
+The fix routes a launcher crash into a continuation instead of a reap. §1a-crash
+in `trident/orchestrator.ts` claims the crashed row atomically via
+`TridentRunStore.beginCrashRecovery` and relaunches it as a CONTINUATION from
+its persisted `branch`/`pr`/`inner_checkpoint` — the round and `ralph_round`
+counters are untouched, because a launcher dying mid-build is not the agent's
+failure to spend a round on.
+
+Recovery is bounded, and the bound is durable: a new `crash_recoveries` column
+(migration 0123) is spent only by the atomic `beginCrashRecovery` claim, capped
+at `DEFAULT_MAX_CRASH_RECOVERIES = 3`. Past the cap the run fails with a reason
+that names the crash-recovery budget and embeds the latched crash reason —
+deliberately never the token "exhausted", which `trident/delivery.ts` would
+otherwise misclassify as an agent-side budget exhaustion rather than an infra
+event.
+
+`onChildCrash` now stamps the latched reason with both the observation time and
+the gateway process's own boot time (`Date.now() - process.uptime() * 1000`),
+phrased strictly as measurements rather than an asserted cause, per #240. And
+harvest-before-reap is preserved: a crashed row that already carries a terminal
+`inner_result` still harvests on the next tick, with zero relaunches spent.
+
 ## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
 
 `trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex

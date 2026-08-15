@@ -3372,7 +3372,13 @@ separate change).
   **hang watchdog** (`trident/orchestrator.ts`, `NO_ADVANCE_HANG_MS` = 25 min)
   reaps a non-terminal run whose `last_advanced_at` has not moved — a suspected
   zero-token agent hang — to `failed` with a named reason, so it surfaces on the
-  Plan item + fires the terminal notification instead of stalling silently.
+  Plan item + fires the terminal notification instead of stalling silently. A
+  **launcher crash is not a dead build**, though: a gateway restart/deploy that
+  kills the warm REPL's child is caught by §1a-crash in `trident/orchestrator.ts`,
+  which atomically claims the crashed row (`TridentRunStore.beginCrashRecovery`)
+  and relaunches it as a continuation from its persisted branch/PR/checkpoint,
+  bounded by the durable `crash_recoveries` budget (default 3) and carrying the
+  measured gateway boot timestamp in the latched failure reason.
 - **▶ play button + on-disk spec persistence (M1).** A Plan card created from a
   NON-TRIVIAL ask now persists the FULL context to a real, user-visible markdown
   doc so it survives session resets and drives the build. `work-board/spec-doc.ts`
