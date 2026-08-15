@@ -41,6 +41,83 @@ The guard is asserted in both directions: the neutron-enterprise rollup passes r
 on an unprotected base, and under a protection demanding `test` it names the config
 error on the first probe. There is no third outcome, so it can never silently defer.
 
+## 2026-08-15 — the device stops interrupting the conversation he is reading
+
+`app/lib/push-foreground-policy.ts` (new) + `app/lib/push.ts` + `ChatSyncSurface`.
+
+**Owner:** *"Everything should be a chat message, and I get notified for any and
+all chat messages if I'm not actively in the app. Same way notifications work
+for every single other chat app in existence."*
+
+The handler had been showing every foreground notification ON PURPOSE — its
+comment said so, *"so the user sees the notification even when the app is
+open"*, overriding Expo's default. That is now wrong, but the fix is NOT Expo's
+default either: "is the app open" is the wrong question. Foregrounded in project
+A while a message lands in project B should still tell him. The question is
+whether he is looking at THE CONVERSATION THAT PRODUCED IT, which is what
+`decideForegroundPresentation` answers.
+
+**This is the half that makes the server half safe.** The server-side change —
+notifying for in-turn replies, which `open/composer.ts` currently excludes
+deliberately — only stops being an interruption because the device now declines
+to interrupt. If this policy is ever weakened, that server rule has to be
+revisited in the same change.
+
+Suppression is of the INTERRUPTION only: `shouldShowList` and `shouldSetBadge`
+stay true, so a message that arrives while he scrolls past still leaves a trace
+outside the transcript. An unregistered screen FAILS OPEN — he gets a banner he
+did not need, never silence, because silence is the failure nobody notices.
+
+📌 **A REPRESENTATION BUG LIVED FOR THE LENGTH OF ONE DRAFT.** The policy modelled
+General as `null`; the push payload always sends `GENERAL_RAIL_ID` (`~general`).
+Those compare unequal, so a General message would have buzzed him while he read
+it — the exact interruption the module exists to prevent, in the one scope that
+has three names. Normalised through a `scopeKey`, with tests pinning all three
+spellings. `app/lib/general-scope.ts` already warned this is how #410/#411
+happened; this was that hazard one layer out.
+
+⚠️ **AND THE TEST HARNESS HID A FIFTH OF ITSELF.** `ChatSyncSurface` began
+importing `useFocusEffect`, the expo-router STUB did not export it, and every
+file mounting that surface stopped LOADING — so the local suite ran **122 fewer
+tests and reported FEWER failures than before the change**. A falling failure
+count read as an improvement while a fifth of the suite silently stopped
+running. Stub extended; suite back to 1916 tests with a failure set IDENTICAL to
+untouched main. ⇒ **count the tests that RAN, not just the ones that failed.**
+
+Mutation-verified three ways with a control on each: dropping scope
+normalisation fails the General-spelling tests, silencing an unreadable payload
+fails the fail-open tests, and making SILENT drop the list/badge fails the
+record test.
+
+## 2026-08-15 — deployed to the owner's instance
+
+Vendor `cbcfb655` → `d08555e1` (#294 diagnostics instrument + chat CSS, and
+#296). `juno` restarted healthy in one wave, `uptime_ms: 12230`. Control plane
+needed no restart and that was CHECKED (`git diff --name-only HEAD origin/main
+-- src/` empty), not assumed. Verified SERVED against the specific changes with
+controls in both directions: the served tree carries `min(72ch, 88%)`,
+`font-size: 0.95em` and the last-child margin fix, with the old `min(60ch, 80%)`
+GONE; the served JS bundle carries the new diagnostics failure path against a
+control string proving the grep works.
+
+⚠️ The first verification attempt returned ZERO for everything **including the
+control**, because `/chat` 302s to auth — a tool that cannot read its input
+returning a negative that looks like an answer. Without the control it would
+have been reported as a broken deploy.
+
+## 2026-08-15 — #294: a rejected diagnostics report was invisible on both sides
+
+The owner asked for switch timings to reach the diagnostics queue so he would
+stop pasting console output. Measured on his instance: four reports on disk, all
+mobile `push_registration_failed`, **not one web switch timing**, while he spent
+the day hand-pasting exactly those. Three stacked silencers — the client
+discarded its Response, the emitter wrapped the send in `.catch(() =>
+undefined)`, and the server's only operator-visible artefact is a file that stays
+EMPTY on refusal, which reads exactly like "nothing to report". Writing the test
+found a fourth: a wrong-slug bearer takes a different branch, so instrumenting
+only the first would have left the most likely real refusal just as silent.
+
+
 
 Measured on PR #284's card (the #283 build), 2026-08-15, one inner workflow, fully
 serial — the sum of agent time equals wall clock exactly: head probe 5 s, `plan:fable`
@@ -294,6 +371,7 @@ prints the live token in the failure diff (pre-existing — it landed at the mer
 and reproduces on `main` with no diff applied; the fix is to assert on
 `githubProcessEnv` instead of the merged env), and the codex forge route still cannot
 report `deviatedFromSpec` until `trident/codex-build.sh` grows a seventh trailer line.
+
 ## 2026-08-15 — the review diff is taken from the base tip git observed
 
 `publishBuiltCommit` took the review diff from `<base>..<head>` where `<base>` was the
@@ -655,6 +733,7 @@ newline; the sensitivity check therefore uses mutations that move a real byte. U
 one-character head-slice shift and under a one-character tail edit, both new tests go
 RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
 gap this task existed to close.
+
 ## 2026-08-14 — review-round readiness is checked before reviewer spend
 
 `trident/inner-workflow.mjs` now refuses to dispatch a review panel when GitHub
@@ -791,6 +870,7 @@ coda's stand-down paragraph removed. Ten mutants, ten reds.
 whether it can, first" (the 2026-08-13 BUILD-on-codex entry) described the interim state:
 the wrapper refusing honestly because the fix was a change to the workflow's shape. This is
 that change. The dated entry keeps its text — it is a log, not current state.
+
 ## 2026-08-13 — a successful merge is TERMINAL: the run lifecycle ends where the change ships
 
 ISSUES #563. A lane approved its PR and merged it; the merge deleted the head branch;
@@ -850,6 +930,7 @@ as "done". The step is routed to the cheap tier (`merge-probe-round-*` → `book
 for the reason `head-probe` earned that rule: it runs once per round, and a silent
 fallback to the most expensive tier would be a per-round tax on the step that exists to
 remove a per-lane tax.
+
 ## 2026-08-13 — the Sonnet tier was a generation behind, and the test written to prove it found a second, worse hole (ISSUES #564)
 
 **What the owner saw.** First look at the shipped model-selector pane: *"Minor bug -
@@ -1827,6 +1908,7 @@ guard is green again.
 **Out of scope, deliberately:** the twice-daily brief/digest, the
 `email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
 fan-out migration. Those are P2/P3.
+
 ## 2026-08-12 — the GitHub-connect test that could not fail, and four dead ends behind it (#204 review)
 
 Review of the entry below found its mobile "a failed status read" test **fail
@@ -2148,6 +2230,7 @@ Tested against the production composer's output rather than a hand-built config
 literal, so it fails if `substrates.ts` stops passing the profile.
 Mutation-verified: removing the window from the profile fails four tests, and
 keeping it while the factory silently stops threading it fails two.
+
 ## 2026-08-11 — a nit may not cost a round (#184)
 
 `enforceSeverityGate` in `trident/inner-workflow.mjs` now enforces
@@ -2445,6 +2528,7 @@ write (3), break the nudge post path (14), restore #506's tautological reason (1
 drop the composer's `tool_names` (1). Suites green: `reminders/` 377 pass / 3 skip,
 plus the affected gateway/open/runtime files; `bunx tsc -p tsconfig.json` and
 `bash scripts/ci/typecheck-all.sh` clean.
+
 ## 2026-08-05 — mobile chat opens at the bottom, and only anchors a message top when it is unread
 
 Branch `fix/issue-505-chat-initial-anchor` (ISSUES #505). Changed:
@@ -3148,6 +3232,7 @@ echoes the token it was handed back under the bare MANIFEST label
 un-keyed grant is that grant's own access row — so it transiently holds the
 just-connected account's token until that token expires and the row's own
 refresh_token takes over. Worth an ISSUES entry.
+
 ## 2026-08-04 — bounded transient recovery for the ritual background path (ISSUES #489)
 
 Branch `fix/ritual-transient-recovery`. New: `reminders/ritual-retry.ts`,
@@ -4101,6 +4186,7 @@ Manifest records gained `source_kind: 'active' | 'archived'` and `archive_contai
 **All three mutations were killed.** (1) Archive BEFORE writing content → 6 failures, led by the content-landed test. (2) Remove the non-project exclusion (every dir is a project) → 10 failures including `EXCLUDES a non-project dir`. (3) Remove the `skipped-active` guard → exactly the 2 live-row tests, and nothing else.
 
 59 pass / 0 fail across `open/__tests__/legacy-import-archived.test.ts` (24 new) + the two pre-existing `legacy-import*` files. Verified beyond unit tests with a dry run against the real vault into a throwaway `NEUTRON_HOME`: 25 active CREATE + 19 CREATE-ARCHIVED, 5 exclusions each printed with its evidence, 18 degraded archive sources named, 0 assertion failures.
+
 ## 2026-07-28 — the legacy harness cutover, MEMORY lane (`open/legacy-import/memory/`)
 
 Branch `feat/legacy-memory-importer`. The memory replay: MemoryStore drawers + the MemoryStore knowledge graph + Claude auto-memory + `~/legacy/Memory/` notes → GBrain pages and typed edges. Dry-run by default, `--apply` to write, resumable, converging on re-run, and it refuses to write rather than fuse two records into one slug. No CLI subcommand is wired yet — the lane is a library with injected seams (see "wiring" below).
@@ -4157,6 +4243,7 @@ So the import splits the page the way the codec will read it back: rows become r
 Verified end to end against the real tree into a temp data dir (read-only on `~/legacy`): 1309 written, 0 fidelity failures, 0 collisions; re-run wrote 0 and converged 1309 byte-identically. An audit written independently of the importer confirms **0 source content lines missing** from the 1309 written pages.
 
 **A mutation SURVIVED and it was the important one.** Neutering `verifyBodyFidelity` to always pass killed nothing — because the tests proved the SPLIT (so no realistic page reaches the verifier in a failing state) and left the safety net itself unasserted. Fixed with three tests that make it fire: a page carrying a SECOND embedded separator that survives the split, plus direct tests that tamper with a written page and pass a row that was never written. Six mutations now all die: collision detection removed (3 fail), per-line body re-trim (1), body verification neutered (2), trailing block dropped (2), timeline rows dropped (3), timeline verification neutered (1). 29 pass / 0 fail, `open/legacy-import/entities/entities-import.test.ts`, all fixtures synthetic and in a temp dir.
+
 ## 2026-07-28 — ISSUES #367: an instance's ROOT URL 404'd, because the gate never routed `/` to the handler that could serve it
 
 Branch `fix/367-root-url-404`. Typing your own instance URL returned "Not Found"; only `/chat` worked. Verified live before touching anything — a bare `GET /` returned 404 both through the reverse proxy (`https://owner.example.com/`) and directly against the instance's own port, so it was current code rather than a stale deploy.
@@ -4184,6 +4271,7 @@ Gates: 21 pass / 0 fail in `open/__tests__/open-owner-gate.test.ts`; the rest ru
 >
 > This file stays exactly as it is and remains the place to read history through
 > 2026-07-28. Nothing is migrated out of it.
+
 ## 2026-07-28 — `neutron import-legacy`: Lane A of the the legacy harness cutover (PROJECTS)
 
 Branch `feat/legacy-projects-importer`. `neutron import-legacy [--dry-run] [--legacy-home <path>]` — a new `bin/neutron` subcommand execing `open/import-legacy-cli.ts` via bun, the same bootstrap shape as `doctor`/diagnostics (thin loader arms the process safety net, then dynamically imports the impl).
@@ -4225,6 +4313,7 @@ Deliberately NOT on the `ProjectSettingsStore` interface: no HTTP route writes t
 Two smaller mutations also verified: an empty string must write SQL NULL (or a never-set persona and one explicitly set to `""` read back differently), and an empty patch must not stamp `updated_at` (a no-op write would float a project up the owner's rail during an import that changed nothing).
 
 8 pass / 0 fail, `gateway/projects/__tests__/sqlite-store-set-content.test.ts`.
+
 ## 2026-07-28 — the scribe captures the owner's reflective passages VERBATIM again (M2 cutover blocker)
 
 Branch `feat/scribe-verbatim-originals`. Found while auditing what M2 actually requires, not from a bug report — which is why it is worth recording carefully: it would have degraded the owner's data silently, starting the day he cut over.
@@ -4262,6 +4351,7 @@ Three existing tests encoded the old contract and were updated rather than delet
 Gates: root tsc 0, lint 0, leak 0, depcruise 0. Suites run locally: the four projects suites, the unified surface suite, the app project-tabs suites, route-matrix, launcher-seed — 7 + 31 + 84 + 7 pass, 0 fail. The FULL suite runs in CI (it is not run on the owner's machine).
 
 **Does NOT clean up the existing row.** The stray `general` project still sits in the owner's tenant DB; deleting it is his call. This stops the next one being created.
+
 ## 2026-07-28 — CI parallelised: independent gate jobs + a 4-way sharded suite
 
 The owner asked whether we could lean on CI instead of his laptop. Open's CI was ONE job with seven sequential steps on a 2-core/7GB runner, so a 2-minute typecheck error surfaced only after a 12-minute test run — which is why running gates locally had become the fast-feedback path by default.
@@ -4346,6 +4436,7 @@ Branch `test/406-io-bound-gate-timeouts`. Three tests inherit bun's 5s default w
 **Why raising a timeout is the right fix here and was NOT the right fix for the anchor race.** In the anchor race the ASSERTION itself was nondeterministic — it compared `Date.now()` against a filesystem timestamp, so no timeout could make it reliable and that test is now skipped under #408. These three are the opposite: the assertions are fully deterministic and only the wall-clock allowance was wrong. A gate that walks every `tsconfig.json` on disk, or boots a real composition, is not a unit test and 5s was never the right budget for it.
 
 These have never failed in CI, whose runner is not competing with an emulator and two builds. The cost being removed is local: a false-positive generator trains you to skim past red, which is the habit the green-CI rule exists to break — and it did briefly bury two genuine anchor-walker failures in noise.
+
 ## 2026-07-28 — ISSUES #411: the General sentinel must be URL-PATH-safe, not just validator-illegal
 
 Branch `fix/411-general-sentinel-url-safe`. Fixes a regression **I shipped in #460**, caught by driving the app on a device.
@@ -4377,6 +4468,7 @@ Branch `fix/404-work-tab-key-collision`. The owner's device showed `Chat | Work 
 The constant is now split: `WORK_TAB_KEY = 'work_board'` (registry identity, what badges key on, what the gateway sends) and `WORK_TAB_ROUTE_LEAF = 'workboard'` (the `workboard.tsx` file route, mirroring the registry's `mount.target`). Web already had this right — `landing/chat-react/tabs-client.ts:110` uses `work_board`.
 
 Mutation-verified both halves: restoring the conflated key fails 3 tests; building the route from the key instead of the leaf fails 3. The new test uses the VERBATIM live payload, so it fails the moment the client stops recognising what the server actually sends. Gates: app tsc 0, root tsc 0, lint 0, depcruise 0, leak gate silent, 1134 app tests pass.
+
 ## 2026-07-28 — ISSUES #410: the General sentinel is collision-proof, matching web
 
 Branch `fix/410-general-sentinel-collision`. `GENERAL_PROJECT_ID` moves from the bare string `'general'` to **`'#general'`**, mirroring the web client exactly.
@@ -4414,6 +4506,7 @@ Branch `revert/anchor-race-deflake`. `main` went red twice in one night from my 
 **What a real fix needs, recorded in #408 so the guard can be rebuilt rather than lost:** a production seam — an injectable clock in `DocStore` — so both stamps can be FORCED into a known order instead of raced. That is a deliberate change to shipping code and did not belong in an unsupervised test repair at 07:40.
 
 The regression it guarded is real: pre-fix, `delete_time` was sampled at the hook site instead of before the slow `recordCommit()`, so the deleter's event out-stamped a concurrent writer's and the anchor flipped dead while the file still existed. Verified after the skip: 12/12 green locally, 30 pass / 1 skip / 0 fail.
+
 ## 2026-07-28 — The project shell's chrome follows the rail selection (found on-device)
 
 Branch `fix/shell-follows-rail-selection`. Third defect in this rail sequence found by driving a real build rather than reading a diff.
@@ -4438,6 +4531,7 @@ That 42% is also why #452's own CI passed and the post-merge `main` run failed �
 **The fix makes both guarantees explicit and keyed on observable conditions rather than on a guessed interval:** the handshake now runs BOTH ways (the writer waits for the deleter to be inside `commit()`; the deleter waits for the writer to land, so neither can run first), and the writer additionally waits for the wall clock to strictly advance past the instant `delete_time` was sampled — one tick, not 50ms. Both waits are bounded and reject loudly rather than hanging.
 
 Verified: 8/8 green, plus 5/5 green under 10× CPU saturation. Mutation-verified two ways — re-sampling `delete_time` at the hook site (the original regression) still fails; removing the clock-advance reproduces the red at 5/12.
+
 ## 2026-07-27 — The owner session cookie's `Secure` flag now FAILS CLOSED
 
 Branch `fix/392-owner-cookie-fail-closed`. Closes ISSUES #392, the hardening follow-up to #303 (which is fixed, deployed and verified — this is not a reopen).
@@ -4453,6 +4547,7 @@ The loopback exemption has to stay: browsers drop a `Secure` cookie over plain h
 **Two `#303` tests had to change, and the distinction matters.** `an unrecognised X-Forwarded-Proto falls back to the socket scheme` was asserting `.not.toContain('Secure')` — it encoded the exact behaviour #392 removes, so it was PINNING the weakness and its assertion is now inverted with a comment saying why. The other, `direct plain-http self-host (no header) keeps the cookie NON-Secure`, was describing a REQUIREMENT and exposed a real gap: a constructed `Request` (and a client that omits `Host`) carries no `Host` header, so host resolution now falls back to the request URL's own host. That cannot re-open the hole, because a proxied request is already forced Secure by the header-presence check.
 
 Mutation-verified three ways: restoring the header-derived polarity fails 5 tests; keying the proxy check on header VALUE instead of presence fails 2; a naive substring loopback match fails 2. Gates: root tsc 0, lint 0, leak gate silent, 26 owner-gate + cookie-policy tests pass.
+
 ## 2026-07-27 — The app is declared NATIVE-ONLY, so an OTA no longer needs `--platform android`
 
 Branch `fix/400-app-native-only`. Closes ISSUES #400. The owner: *"App is native only."*
@@ -4482,6 +4577,7 @@ Because a session now OUTLIVES the view that created it, `MobileChatSession`'s c
 **What this is NOT.** The optimal design is one multiplexed socket subscribing to many topics, which makes warmth free. That needs a server-side subscription frame — app-ws binds exactly one topic per connection from its query string — so it is a protocol change, not a client change. This is the correct client-only increment, and the multiplexing work is tracked rather than pretended away.
 
 Mutation-verified: making release stop the session fails 3 tests, removing eviction fails 1, and making sign-out skip `stop()` fails 1. Gates: app tsc 0, root tsc 0, lint 0, depcruise 0, leak gate silent, 1030 app tests pass.
+
 ## 2026-07-27 — General's rail entry opens General's transcript (found on a running emulator)
 
 Branch `fix/general-rail-scope`. Follow-up to #450, which put General back in the mobile rail. Tapping it opened a permanently empty chat — caught by installing the build on an emulator and driving it, not by reading the diff.
@@ -4493,6 +4589,7 @@ Branch `fix/general-rail-scope`. Follow-up to #450, which put General back in th
 **Second half: the shell.** `getSettings('general')` 404s, so the project shell rendered "project not found" for the scope holding the largest transcript. General now renders from a synthetic scope identity (name, glyph, no members) — explicitly NOT the ISSUES #393 placeholder pattern: every field is either literally true of General or inert, and the chrome that would misrepresent it stays suppressed. The three project-null early returns collapsed into one gate that narrows properly.
 
 Mutation-verified: letting the sentinel pass through (the original bug) fails 2 tests. Gates: app tsc 0, root tsc 0, lint 0, depcruise 0, leak gate silent, 1026 app tests pass.
+
 ## 2026-07-27 — De-flake the anchor-walker delete-vs-write race test
 
 Branch `fix/deflake-anchor-walker-race`. `anchor-walker.test.ts`'s "a writer recreating the doc during the deleter's post-unlink awaits keeps the anchor live" opened its race window with a flat 50ms sleep inside the stubbed `VersionStore.commit()`, betting the concurrent writer would land its rename + fstat + hook inside that window. On the loaded partitioned CI runner it does not, and the test went red for scheduling reasons rather than for the regression it guards — blocking an unrelated PR.
@@ -4557,6 +4654,7 @@ Branch `feat/app-remote-diagnostics`. The Android app failed on the owner's devi
 **Mutation-verified** (a test that cannot fail is not a test): neutralising `buildClientReport`'s scrub turns the app redaction invariant red (3 of 6 cases); neutralising `redactString` in the gateway redactor turns the ingest redaction cases red (2 of 15); pruning on any 2xx instead of the `accepted` count, removing the queue lock, disabling `fitReport`, and removing the `origin` filter each turn distinct persisted-queue cases red (1, 1, 3 and 3 of 21). Each was restored and re-run green.
 
 **Codex cross-model review (r1 + r2)** found four real defects in the queue, all fixed above and each now pinned by a mutation-verified test: the batch-limit over-prune (r1 P1), the concurrent-append race (r1 P1), the oversized-report wedge (r1 P2), and — the one with privacy consequences — **cross-server delivery** (r2 P1): the queue survives a server change by design, so a report captured against one gateway would have been flushed to the next gateway the owner configured. `DiagnosticsClient` also now reports `accepted: 0` rather than `reports.length` when a 2xx body does not carry the gateway's count — a stalled queue is recoverable (capped, oldest-evicted) while a wrongly pruned crash report is gone for good.
+
 ## 2026-07-25 — mobile app: LOGIN-FIRST — the app opens on login and DISCOVERS its own instance URL
 
 Branch `trident/app-login-first-discovery`. The OPEN/app half of the login-first flow; the control-plane half (`POST /v1/route` returning the instance's PUBLIC base url) already shipped and is live. The owner: *"why does it have to ask? it should just open with a login screen, and once you login it should know the url."* PR #439 (#385 part 1) gave the app a runtime server URL but made TYPING it the FIRST-RUN surface — `app/app/_layout.tsx` rendered the "Connect to your Neutron" form INSTEAD of the `<Stack>` while unconfigured, so a new owner's first task was to know and type a hostname. Now the app opens on LOGIN and learns its own address after authenticating. **NO FEATURE FLAGS** — login-first IS the behaviour, one code path; the typed-URL form is DEMOTED, not duplicated.
@@ -5428,6 +5526,7 @@ live + replay paths.
   `onboarding_completed` frames (failed on prior main: the null stamp let the replay
   re-fire once). Scope: the live-emit stamp only; the Managed claim flow (Defect 1
   start-token + 2b auto-redirect) is a separate PR.
+
 ## 2026-07-20 — Per-project isolated onboarding compose (#377 + #378, Approach A)
 
 Closed the two trust-critical onboarding-opening defects (SPEC Decisions Log
@@ -6905,6 +7004,7 @@ App `tsc` clean, root `tsc` clean, leak-gate SILENT.
 
 **Out of scope.** Desktop web (PR-1..5), docs drill-down (PR-5), a rail preview
 line, any activity/live_runs derivation outside the composer.
+
 ## 2026-07-03 — TRIDENT parallel builds + build lifecycle (#342/#340/#339/#334/#337)
 
 **Why.** The owner's live test 2026-07-03 (SPEC.md Decisions Log, owner-locked). the legacy harness runs
@@ -7313,6 +7413,7 @@ migration (the `design_doc_ref` column already existed, unused for docs).
   path" instruction, the bidirectional write-back is left for a follow-up. No
   parallel user-facing plan doc is created; the worktree `IMPLEMENTATION_PLAN.md`
   is an existing build-internal artifact (not user-surfaced).
+
 ## 2026-07-02 — Trident: per-project git build workspace (brand-new projects are buildable)
 
 **Why.** A trident build for a BRAND-NEW project (no code repo) died ~2 min in —
@@ -7524,6 +7625,7 @@ read/list/write round-trip and `.txt`-still-rejected in
 `landing/chat-react`) clean; leak-gate silent; fresh `NEUTRON_HOME=/tmp/wfi`
 boot on :7874 serves the bundle with the `HtmlDoc` renderer and the docs routes
 wired.
+
 ## 2026-07-02 — Chat typing dots persist for the WHOLE processing window (incl. background builds)
 
 **Why.** The owner's live-test 2026-07-01: he asked the agent to build a meditation-timer
@@ -7670,6 +7772,7 @@ project-scoped (a separate change: thread the originating project id onto the ru
 that for trident specifically it is a stored preference, not yet a per-run switch.
 Codex cross-model review re-raised this as the remaining item; it is an
 acknowledged trident-architecture constraint, not a defect in this diff.
+
 ## 2026-07-02 — SEV1 chat project-switch: fresh per-conversation assistant-ui runtime (seamless switch, no error card, no flicker)
 
 **Why.** M1 top-priority (the owner, frustrated): switching projects (or cold-loading
@@ -7828,6 +7931,7 @@ persist personality; gate off with no import); minimal-vs-full STATUS.md +
 ProjectOpening` copy; `stripLeadingFrontmatter` (fence removed, body kept, bare
 rule + no-frontmatter untouched, CRLF). tsc clean, leak-gate silent, server boots
 clean on a fresh QUIET install (port 7869).
+
 ## 2026-07-01 — Chat turn timeout is ACTIVITY-BASED; freezes auto-retry + get a Retry button
 
 **Why.** The owner's live-test 2026-07-01 (frustrated): a chat turn running a long-but-active
@@ -8150,6 +8254,7 @@ tool. The HTTP PATCH surface + mobile client already accept `emoji`; adding a 10
 tool to that Core's manifest/capability-guard/test contract is deferred to a
 follow-up so this sprint stays focused on the rail. Per-project unread on the
 General scope is also not badged (onboarding lives there; low value).
+
 ## 2026-07-01 — Reminders: faithful cron cadence (the legacy harness parity)
 
 **Why.** Neutron's reminder store only understood COARSE recurrence
@@ -8389,6 +8494,7 @@ project. No flags.
 that opens both a project-scoped socket and a General socket, drives the real
 `POST /api/app/projects`, and asserts the new project reaches both live.
 Confirmed red before the fix, green after; leak-gate silent; `tsc` clean.
+
 ## 2026-06-30 — Onboarding live-path: deterministic name/personality capture (no double-ask) + single closing
 
 **P1 — two live-path bugs from the owner's deployed-onboarding test.** Both fixed inside
@@ -8614,6 +8720,7 @@ consistent with the dispatch.)
 NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
 timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
 regression from this change.
+
 ## 2026-06-30 — Web-client rework: per-project chat + rail/tab layout + Plan rename + remove Tasks + markdown (P0)
 
 The linchpin fix for the onboarding→project UX. Five linked changes, all in the
@@ -8676,6 +8783,7 @@ green; leak-gate SILENT. Files: `gateway/http/app-ws-surface.ts`,
 `tabs/registry.ts`, `landing/chat-react/{ProjectShell,ChatApp,DocumentsTab,
 controller,config,main,Markdown}.tsx?`, `landing/chat-react.html`,
 `landing/package.json`.
+
 ## 2026-06-30 — Onboarding live-path: archetypes + option buttons + custom-name + closing + per-project openings
 
 Five Path-1 onboarding content/flow regressions the owner hit live-testing, all wired
@@ -8844,6 +8952,7 @@ Claude export → job started). Added two engine-level repros in
 (no-state solicited → seeds row + starts; no-state affordance-off / managed →
 no-op, no row manufactured). Negative control: reverting the engine fix fails
 exactly these no-state tests.
+
 ## 2026-06-29 — Create Project affordance (project rail + create-project capability + agent tool)
 
 A skip-import owner had no user-initiated way to create a project (projects only
@@ -10189,6 +10298,7 @@ delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; a
 short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
 no-reply gate is untouched. No feature flag — the gate ships on as default
 behaviour.
+
 ## Mid-turn message injection (#516)
 
 The web composer keeps Send enabled while the agent is typing. A second message
@@ -10701,6 +10811,7 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+
 ## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
 
 Observed live: the owner cancelled a running email-core build and the row settled at
@@ -11444,6 +11555,7 @@ the only record the owner keeps, so it now says what actually happened. That cor
 own test.
 
 Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
+
 ## 2026-08-13 — adversarial review can dispatch on Codex
 
 `review_adversarial` now declares `alsoRunsOn: ['codex']` in
@@ -11460,6 +11572,7 @@ the CLI transport does not consume that setting. Core-seat completeness also tre
 a deferred, unavailable, or dead Codex adversarial run as incomplete, so
 `enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
 the panel gate.
+
 ## 2026-08-13 — killed Codex builds report themselves and survive the bridge bound
 
 The `typing-on-connect` artifacts establish the failure mechanism. The wrapper's
@@ -11529,6 +11642,7 @@ record explicitly says no review ran and that only build and CI gates supported 
 Mutation checks: `NONE_DISPATCH_GUARD` (forcing the rubric NONE branch to dispatch)
 failed the no-agent assertion; `CONFIGURED_DEAD_COMPLETENESS` (removing core missing-seat
 collection) produced APPROVE for a dead configured reviewer and failed four gate tests.
+
 ## 2026-08-13 — typing catches up on connect and explains the live step
 
 Typing is now level-triggered for a socket opening during a turn and remains
@@ -11563,6 +11677,7 @@ suppresses nested edges and rejects stale timer callbacks; its fail-safe remains
 46 minutes, beyond the live turn's 45-minute ceiling, and still synthesises `end`
 when the genuine edge is lost. Connect catch-up stays a direct per-socket send in
 `open/wiring/typing-catchup.ts`, so it is neither durable nor broadcast.
+
 ## 2026-08-14 — pr-mode publishing belongs to the durable outer loop
 
 The inner build process now ends at a local commit. `trident/codex-build.sh` has no
@@ -11595,6 +11710,7 @@ injects both GitHub token names, proves the captured child environment is popula
 with positive controls, and asserts neither secret reached the Codex process. Its
 command-absence guard matches wrapped commands as well as line-leading commands. The
 obsolete inner-publisher tests were removed instead of remaining skipped.
+
 ## 2026-08-14 — Quiet live turns survive
 
 - Pre-change verification searched the prior
@@ -11634,6 +11750,7 @@ was added; the change makes the existing view boundary legible.
 Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
 tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
 after its expected red run.
+
 ## 2026-08-14 — host deploy resolves remote refs against the remote
 
 `open/host-deploy.ts:544` now resolves a deploy target through a distinct
@@ -11668,6 +11785,7 @@ Mutation checks (each production guard was removed independently and restored):
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
 ## 2026-08-14 — launcher-held build brief segments travel by path
 
 Task and reflection brief segments now travel by path via the `briefParts` manifest
@@ -11760,6 +11878,7 @@ re-run rebuilds, because there is no resume-a-terminal-run path (see above). Wid
 window trades a longer stall on every genuinely-dead branch for a rarer manual re-run; the
 numbers live in one exported constant so that trade can be made with evidence rather than
 by guess.
+
 ## 2026-08-09 — A ritual post is a chat message, and so is its notification
 
 The owner's phone said `ritual:kaizen`, and tapping it opened the app but not the
