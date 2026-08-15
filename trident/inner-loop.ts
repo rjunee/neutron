@@ -343,6 +343,12 @@ export function buildWorkflowArgs(
     slug: run.slug,
     maxRounds: input.max_rounds,
     ralph: run.ralph,
+    // WHICH Ralph iteration this is (0 on the first, bumped per re-fire). The
+    // workflow gates its cheap `plan:next` continuation planner on it, along with
+    // the every-Kth full re-plan cadence; a missing value reads there as "always
+    // run the full planner", so a launcher that does not thread it is slower,
+    // never wrong.
+    ralphRound: run.ralph_round,
     // Thread the run's git-mode so the workflow's Forge prompt matches it: a
     // `local` run (no GitHub origin / no `gh`) must NOT be told to push to
     // origin + `gh pr create` (that would fail Forge); it commits on the branch

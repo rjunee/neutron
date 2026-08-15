@@ -268,6 +268,17 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
   })
 
   /**
+   * The durable re-fire counter. The workflow gates its cheap `plan:next`
+   * continuation planner (and the every-Kth full re-plan) on it, so a launcher that
+   * dropped it would silently pay the full whole-repo survey on every Ralph task —
+   * exactly the waste that planner exists to remove, and invisible from either side.
+   */
+  test('the Ralph round counter is threaded from the run row', () => {
+    expect(buildWorkflowArgs(input()).ralphRound).toBe(0)
+    expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
+  })
+
+  /**
    * The live head the launcher READ from git (never a model's report of it). The key's
    * PRESENCE is the signal that a code-read answer exists, so it must be absent — not
    * null — when the launcher did not read one, or the workflow could not tell an old

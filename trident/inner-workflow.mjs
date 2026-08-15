@@ -108,6 +108,16 @@ const {
   maxRounds = 10,
   laneRetryAttempts = 1,
   ralph = false,
+  // THE DURABLE RE-FIRE COUNTER (`code_trident_runs.ralph_round`), threaded by the
+  // launcher (`buildWorkflowArgs`). It is 0 on the FIRST iteration of a Ralph card
+  // and bumped by one per re-fire (`refireNextRalphTask`), so it is the only input
+  // that can tell a continuation apart from the run that started the card.
+  //
+  // NULL (a legacy caller, or a dry source check that supplies no args) → the FULL
+  // planner always runs. Fail-safe by construction: the cheap continuation planner
+  // is an optimisation, and an optimisation that cannot prove it applies must not
+  // apply.
+  ralphRound = null,
   // Git-mode threaded from the run (`local` | `pr`). Defaults to `pr` for any
   // legacy caller that doesn't thread it; the launcher always sets it.
   mergeMode = 'pr',
@@ -466,6 +476,13 @@ const modelForTag = (tag) =>
 // literals in THIS file — see the head-probe note below for why that matters.
 const ROLE_MODEL = {
   'plan:fable': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition', dispatchGroups: ['claude'] },
+  // THE CONTINUATION PLANNER IS THE SAME SEAT ON THE SAME TIER, deliberately. What
+  // `plan:next` removes is the whole-repo SURVEY, not the thinking: it still picks
+  // the next task and writes the execution spec a cheaper executor follows without
+  // re-reasoning the design. Routing it below `plan:fable` would make the two
+  // iterations of one card plan at different qualities, which is a harder failure
+  // to see than a slow build.
+  'plan:next': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition', dispatchGroups: ['claude'] },
   'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric', dispatchGroups: ['none', 'claude'] },
   'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial', group: 'claude', dispatchGroups: ['none', 'claude', 'codex'], codexWrapper: 'review' },
   'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis', dispatchGroups: ['claude'] },
@@ -506,6 +523,11 @@ const ROLE_MODEL = {
   // so a fallback to the most expensive tier would be a per-round tax on the step
   // that exists to REMOVE a per-lane tax.
   'merge-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
+  // The plan probe is the fourth of the same shape: two fixed git commands, a file
+  // body and a `grep -c` count back, interpreting nothing (the plan:fable-vs-plan:next
+  // selection is made in CODE from those fields). Routed explicitly for the reason
+  // head-probe's comment above gives — the silent fallback is the most expensive tier.
+  'plan:probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
 }
 
 // Generic seats use the canonical rubric review effort when moved onto Claude;
@@ -855,6 +877,34 @@ const PLAN_SCHEMA = {
     },
     complexity: { type: 'string', enum: ['mechanical', 'reasoning'] },
     remainingTasks: { type: 'number', description: 'count of tasks still unchecked AFTER the top task' },
+  },
+}
+
+// HOW OFTEN A CONTINUATION ITERATION STILL PAYS FOR THE FULL RE-DERIVATION.
+//
+// RE-PLANNING IS NOT PURE WASTE — building task N can legitimately change what
+// task N+1 should be. That is why the full `plan:fable` re-derivation still runs
+// at iteration 1, on ANY genuine crash-resume, and every PLAN_REFRESH_EVERY'th
+// round, so the committed plan cannot drift arbitrarily far from the code it is
+// supposed to describe. The claim this constant encodes is NOT "planning is
+// unnecessary"; it is "re-deriving the whole checklist from the whole codebase,
+// every single task, is the wrong default".
+//
+// DO NOT REMOVE THE PERIODIC FULL RE-PLAN TO MAKE THE NUMBERS LOOK BETTER.
+const PLAN_REFRESH_EVERY = 5
+
+// The one thing the cheap plan probe reports: whether the branch carries a
+// committed IMPLEMENTATION_PLAN.md, how many '- [ ]' tasks are still unchecked in
+// it, and its VERBATIM body (which `plan:next` returns unchanged as
+// `implementationPlan`, so `ralphExecuteNote` keeps working untouched).
+const PLAN_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['planFound', 'uncheckedCount', 'planBody'],
+  properties: {
+    planFound: { type: 'boolean' },
+    uncheckedCount: { type: 'number' },
+    planBody: { type: 'string' },
   },
 }
 
@@ -1453,6 +1503,53 @@ You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry 
 6. Return \`remainingTasks\` = the count of tasks still unchecked AFTER this one (0 when this is the last).
 Return via the schema. NEVER exit silently.
 SPEC / TASK CONTEXT:
+${task}`
+}
+
+// THE CHEAP PROBE THAT DECIDES WHETHER THE CONTINUATION PLANNER CAN RUN AT ALL.
+//
+// The workflow script has NO direct shell — every git fact it uses arrives through
+// an `agent()` Bash step (see `readBranchHead`). So "does the branch carry a
+// committed plan, and does it still have unchecked tasks?" needs a seat. This is
+// the same shape as the head probe: ONE fixed command pair, a verbatim body and a
+// count back, no judgement about what any of it means — the selection is made in
+// code below, from these three fields.
+function planProbePrompt() {
+  return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
+1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
+2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(`${forgeBranch}:IMPLEMENTATION_PLAN.md`)}\`
+If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": ""}\` — that is a normal answer, not an error to retry around.
+Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:
+\`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(`${forgeBranch}:IMPLEMENTATION_PLAN.md`)} | grep -c '^[[:space:]]*- \\[ \\]'\`
+(\`grep -c\` exits 1 and prints 0 when nothing matches; that is \`uncheckedCount\` = 0, not a failure.)
+NEVER EXIT SILENTLY.`
+}
+
+// THE CONTINUATION PLANNER (`plan:next`) — the same PLAN_SCHEMA, without the
+// whole-repo survey.
+//
+// The previous iteration's Forge PERSISTED AND COMMITTED the regenerated
+// IMPLEMENTATION_PLAN.md with its task checked off (`ralphExecuteNote`), so the
+// branch already carries a CURRENT plan. Iteration N+1 re-deriving that document
+// from SPEC.md + the whole codebase is the measured 287 s this step removes: the
+// saving is the ABSENT SURVEY, not a cheaper model — the routing matches
+// `plan:fable` deliberately, because choosing the next task and writing its
+// execution spec is still the high-value thinking.
+function planNextPrompt(body) {
+  return `You are the CONTINUATION PLANNER for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+A PRIOR ITERATION of this same build regenerated the IMPLEMENTATION_PLAN.md below and committed it to branch ${forgeBranch} with the task it built already marked '- [x]'. That plan is CURRENT. Your job is to pick up where it left off — NOT to re-derive it.
+- Do NOT read SPEC.md. Do NOT survey, read, or diff the codebase. Do NOT run any command. Everything you need is in this prompt.
+- Do NOT regenerate, re-order, re-word, or re-prioritise the checklist.
+1. Return \`implementationPlan\` = EXACTLY the committed plan body below, VERBATIM, byte for byte (the executor persists it again with the task you pick marked '- [x]', so any edit here silently rewrites the card's plan).
+2. Return \`topTask\` = the FIRST still-unchecked '- [ ]' item in that body, reading top to bottom (the Ralph one-task discipline: exactly one task per iteration).
+3. Return \`executionSpec\` for that ONE task: the exact TARGET FILES, the ACCEPTANCE CRITERION (what "done" means), and the TEST PLAN (which tests to write/run) — derived from that item's own text plus the TASK CONTEXT below. Make it precise enough that a cheaper model executes it WITHOUT re-reasoning the design.
+4. Tag \`complexity\`: 'mechanical' (boilerplate, tests, formatting, a single-file edit) vs 'reasoning' (multi-file, architecture-touching, tricky invariants). When genuinely uncertain choose 'reasoning' (Opus is the safer executor).
+5. Return \`remainingTasks\` = the count of unchecked items left AFTER the one you picked. A probe counted the unchecked '- [ ]' items in this body already, so this should be that count minus one.
+Return via the schema. NEVER exit silently.
+COMMITTED IMPLEMENTATION_PLAN.md (verbatim):
+${body}
+TASK CONTEXT:
 ${task}`
 }
 
@@ -3744,21 +3841,90 @@ try {
         : ''
     let ralphNote = ''
     if (ralph === true) {
-      const plan = await agent(
-        planFablePrompt(resuming),
-        withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
-      )
+      // ── WHICH PLANNER RUNS THIS ITERATION ─────────────────────────────────
+      // A PLANNED RALPH HANDOFF WHOSE BRANCH DID NOT MOVE IN THE CRASH WINDOW is
+      // the ONLY shape that may skip the survey, and this predicate is exactly
+      // that — read it against `classifyResume`, which is where it gets its
+      // force. For the checkpoint name 'ralph-task-built', reason
+      // 'unknown-checkpoint' is reachable ONLY after the recorded head was
+      // compared against the live head and MATCHED: every other outcome
+      // (head-moved / head-unreadable / head-branch-absent / no-recorded-head /
+      // no-checkpoint) returns earlier with its own reason. So this is not a
+      // name check with a comparison bolted on; the comparison already happened.
+      //
+      // Every other resume shape — 'forge-done', 'fix-round-N', 'argus-*', an
+      // outer-published resume, no checkpoint at all — is a GENUINE crash-resume
+      // (or the first iteration) and keeps the full planner and its verbatim
+      // `resumeNote` path, unchanged.
+      const cleanContinuation =
+        resumePlan.reason === 'unknown-checkpoint' &&
+        typeof resumeCheckpoint === 'string' &&
+        resumeCheckpoint.trim() === 'ralph-task-built' &&
+        Number.isSafeInteger(ralphRound) &&
+        ralphRound >= 2 &&
+        ralphRound % PLAN_REFRESH_EVERY !== 0
+      // The committed plan, read by the cheap probe seat — but ONLY when the cheap
+      // planner could actually be used. On every other path this costs nothing,
+      // because it is not dispatched.
+      const planProbe = cleanContinuation
+        ? await agent(
+            planProbePrompt(),
+            withModel({ label: 'plan:probe', phase: 'Build', schema: PLAN_PROBE_SCHEMA }),
+          )
+        : null
+      // THE DECISION IS MADE HERE, IN CODE, from the probe's three facts — the
+      // probe itself judges nothing. A dead probe, a branch with no committed
+      // plan, an empty body, or a plan with ZERO unchecked tasks all FALL THROUGH
+      // to the full planner: a branch whose plan is exhausted must ESCALATE to the
+      // planner that can decide the card is done, never silently build nothing.
+      const usePlanNext =
+        cleanContinuation &&
+        planProbe !== null &&
+        planProbe.planFound === true &&
+        Number.isSafeInteger(planProbe.uncheckedCount) &&
+        planProbe.uncheckedCount >= 1 &&
+        typeof planProbe.planBody === 'string' &&
+        planProbe.planBody.trim().length > 0
+      if (cleanContinuation && !usePlanNext) {
+        log(
+          `trident-v2 plan:next SKIPPED (round ${ralphRound}) — ${
+            planProbe === null
+              ? 'the plan probe returned nothing'
+              : planProbe.planFound !== true
+                ? `no committed IMPLEMENTATION_PLAN.md on ${forgeBranch}`
+                : typeof planProbe.planBody !== 'string' || planProbe.planBody.trim().length === 0
+                  ? 'the committed plan is empty'
+                  : `the committed plan has ${JSON.stringify(planProbe.uncheckedCount)} unchecked task(s)`
+          } → falling through to the full plan:fable`,
+        )
+      }
+      const plannerLabel = usePlanNext ? 'plan:next' : 'plan:fable'
+      const plan = usePlanNext
+        ? await agent(
+            planNextPrompt(planProbe.planBody),
+            withModel({ label: 'plan:next', phase: 'Build', schema: PLAN_SCHEMA }),
+          )
+        : await agent(
+            planFablePrompt(resuming),
+            withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
+          )
       // NEVER continue Ralph without a plan (Codex [P2]). The old in-Forge
       // RALPH_NOTE is gone, so a null plan (planner terminal error) would run
       // forge:build with NO plan + NO one-task discipline — an unplanned build.
       // Fail loudly; the catch{} persists a terminal failure result promptly.
+      // IDENTICAL FOR BOTH PLANNERS — the cheap path is allowed to be cheaper, not
+      // to be less safe.
       if (!plan) {
-        throw new Error('plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode')
+        throw new Error(
+          usePlanNext
+            ? 'plan:next returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode'
+            : 'plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode',
+        )
       }
       complexityTag = plan.complexity
       ralphNote = ralphExecuteNote(plan)
       ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
-      log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
+      log(`trident-v2 ${plannerLabel} → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
     }
 
     // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
