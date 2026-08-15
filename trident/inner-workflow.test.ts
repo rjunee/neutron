@@ -314,14 +314,17 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
   })
 
   test("every pr-mode fix hands its own commit back to the outer publisher before re-review", () => {
-    const handoff = SRC.indexOf("typeof fix?.commitSha === 'string'")
+    // The fix round's CLAIM is read once, through `oidClaim` — the same shape round 1
+    // uses. (It used to be a raw `typeof fix?.commitSha === 'string'` trim beside a
+    // separate `oidClaim` null-test, two readings of one value.)
+    const handoff = SRC.indexOf('const fixClaim = oidClaim(fix?.commitSha)')
     const returned = SRC.indexOf('return publishResult', handoff)
     expect(handoff).toBeGreaterThan(-1)
     expect(returned).toBeGreaterThan(handoff)
   })
 
-  test("every fix round re-pins to the sha THAT round's fix agent reported committing", () => {
-    const rePin = SRC.indexOf('reviewedHead = typeof fix?.commitSha')
+  test("every fix round re-pins to the head read from git at that round's completion", () => {
+    const rePin = SRC.indexOf('reviewedHead = fixHead')
     // `lastIndexOf`: the FIRST call is round 1's pre-loop review, which of course
     // precedes the re-pin. The one that must follow it is the in-loop RE-review.
     const loopReview = SRC.lastIndexOf('runReviewRound(diffFile, round, pr)')

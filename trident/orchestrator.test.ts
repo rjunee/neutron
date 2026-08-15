@@ -11,6 +11,7 @@ import {
   buildTridentOrchestrator,
   isTridentHarvestTerminal,
   resolveResumeLiveHead,
+  RESUME_HEAD_RETRY_DELAYS_MS,
 } from './orchestrator.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -91,6 +92,9 @@ function buildHarness(opts: {
     run_host: host,
     base_branch: 'main',
     now,
+    // The resume head-read retries are SPACED in production (a `pr`-mode read is a
+    // network call). The suite injects a no-op wait so those attempts stay free.
+    sleep: async () => {},
     // RALPH RE-FIRE (#362) — persist the re-fire reset atomically out-of-band so a
     // re-fired run isn't re-harvested (production wires the identical seam). The spy
     // records each patch to assert the crash-safe bundle, then applies it for real.
@@ -242,6 +246,59 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // …and the suffix must not break the recorded-OID extraction the live-head read
     // is gated on, or the resume would rebuild for the wrong reason.
     expect(h.inputs[1]!.resume_live_head).toBe(head)
+  })
+
+  /**
+   * THE REVIEW DIFF IS TAKEN AGAINST THE OBSERVED BASE TIP, NOT THE LOCAL `main` REF.
+   *
+   * MEASURED (Argus r4, run 25b2327d): the published artifact was 15,154 lines / ~100 files
+   * while the branch's own work was 20 files / 1,738 lines. The shared build checkout's local
+   * `main` was 8 merges behind `origin/main`, so `git diff main..<head>` presented every
+   * commit merged in between as part of this card — ~87% already-merged unrelated code. One
+   * reviewer diffed that stale base and vetoed the branch over files it does not touch; the
+   * round was lost. `rebaseOntoObservedBase` already ls-remotes the true base tip, so the
+   * publisher uses THAT sha and never the local ref name.
+   */
+  test('the published review diff is computed from the ls-remote-observed base tip, never the local base ref', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const stale = '9'.repeat(40)
+    const baseTip = '7'.repeat(40)
+    let lsRemotes = 0
+    let prLists = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        // The branch ALREADY contains the observed base tip → no replay, and git could only
+        // have answered that by reading the object, so it is local and diffable.
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes('gh pr list')) {
+          prLists += 1
+          return ok(prLists > 1 ? '42' : '')
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    const diffs = calls.filter((c) => c.includes(' diff ') && c.includes(`..${head}`))
+    expect(diffs.length).toBeGreaterThan(0)
+    for (const c of diffs) expect(c).toContain(`${baseTip}..${head}`)
+    // The positive control for the defect: not one of them names the local ref.
+    expect(calls.some((c) => c.includes(`main..${head}`))).toBe(false)
+    expect(calls.some((c) => c.includes(`--output=/tmp/trident-outer-published-${run.id}.diff`))).toBe(true)
   })
 
   test('a successful push without a matching origin witness fails closed', async () => {
@@ -520,6 +577,15 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // The REBASED head — not the head the build reported — is what review is re-fired against.
     expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${newHead}:0:1`)
     expect(h.inputs[1]?.resume_checkpoint).toBe(`outer-published:${newHead}:0:1`)
+    // …AND THE DIFF HANDED TO REVIEW IS TAKEN FROM THE OBSERVED BASE, ON THIS PATH TOO
+    // (Argus r5). `rebaseOntoObservedBase` has TWO return sites — already-contains
+    // (asserted above, at the `${baseTip}..${head}` test) and the REPLAY, this one — and
+    // only the first was pinned. A replay that returned the pre-rebase base would hand
+    // reviewers the ~87%-already-merged artifact this card exists to stop.
+    const replayDiffs = calls.filter((c) => c.includes(' diff ') && c.includes(`..${newHead}`))
+    expect(replayDiffs.length).toBeGreaterThan(0)
+    for (const c of replayDiffs) expect(c).toContain(`${newBaseSha}..${newHead}`)
+    expect(calls.some((c) => c.includes(`main..${newHead}`))).toBe(false)
     // The lease observation still precedes the push it certifies.
     const observeAt = calls.findIndex((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))
     const pushAt = calls.findIndex((c) => c.includes(' push '))
@@ -1895,8 +1961,11 @@ describe('orchestrator — the resume live head is read in code, never relayed b
   })
 
   // A read that never succeeds is bounded at 3 attempts and reports '' — reserved
-  // exclusively for "could not tell", never for "the branch is not there".
-  test('a read that never succeeds is bounded at three attempts and reports ""', async () => {
+  // exclusively for "could not tell", never for "the branch is not there". PART 2b:
+  // and '' at THIS boundary ends the run here, because the fire it would pay for has
+  // exactly one outcome (`classifyResume` → the bounded stop). The checkpoint columns
+  // are left untouched so a re-run after the read recovers resumes at this point.
+  test('a read that never succeeds stops the run at the boundary — no fire, checkpoint preserved', async () => {
     let dead = 0
     const broken = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
@@ -1906,10 +1975,167 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         return { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
       },
     })
-    await resumeRun()
+    const run = await resumeRun()
     await launchOnce(broken)
-    expect(broken.inputs[0]!.resume_live_head).toBe('')
+
     expect(dead).toBe(3)
+    expect(broken.inputs).toHaveLength(0)
+
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('review never ran (infra-only)')
+    expect(final.failure_reason).toContain('could not read the head of feat-x')
+    expect(final.failure_reason).toContain(HEAD)
+    expect(final.failure_reason).toContain('re-run when the read succeeds')
+    // Argus never ran; the reason for this class must never claim it did.
+    expect(final.failure_reason).not.toContain('without Argus APPROVE')
+    expect(final.inner_checkpoint).toBe('forge-done')
+    expect(final.inner_checkpoint_head).toBe(HEAD)
+  })
+
+  // `classifyResume` resolves a 'pr-merged' checkpoint to `merged` BEFORE it looks at
+  // the head, so the fast-exit must not steal that run: it fires and the inner loop
+  // finishes the merge.
+  test("a 'pr-merged' checkpoint is exempt — the fire still happens on an unreadable head", async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+          : ok(),
+    })
+    await resumeRun({ inner_checkpoint: 'pr-merged' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_live_head).toBe('')
+  })
+
+  // …and so is an EMPTY checkpoint name: `classifyResume` resolves that to `rebuild`
+  // (reason 'no-checkpoint') before it looks at the head, so there is no recorded work
+  // to preserve and nothing for the bounded stop to name.
+  test('an EMPTY checkpoint name is exempt too — no fast-exit, the fire still happens', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+          : ok(),
+    })
+    await resumeRun({ inner_checkpoint: '' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_live_head).toBe('')
+  })
+
+  // Local mode reaches '' by a different route (a failed rev-parse under an UNHEALTHY
+  // git); it takes the same exit.
+  test('a local-mode unreadable head takes the same boundary exit — no fire', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (
+          joined.includes('rev-parse --verify refs/heads/feat-x^{commit}') ||
+          joined.includes('rev-parse --git-dir')
+        ) {
+          return { ok: false, stdout: '', stderr: 'fatal: not a git repository', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await resumeRun({}, 'local' as MergeMode)
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('review never ran (infra-only)')
+    expect(final.failure_reason).toContain('could not read the head of feat-x')
+    expect(final.failure_reason).toContain(HEAD)
+    expect(final.failure_reason).not.toContain('without Argus APPROVE')
+    expect(final.inner_checkpoint).toBe('forge-done')
+    expect(final.inner_checkpoint_head).toBe(HEAD)
+  })
+
+  /**
+   * THE EXIT MUST NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN (Argus r5).
+   * `classifyResume` rebuilds on EVERY head — matching, moved, absent or unreadable —
+   * for a ralph `forge-done` and for any name it does not recognise, `ralph-task-built`
+   * above all. Exiting terminally on those turns a rebuild that was going to happen
+   * anyway into a dead run, so one transient `ls-remote` blip would kill every
+   * resuming ralph re-fire. `resumeHeadDecides` is the shared mirror;
+   * `inner-workflow-resume.test.ts` pins it against the `.mjs` decision itself.
+   */
+  const unreadable = (): Harness =>
+    buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+          : ok(),
+    })
+
+  test("a 'ralph-task-built' checkpoint is exempt — the fire still happens on an unreadable head", async () => {
+    const h = unreadable()
+    const run = await resumeRun({ inner_checkpoint: 'ralph-task-built' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_live_head).toBe('')
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+  })
+
+  test("a RALPH 'forge-done' is exempt too — its rebuild does not depend on the head", async () => {
+    const h = unreadable()
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, slug: 'ralph-resume', ralph: true })
+    await store.update(run.id, {
+      subagent_run_id: 'stale-id-from-prior-process',
+      subagent_status: 'running',
+      pr: 42,
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+    })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+  })
+
+  // NEGATIVE CONTROL for the pair above: the same 'forge-done' checkpoint on a
+  // NON-ralph run still takes the bounded exit, or the exemption would have deleted
+  // the stop rather than narrowed it.
+  test("a non-ralph 'forge-done' still stops — the exemption is narrow, not a repeal", async () => {
+    const h = unreadable()
+    const run = await resumeRun()
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)!.phase).toBe('failed')
+  })
+
+  /**
+   * THE TERMINAL RECORD POINTS AT THE WORK (Argus r5). "Re-run when the read succeeds"
+   * is advice a human follows by opening the PR the recorded commit is on — and this
+   * exit used to run BEFORE `detectExistingPr`, so a run whose row had not yet learned
+   * its PR number was filed with `pr: null` and no link to the branch it is naming.
+   */
+  test('the bounded exit still records the PR it detected', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+        }
+        if (joined.includes('gh pr list')) return ok('77\n')
+        return ok()
+      },
+    })
+    const run = await resumeRun({ pr: null })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.pr).toBe(77)
+    expect(final.failure_reason).toContain('could not read the head of feat-x')
   })
 
   test("an OK read with no output is the remote SAYING the branch is gone → 'absent'", async () => {
@@ -1994,11 +2220,11 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       // exists to stop being believed.
       return ok('1d731ad\trefs/heads/feat-x\n')
     }
-    const out = await resolveResumeLiveHead(host, {
-      repo_path: '/repo',
-      branch: 'feat-x',
-      merge_mode: 'pr',
-    })
+    const out = await resolveResumeLiveHead(
+      host,
+      { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' },
+      async () => {},
+    )
     expect(out).toBe('')
     expect(calls).toHaveLength(3)
   })
@@ -2011,11 +2237,94 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       exit_code: 128,
     })
     expect(
-      await resolveResumeLiveHead(host, {
-        repo_path: '/repo',
-        branch: 'feat-x',
-        merge_mode: 'local',
-      }),
+      await resolveResumeLiveHead(
+        host,
+        { repo_path: '/repo', branch: 'feat-x', merge_mode: 'local' },
+        async () => {},
+      ),
     ).toBe('')
+  })
+
+  /**
+   * A `pr`-mode read is `git ls-remote` — a NETWORK call — and `''` fails the run
+   * terminally at the fast-exit. Three back-to-back attempts complete inside a few
+   * milliseconds, which a DNS blip outlives comfortably: the retry existed but did not
+   * cover the one class that is actually transient. The waits are now a seam.
+   */
+  test('resolveResumeLiveHead: the retries are SPACED, not fired back to back', async () => {
+    const waits: number[] = []
+    const order: string[] = []
+    const host = async (): Promise<HostCommandResult> => {
+      order.push('read')
+      return { ok: false, stdout: '', stderr: 'ssh: Could not resolve hostname github.com', exit_code: 128 }
+    }
+    const out = await resolveResumeLiveHead(
+      host,
+      { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' },
+      async (ms) => {
+        waits.push(ms)
+        order.push(`wait:${ms}`)
+      },
+    )
+    expect(out).toBe('')
+    // Between attempts only: never before the first read, never after the last.
+    expect(order).toEqual(['read', ...RESUME_HEAD_RETRY_DELAYS_MS.flatMap((ms) => [`wait:${ms}`, 'read'])])
+    expect(waits).toEqual([...RESUME_HEAD_RETRY_DELAYS_MS])
+    expect(waits.every((ms) => ms > 0)).toBe(true)
+  })
+
+  /**
+   * THE PRODUCTION DEFAULT IS THE ONE THING EVERY OTHER TEST HERE REPLACES (Argus r4). The
+   * suite injects a no-op `sleep` everywhere, and `gateway/composition/build-core-modules.ts`
+   * never passes `opts.sleep` — so the value that actually runs in production, the default
+   * parameter, was exercised by nothing. If it were `async () => {}` the three attempts would
+   * fire back to back in production and every test above would still pass.
+   *
+   * MEASURED WITHOUT A CLOCK (Argus r5). An earlier version of this test spent the real
+   * ~1.25 s and asserted on `Date.now()` elapsed, which measures the runner rather than the
+   * code (`scripts/ci/wall-clock-bound-check.mjs`, ISSUES #438). The observable that
+   * actually distinguishes "sleeps" from "does not sleep" is the TIMER IT SCHEDULES, so the
+   * default is exercised for real against a captured `setTimeout`: the delays it asks for
+   * are the assertion, and firing each callback immediately keeps the test free.
+   */
+  test('resolveResumeLiveHead: the DEFAULT sleep schedules the real delays (no stub injected)', async () => {
+    const host = async (): Promise<HostCommandResult> => ({
+      ok: false,
+      stdout: '',
+      stderr: 'ssh: Could not resolve hostname github.com',
+      exit_code: 128,
+    })
+    const scheduled: number[] = []
+    const realSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      scheduled.push(ms ?? 0)
+      // Fire on the microtask queue instead of the timer queue: same ordering, no wait.
+      queueMicrotask(fn)
+      return 0
+    }) as unknown as typeof globalThis.setTimeout
+    try {
+      // No third argument: exactly how production calls it.
+      const out = await resolveResumeLiveHead(host, { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' })
+      expect(out).toBe('')
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
+    // A no-op default would schedule nothing; a back-to-back default would schedule zeroes.
+    expect(scheduled).toEqual([...RESUME_HEAD_RETRY_DELAYS_MS])
+  })
+
+  test('resolveResumeLiveHead: a read that SUCCEEDS first time never waits at all', async () => {
+    const waits: number[] = []
+    const head = 'a'.repeat(40)
+    const host = async (): Promise<HostCommandResult> => ok(`${head}\trefs/heads/feat-x\n`)
+    const out = await resolveResumeLiveHead(
+      host,
+      { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' },
+      async (ms) => {
+        waits.push(ms)
+      },
+    )
+    expect(out).toBe(head)
+    expect(waits).toEqual([])
   })
 })

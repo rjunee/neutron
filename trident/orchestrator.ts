@@ -96,6 +96,10 @@ export interface BuildTridentOrchestratorOptions {
   run_host: RunHostCommand
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
+  /** Injectable wait, used to SPACE the resume head-read retries
+   *  (`resolveResumeLiveHead`). Production leaves it unset and really sleeps; the
+   *  suite passes a no-op so a retried read still costs nothing. */
+  sleep?: SleepMs
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
   /** Static Codex credential dir (CODEX_HOME) threaded into the inner workflow —
@@ -461,6 +465,12 @@ export class TridentRebaseConflict extends Error {
  * refuse rather than force.
  *
  * The replay SQUASHES the branch into one commit. Deliberate — the PR merge is `--squash` anyway.
+ *
+ * RETURNS THE OBSERVED BASE TIP as well as the head, because the caller needs BOTH to describe
+ * what was built: the review diff is `<baseSha>..<head>`, and `baseSha` is the only value in the
+ * process that is guaranteed to be the tip the head sits on. `''` means the remote has no such
+ * base branch at all. See the review-diff comment in `publishBuiltCommit` for what taking the
+ * LOCAL `<base>` ref instead cost.
  */
 export async function rebaseOntoObservedBase(
   run_host: RunHostCommand,
@@ -469,7 +479,7 @@ export async function rebaseOntoObservedBase(
   base: string,
   pr: number | null,
   scratchDir: string,
-): Promise<{ head: string; rebased: boolean }> {
+): Promise<{ head: string; rebased: boolean; baseSha: string }> {
   // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
   //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
   const observedBase = await run_host(
@@ -486,7 +496,7 @@ export async function rebaseOntoObservedBase(
   }
   let baseSha = observedBase.stdout.trim().split(/\s+/)[0] ?? ''
   // No remote base at all → there is nothing to rebase ONTO. Not an error (a brand-new origin).
-  if (baseSha === '') return { head: await readHead(), rebased: false }
+  if (baseSha === '') return { head: await readHead(), rebased: false, baseSha: '' }
 
   // (b) The branch tip we are about to move, captured BEFORE anything touches it — it is the
   //     compare-and-swap expectation in (h).
@@ -499,7 +509,10 @@ export async function rebaseOntoObservedBase(
     ['git', '-C', repoPath, 'merge-base', '--is-ancestor', baseSha, `refs/heads/${branch}`],
     repoPath,
   )
-  if (contains.ok) return { head: oldHead, rebased: false }
+  //     `contains.ok` also PROVES `baseSha` is a local object — git could only answer the
+  //     ancestry question by reading it — which is what makes it safe to hand back as a
+  //     diff base on a shallow checkout that never reaches the fetch below.
+  if (contains.ok) return { head: oldHead, rebased: false, baseSha }
 
   // (d) Make the base tip a real local object. `--no-tags` and NOT `--unshallow`: deepening the
   //     shared checkout is minutes of network for every lane on this box.
@@ -592,7 +605,7 @@ export async function rebaseOntoObservedBase(
       repoPath,
     )
     if (!swapped.ok) throw new Error(publishFailureReason('advance', branch, swapped.stderr))
-    return { head: newHead, rebased: true }
+    return { head: newHead, rebased: true, baseSha }
   } finally {
     await dropScratch()
   }
@@ -614,20 +627,70 @@ export async function rebaseOntoObservedBase(
  *                              is gone from the authority, so a rebuild is correct and
  *                              can be named truthfully (`head-branch-absent`).
  *   - `''`                   → the read FAILED after 3 attempts. Reserved exclusively
- *                              for "could not read", never for "not there", so Part 2b
- *                              of this card can give it a bounded STOP consequence.
+ *                              for "could not read", never for "not there" — and
+ *                              `classifyResume` now GIVES it a bounded STOP
+ *                              (`{ mode: 'stop', reason: 'head-unreadable' }`): the run
+ *                              ends naming the branch and the recorded OID instead of
+ *                              rebuilding work that is already committed.
  *
  * The authority split mirrors the workflow's own `readBranchHead`: in `pr` mode the
  * REMOTE is the authority (an unpushed local branch is not the shared truth); in
- * `local` mode the local ref is. Retries are attempt-only (no sleeps) — `run_host` is
- * the seam, and the tests must stay fast.
+ * `local` mode the local ref is.
+ *
+ * THE RETRIES ARE SPACED, AND THE SPACING IS AN INJECTED SEAM. In `pr` mode the read is
+ * `git ls-remote` — a NETWORK call — and the consequence of `''` is a terminal, non-
+ * self-healing run failure at the fast-exit in `launch()`. Three attempts fired back to
+ * back complete inside a few milliseconds, which is short enough that one dropped packet
+ * fails all three and kills a run whose work is intact. So the attempts are separated by
+ * `RESUME_HEAD_RETRY_DELAYS_MS`, through an injected `sleep` the tests replace with a
+ * no-op — the delay is real in production and free in the suite. `run_host` remains the
+ * seam for the READ; this is the seam for the WAIT.
+ *
+ * THE WINDOW IS ~1.25 s IN TOTAL, AND IT IS NOT CLAIMED TO BE MORE. It covers a sub-second
+ * blip; it does not outlive a sustained outage, and this docblock previously said otherwise.
+ *
+ * IT IS SPENT ON THE TICK THREAD, AND THAT COST IS SERIAL (Argus r5). `tick.ts` steps runs
+ * ONE AT A TIME (`per_tick_limit` 50) and this wait is awaited from `launch()`, so an origin
+ * blip that hits N resuming runs at once adds ~1.25 s × N to that tick. The constant is left
+ * small partly for this reason: it bounds a SHARED thread, not just one run. Making the tick
+ * concurrent is a change to `tick.ts`, not to this function — recorded here so the next
+ * person tempted to raise the constant knows what else it multiplies.
+ *
+ * WHAT THE FAILURE IT LEAVES BEHIND ACTUALLY COSTS, STATED WITHOUT THE CLAIM THIS COMMENT USED
+ * TO MAKE (Argus r4): the run is terminal, and re-running the card is a FRESH DISPATCH — a new
+ * row with NULL checkpoint columns (`store.ts` `create`), because a terminal row is never
+ * advanced again (`step()` short-circuits on `isTerminalPhase`). So the re-run REBUILDS. The
+ * checkpoint columns preserved on the failed row are evidence for a human, not an input to
+ * anything. There is no resume-a-terminal-run path today; adding one is a separate card
+ * (IMPLEMENTATION_PLAN.md, follow-ups).
+ *
+ * THAT IS STILL THE TRADE THIS CARD ASKED FOR, and it is deliberate rather than free: before
+ * this change the same blip rebuilt AUTOMATICALLY, so the regression is availability, not work
+ * lost — the branch and its commits are untouched. "Could not tell" must not silently spend a
+ * max-effort rebuild of already-pushed work (measured: 3,813 → 84,875 → 133,169 output tokens on
+ * the neutron-enterprise run), so the rebuild now needs a human to ask for it. The number here
+ * is left small rather than grown by guess: every second is also a second a genuinely-dead
+ * branch stalls, and the constant is exported so the trade can be made with evidence.
  */
+export const RESUME_HEAD_RETRY_DELAYS_MS = [250, 1000] as const
+
+/** Injectable wait. Production sleeps; the suite passes a no-op so 3 attempts still
+ *  cost nothing. */
+export type SleepMs = (ms: number) => Promise<void>
+
+const realSleep: SleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 export async function resolveResumeLiveHead(
   run_host: RunHostCommand,
   run: { repo_path: string; branch: string; merge_mode: 'local' | 'pr' },
+  sleep: SleepMs = realSleep,
 ): Promise<string> {
   const ref = `refs/heads/${run.branch}`
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const attempts = RESUME_HEAD_RETRY_DELAYS_MS.length + 1
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    // Between attempts only — never before the first read, and never after the last
+    // (a run that is about to be failed must not also be made to wait for it).
+    if (attempt > 0) await sleep(RESUME_HEAD_RETRY_DELAYS_MS[attempt - 1] ?? 0)
     if (run.merge_mode === 'pr') {
       const res = await run_host(
         ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', ref],
@@ -661,6 +724,47 @@ export async function resolveResumeLiveHead(
     }
   }
   return ''
+}
+
+/**
+ * Does the LIVE HEAD decide what this resume checkpoint means?
+ *
+ * The launcher's fast-exit (in `launch()`) exists only to avoid spending a fire whose
+ * outcome is already known: `classifyResume` would return the bounded
+ * `{ mode: 'stop', reason: 'head-unreadable' }`. It must therefore fire — not exit —
+ * for every checkpoint `classifyResume` answers WITHOUT consulting the head, or it
+ * pre-empts a decision it does not share. Those are:
+ *
+ *   • `''` — no checkpoint at all → `rebuild`, and nothing recorded to preserve.
+ *   • `pr-merged` → `merged`; the head branch may already be deleted.
+ *   • `forge-done` in RALPH mode → `rebuild` ('ralph-progress-unknown'), and
+ *     any name `classifyResume` does not recognise — `ralph-task-built` above all —
+ *     → `rebuild` ('unknown-checkpoint'). Both are the answer on EVERY head, so a
+ *     read failure changed nothing (Argus r5). Stopping these terminally would let
+ *     one transient `ls-remote` blip kill every resuming ralph re-fire.
+ *
+ * MIRRORS `classifyResume`/`resumeOnUnchangedHead` in `inner-workflow.mjs`, which is
+ * a `.mjs` Workflow script this module cannot import; `inner-workflow-resume.test.ts`
+ * executes BOTH and asserts they agree on every name, so the pair cannot drift
+ * silently.
+ */
+export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
+  const name = checkpoint.trim()
+  if (name === '' || name === 'pr-merged') return false
+  if (name === 'forge-done' && ralph) return false
+  return (
+    name === 'argus-approved' ||
+    name === 'argus-request-changes' ||
+    name === 'forge-done' ||
+    /^argus-request-changes-round-\d+$/.test(name) ||
+    /^fix-round-\d+$/.test(name) ||
+    // The `:deviated` suffix (#291's taskDeviated carry) is part of the PRODUCTION
+    // checkpoint vocabulary — `classifyResume` accepts it at inner-workflow.mjs:2472.
+    // Rejecting it here made the launcher spend a whole workflow fire on a checkpoint
+    // it should have fast-exited on. The suffix says nothing about whether THIS
+    // invocation may skip its rebuild, so a deviated publish decides exactly as a clean one.
+    /^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)
+  )
 }
 
 export function innerTerminalFailureReason(
@@ -700,11 +804,45 @@ export function innerTerminalFailureReason(
   // unauthenticated `gh` made the readiness probe say `gh auth login`, no review seat ever
   // ran, and this function reported ten rounds' worth of review that never happened. So the
   // specific message ships WITH that measured signal, and ONLY with it: the branch below is
-  // the one permitted specific message, gated on BOTH the block kind and a non-null cause.
+  // the one permitted specific message, gated on a non-null cause.
   // Everything else — every inferred cause, every result carrying no measurement — still
   // gets the generic sentence above, for all the reasons R1/R2 record.
-  if (result.block_kind === 'infra-only' && result.terminal_cause !== null) {
-    return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${redactPushError(result.terminal_cause)}`
+  // …and ONLY when the cause survives redaction with something left to read. An
+  // over-redacted (or whitespace-only) cause is not a measurement, and appending a
+  // dangling colon to the sentence would report one where none exists.
+  //
+  // 2026-08-15 — A THROWN WORKFLOW ALSO MEASURES A CAUSE, and it was being discarded.
+  // `block_kind: 'infra-only'` is emitted only by the review-stop paths, so requiring it
+  // meant every exit that THREW — including the one this card was raised for — fell through
+  // to the sentence below. Run 3d2696c3 threw "forge:build completed without a full local
+  // commit OID for the outer publisher" and the operator was told "…without Argus APPROVE"
+  // about a run Argus never saw. The catch path now carries the sentence the workflow
+  // composed where the fact was known, with NO block kind (a throw is not a review verdict).
+  //
+  // THE GATE WIDENS BY EXACTLY THAT ONE VALUE — `null` — and no further. 'code',
+  // 'round-lost' and 'none' are REVIEW verdicts, whose findings describe the DIFF; quoting
+  // one as a terminal cause would re-invent the inference this function refuses to make, so
+  // they keep the generic sentence (see the test that pins each of them).
+  //
+  // `null` IS NOT ONLY "THE CATCH PATH" — and an earlier revision of this comment said it
+  // was (Argus r4). `parseInnerResult` decodes `block_kind` FAIL-CLOSED: the four strings the
+  // workflow writes decode, and ANY other value — garbled, truncated, from a future writer —
+  // becomes `null` too. Which is precisely why this branch is safe to widen to it: the
+  // sentence `null` selects states the failure and quotes the measured cause, and claims
+  // NOTHING about the review panel. Only 'infra-only' licenses "review never ran", and only
+  // an exact-match decode produces it. A garbled kind therefore lands in the honest sentence,
+  // never the specific one (pinned by the garbled-kind test).
+  //
+  // The kind also decides WHICH sentence, because it is the only thing that licenses the
+  // claim "review never ran". Without it the reason states the failure and quotes the
+  // measurement, and says nothing at all about the review panel.
+  if (result.terminal_cause !== null && (result.block_kind === 'infra-only' || result.block_kind === null)) {
+    const cause = redactPushError(result.terminal_cause).trim()
+    if (cause !== '') {
+      return result.block_kind === 'infra-only'
+        ? `review never ran (infra-only) at round ${reported} of ${ceiling}: ${cause}`
+        : `inner workflow failed at round ${reported} of ${ceiling}: ${cause}`
+    }
   }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
@@ -912,7 +1050,22 @@ export function buildTridentOrchestrator(
     if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
 
     const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
-    const base = await resolveBase(run)
+    // THE REVIEW DIFF IS TAKEN AGAINST THE OBSERVED BASE TIP, NOT AGAINST THE LOCAL `main` REF.
+    //
+    // MEASURED (Argus r4, run 25b2327d): the published artifact was 15,154 lines across ~100
+    // files while the branch's own work was 20 files / 1,738 lines. The shared build checkout's
+    // local `main` was 8 merges behind `origin/main`, and `git diff main..<head>` on a branch
+    // built from CURRENT origin therefore shows every commit merged in between as part of this
+    // card. ~87% of that artifact was already-merged unrelated code — one reviewer diffed the
+    // stale base, vetoed the branch over bugs in files it does not touch, and the round was lost.
+    //
+    // `rebaseOntoObservedBase` already `ls-remote`s the base tip (the same observation the push
+    // lease uses) and the head it returns is replayed directly onto it, so that sha is the exact
+    // left-hand side of this branch's own diff. It is a local object on BOTH paths that return a
+    // non-empty one: the replay fetches it, and the already-contains path could only have been
+    // answered by reading it. An empty one means there is no remote base at all (a brand-new
+    // origin), which is the one case the base NAME is still the best available answer.
+    const base = rebased.baseSha !== '' ? rebased.baseSha : await resolveBase(run)
     const changed = await opts.run_host(
       ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${headToPublish}`],
       run.repo_path,
@@ -972,14 +1125,63 @@ export function buildTridentOrchestrator(
       /^[0-9a-f]{40}$/.test(recorded) &&
       typeof run.branch === 'string' &&
       run.branch.length > 0
-        ? await resolveResumeLiveHead(opts.run_host, {
-            repo_path: run.repo_path,
-            branch: run.branch,
-            merge_mode: run.merge_mode,
-          })
+        ? await resolveResumeLiveHead(
+            opts.run_host,
+            {
+              repo_path: run.repo_path,
+              branch: run.branch,
+              merge_mode: run.merge_mode,
+            },
+            // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
+            // network call and the consequence of `''` is terminal, so the attempts are
+            // spread over real time in production and collapsed to nothing in the suite.
+            opts.sleep,
+          )
         : undefined
+    // PART 2b, OUTER FAST-EXIT — the launcher itself just failed 3 code reads of the
+    // head. Firing the workflow now would spend a fire only to have `classifyResume`
+    // return the bounded stop ({ mode: 'stop', reason: 'head-unreadable' }) for every
+    // checkpoint except 'pr-merged' (resolved to `merged` BEFORE the head check —
+    // exempted here for exactly that reason). classifyResume stays the single semantic
+    // decider; this is only the cheap exit for the one case whose outcome is already
+    // known at this boundary. `failedRun` spreads `run`, so inner_checkpoint /
+    // inner_checkpoint_head / inner_checkpoint_findings survive untouched — which
+    // preserves the EVIDENCE (what was built, and where), and nothing more: a re-run is
+    // a fresh dispatch with null checkpoints, so it rebuilds. See `resolveResumeLiveHead`
+    // for why that is the trade, and IMPLEMENTATION_PLAN.md for the resume follow-up.
+    //
+    // SOME CHECKPOINT NAMES ARE EXEMPT, each because classifyResume does not consult
+    // the head for them, so this exit would pre-empt a decision it does not share:
+    // 'pr-merged' (resolved to `merged`) and the empty name (resolved to `rebuild`,
+    // reason 'no-checkpoint' — there is nothing recorded to preserve) are answered
+    // before the head check; the head-INDEPENDENT names rebuild on every head. See
+    // `resumeHeadDecides`.
+    const resume_checkpoint_name = (resume_checkpoint ?? '').trim()
+    // THE PR LINK IS RESOLVED BEFORE THE EXIT, NOT AFTER IT (Argus r5). This used to sit
+    // below, so the one path that ends a run WITHOUT ever firing recorded a terminal row
+    // with `pr: null` — and "re-run when the read succeeds" is advice a human follows by
+    // opening the PR the recorded work is on. The exit is rare and already terminal; one
+    // `gh pr view` to make the record point at the work is worth more than the call saved.
     const existingPr = run.pr ?? (await detectExistingPr(run))
     const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
+    if (resume_live_head === '' && resumeHeadDecides(resume_checkpoint_name, run.ralph)) {
+      const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
+      return {
+        run: failedRun(
+          launchRun,
+          innerTerminalFailureReason(launchRun, {
+            round: launchRun.round,
+            checkpoint: resume_checkpoint,
+            block_kind: 'infra-only',
+            terminal_cause: cause,
+          }),
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${launchRun.phase} → failed (resume head unreadable — bounded stop, no fire)`,
+      }
+    }
 
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {

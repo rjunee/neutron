@@ -92,6 +92,20 @@ describe('roundLanded — did the branch actually move?', () => {
     expect(roundLanded(A, undefined)).toBe(false)
   })
 
+  /**
+   * THE TWO HEADS COMPARED HERE COME FROM DIFFERENT PROBES (Argus r4). `branchHead` is
+   * `readBuiltHead`, which lowercases through `normalizeOid`; `headAfter` is
+   * `readBranchHead`, which lowercases only for its `absent` test. git prints lowercase,
+   * so an uppercase relay is theoretical — but the failure it would produce is the one
+   * direction this gate must never fail in: the SAME commit reading as a landed round.
+   */
+  test('case does not fake movement — the same commit in either case did NOT land', () => {
+    expect(roundLanded(A, A.toUpperCase())).toBe(false)
+    expect(roundLanded(A.toUpperCase(), A)).toBe(false)
+    // …and a genuinely different commit still lands, whatever case it arrives in.
+    expect(roundLanded(A, B.toUpperCase())).toBe(true)
+  })
+
   test('an unreadable BEFORE is permissive — no baseline, so invent no failure', () => {
     // Round 1's Forge is the only source of the baseline. If it reported no
     // commitSha we know nothing, and failing the run on that would block builds
@@ -135,7 +149,7 @@ describe('the loop honours the gate', () => {
   test('the check runs BEFORE the re-review, not after', () => {
     // Order is the point. Checking after the review would still have paid for four
     // reviewers on unchanged code — the exact cost being eliminated.
-    const probeAt = SRC.indexOf('const headAfter = await readBranchHead(round)')
+    const probeAt = SRC.indexOf('const headAfterRead = await readBranchHead(round)')
     // `lastIndexOf` on purpose: the FIRST `reviewAndSynthesize(diffFile, round)` is
     // the pre-loop review (`let synthesis = await …`), which of course precedes the
     // probe. The one that must come after is the RE-review inside the fix loop, and
@@ -168,7 +182,16 @@ describe('the loop honours the gate', () => {
 
   test('the head probe asks the REMOTE in PR mode', () => {
     // "Pushed" is the property that matters: a local ref can be ahead of anything
-    // a reviewer or the merge will ever see.
-    expect(SRC).toContain('git ls-remote origin')
+    // a reviewer or the merge will ever see. `--exit-code` so the probe can tell a
+    // branch the remote says is GONE (exit 2) from a read that failed — the tri-state
+    // `classifyResume` gives opposite consequences to.
+    expect(SRC).toContain('git ls-remote --exit-code origin')
+  })
+
+  test("a branch the authority says is GONE is not read as this round's progress", () => {
+    // The probe is tri-state now, and `roundLanded` compares STRINGS: a literal
+    // 'absent' differs from the round-1 head and would read as a landed round. It is
+    // collapsed to '' at this one call site — "the branch is gone" is not "it moved".
+    expect(SRC).toContain("const headAfter = headAfterRead === 'absent' ? '' : headAfterRead")
   })
 })

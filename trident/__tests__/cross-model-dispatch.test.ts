@@ -164,9 +164,12 @@ async function runWorkflow(
           }
         : built
     }
+    if (String(label).startsWith('head-probe-round-built-')) {
+      return { head: label === 'head-probe-round-built-r1' ? 'a'.repeat(40) : 'b'.repeat(40) }
+    }
     if (String(label).startsWith('head-probe-round-')) {
       // A head DIFFERENT from round 1's `abc`, so `roundLanded` sees the branch move.
-      return { head: opts.fixLands === true ? 'fed' : '' }
+      return { head: opts.fixLands === true ? 'b'.repeat(40) : '' }
     }
     if (label === 'plan:fable') {
       // Ralph's planner. `complexity` is the field that splits the build dispatch
@@ -550,6 +553,7 @@ describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () =>
       .filter((label): label is string => label !== undefined)
     expect(anthropicLabels).toEqual([
       'plan:fable',
+      'head-probe-round-built-r1',
       'argus:claude',
       'argus:synthesis',
       'cleanup:worktree',
@@ -987,13 +991,11 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(panels[1]!.prompt).not.toContain('/tmp/x.diff')
   })
 
-  test('the downstream contract survives: the measured sha becomes `reviewedHead`', async () => {
-    // The merge pins to `reviewedHead` (#545) and refuses when it is empty, so a
-    // codex build that could not report a pushed sha the way a Claude build does
-    // would fail every merge. The bridge copies it out of the wrapper's measured
-    // trailer, and it has to arrive here unchanged.
+  test('the downstream contract survives: the git-read sha becomes `reviewedHead`', async () => {
+    // The merge pins to the full OID read from git at build completion (#545),
+    // not to the executor's independent structured claim.
     const { result } = await runWorkflow(productionArgs(CODEX_BUILD))
-    expect(result['reviewedHead']).toBe('abc')
+    expect(result['reviewedHead']).toBe('a'.repeat(40))
     expect(result['branch']).toBe('trident/a-run')
     expect(result['verdict']).toBe('APPROVE')
   })
@@ -1126,14 +1128,15 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // Never an APPROVE — an empty diff must not be able to produce one.
     expect(result['verdict'] ?? null).not.toBe('APPROVE')
 
-    // EACH FACT ALONE IS FATAL, for a different reason: a diff with no sha can never
-    // be merged (`--match-head-commit` has nothing to pin), and a sha with no diff
-    // gives the panel nothing to read.
-    for (const produced of [{ commitSha: 'abc', diffFile: '' }, { commitSha: '', diffFile: '/tmp/x.diff' }]) {
-      const half = await runWorkflow(productionArgs(CODEX_BUILD), { buildProduces: produced })
-      expect(half.result['ok']).toBe(false)
-      expect(half.captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
-    }
+    // A missing diff is still fatal, whether or not the agent reports a sha.
+    const noDiff = await runWorkflow(productionArgs(CODEX_BUILD), { buildProduces: { commitSha: 'abc', diffFile: '' } })
+    expect(noDiff.result['ok']).toBe(false)
+    expect(noDiff.captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+
+    // A missing agent claim with a real diff is healthy: git supplies the head.
+    const noClaim = await runWorkflow(productionArgs(CODEX_BUILD), { buildProduces: { commitSha: '', diffFile: '/tmp/x.diff' } })
+    expect(noClaim.result['ok']).toBe(true)
+    expect(noClaim.result['reviewedHead']).toBe('a'.repeat(40))
 
     // THE CONTROL: the same harness with a real sha and diff DOES reach the panel, so
     // the emptiness above is the guard firing and not a workflow that never reviews.
