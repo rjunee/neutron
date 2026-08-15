@@ -92,8 +92,13 @@ describe('WebDiagnosticsClient — a refused report is not a delivered one', () 
       token: 'secret-bearer',
       fetchImpl: async () => new Response('{}', { status: 401 }),
     })
-    await expect(client.sendReport(report)).rejects.toThrow()
-    const err = await client.sendReport(report).catch((e: Error) => e)
-    expect(err.message).not.toContain('secret-bearer')
+    let caught: unknown
+    try {
+      await client.sendReport(report)
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(DiagnosticsSendError)
+    expect((caught as Error).message).not.toContain('secret-bearer')
   })
 })
