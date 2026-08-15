@@ -2910,12 +2910,22 @@ actionable `dispatchConstraint` describing the wrapper or executor required to w
     does it re-fire the workflow from `outer-published:<sha>` for review.
     Before the lease observation the outer loop also REBASES the branch onto the
     observed base tip (`rebaseOntoObservedBase`): the shared checkout is shallow
-    (#574), so it replays the branch's own diff (`gh pr diff` when a PR exists,
-    two-dot diff on first publish) onto the base tip in a throwaway worktree with
-    `git apply --3way` and moves the branch ref by compare-and-swap — a stale branch
-    reaches review as `MERGEABLE`, and a replay conflict is an ATTENTION failure
-    (`TridentRebaseConflict`, naming the conflicting paths), never a
-    `REQUEST_CHANGES` and never auto-resolved. The credential
+    (#574), so it replays the branch's own diff (`gh pr diff` when a PR exists, the
+    diff from the branch's FORK POINT on first publish — a two-dot `base..branch`
+    diff would replay work `base` already has) onto the base tip in a throwaway
+    worktree with `git apply --3way` and moves the branch ref by compare-and-swap —
+    a stale branch reaches review as `MERGEABLE`. A replay CONFLICT is handed to
+    the bounded Forge `resolve_conflict` resolver first, in that throwaway worktree:
+    this is the autonomous path, so unlike the local-merge path there is no human
+    present to reconcile the branch by hand. The resolver's claim is checked against
+    git, not taken — the unmerged set AND the staged bytes must come back free of
+    conflict markers, and every round must shrink the set. With no resolver
+    configured, on a decline, on a round that makes no progress, or on an exhausted
+    bound, the outcome is the unchanged ATTENTION failure (`TridentRebaseConflict`,
+    naming the conflicting paths), never a `REQUEST_CHANGES`. A resolved conflict
+    shortcuts nothing: resolution is a mergeability operation, not a verdict, and
+    the branch goes through the full review gate exactly as a clean replay does.
+    The credential
     is injected at the host-command boundary in `open/composer.ts`; it never enters the
     wrapper command, the Forge transcript, or any process below the inner workflow.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
