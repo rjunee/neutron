@@ -8,6 +8,7 @@ import type { HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator, isTridentHarvestTerminal } from './orchestrator.ts'
+import { interpretFailure } from './delivery.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
@@ -1803,5 +1804,74 @@ describe('orchestrator — T3: an unpushed finished commit is an ALARM in words'
     expect(final.failure_reason).toContain(`a finished commit was not published: ${HEAD40}`)
     // Said ONCE — the alarm is a sentence, not a stutter.
     expect(final.failure_reason!.match(/a finished commit was not published/g)).toHaveLength(1)
+  })
+})
+
+/**
+ * T4 — RUN `f384460d` REPLAYED: AN INFRASTRUCTURE DEATH MUST NOT BE REPORTED AS A VERDICT.
+ *
+ * The measured trace: the build finished (`9e7dfbe`, tests green), then the inner workflow
+ * THREW and its catch path wrote `{ ok:false, verdict:'REQUEST_CHANGES', checkpoint:
+ * 'inner-error', findings: [], remainingTasks: 0 }`. That verdict is the WRAPPER'S — no
+ * reviewer ever ran. The orchestrator copied it onto the row and `run-progress.ts`
+ * (`verdict: run.inner_verdict`) told the owner the reviewer had rejected the work. Three
+ * times in one night.
+ */
+describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f384460d)', () => {
+  test('the replayed inner-error harvest fails with a null verdict, the PR intact, and an infra reason', async () => {
+    const h = buildHarness({
+      // The exact terminal JSON from the journal, PR sentinel and all.
+      plan: () => ({
+        result: {
+          ok: false,
+          prNumber: 0,
+          branch: 'feat-x',
+          verdict: 'REQUEST_CHANGES',
+          round: 1,
+          checkpoint: 'inner-error',
+          remainingTasks: 0,
+        },
+      }),
+      // `detectExistingPr` runs at FIRE time — this is how the row comes to hold pr=267.
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    // THE HEADLINE. The workflow's row-level write said REQUEST_CHANGES (the sim writes it,
+    // exactly as `writeTerminalResult` does); the harvest must REPLACE it with "no verdict".
+    expect(final.inner_verdict).toBeNull()
+    // …and the recovery still has something to point at.
+    expect(final.pr).toBe(267)
+    // The reason says infrastructure, in words, because that is what the delivery reads.
+    expect(final.failure_reason).toContain('build infrastructure failed')
+    expect(final.failure_reason).not.toContain('without Argus APPROVE')
+    // End to end: the owner is delivered the infra class, not a review outcome.
+    expect(interpretFailure(final).klass).toBe('infra')
+  })
+
+  test('a genuine review exhaustion still reports REQUEST_CHANGES with review copy', async () => {
+    // THE POSITIVE CONTROL. Without it, a change that nulled every failed verdict would pass
+    // the test above while erasing the one verdict that IS a verdict.
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          round: 8,
+          checkpoint: 'argus-request-changes',
+          blockKind: 'code',
+          findings: [{ severity: 'blocker', title: 'null deref in a.ts' }],
+        },
+      }),
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(final.failure_reason).toContain('without Argus APPROVE')
+    expect(interpretFailure(final).klass).not.toBe('infra')
   })
 })

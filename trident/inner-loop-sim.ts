@@ -45,6 +45,12 @@ export interface SimResult {
   prMerged?: boolean
   publishRequested?: boolean
   publishHead?: string | null
+  /** #240 — why the workflow stopped ('infra-only' means no review seat judged the code). */
+  blockKind?: 'none' | 'code' | 'infra-only' | 'round-lost' | null
+  /** T4 — the review findings the terminal result carried. Emitted only when the test sets
+   *  it (the wrapper's catch path writes `findings: []`, and legacy rows omit it entirely),
+   *  so the absent-field default decodes to `findings_present: false`. */
+  findings?: unknown[]
 }
 
 /** The stand-in reviewed head OID a simulated workflow records (#545). Real
@@ -69,6 +75,10 @@ export function simResultJson(sim: SimResult): string {
     ...(sim.prMerged !== undefined ? { prMerged: sim.prMerged } : {}),
     ...(sim.publishRequested !== undefined ? { publishRequested: sim.publishRequested } : {}),
     ...(sim.publishHead !== undefined ? { publishHead: sim.publishHead } : {}),
+    ...(sim.blockKind !== undefined ? { blockKind: sim.blockKind } : {}),
+    // T4 — same rule: only what the test asked for, so every other test exercises the
+    // absent-field default (no findings recorded).
+    ...(sim.findings !== undefined ? { findings: sim.findings } : {}),
     // #545 — production ALWAYS records the reviewed head, so the default models
     // that; an explicit null models the workflow that failed to (and the pr-mode
     // merge must then refuse rather than merge an unpinned head).

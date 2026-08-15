@@ -140,7 +140,24 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       publish_head: null,
       block_kind: null,
       terminal_cause: null,
+      findings_present: false,
     })
+  })
+  // T4 (run f384460d) — DID A REVIEWER SAY ANYTHING AT ALL? This is the field that tells an
+  // infrastructure death (the wrapper's catch path: `checkpoint:'inner-error'`, `findings: []`)
+  // apart from a terminal result carrying real review findings. Decoded FAIL-CLOSED, because a
+  // false positive re-creates the defect: a crash delivered to the owner as REQUEST_CHANGES.
+  test('decodes findings_present — only a NON-EMPTY array counts', () => {
+    const presence = (raw: Record<string, unknown>) =>
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', ...raw }))?.findings_present
+    // The measured f384460d shape: the catch path does not write the field at all.
+    expect(presence({})).toBe(false)
+    // The reviewed-nothing shape: written, and empty.
+    expect(presence({ findings: [] })).toBe(false)
+    // A real review finding behind the stop → NOT an infra death.
+    expect(presence({ findings: [{ severity: 'blocker', title: 'it is broken' }] })).toBe(true)
+    // Garbled/foreign shapes decode false rather than reading truthy.
+    for (const bogus of ['garbled', 1, true, {}, null]) expect(presence({ findings: bogus })).toBe(false)
   })
   // A MERGE IS TERMINAL (#563). The flag the OUTER loop reads to finish a run
   // WITHOUT running a second `gh pr merge`, so only the exact boolean counts: every
@@ -246,6 +263,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       publish_head: null,
       block_kind: null,
       terminal_cause: null,
+      findings_present: false,
     })
   })
 })

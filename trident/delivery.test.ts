@@ -11,6 +11,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildTridentDelivery,
   composeTerminalDelivery,
+  infraDeathSentence,
   interpretFailure,
   topicForRun,
   unpublishedCommitAlarm,
@@ -474,5 +475,68 @@ describe('unpublishedCommitAlarm', () => {
 
   test('the writer and the reader share one sentence', () => {
     expect(unpublishedCommitAlarm(unpublishedCommitAlarmSentence(SHA))).toBe(unpublishedCommitAlarmSentence(SHA))
+  })
+})
+
+/**
+ * T4 — AN INFRASTRUCTURE DEATH IS NOT A VERDICT (run `f384460d`, 2026-08-15).
+ *
+ * The inner workflow threw; its catch path self-asserts `verdict:'REQUEST_CHANGES'` and the
+ * owner was told the reviewer had rejected a build that had passed its tests. The reason is
+ * what routes the delivery, so BOTH authored infrastructure sentences — `infraDeathSentence`
+ * and the measured-cause "review never ran (infra-only)…" one — must land in the `infra`
+ * class, and neither may reach the owner in review copy.
+ */
+describe('interpretFailure — an infrastructure death is delivered as infrastructure', () => {
+  test('the authored infra sentence → klass infra, not a review outcome', () => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: infraDeathSentence(3, 10) }),
+    )
+    expect(interp.klass).toBe('infra')
+    expect(interp.summary.toLowerCase()).toContain('internal error')
+    expect(interp.summary.toLowerCase()).not.toContain('blocking findings')
+  })
+
+  test("an infra-only reason whose measured cause contains 'stalled' is NOT a hang", () => {
+    // BRANCH ORDERING, asserted. This reason deliberately embeds the probe's own words, and
+    // those words are not ours to keyword-proof: 'stalled' is exactly what the hang branch
+    // matches on. Order this branch after it and a lane that never reached a reviewer is
+    // reported as an agent that hung — a confident sentence about a cause nobody measured.
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        failure_reason: 'review never ran (infra-only) at round 1 of 10: readiness probe stalled: gh auth login',
+      }),
+    )
+    expect(interp.klass).toBe('infra')
+  })
+
+  test("an infra reason carrying 'exhausted' is still infra, never review-unresolved", () => {
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        failure_reason: 'review never ran (infra-only) at round 1 of 10: the pool exhausted its slots',
+      }),
+    )
+    expect(interp.klass).toBe('infra')
+    expect(interp.summary.toLowerCase()).not.toContain('blocking findings')
+  })
+
+  test('the composed delivery names the internal error, keeps the PR, and claims no verdict', () => {
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        merge_mode: 'pr',
+        pr: 267,
+        inner_verdict: null,
+        failure_reason: infraDeathSentence(1, 8),
+      }),
+    )
+    expect(out).not.toBeNull()
+    expect(out!.text.toLowerCase()).toContain('internal error')
+    expect(out!.text).toContain('PR #267 left open')
+    // The two review-flavoured phrasings that made a crash read as a rejection.
+    expect(out!.text).not.toContain('blocking findings')
+    expect(out!.text).not.toContain('without an approved review')
   })
 })

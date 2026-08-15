@@ -181,6 +181,31 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // T4 — AN INFRASTRUCTURE DEATH IS NOT A VERDICT (run `f384460d`, 2026-08-15).
+  // The inner workflow THREW; its catch path writes `checkpoint:'inner-error'` with
+  // `findings: []`, and the owner was told "REQUEST_CHANGES" — three times in one night —
+  // for work no reviewer ever judged. Same for an `infra-only` block: no review seat ran.
+  //
+  // THE TWO MATCHED STRINGS ARE AUTHORED IN EXACTLY TWO PLACES — `infraDeathSentence`
+  // (below, this file) and `innerTerminalFailureReason`'s infra-only branch
+  // (`orchestrator.ts`). THE TWO HALVES MUST MOVE TOGETHER: a reworded reason that stops
+  // matching here silently reverts the owner to review-flavoured copy for a crash.
+  //
+  // CHECKED EARLY, and that placement is load-bearing. The infra-only reason EMBEDS the
+  // probe's own measured words ("review never ran (infra-only) at round X of Y: <cause>"),
+  // which are not ours to keyword-proof: a cause containing 'stalled', 'git ' or
+  // 'exhausted' would otherwise be captured below and reported as a hang, a merge or a
+  // review outcome — the #240 failure shape (a confident sentence about a cause nobody
+  // measured).
+  if (r.includes('build infrastructure failed') || r.includes('review never ran (infra-only)')) {
+    return {
+      klass: 'infra',
+      summary:
+        'The build hit an internal error before any reviewer judged the code — this is not a verdict on the work.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
   // Suspected agent hang / stalled inner workflow — already a plain reason.
   if (r.includes('suspected agent hang') || r.includes('no progress for') || r.includes('stalled')) {
     return {
@@ -315,6 +340,22 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
  */
 export function unpublishedCommitAlarmSentence(sha: string): string {
   return `a finished commit was not published: ${sha}`
+}
+
+/**
+ * T4 (run `f384460d`) — THE one sentence for an INFRASTRUCTURE death.
+ *
+ * The inner workflow threw; nothing about the diff was ever judged. The reason
+ * has to say that in words, because `interpretFailure` reads the reason (not the
+ * verdict) to choose the class the owner is delivered.
+ *
+ * ONE source, same drift rationale as `unpublishedCommitAlarmSentence`: the
+ * orchestrator WRITES this into `failure_reason` and `interpretFailure` READS it
+ * back to route the `infra` class, so a reworded sentence can never become one
+ * the delivery silently stops recognising.
+ */
+export function infraDeathSentence(round: number, ceiling: number): string {
+  return `build infrastructure failed at round ${round} of ${ceiling} before any review verdict`
 }
 
 /** Extract the alarm sentence from a `failure_reason`, or `null` when it carries none. */

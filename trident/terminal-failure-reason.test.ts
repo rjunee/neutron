@@ -36,8 +36,8 @@
  * unchanged; only the supply of measurements changed.
  */
 import { describe, expect, test } from 'bun:test'
-import { innerTerminalFailureReason, publishFailureReason, redactPushError } from './orchestrator.ts'
-import { interpretFailure } from './delivery.ts'
+import { innerTerminalFailureReason, isInfraDeath, publishFailureReason, redactPushError } from './orchestrator.ts'
+import { infraDeathSentence, interpretFailure } from './delivery.ts'
 import type { TridentRun } from './store.ts'
 
 const run = (over: Partial<TridentRun> = {}): TridentRun =>
@@ -72,6 +72,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
       checkpoint: 'inner-error',
       block_kind: null,
       terminal_cause: null,
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
+      findings_present: true,
     })
     expect(reason).not.toContain('exhausted')
     // …and it must not smuggle the ceiling in as if it were the count.
@@ -95,6 +98,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
       checkpoint: 'argus-request-changes',
       block_kind: null,
       terminal_cause: null,
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
+      findings_present: true,
     })
     expect(reason).not.toContain('exhausted')
     expect(reason).toContain('round 10 of 10')
@@ -104,11 +110,14 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     // The regression this file exists for, stated as a property rather than four cases: no
     // terminal reason may contain a number that was never measured. `max_rounds` appearing
     // as a COUNT is the specific lie — it is the ceiling, and it was printed as the tally.
+    // T4: the two `inner-error` rows carried NO findings, which is what they always were —
+    // a build that threw before any reviewer saw it. They now say so (see the T4 describe).
+    const base = { block_kind: null, terminal_cause: null, verdict: 'REQUEST_CHANGES' as const }
     const cases = [
-      { round: 1, checkpoint: 'inner-error', block_kind: null, terminal_cause: null },        // CODEX_HOME / brief / push credential
-      { round: 10, checkpoint: 'argus-request-changes', block_kind: null, terminal_cause: null }, // ten real rounds
-      { round: 2, checkpoint: 'argus-request-changes', block_kind: null, terminal_cause: null },  // a lost fix round
-      { round: 10, checkpoint: 'inner-error', block_kind: null, terminal_cause: null },        // a throw DURING the last round
+      { ...base, round: 1, checkpoint: 'inner-error', ok: false, findings_present: false },        // CODEX_HOME / brief / push credential
+      { ...base, round: 10, checkpoint: 'argus-request-changes', ok: false, findings_present: true }, // ten real rounds
+      { ...base, round: 2, checkpoint: 'argus-request-changes', ok: false, findings_present: true },  // a lost fix round
+      { ...base, round: 10, checkpoint: 'inner-error', ok: false, findings_present: false },        // a throw DURING the last round
     ]
     for (const c of cases) {
       const reason = innerTerminalFailureReason(run({ round: c.round }), c)
@@ -130,6 +139,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
       checkpoint: 'inner-error',
       block_kind: null,
       terminal_cause: null,
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
+      findings_present: true,
     })
     expect(reason).toContain('round 2 of 10')
     expect(reason).not.toContain('exhausted')
@@ -148,6 +160,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
       checkpoint: 'inner-error',
       block_kind: null,
       terminal_cause: null,
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
+      findings_present: true,
     })
     expect(reason).not.toContain('exhausted')
     expect(reason).toContain('round 10 of 10')
@@ -164,6 +179,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
       checkpoint: 'inner-error',
       block_kind: null,
       terminal_cause: null,
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
+      findings_present: true,
     })
     expect(reason).not.toContain('exhausted')
   })
@@ -175,6 +193,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
       checkpoint: null,
       block_kind: null,
       terminal_cause: null,
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
+      findings_present: true,
     })
     expect(reason).toContain('round 3 of 10')
     expect(reason).not.toContain('checkpoint')
@@ -187,6 +208,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
       checkpoint: 'inner-error',
       block_kind: null,
       terminal_cause: null,
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
+      findings_present: true,
     })
     expect(reason).toContain('round 4 of 10')
   })
@@ -213,6 +237,9 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     checkpoint: 'argus-request-changes',
     block_kind: 'infra-only' as const,
     terminal_cause: cause,
+    ok: false,
+    verdict: 'REQUEST_CHANGES' as const,
+    findings_present: false,
   })
   const GENERIC = "inner workflow ended at round 1 of 10 at checkpoint 'argus-request-changes' without Argus APPROVE"
 
@@ -229,10 +256,16 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     expect(reason).not.toContain('exhausted')
   })
 
-  test('infra-only with NO measured cause is still the generic sentence, verbatim', () => {
-    // A legacy row, or a stop whose synthesis carried no titled finding. Nothing was
-    // measured, so nothing is asserted — the rule this file exists for, unchanged.
-    expect(innerTerminalFailureReason(run({ round: 1 }), infraOnly(null))).toBe(GENERIC)
+  test('infra-only with NO measured cause is the INFRASTRUCTURE sentence, not the review one', () => {
+    // A legacy row, or a stop whose synthesis carried no titled finding. Nothing about the
+    // CAUSE is asserted — the rule this file exists for, unchanged. But T4 (run f384460d)
+    // added a second thing that IS measured on this path: `block_kind: 'infra-only'` is the
+    // workflow's own statement that NO REVIEW SEAT judged the code, so the generic sentence
+    // ("without Argus APPROVE") was still a review sentence for a review that never ran.
+    const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly(null))
+    expect(reason).toBe(infraDeathSentence(1, 10))
+    expect(reason).not.toBe(GENERIC)
+    expect(reason).not.toContain('without Argus APPROVE')
   })
 
   test('a cause WITHOUT infra-only is still the generic sentence — the pair gates together', () => {
@@ -245,6 +278,9 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
           checkpoint: 'argus-request-changes',
           block_kind: kind,
           terminal_cause: 'CI FAILING: test',
+          ok: false,
+          verdict: 'REQUEST_CHANGES' as const,
+          findings_present: true,
         }),
       ).toBe(GENERIC)
     }
@@ -407,5 +443,128 @@ describe('publishFailureReason — names the step, quotes the cause, invents not
     const a = publishFailureReason('push', 'feat-x', '')
     const b = publishFailureReason('read the remote state of', 'feat-x', '')
     expect(a).not.toBe(b)
+  })
+})
+
+/**
+ * T4 — AN INFRASTRUCTURE DEATH IS NOT A VERDICT (run `f384460d`, 2026-08-15).
+ *
+ * MEASURED, from the run's own journal. The build SUCCEEDED (`commitSha 9e7dfbe`,
+ * `testsPassed: true`), then the inner workflow THREW. Its catch path writes
+ * `{ ok:false, verdict:'REQUEST_CHANGES', checkpoint:'inner-error', findings: [] }` — the
+ * verdict is the WRAPPER'S, self-asserted on a throw, not a reviewer's. The orchestrator
+ * copied it onto the row, `run-progress.ts` surfaced it, and the owner was told the reviewer
+ * had rejected work no reviewer ever saw. Three times in one night.
+ *
+ * The two triggers below are MEASURED SIGNALS, not the inference R1/R2 killed:
+ * `checkpoint:'inner-error'` is written ONLY by that catch path, and `block_kind:'infra-only'`
+ * is the workflow's own "no review seat judged this". An inner-error that DOES carry findings
+ * keeps the generic sentence — there is a real review behind it.
+ */
+describe('T4 — an inner-error with no findings is INFRASTRUCTURE, not a review outcome', () => {
+  const innerError = (over: Record<string, unknown> = {}) => ({
+    ok: false,
+    verdict: 'REQUEST_CHANGES' as const,
+    round: 4,
+    checkpoint: 'inner-error',
+    block_kind: null,
+    terminal_cause: null,
+    findings_present: false,
+    ...over,
+  })
+
+  test('HEADLINE: the f384460d shape stores an infrastructure reason, not a review one', () => {
+    const reason = innerTerminalFailureReason(run({ round: 4, max_rounds: 10 }), innerError())
+    expect(reason).toBe('build infrastructure failed at round 4 of 10 before any review verdict')
+    // The lie this whole card is about: a review sentence for a review that never happened.
+    expect(reason).not.toContain('without Argus APPROVE')
+    expect(reason).not.toContain('exhausted')
+  })
+
+  test('an inner-error that DOES carry findings keeps the generic sentence, unchanged', () => {
+    // A real review ran and produced findings before the throw; the catch-all is still true
+    // of it, and re-labelling it "infrastructure" would hide the findings that exist.
+    const reason = innerTerminalFailureReason(
+      run({ round: 4, max_rounds: 10 }),
+      innerError({ findings_present: true }),
+    )
+    expect(reason).toBe(
+      "inner workflow ended at round 4 of 10 at checkpoint 'inner-error' without Argus APPROVE",
+    )
+  })
+
+  test('an infra-only stop WITH a measured cause still quotes the cause (unchanged)', () => {
+    // The 8417b277 message keeps precedence: a measured cause beats a generic infra sentence.
+    const reason = innerTerminalFailureReason(
+      run({ round: 1, max_rounds: 10 }),
+      innerError({
+        round: 1,
+        checkpoint: 'argus-request-changes',
+        block_kind: 'infra-only',
+        terminal_cause: 'REVIEW DEFERRED — gh auth login',
+      }),
+    )
+    expect(reason).toBe('review never ran (infra-only) at round 1 of 10: REVIEW DEFERRED — gh auth login')
+  })
+
+  test('an infra-only stop with NO cause falls to the infrastructure sentence', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1, max_rounds: 10 }),
+      innerError({ round: 1, checkpoint: 'argus-request-changes', block_kind: 'infra-only' }),
+    )
+    expect(reason).toBe(infraDeathSentence(1, 10))
+  })
+
+  test('BOTH authored infra reasons reach the owner as the infra class', () => {
+    // The writer/reader pair asserted end to end: whatever this function WRITES must be what
+    // `interpretFailure` recognises, or the owner silently gets review copy for a crash.
+    for (const reason of [
+      infraDeathSentence(4, 10),
+      'review never ran (infra-only) at round 1 of 10: REVIEW DEFERRED — gh auth login',
+    ]) {
+      const out = interpretFailure(run({ failure_reason: reason }))
+      expect(out.klass).toBe('infra')
+      expect(out.summary).not.toContain('blocking findings')
+    }
+  })
+})
+
+describe('isInfraDeath — which terminal results are infrastructure, and which are not', () => {
+  const r = (over: Partial<Parameters<typeof isInfraDeath>[0]>) => ({
+    ok: false,
+    verdict: 'REQUEST_CHANGES' as const,
+    checkpoint: 'inner-error',
+    block_kind: null,
+    findings_present: false,
+    ...over,
+  })
+
+  test('infra-only is infrastructure regardless of findings — no seat ever judged the code', () => {
+    expect(isInfraDeath(r({ block_kind: 'infra-only', checkpoint: 'argus-request-changes' }))).toBe(true)
+    expect(
+      isInfraDeath(r({ block_kind: 'infra-only', checkpoint: 'argus-request-changes', findings_present: true })),
+    ).toBe(true)
+  })
+
+  test('the f384460d shape — ok:false + inner-error + no findings — is infrastructure', () => {
+    expect(isInfraDeath(r({}))).toBe(true)
+  })
+
+  test('an inner-error WITH findings is not — a real review is behind it', () => {
+    expect(isInfraDeath(r({ findings_present: true }))).toBe(false)
+  })
+
+  test('a genuine review rejection is not infrastructure', () => {
+    expect(
+      isInfraDeath(r({ checkpoint: 'argus-request-changes', block_kind: 'code', findings_present: true })),
+    ).toBe(false)
+  })
+
+  test('an APPROVE is never infrastructure — reclassifying one would drop a successful run', () => {
+    expect(isInfraDeath(r({ verdict: 'APPROVE', block_kind: 'infra-only' }))).toBe(false)
+  })
+
+  test('ok:true with an inner-error checkpoint is not — the catch path writes ok:false', () => {
+    expect(isInfraDeath(r({ ok: true }))).toBe(false)
   })
 })
