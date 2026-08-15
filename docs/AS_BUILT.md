@@ -2,6 +2,81 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — half a Ralph card's wall clock was re-planning and tick latency; both halves removed
+
+Measured on PR #284's card (the #283 build), 2026-08-15, one inner workflow, fully
+serial — the sum of agent time equals wall clock exactly: head probe 5 s, `plan:fable`
+287 s (4.8 min), `forge:build` 619 s (10.3 min, 54 Bash / 20 Edit / 5 Read), checkpoint
+9 s, terminal result 21 s, cleanup 7 s — 15.8 min total. PR #284 ran EIGHT such
+workflows in ~70 minutes, and every one re-ran `plan:fable` from scratch. Measured
+inter-cycle dead air (workflow-exit → next-workflow-start): 3.0, 3.0, 3.7, 3.8 min.
+Across eight cycles: ~25 min re-planning + ~25 min idle — roughly half the wall clock
+was neither planning something new nor building.
+
+**Part 1 — the planner re-derived an unchanged plan every task.** `planFablePrompt`'s
+steps 1-2 ("read SPEC.md … survey the CURRENT code … regenerate the full checklist")
+ARE the 287 s, yet `ralphExecuteNote` already makes Forge commit the regenerated
+`IMPLEMENTATION_PLAN.md` to the branch every task — iteration N+1 was paying five
+minutes to re-derive a document iteration N had already committed. The fix is a
+`plan:probe` Bash agent (`git show` of the committed plan on the forge branch; returns
+the body plus the unchecked-task count, interprets nothing) gating a `plan:next`
+planner that returns the SAME `PLAN_SCHEMA` — the committed body VERBATIM as
+`implementationPlan`, the first unchecked `- [ ]` as `topTask` — and is FORBIDDEN from
+reading SPEC.md or surveying the codebase. Selection is plain code over args + probe
+output: `plan:next` fires only when `resumeCheckpoint === 'ralph-task-built'` and
+`resumeClass.reason === 'unknown-checkpoint'` (the recorded head matched the live head
+— any head-moved / unreadable / absent resume is a genuine crash-resume and gets the
+full planner), `ralphRound >= 2`, and `ralphRound % PLAN_REFRESH_EVERY !== 0` with
+`PLAN_REFRESH_EVERY = 5`. Fail-safes: a dead, unreadable, or zero-unchecked probe falls
+through to full `plan:fable` (zero-unchecked escalates so the full planner — not
+`plan:next` — decides whether the card is done); `plan:next` returning null is fatal
+exactly as a null `plan:fable` is — Forge never runs planless. `run.ralph_round` was
+threaded through `buildWorkflowArgs`; a missing round defaults to the full planner,
+the fail-safe for legacy callers.
+
+The tradeoff, stated so no review round rediscovers it: re-planning every task is not
+pure waste — building task N can legitimately change task N+1. That is why the full
+re-derivation survives at iteration 1, on every genuine crash-resume, every K = 5
+tasks, AND whenever the previous Forge reported `deviatedFromSpec: true` (the flag
+rides `FORGE_SCHEMA` optionally, becomes checkpoint `ralph-task-built-deviated`
+locally or a suffix on the `outer-published:` checkpoint in PR mode, and that name
+fails `plan:next`'s exact-name check, forcing the full planner). The claim is not
+"planning is unnecessary" but "re-deriving the whole checklist from the whole
+codebase, every task, is the wrong default."
+
+**Part 2 — the outer loop slept up to 90 s between handoffs.** The inner workflow runs
+detached, so a finished handoff waited one to two ticks of `tick_interval_ms ?? 90_000`
+— the measured 3.0-3.8 min. The fix is `SupervisedLoop.wake()`: idle → `void
+runOnce()`; mid-tick → a pending flag consumed after the in-flight tick settles,
+re-firing exactly once (because `runOnce` is single-flight, and an unguarded wake
+landing mid-tick would come back `skipped` and the change would be missed for a full
+interval); not-started → dropped, so no tick can outlive `stop()`. Exposed as
+`TridentTickLoop.wake()`, plus an internal `'trident-watch'` `SupervisedLoop` (2 s
+default, `watch_interval_ms <= 0` disables) whose entire body is ONE query —
+`TridentRunStore.changeSignature()`: `SELECT COUNT(*), COALESCE(MAX(last_advanced_at),
+'') … WHERE phase NOT IN (terminal)` — waking the sweep only when that signature
+changed (the first observation records without waking). It never calls `step`, never
+touches git/gh/network; a throw is contained and the 90 s interval stays armed
+unchanged as the backstop. The interval itself was NOT lowered — a full tick does
+per-run git/gh work for up to 50 runs; the point is a cheap detector gating an
+expensive sweep. An out-of-process checkpoint now triggers a full tick within roughly
+one watcher cadence instead of 90-180 s.
+
+**The honest after.** Do not read the projection below as a measured result — it is
+not. What each fix mechanically removes, per continuation task on a 5-task card:
+~4.8 min of planner survey on each of the 3-of-4 continuation iterations that skip the
+survey (round 5 still full-plans by design, and any deviated-from-spec iteration
+full-plans too), and ~1.5-3.8 min of tick latency per handoff. The card's own
+projection (~70 min → ~30-35 min) is a projection made at planning time; the
+after-numbers are to be measured on the next multi-task Ralph card and recorded here
+once they exist.
+
+Test coverage: selection is asserted over the REAL `inner-workflow.mjs` body via the
+assembly harness (which planner LABEL fires per scenario), and the watcher/wake
+behaviour over real timers in `tick.test.ts` / `loop/index.test.ts` (wake-mid-tick
+re-runs exactly once; a quiet interval fires zero extra tick bodies; a watcher throw
+leaves the backstop ticking; `stop()` leaves no live timer).
+
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 
 `renderHostDeployApprovalBody`'s last line said "Tap Approve or Deny. Typing anything
