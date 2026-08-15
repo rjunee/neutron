@@ -693,25 +693,42 @@ export async function rebaseOntoObservedBase(
     let autoResolved: string[] | null = null
     const applied = await run_host(['git', '-C', scratchDir, 'apply', '--3way', '--index', diffFile], scratchDir)
     if (!applied.ok) {
-      // Best-effort: name the files a human has to look at. Failing to read them is not itself
-      // a different failure — the conflict is the event. Read in a LOOP now: it is also how a
-      // claimed resolution is verified.
+      // Name the files a human has to look at. Read in a LOOP now: this is also how a claimed
+      // resolution is VERIFIED, and that second role is why it must not fail open.
+      //
+      // AN UNREADABLE CONFLICT STATE IS NOT AN EMPTY ONE. This used to swallow the command's
+      // failure and return `[]`, which the post-resolution check at the bottom of the loop reads
+      // as "nothing unmerged — the resolver succeeded". A `git diff` that never ran would have
+      // been accepted as git's own evidence that the tree is clean, and the loop would go on to
+      // commit and force-push whatever the resolver left behind. The resolver's word is never the
+      // evidence; if git cannot be asked, there IS no evidence, and the only safe answer is to
+      // refuse. Same reasoning as the wholesale-apply carve-out below: never report one condition
+      // in the costume of another.
       //
       // `-z` + `core.quotePath=false` BECAUSE THIS LIST IS MACHINE-CONSUMED. It becomes the
       // resolver's `CONFLICTED FILES` and the pathspec of the staged-marker scan below, and git's
       // default C-quoting renders `ünicode file.txt` as `"\303\274nicode file.txt"` — a name that
       // opens nothing and matches no pathspec. `-z` emits the raw bytes, NUL-separated.
+      const unreadableConflictState = (detail: string): Error =>
+        new Error(
+          publishFailureReason(
+            'read the conflict state of',
+            branch,
+            `${detail} — git could not be asked which paths are unmerged, so a claimed resolution CANNOT be verified; refusing rather than treating an unreadable index as a clean one`,
+          ),
+        )
       const readUnmerged = async (): Promise<string[]> => {
+        let unmerged
         try {
-          const unmerged = await run_host(
+          unmerged = await run_host(
             ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '-z', '--name-only', '--diff-filter=U'],
             scratchDir,
           )
-          if (unmerged.ok) return unmerged.stdout.split('\0').filter((l) => l !== '')
-        } catch {
-          // paths stay empty; the message says so.
+        } catch (err) {
+          throw unreadableConflictState(err instanceof Error ? err.message : String(err))
         }
-        return []
+        if (!unmerged.ok) throw unreadableConflictState(unmerged.stderr || 'git diff --diff-filter=U failed with no output')
+        return unmerged.stdout.split('\0').filter((l) => l !== '')
       }
       /**
        * THE UNMERGED BIT IS NOT PROOF OF RESOLUTION. `git add <path>` clears the unmerged bit for
@@ -725,14 +742,23 @@ export async function rebaseOntoObservedBase(
        * count (a marker that was already in the base is the base's problem, not this replay's),
        * and only the paths that ever conflicted are scanned (a fixture elsewhere in the repo that
        * legitimately contains marker text is none of our business).
+       *
+       * AND IT FAILS CLOSED, for the same reason `readUnmerged` does: a scan that could not run
+       * found no markers in exactly the way a clean tree does, and the difference is a `<<<<<<<`
+       * on the shared branch.
        */
       const stagedMarkerFiles = async (candidates: string[]): Promise<string[]> => {
         if (candidates.length === 0) return []
-        const res = await run_host(
-          ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--', ...candidates],
-          scratchDir,
-        )
-        if (!res.ok) return []
+        let res
+        try {
+          res = await run_host(
+            ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--', ...candidates],
+            scratchDir,
+          )
+        } catch (err) {
+          throw unreadableConflictState(err instanceof Error ? err.message : String(err))
+        }
+        if (!res.ok) throw unreadableConflictState(res.stderr || 'git diff --cached failed with no output')
         const marked: string[] = []
         let current: string | null = null
         for (const line of res.stdout.split('\n')) {

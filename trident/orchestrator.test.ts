@@ -1077,6 +1077,64 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
+  // A VERIFICATION THAT CANNOT RUN IS NOT A VERIFICATION THAT PASSED. Both post-resolution reads
+  // used to swallow a failed command and return an empty list, which the loop reads as "nothing
+  // unmerged, no markers staged — the resolver was telling the truth". A `git diff` that never ran
+  // would have been accepted as git's own evidence that the tree is clean, and the run would go on
+  // to commit and force-push whatever the resolver actually left. The resolver's claim is the one
+  // thing in this path that is never evidence, so when git cannot be asked there is nothing to
+  // check the claim against, and the only safe answer is to refuse. Both commands get their own
+  // test because they fail independently and either one alone is enough to lose the invariant.
+  for (const failing of [
+    { label: 'the unmerged-path read', match: '--diff-filter=U', stderr: 'fatal: not a git repository' },
+    { label: 'the staged-marker scan', match: 'diff --cached -U0', stderr: 'fatal: bad object HEAD' },
+  ]) {
+    test(`a resolver claiming RESOLVED is REFUSED when ${failing.label} cannot run — it never fails open`, async () => {
+      const head = 'abcdef0123456789abcdef0123456789abcdef01'
+      const newBaseSha = '6666666666666666666666666666666666666666'
+      let resolverCalls = 0
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+        resolve_conflict: async () => {
+          resolverCalls += 1
+          return { resolved: true }
+        },
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+          if (joined.includes('merge-base --is-ancestor')) return failWith('')
+          if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+          if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+          if (joined.includes('gh pr list')) return ok('42')
+          if (joined.includes('gh pr diff'))
+            return ghPrDiffTo(joined, 'diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
+          if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
+          // The FIRST unmerged read must succeed — otherwise the resolver is never reached and the
+          // test would prove nothing about post-resolution verification.
+          if (joined.includes(failing.match) && resolverCalls > 0) return failWith(failing.stderr)
+          if (joined.includes('--diff-filter=U')) return ok('shared.ts')
+          if (joined.includes('diff --cached -U0')) return ok('')
+          return ok()
+        },
+      })
+      const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+      const calls = h.hostCalls.map((c) => c.join(' '))
+
+      expect(resolverCalls).toBe(1)
+      expect(final.phase).toBe('failed')
+      // Refused for the REASON IT ACTUALLY FAILED — git's own words, and an explicit statement
+      // that this is an unverifiable resolution rather than a merge conflict.
+      expect(final.failure_reason).toContain('could not read the conflict state of')
+      expect(final.failure_reason).toContain(failing.stderr)
+      expect(final.failure_reason).toContain('CANNOT be verified')
+      expect(final.failure_reason).not.toContain('REBASE CONFLICT')
+      // NOTHING IS COMMITTED, NOTHING IS SWAPPED, NOTHING IS PUSHED.
+      expect(calls.some((c) => c.includes(' commit '))).toBe(false)
+      expect(calls.some((c) => c.includes('update-ref refs/heads/feat-x'))).toBe(false)
+      expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    })
+  }
+
   test('PARTIAL resolution is progress: round 2 is handed only the files round 1 left', async () => {
     // Two conflicts, one resolved per round. The re-read shrinking is what buys the second round,
     // and the second round must see the REMAINDER — not the original set, and not everything again.

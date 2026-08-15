@@ -73,6 +73,16 @@ git-truth fix lands. Taking main's text verbatim would have silently converted a
 cross-check into a tautology. The resolver must reach that conclusion or correctly
 decline (declining is the escalation path, unchanged).
 
+**Fail-closed verification (codex Blocker, hand-fixed before merge).** Both post-resolution
+reads — `git diff --diff-filter=U` and the staged-marker scan — used to swallow a failed
+command and return an empty list, which the loop reads as "nothing unmerged, no markers
+staged". A `git diff` that never ran would have been accepted as git's own evidence that the
+tree is clean, and the run would have gone on to commit and force-push whatever the resolver
+left behind. The resolver's claim is the one thing here that is never evidence, so with no
+git to check it against the only safe answer is to refuse. Both now throw, naming git's own
+stderr, and both are mutation-proven: restoring the empty-list fallback turns the two new
+boundary tests RED.
+
 ## 2026-08-15 — the device stops interrupting the conversation he is reading
 
 `app/lib/push-foreground-policy.ts` (new) + `app/lib/push.ts` + `ChatSyncSurface`.
