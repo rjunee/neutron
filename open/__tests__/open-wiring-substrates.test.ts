@@ -15,7 +15,7 @@
  *     factories throwing.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -111,6 +111,15 @@ async function drain(sub: Substrate): Promise<void> {
   }
 }
 
+// `githubSpawnEnvRef` is module-level state a composer registers at boot, so a
+// composer test running earlier IN THE SAME SHARD leaves a live resolver behind
+// and every profile that opts into the credential then calls it. CI found this;
+// a local single-file run never could. Clear it so this file measures its own
+// wiring rather than whatever ran before it.
+beforeEach(() => {
+  githubSpawnEnvRef.resolve = undefined
+})
+
 describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
   test('cc-llm-* phase-spec substrate omits the tool bridge', async () => {
     const { ctx, captured } = makeCtx()
@@ -169,6 +178,26 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       await drain(w.llmCallSubstrate!)
       const llm = captured.find((o) => o.substrate_instance_id === 'cc-llm-owner')
       expect(llm!.env!['GH_TOKEN']).toBeUndefined()
+    } finally {
+      githubSpawnEnvRef.resolve = undefined
+    }
+  })
+
+  test('A FAILING credential read degrades the spawn, it does not kill it', async () => {
+    // Surfaced by CI: the resolver threw and took the whole substrate down with
+    // it. In production that is a locked store turning a chat turn into a dead
+    // session — strictly worse than having no credential, which merely makes
+    // `gh` fail with git's own message.
+    setGithubSpawnEnvResolver(async () => {
+      throw new Error('secrets store unavailable')
+    })
+    try {
+      const { ctx, captured } = makeCtx()
+      const w = wireSubstrates(ctx)
+      await drain(w.liveAgentSubstrate!)
+      const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+      expect(agent).toBeDefined()
+      expect(agent!.env!['GH_TOKEN']).toBeUndefined()
     } finally {
       githubSpawnEnvRef.resolve = undefined
     }

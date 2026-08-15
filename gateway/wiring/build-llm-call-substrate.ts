@@ -65,7 +65,10 @@ import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
+import { createLogger } from '@neutronai/logger'
 import { githubSpawnEnvRef, type SubstrateProfile } from './substrate-profiles.ts'
+
+const substrateLog = createLogger('substrate')
 
 /**
  * Discriminated failure reasons for `resolveScrubbedAuthEnv`. Mirrors the
@@ -715,10 +718,24 @@ export function buildLlmCallSubstrate(
         // RESOLVED HERE, INSIDE THE PER-SPAWN CLOSURE — never hoisted. A credential
         // read once outside this is the boot-time snapshot that misses a GitHub
         // connected after boot and goes stale on rotation.
-        const githubEnv =
-          input.profile?.github_credential === true && githubSpawnEnvRef.resolve !== undefined
-            ? await githubSpawnEnvRef.resolve()
-            : undefined
+        // A CREDENTIAL READ THAT FAILS MUST NOT KILL THE SPAWN. Surfaced by CI:
+        // the resolver threw and took the whole substrate down with it, which in
+        // production would mean a locked store or an unreadable secret turning a
+        // chat turn into a dead session. Degrading to "no credential" is strictly
+        // better — `gh` then fails with git's own message, which is the behaviour
+        // of an instance that never connected GitHub, and the log says why.
+        let githubEnv: Record<string, string | undefined> | undefined
+        if (input.profile?.github_credential === true && githubSpawnEnvRef.resolve !== undefined) {
+          try {
+            githubEnv = await githubSpawnEnvRef.resolve()
+          } catch (err) {
+            substrateLog.warn('github_credential_unavailable', {
+              substrate_instance_id: input.substrate_instance_id,
+              reason: err instanceof Error ? err.message : String(err),
+            })
+            githubEnv = undefined
+          }
+        }
         const extraEnvResolver = input.profile?.extra_env ?? input.extra_env
         const resolvedExtraEnv = extraEnvResolver === undefined ? undefined : await extraEnvResolver()
         // `extra_env` wins over the credential on collision: it is the explicit
