@@ -153,6 +153,24 @@ export interface TridentRun {
    * Null until (and unless) the outer loop harvests.
    */
   harvested_at: number | null
+  /**
+   * CRASH-RECOVERY BUDGET SPENT (migration 0123) — how many times a launcher
+   * crash on this run has been recovered by relaunching the build as a
+   * continuation instead of reaping it. Legacy rows (NULL) read as 0.
+   *
+   * RECOVERY-OWNED, SINGLE WRITER: only {@link TridentRunStore.beginCrashRecovery}
+   * ever writes it. It is DELIBERATELY absent from `TridentRunUpdate`, `update()`,
+   * `save()` and `saveIfActive()` — same ownership discipline as `inner_result`
+   * (workflow-owned) and `harvested_at` (harvest-owned), so no full-snapshot save
+   * carrying a stale in-memory copy can ever refund budget that was already spent.
+   *
+   * DURABLE on purpose: the cause it bounds is a gateway deploy loop (three
+   * restarts in 53 min on 2026-08-14), and every gateway boot resets in-memory
+   * state — an in-process counter cannot cap the very loop that restarts the
+   * process. SEPARATE from `round`/`ralph_round`: a launcher crash is not the
+   * agent's failure and must not consume its fix rounds.
+   */
+  crash_recoveries: number
 }
 
 export interface CreateTridentRunInput {
@@ -241,15 +259,24 @@ interface TridentRunDbRow {
   started_at: string
   last_advanced_at: string
   harvested_at: number | null
+  crash_recoveries: number | null
 }
 
-const COLS =
+/** Exported solely so tests can pin the column-count invariant. */
+export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
-  'started_at, last_advanced_at, harvested_at'
+  'started_at, last_advanced_at, harvested_at, crash_recoveries'
+
+// Derived from COLS so placeholder-count = column-count BY CONSTRUCTION. A
+// hand-miscounted `?` list silently corrupts every insert and no type error
+// catches it — so the list is never typed by hand.
+const INSERT_PLACEHOLDERS = COLS.split(', ')
+  .map(() => '?')
+  .join(', ')
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
 const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
@@ -302,10 +329,11 @@ export class TridentRunStore {
       started_at: ts,
       last_advanced_at: ts,
       harvested_at: null,
+      crash_recoveries: 0,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (${INSERT_PLACEHOLDERS})`,
       [
         run.id,
         run.slug,
@@ -337,6 +365,7 @@ export class TridentRunStore {
         run.started_at,
         run.last_advanced_at,
         run.harvested_at,
+        run.crash_recoveries,
       ],
     )
     return run
@@ -451,6 +480,38 @@ export class TridentRunStore {
         [failure_reason, now, session_key],
       )
     })
+  }
+
+  /**
+   * Atomically CLAIM a crashed run for recovery: clear the crash latch, release the
+   * sub-agent slot, null the (tombstoned) launcher generation so `launch()`'s
+   * `?? workflow_run_id` fallback can never re-adopt a dead generation, and spend one
+   * unit of the durable crash-recovery budget — ONE conditional UPDATE, so a racing
+   * terminate / second tick loses cleanly. Returns the reloaded run, or null if the
+   * claim lost (row terminal, already recovered, or gone).
+   *
+   * WHY RAW SQL RATHER THAN `update()`: `update()`'s statusGuard and `saveIfActive`'s
+   * crash veto both REFUSE a non-crashed write onto a latched row, and that veto is
+   * load-bearing for every other path (it is what stopped the unbounded re-fire) — so
+   * it stays. Recovery goes around it DELIBERATELY, in one atomic claim, and is the
+   * only writer of `crash_recoveries`.
+   */
+  async beginCrashRecovery(id: string): Promise<TridentRun | null> {
+    const won = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET subagent_status = NULL,
+                subagent_run_id = NULL,
+                workflow_run_id = NULL,
+                crash_recoveries = COALESCE(crash_recoveries, 0) + 1,
+                last_advanced_at = ?
+          WHERE id = ? AND subagent_status = 'crashed'
+            AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        [this.now(), id],
+      )
+      return res.changes > 0
+    })
+    return won ? this.get(id) : null
   }
 
   /**
@@ -762,5 +823,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     started_at: row.started_at,
     last_advanced_at: row.last_advanced_at,
     harvested_at: row.harvested_at,
+    // Legacy rows predate migration 0123 and read NULL — no budget spent yet.
+    crash_recoveries: row.crash_recoveries ?? 0,
   }
 }

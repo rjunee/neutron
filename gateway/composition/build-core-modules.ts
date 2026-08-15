@@ -593,6 +593,13 @@ export function buildCoreModules(
         // Ralph build re-fires a fresh inner iteration per remaining task.
         orchestratorOpts.persist_refire_reset = (id, patch) =>
           store.update(id, patch).then(() => {})
+        // "A gateway restart must not kill an in-flight build" — the crash-recovery
+        // claim. A gateway restart kills the warm `cc-trident-fire-*` REPL supervising
+        // a DETACHED build; without this seam the tick reaps the run to `failed` (it
+        // did exactly that to three healthy builds on 2026-08-14). Wired here, a
+        // crashed launcher is instead relaunched as a continuation from its pushed
+        // branch/PR/checkpoint, bounded by the durable `crash_recoveries` budget.
+        orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({ store, step: orchestrator.step, on_terminal, ...transitionOpt })
         drain = orchestrator.drain

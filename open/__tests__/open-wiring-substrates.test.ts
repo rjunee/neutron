@@ -452,6 +452,17 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       expect(runs.get(dead!.id)?.subagent_status).toBe('crashed')
       expect(runs.get(live.id)?.subagent_status).toBe('running')
 
+      // #240 / T2 — the latched crash reason must carry the MEASURED cause
+      // (observation time + gateway process boot time), not a bare detail
+      // string. Mutation killed: stripping the timestamp composition in
+      // onChildCrash makes this regex fail.
+      const latched = runs.get(dead!.id)?.failure_reason ?? ''
+      expect(latched).toContain('inner workflow child crashed')
+      expect(latched).toMatch(
+        /observed \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z; gateway process booted \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/,
+      )
+      expect(latched.toLowerCase()).not.toContain('exhausted')
+
       await loop.runOnce()
       const stored = runs.get(dead!.id)!
       expect(stored.phase).toBe('failed')
