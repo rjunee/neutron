@@ -698,6 +698,134 @@ describe('TridentTickLoop — change watcher (wake-on-change)', () => {
     await loop.stop()
   })
 
+  test('an out-of-process checkpoint that lands DURING an advancing sweep still wakes the next one', async () => {
+    // ARGUS r2, THE CONFIRMED MAJOR — reproduced here as the regression guard. The
+    // first fix damped the sweep's own writes by RE-SAMPLING the signature at the
+    // tick's tail whenever the tick had written anything, which also absorbed every
+    // out-of-process checkpoint that landed after the sweep took its own sample.
+    // Under the multi-lane workload this card targets that is the common case (a
+    // sweep advances lane A while lane B's inner workflow checkpoints), and the
+    // absorbed handoff then waited out the 90 s backstop — the exact latency the
+    // watcher exists to remove.
+    //
+    // The injected write is deliberately made from INSIDE the sweep, before the
+    // sweep's own `saveIfActive`, so B's stamp is OLDER than the stamp the tick
+    // leaves on A: an aggregate MAX cannot tell that apart from "only my own
+    // writes", which is why the detector is per-run.
+    const store = new TridentRunStore(db)
+    const a = await store.create({ slug: 'cw9a', project_slug: 't1', repo_path: '/r', task: 't' })
+    const b = await store.create({ slug: 'cw9b', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+    let injected = false
+    // `listNonTerminal` orders by `last_advanced_at ASC`, so A (created first) is
+    // stepped first and its commit stamps AFTER the injected checkpoint on B.
+    const step = async (r: TridentRun): Promise<AdvanceOutcome> => {
+      stepped.push(r.slug)
+      if (r.id === a.id && !injected) {
+        injected = true
+        await store.update(b.id, { inner_checkpoint: 'building' })
+      }
+      // Only A advances, so the tick WRITES — the condition under which the old
+      // settle re-sampled and swallowed B's checkpoint.
+      return { run: r, changed: r.id === a.id, waiting: false, note: 'advanced' }
+    }
+
+    const loop = new TridentTickLoop({
+      store,
+      step,
+      tick_interval_ms: 600_000, // the backstop cannot fire in-test
+      watch_interval_ms: 25,
+    })
+    loop.start()
+    await new Promise((r) => setTimeout(r, 100)) // boot observation, no wake
+    expect(stepped.length).toBe(0)
+
+    // One external checkpoint kicks off sweep #1 (2 runs); B's mid-sweep checkpoint
+    // must produce sweep #2 (2 more) within a cadence or two, NOT in 90 s.
+    await store.update(a.id, { inner_checkpoint: 'building' })
+    await waitFor(() => stepped.length >= 4)
+    expect(stepped.length).toBeGreaterThanOrEqual(4)
+
+    // …and it must then go quiet: nothing external happens after sweep #2, so the
+    // sweep's own writes may not keep re-waking it.
+    const settled = stepped.length
+    await new Promise((r) => setTimeout(r, 300)) // ~12 cadences
+    expect(stepped.length).toBe(settled)
+    await loop.stop()
+  })
+
+  test('a run RE-STAMPED after the sweep committed it is not mistaken for the sweep own write', async () => {
+    // The narrow half of the same finding: the sweep's ledger records the stamp ITS
+    // write left, so a checkpoint that lands on the very run the sweep advanced —
+    // after the commit, before the settle — is still a difference. Injected from the
+    // transition fan, which runs after `saveIfActive`.
+    //
+    // The injected clock makes every write's stamp DISTINCT. In-process, the fan's
+    // write lands microseconds after the sweep's own and the two share a millisecond
+    // — the one residual this detector has (a same-run, same-millisecond overwrite
+    // reads as the sweep's own write and waits for the backstop). That is a property
+    // of the column's resolution, not of the rule under test, so the test does not
+    // depend on it.
+    let ticks = 0
+    const base = Date.now()
+    const store = new TridentRunStore(db, () => new Date(base + ticks++ * 1_000).toISOString())
+    const run = await store.create({ slug: 'cw10', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+    let injected = false
+    const step = async (r: TridentRun): Promise<AdvanceOutcome> => {
+      stepped.push(r.id)
+      return { run: r, changed: true, waiting: false, note: 'advanced' }
+    }
+    const on_transition = {
+      async onTransition(): Promise<void> {
+        if (injected) return
+        injected = true
+        await store.update(run.id, { inner_checkpoint: 'reviewing' })
+      },
+    }
+
+    const loop = new TridentTickLoop({
+      store,
+      step,
+      on_transition,
+      tick_interval_ms: 600_000,
+      watch_interval_ms: 25,
+    })
+    loop.start()
+    await new Promise((r) => setTimeout(r, 100))
+
+    await store.update(run.id, { inner_checkpoint: 'building' })
+    await waitFor(() => stepped.length >= 2)
+    expect(stepped.length).toBeGreaterThanOrEqual(2)
+
+    const settled = stepped.length
+    await new Promise((r) => setTimeout(r, 300))
+    expect(stepped.length).toBe(settled)
+    await loop.stop()
+  })
+
+  test('watch_interval_ms: NaN disables the watcher instead of arming a ~1 ms timer', async () => {
+    // `NaN <= 0` is FALSE, so a bare `<= 0` disable check let a NaN cadence through
+    // to `setInterval(fn, NaN)`, which clamps to ~1 ms: a ~500 Hz signature query
+    // where the caller asked for no watcher at all.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cw11', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stepped: string[] = []
+
+    const loop = new TridentTickLoop({
+      store,
+      step: recordingStep(stepped),
+      tick_interval_ms: 600_000,
+      watch_interval_ms: Number.NaN,
+    })
+    loop.start()
+    expect(loop.describeAll().map((d) => d.name)).toEqual(['trident'])
+    await store.update(run.id, { inner_checkpoint: 'building' })
+    await new Promise((r) => setTimeout(r, 150))
+    expect(stepped.length).toBe(0)
+    await loop.stop()
+  })
+
   test('stop() drops the observed signature — a re-armed loop does not wake for a dead lifetime', async () => {
     // The baseline is a comparison against a MOMENT, and that moment ends at
     // shutdown. A `stop()` → `start()` re-arm that kept it would fire a sweep for

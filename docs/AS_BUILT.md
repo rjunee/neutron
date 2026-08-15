@@ -52,12 +52,25 @@ body (mismatch → the COMMITTED body is what Forge is told to persist, because
 echo would delete tasks nobody decided to drop), and `remainingTasks` is compared
 against the probe's `grep -c` count minus one (mismatch → the measured count wins,
 because `remainingTasks` is the re-fire gate and a hallucinated `0` declares a
-half-built card finished). The probe carries its own truncation guard, which is what
-lets it stay on the cheapest tier: it reports `wc -l` alongside the body, and a body
-whose line count contradicts that measurement abandons the cheap path entirely. It also
-reads `origin/<branch>` in `pr` mode and the local ref in `local` mode — the same
-authority split as `readBranchHead` and `resolveResumeLiveHead` — so it can never plan
-from an unpublished local commit the resume gate never cleared.
+half-built card finished), and `topTask` is compared against the FIRST literal
+unchecked `- [ ]` line of that same body (mismatch → the committed line wins, because
+`ralphExecuteNote` tells Forge to mark "the task above" as `- [x]` and a paraphrased
+task leaves Forge nothing to check off: the same plan comes back, the next iteration
+picks the same task, and the checklist cannot converge until the periodic re-plan or
+`max_ralph_rounds` stops it). The probe carries its own integrity guard, which is what
+lets it stay on the cheapest tier: it reports `wc -lc` — lines AND bytes — alongside
+the body, and a body contradicting either measurement abandons the cheap path entirely.
+Line count alone was not enough: the body is relayed THROUGH a model and then forced
+authoritative, so a reword, a re-order, or a silently flipped `- [ ]` → `- [x]` passed
+a `wc -l` guard and rewrote the card's plan; `wc -c` closes that class for one extra
+number in the same pipeline (a digest would be stricter, but a Workflow script has no
+crypto and no filesystem — `agent()` Bash steps are its only instrument, and the
+UTF-8 byte length of the relayed body is computed from code units so it measures the
+same thing `wc -c` did). Both counts use the same ±1 window, because a relay routinely
+drops the file's trailing newline. It also reads `origin/<branch>` in `pr` mode and the
+local ref in `local` mode — the same authority split as `readBranchHead` and
+`resolveResumeLiveHead` — so it can never plan from an unpublished local commit the
+resume gate never cleared.
 
 One deliberate gap, recorded rather than hidden: on the **codex forge route** the agent
 filling the schema is the codex BRIDGE, which launches a subprocess and copies the
@@ -78,6 +91,20 @@ fails `plan:next`'s exact-name check, forcing the full planner). The claim is no
 "planning is unnecessary" but "re-deriving the whole checklist from the whole
 codebase, every task, is the wrong default."
 
+**One acceptance criterion is implemented differently than written, deliberately.**
+The card says "a resume (`resuming === true`) always runs the full `plan:fable`", but
+`resuming` is TRUE on EVERY Ralph continuation — the handoff always carries
+`resumeCheckpoint = 'ralph-task-built'` and a PR — so the literal criterion disables
+the whole feature. What is implemented is the criterion's intent: the cheap path
+requires `classifyResume`'s reason to be `unknown-checkpoint` AND the checkpoint name
+to be exactly `ralph-task-built`, i.e. "the branch did not move under this handoff and
+the last thing that happened was a clean task completion". Every OTHER resume shape —
+`forge-done`, `fix-round-N`, `argus-*`, an outer-published resume, a deviated
+checkpoint, no checkpoint at all — is a genuine crash-resume and keeps the full
+planner and its verbatim `resumeNote` path, unchanged. That is a deviation from the
+words and a match to the reason they were written; it is recorded here rather than
+left for a reviewer to find.
+
 **Part 2 — the outer loop slept up to 90 s between handoffs.** The inner workflow runs
 detached, so a finished handoff waited one to two ticks of `tick_interval_ms ?? 90_000`
 — the measured 3.0-3.8 min. The fix is `SupervisedLoop.wake()`: idle → `void
@@ -86,10 +113,11 @@ re-firing exactly once (because `runOnce` is single-flight, and an unguarded wak
 landing mid-tick would come back `skipped` and the change would be missed for a full
 interval); not-started → dropped, so no tick can outlive `stop()`. Exposed as
 `TridentTickLoop.wake()`, plus an internal `'trident-watch'` `SupervisedLoop` (2 s
-default, `watch_interval_ms <= 0` disables) whose entire body is ONE query —
-`TridentRunStore.changeSignature()`: `SELECT COUNT(*), COALESCE(MAX(last_advanced_at),
-'') … WHERE phase NOT IN (terminal)` — waking the sweep only when that signature
-changed (the first observation records without waking). It never calls `step`, never
+default; `<= 0` — or any non-finite value, because `NaN <= 0` is false and
+`setInterval(fn, NaN)` clamps to ~1 ms — disables it) whose entire body is ONE query,
+`TridentRunStore.changeSignature()`: one `<last_advanced_at>\t<id>` line per
+non-terminal run, ordered by id — waking the sweep only when that signature changed
+(the first observation records without waking). It never calls `step`, never
 touches git/gh/network; a throw is contained and the 90 s interval stays armed
 unchanged as the backstop. The interval itself was NOT lowered — a full tick does
 per-run git/gh work for up to 50 runs; the point is a cheap detector gating an
@@ -99,29 +127,45 @@ one watcher cadence instead of 90-180 s. Both timers are registered with the
 loop inventory instead of only as `watch_failed` log lines while the inventory reports
 one contented 90 s loop.
 
-**The detector must not count its own sweep as change.** The tick's `saveIfActive`
-re-stamps `last_advanced_at` on every run it advances, which is indistinguishable —
-inside one aggregate signature — from an out-of-process checkpoint. Left alone, one run
-reporting `changed` re-fired the whole `listNonTerminal(50)` × per-run git/gh sweep on
-EVERY 2 s cadence: burst amplification, converging only when the change stopped, and
-exactly the shape the card forbade. Two rules fix it, and both are about WHERE the
-baseline may move: the watcher takes no sample at all while a tick is in flight, and
-the baseline is settled at the tail of every tick body — the post-sweep signature when
-the tick wrote something (absorbing its own writes), the pre-sweep signature when it
-wrote nothing (so an external checkpoint that landed mid-sweep is still seen). One
-external change now produces exactly one sweep, and a second external change still
-wakes within a cadence. `stop()` drops the observed signature with the timers, so a
-`stop()` → `start()` re-arm does not compare against a dead lifetime.
+**The detector must not count its own sweep as change — and must not swallow anyone
+else's.** The tick's `saveIfActive` re-stamps `last_advanced_at` on every run it
+advances. Left alone, one run reporting `changed` re-fired the whole
+`listNonTerminal(50)` × per-run git/gh sweep on EVERY 2 s cadence: burst
+amplification, converging only when the change stopped, and exactly the shape the card
+forbade. The first fix damped that by re-sampling the signature at the tick's tail
+whenever the tick had written anything — which ALSO absorbed every out-of-process
+checkpoint that landed after the sweep took its own sample, sending precisely the
+handoff this card exists to accelerate back to the 90 s backstop under the multi-lane
+workload it targets (Argus r2, two independent repros).
 
-The signature's timestamps were also mixing precisions: `store.now()` writes
-milliseconds (`…T03:15:45.900Z`) while `trident/checkpoint.sh` wrote whole seconds
-(`…T03:15:45Z`), SQLite compares them as TEXT, and `'Z'` (0x5A) sorts above `'.'`
-(0x2E) — so a whole-second stamp could pin `MAX` above a LATER millisecond one inside
-the same second, and a checkpoint could miss its wake until the backstop. The MAX is
-now taken over `replace(last_advanced_at, 'Z', '')`, where the shorter string is a
-prefix of the longer and lexical order is chronological order again, and checkpoint.sh
-stamps milliseconds where the platform's `date` supports `%3N` (BSD `date` echoes it
-literally, so the result is validated and falls back to the whole-second stamp).
+Both are fixed by making the question decidable instead of choosing which way to be
+wrong: the signature is PER-RUN, not aggregate, and the sweep keeps a LEDGER of every
+row it committed → the stamp its own write left there (read back from the row, since
+`saveIfActive` stamps the store's clock). At the tail of every tick body the settle
+compares the pre-sweep signature with a fresh one: differences explained by the ledger
+are absorbed; ANY difference outside it — a run the sweep never wrote carrying a new
+stamp, a run that appeared, a run that left the set on someone else's write, a run the
+sweep wrote that was re-stamped AGAIN afterwards — keeps the pre-sweep signature, so
+the very next watcher cadence sees it and wakes. The watcher still takes no sample
+while a tick is in flight (a half-applied sample means nothing and the settle
+overwrites it anyway). One external change produces exactly one sweep; an external
+checkpoint landing DURING an advancing sweep still wakes the next one; `stop()` drops
+the observed signature with the timers, so a `stop()` → `start()` re-arm does not
+compare against a dead lifetime. The one residual, stated so it is not rediscovered: an
+external write landing on a run the sweep committed, inside the SAME MILLISECOND as the
+sweep's own write, leaves an identical stamp and reads as ours — a column-resolution
+limit, and a strictly smaller window than the seconds-long one it replaced. Narrowing
+it further needs a monotonic row version the schema does not have.
+
+Per-run equality also retired a mixed-precision hazard rather than patching it:
+`store.now()` writes milliseconds (`…T03:15:45.900Z`) while `trident/checkpoint.sh`
+wrote whole seconds (`…T03:15:45Z`), SQLite compares them as TEXT, and `'Z'` (0x5A)
+sorts above `'.'` (0x2E) — so under the old aggregate a whole-second stamp could pin
+`MAX` above a LATER millisecond one inside the same second and a checkpoint could miss
+its wake. There is no ordering left in the comparison, so the case is structurally
+impossible; checkpoint.sh still stamps milliseconds where the platform's `date`
+supports `%3N` (BSD `date` echoes it literally, so the result is validated and falls
+back to the whole-second stamp), which keeps same-second writes distinct.
 
 **The honest after.** Do not read the projection below as a measured result — it is
 not. What each fix mechanically removes on a 5-task card, which runs iterations 1-5 at
@@ -131,19 +175,34 @@ iteration 6 (`ralphRound` 5), which a 5-task card never reaches. A deviated-from
 iteration full-plans regardless, on any card length. Plus ~1.5-3.8 min of tick latency
 per handoff. The card's own projection (~70 min → ~30-35 min) is a projection made at
 planning time; the after-numbers are to be measured on the next multi-task Ralph card
-and recorded here once they exist.
+and recorded here once they exist. This is an OPEN acceptance criterion ("report the
+measured before/after in AS_BUILT.md rather than asserting it"), not a closed one: the
+before-numbers above are measured from real runs, the after-numbers do not exist yet
+because no multi-task Ralph card has run on this code, and inventing them would be
+worse than owing them. The follow-up is a one-paragraph edit here, not a code change.
 
 Test coverage: selection is asserted over the REAL `inner-workflow.mjs` body via the
 assembly harness (which planner LABEL fires per scenario), across `ralphRound` 0-5 and
 10 so neither the first continuation nor the refresh boundary can regress unseen, plus
-a throwing probe dispatch, a truncated probe relay, an edited plan body and a
-contradicted `remainingTasks`. The watcher/wake behaviour is asserted over real timers
-in `tick.test.ts` / `loop/index.test.ts`: wake-mid-tick re-runs exactly once; a quiet
-interval fires zero extra tick bodies; a tick that WRITES produces exactly one sweep
-per external change (the amplification guard — the older test used a `changed: false`
-step and could not see it); a second external change still wakes promptly; a watcher
-throw leaves the backstop ticking; `stop()` leaves no live timer and no stale
-signature.
+a throwing probe dispatch, a truncated probe relay, a REWORDED relay that keeps the
+line count and is caught by the byte count, a paraphrased `topTask`, an edited plan
+body and a contradicted `remainingTasks`. The watcher/wake behaviour is asserted over
+real timers in `tick.test.ts` / `loop/index.test.ts`: wake-mid-tick re-runs exactly
+once; a quiet interval fires zero extra tick bodies; a tick that WRITES produces
+exactly one sweep per external change (the amplification guard — the older test used a
+`changed: false` step and could not see it); an out-of-process checkpoint that lands
+DURING an advancing sweep still wakes the next one, and a run re-stamped after the
+sweep committed it is not mistaken for the sweep's own write; a second external change
+still wakes promptly; a `NaN` cadence disables the watcher instead of arming a ~1 ms
+timer; a watcher throw leaves the backstop ticking; `stop()` leaves no live timer and
+no stale signature.
+
+Two hygiene follow-ups are recorded rather than folded in, because neither is this
+card's code: `trident/gh-authed.test.ts` fails on any host with `GH_TOKEN` exported and
+prints the live token in the failure diff (pre-existing — it landed at the merge-base
+and reproduces on `main` with no diff applied; the fix is to assert on
+`githubProcessEnv` instead of the merged env), and the codex forge route still cannot
+report `deviatedFromSpec` until `trident/codex-build.sh` grows a seventh trailer line.
 
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 

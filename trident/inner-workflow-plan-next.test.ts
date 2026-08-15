@@ -46,14 +46,17 @@ interface Captured {
 }
 
 /** What the `plan:probe` seat reports — or `null` for a seat that died.
- *  `planLines` is the probe's own `wc -l` measurement of the file it relayed; the
- *  workflow checks the relayed body against it, so a test can express "the model
- *  stopped copying half way" as a body that contradicts the count. */
+ *  `planLines`/`planBytes` are the probe's own `wc -lc` measurements of the file it
+ *  relayed; the workflow checks the relayed body against BOTH, so a test can express
+ *  "the model stopped copying half way" as a body that contradicts the line count,
+ *  and "the model tidied the wording on the way through" as one that contradicts the
+ *  byte count while keeping the lines. */
 type ProbeAnswer = {
   planFound: boolean
   uncheckedCount: number
   planBody: string
   planLines?: number
+  planBytes?: number
 } | null
 
 interface Opts {
@@ -77,7 +80,7 @@ interface Opts {
   /** Overrides for what `plan:next` RELAYS BACK, so a test can express a planner
    *  that edited, truncated or miscounted the committed plan it was told to echo
    *  verbatim. Absent → a faithful relay. */
-  planNextRelay?: { implementationPlan?: string; remainingTasks?: number }
+  planNextRelay?: { implementationPlan?: string; remainingTasks?: number; topTask?: string }
   /** `true` → the mocked `forge:build` reports `deviatedFromSpec: true`, i.e. it
    *  materially built something other than what its exec spec described. */
   forgeDeviates?: boolean
@@ -132,6 +135,7 @@ async function run(opts: Opts = {}): Promise<Out> {
               uncheckedCount: (opts.remainingTasks ?? 0) + 1,
               planBody: COMMITTED_PLAN,
               planLines: COMMITTED_PLAN.split('\n').length,
+              planBytes: Buffer.byteLength(COMMITTED_PLAN, 'utf8'),
             }
           : opts.probe
       return answer
@@ -142,7 +146,7 @@ async function run(opts: Opts = {}): Promise<Out> {
       // VERBATIM, so `ralphExecuteNote` hands Forge exactly what is on the branch.
       return {
         implementationPlan: opts.planNextRelay?.implementationPlan ?? COMMITTED_PLAN,
-        topTask: 'T2 — the task THIS iteration must pick up',
+        topTask: opts.planNextRelay?.topTask ?? 'T2 — the task THIS iteration must pick up',
         executionSpec: 'TARGET FILES: t2.ts',
         complexity: 'reasoning',
         // 0 by default so the iteration flows into forge:build + review instead of
@@ -479,6 +483,61 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
     expect(out.labels).toContain('plan:next')
     expect(out.labels).not.toContain('plan:fable')
   })
+
+  test('a REWORDED relay that keeps the line count is caught by the probe’s byte count', async () => {
+    // ARGUS r2, THE CONFIRMED MAJOR. A line count is not an integrity check: the body
+    // is relayed THROUGH A MODEL, then forced authoritative and handed to Forge with
+    // "write EXACTLY this body and commit it". A reword, a re-order, or a silently
+    // flipped '- [ ]' → '- [x]' keeps `wc -l` intact and rewrites the card's plan.
+    // Here the relay checks off the task it was supposed to build and reworks its
+    // text, over the same five lines — same lines, different bytes.
+    const reworded = [
+      '# IMPLEMENTATION_PLAN — the card',
+      '',
+      '- [x] T1 — the task the previous iteration built',
+      '- [x] T2 — the task THIS iteration must pick up (already done, honest)',
+      '- [ ] T3 — the one after that',
+    ].join('\n')
+    expect(reworded.split('\n').length).toBe(COMMITTED_PLAN.split('\n').length) // the guard that WAS there
+    expect(Buffer.byteLength(reworded, 'utf8')).not.toBe(Buffer.byteLength(COMMITTED_PLAN, 'utf8'))
+
+    const out = await run(
+      cleanHandoff(2, {
+        probe: {
+          planFound: true,
+          uncheckedCount: 2,
+          planBody: reworded,
+          planLines: COMMITTED_PLAN.split('\n').length,
+          planBytes: Buffer.byteLength(COMMITTED_PLAN, 'utf8'),
+        },
+      }),
+    )
+
+    expect(out.labels).toContain('plan:probe')
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+    expect(out.logs.some((l) => l.includes('plan:next SKIPPED') && l.includes('byte(s)'))).toBe(true)
+  })
+
+  test('a byte-faithful relay that dropped only the trailing newline still passes', async () => {
+    // The other half again: the guard may not become a way to disable the feature.
+    // `wc -c` counts the file's trailing newline; a relay that drops it is one byte
+    // short and still faithful, exactly as it is one line short and still faithful.
+    const out = await run(
+      cleanHandoff(2, {
+        probe: {
+          planFound: true,
+          uncheckedCount: 1,
+          planBody: COMMITTED_PLAN,
+          planLines: COMMITTED_PLAN.split('\n').length,
+          planBytes: Buffer.byteLength(COMMITTED_PLAN, 'utf8') + 1,
+        },
+      }),
+    )
+
+    expect(out.labels).toContain('plan:next')
+    expect(out.labels).not.toContain('plan:fable')
+  })
 })
 
 /**
@@ -505,6 +564,41 @@ describe('plan:next — the measurement beats the relay', () => {
     expect(out.logs.some((l) => l.includes('plan:next INTEGRITY') && l.includes('COMMITTED body'))).toBe(
       true,
     )
+  })
+
+  test('a topTask that is not a literal unchecked line is replaced by the committed one', async () => {
+    // `ralphExecuteNote` tells Forge to implement "the task above" and to commit the
+    // plan with THAT task marked '- [x]'. A paraphrased (or invented) topTask leaves
+    // Forge nothing to check off: the same plan comes back with the same unchecked
+    // items, the next iteration picks the same first task, and the checklist cannot
+    // converge until PLAN_REFRESH_EVERY or `max_ralph_rounds` stops it. The body is
+    // right here, so the first unchecked line is READ, not taken on the relay's word.
+    const out = await run(
+      cleanHandoff(2, { planNextRelay: { topTask: 'tidy up the T2 area a bit' } }),
+    )
+
+    expect(out.labels).toContain('plan:next')
+    const forge = promptFor(out, 'forge:build')
+    expect(forge).toContain('Implement ONLY this one task: T2 — the task THIS iteration must pick up')
+    expect(forge).not.toContain('tidy up the T2 area a bit')
+    expect(
+      out.logs.some((l) => l.includes('plan:next INTEGRITY') && l.includes('first unchecked')),
+    ).toBe(true)
+  })
+
+  test('a topTask that quotes the checklist line verbatim (marker and all) is not "corrected"', async () => {
+    // The guard compares the TASK, not its punctuation: a planner that echoes the
+    // whole '- [ ] …' line has answered correctly and must not be logged as a
+    // divergence — an integrity log that fires on every clean run is noise, and noise
+    // is how a real divergence gets missed.
+    const out = await run(
+      cleanHandoff(2, { planNextRelay: { topTask: '- [ ] T2 — the task THIS iteration must pick up' } }),
+    )
+
+    expect(promptFor(out, 'forge:build')).toContain(
+      'Implement ONLY this one task: T2 — the task THIS iteration must pick up',
+    )
+    expect(out.logs.some((l) => l.includes('plan:next INTEGRITY'))).toBe(false)
   })
 
   test('a faithful relay is left exactly alone (no correction, no log)', async () => {
