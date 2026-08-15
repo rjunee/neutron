@@ -127,11 +127,48 @@ freshness window is `INLINE_EVIDENCE_WINDOW_MS = 90_000`, held equal to the
 inspector's `WEDGE_AFTER_MS` by a test (the module is a dependency-free leaf and
 cannot import it).
 
-KNOWN GRANULARITY, stated rather than implied: the clock is per PROJECT, because a
-card carries no session binding. A write in a project therefore marks every runless
-in-progress card of that project active for the window — it cannot say WHICH of two
-simultaneously in-progress cards is being written. Narrowing that needs a
-card↔session binding on the row and is a separate change.
+GRANULARITY, AND WHY IT IS CAPPED AT ONE ROW. The clock is per PROJECT, because a
+card carries no session binding — a write cannot say WHICH of two in-progress cards
+it belongs to. Left unbounded, one write marked every runless in-progress card of the
+project active and, because both clients suppress ▶ on `inline_active`, hid
+Start/Retry BOARD-WIDE for the window: one read-only tool call could take the play
+control off three unrelated cards. So status-only derivation is RATIONED — at most
+ONE card per board may go active on project evidence alone (rule R5), the most
+recently touched eligible in-progress card, which is the card the agent moved into
+`in_progress` before it started writing. Cards whose stored flag is set are
+unaffected: that is an explicit claim, and it is still corroborated by evidence. A
+real card↔session binding on the row would replace the heuristic and is a separate
+change.
+
+RUN-BOUND CARDS FOLLOW `isLinkedRunning`, NOT MERE BINDING. R2 defers to the fork
+lane only while the bound run is LIVE; a card bound to a TERMINAL run — the
+retry-after-failure card someone is now fixing inline — reads its inline evidence
+again. The composer passes the SAME "is this run live" predicate the store's
+`isRunLive` safety invariant uses, so "bound and running" means one thing everywhere,
+and a throwing/absent run store degrades to "live" rather than inventing activity.
+
+TWO CLASSIFIER CORRECTIONS the first cut got wrong, both in the over-claiming
+direction that acceptance (c) exists to prevent. A `>` inside QUOTES is an argument,
+not a redirect (`grep -rn "a > b" src`, `awk '{if (a > b) print}'`), so quoted spans
+are blanked before the redirect is looked for; and a redirect whose target is a
+discard or scratch path (`/dev/null`, `2>&1`, `/tmp/…`, `/var/tmp/…`) writes nothing
+the board cares about — the agent is instructed to send verbose build/test output to
+a scratch log, so counting it would have made "quiet means quiet" fail on every test
+run. Separately, the tap CLIPS its rendered arguments at 2000 chars, so a long
+multi-key Bash call (`git commit -m "<long message>"`) arrives as unparseable JSON;
+the command is now recovered textually from the clipped body instead of being
+classified as `{`, i.e. as nothing.
+
+WHAT THE WRITE CLOCK CANNOT SEE, stated rather than hidden: read-only inline work.
+A research/analysis card, or a card whose inline turn is ten minutes of `bun test`,
+records no write and reads NOT active — and after 90 s of reads a genuinely live
+inline card goes quiet again, EVEN WITH THE FLAG SET. That is deliberate: the flag
+gets no exemption from the freshness check, because "the evidence wins" only means
+something in the direction that costs something. Two obligations follow, and both are
+now honoured in the code: callers describe the signal as RECENT WRITE ACTIVITY rather
+than "an inline action is executing" (both `canPlay` headers), and the operating
+doctrine + `work_board_update` description tell the agent the truth — read-only work
+is carried by the card's STATUS, not by the flag.
 
 The crashed-session heal is by construction, not by a reconciler: the inspector's
 buffer dies with the process, so after a restart evidence reads 0 and every stale
@@ -139,12 +176,22 @@ flag reads not-active. A late-bound `inlineEvidenceReader` holder in `open/compo
 gives the same fail-soft answer before the inspector exists (unset ⇒ evidence 0 ⇒ not
 active), which is why construction order does not matter at any of the five call sites.
 
-IT HEALS ON A CLOCK, NOT ON AN EVENT. Expiry produces no write, so nothing fans a
-frame: a client that stops re-reading keeps rendering the last board it was sent.
-Both clients therefore re-poll every 15 s while any card reads inline-active
-(`landing/chat-react/WorkBoardTab.tsx`, `app/app/projects/[id]/workboard.tsx`) — the
-existing live-run poll cannot cover it, since a derived-inline card is runless by
-construction (rule R2). A quiet board still polls nothing.
+THE ON EDGE IS PUSHED; THE OFF EDGE IS POLLED. `fanWorkBoardChanged` is driven by
+store writes and run transitions, and inline work makes NEITHER — so on an
+already-open board nothing would announce that work started, and acceptance (a) would
+hold only at server READ boundaries (reload, mutation, reconnect). The tool tap
+therefore fans ONE board frame on the rising edge of the write clock
+(`isInlineEvidenceEdge`: the first write for the scope, or the first after the signal
+expired). It is edge-only by construction, so a burst of tool calls inside an already
+active window costs nothing.
+
+Expiry, in contrast, produces no event at all, so both clients re-poll every 15 s
+while any card reads inline-active (`landing/chat-react/WorkBoardTab.tsx`,
+`app/app/projects/[id]/workboard.tsx`); the existing live-run poll cannot cover it,
+since a derived-inline card is runless-or-terminal by construction (rule R2). A quiet
+board still polls nothing. That poll is QUIET on both clients — the mobile screen
+renders `loading` as a full-screen spinner that REPLACES the board, so a loud 15 s
+poll blanked the board for exactly as long as the feature was on.
 
 ONE DELIBERATE ASYMMETRY: the HTTP echoes of create/update/complete derive, while
 the AGENT-TOOL mutation echoes (`work-board/agent-tool.ts`) return the raw stored
@@ -164,10 +211,14 @@ no-write turn, the keepalive mutant, the classifier, the window equality),
 the stale-flag heal, the no-latch expiry, dep-absent passthrough, the General scope
 id, and an `inline_active` write still returning `ok`),
 `gateway/http/work-board-surface.test.ts` (acceptance a–e per response shape, with
-(d) asserting the mutations actually landed) and
+(d) asserting the mutations actually landed and (e) also pinning that five
+in-progress cards do not all light from one write),
+`app/__tests__/workboard-inline-activity-poll.test.ts` (the mobile poll is quiet and
+a failed quiet poll leaves the board standing) and
 `open/__tests__/inline-activity-wiring.test.ts` (real tap → real inspector → real
-deriver for a–c, plus the five composer call sites, the fragment site by name, the
-late binding, and the `build-core-modules.ts` threading).
+deriver for a–c, plus every composer call site pinned BY NAME rather than by a call
+count, the late binding, the tap's evidence edge, and the `build-core-modules.ts`
+threading).
 
 ## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
 

@@ -115,16 +115,16 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
  * the old `status !== 'in_progress'` clause made a failed-run in_progress card
  * unrecoverable from the UI).
  *
- * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): prevents a
- * competing Trident build while an inline agent action is executing. The old
- * staleness caveat is narrowed, NOT abolished: the SERVER now derives
- * `inline_active` from write-class evidence at every read boundary (WS
- * `work_board_changed` frame, HTTP list + echoes, rail extras, per-turn fragment,
- * agent `work_board_list`), so a crashed session's stale flag reads false on the
- * NEXT read. It heals on a clock, not on an event — which is exactly why the poll
- * below re-reads while any card is inline-active; without that re-read a
- * stationary board would hold the last frame it was sent (mirrors
- * app/lib/work-board-helpers.ts canPlay).
+ * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): suppresses ▶
+ * while the card shows RECENT WRITE ACTIVITY, so the owner does not launch a
+ * Trident build on top of a repo an inline agent was just rewriting. No stronger
+ * claim than that: the wire field is DERIVED server-side from a 90 s
+ * write-evidence window, so a crashed session's stale flag reads false on the
+ * next read (it heals on a clock, not an event — which is why the poll below
+ * re-reads while any card is inline-active), and inline work that writes nothing
+ * for 90 s (a long test run, a research turn) reads NOT active and ▶ returns.
+ * That false negative is deliberate: a hint, never a lock, and nothing here
+ * blocks (mirrors app/lib/work-board-helpers.ts canPlay).
  */
 function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active

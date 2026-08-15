@@ -730,10 +730,40 @@ function shellCommandFromArgs(args: string): string {
         if (typeof cmd === 'string') return cmd
       }
     } catch {
-      // Clipped/invalid JSON falls through to the raw text, which still classifies.
+      // Fall through to the textual recovery below.
+    }
+    // CLIPPED JSON. The hook caps its rendered argument body (2000 chars), so a
+    // long multi-key Bash call — `git commit -m "<a very long message>"` — arrives
+    // truncated mid-string and never parses. Raw text would then be classified as
+    // `{`, i.e. not write-class: the tap would silently miss the single most
+    // common write there is. Recover the `command` value textually instead.
+    const at = /"command"\s*:\s*"/.exec(t)
+    if (at !== null) {
+      return t
+        .slice(at.index + at[0].length)
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, ' ')
+        .replace(/\\(["'\\])/g, '$1')
     }
   }
   return t
+}
+
+/** Quoted spans blanked out, so a `>` that is part of an ARGUMENT — `grep "a > b"`,
+ *  `awk '{if (a > b) print}'` — cannot be misread as the shell's own redirect. */
+function withoutQuotedSpans(segment: string): string {
+  return segment.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, '""')
+}
+
+/** Redirect targets that write nothing worth reporting: the bit bucket, an fd dup
+ *  (`2>&1`), and scratch space. A build or test run told to drop its output in
+ *  `/tmp` is READ-ONLY work as far as the board is concerned — and it is exactly
+ *  what the agent is instructed to do with verbose commands, so counting it would
+ *  make "quiet means quiet" fail on every test run. */
+function isDiscardRedirectTarget(target: string): boolean {
+  if (target.startsWith('&')) return true
+  if (target.startsWith('/dev/')) return true
+  return target.startsWith('/tmp/') || target.startsWith('/var/tmp/')
 }
 
 /**
@@ -754,8 +784,12 @@ export function isWriteClassShellCommand(command: string): boolean {
       .replace(/^\(+\s*/, '')
       .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)+/, '')
     if (segment === '') continue
-    // `> file` / `>> file` — the shell's own write verb.
-    if (/(^|\s)>>?\s*\S/.test(segment)) return true
+    // `> file` / `>> file` — the shell's own write verb, but ONLY once the quoted
+    // spans are gone and the target is a real file (see the two helpers above).
+    const bare = withoutQuotedSpans(segment)
+    for (const m of bare.matchAll(/(?:^|\s)\d?>>?\s*(&\d+|\S+)/g)) {
+      if (!isDiscardRedirectTarget(m[1] ?? '')) return true
+    }
     const tokens = segment.split(/\s+/)
     const head = (tokens[0] ?? '').toLowerCase().replace(/^.*\//, '')
     if (WRITE_SHELL_COMMANDS.has(head)) return true

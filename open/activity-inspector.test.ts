@@ -359,6 +359,26 @@ describe('isWriteClassTool — what counts as evidence a repo is being rewritten
     const readArgs = JSON.stringify({ command: 'ls -la', description: 'look' }, null, 2)
     expect(isWriteClassTool('Bash', readArgs)).toBe(false)
   })
+
+  it('recovers the command from JSON the hook CLIPPED mid-string', () => {
+    // The tap caps its rendered argument body (2000 chars), so the single most
+    // common write there is — a long commit message — arrives as unparseable
+    // JSON. Classifying the raw text then sees `{`, i.e. nothing.
+    const long = JSON.stringify(
+      { command: `git commit -m "${'x'.repeat(2_200)}"`, description: 'commit' },
+      null,
+      2,
+    ).slice(0, 2_000)
+    expect(() => JSON.parse(long)).toThrow()
+    expect(isWriteClassTool('Bash', long)).toBe(true)
+    // The recovery must not invent writes either: a clipped READ stays quiet.
+    const longRead = JSON.stringify(
+      { command: `grep -rn "${'y'.repeat(2_200)}" src`, description: 'search' },
+      null,
+      2,
+    ).slice(0, 2_000)
+    expect(isWriteClassTool('Bash', longRead)).toBe(false)
+  })
 })
 
 describe('isWriteClassShellCommand', () => {
@@ -392,6 +412,33 @@ describe('isWriteClassShellCommand', () => {
     ]) {
       expect(isWriteClassShellCommand(cmd)).toBe(false)
     }
+  })
+
+  it('does not read a QUOTED angle bracket as the shell’s redirect', () => {
+    // Acceptance (c): one read-only grep must not light a card for 90 s.
+    for (const cmd of [
+      'grep -rn "a > b" src',
+      "grep -rn 'a >> b' src",
+      'echo "1 > 2"',
+      'awk \'{if (a > b) print}\' f.txt',
+    ]) {
+      expect(isWriteClassShellCommand(cmd)).toBe(false)
+    }
+  })
+
+  it('treats a discard/scratch redirect target as no write at all', () => {
+    for (const cmd of [
+      'grep -rn thing src > /dev/null',
+      'bun test > /dev/null 2>&1',
+      // The agent is INSTRUCTED to send verbose output to a scratch log; doing so
+      // is read-only work, not a repo rewrite.
+      'bun test > /tmp/out.log 2>&1',
+      'bun run build > /var/tmp/build.log',
+    ]) {
+      expect(isWriteClassShellCommand(cmd)).toBe(false)
+    }
+    // …while a redirect at a REAL path is still the shell's own write verb.
+    expect(isWriteClassShellCommand('bun run build > dist/manifest.json')).toBe(true)
   })
 })
 

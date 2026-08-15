@@ -16,6 +16,7 @@ import {
 } from '../activity-inspector.ts'
 import {
   INLINE_EVIDENCE_WINDOW_MS,
+  isInlineEvidenceEdge,
   makeInlineActivityDeriver,
   type InlineEvidenceReader,
 } from '@neutronai/work-board/inline-activity.ts'
@@ -128,17 +129,23 @@ describe('inline activity wiring — composer source mutant pin', () => {
     const src = readFileSync(join(here, '..', 'composer.ts'), 'utf8')
     // One construction…
     expect(src.includes('makeInlineActivityDeriver({')).toBe(true)
-    // …and five call sites: rail extras, the WS `work_board_changed` frame, the
-    // HTTP surface dep (T3), the per-turn `<work_board>` fragment and the
-    // `work_board` agent-tools dep (T4). Deleting any one drops the count.
-    expect((src.match(/deriveInlineActivity\(/g) ?? []).length).toBe(5)
-    // …and the fragment site specifically: the injected board the AGENT reads
-    // must be derived, not the stored flag (count alone would not catch this one).
-    expect(/formatWorkBoardFragment\(\s*deriveInlineActivity\(/.test(src)).toBe(true)
+    // …and every read boundary pinned BY NAME rather than by a call COUNT: a
+    // count goes red on a benign refactor and cannot tell a call from a comment,
+    // whereas each of these names the site it protects.
+    for (const [site, pattern] of [
+      ['rail extras', /deriveInlineActivity\(workBoardStore\.list\(scopeKey\)/],
+      ['WS work_board_changed frame', /deriveInlineActivity\(workBoardStore\.list\(changedKey\)/],
+      // The injected board the AGENT reads must be derived, not the stored flag.
+      ['per-turn <work_board> fragment', /formatWorkBoardFragment\(\s*deriveInlineActivity\(/],
+      ['HTTP surface dep (T3)', /trident_runs: boardRunAccess,[\s\S]{0,900}?derive_inline_active:/],
+      ['work_board agent-tools dep (T4)', /store: workBoardStore,[\s\S]{0,400}?derive_inline_active:/],
+      // The tap's OFF→ON edge: without it an already-open board never learns that
+      // inline work started, because nothing else fans a frame for it.
+      ['tool-tap evidence edge', /isInlineEvidenceEdge\(before, after\)[\s\S]{0,120}?fanWorkBoardChanged\(/],
+    ] as const) {
+      expect(`${site}: ${String(pattern.test(src))}`).toBe(`${site}: true`)
+    }
     expect(src.includes('inlineEvidenceReader.lastWriteActivityAt =')).toBe(true)
-    // Two `derive_inline_active:` deps: the HTTP surface (T3) and the
-    // `work_board` tools input (T4). Deleting either turns this red.
-    expect((src.match(/derive_inline_active:/g) ?? []).length).toBe(2)
     // …and the gateway must still thread the tools dep through to the surface.
     const coreModules = readFileSync(
       join(here, '..', '..', 'gateway', 'composition', 'build-core-modules.ts'),

@@ -286,15 +286,20 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
  *
  * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): the spec's
  * two-clause form (`!isLinkedRunning && status !== 'done'`) does not mention
- * inline_active. This extension prevents launching a competing Trident build
- * while an inline agent action is already executing. The old staleness caveat is
- * narrowed, NOT abolished: the SERVER now derives `inline_active` from
- * write-class evidence at every read boundary (WS `work_board_changed` frame,
- * HTTP list + echoes, rail extras, per-turn fragment, agent `work_board_list`),
- * so a crashed session's stale flag reads false on the NEXT read. It heals on a
- * clock, not on an event, so a client that stops re-reading keeps showing the
- * last frame it was sent — which is why the board screen re-polls while any card
- * reads inline-active. This helper keeps reading the wire field unchanged.
+ * inline_active. It suppresses ▶ while the card shows RECENT WRITE ACTIVITY, so
+ * the owner does not launch a Trident build on top of a repo an inline agent was
+ * just rewriting. Say it that way and no stronger: the wire field is now DERIVED
+ * server-side from a 90 s write-evidence window
+ * (`work-board/inline-activity.ts`), which means
+ *   - a crashed session's stale flag reads false on the NEXT read (the old
+ *     permanent pulse+no-▶ state is gone), but it heals on a CLOCK, not on an
+ *     event, so a client that stops re-reading keeps showing the last frame it
+ *     was sent — hence the board screen's quiet re-poll while any card reads
+ *     inline-active; and
+ *   - inline work that writes nothing for 90 s (a long test/build run, a
+ *     research turn) reads NOT active and ▶ comes back. That is a deliberate
+ *     false negative: this is a HINT, never a lock, and nothing here blocks.
+ * This helper keeps reading the wire field unchanged.
  */
 export function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;

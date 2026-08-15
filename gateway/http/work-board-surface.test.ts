@@ -799,7 +799,10 @@ describe('derived inline activity on the HTTP surface', () => {
     const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
     const body = (await res!.json()) as { items: { inline_active: boolean }[] }
     expect(body.items).toHaveLength(5)
-    expect(body.items.every((i) => i.inline_active)).toBe(true)
+    // …and ONE project write does not claim five cards: status-only derivation is
+    // rationed to a single candidate row, so ▶ stays available on the rest of the
+    // board. Deleting that rationing makes this five.
+    expect(body.items.filter((i) => i.inline_active)).toHaveLength(1)
     // Deleting the BATCH shape (calling the reader per item) turns this red.
     expect(readerCalls).toBe(1)
   })

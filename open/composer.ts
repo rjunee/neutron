@@ -500,6 +500,7 @@ import { buildTridentTerminator, type TridentTerminator } from '@neutronai/tride
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
 import {
+  isInlineEvidenceEdge,
   makeInlineActivityDeriver,
   type InlineEvidenceReader,
 } from '@neutronai/work-board/inline-activity.ts'
@@ -2245,6 +2246,16 @@ export function buildOpenGraphComposer(
     const deriveInlineActivity = makeInlineActivityDeriver({
       reader: inlineEvidenceReader,
       scopeKey: inspectorScopeKey,
+      // The SAME "is the bound run still live" predicate the store's `isRunLive`
+      // safety invariant uses (~:3790), so a card bound to a run means one thing
+      // everywhere: a LIVE run owns the card's activity (fork lane), a TERMINAL
+      // one does not — and the card someone is now fixing inline reads active
+      // instead of staying dark. `boardRunStore` is declared later in this scope;
+      // the closure only derefs it at read time, long after composition.
+      isRunLive: (run_id: string): boolean => {
+        const run = boardRunStore.get(run_id)
+        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+      },
     })
     // M1 UX REDESIGN — the rail-redesign per-project derived fields
     // (`activity` / `preview` / `preview_from` / `live_runs`). Pure derivation in
@@ -4074,7 +4085,23 @@ export function buildOpenGraphComposer(
       })
       // `null` ⇒ a row the transcript is better without (the `reply` tool's bare
       // post-ack, whose words already landed as the assistant message row).
-      if (row !== null) activityInspector.record(inspectorScopeKey(project_id), row)
+      if (row === null) return
+      const scope = inspectorScopeKey(project_id)
+      // THE OFF→ON EDGE. Nothing else pushes a board frame when evidence appears:
+      // `fanWorkBoardChanged` is driven by store writes and run transitions, and
+      // inline work makes NEITHER — that is the whole point of this card. Without
+      // this line an already-open board keeps showing the card as quiet until
+      // something unrelated happens to touch it, so acceptance (a) would hold only
+      // at server READ boundaries (reload, mutation, reconnect). Comparing the
+      // write clock before/after the record fires it only on the transition from
+      // "no fresh evidence" to "fresh": at most once per project per window, and
+      // the OFF edge is the clients' expiry poll, which this frame is what arms.
+      const before = activityInspector.lastWriteActivityAt(scope)
+      activityInspector.record(scope, row)
+      const after = activityInspector.lastWriteActivityAt(scope)
+      if (isInlineEvidenceEdge(before, after)) {
+        fanWorkBoardChanged(workBoardScopeKey(project_slug, project_id))
+      }
     }
     setReplActivityTap(wiredActivityTap)
     const activitySurface = createActivitySurface({

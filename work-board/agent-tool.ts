@@ -288,8 +288,11 @@ export function registerWorkBoardToolSurface(
       'Update a Work Board item by id: change its title, move its status (upcoming/in_progress/done), ' +
       'set/replace its design_doc_ref, or flag inline_active when YOU are working the item INLINE in ' +
       'this topic (shows a caret › on the board; a bound sub-agent shows a fork ⑂ instead — that is ' +
-      'set automatically when a build is dispatched). Clear inline_active when you stop. Re-opening ' +
-      'off done clears the completion datestamp.',
+      'set automatically when a build is dispatched). Clear inline_active when you stop, though the ' +
+      'board no longer depends on you remembering: what it displays is DERIVED from recent WRITES in ' +
+      'the project, so a flag you forget expires on its own and a card you are visibly editing shows ' +
+      'as worked even if you never set the flag. Read-only work (research, a long test run) is ' +
+      'carried by the status, not the flag. Re-opening off done clears the completion datestamp.',
     input_schema: {
       type: 'object',
       properties: {
