@@ -269,6 +269,25 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     expect(reason).toContain('could not read Password')
   })
 
+  test('a bounded resume STOP names the branch and the recorded OID, never the round sentence', () => {
+    // Part 2b: an unreadable head stops the run instead of rebuilding committed work.
+    // What lands in the row must be the two facts that make it re-runnable.
+    const OID = 'a'.repeat(40)
+    const reason = innerTerminalFailureReason(
+      run({ max_rounds: 10, round: 1, inner_checkpoint: 'forge-done' }),
+      {
+        round: 3,
+        checkpoint: 'forge-done',
+        block_kind: 'infra-only',
+        terminal_cause: `could not read the head of trident/x; the recorded work is at ${OID}; re-run when the read succeeds`,
+      },
+    )
+    expect(reason).toContain('could not read the head of trident/x')
+    expect(reason).toContain(OID)
+    // Argus was never reached, so the round sentence would be a lie.
+    expect(reason).not.toContain('without Argus APPROVE')
+  })
+
   test('it does not read as a review outcome to the owner', () => {
     // The misclassification the whole card is about: nobody rejected this work.
     const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly('REVIEW DEFERRED — gh auth login'))

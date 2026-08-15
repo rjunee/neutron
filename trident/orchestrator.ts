@@ -614,8 +614,11 @@ export async function rebaseOntoObservedBase(
  *                              is gone from the authority, so a rebuild is correct and
  *                              can be named truthfully (`head-branch-absent`).
  *   - `''`                   → the read FAILED after 3 attempts. Reserved exclusively
- *                              for "could not read", never for "not there", so Part 2b
- *                              of this card can give it a bounded STOP consequence.
+ *                              for "could not read", never for "not there" — and
+ *                              `classifyResume` now GIVES it a bounded STOP
+ *                              (`{ mode: 'stop', reason: 'head-unreadable' }`): the run
+ *                              ends naming the branch and the recorded OID instead of
+ *                              rebuilding work that is already committed.
  *
  * The authority split mirrors the workflow's own `readBranchHead`: in `pr` mode the
  * REMOTE is the authority (an unpushed local branch is not the shared truth); in

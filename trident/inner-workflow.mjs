@@ -2381,9 +2381,18 @@ function oidClaim(value) {
  *     skip forward to the next step and (only here) carry the RECORDED reviewed
  *     OID as `reviewedHead`.
  *   • recorded OID != live head → the verdict is about different code. RE-REVIEW.
- *   • no recorded OID (a checkpoint written before it was recorded), a
- *     not-full-OID value, or an unreadable live head → treated as MOVED. Old data
- *     must not unlock the new fast path, and "could not tell" is never "unchanged".
+ *   • no recorded OID (a checkpoint written before it was recorded) or a
+ *     not-full-OID recorded value → treated as MOVED, i.e. REBUILD. Old data must
+ *     not unlock the new fast path.
+ *   • an UNREADABLE live head ('') → a bounded STOP. "Could not tell" is still
+ *     never "unchanged" — no fast path opens — but REBUILDING is the wrong
+ *     consequence too: it redoes work that is already committed, at the most
+ *     expensive effort available, and can fork a divergent commit the publisher
+ *     then refuses. Measured: the neutron-enterprise run resumed at
+ *     `outer-published:2aa070d7…` was rebuilt at 133,169 output tokens because one
+ *     probe read failed, and the rebuild's commit existed nowhere. The recorded
+ *     work is intact; only the READ failed, so the run stops naming the branch and
+ *     the recorded OID and is re-runnable the moment the read succeeds.
  *   • an UNKNOWN checkpoint name → rebuild. `ralph-task-built` lands here on
  *     purpose: that iteration deliberately built one task and handed back for a
  *     re-fire, so the next iteration must PLAN and BUILD the next task, not review.
@@ -2408,10 +2417,10 @@ function classifyResume(input) {
   // READ, not a failed one — the recorded work is gone from the authority, so a
   // rebuild is correct here and can be named truthfully. Checked BEFORE normalizeOid,
   // which would flatten this to '' — and '' is reserved exclusively for "could not
-  // read the head", the case Part 2b of this card gives a bounded-STOP consequence.
+  // read the head", the case that gets a bounded-STOP consequence just below.
   if (input.currentHead === 'absent') return { mode: 'rebuild', reason: 'head-branch-absent' }
   const current = normalizeOid(input.currentHead)
-  if (current.length === 0) return { mode: 'rebuild', reason: 'head-unreadable' }
+  if (current.length === 0) return { mode: 'stop', reason: 'head-unreadable' }
   if (current !== recorded) return { mode: 'rebuild', reason: 'head-moved' }
   // From here the recorded OID and the live head are the SAME commit, so the
   // prior phase's outcome is about exactly the code this run is looking at.
@@ -3927,6 +3936,31 @@ try {
     log(
       `trident-v2 resume: checkpoint=${resumeCheckpoint} recorded=${recordedResumeHead || '(none)'} head=${currentHeadAtResume || '(unread)'} src=${launcherLiveHead !== null ? 'launcher' : 'probe'} → ${resumeMode} (${resumePlan.reason})`,
     )
+  }
+
+  // PART 2b — AN UNREADABLE HEAD IS A BOUNDED STOP, NEVER A REBUILD. The recorded
+  // work exists; only the READ failed (already retried 3x in code by the launcher's
+  // resolveResumeLiveHead). Rebuilding here redoes committed work and can fork a
+  // divergent commit — the exact double-failure of the neutron-enterprise #439 run.
+  // The recorded checkpoint is passed through UNTOUCHED so a re-run after the read
+  // recovers resumes at exactly this point. blockKind 'infra-only' + terminalCause
+  // make the outer failure reason name the measurement, never "without Argus APPROVE".
+  if (resumeMode === 'stop') {
+    const stopCause = `could not read the head of ${forgeBranch}; the recorded work is at ${recordedResumeHead}; re-run when the read succeeds`
+    log(`trident-v2 resume STOP (bounded): ${stopCause} — not rebuilding already-recorded work`)
+    const stopResult = {
+      ok: false,
+      prNumber: pr,
+      branch: forgeBranch,
+      verdict: 'REQUEST_CHANGES',
+      round,
+      checkpoint: resumeCheckpoint,
+      remainingTasks: 0,
+      blockKind: 'infra-only',
+      terminalCause: stopCause,
+    }
+    await writeTerminalResult(stopResult)
+    return stopResult
   }
 
   if (resumeMode === 'merged') {

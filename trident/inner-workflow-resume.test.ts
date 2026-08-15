@@ -54,6 +54,8 @@ interface RunOut {
     checkpoint: string
     reviewedHead?: string
     remainingTasks?: number
+    blockKind?: string
+    terminalCause?: string
   }
 }
 
@@ -352,12 +354,9 @@ describe('mid-loop resume — every "could not tell" answer re-reviews', () => {
     expect(out.result.round).not.toBe(0)
   })
 
-  test('an UNREADABLE live head → rebuild (a failed probe is not "unchanged")', async () => {
-    const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, currentHead: '' })
-    expect(out.labels).toContain('head-probe-round-resume')
-    expect(built(out.labels)).toBe(true)
-    expect(out.labels).not.toContain('resume-diff')
-  })
+  // An UNREADABLE live head is covered by its own suite below: it is still never
+  // "unchanged" (no fast path opens, no resume-diff), but since Part 2b its
+  // consequence is a bounded STOP rather than a rebuild.
 
   test('a diff that could not be regenerated → rebuild rather than review nothing', async () => {
     const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, diffBytes: 0 })
@@ -500,7 +499,9 @@ describe('classifyResume — the boundaries, executed', () => {
   test('every non-matching comparison is a rebuild, with the reason named', () => {
     expect(at(null, RECORDED, RECORDED)).toEqual({ mode: 'rebuild', reason: 'no-checkpoint' })
     expect(at('forge-done', null, RECORDED)).toEqual({ mode: 'rebuild', reason: 'no-recorded-head' })
-    expect(at('forge-done', RECORDED, '')).toEqual({ mode: 'rebuild', reason: 'head-unreadable' })
+    // An UNREADABLE head is still never "unchanged" — but its consequence is a
+    // bounded STOP, not the most expensive action available (Part 2b).
+    expect(at('forge-done', RECORDED, '')).toEqual({ mode: 'stop', reason: 'head-unreadable' })
     // 'absent' is a SUCCESSFUL read saying the branch is gone from the authority — a
     // different fact from '' ("could not read"), and named as such.
     expect(at('forge-done', RECORDED, 'absent')).toEqual({
@@ -601,5 +602,86 @@ describe('mid-loop resume — the launcher-read head replaces the probe agent', 
   test('a launcher that predates the arg still probes — the fallback is pinned', async () => {
     const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED })
     expect(out.labels).toContain('head-probe-round-resume')
+  })
+})
+
+/**
+ * AN UNREADABLE HEAD IS A BOUNDED STOP, NEVER A REBUILD (Part 2b).
+ *
+ * The safety verdict is unchanged and must stay: "could not tell" is never
+ * "unchanged", so no fast path opens. What changes is the CONSEQUENCE. The recorded
+ * work is committed and intact — only the READ failed — so rebuilding redoes it at
+ * the most expensive effort available and can fork a divergent commit the publisher
+ * then refuses. That is the measured double-failure of the neutron-enterprise #439
+ * run (133,169 output tokens for a rebuild caused by one failed probe read).
+ *
+ * Every test here asserts the ABSENCES that make it a stop: no plan, no build, no
+ * review — and that the terminal result names the branch and the recorded OID so the
+ * run is re-runnable the moment the read succeeds.
+ */
+describe('mid-loop resume — an unreadable head is a bounded STOP, never a rebuild', () => {
+  const planned = (labels: string[]): boolean => labels.includes('plan:fable')
+  const judged = (labels: string[]): boolean => labels.some((l) => l.startsWith('argus:'))
+
+  test('a launcher-read head of "" STOPS: no probe, no build, no review, and it names the work', async () => {
+    const out = await runResume({
+      checkpoint: 'forge-done',
+      recordedHead: RECORDED,
+      resumeLiveHead: '',
+    })
+
+    // The launcher already read (and retried) — the probe seat is not dispatched.
+    expect(out.labels).not.toContain('head-probe-round-resume')
+    // THE STOP, asserted as absences: nothing was re-planned, rebuilt or re-judged.
+    expect(built(out.labels)).toBe(false)
+    expect(planned(out.labels)).toBe(false)
+    expect(judged(out.labels)).toBe(false)
+    expect(out.labels).not.toContain('resume-diff')
+
+    expect(out.result.ok).toBe(false)
+    expect(out.result.verdict).toBe('REQUEST_CHANGES')
+    // The RECORDED checkpoint is passed through untouched, so re-running once the
+    // read succeeds resumes at exactly this point.
+    expect(out.result.checkpoint).toBe('forge-done')
+    expect(out.result.blockKind).toBe('infra-only')
+    // The cause names the two facts a human (or a re-run) needs, verbatim.
+    expect(out.result.terminalCause).toContain('trident/resume-run')
+    expect(out.result.terminalCause).toContain(RECORDED)
+    expect(out.result.terminalCause).toContain('could not read')
+    // Not the Ralph re-fire path: there is no task to hand back.
+    expect(out.result.remainingTasks).toBe(0)
+    // The finally block still ran — a bounded stop is still a tidy exit.
+    expect(out.labels).toContain('cleanup:worktree')
+  })
+
+  test('a LEGACY probe that reports "" stops too — one probe, then no build and no review', async () => {
+    const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, currentHead: '' })
+
+    // Old launcher → the fallback probe seat is still dispatched, exactly once.
+    expect(out.labels.filter((l) => l === 'head-probe-round-resume')).toHaveLength(1)
+    expect(built(out.labels)).toBe(false)
+    expect(planned(out.labels)).toBe(false)
+    expect(judged(out.labels)).toBe(false)
+    expect(out.labels).not.toContain('resume-diff')
+
+    expect(out.result.ok).toBe(false)
+    expect(out.result.verdict).toBe('REQUEST_CHANGES')
+    expect(out.result.blockKind).toBe('infra-only')
+    expect(out.result.terminalCause).toContain('trident/resume-run')
+    expect(out.result.terminalCause).toContain(RECORDED)
+    expect(out.result.remainingTasks).toBe(0)
+  })
+
+  test('an outer-published resume with an unreadable head does not re-enter review or re-fire', async () => {
+    const checkpoint = `outer-published:${RECORDED}:2:3`
+    const out = await runResume({ checkpoint, recordedHead: RECORDED, resumeLiveHead: '' })
+
+    expect(judged(out.labels)).toBe(false)
+    expect(out.labels.some((l) => l.startsWith('forge:'))).toBe(false)
+    // remainingTasks 0 keeps the outer loop off the Ralph re-fire path…
+    expect(out.result.remainingTasks).toBe(0)
+    // …and the published checkpoint survives verbatim, so the re-run reviews the
+    // very OID the publisher recorded.
+    expect(out.result.checkpoint).toBe(checkpoint)
   })
 })
