@@ -594,6 +594,13 @@ describe('classifyResume — the boundaries, executed', () => {
       'fix-round-1',
       'fix-round-12',
       `outer-published:${RECORDED}:3:1`,
+      // CODEX REVIEW [Major]: the PRODUCTION variant. #291 appends `:deviated` when the
+      // build reported it deviated from its exec spec, and `classifyResume` accepts it —
+      // but the launcher's mirror regex did not, so a deviated publish spent a whole
+      // workflow fire to reach a stop it should have fast-exited on. This table is the
+      // mirror's only guard, and it did not carry the suffixed form.
+      `outer-published:${RECORDED}:3:1:deviated`,
+      `outer-published:${RECORDED}:2:3:deviated`,
       'ralph-task-built',
       'who-knows',
       'outer-published:nothex:3:1',

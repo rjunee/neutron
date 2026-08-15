@@ -758,7 +758,12 @@ export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
     name === 'forge-done' ||
     /^argus-request-changes-round-\d+$/.test(name) ||
     /^fix-round-\d+$/.test(name) ||
-    /^outer-published:[0-9a-f]{40}:\d+:\d+$/.test(name)
+    // The `:deviated` suffix (#291's taskDeviated carry) is part of the PRODUCTION
+    // checkpoint vocabulary — `classifyResume` accepts it at inner-workflow.mjs:2472.
+    // Rejecting it here made the launcher spend a whole workflow fire on a checkpoint
+    // it should have fast-exited on. The suffix says nothing about whether THIS
+    // invocation may skip its rebuild, so a deviated publish decides exactly as a clean one.
+    /^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)
   )
 }
 
