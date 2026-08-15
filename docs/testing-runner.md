@@ -135,7 +135,11 @@ Only do this with headroom; drop `JOBS` first if the box starts swapping.
 > (`DEFAULT_BUILD_FANOUT = 4`), not a launch-time snapshot that goes stale the moment the
 > next build starts, and `jobs × concurrency` is one box's worth of work per build rather
 > than `cores²`. On this 8-core box that ships `JOBS=2 CONCURRENCY=4` per build, and four
-> concurrent builds total 8 chunk processes. See `trident/test-strategy.ts`. Measured
+> concurrent builds total 8 chunk processes. `jobs × concurrency` is one box's worth of
+> work PER BUILD, which is also exactly what this runner's own defaults produce per build
+> (`JOBS=1 CONCURRENCY=cores`): the budget re-splits that load across processes rather
+> than adding to it, and it never puts more test files in flight than an untouched
+> invocation would. See `trident/test-strategy.ts`. Measured
 > 2026-08-15 on the real box: 22.0 min sequential → 11.2 min at `JOBS=8` (an idle-box
 > ceiling) → see `docs/AS_BUILT.md` for the shipped `JOBS=2` figure; the
 > `files executed: 1273` audit is unchanged and the PGLite/device lanes stay serial in

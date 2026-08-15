@@ -70,6 +70,7 @@ import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
   buildFocusScoreRecomputeHandler,
@@ -613,13 +614,9 @@ export function buildCoreModules(
         // lesson — an unwired producer ships a feature whose every part works and which
         // as a whole does nothing).
         //
-        // ONLY THE BUILD PHASES COUNT. `forge-init` and `forge-fix` are the phases that
-        // actually run a suite; a run parked in `ralph-plan`/`ralph-task` (planning) or
-        // `argus` (review) is burning tokens, not cores, and counting it would starve
-        // the one build that IS running tests. The row limit is generous (a cap that
-        // clipped the count would silently pin every budget at its floor).
-        orchestratorOpts.resolve_active_runs = () =>
-          store.listNonTerminal(200).filter((r) => r.phase === 'forge-init' || r.phase === 'forge-fix').length
+        // ONLY THE BUILD PHASES COUNT — see `countActiveBuildRuns`, which is where the
+        // rule and its known over-count live, and which is unit-tested behaviourally.
+        orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome

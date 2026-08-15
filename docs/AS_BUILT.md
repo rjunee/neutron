@@ -917,11 +917,22 @@ transient WASM-init flake the budget exists for. Out of scope for this card.
 
 It becomes banned. `NO_TIMEOUT_WRAPPER` is spliced into the Forge contract: do not wrap
 the suite in a timeout wrapper, start it in the background redirected to a log file, poll
-the log tail until the runner prints its summary, and budget up to 40 minutes before
+the log tail until the runner prints its summary, and budget up to **25 minutes** before
 declaring a hang. The measurement is the argument. 590 s is 9.8 minutes; the suite is
 22.0 minutes before this card and **13.7 minutes after it**, so the cap was shorter than
 the suite before and would still be shorter after. Every full run under that wrapper was
 killed mid-flight and read as a test failure. No amount of speedup fixes that.
+
+**Why 25 and not 40.** The first cut said 40 minutes, which review found unreconciled with
+the ceiling that actually binds a build round: the codex build bridge polls at most 45
+minutes total (five 540 s waits, `trident/inner-workflow.mjs`) and then reports
+`codexStatus='deferred'` with `testsPassed=false` — which, since this card, ALSO trips the
+full-suite gate. A round is edit + stage 1 + suite + fix + re-run, so a 40-minute patience
+budget for ONE suite run could not fit inside 45 minutes with anything else in it. 25
+minutes is ~1.8x the measured 13.7-minute run and leaves ~20 minutes of the bridge ceiling
+for the rest of the round, while staying 2.5x the cap that was killing complete runs. The
+block also now says what to do when the budget runs out — report `testsPassed=false` and
+say the suite did not complete — so an impatient round can never be recorded as a pass.
 
 ### Criterion 4 — stage 1 reads the WORKING TREE, and is bounded
 
@@ -991,6 +1002,30 @@ corrected here.**
    what the next round needs, so it runs; the gate rides on top of its verdict. Criterion 5
    now holds by **verdict override**, not by starvation.
 
+**A third thing, found in round 3 by two reviewers: the gate had no way out.** It keyed
+solely on `testsPassed === true`, with no baseline comparison, no allowlist, no env var
+and no launcher override. On a box whose suite is red for reasons that predate the branch
+— which this document records as the state of THIS box in every measured run — no run
+could reach `argus-approved`, and merge is server-gated on that checkpoint. So no run
+could merge, and each one instead burned `maxRounds` re-running a ~14-minute suite to be
+told the same thing. Worse, the gate saw one boolean, so "the suite never ran" and "the
+suite ran red for pre-existing reasons" were the same event to it.
+
+The build now names WHICH, in a new optional `suiteOutcome` field on FORGE_SCHEMA
+(`passed` / `failed-new` / `failed-preexisting` / `not-run`), and the TEST EXECUTION block
+defines the four words and what the non-blocking one costs. `failed-preexisting` still
+raises a finding, still goes to the panel FIRST, and no longer forces the verdict.
+
+**It is a claim with evidence, not a switch, and that is deliberate.** An env var or a
+box-wide allowlist would turn the gate off for every run on that box, silently and
+invisibly in the run record — the exact hole criterion 5 exists to close. Earning
+`failed-preexisting` costs a base-branch re-run of the failing files whose result goes in
+the build's final text; the finding itself tells the reviewer to check for that comparison
+and to treat a missing one as a blocker. Same scope caveat as the rest of this gate: it
+scores the build's OWN claim, and CI is what catches a lie. `failed-new` and `not-run`
+remain blockers, and an ABSENT `suiteOutcome` behaves exactly as before the field existed,
+so a legacy launcher and every existing harness are unchanged.
+
 The gate is inert when no strategy was supplied — at the write site AND at the resume read
 site — so a legacy launcher is byte-identical.
 
@@ -1002,7 +1037,24 @@ pinned in the opposite direction from before); in PR mode the `checkpoint:forge-
 command is asserted to carry the blocker, and to carry `'[]'` on a proven suite or with no
 strategy. `trident/inner-workflow-resume.test.ts` drives the resume: `forge-done` + a
 recorded blocker → the panel runs, APPROVES, is overridden, one fix round is bought, and
-the run approves only once that round reports the suite passed.
+the run approves only once that round reports the suite passed. Seven more drive the
+escape hatch: `failed-preexisting` + every reviewer approving → the run APPROVES;
+`failed-preexisting` + a blocking panel → REQUEST_CHANGES (the hatch cannot approve on its
+own); `failed-new` and `not-run` still force REQUEST_CHANGES against a unanimous APPROVE;
+an absent field is byte-identical to the old behaviour; and the fix round is handed `FULL
+SUITE RED FOR PRE-EXISTING REASONS` rather than `FULL SUITE NOT PROVEN`.
+
+### Criterion 4 is AGENT COMPLIANCE, not a mechanism — stated plainly
+
+Criteria 1, 2, 3 and 7 above carry real numbers off the real box. Criterion 4 does not,
+and review was right to say so: the evidence for "a build whose diff breaks a test in its
+own directory fails in stage 1, in minutes" is the rendered prompt text and the tests that
+pin it, and **no observed stage-1 rejection and no minutes figure exist**. Stage 1 is an
+instruction to the build agent, not a gate the workflow enforces — nothing in JS checks
+that stage 1 ran, and nothing could without re-running the tests. What IS mechanically
+enforced is the opposite direction, which is the one that matters for correctness: a
+stage-1 pass can never stand in for the full suite (criterion 5, the gate above). Stage 1
+can only save time, and whether it does depends on the agent following the block.
 
 ### What a project trident has never seen gets (PART 2)
 
@@ -1030,7 +1082,16 @@ without ever spawning it, and:
 * **a recognised prefix is not a recognised command.** Every alternative in the closed
   agent-doc list ends in `.*` so real flags survive, which on its own would carry
   `bun test ; curl … | sh` into "run exactly this". Any line containing shell
-  chaining/substitution/redirection metacharacters is rejected and the scan keeps looking;
+  chaining/substitution/redirection metacharacters is rejected and the scan keeps looking.
+  The `bash <script>.sh` alternative was the ONE that did not end in `.*`, so a documented
+  `bash ci/test.sh --all` fell through to unresolved for no reason; it now carries flags
+  like every other arm, with the metacharacter guard still doing the disqualifying;
+* **a MENTION of a knob is not an implementation of it.** The knob probe scanned for the
+  bare word, so `# NOTE: NEUTRON_TEST_JOBS is NOT supported by this runner.` reported the
+  runner as honouring it and the block then said so in those words. It now requires a real
+  shell position — an expansion (`$NAME`, `${NAME}`, `${NAME:-x}`) or an
+  assignment/default (`NAME=`, `NAME:=`, `NAME?`). `scripts/run-tests.sh` reads
+  `JOBS="${NEUTRON_TEST_JOBS:-1}"`, which matches the expansion arm;
 * **an EXAMPLE is not the suite.** Review reproduced the worst version of this: an agent
   doc that shows `bun test packages/api/src/one.test.ts` before its real whole-suite
   command had that single file adopted as "Full suite (stage 2), run exactly this", and the
@@ -1038,8 +1099,24 @@ without ever spawning it, and:
   exact defect this card says it must not introduce, reachable precisely on the PART-2 path
   (a repo whose `package.json` has no usable `scripts.test`). A candidate naming a concrete
   test file (`*.test.*` / `*.spec.*`) is skipped and the scan keeps reading. A directory
-  argument (`pytest -q tests/`) is not a file and still resolves; tier 1 is never filtered,
-  because the project's own declared entry point is not an example;
+  argument (`pytest -q tests/`) is not a file and still resolves. **Round 3 found this
+  guard incomplete on two axes, and both are now closed** — the earlier claim here that
+  the defect was closed and "reachable precisely on the PART-2 path" was wrong on both
+  counts:
+  * it was a JS/TS FILENAME regex while the closed invocation list also admits pytest,
+    `go test` and `cargo test`, so `pytest tests/test_foo.py`, `go test ./pkg/foo` and
+    `cargo test my_unit_test` were all adopted as full suites. The guard now asks the
+    runner-appropriate question: a `.py` path or node id, and for go/cargo any positional
+    target other than go's whole-module `./...` (a positional there is a package or
+    test-name filter, i.e. a subset by construction);
+  * it was consulted from the AGENT-DOC path only, so TIER 1 bypassed it entirely and
+    `{"scripts":{"test":"bun test app/one.test.ts"}}` was rendered as the full-suite
+    command. Tier 1 is now filtered too. "The project's own declared entry point" is a
+    good argument about shell metacharacters — `tsc && bun test` is normal and correct
+    there, and that exemption stands — and no argument at all about naming one file: a
+    `scripts.test` that runs a single test file is not the suite whoever declared it. A
+    filtered tier 1 falls through to the agent docs and then to the honest unresolved
+    branch;
 * **the block does not claim bounds it did not set.** A runner that takes the jobs knob but
   exposes no per-process concurrency knob keeps its own default (commonly the core count),
   so the `jobs × concurrency = cores` pairing cannot be completed — the budget is still
@@ -1058,6 +1135,100 @@ mem_available: 16 GiB}` returned 5 jobs per build — a claimed 48 GiB across a 
 fan-out against 16 GiB available. RAM is shared by the same builds the cores are, so it is
 divided by the same divisor; that input now returns 1. On the reference box the term stays
 INERT (8.3 ÷ divisor against 8 ÷ divisor), so every figure in the table above is unchanged.
+
+### Why `computeTestConcurrency` does NOT divide by the fan-out — the aggregate question
+
+Round 3 asked (one reviewer, unconfirmed) whether the pairing oversubscribes: `jobs ×
+concurrency` is `cores` PER BUILD, so four builds put `4 × cores` worth of interleaving on
+one box. The answer is that the two terms bound different resources, and that the
+aggregate is not in fact worse than the project's own defaults.
+
+* `jobs` is a PROCESS count, so it multiplies RSS. Memory is what kills a box outright and
+  is genuinely shared across the fan-out, which is why BOTH terms of `computeTestJobs`
+  carry the divisor (previous section).
+* `concurrency` is in-process interleaving. It costs CPU, and CPU oversubscription
+  degrades gracefully — it does not OOM anything.
+
+The invariant the pairing holds is `jobs × concurrency ≤ cores`, and the runner's own
+default is `JOBS=1` with `CONCURRENCY=cores` — also `cores` files in flight per build. On
+the reference box, `N ≤ 4` gives `2 × 4 = 8` and `N = 8` gives `1 × 8 = 8`, both exactly
+the default's 8. Under a 4-way fan-out the box sees 32 concurrent test files either way:
+**trident re-splits the load across processes, it does not add to it.** Dividing this term
+as well would take a lone build on an idle box to `2 × 1 = 2` files in flight — a QUARTER
+of what the project gets with trident not involved at all, and slower than the sequential
+baseline criterion 1 exists to beat. `trident/test-strategy.test.ts` pins both the `≤
+cores` invariant across `active_runs ∈ {1,2,3,4,5,8,16,50}` and the never-below-default
+equality at N ∈ {1,4,8}.
+
+### The budget is now VISIBLE, and the live count honestly over-counts
+
+Two round-3 minors, both about the same blind spot. `resolve_active_runs` counts runs in
+`forge-init`/`forge-fix`, and a phase is a RUN-LIFETIME marker rather than a suite window:
+in pr mode the orchestrator's publish-requested branch returns without touching `phase`,
+so a run stays `forge-init` through publish, the review re-fire and its fix rounds until
+the state machine moves it at harvest. The count therefore reads "runs somewhere in their
+build lifetime", which is ≥ the number executing a suite right now.
+
+The direction is safe — over-counting means a LARGER divisor, i.e. FEWER jobs, degrading
+toward the runner's own sequential default and never toward oversubscription — and it
+cannot bite below `DEFAULT_BUILD_FANOUT` at all, because the divisor is
+`max(FANOUT, active_runs)`. Narrowing it needs a phase that moves on publish, which is a
+state-machine change and not a budgeting one, so it is recorded rather than fixed.
+
+What IS fixed is the invisibility, which was the real complaint: nothing anywhere logged
+the divisor or the chosen jobs value, so a box with ≥ 8 parked runs quietly pinned every
+build at `jobs=1` and looked identical to a healthy one. `buildTestStrategyDetail` returns
+the numbers beside the block and the orchestrator puts them on its fire note:
+`test-strategy: source=package-json knob=NEUTRON_TEST_JOBS cores=8 active_runs=2
+divisor=4 jobs=2 concurrency=4`. The project's command string is never logged — only where
+it came from and whether a knob was found.
+
+The counting rule also moved out of the gateway composer closure into
+`trident/active-runs.ts`, so round 3's other minor is answered too: it is now covered by
+behavioural tests (zero / one / four / over-limit / non-build phases / a throwing store)
+rather than by assertions on the composer's source text. The wiring assertion stays where
+it was, because that composition genuinely is not reachable from a unit test.
+
+### Round-4 verification run (2026-08-15, same box)
+
+The whole suite was re-run on the round-4 tree with the SHIPPED budget
+(`NEUTRON_TEST_JOBS=2 NEUTRON_TEST_CONCURRENCY=4`), and the coverage audit is intact with
+this round's new test file included:
+
+```
+declared files: 1274   bun-discovered: 1274   assigned here: 1274
+files executed: 1274 (1220 general + 20 PGLite + 34 device)
+lanes: 13 general chunks + PGLite lane + device lane   failed: 6 (6 7 11 9 12 PGLite-lane)
+```
+
+1,274 rather than 1,273 because `trident/active-runs.test.ts` is new; declared, discovered,
+assigned and executed all move together, which is the property criterion 3 is about. The
+run is RED — 125 failing assertions across 120 unique tests in 44 files, the same
+environment-shaped set this document has recorded in every measured run on this box.
+
+**Proven pre-existing, not asserted.** All 44 failing files were re-run twice in the same
+worktree, once with this round's changes and once with them stashed (base = the branch tip
+`a3e392d`): `196 pass / 117 fail / 313 tests` both times, and the sorted unique failure
+lists are **byte-identical** — zero new failures from this diff. None of the 44 files is a
+file this diff touches. `tsc --noEmit -p tsconfig.json` exits 0. This is exactly the
+evidence the new `suiteOutcome='failed-preexisting'` claim is defined to cost, produced by
+the round that introduced the claim.
+
+No new wall-clock figure is published here: the round-4 run was not timed to the second
+against a matched sequential baseline, and the 22.0 min → 13.7 min pair recorded above was.
+A speedup without a measurement is exactly what criterion 1 forbids.
+
+### `readHostBudget` is sampled once, and only the memory term is exposed to that
+
+Recorded rather than fixed (round-3 nit, and correct). The block is rendered at fire time
+and reused for round 1 and every fix round, so `MemAvailable` is the box's figure at
+launch. The CORE term is stale-proof by construction — it divides by a CONSTANT fan-out,
+not by a live count, which is the whole argument for the constant divisor. The memory term
+has no equivalent mitigation and instead relies on `DEFAULT_PER_FILE_RSS` being a ~24x
+safety factor over the measured per-file working set; on the reference box that term is
+inert either way, and on a small box a stale reading can only have been read HIGH, which
+is what the safety factor absorbs. Re-sampling per round would mean re-rendering the block
+per round, which is precisely the staleness trade this module refuses.
 
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 

@@ -72,6 +72,12 @@ interface RunOpts {
    */
   testsPassed?: boolean
   /**
+   * What every forge build/fix round reports for `suiteOutcome`. Undefined → the field
+   * is absent, which is the legacy shape and must behave exactly as it did before the
+   * field existed. `'failed-preexisting'` is the escape hatch the gate has to honour.
+   */
+  suiteOutcome?: string
+  /**
    * Thread a `dbPath`/`runId`/`checkpointScript` so the checkpoint steps actually issue
    * their `agent()` call and their exact command can be read. Nothing is executed (the
    * agent is a mock), so no database is touched. Off by default: every other test here
@@ -104,10 +110,11 @@ async function runWorkflow(
     if (String(label).startsWith('head-probe-round-built-')) return { head: 'a'.repeat(40) }
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       const testsPassed = opts.testsPassed ?? true
+      const suite = opts.suiteOutcome === undefined ? {} : { suiteOutcome: opts.suiteOutcome }
       if (opts.codexBuild) {
-        return { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, branch: 'trident/test-run', commitSha: 'a'.repeat(40), prNumber: null, diffFile: '/tmp/x.diff', worktreePath: '/wt', testsPassed }
+        return { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, branch: 'trident/test-run', commitSha: 'a'.repeat(40), prNumber: null, diffFile: '/tmp/x.diff', worktreePath: '/wt', testsPassed, ...suite }
       }
-      return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed }
+      return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed, ...suite }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: opts.approveAll === true ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
@@ -876,6 +883,82 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
         recordCheckpoints: true,
       })
       expect(checkpointPrompt(captured, 'forge-done')).toContain("printf '%s' '[]'")
+    })
+  })
+
+  /**
+   * THE ESCAPE HATCH (Argus round 3, confirmed by two reviewers).
+   *
+   * With the gate keyed solely on `testsPassed === true` and no override anywhere, a box
+   * whose suite is red for reasons that predate the branch could never reach
+   * `argus-approved`, so no run on it could ever merge — and every run spent its whole
+   * round budget re-running a ~14-minute suite to be told the same thing. The gate could
+   * not tell "the suite never ran" from "the suite ran red before I got here".
+   *
+   * The hatch is a CLAIM WITH EVIDENCE, not a switch: `suiteOutcome='failed-preexisting'`
+   * still raises a finding the panel reads, and still costs a base-branch comparison the
+   * reviewer is told to look for. What it no longer does is force the verdict.
+   */
+  describe('a suite that was red BEFORE this branch is reviewable, not fatal', () => {
+    test('failed-preexisting does NOT force REQUEST_CHANGES — the panel decides', async () => {
+      const { result } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: false,
+        suiteOutcome: 'failed-preexisting',
+        approveAll: true,
+      })
+      expect(result.verdict).toBe('APPROVE')
+    })
+
+    test('…and the panel still SEES it, first, as a finding it is told to check', async () => {
+      const { captured } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: false,
+        suiteOutcome: 'failed-preexisting',
+      })
+      const fix = captured.find((c) => String(c.label).startsWith('forge:fix-round-'))
+      expect(String(fix?.prompt)).toContain('FULL SUITE RED FOR PRE-EXISTING REASONS')
+      expect(String(fix?.prompt)).not.toContain('FULL SUITE NOT PROVEN')
+    })
+
+    test('a panel that BLOCKS still blocks — the hatch cannot approve on its own', async () => {
+      const { result } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: false,
+        suiteOutcome: 'failed-preexisting',
+      })
+      expect(result.verdict).toBe('REQUEST_CHANGES')
+    })
+
+    test.each(['failed-new', 'not-run'])('%s is still a BLOCKER — the hatch is narrow', async (outcome) => {
+      const { result } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: false,
+        suiteOutcome: outcome,
+        approveAll: true,
+      })
+      expect(result.verdict).toBe('REQUEST_CHANGES')
+    })
+
+    test('an ABSENT suiteOutcome behaves exactly as before the field existed', async () => {
+      const { result } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: false,
+        approveAll: true,
+      })
+      expect(result.verdict).toBe('REQUEST_CHANGES')
+    })
+
+    test('testsPassed=true still short-circuits the gate whatever the outcome says', async () => {
+      // The two fields cannot disagree in the dangerous direction: `testsPassed=true` is
+      // the pass claim and it is checked first, exactly as it always was.
+      const { result } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: true,
+        suiteOutcome: 'passed',
+        approveAll: true,
+      })
+      expect(result.verdict).toBe('APPROVE')
     })
   })
 })

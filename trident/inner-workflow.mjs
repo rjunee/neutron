@@ -859,6 +859,13 @@ const FORGE_SCHEMA = {
     // cheap `plan:next` continuation. Absent/null decodes as false everywhere, so
     // an executor that never mentions it keeps today's behaviour exactly.
     deviatedFromSpec: { type: ['boolean', 'null'] },
+
+    // WHICH KIND OF NOT-PASSED, so the gate can tell "the suite never ran" from "the
+    // suite ran and was red before this branch existed". OPTIONAL on purpose: a legacy
+    // launcher (no TEST EXECUTION block) and every existing test harness omit it, and
+    // `fullSuiteFindings` treats an absent value exactly as it treated every
+    // `testsPassed !== true` before this field existed. See `SUITE_OUTCOME_*`.
+    suiteOutcome: { type: 'string', enum: ['passed', 'failed-new', 'failed-preexisting', 'not-run'] },
   },
 }
 
@@ -1178,7 +1185,7 @@ CONTRACT
 3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
-6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
+6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim)'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -1604,11 +1611,11 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
-  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. ${corruptInstructions}, copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.${partMissingInstructions}
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
-For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null and testsPassed as false, even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
+For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred', trailerComplete=false, wrapperExitCode=null, and report whether the current worktree has preserved work.`
 }
 
@@ -3640,19 +3647,64 @@ function reviewPreconditionDeferred(readiness) {
 function fullSuiteFindings(report) {
   if (testStrategy === '') return []
   if (report?.testsPassed === true) return []
+  if (report?.suiteOutcome === 'failed-preexisting') {
+    return [
+      {
+        severity: 'major',
+        title: 'FULL SUITE RED FOR PRE-EXISTING REASONS — the build says the failures are not its diff',
+        evidence:
+          'The build ran the FULL suite (stage 2), reported testsPassed=false, and reported ' +
+          "suiteOutcome='failed-preexisting' — i.e. it re-ran the failing files at the base branch and " +
+          'observed the same failures WITHOUT its diff. That claim is the build\'s own; the TEST EXECUTION ' +
+          'block requires the base-branch comparison and the named failures in its final text, so CHECK ' +
+          'THAT THEY ARE THERE before you weigh this. If the comparison is missing, or the named failures ' +
+          'touch files this diff changed, treat this as a BLOCKER and say so. Otherwise this is a ' +
+          'pre-existing repository condition, not a defect of this change, and it does not by itself ' +
+          'prevent approval.',
+      },
+    ]
+  }
   return [
     {
       severity: 'blocker',
       title: 'FULL SUITE NOT PROVEN — the build did not report testsPassed=true',
       evidence:
-        `The build reported testsPassed=${JSON.stringify(report?.testsPassed ?? null)}. The TEST EXECUTION block makes the ` +
+        `The build reported testsPassed=${JSON.stringify(report?.testsPassed ?? null)} and ` +
+        `suiteOutcome=${JSON.stringify(report?.suiteOutcome ?? null)}. The TEST EXECUTION block makes the ` +
         'FULL suite (stage 2) a precondition of testsPassed=true — a stage-1/diff-scoped pass, a skipped ' +
         'run, or a run that never reached the runner\'s final summary line does not qualify. This round ' +
         'CANNOT be approved whatever the reviewers say. Run the full suite exactly as the TEST EXECUTION ' +
         'block specifies, fix what it reds, and report testsPassed=true with the runner\'s own ' +
-        'summary/coverage-audit line in your log tail.',
+        'summary/coverage-audit line in your log tail. If the suite is red for reasons that predate this ' +
+        "branch, PROVE it (re-run the failing files at the base branch) and report suiteOutcome=" +
+        "'failed-preexisting' with those failures named — that outcome is reviewable rather than fatal.",
     },
   ]
+}
+
+/**
+ * Does a suite finding FORCE the verdict? Only a blocker does.
+ *
+ * THE HOLE THIS CLOSES (round-3 review, confirmed by two reviewers). The gate used to
+ * force REQUEST_CHANGES on every `testsPassed !== true`, with no override anywhere — no
+ * baseline comparison, no allowlist, no env var, no launcher flag. On a box whose suite
+ * is red for reasons that predate the branch (this repo's own AS_BUILT records exactly
+ * that, in every measured run), NO run could reach `argus-approved` and therefore no run
+ * could merge; each one instead burned its full round budget re-running a ~14-minute
+ * suite to be told the same thing. And because the gate saw one boolean, "the suite never
+ * ran" and "the suite ran red for pre-existing reasons" were the same event to it.
+ *
+ * THE ESCAPE HATCH IS A CLAIM WITH EVIDENCE, NOT A SWITCH. An env var or a box-wide
+ * allowlist would turn the gate off for every run on that box, silently, which is exactly
+ * the hole criterion 5 exists to close and is invisible in the run record. Instead the
+ * build must name the outcome (`suiteOutcome='failed-preexisting'`), and earning it costs
+ * a base-branch re-run whose result goes in its final text. The claim is per-round, it is
+ * in the findings the panel reads, and a reviewer who cannot find the comparison is told
+ * (in the finding itself) to treat it as a blocker. Same scope caveat as the rest of this
+ * gate: it scores the build's OWN claim, and CI is what catches a lie.
+ */
+function suiteFindingsBlock(suiteFindings) {
+  return Array.isArray(suiteFindings) && suiteFindings.some((f) => f?.severity === 'blocker')
 }
 
 /**
@@ -3663,11 +3715,18 @@ function fullSuiteFindings(report) {
  * infra-only block EXITS the fix loop without re-Forging, on the grounds that there is no
  * code-side action; an unproven suite is a code-side action, so the loop must continue.
  * Empty findings → the synthesis is returned untouched, so a healthy round is unchanged.
+ *
+ * A NON-BLOCKER SUITE FINDING IS ADDED WITHOUT FORCING THE VERDICT — that is the whole
+ * of the `failed-preexisting` escape hatch (see `suiteFindingsBlock`). The panel still
+ * sees it first and can still block on it in its own words; what it can no longer do is
+ * be overruled into REQUEST_CHANGES by a suite that was red before the branch existed.
  */
 function withSuiteBlocker(synthesis, suiteFindings) {
   if (!Array.isArray(suiteFindings) || suiteFindings.length === 0) return synthesis
   const panelFindings = Array.isArray(synthesis?.findings) ? synthesis.findings : []
-  return { ...synthesis, verdict: 'REQUEST_CHANGES', blockKind: 'code', findings: [...suiteFindings, ...panelFindings] }
+  const findings = [...suiteFindings, ...panelFindings]
+  if (!suiteFindingsBlock(suiteFindings)) return { ...synthesis, findings }
+  return { ...synthesis, verdict: 'REQUEST_CHANGES', blockKind: 'code', findings }
 }
 
 async function runReviewRound(diffFile, round, prForReview, paidReview = null) {
@@ -4548,7 +4607,9 @@ try {
   // gate record by a workflow that does.
   const resumeSuiteFindings = resumeMode === 'review' && testStrategy !== '' ? resumeFindingsList : []
   if (resumeSuiteFindings.length > 0) {
-    log(`trident-v2 full-suite gate: resumed at ${resumeCheckpoint} with a recorded unproven-suite blocker — the panel runs, but this round cannot APPROVE`)
+    log(
+      `trident-v2 full-suite gate: resumed at ${resumeCheckpoint} with a recorded suite finding — the panel runs, and ${suiteFindingsBlock(resumeSuiteFindings) ? 'this round cannot APPROVE' : 'the finding is advisory (pre-existing red)'}`,
+    )
   }
 
   if (resumeMode === 'review' || resumeMode === 'fix') {
@@ -5033,7 +5094,9 @@ ${task}${reflectionGuidance}`,
     // the only shape `synthesis-unavailable.test.ts` allows: every assignment to
     // `synthesis` comes from `runReviewRound`, which is what makes a dead panel safe.
     if (round1SuiteFindings.length > 0) {
-      log(`trident-v2 full-suite gate: round=${round} suite NOT proven — the panel runs, but its verdict is overridden to REQUEST_CHANGES`)
+      log(
+        `trident-v2 full-suite gate: round=${round} suite NOT proven — the panel runs, and ${suiteFindingsBlock(round1SuiteFindings) ? 'its verdict is overridden to REQUEST_CHANGES' : 'the finding rides along without forcing the verdict (pre-existing red)'}`,
+      )
     }
     synthesis = withSuiteBlocker(await runReviewRound(diffFile, round, pr), round1SuiteFindings)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
@@ -5204,7 +5267,9 @@ ${task}${reflectionGuidance}`,
     // "no commit to pin", and it is what this one says now.
     reviewedHead = fixHead === 'absent' ? '' : fixHead
     if (fixSuiteFindings.length > 0) {
-      log(`trident-v2 full-suite gate: round=${round} fix reported testsPassed=${JSON.stringify(fix?.testsPassed ?? null)} — the panel runs, but its verdict is overridden to REQUEST_CHANGES`)
+      log(
+        `trident-v2 full-suite gate: round=${round} fix reported testsPassed=${JSON.stringify(fix?.testsPassed ?? null)} suiteOutcome=${JSON.stringify(fix?.suiteOutcome ?? null)} — the panel runs, and ${suiteFindingsBlock(fixSuiteFindings) ? 'its verdict is overridden to REQUEST_CHANGES' : 'the finding rides along without forcing the verdict (pre-existing red)'}`,
+      )
     }
     synthesis = withSuiteBlocker(await runReviewRound(diffFile, round, pr), fixSuiteFindings)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord

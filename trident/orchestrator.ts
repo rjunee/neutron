@@ -80,7 +80,7 @@ import {
 } from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
-import { buildTestStrategy, readHostBudget } from './test-strategy.ts'
+import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
@@ -292,7 +292,9 @@ export interface BuildTridentOrchestratorOptions {
    * checkpoint (`forge-done`, `argus-*`, `fix-round-N`), so it never trips this;
    * only a genuinely wedged agent() (or a stalled orphan) does. This is
    * deliberately SHORTER than `max_inflight_ms` (the 2h absolute ceiling, kept
-   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (25 min).
+   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (90 min —
+   * `trident/liveness.ts`; this comment said 25 min long after the constant was
+   * raised, which is exactly the kind of drift that makes a reader distrust it).
    */
   no_advance_hang_ms?: number
   /**
@@ -1568,6 +1570,11 @@ export function buildTridentOrchestrator(
     // never fail because the strategy could not be derived. Null → the workflow's
     // contract is byte-identical legacy.
     let test_strategy: string | null = null
+    // The numbers behind that block, carried into this launch's AdvanceOutcome note so
+    // the divisor and the chosen jobs value are VISIBLE. Round-3 review: a box with
+    // enough parked runs to pin every build at `jobs=1` logged nothing at all and was
+    // indistinguishable from a healthy one.
+    let test_strategy_summary: string | null = null
     try {
       let active = 1
       if (opts.resolve_active_runs) {
@@ -1585,14 +1592,17 @@ export function buildTridentOrchestrator(
         }
       }
       const budget = readHostBudget()
-      test_strategy = buildTestStrategy(launchRun.repo_path, {
+      const detail = buildTestStrategyDetail(launchRun.repo_path, {
         cores: budget.cores,
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
         base_branch: base,
       })
+      test_strategy = detail.block
+      test_strategy_summary = detail.summary
     } catch {
       test_strategy = null
+      test_strategy_summary = null
     }
 
     // FIRE the workflow. The launching turn settles in seconds; the build runs
@@ -1686,7 +1696,9 @@ export function buildTridentOrchestrator(
       run: next,
       changed: true,
       waiting: true,
-      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}`,
+      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}${
+        test_strategy_summary !== null ? ` [${test_strategy_summary}]` : ''
+      }`,
     }
   }
 

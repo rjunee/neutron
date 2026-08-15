@@ -8,9 +8,17 @@
  * `TridentRunStore`) actually wires the producer.
  *
  * That is exactly how `resolve_phase_models` shipped inert, and it was found by review
- * rather than by a test. So this is a source assertion, in the style of
- * `trident-phase-models-producer.test.ts`: the composition is not reachable from a unit
- * test, but its ABSENCE is the defect, and absence is checkable.
+ * rather than by a test. So the first half of this file is a source assertion, in the
+ * style of `trident-phase-models-producer.test.ts`: the composition is not reachable from
+ * a unit test, but its ABSENCE is the defect, and absence is checkable.
+ *
+ * ROUND-3 REVIEW ASKED FOR THE OTHER HALF, and it was right: assertions about source
+ * strings prove the line exists, and nothing here exercised the count it produces. So the
+ * counting rule moved OUT of this closure into `trident/active-runs.ts`, where
+ * `trident/active-runs.test.ts` drives it with real rows — zero, one, four, over the scan
+ * limit, the non-build phases that must NOT be counted, and the store failure the
+ * orchestrator has to survive. What stays here is the wiring assertion, which is the part
+ * a unit test genuinely cannot reach (this composer imports the whole gateway graph).
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -31,17 +39,10 @@ describe('the COMPOSER supplies the live-run-count resolver', () => {
       await Bun.file(new URL('../composition/build-core-modules.ts', import.meta.url)).text(),
     )
     expect(src.includes('orchestratorOpts.resolve_active_runs = () =>')).toBe(true)
-    expect(src.includes('store.listNonTerminal(')).toBe(true)
-  })
-
-  it('counts only the BUILD phases — a run parked in planning or review burns tokens, not cores', async () => {
-    const src = strip(
-      await Bun.file(new URL('../composition/build-core-modules.ts', import.meta.url)).text(),
-    )
-    const wiring = src.slice(src.indexOf('orchestratorOpts.resolve_active_runs'))
-    const line = wiring.slice(0, wiring.indexOf('\n', wiring.indexOf('.filter(')))
-    expect(line).toContain("'forge-init'")
-    expect(line).toContain("'forge-fix'")
+    // …and that it reads the STORE, rather than being handed a constant. The counting
+    // rule itself is `trident/active-runs.ts`, tested behaviourally beside its source.
+    expect(src.includes('countActiveBuildRuns(store)')).toBe(true)
+    expect(src.includes("from '@neutronai/trident/active-runs.ts'")).toBe(true)
   })
 
   it('wires it UNCONDITIONALLY — the store is always constructed in that scope', async () => {

