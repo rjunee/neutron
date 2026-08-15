@@ -416,6 +416,24 @@ untouched by this: the claim travels out verbatim as `publishHead`, and the publ
 fails loudly naming both values. In `local` mode there is no publisher, so the check stands
 there.
 
+**THE BOUNDED STOP DOES NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN (Argus r5).**
+Two `classifyResume` dispositions are `rebuild` on EVERY head — matching, moved, absent or
+unreadable: `forge-done` in ralph mode (`ralph-progress-unknown`) and any checkpoint name it
+does not recognise, `ralph-task-built` above all (`unknown-checkpoint`). Ordering the
+unreadable-head check in FRONT of those made a transient read failure convert a rebuild that
+was going to happen anyway into a TERMINAL stop, so one dropped `ls-remote` packet would kill
+every resuming ralph re-fire — strictly worse than the behaviour Part 2b set out to remove,
+and the exact inverse of its intent. The head-unreadable branch now asks
+`resumeOnUnchangedHead` — the same function the head-MATCHED path calls — what this
+checkpoint would do on the best possible head, and defers to it when the answer is already
+`rebuild`. Consulting one function rather than keeping a second list of names is what stops
+the two drifting. `orchestrator.ts`'s launcher fast-exit mirrors the same exemptions through
+`resumeHeadDecides` (it cannot import a `.mjs` Workflow script), and
+`inner-workflow-resume.test.ts` executes BOTH and asserts they agree on every checkpoint
+name, so the mirror cannot rot silently. The exit also resolves the PR link BEFORE it fires:
+"re-run when the read succeeds" is advice a human follows by opening the PR the recorded
+commit is on, and the terminal row used to be written with `pr: null`.
+
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 
 `renderHostDeployApprovalBody`'s last line said "Tap Approve or Deny. Typing anything

@@ -2389,8 +2389,9 @@ function oidClaim(value) {
  *   • no recorded OID (a checkpoint written before it was recorded) or a
  *     not-full-OID recorded value → treated as MOVED, i.e. REBUILD. Old data must
  *     not unlock the new fast path.
- *   • an UNREADABLE live head ('') → a bounded STOP. "Could not tell" is still
- *     never "unchanged" — no fast path opens — but REBUILDING is the wrong
+ *   • an UNREADABLE live head ('') → a bounded STOP, *but only for a checkpoint
+ *     whose meaning the head actually decides* (see below). "Could not tell" is
+ *     still never "unchanged" — no fast path opens — but REBUILDING is the wrong
  *     consequence too: it redoes work that is already committed, at the most
  *     expensive effort available, and can fork a divergent commit the publisher
  *     then refuses. Measured: the neutron-enterprise run resumed at
@@ -2401,6 +2402,18 @@ function oidClaim(value) {
  *   • an UNKNOWN checkpoint name → rebuild. `ralph-task-built` lands here on
  *     purpose: that iteration deliberately built one task and handed back for a
  *     re-fire, so the next iteration must PLAN and BUILD the next task, not review.
+ *
+ * THE STOP DOES NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN (Argus r5).
+ * Two dispositions are the same on EVERY head — matching, moved, absent or
+ * unreadable: `forge-done` in ralph mode ('ralph-progress-unknown') and any name
+ * this function does not recognise, `ralph-task-built` included
+ * ('unknown-checkpoint'). Both rebuild. When the read fails for one of those, the
+ * failed read changed nothing, and converting a rebuild that was going to happen
+ * anyway into a TERMINAL stop is a strict regression — a transient blip would kill
+ * every ralph re-fire. So the '' branch asks `resumeOnUnchangedHead` what this
+ * checkpoint would do if the head DID match, and defers to it when the answer is
+ * already `rebuild`. Asking the same function the match path uses is what keeps the
+ * two in step: there is no second list of names to drift.
  *
  * THE COMPARISON HAPPENS HERE, IN CODE, exactly like `roundLanded`: the agent is
  * asked for one fact (the head sha) and this function decides what it means. And
@@ -2425,10 +2438,33 @@ function classifyResume(input) {
   // read the head", the case that gets a bounded-STOP consequence just below.
   if (input.currentHead === 'absent') return { mode: 'rebuild', reason: 'head-branch-absent' }
   const current = normalizeOid(input.currentHead)
-  if (current.length === 0) return { mode: 'stop', reason: 'head-unreadable' }
+  if (current.length === 0) {
+    // A FAILED READ MUST NOT CHANGE A HEAD-INDEPENDENT ANSWER (Argus r5). If this
+    // checkpoint rebuilds even when the head matches, the head was never an input to
+    // it — so return that rebuild rather than a terminal stop the read failure would
+    // otherwise invent. The bounded stop is for the checkpoints whose fast path the
+    // unreadable head would have unlocked; there is no committed round to protect
+    // when the checkpoint itself says the progress is unknown.
+    const regardless = resumeOnUnchangedHead(name, input)
+    if (regardless.mode === 'rebuild') return regardless
+    return { mode: 'stop', reason: 'head-unreadable' }
+  }
   if (current !== recorded) return { mode: 'rebuild', reason: 'head-moved' }
   // From here the recorded OID and the live head are the SAME commit, so the
   // prior phase's outcome is about exactly the code this run is looking at.
+  return resumeOnUnchangedHead(name, input)
+}
+
+/**
+ * What a checkpoint NAME means once the live head is known to be the recorded
+ * commit. Split out of `classifyResume` so the unreadable-head branch can consult
+ * the SAME decision (Argus r5) instead of carrying a second list of names that
+ * could drift out of step with this one.
+ *
+ * Every `rebuild` returned here is head-INDEPENDENT by construction: it is the
+ * answer on the BEST possible head, so a worse head cannot improve it.
+ */
+function resumeOnUnchangedHead(name, input) {
   if (name === 'argus-approved') return { mode: 'approved', reason: 'head-unchanged' }
   // The optional `:deviated` suffix is about the NEXT iteration's PLANNER, not
   // about whether THIS invocation may skip its own re-build — so a deviated
@@ -4544,9 +4580,16 @@ ${task}${reflectionGuidance}`,
     // run whose head read failed: the outer publisher re-reads the head in real code and
     // is the authority. But recording `head: ''` here is how that carve-out re-opened the
     // very defect this card exists to close — `classifyResume` reads an empty recorded
-    // OID as `no-recorded-head` → REBUILD, so a publish that fails for any reason
-    // (orchestrator's publish-failed path) leaves a finished, committed build to be
-    // rebuilt. The claim is the only other evidence there is, and recording it is safe
+    // OID as `no-recorded-head` → REBUILD.
+    //
+    // WHO ACTUALLY BENEFITS, NAMED CORRECTLY (Argus r5). This comment used to say "a
+    // publish that fails leaves a finished, committed build to be rebuilt". That path
+    // does not exist: a failed publish is TERMINAL (`orchestrator.ts`, publish-failed),
+    // and a terminal row is never resumed. The real beneficiary is CRASH-RECOVERY
+    // RELAUNCH (#267) — the launcher process dies between this checkpoint and the
+    // publish, the row is reclaimed non-terminal, and the relaunch resumes from exactly
+    // this checkpoint. With `head: ''` that relaunch rebuilds a build that is already
+    // committed. The claim is the only other evidence there is, and recording it is safe
     // BECAUSE IT REMAINS A CLAIM: no fast path opens unless the recorded OID EQUALS the
     // live head the LAUNCHER reads from git, so a wrong claim degrades to `head-moved` →
     // rebuild — exactly what an empty one would have done — while a right one preserves
@@ -4820,9 +4863,20 @@ ${task}${reflectionGuidance}`,
     // recording that push as `reviewedHead` would pin the merge to code the
     // upcoming review never sees. It cannot be empty here: this line is past the
     // empty-diff break, so `fixDiff !== ''`, which is exactly the condition under which
-    // an unreadable head stopped the round above. `'absent'` cannot reach this line
-    // either (the branch has to have MOVED for `roundOutcome` to return 'landed').
-    reviewedHead = fixHead
+    // an unreadable head stopped the round above.
+    //
+    // `'absent'` COLLAPSES TO `''`, EXACTLY AS THE CHECKPOINT WRITE AND `headAfter`
+    // ABOVE ALREADY DO (Argus r5). This comment used to claim `'absent'` could not
+    // reach the line at all — "the branch has to have MOVED for `roundOutcome` to
+    // return 'landed'" — which is false: `fixHead` and `headAfter` are two SEPARATE
+    // probes, so a built-head read that says the branch is gone can sit next to a
+    // branch read that says it moved, and the literal string `'absent'` was then
+    // recorded as the reviewed commit. Bounded downstream (`reviewedHeadOid` in
+    // merge.ts refuses anything that is not 40 hex, so a `pr`-mode merge could never
+    // pin it) but this is a LOCAL-mode value that is not a commit, and naming it one
+    // is the lie #545 is about. `''` is what every other site in this file says for
+    // "no commit to pin", and it is what this one says now.
+    reviewedHead = fixHead === 'absent' ? '' : fixHead
     synthesis = await runReviewRound(diffFile, round, pr)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)

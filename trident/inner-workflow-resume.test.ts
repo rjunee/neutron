@@ -28,6 +28,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { reviewedHeadOid } from './merge.ts'
+import { resumeHeadDecides } from './orchestrator.ts'
 import type { TridentRun } from './store.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -462,6 +463,7 @@ describe('classifyResume — the boundaries, executed', () => {
     'const FULL_OID = /^[0-9a-f]{40}$/',
     extractFn('normalizeOid'),
     extractFn('classifyResume'),
+    extractFn('resumeOnUnchangedHead'),
     extractFn('parseResumeRound'),
     'return { normalizeOid, classifyResume, parseResumeRound }',
   ].join('\n')
@@ -473,6 +475,9 @@ describe('classifyResume — the boundaries, executed', () => {
     expect(source).toContain("reason: 'no-recorded-head'")
     expect(source).toContain("mode: 'approved'")
     expect(source).toContain('fix-round-')
+    // …and from the head-unchanged half, which now lives in its own function.
+    expect(source).toContain("reason: 'unknown-checkpoint'")
+    expect(source).toContain("reason: 'ralph-progress-unknown'")
     expect(source.length).toBeGreaterThan(500)
   })
 
@@ -528,6 +533,87 @@ describe('classifyResume — the boundaries, executed', () => {
         ralph: true,
       }),
     ).toEqual({ mode: 'rebuild', reason: 'ralph-progress-unknown' })
+  })
+
+  /**
+   * THE BOUNDED STOP MUST NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN
+   * (Argus r5). Two dispositions are `rebuild` on EVERY head — a ralph `forge-done`
+   * and any unrecognised name, `ralph-task-built` above all. Ordering the `''` check
+   * in front of them made a transient read failure convert a rebuild that was going
+   * to happen anyway into a TERMINAL stop: one `ls-remote` blip would have killed
+   * every resuming ralph re-fire, which is a strictly worse outcome than the one this
+   * card set out to remove.
+   */
+  test('an unreadable head does NOT stop a checkpoint that rebuilds on every head', () => {
+    // `ralph-task-built` — the checkpoint the ralph re-fire path writes.
+    expect(at('ralph-task-built', RECORDED, '')).toEqual({
+      mode: 'rebuild',
+      reason: 'unknown-checkpoint',
+    })
+    // …and the same answer on every OTHER head, which is what makes it head-independent.
+    expect(at('ralph-task-built', RECORDED, RECORDED).mode).toBe('rebuild')
+    expect(at('ralph-task-built', RECORDED, MOVED).mode).toBe('rebuild')
+    expect(at('ralph-task-built', RECORDED, 'absent').mode).toBe('rebuild')
+    // `forge-done` in ralph mode: built one task, progress unknown → rebuild regardless.
+    const ralphAt = (currentHead: unknown): { mode: string; reason: string } =>
+      fns.classifyResume({
+        checkpoint: 'forge-done',
+        recordedHead: RECORDED,
+        currentHead,
+        hasFindings: false,
+        ralph: true,
+      })
+    expect(ralphAt('')).toEqual({ mode: 'rebuild', reason: 'ralph-progress-unknown' })
+    expect(ralphAt(RECORDED).mode).toBe('rebuild')
+    expect(ralphAt(MOVED).mode).toBe('rebuild')
+    // NEGATIVE CONTROL — the head-DEPENDENT names still stop, or the exemption above
+    // would have quietly deleted the bounded stop entirely.
+    expect(at('forge-done', RECORDED, '')).toEqual({ mode: 'stop', reason: 'head-unreadable' })
+    expect(at('argus-approved', RECORDED, '').mode).toBe('stop')
+    expect(at(`outer-published:${RECORDED}:3:1`, RECORDED, '').mode).toBe('stop')
+    expect(at('fix-round-2', RECORDED, '').mode).toBe('stop')
+    expect(at('argus-request-changes', RECORDED, '', true).mode).toBe('stop')
+  })
+
+  /**
+   * THE LAUNCHER'S FAST-EXIT AND `classifyResume` MUST AGREE ON EVERY NAME. The exit
+   * in `orchestrator.ts launch()` exists only to skip a fire whose outcome is already
+   * known; a name it exits on that `classifyResume` would NOT have stopped is a run
+   * killed for nothing (that is exactly the r5 finding), and a name it fires on that
+   * `classifyResume` DOES stop is only a wasted fire. `resumeHeadDecides` is a hand
+   * mirror of the `.mjs` decision — this executes both and pins the mirror.
+   */
+  test('resumeHeadDecides mirrors classifyResume on every checkpoint name', () => {
+    const names = [
+      '',
+      'pr-merged',
+      'argus-approved',
+      'argus-request-changes',
+      'argus-request-changes-round-3',
+      'forge-done',
+      'fix-round-1',
+      'fix-round-12',
+      `outer-published:${RECORDED}:3:1`,
+      'ralph-task-built',
+      'who-knows',
+      'outer-published:nothex:3:1',
+    ]
+    for (const ralph of [false, true]) {
+      for (const name of names) {
+        const verdict = fns.classifyResume({
+          checkpoint: name,
+          recordedHead: RECORDED,
+          currentHead: '',
+          hasFindings: true,
+          ralph,
+        })
+        expect({ name, ralph, exits: resumeHeadDecides(name, ralph) }).toEqual({
+          name,
+          ralph,
+          exits: verdict.mode === 'stop',
+        })
+      }
+    }
   })
 
   test('case and surrounding whitespace do not change a comparison of the same commit', () => {

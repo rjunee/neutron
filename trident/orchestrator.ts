@@ -649,6 +649,13 @@ export async function rebaseOntoObservedBase(
  * THE WINDOW IS ~1.25 s IN TOTAL, AND IT IS NOT CLAIMED TO BE MORE. It covers a sub-second
  * blip; it does not outlive a sustained outage, and this docblock previously said otherwise.
  *
+ * IT IS SPENT ON THE TICK THREAD, AND THAT COST IS SERIAL (Argus r5). `tick.ts` steps runs
+ * ONE AT A TIME (`per_tick_limit` 50) and this wait is awaited from `launch()`, so an origin
+ * blip that hits N resuming runs at once adds ~1.25 s × N to that tick. The constant is left
+ * small partly for this reason: it bounds a SHARED thread, not just one run. Making the tick
+ * concurrent is a change to `tick.ts`, not to this function — recorded here so the next
+ * person tempted to raise the constant knows what else it multiplies.
+ *
  * WHAT THE FAILURE IT LEAVES BEHIND ACTUALLY COSTS, STATED WITHOUT THE CLAIM THIS COMMENT USED
  * TO MAKE (Argus r4): the run is terminal, and re-running the card is a FRESH DISPATCH — a new
  * row with NULL checkpoint columns (`store.ts` `create`), because a terminal row is never
@@ -717,6 +724,42 @@ export async function resolveResumeLiveHead(
     }
   }
   return ''
+}
+
+/**
+ * Does the LIVE HEAD decide what this resume checkpoint means?
+ *
+ * The launcher's fast-exit (in `launch()`) exists only to avoid spending a fire whose
+ * outcome is already known: `classifyResume` would return the bounded
+ * `{ mode: 'stop', reason: 'head-unreadable' }`. It must therefore fire — not exit —
+ * for every checkpoint `classifyResume` answers WITHOUT consulting the head, or it
+ * pre-empts a decision it does not share. Those are:
+ *
+ *   • `''` — no checkpoint at all → `rebuild`, and nothing recorded to preserve.
+ *   • `pr-merged` → `merged`; the head branch may already be deleted.
+ *   • `forge-done` in RALPH mode → `rebuild` ('ralph-progress-unknown'), and
+ *     any name `classifyResume` does not recognise — `ralph-task-built` above all —
+ *     → `rebuild` ('unknown-checkpoint'). Both are the answer on EVERY head, so a
+ *     read failure changed nothing (Argus r5). Stopping these terminally would let
+ *     one transient `ls-remote` blip kill every resuming ralph re-fire.
+ *
+ * MIRRORS `classifyResume`/`resumeOnUnchangedHead` in `inner-workflow.mjs`, which is
+ * a `.mjs` Workflow script this module cannot import; `inner-workflow-resume.test.ts`
+ * executes BOTH and asserts they agree on every name, so the pair cannot drift
+ * silently.
+ */
+export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
+  const name = checkpoint.trim()
+  if (name === '' || name === 'pr-merged') return false
+  if (name === 'forge-done' && ralph) return false
+  return (
+    name === 'argus-approved' ||
+    name === 'argus-request-changes' ||
+    name === 'forge-done' ||
+    /^argus-request-changes-round-\d+$/.test(name) ||
+    /^fix-round-\d+$/.test(name) ||
+    /^outer-published:[0-9a-f]{40}:\d+:\d+$/.test(name)
+  )
 }
 
 export function innerTerminalFailureReason(
@@ -1102,22 +1145,27 @@ export function buildTridentOrchestrator(
     // a fresh dispatch with null checkpoints, so it rebuilds. See `resolveResumeLiveHead`
     // for why that is the trade, and IMPLEMENTATION_PLAN.md for the resume follow-up.
     //
-    // TWO CHECKPOINT NAMES ARE EXEMPT, each because classifyResume answers them BEFORE
-    // it looks at the head, so this exit would pre-empt a decision it does not share:
+    // SOME CHECKPOINT NAMES ARE EXEMPT, each because classifyResume does not consult
+    // the head for them, so this exit would pre-empt a decision it does not share:
     // 'pr-merged' (resolved to `merged`) and the empty name (resolved to `rebuild`,
-    // reason 'no-checkpoint' — there is nothing recorded to preserve).
+    // reason 'no-checkpoint' — there is nothing recorded to preserve) are answered
+    // before the head check; the head-INDEPENDENT names rebuild on every head. See
+    // `resumeHeadDecides`.
     const resume_checkpoint_name = (resume_checkpoint ?? '').trim()
-    if (
-      resume_live_head === '' &&
-      resume_checkpoint_name !== 'pr-merged' &&
-      resume_checkpoint_name !== ''
-    ) {
+    // THE PR LINK IS RESOLVED BEFORE THE EXIT, NOT AFTER IT (Argus r5). This used to sit
+    // below, so the one path that ends a run WITHOUT ever firing recorded a terminal row
+    // with `pr: null` — and "re-run when the read succeeds" is advice a human follows by
+    // opening the PR the recorded work is on. The exit is rare and already terminal; one
+    // `gh pr view` to make the record point at the work is worth more than the call saved.
+    const existingPr = run.pr ?? (await detectExistingPr(run))
+    const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
+    if (resume_live_head === '' && resumeHeadDecides(resume_checkpoint_name, run.ralph)) {
       const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
       return {
         run: failedRun(
-          run,
-          innerTerminalFailureReason(run, {
-            round: run.round,
+          launchRun,
+          innerTerminalFailureReason(launchRun, {
+            round: launchRun.round,
             checkpoint: resume_checkpoint,
             block_kind: 'infra-only',
             terminal_cause: cause,
@@ -1126,11 +1174,9 @@ export function buildTridentOrchestrator(
         ),
         changed: true,
         waiting: false,
-        note: `${run.phase} → failed (resume head unreadable — bounded stop, no fire)`,
+        note: `${launchRun.phase} → failed (resume head unreadable — bounded stop, no fire)`,
       }
     }
-    const existingPr = run.pr ?? (await detectExistingPr(run))
-    const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
 
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {

@@ -577,6 +577,15 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // The REBASED head — not the head the build reported — is what review is re-fired against.
     expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${newHead}:0:1`)
     expect(h.inputs[1]?.resume_checkpoint).toBe(`outer-published:${newHead}:0:1`)
+    // …AND THE DIFF HANDED TO REVIEW IS TAKEN FROM THE OBSERVED BASE, ON THIS PATH TOO
+    // (Argus r5). `rebaseOntoObservedBase` has TWO return sites — already-contains
+    // (asserted above, at the `${baseTip}..${head}` test) and the REPLAY, this one — and
+    // only the first was pinned. A replay that returned the pre-rebase base would hand
+    // reviewers the ~87%-already-merged artifact this card exists to stop.
+    const replayDiffs = calls.filter((c) => c.includes(' diff ') && c.includes(`..${newHead}`))
+    expect(replayDiffs.length).toBeGreaterThan(0)
+    for (const c of replayDiffs) expect(c).toContain(`${newBaseSha}..${newHead}`)
+    expect(calls.some((c) => c.includes(`main..${newHead}`))).toBe(false)
     // The lease observation still precedes the push it certifies.
     const observeAt = calls.findIndex((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))
     const pushAt = calls.findIndex((c) => c.includes(' push '))
@@ -2048,6 +2057,87 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(final.inner_checkpoint_head).toBe(HEAD)
   })
 
+  /**
+   * THE EXIT MUST NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN (Argus r5).
+   * `classifyResume` rebuilds on EVERY head — matching, moved, absent or unreadable —
+   * for a ralph `forge-done` and for any name it does not recognise, `ralph-task-built`
+   * above all. Exiting terminally on those turns a rebuild that was going to happen
+   * anyway into a dead run, so one transient `ls-remote` blip would kill every
+   * resuming ralph re-fire. `resumeHeadDecides` is the shared mirror;
+   * `inner-workflow-resume.test.ts` pins it against the `.mjs` decision itself.
+   */
+  const unreadable = (): Harness =>
+    buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+          : ok(),
+    })
+
+  test("a 'ralph-task-built' checkpoint is exempt — the fire still happens on an unreadable head", async () => {
+    const h = unreadable()
+    const run = await resumeRun({ inner_checkpoint: 'ralph-task-built' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_live_head).toBe('')
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+  })
+
+  test("a RALPH 'forge-done' is exempt too — its rebuild does not depend on the head", async () => {
+    const h = unreadable()
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, slug: 'ralph-resume', ralph: true })
+    await store.update(run.id, {
+      subagent_run_id: 'stale-id-from-prior-process',
+      subagent_status: 'running',
+      pr: 42,
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+    })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+  })
+
+  // NEGATIVE CONTROL for the pair above: the same 'forge-done' checkpoint on a
+  // NON-ralph run still takes the bounded exit, or the exemption would have deleted
+  // the stop rather than narrowed it.
+  test("a non-ralph 'forge-done' still stops — the exemption is narrow, not a repeal", async () => {
+    const h = unreadable()
+    const run = await resumeRun()
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)!.phase).toBe('failed')
+  })
+
+  /**
+   * THE TERMINAL RECORD POINTS AT THE WORK (Argus r5). "Re-run when the read succeeds"
+   * is advice a human follows by opening the PR the recorded commit is on — and this
+   * exit used to run BEFORE `detectExistingPr`, so a run whose row had not yet learned
+   * its PR number was filed with `pr: null` and no link to the branch it is naming.
+   */
+  test('the bounded exit still records the PR it detected', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+        }
+        if (joined.includes('gh pr list')) return ok('77\n')
+        return ok()
+      },
+    })
+    const run = await resumeRun({ pr: null })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.pr).toBe(77)
+    expect(final.failure_reason).toContain('could not read the head of feat-x')
+  })
+
   test("an OK read with no output is the remote SAYING the branch is gone → 'absent'", async () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
@@ -2188,25 +2278,40 @@ describe('orchestrator — the resume live head is read in code, never relayed b
    * suite injects a no-op `sleep` everywhere, and `gateway/composition/build-core-modules.ts`
    * never passes `opts.sleep` — so the value that actually runs in production, the default
    * parameter, was exercised by nothing. If it were `async () => {}` the three attempts would
-   * fire back to back in production and every test above would still pass. This one spends
-   * the real ~1.25 s once, to pin that it does not.
+   * fire back to back in production and every test above would still pass.
+   *
+   * MEASURED WITHOUT A CLOCK (Argus r5). An earlier version of this test spent the real
+   * ~1.25 s and asserted on `Date.now()` elapsed, which measures the runner rather than the
+   * code (`scripts/ci/wall-clock-bound-check.mjs`, ISSUES #438). The observable that
+   * actually distinguishes "sleeps" from "does not sleep" is the TIMER IT SCHEDULES, so the
+   * default is exercised for real against a captured `setTimeout`: the delays it asks for
+   * are the assertion, and firing each callback immediately keeps the test free.
    */
-  test('resolveResumeLiveHead: the DEFAULT sleep is a real wait (no stub injected)', async () => {
+  test('resolveResumeLiveHead: the DEFAULT sleep schedules the real delays (no stub injected)', async () => {
     const host = async (): Promise<HostCommandResult> => ({
       ok: false,
       stdout: '',
       stderr: 'ssh: Could not resolve hostname github.com',
       exit_code: 128,
     })
-    const started = Date.now()
-    // No third argument: exactly how production calls it.
-    const out = await resolveResumeLiveHead(host, { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' })
-    const elapsed = Date.now() - started
-    expect(out).toBe('')
-    const total = RESUME_HEAD_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0)
-    // A timer can fire a hair early; anything near zero means the default is not sleeping.
-    expect(elapsed).toBeGreaterThanOrEqual(total - 50)
-  }, 10_000)
+    const scheduled: number[] = []
+    const realSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      scheduled.push(ms ?? 0)
+      // Fire on the microtask queue instead of the timer queue: same ordering, no wait.
+      queueMicrotask(fn)
+      return 0
+    }) as unknown as typeof globalThis.setTimeout
+    try {
+      // No third argument: exactly how production calls it.
+      const out = await resolveResumeLiveHead(host, { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' })
+      expect(out).toBe('')
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
+    // A no-op default would schedule nothing; a back-to-back default would schedule zeroes.
+    expect(scheduled).toEqual([...RESUME_HEAD_RETRY_DELAYS_MS])
+  })
 
   test('resolveResumeLiveHead: a read that SUCCEEDS first time never waits at all', async () => {
     const waits: number[] = []
