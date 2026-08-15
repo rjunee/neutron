@@ -39,7 +39,7 @@ describe('decideForegroundPresentation — do not talk over the conversation he 
 
   test('a message for a DIFFERENT project interrupts, even though the app is open', () => {
     // Every other chat app shows you an in-app banner for another conversation.
-    const p = decideForegroundPresentation({ project_id: 'pristine' }, { project_id: 'neutron-open' })
+    const p = decideForegroundPresentation({ project_id: 'other-project' }, { project_id: 'neutron-open' })
     expect(p.shouldShowBanner).toBe(true)
     expect(p.shouldPlaySound).toBe(true)
   })
