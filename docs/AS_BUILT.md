@@ -862,8 +862,18 @@ run-tests: bun=bun max-concurrency=4 timeout=15000ms jobs=2
 ```
 
 Both lane headers appear *after* `==== chunk 13/13 ====`, with `max-concurrency=1` and
-the full 3-attempt retry budget intact. `JOBS` reaches the general pool only, and
-`scripts/run-tests.sh` was not modified by this card.
+the full 3-attempt retry budget intact. `scripts/run-tests.sh` was not modified by this
+card.
+
+Precisely which knob reaches which lane, since an earlier draft of this section said
+"`JOBS` reaches the general pool only" and left the impression that the whole budget did:
+`NEUTRON_TEST_JOBS` reaches the general pool only — but the exported
+`NEUTRON_TEST_CONCURRENCY` also feeds `run_device_lane`'s `--max-concurrency`
+(`scripts/run-tests.sh:414`), so on this box the device lane runs at 4 instead of its
+default 8. The PGLite lane is unaffected (it has its own `PGLITE_CONCURRENCY`, and its
+`max-concurrency=1` is hard-coded). No regression was observed from it — the device lane
+went 407 s → 362 s across the measured runs — and the lane stays serial-by-file-set and
+keeps its retry budget, so criterion 6 holds; the accuracy of the sentence is the point.
 
 ### Honesty about the result: this suite is RED on this box, identically in all three runs
 
@@ -885,6 +895,18 @@ surface tests get `401 missing_bearer` from an unauthenticated harness, the comp
 diff. **No speedup is claimed on a green run, because there was not one to claim it on** —
 what is claimed is that the identical failing set completed in 13.7 minutes instead of
 22.0.
+
+**Round-3 receipt (the Argus-round-2 fix commit).** The full suite was run twice more, back
+to back in the same worktree at the SHIPPED budget (`NEUTRON_TEST_JOBS=2
+NEUTRON_TEST_CONCURRENCY=4`): once on the parent commit and once on the fix commit. Both
+print `declared files: 1273 bun-discovered: 1273 assigned here: 1273 files executed: 1273
+(1219 general + 20 PGLite + 34 device)` (criterion 3, again), both exit 1, and the
+normalised failing sets are **227 unique failures, byte-identical between the two** — this
+build worktree has no `react` in its resolvable `node_modules`, so the device lane and much
+of the app surface fail before they run, on both commits alike. The change is confined to
+`trident/` + docs; the trident directory suite was ALSO run against the same parent commit
+and diffed test-by-test (1179 pass / 187 pre-existing fail, **zero new failures**, 11 net
+new passing tests).
 
 One finding recorded rather than fixed here: the PGLite lane burns all three attempts
 (~291 s) on a *deterministic* failure — `buildGBrainMemory > gbrain truly absent
@@ -911,10 +933,16 @@ review caught that make it real rather than decorative:
   tests at step 3 and commits at step 4, so at stage-1 time `<base>..HEAD` is EMPTY on
   round 1 and lists the PREVIOUS round's files on a fix round. A stage that names no
   files rejects nothing.
-* **The set is capped at 40 files, run in batches of at most 20.** Tier (c) — "test files
-  naming a changed module's basename" — is a `grep -l` on a basename: on this repo
-  `index` matches 642 test files and `store` matches 609, and a file-scoped invocation is
-  ONE un-chunked process. That reproduces both the single-process OOM and the
+* **The WHOLE set is capped at 40 files, run in batches of at most 20.** The first cut
+  capped tier (c) ALONE, which bounded nothing: review measured 54 files selected for a
+  one-file edit and 589 — 46% of the suite — for this card's own diff, growing every fix
+  round because `git diff --name-only <base>` is the branch's CUMULATIVE diff, not the
+  round's. A stage 1 that costs ten minutes is the full suite wearing a hat. The cap is now
+  on the TOTAL, taken in priority order (a) → (b) → (c), and the block says to prefer the
+  files THIS round touched when the cap forces a choice. Tier (c) — "test files naming a
+  changed module's basename" — is still the first tier dropped, because it is a `grep -l` on
+  a basename: on this repo `index` matches 642 test files and `store` matches 609, and a
+  file-scoped invocation is ONE un-chunked process. That reproduces both the single-process OOM and the
   cross-file lane contamination the chunked runner exists to prevent. Over budget, tier
   (c) is DROPPED whole rather than trimmed, and the block says outright that a file-scoped
   run does not reproduce the project's isolation lanes, so an unexplained stage-1 red is
@@ -929,26 +957,52 @@ anywhere read**, so a build that ran only the fast stage went straight to a pane
 reviewers who read the DIFF and never run a test. "No verdict is issued on a stage-1 pass
 alone" cannot be true of a claim nothing checks.
 
-`fullSuiteBlock` (`trident/inner-workflow.mjs`) is that consumer, deterministic and in JS,
-in the same shape as the CI gate: if the build was GIVEN the TEST EXECUTION block and did
-not come back with `testsPassed === true`, **the review panel is not opened at all** — the
-round returns a synthetic REQUEST_CHANGES whose single blocker is the missing suite, and
-the bounded fix loop re-Forges against it. No review budget is spent to be told the tests
-did not run.
+`fullSuiteFindings` + `withSuiteBlocker` (`trident/inner-workflow.mjs`) are that consumer,
+deterministic and in JS, in the same shape as the CI gate: if the build was GIVEN the TEST
+EXECUTION block and did not come back with `testsPassed === true`, a BLOCKER finding is
+prepended to the round's findings and **the verdict is forced to REQUEST_CHANGES**,
+whatever the reviewers said. `blockKind` is forced to `code` too, so an infra-only panel
+cannot exit the fix loop on it.
 
-Where it applies, and what covers the rest: in LOCAL mode one process runs
-build → review → fix, so the gate sits in round 1 and in every fix round. In PR mode the
-build round ends at the publish handoff, and the full-suite requirement is enforced there
-by something stronger than a self-report — GitHub's `test` aggregator runs the whole suite
-independently of anything the build claims, and the existing CI gate turns a red or
-unreadable result into a blocker / a deferred peer that cannot become an APPROVE. The gate
-is inert when no strategy was supplied, so a legacy launcher is byte-identical.
+**Two things the first version of this gate got wrong, both found in review and both
+corrected here.**
 
-Proven by execution, not by reading: `trident/inner-workflow-assembly.test.ts` drives the
-REAL workflow body and asserts WHICH SEATS WERE DISPATCHED — with `testsPassed: false` the
-`argus:*` label list is EMPTY, a `forge:fix-round-*` is dispatched carrying `FULL SUITE NOT
-PROVEN`, and the run's verdict can never be APPROVE; with `testsPassed: true` the panel
-runs exactly as before.
+1. **It was structurally unreachable in PR mode — the DEFAULT mode.** The round-1 gate sat
+   AFTER the `isPr` publish handoff, which ends the process; the re-fired run re-enters as
+   `mode:'review'` with no build report, so nothing was gated. The earlier claim in this
+   document — that the requirement held in both modes, by CI in PR mode — **was wrong**:
+   `classifyCi` returns `status:'none'` for a PR with no checks and only `'red'` blocks, so
+   a PR-mode project **without CI** (the enterprise-shaped case, and the one PART 2 is
+   about) had the requirement enforced by nothing at all. neutron-open itself was covered
+   only accidentally, by `.github/workflows/ci.yml` running the full sharded suite.
+   The claim now TRAVELS: `checkpoint('forge-done' | 'fix-round-N')` records the blocker in
+   `inner_checkpoint_findings`, the orchestrator's publish reset patch leaves that column
+   untouched, and the re-fired run reads it back as `resumeFindings` and injects it into the
+   panel it opens. Those two checkpoint names never carry any other findings (`checkpoint()`
+   writes `[]` unless findings are passed), so the read is unambiguous. The same wire closes
+   the local-mode crash-resume hole, where a process that died between the build and the
+   panel used to lose the claim entirely.
+2. **It replaced the panel instead of adding to it.** Skipping the panel looked like a
+   saving ("no review budget spent to be told the tests did not run") and was in fact a way
+   to spend a whole run on nothing: this repo is RED on this box (120 pre-existing failures,
+   measured above), so an HONEST build reports `testsPassed=false` round after round, and a
+   run that never opens a panel burns its entire round budget — a ~14-minute suite each —
+   and returns ZERO review signal. The panel is cheap next to the suite and its findings are
+   what the next round needs, so it runs; the gate rides on top of its verdict. Criterion 5
+   now holds by **verdict override**, not by starvation.
+
+The gate is inert when no strategy was supplied — at the write site AND at the resume read
+site — so a legacy launcher is byte-identical.
+
+Proven by execution, not by reading. `trident/inner-workflow-assembly.test.ts` drives the
+REAL workflow body: with `testsPassed: false` and **every reviewer and the synthesis
+APPROVING**, the run still terminates REQUEST_CHANGES and the fix round is handed `FULL
+SUITE NOT PROVEN`; the `argus:*` seat list is asserted NON-empty (the round-2 regression is
+pinned in the opposite direction from before); in PR mode the `checkpoint:forge-done`
+command is asserted to carry the blocker, and to carry `'[]'` on a proven suite or with no
+strategy. `trident/inner-workflow-resume.test.ts` drives the resume: `forge-done` + a
+recorded blocker → the panel runs, APPROVES, is overridden, one fix round is bought, and
+the run approves only once that round reports the suite passed.
 
 ### What a project trident has never seen gets (PART 2)
 
@@ -976,10 +1030,34 @@ without ever spawning it, and:
 * **a recognised prefix is not a recognised command.** Every alternative in the closed
   agent-doc list ends in `.*` so real flags survive, which on its own would carry
   `bun test ; curl … | sh` into "run exactly this". Any line containing shell
-  chaining/substitution/redirection metacharacters is rejected and the scan keeps looking.
+  chaining/substitution/redirection metacharacters is rejected and the scan keeps looking;
+* **an EXAMPLE is not the suite.** Review reproduced the worst version of this: an agent
+  doc that shows `bun test packages/api/src/one.test.ts` before its real whole-suite
+  command had that single file adopted as "Full suite (stage 2), run exactly this", and the
+  full-suite gate would then have accepted `testsPassed=true` from a ONE-FILE run — the
+  exact defect this card says it must not introduce, reachable precisely on the PART-2 path
+  (a repo whose `package.json` has no usable `scripts.test`). A candidate naming a concrete
+  test file (`*.test.*` / `*.spec.*`) is skipped and the scan keeps reading. A directory
+  argument (`pytest -q tests/`) is not a file and still resolves; tier 1 is never filtered,
+  because the project's own declared entry point is not an example;
+* **the block does not claim bounds it did not set.** A runner that takes the jobs knob but
+  exposes no per-process concurrency knob keeps its own default (commonly the core count),
+  so the `jobs × concurrency = cores` pairing cannot be completed — the budget is still
+  applied, and the block says outright that the jobs figure is the only bound set there.
+  The unresolved-command branch no longer reports "knobs not found in the project test
+  runner" about a runner it never identified, let alone probed.
 
 A throughput optimisation that breaks a project it does not understand is a regression, so
 a repo trident cannot read simply keeps building exactly as it did.
+
+### The RAM cap is an AGGREGATE cap, not a per-build one
+
+`computeTestJobs` divided the CORE term by the fan-out and left the MEMORY term
+undivided, which is not a bound on a shared box: `{cores: 32, active_runs: 1,
+mem_available: 16 GiB}` returned 5 jobs per build — a claimed 48 GiB across a 4-way
+fan-out against 16 GiB available. RAM is shared by the same builds the cores are, so it is
+divided by the same divisor; that input now returns 1. On the reference box the term stays
+INERT (8.3 ÷ divisor against 8 ÷ divisor), so every figure in the table above is unchanged.
 
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 

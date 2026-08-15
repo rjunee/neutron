@@ -21,6 +21,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   buildTestStrategy,
@@ -37,6 +38,8 @@ import {
   PINNED_KNOBS_LINE,
   STAGE_1_FILE_CAP,
   STAGE_1_REJECT_ONLY,
+  UNPAIRED_CONCURRENCY_LINE,
+  UNRESOLVED_COMMAND_LINE,
 } from './test-strategy.ts'
 
 /** The knob shape the render takes, spelled once. */
@@ -149,6 +152,39 @@ describe('resolveTestCommand', () => {
     })
     expect(resolveTestCommand(repo)).toEqual({ command: 'bash scripts/run-tests.sh', source: 'agent-docs' })
   })
+
+  test('tier 2 REFUSES a file-scoped EXAMPLE and keeps reading for the real suite', () => {
+    // Argus round 2, executed repro: an agent doc that shows the one-file form first
+    // (every doc does) had its EXAMPLE adopted as the project's "full suite", and the
+    // full-suite gate then accepted testsPassed=true from a single-file run. Reachable
+    // exactly on the PART-2 path — a repo with no usable `scripts.test`.
+    const repo = fixture({
+      'AGENTS.md': [
+        'Run one file while iterating:',
+        '```bash',
+        'bun test packages/api/src/one.test.ts',
+        '```',
+        'The whole suite:',
+        '```bash',
+        'bun test',
+        '```',
+      ].join('\n'),
+    })
+    expect(resolveTestCommand(repo)).toEqual({ command: 'bun test', source: 'agent-docs' })
+  })
+
+  test('…including the spec/tsx spellings, and a doc with ONLY examples resolves nothing', () => {
+    const only = (line: string): string => ['```bash', line, '```'].join('\n')
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('bun test app/x.spec.tsx') })).command).toBeNull()
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('npm test -- src/a.test.js') })).command).toBeNull()
+    // A directory argument is not a file: `pytest tests/` really is the suite.
+    expect(resolveTestCommand(fixture({ 'AGENTS.md': only('pytest -q tests/') })).command).toBe('pytest -q tests/')
+  })
+
+  test('tier 1 is NOT filtered — the project\'s own declared entry point is never an example', () => {
+    const repo = fixture({ 'package.json': JSON.stringify({ scripts: { test: 'bun test src/all.test.ts' } }) })
+    expect(resolveTestCommand(repo).source).toBe('package-json')
+  })
 })
 
 describe('probeParallelKnobs', () => {
@@ -251,6 +287,14 @@ describe('computeTestJobs', () => {
     expect(computeTestJobs({ ...box, active_runs: 50 })).toBe(1)
   })
 
+  test('the memory cap divides by the SAME fan-out the cores do', () => {
+    // A per-build RAM cap is not an aggregate one: this box budgeted 5 jobs per build,
+    // i.e. a claimed 48 GiB across a 4-way fan-out against 16 GiB available.
+    expect(computeTestJobs({ cores: 32, active_runs: 1, mem_available_bytes: 16 * GiB })).toBe(1)
+    // Inert on the reference box, which is why the table above is unchanged.
+    expect(computeTestJobs({ cores: 8, active_runs: 1, mem_available_bytes: 25 * GiB })).toBe(2)
+  })
+
   test('memory caps below the core budget', () => {
     expect(computeTestJobs({ cores: 8, active_runs: 1, fanout: 1, mem_available_bytes: 3 * GiB })).toBe(1)
     expect(computeTestJobs({ cores: 8, active_runs: 1, fanout: 1, mem_available_bytes: 6 * GiB })).toBe(2)
@@ -278,6 +322,8 @@ describe('computeTestConcurrency', () => {
     expect(computeTestConcurrency(8, 16)).toBe(1)
     expect(computeTestConcurrency(0, 2)).toBe(1)
     expect(computeTestConcurrency(8, Number.NaN)).toBe(1)
+    // A FRACTIONAL jobs count floors to 0 and used to divide through to Infinity.
+    expect(computeTestConcurrency(8, 0.5)).toBe(8)
   })
 })
 
@@ -335,7 +381,10 @@ describe('renderTestStrategy', () => {
   test('unresolved branch tells the agent to resolve the command from the project docs', () => {
     expect(unresolvedBranch).toContain('could NOT be resolved')
     expect(unresolvedBranch).toContain('UNCHANGED')
-    expect(unresolvedBranch).toContain(NO_KNOBS_LINE)
+    // NOT the no-knobs line: that one reports on a runner that was PROBED, and this
+    // branch could not even name the command, so it probed nothing.
+    expect(unresolvedBranch).toContain(UNRESOLVED_COMMAND_LINE)
+    expect(unresolvedBranch).not.toContain(NO_KNOBS_LINE)
   })
 
   test('stage 1 is diff-scoped against the base branch — INCLUDING the uncommitted work', () => {
@@ -350,15 +399,36 @@ describe('renderTestStrategy', () => {
     expect(knobBranch).toContain('__tests__/')
   })
 
-  test('stage 1 is BOUNDED — the grep tier cannot grow into an un-chunked whole-suite run', () => {
-    // `grep -l <basename>` on a generic name ("index", "store") matches hundreds of
-    // files in a large repo, and a file-scoped invocation is ONE process: the exact
-    // single-process OOM and cross-file contamination the project's chunked runner
-    // exists to prevent. Stage 1 is a fast reject, so it is allowed to be incomplete.
-    expect(knobBranch).toContain(`below ${STAGE_1_FILE_CAP} files`)
+  test('the cap bounds the WHOLE stage-1 set, not just the grep tier', () => {
+    // THE ROUND-2 DEFECT: the cap applied to tier (c) only, so (a)+(b) were unbounded —
+    // 54 files for a one-file edit and 589 (46% of the suite) for this card's own diff,
+    // growing every fix round because `git diff --name-only <base>` is the branch's
+    // CUMULATIVE diff. A stage 1 that costs ten minutes is not fail-fast.
+    expect(knobBranch).toContain(`Bound the WHOLE stage-1 set at ${STAGE_1_FILE_CAP} files`)
     expect(knobBranch).toContain('DROP (c) entirely')
+    expect(knobBranch).toContain('then drop (b) the')
+    expect(knobBranch).toContain("branch's CUMULATIVE one")
     expect(knobBranch).toContain('batches of at most 20')
     expect(knobBranch).toContain('does NOT reproduce the isolation lanes')
+  })
+
+  test('a jobs-only runner is told its per-process concurrency is NOT bounded here', () => {
+    // The pairing (`jobs x concurrency = cores`) cannot be completed when the runner has
+    // no concurrency knob: it keeps its own default, commonly the core count. The budget
+    // is still applied — sequential is worse — but the block must not imply a bound it
+    // did not set.
+    const jobsOnly = renderTestStrategy({
+      resolution: { command: 'bash scripts/run-tests.sh', source: 'package-json' },
+      knobs: { ...KNOBS, concurrency_env: null },
+      jobs: 2,
+      concurrency: 4,
+      base_branch: 'main',
+    })
+    expect(jobsOnly).toContain('export NEUTRON_TEST_JOBS=2')
+    expect(jobsOnly).not.toContain('export NEUTRON_TEST_CONCURRENCY')
+    expect(jobsOnly).toContain(UNPAIRED_CONCURRENCY_LINE)
+    // …and the paired case says nothing of the kind.
+    expect(knobBranch).not.toContain(UNPAIRED_CONCURRENCY_LINE)
   })
 
   test.each(Object.entries(branches))('%s carries every load-bearing rule', (_name, block) => {
@@ -388,6 +458,31 @@ describe('buildTestStrategy', () => {
     expect(block).toContain('export NEUTRON_TEST_CONCURRENCY=4')
     expect(block).toContain('bash scripts/run-tests.sh')
     expect(block).toContain(FULL_SUITE_REQUIRED)
+  })
+
+  test('THIS repo, for real: the derivation finds neutron-open\'s own runner and its knobs', () => {
+    // The fixtures above prove the LOGIC; this proves the derivation still matches the
+    // runner as it actually ships. `scripts/run-tests.sh` is the thing the whole card is
+    // wiring, and a rename of either env var would otherwise silently drop every build
+    // back to sequential with a cheerful "knobs not found" line.
+    const repoRoot = fileURLToPath(new URL('..', import.meta.url))
+    const resolution = resolveTestCommand(repoRoot)
+    expect(resolution).toEqual({ command: 'bash scripts/run-tests.sh', source: 'package-json' })
+    expect(probeParallelKnobs(repoRoot, resolution.command)).toEqual({
+      jobs_env: 'NEUTRON_TEST_JOBS',
+      concurrency_env: 'NEUTRON_TEST_CONCURRENCY',
+      probed_file: 'scripts/run-tests.sh',
+      pinned_by_command: false,
+    })
+    const block = buildTestStrategy(repoRoot, {
+      cores: 8,
+      active_runs: 1,
+      mem_available_bytes: 25 * GiB,
+      base_branch: 'main',
+    })
+    expect(block).toContain('export NEUTRON_TEST_JOBS=2')
+    expect(block).toContain('export NEUTRON_TEST_CONCURRENCY=4')
+    expect(block).not.toContain(NO_KNOBS_LINE)
   })
 
   test('a knob-less project still gets a usable block, sequentially, with no error', () => {

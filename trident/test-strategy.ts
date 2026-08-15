@@ -78,10 +78,30 @@ const TEST_INVOCATION =
  * Applies to AGENT DOCS ONLY. `package.json` `scripts.test` is the project's own
  * declared entry point, where `tsc && bun test` is both normal and correct.
  */
-const SHELL_METACHARACTERS = /[;&|`$(){}<>\\\n]|\|\|/
+const SHELL_METACHARACTERS = /[;&|`$(){}<>\\\n]/
 
 function hasShellMetacharacters(command: string): boolean {
   return SHELL_METACHARACTERS.test(command)
+}
+
+/**
+ * An agent doc's fenced blocks are mostly EXAMPLES, and the commonest example of all is
+ * "run one file": `bun test packages/api/src/one.test.ts`. That line matches
+ * `TEST_INVOCATION` perfectly, and `firstFencedTestInvocation` takes the FIRST match —
+ * so a doc that shows the one-file form before its `make test-all` would have handed the
+ * build a SINGLE FILE under "Full suite (stage 2), run exactly this", and the full-suite
+ * gate would then have accepted `testsPassed=true` from a one-file run. That is exactly
+ * the defect this card says it must not introduce, reachable on the PART-2 path (a repo
+ * whose `package.json` has no usable `scripts.test`).
+ *
+ * So a candidate that names a concrete TEST FILE is not the project's suite, whatever
+ * else it looks like: skip it and keep reading. Applies to agent docs only — tier 1 is
+ * the project's own declared entry point and is never an example.
+ */
+const NAMES_A_TEST_FILE = /(?:^|\s)\S*\.(?:test|spec)\.[cm]?[jt]sx?(?:\s|$)/
+
+function namesATestFile(command: string): boolean {
+  return NAMES_A_TEST_FILE.test(command)
 }
 
 /**
@@ -154,7 +174,13 @@ function firstFencedTestInvocation(markdown: string): string | null {
     if (!inFence) continue
     const match = TEST_INVOCATION.exec(line)
     const candidate = match?.[1]?.trim()
-    if (candidate !== undefined && candidate.length > 0 && !hasShellMetacharacters(candidate)) return candidate
+    if (
+      candidate !== undefined &&
+      candidate.length > 0 &&
+      !hasShellMetacharacters(candidate) &&
+      !namesATestFile(candidate)
+    )
+      return candidate
   }
   return null
 }
@@ -313,6 +339,13 @@ export const DEFAULT_BUILD_FANOUT = 4
  * `JOBS=2` per build and 4 concurrent builds total 8 chunk processes on 8 cores.
  * (These numbers go verbatim into AS_BUILT.) Any unusable input degrades to 1 —
  * sequential, i.e. exactly the runner's own default, which is always safe.
+ *
+ * BOTH TERMS DIVIDE BY THE FAN-OUT. The core term always did; the memory term did not,
+ * and a per-build RAM cap is not an aggregate one — `{cores:32, mem:16 GiB}` budgeted 5
+ * jobs per build, i.e. a claimed 48 GiB across a 4-way fan-out against 16 GiB available.
+ * RAM is shared by the same builds the cores are, so it is shared by the same divisor.
+ * On the reference box the memory term is INERT either way (8.3/divisor vs 8/divisor),
+ * which is why the table above is unchanged.
  */
 export function computeTestJobs(input: TestJobsInput): number {
   const chunkSize = positiveOr(input.chunk_size, DEFAULT_CHUNK_SIZE)
@@ -322,7 +355,7 @@ export function computeTestJobs(input: TestJobsInput): number {
 
   const divisor = Math.max(1, Math.floor(Math.max(fanout, isPositive(input.active_runs) ? input.active_runs : 1)))
   const byCores = Math.max(1, Math.floor(input.cores / divisor))
-  const byMem = Math.max(1, Math.floor((input.mem_available_bytes * MEM_HEADROOM) / (chunkSize * perFileRss)))
+  const byMem = Math.max(1, Math.floor((input.mem_available_bytes * MEM_HEADROOM) / (divisor * chunkSize * perFileRss)))
   return Math.min(byCores, byMem)
 }
 
@@ -341,7 +374,12 @@ export function computeTestJobs(input: TestJobsInput): number {
  */
 export function computeTestConcurrency(cores: number, jobs: number): number {
   if (!isPositive(cores) || !isPositive(jobs)) return 1
-  return Math.max(1, Math.floor(cores / Math.floor(jobs)))
+  // `Math.max(1, …)` on the DIVISOR, not just the result: `isPositive` admits 0.5, and
+  // `floor(0.5)` is 0, so a fractional jobs count divided straight through returned
+  // Infinity. Unreachable through `buildTestStrategy` (`computeTestJobs` only ever
+  // returns integers ≥ 1) and guarded again downstream, but a helper that answers
+  // Infinity is a trap for the next caller.
+  return Math.max(1, Math.floor(cores / Math.max(1, Math.floor(jobs))))
 }
 
 export interface HostBudget {
@@ -443,6 +481,24 @@ export const NO_KNOBS_LINE = 'parallel knobs not found in the project test runne
 export const PINNED_KNOBS_LINE =
   'the project pins its own parallelism in the test command — running it unchanged, budget not applied'
 
+/**
+ * The unresolved branch used to end on `NO_KNOBS_LINE`, which says the knobs were not
+ * found "in the project test runner" — a claim about a runner this branch has just said
+ * it could not identify. Nothing was probed, so nothing can be reported about it.
+ */
+export const UNRESOLVED_COMMAND_LINE =
+  'project test command not resolved — no runner was probed, so no parallelism budget is applied (sequential)'
+
+/**
+ * The runner takes the jobs knob but exposes no per-process concurrency knob, so the
+ * pairing that keeps `jobs × concurrency` at `cores` cannot be completed: the runner
+ * keeps its own default (commonly the core count), and the product is `jobs × cores`.
+ * The budget is still applied — sequential is the worse answer — but the block SAYS so
+ * rather than implying a bound it did not set.
+ */
+export const UNPAIRED_CONCURRENCY_LINE =
+  'this runner exposes no per-process concurrency knob, so its own default is left in place — the jobs budget above is the only bound set here'
+
 /** Stage 1 must never grow into an un-chunked whole-suite run. See `renderTestStrategy`. */
 export const STAGE_1_FILE_CAP = 40
 
@@ -472,7 +528,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
       "Resolve it yourself from the project's own documentation (README / CLAUDE.md / AGENTS.md /",
       'CONTRIBUTING.md / package.json) and then run it UNCHANGED — do not invent flags, do not',
       'substitute a narrower command, and do not add environment variables it does not document.',
-      NO_KNOBS_LINE,
+      UNRESOLVED_COMMAND_LINE,
     )
   } else if (hasKnob) {
     // EXPORTS ON THEIR OWN LINES, NOT A `VAR=v cmd` PREFIX. A one-command prefix reaches
@@ -493,6 +549,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
       "above is this box's core/RAM budget divided across trident's planned build fan-out — do NOT",
       'raise it; other builds are sharing these cores. Everything else about the command stays as',
       'the project wrote it.',
+      ...(concurrency !== null && typeof knobs.concurrency_env === 'string' ? [] : [UNPAIRED_CONCURRENCY_LINE]),
     )
   } else if (knobs?.pinned_by_command === true) {
     commandLines.push('Full suite (stage 2), run exactly this:', '', `  ${command}`, '', PINNED_KNOBS_LINE)
@@ -522,15 +579,22 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     'The stage-1 set is: (a) the changed files that are themselves test files, (b) the test files',
     "in each changed file's own directory or its adjacent `__tests__/`, and (c) test files that",
     "name a changed module's basename (`grep -l <basename> <test files>`).",
-    // THE CAP IS THE POINT, not politeness. Tier (c) on a generic basename ("index",
-    // "store", "utils") matches hundreds of files in a large repo, and a file-scoped
-    // invocation is ONE un-chunked process — reproducing exactly the single-process OOM
-    // and the cross-file lane contamination the project's own chunked runner exists to
-    // prevent. Stage 1 is a fast REJECT, so it is allowed to be incomplete; stage 2 is
-    // the authority, and it runs everything.
-    `Bound that set: keep tiers (a)+(b) always, and take tier (c) only while the total stays at or`,
-    `below ${STAGE_1_FILE_CAP} files — if (c) would blow that budget, DROP (c) entirely rather than`,
-    'trimming it, and run the files in batches of at most 20 per invocation. Stage 1 is a fast',
+    // THE CAP BOUNDS THE WHOLE SET, and the first version of this block got that wrong:
+    // it capped tier (c) only, so (a)+(b) were unbounded — 54 files for a one-file edit,
+    // 589 (46% of the suite) for this card's own diff, and GROWING every fix round,
+    // because `git diff --name-only <base>` is the branch's CUMULATIVE diff, not this
+    // round's. Stage 1 that costs ten minutes is not fail-fast; it is the full suite
+    // wearing a hat. Tier (c) on a generic basename ("index", "store", "utils") is the
+    // worst offender, so it is still the first tier dropped, but the budget is now the
+    // TOTAL. A file-scoped invocation is also ONE un-chunked process, which is the
+    // single-process OOM and the cross-file lane contamination the project's own chunked
+    // runner exists to prevent. Stage 1 is a fast REJECT, so it is allowed to be
+    // incomplete; stage 2 is the authority, and it runs everything.
+    `Bound the WHOLE stage-1 set at ${STAGE_1_FILE_CAP} files, in priority order: take (a), then add (b), then`,
+    `add (c), stopping at ${STAGE_1_FILE_CAP} — DROP (c) entirely rather than trimming it, then drop (b) the`,
+    `same way, and if (a) alone is over budget run its first ${STAGE_1_FILE_CAP} files. On a fix round that`,
+    "diff is the branch's CUMULATIVE one, so prefer the files THIS round touched when the cap",
+    'forces a choice. Run the set in batches of at most 20 per invocation. Stage 1 is a fast',
     'reject and is ALLOWED to be incomplete.',
     "Run that set with the project's file-scoped test invocation (e.g. `bun test <file> …`). A",
     'stage-1 failure is fixed IMMEDIATELY, before anything else — do not start the full suite on a',

@@ -71,6 +71,16 @@ interface RunOpts {
    * shrug that off.
    */
   testsPassed?: boolean
+  /**
+   * Thread a `dbPath`/`runId`/`checkpointScript` so the checkpoint steps actually issue
+   * their `agent()` call and their exact command can be read. Nothing is executed (the
+   * agent is a mock), so no database is touched. Off by default: every other test here
+   * wants the checkpoint steps silent.
+   */
+  recordCheckpoints?: boolean
+  /** `'pr'` stops the run at the durable publisher handoff, which is where the build's
+   *  claim and the review panel end up in DIFFERENT PROCESSES. */
+  mergeMode?: 'pr' | 'local'
 }
 
 async function runWorkflow(
@@ -147,15 +157,16 @@ async function runWorkflow(
     ralph: opts.ralph === true,
     // Codex-build cases use pr mode so the workflow stops at the durable publisher
     // handoff after Forge; the task is not subsequently copied into reviewer prompts.
-    mergeMode: opts.codexBuild ? 'pr' : 'local',
+    mergeMode: opts.mergeMode ?? (opts.codexBuild ? 'pr' : 'local'),
     prNumber: null,
     branch: null,
-    dbPath: null, // → checkpoint()/writeTerminalResult() no-op (no bash agent steps)
-    runId: null,
+    // dbPath null → checkpoint()/writeTerminalResult() no-op (no bash agent steps).
+    dbPath: opts.recordCheckpoints === true ? '/tmp/does-not-exist.db' : null,
+    runId: opts.recordCheckpoints === true ? 'run-assembly-1' : null,
+    checkpointScript: opts.recordCheckpoints === true ? '/repo/trident/checkpoint.sh' : null,
     resumeCheckpoint: null,
     codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
     kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured
-    checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance,
     phaseModels: opts.phaseModels ?? null,
@@ -769,41 +780,102 @@ describe('AS-BUILT: TEST EXECUTION strategy threading (executed prompt capture)'
  * `testsPassed` is a REQUIRED field of FORGE_SCHEMA that, before this, no consumer
  * anywhere read: a build that ran only the fast diff-scoped stage went straight to a
  * panel of reviewers who read the DIFF and never run a test. These tests execute the
- * REAL workflow body and assert on WHICH SEATS WERE DISPATCHED — a gate that merely
- * added a finding while the panel still ran (and could still APPROVE) would pass a
- * naive "the findings mention the suite" assertion.
+ * REAL workflow body and assert on the VERDICT the run terminates with and on the
+ * findings the next round is handed — a gate that merely mentioned the suite somewhere
+ * while an APPROVE was still reachable would pass a naive assertion.
+ *
+ * THE GATE ADDS TO THE PANEL, IT DOES NOT REPLACE IT (Argus round 2). The first version
+ * skipped the panel entirely on an unproven suite, which turns any run against a
+ * pre-existing red suite into `maxRounds` suite runs with ZERO review signal. The
+ * guarantee criterion 5 actually asks for is about the VERDICT, and that is what is
+ * asserted here.
  */
 describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
   const STRATEGY = 'TEST EXECUTION\n\nfull suite rules'
   const argusLabels = (captured: Captured[]): string[] =>
     captured.map((c) => String(c.label)).filter((l) => l.startsWith('argus:'))
 
-  test('a build that did NOT prove the full suite gets NO review panel at all', async () => {
-    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false })
-    expect(argusLabels(captured)).toEqual([])
+  test('the run can NEVER end in APPROVE on an unproven suite, even when EVERY reviewer approves', async () => {
+    // `approveAll` makes the panel — and the synthesis — return APPROVE on round 1. The
+    // gate is then the only thing standing between an unproven suite and a shipped merge.
+    const { result } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false, approveAll: true })
+    expect(result.verdict).toBe('REQUEST_CHANGES')
   })
 
-  test('…and is sent straight back to a fix round carrying the full-suite blocker', async () => {
-    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false })
+  test('…and the fix round is handed the full-suite blocker FIRST', async () => {
+    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false, approveAll: true })
     const fix = captured.find((c) => String(c.label).startsWith('forge:fix-round-'))
     expect(fix).toBeDefined()
     expect(String(fix?.prompt)).toContain('FULL SUITE NOT PROVEN')
   })
 
-  test('the run can NEVER end in APPROVE on an unproven suite, however many rounds it burns', async () => {
-    const { result } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false })
-    expect(result.verdict).toBe('REQUEST_CHANGES')
+  test('the panel STILL RUNS — a red-suite run must not burn its rounds with no review signal', async () => {
+    // The regression this replaces: `argusLabels` was asserted EMPTY here, i.e. every
+    // round of a build against a pre-existing red suite bought a ~14-minute suite run
+    // and no reviewer at all.
+    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: false })
+    expect(argusLabels(captured).length).toBeGreaterThan(0)
   })
 
-  test('a build that DID prove it is untouched — the panel runs exactly as before', async () => {
-    const { captured } = await runWorkflow('', { testStrategy: STRATEGY, testsPassed: true })
+  test('a build that DID prove it is untouched — the panel runs and can APPROVE', async () => {
+    const { captured, result } = await runWorkflow('', {
+      testStrategy: STRATEGY,
+      testsPassed: true,
+      approveAll: true,
+    })
     expect(argusLabels(captured).length).toBeGreaterThan(0)
+    expect(result.verdict).toBe('APPROVE')
   })
 
   test('the gate is INERT without a strategy — a legacy launcher behaves byte-identically', async () => {
     // The gate keys off the block having been GIVEN: a build never told the full suite
     // was mandatory must not be blocked for not proving it.
-    const { captured } = await runWorkflow('', { testsPassed: false })
-    expect(argusLabels(captured).length).toBeGreaterThan(0)
+    const { result } = await runWorkflow('', { testsPassed: false, approveAll: true })
+    expect(result.verdict).toBe('APPROVE')
+  })
+
+  /**
+   * PR MODE IS THE DEFAULT MODE AND THE ONE THE GATE COULD NOT REACH (Argus round 2,
+   * confirmed by two reviewers). The build round ENDS at the publish handoff, so the
+   * claim and the panel are in different processes; the resumed process has no build
+   * report and the gate went inert. The claim therefore has to be WRITTEN DOWN, and the
+   * only durable channel that survives the handoff is the checkpoint's findings column —
+   * which the orchestrator's publish re-fire leaves untouched.
+   */
+  describe('the claim survives the PR-mode publish handoff', () => {
+    const checkpointPrompt = (captured: Captured[], name: string): string =>
+      String(captured.find((c) => c.label === `checkpoint:${name}`)?.prompt ?? '')
+
+    test('an unproven suite is RECORDED on the forge-done checkpoint the publisher re-fires from', async () => {
+      const { captured, result } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: false,
+        mergeMode: 'pr',
+        recordCheckpoints: true,
+      })
+      expect(result.publishRequested).toBe(true)
+      expect(checkpointPrompt(captured, 'forge-done')).toContain('FULL SUITE NOT PROVEN')
+    })
+
+    test('a PROVEN suite records nothing — the column stays the empty array it always was', async () => {
+      const { captured } = await runWorkflow('', {
+        testStrategy: STRATEGY,
+        testsPassed: true,
+        mergeMode: 'pr',
+        recordCheckpoints: true,
+      })
+      const prompt = checkpointPrompt(captured, 'forge-done')
+      expect(prompt).not.toContain('FULL SUITE NOT PROVEN')
+      expect(prompt).toContain("printf '%s' '[]'")
+    })
+
+    test('no strategy → nothing recorded even on a false claim (the legacy row shape)', async () => {
+      const { captured } = await runWorkflow('', {
+        testsPassed: false,
+        mergeMode: 'pr',
+        recordCheckpoints: true,
+      })
+      expect(checkpointPrompt(captured, 'forge-done')).toContain("printf '%s' '[]'")
+    })
   })
 })
