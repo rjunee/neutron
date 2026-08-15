@@ -96,6 +96,10 @@ export interface BuildTridentOrchestratorOptions {
   run_host: RunHostCommand
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
+  /** Injectable wait, used to SPACE the resume head-read retries
+   *  (`resolveResumeLiveHead`). Production leaves it unset and really sleeps; the
+   *  suite passes a no-op so a retried read still costs nothing. */
+  sleep?: SleepMs
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
   /** Static Codex credential dir (CODEX_HOME) threaded into the inner workflow —
@@ -622,15 +626,36 @@ export async function rebaseOntoObservedBase(
  *
  * The authority split mirrors the workflow's own `readBranchHead`: in `pr` mode the
  * REMOTE is the authority (an unpushed local branch is not the shared truth); in
- * `local` mode the local ref is. Retries are attempt-only (no sleeps) — `run_host` is
- * the seam, and the tests must stay fast.
+ * `local` mode the local ref is.
+ *
+ * THE RETRIES ARE SPACED, AND THE SPACING IS AN INJECTED SEAM. In `pr` mode the read is
+ * `git ls-remote` — a NETWORK call — and the consequence of `''` is a terminal, non-
+ * self-healing run failure at the fast-exit in `launch()`. Three attempts fired back to
+ * back complete inside a few milliseconds, which is short enough that a DNS blip or a
+ * momentary GitHub 5xx fails all three and kills a run whose work is intact. So the
+ * attempts are separated by `RESUME_HEAD_RETRY_DELAYS_MS`, through an injected `sleep`
+ * the tests replace with a no-op — the delay is real in production and free in the
+ * suite. `run_host` remains the seam for the READ; this is the seam for the WAIT.
  */
+export const RESUME_HEAD_RETRY_DELAYS_MS = [250, 1000] as const
+
+/** Injectable wait. Production sleeps; the suite passes a no-op so 3 attempts still
+ *  cost nothing. */
+export type SleepMs = (ms: number) => Promise<void>
+
+const realSleep: SleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 export async function resolveResumeLiveHead(
   run_host: RunHostCommand,
   run: { repo_path: string; branch: string; merge_mode: 'local' | 'pr' },
+  sleep: SleepMs = realSleep,
 ): Promise<string> {
   const ref = `refs/heads/${run.branch}`
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const attempts = RESUME_HEAD_RETRY_DELAYS_MS.length + 1
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    // Between attempts only — never before the first read, and never after the last
+    // (a run that is about to be failed must not also be made to wait for it).
+    if (attempt > 0) await sleep(RESUME_HEAD_RETRY_DELAYS_MS[attempt - 1] ?? 0)
     if (run.merge_mode === 'pr') {
       const res = await run_host(
         ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', ref],
@@ -979,11 +1004,18 @@ export function buildTridentOrchestrator(
       /^[0-9a-f]{40}$/.test(recorded) &&
       typeof run.branch === 'string' &&
       run.branch.length > 0
-        ? await resolveResumeLiveHead(opts.run_host, {
-            repo_path: run.repo_path,
-            branch: run.branch,
-            merge_mode: run.merge_mode,
-          })
+        ? await resolveResumeLiveHead(
+            opts.run_host,
+            {
+              repo_path: run.repo_path,
+              branch: run.branch,
+              merge_mode: run.merge_mode,
+            },
+            // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
+            // network call and the consequence of `''` is terminal, so the attempts are
+            // spread over real time in production and collapsed to nothing in the suite.
+            opts.sleep,
+          )
         : undefined
     // PART 2b, OUTER FAST-EXIT — the launcher itself just failed 3 code reads of the
     // head. Firing the workflow now would spend a fire only to have `classifyResume`

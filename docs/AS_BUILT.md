@@ -263,22 +263,58 @@ Both Forge completion sites now read the local branch ref with a retried, single
 `git rev-parse --verify` probe. That git-read OID is the source for checkpoints and
 `reviewedHead`; a Forge-reported OID is only an independent prefix cross-check. A
 disagreement stops as a typed infra-only result naming both values; a permanently
-unreadable local head — at round one OR at any fix round — stops boundedly and preserves
-the finished branch. The fix round is not the weaker half: without its own empty-head stop
-it approved with an empty `reviewedHead` and checkpointed `head: ''`, which
-`classifyResume` reads as no-recorded-head and REBUILDS — the exact path Part 2 exists to
-remove.
+unreadable local head — at round one OR at any fix round — stops boundedly without
+rebuilding, publishing or reviewing anything. The fix round is not the weaker half:
+without its own empty-head stop it approved with an empty `reviewedHead` and checkpointed
+`head: ''`, which `classifyResume` reads as no-recorded-head and REBUILDS — the exact path
+Part 2 exists to remove.
 
 **The probe is still relayed by a model seat, and that is a stated limitation, not an
 omission.** `inner-workflow.mjs` runs inside the Workflow runtime, whose only injected
 capability is `agent()`; there is no in-process exec at THIS point in the run, so the
 command is dispatched to a one-command probe seat that is told to copy one token. What
 changed is the SOURCE — the value is produced by `git rev-parse`, not composed by the
-builder. The failure mode is fail-closed at every step: a bad transcript is retried, then
-STOPS the run with the branch and its commit preserved; the outer publisher independently
-`rev-parse`s in real code at the credentialed boundary (Part 1); and `--match-head-commit`
+builder. The seat itself can die (a 529 on the shared account), and `seatAttempt` returns
+null for that exactly as it does for a garbled answer, so a transient seat death is
+indistinguishable here from a genuinely unreadable head. Three things follow, all
+deliberate: the budget is `BUILT_HEAD_READ_ATTEMPTS = 3` — the same budget
+`resolveResumeLiveHead` spends on the same question at the launcher boundary, and each
+attempt is a fresh agent dispatch, so the retries are spread over real time without a
+sleep this runtime does not provide; every failed attempt is logged with its tag, so the
+transcript distinguishes a one-attempt blip from a three-attempt outage; and the
+consequence of giving up is fail-closed and bounded. The outer publisher independently
+`rev-parse`s in real code at the credentialed boundary (Part 1), and `--match-head-commit`
 refuses a mismatched pin at merge. A mangled read can refuse finished work — it can never
 certify or publish the wrong commit.
+
+**A `pr`-mode run whose head read failed still records what it built.** The `&& !isPr`
+carve-out keeps that run going (the publisher is the authority), but it used to checkpoint
+`head: ''`, which `classifyResume` reads as `no-recorded-head` → REBUILD — so one failed
+probe plus one failed publish still rebuilt already-committed work, the very defect this
+card removes, one run deeper. The checkpoint now falls back to the builder's claim when
+the read failed and the claim is a FULL 40-hex OID. That is safe because it remains a
+CLAIM: no fast path opens unless the recorded OID equals the live head the launcher reads
+from git, so a wrong claim degrades to `head-moved` → rebuild — exactly what `''` did —
+while a right one preserves the work. `absent` still records `''`, and so does an
+abbreviated claim (it cannot be compared for equality); a claim about a branch git says
+does not exist is not evidence of anything.
+
+**A bounded stop reports only the checkpoint it wrote — `checkpoint: null`.**
+`writeTerminalResult` does not touch `inner_checkpoint`; the outer loop copies
+`result.checkpoint` into the row on the REQUEST_CHANGES path and leaves
+`inner_checkpoint_head` alone. Naming a phase the stop never recorded would land the new
+name beside the previous phase's OID — precisely the drift the checkpoint invariant ("a
+checkpoint records which commit it applied to") exists to make impossible. The phase is
+not lost: `terminalCause` names it verbatim ("after `forge:fix-round-2`"). Both bounded
+stops also shape that text through one `infraCause` helper (redact + cap) instead of one
+redacting and the other passing its sentence through raw.
+
+**The stop wording promises nothing about a checkout the read never saw.** In a directory
+that is not a git repo the compound probe prints nothing and lands on the same `''`, so
+"the branch is preserved — re-run when the read succeeds" was an assertion about something
+unobserved. The message now says what the run DID: "this run rebuilt, published and
+reviewed nothing — re-run when the read succeeds". The "nothing was built" throw likewise
+says when a commit's absence was inferred from the sentence's shape rather than measured.
 
 The probe is TRI-STATE, mirroring the launcher's `resolveResumeLiveHead`, because "not
 there" and "could not tell" earn opposite consequences. `absent` is git ANSWERING that the
@@ -11525,8 +11561,11 @@ production behavior was restored.
 (`resolveResumeLiveHead`, three attempts, tri-state `40-hex` / `absent` / `''`). When
 that read comes back `''` — the launcher itself could not tell — firing the workflow
 bought nothing: `classifyResume` returns the bounded stop
-(`{ mode: 'stop', reason: 'head-unreadable' }`) for every checkpoint except
-`pr-merged`, which it resolves to `merged` before it ever looks at the head. The
+(`{ mode: 'stop', reason: 'head-unreadable' }`) for every checkpoint except the TWO it
+answers BEFORE it looks at the head — `pr-merged` (resolved to `merged`) and the EMPTY
+name (resolved to `rebuild`, reason `no-checkpoint`; there is nothing recorded to
+preserve). Both are exempt from the fast exit for exactly that reason, and both have
+their own test. The
 launcher now takes that one known outcome at the boundary: no fire, the run is failed
 through `innerTerminalFailureReason` with `block_kind: 'infra-only'` and the inner
 stop's wording verbatim ("could not read the head of `<branch>`; the recorded work is
@@ -11535,7 +11574,7 @@ byte-identical to the one `applyResult` writes for the inner stop and never read
 "without Argus APPROVE" for a run Argus never reached.
 
 `classifyResume` remains the single semantic decider — this is only the cheap
-fast-exit, and `pr-merged` is exempted for exactly the reason above. `failedRun`
+fast-exit, and the two names above are exempted for exactly the reason given. `failedRun`
 spreads the row, so `inner_checkpoint` / `inner_checkpoint_head` /
 `inner_checkpoint_findings` survive untouched and a re-run after the read recovers
 resumes at exactly this point. Coverage lives in the "the resume live head is read in
@@ -11543,3 +11582,14 @@ code, never relayed by a model" block of `trident/orchestrator.test.ts`: the
 never-succeeding read now asserts three attempts, zero fires, the persisted reason,
 and the preserved checkpoint columns; `pr-merged` and the local-mode `''` route have
 their own tests; a successful OID read and an `absent` answer still fire unchanged.
+
+**THE RETRIES ARE SPACED, AND THE SPACING IS A SEAM.** The consequence of `''` here is a
+TERMINAL, non-self-healing run failure, and in `pr` mode the read is `git ls-remote` — a
+NETWORK call. Three attempts fired back to back complete inside a few milliseconds, which
+a DNS blip or a momentary GitHub 5xx outlives comfortably: the retry existed but did not
+cover the one class that is actually transient. `resolveResumeLiveHead` now waits
+`RESUME_HEAD_RETRY_DELAYS_MS` (`[250, 1000]`) BETWEEN attempts — never before the first,
+never after the last — through an injected `sleep` (`BuildTridentOrchestratorOptions.sleep`)
+that the suite replaces with a no-op, so the delay is real in production and free in the
+tests. The failure remains terminal and the run remains re-runnable from its preserved
+checkpoint columns; what changed is that a blip no longer decides it.

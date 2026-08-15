@@ -11,6 +11,7 @@ import {
   buildTridentOrchestrator,
   isTridentHarvestTerminal,
   resolveResumeLiveHead,
+  RESUME_HEAD_RETRY_DELAYS_MS,
 } from './orchestrator.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -91,6 +92,9 @@ function buildHarness(opts: {
     run_host: host,
     base_branch: 'main',
     now,
+    // The resume head-read retries are SPACED in production (a `pr`-mode read is a
+    // network call). The suite injects a no-op wait so those attempts stay free.
+    sleep: async () => {},
     // RALPH RE-FIRE (#362) — persist the re-fire reset atomically out-of-band so a
     // re-fired run isn't re-harvested (production wires the identical seam). The spy
     // records each patch to assert the crash-safe bundle, then applies it for real.
@@ -2073,11 +2077,11 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       // exists to stop being believed.
       return ok('1d731ad\trefs/heads/feat-x\n')
     }
-    const out = await resolveResumeLiveHead(host, {
-      repo_path: '/repo',
-      branch: 'feat-x',
-      merge_mode: 'pr',
-    })
+    const out = await resolveResumeLiveHead(
+      host,
+      { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' },
+      async () => {},
+    )
     expect(out).toBe('')
     expect(calls).toHaveLength(3)
   })
@@ -2090,11 +2094,54 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       exit_code: 128,
     })
     expect(
-      await resolveResumeLiveHead(host, {
-        repo_path: '/repo',
-        branch: 'feat-x',
-        merge_mode: 'local',
-      }),
+      await resolveResumeLiveHead(
+        host,
+        { repo_path: '/repo', branch: 'feat-x', merge_mode: 'local' },
+        async () => {},
+      ),
     ).toBe('')
+  })
+
+  /**
+   * A `pr`-mode read is `git ls-remote` — a NETWORK call — and `''` fails the run
+   * terminally at the fast-exit. Three back-to-back attempts complete inside a few
+   * milliseconds, which a DNS blip outlives comfortably: the retry existed but did not
+   * cover the one class that is actually transient. The waits are now a seam.
+   */
+  test('resolveResumeLiveHead: the retries are SPACED, not fired back to back', async () => {
+    const waits: number[] = []
+    const order: string[] = []
+    const host = async (): Promise<HostCommandResult> => {
+      order.push('read')
+      return { ok: false, stdout: '', stderr: 'ssh: Could not resolve hostname github.com', exit_code: 128 }
+    }
+    const out = await resolveResumeLiveHead(
+      host,
+      { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' },
+      async (ms) => {
+        waits.push(ms)
+        order.push(`wait:${ms}`)
+      },
+    )
+    expect(out).toBe('')
+    // Between attempts only: never before the first read, never after the last.
+    expect(order).toEqual(['read', ...RESUME_HEAD_RETRY_DELAYS_MS.flatMap((ms) => [`wait:${ms}`, 'read'])])
+    expect(waits).toEqual([...RESUME_HEAD_RETRY_DELAYS_MS])
+    expect(waits.every((ms) => ms > 0)).toBe(true)
+  })
+
+  test('resolveResumeLiveHead: a read that SUCCEEDS first time never waits at all', async () => {
+    const waits: number[] = []
+    const head = 'a'.repeat(40)
+    const host = async (): Promise<HostCommandResult> => ok(`${head}\trefs/heads/feat-x\n`)
+    const out = await resolveResumeLiveHead(
+      host,
+      { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' },
+      async (ms) => {
+        waits.push(ms)
+      },
+    )
+    expect(out).toBe(head)
+    expect(waits).toEqual([])
   })
 })
