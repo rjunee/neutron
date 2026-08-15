@@ -783,7 +783,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('gh pr list')) return ok('42')
         if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
         if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
-        if (joined.includes('diff --name-only --diff-filter=U')) return ok('shared.ts\nother.ts')
+        if (joined.includes('--diff-filter=U')) return ok('shared.ts\0other.ts')
         return ok()
       },
     })
@@ -832,6 +832,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       base_branch: string
       run: TridentRun
       conflicted_files: string[]
+      mode?: 'rebase' | 'replay'
     } | null = null
     let lsRemotesBranch = 0
     let fires = 0
@@ -866,7 +867,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
         // The unmerged set BEFORE the resolver ran and AFTER it did — the same read, and the only
         // evidence the orchestrator accepts that a claimed resolution actually happened.
-        if (joined.includes('diff --name-only --diff-filter=U')) return ok(resolverCalls === 0 ? 'shared.ts' : '')
+        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'shared.ts' : '')
         if (joined.includes('diff --name-only')) return ok('changed.ts')
         return ok()
       },
@@ -877,7 +878,14 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
     // Invoked exactly once — the post-resolution re-read came back clean, so the loop stopped.
     expect(resolverCalls).toBe(1)
-    const input = resolverInput as unknown as { repo_path: string; branch: string; base_branch: string; run: TridentRun; conflicted_files: string[] }
+    const input = resolverInput as unknown as {
+      repo_path: string
+      branch: string
+      base_branch: string
+      run: TridentRun
+      conflicted_files: string[]
+      mode?: 'rebase' | 'replay'
+    }
     expect(input).not.toBeNull()
     // THE TREE IT IS POINTED AT IS THE WHOLE SAFETY PROPERTY: the throwaway scratch worktree the
     // failed `apply --3way` left the markers in — NEVER `/repo`, the checkout other lanes build in.
@@ -886,6 +894,13 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(input.base_branch).toBe('main')
     expect(input.conflicted_files).toEqual(['shared.ts'])
     expect(input.run.id).toBe(run.id)
+    // AND IT IS TOLD WHICH TREE THAT IS. `'replay'` is what makes the resolver's contract true
+    // here: no rebase to `--continue`, no `node_modules` to test against, the outer loop commits.
+    expect(input.mode).toBe('replay')
+
+    // The claimed resolution is checked against git TWICE — the unmerged set and the staged bytes.
+    expect(calls.some((c) => c.includes('--diff-filter=U'))).toBe(true)
+    expect(calls.some((c) => c.includes('diff --cached -U0'))).toBe(true)
 
     // The replay then commits and the branch moves by the UNCHANGED compare-and-swap.
     expect(calls.some((c) => c.includes(`update-ref refs/heads/feat-x ${newHead} ${head}`))).toBe(true)
@@ -918,7 +933,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('gh pr list')) return ok('42')
         if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
         if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
-        if (joined.includes('diff --name-only --diff-filter=U')) return ok('shared.ts\nother.ts')
+        if (joined.includes('--diff-filter=U')) return ok('shared.ts\0other.ts')
         return ok()
       },
     })
@@ -939,10 +954,16 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
-  test('a resolver that CLAIMS success without staging anything is caught by the round bound', async () => {
-    // The lie-detector. The only evidence of resolution the orchestrator accepts is the unmerged
-    // set going empty — so a resolver that reports RESOLVED while the markers stay put loops,
-    // bounded, and ends in exactly the same attention state.
+  test('a resolver that CLAIMS success without staging anything is stopped after ONE no-progress round', async () => {
+    // The lie-detector, and its cost ceiling. The only evidence of resolution the orchestrator
+    // accepts is the unresolved set SHRINKING — so a resolver that reports RESOLVED while the
+    // markers stay put ends in exactly the same attention state, after exactly ONE wasted round.
+    //
+    // NOT `MAX_CONFLICT_ROUNDS` rounds. `rebaseBranchOntoBase` can spend 12 because each one is a
+    // different commit that `git rebase --continue` advanced onto; here there is exactly one
+    // apply, so rounds 2..12 re-hand the resolver the identical tree and cannot do anything new.
+    // Each round is a real Forge turn bounded at 8 minutes, awaited inside the SERIAL tick sweep —
+    // 12 of them is ~96 minutes in which no other run in the process moves at all.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const newBaseSha = '6666666666666666666666666666666666666666'
     let resolverCalls = 0
@@ -962,20 +983,245 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
         if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
         // Never clears, no matter how many times the resolver says it did.
-        if (joined.includes('diff --name-only --diff-filter=U')) return ok('shared.ts')
+        if (joined.includes('--diff-filter=U')) return ok('shared.ts')
         return ok()
       },
     })
     const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
     const calls = h.hostCalls.map((c) => c.join(' '))
 
-    expect(resolverCalls).toBe(MAX_CONFLICT_ROUNDS)
+    expect(resolverCalls).toBe(1)
+    expect(resolverCalls).toBeLessThan(MAX_CONFLICT_ROUNDS)
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
     expect(final.failure_reason).toContain('shared.ts')
     expect(final.failure_reason).not.toContain('REQUEST_CHANGES')
     expect(calls.some((c) => c.includes(' push '))).toBe(false)
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
+  })
+
+  test('a resolver that STAGES A FILE WITH THE MARKERS STILL IN IT never gets `<<<<<<<` onto the branch', async () => {
+    // THE INDEX BIT IS NOT PROOF OF RESOLUTION. `git add <path>` clears the unmerged bit for the
+    // whole path no matter what is left inside the file, so the realistic failure — resolve hunk
+    // 1 of 2, `git add`, report RESOLVED, which is exactly what the resolver's own contract tells
+    // it to do — reads as CLEAN to `--diff-filter=U`. Checking only the index would commit the
+    // marker text and force-push it to the shared branch.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    let resolverCalls = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      resolve_conflict: async () => {
+        resolverCalls += 1
+        return { resolved: true }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
+        // The index says DONE after the resolver's `git add` — this is the lie.
+        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'shared.ts' : '')
+        // The staged bytes say otherwise. Hunk 1 was resolved, hunk 2 was not.
+        if (joined.includes('diff --cached -U0'))
+          return ok(
+            [
+              'diff --git a/shared.ts b/shared.ts',
+              '--- a/shared.ts',
+              '+++ b/shared.ts',
+              '@@ -1,0 +2,4 @@',
+              '+publishHead: oidClaim(branchHead)',
+              '+<<<<<<< ours',
+              '+publishHead: oidClaim(forgeSha)',
+              '+>>>>>>> theirs',
+            ].join('\n'),
+          )
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(resolverCalls).toBe(1)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
+    expect(final.failure_reason).toContain('shared.ts')
+    expect(final.failure_reason).not.toContain('REQUEST_CHANGES')
+    // NOTHING IS COMMITTED, NOTHING IS SWAPPED, NOTHING IS PUSHED. The marker text never leaves
+    // the throwaway worktree, which is then removed.
+    expect(calls.some((c) => c.includes(' commit '))).toBe(false)
+    expect(calls.some((c) => c.includes('update-ref refs/heads/feat-x'))).toBe(false)
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
+  })
+
+  test('PARTIAL resolution is progress: round 2 is handed only the files round 1 left', async () => {
+    // Two conflicts, one resolved per round. The re-read shrinking is what buys the second round,
+    // and the second round must see the REMAINDER — not the original set, and not everything again.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newHead = '7777777777777777777777777777777777777777'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    const preRebase = '2222222222222222222222222222222222222222'
+    const handed: string[][] = []
+    let lsRemotesBranch = 0
+    let fires = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      resolve_conflict: async (input) => {
+        handed.push([...input.conflicted_files])
+        return { resolved: true }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotesBranch += 1
+          return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('rev-parse HEAD')) return ok(newHead)
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr diff')) return ok('diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed: a.ts:1')
+        // Two, then one, then none.
+        if (joined.includes('--diff-filter=U')) {
+          if (handed.length === 0) return ok('a.ts\0b.ts')
+          if (handed.length === 1) return ok('b.ts')
+          return ok('')
+        }
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(handed).toEqual([['a.ts', 'b.ts'], ['b.ts']])
+    // Both rounds shrank the set, so the bound was never the thing that stopped it.
+    expect(handed.length).toBeLessThan(MAX_CONFLICT_ROUNDS)
+    expect(final.phase).toBe('done')
+    expect(final.failure_reason).toBeNull()
+  })
+
+  test('a non-ASCII conflicted path reaches the resolver as a name it can actually open', async () => {
+    // `git diff --name-only` C-QUOTES by default: `ünicode file.txt` comes back as
+    // `"\303\274nicode file.txt"`, which names no file on disk and matches no pathspec. This list
+    // is machine-consumed now (it IS the resolver's CONFLICTED FILES), so it is read with
+    // `-z` + `core.quotePath=false` and the raw bytes survive.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    const odd = 'ünicode file.txt'
+    let handed: string[] = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      resolve_conflict: async (input) => {
+        handed = [...input.conflicted_files]
+        return { resolved: false, question: 'nope' }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr diff')) return ok('diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed')
+        if (joined.includes('--diff-filter=U')) return ok(`${odd}\0plain.ts`)
+        return ok()
+      },
+    })
+    await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(handed).toEqual([odd, 'plain.ts'])
+    // The read that produced them asks git not to quote, and to separate with NUL — a name with a
+    // space in it cannot survive newline-splitting-plus-trimming either.
+    expect(calls.some((c) => c.includes('core.quotePath=false') && c.includes('-z --name-only --diff-filter=U'))).toBe(true)
+  })
+
+  test('a resolution that leaves NOTHING to commit is an attention state, quoting git — not a bare "could not commit"', async () => {
+    // TAKING THE BASE'S SIDE OF EVERY HUNK IS A RESOLUTION THAT ERASES THE BRANCH. `git commit`
+    // then refuses with "nothing to commit" — on STDOUT, which the failure reason used to drop,
+    // producing a bare `outer publisher could not commit the rebase of branch feat-x` right after
+    // the `finally` deleted the tree that held the evidence. A branch that now contributes nothing
+    // is a MERGEABILITY fact, so it lands in the same non-verdict attention state as the conflict
+    // it came from.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    let resolverCalls = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      resolve_conflict: async () => {
+        resolverCalls += 1
+        return { resolved: true }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
+        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'shared.ts' : '')
+        // git says it on STDOUT and says nothing at all on stderr.
+        if (joined.includes(' commit '))
+          return { ok: false, stdout: 'nothing to commit, working tree clean', stderr: '', exit_code: 1 }
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(resolverCalls).toBe(1)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
+    expect(final.failure_reason).toContain('shared.ts')
+    expect(final.failure_reason).not.toContain('REQUEST_CHANGES')
+    expect(calls.some((c) => c.includes('update-ref refs/heads/feat-x'))).toBe(false)
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+  })
+
+  test('a commit failure with NO resolution still quotes git, wherever git wrote it', async () => {
+    // The same discard, on the ordinary clean-apply path: stdout-only diagnoses must reach the
+    // failure reason instead of being replaced by the generic step name.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes(' commit '))
+          return { ok: false, stdout: 'nothing to commit, working tree clean', stderr: '', exit_code: 1 }
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('could not commit the rebase of branch feat-x')
+    expect(final.failure_reason).toContain('nothing to commit')
+    // No resolution happened, so this is NOT the conflict attention state.
+    expect(final.failure_reason).not.toContain('REBASE CONFLICT')
   })
 
   test('a WHOLESALE apply failure (nothing unmerged) is never handed to the resolver, even with one configured', async () => {
@@ -1003,7 +1249,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
         if (joined.includes('apply --3way')) return failWith('error: corrupt patch at line 42')
         // Nothing was staged, so nothing is unmerged — the signature of a wholesale refusal.
-        if (joined.includes('diff --name-only --diff-filter=U')) return ok('')
+        if (joined.includes('--diff-filter=U')) return ok('')
         return ok()
       },
     })

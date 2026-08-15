@@ -53,6 +53,23 @@ async function gitOut(repo: string, ...args: string[]): Promise<string> {
   return res.stdout
 }
 
+/**
+ * The run row the publish path forwards to the resolver seam. No store exists in this real-git
+ * world, so this stands in for one — but it carries `task`, because the PRODUCTION resolver
+ * (`conflict-resolver.ts`) interpolates `run.task` into its prompt. A cast that omitted it hid a
+ * field the real resolver depends on, and would have kept hiding it if the field were renamed.
+ */
+function resolverRun(id: string, world: { checkout: string; branch: string }): TridentRun {
+  return {
+    id,
+    slug: 'realgit',
+    repo_path: world.checkout,
+    branch: world.branch,
+    merge_mode: 'pr',
+    task: 'realgit fixture: reconcile lib.txt across the intervening main commit',
+  } as unknown as TridentRun
+}
+
 /** CI runners have NO ambient git identity (dev machines do). Every non-bare repo gets one. */
 async function identify(repo: string): Promise<void> {
   await git(repo, 'config', 'user.email', 'trident-test@neutron.local')
@@ -262,15 +279,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     const world = await seedWorld({ conflicting: true })
     const scratchDir = scratch(world.checkout, 't5')
 
-    // The publish path only forwards `run` to the resolver seam; no store row exists in this
-    // real-git world, so a minimal cast stands in for it.
-    const run = {
-      id: 'realgit-resolve',
-      slug: 'realgit',
-      repo_path: world.checkout,
-      branch: world.branch,
-      merge_mode: 'pr',
-    } as unknown as TridentRun
+    const run = resolverRun('realgit-resolve', world)
 
     const RESOLUTION = 'line1\nline2-merged-by-resolver\nline3\n'
     let calls = 0
@@ -320,17 +329,55 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     // exercises `rebaseOntoObservedBase` directly, below the orchestrator.
   }, 60_000)
 
+  test('a resolver that `git add`s a file with the markers STILL IN IT never gets `<<<<<<<` onto the branch', async () => {
+    // THE ONE THE INDEX CANNOT CATCH, against real git. `git add` clears the unmerged bit for the
+    // whole path regardless of what is left inside the file, so the realistic partial resolution
+    // — fix one hunk, stage, report RESOLVED, which is precisely what the resolver's contract
+    // tells it to do — looks CLEAN to `--diff-filter=U`. Checking only the index would commit the
+    // marker text and force-push `<<<<<<<` to the shared branch.
+    const world = await seedWorld({ conflicting: true })
+    const scratchDir = scratch(world.checkout, 't7')
+    const run = resolverRun('realgit-half-resolved', world)
+
+    let calls = 0
+    const resolve_conflict: MergeConflictResolver = async (input) => {
+      calls += 1
+      const raw = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+      expect(raw).toContain('<<<<<<<')
+      // Rewrite the file so it is SHORTER and tidier — and still carries a marker. Then stage it,
+      // which is what makes `git diff --diff-filter=U` come back empty.
+      writeFileSync(join(input.repo_path, 'lib.txt'), 'line1\n<<<<<<< ours\nline2-from-branch\n>>>>>>> theirs\nline3\n')
+      await git(input.repo_path, 'add', 'lib.txt')
+      return { resolved: true }
+    }
+
+    let caught: unknown = null
+    try {
+      await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+        run,
+        resolve_conflict,
+      })
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught).toBeInstanceOf(TridentRebaseConflict)
+    expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
+    // ONE ROUND. The re-read did not shrink, so there was nothing to gain from a second.
+    expect(calls).toBe(1)
+    // THE BRANCH NEVER MOVED — no commit, no compare-and-swap, no marker text anywhere in the ref.
+    expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
+    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<<<<<<<')
+    expect(existsSync(scratchDir)).toBe(false)
+    const worktrees = (await gitOut(world.checkout, 'worktree', 'list')).trim().split(/\n/).filter((l) => l !== '')
+    expect(worktrees.length).toBe(1)
+  }, 60_000)
+
   test('a resolver that DECLINES leaves a REAL conflict an attention state — branch unmoved, scratch worktree gone', async () => {
     const world = await seedWorld({ conflicting: true })
     const scratchDir = scratch(world.checkout, 't6')
 
-    const run = {
-      id: 'realgit-decline',
-      slug: 'realgit',
-      repo_path: world.checkout,
-      branch: world.branch,
-      merge_mode: 'pr',
-    } as unknown as TridentRun
+    const run = resolverRun('realgit-decline', world)
 
     let calls = 0
     const resolve_conflict: MergeConflictResolver = async (input) => {

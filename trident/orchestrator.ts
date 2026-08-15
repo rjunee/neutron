@@ -435,6 +435,13 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
 }
 
 /**
+ * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
+ * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
+ * so matching those would fail closed on ordinary prose. Seven of either, then a space or EOL.
+ */
+const CONFLICT_MARKER_ADDED = /^\+(?:<{7}|>{7})(?: |\t|$)/
+
+/**
  * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
  *
  * A branch conflicting with its base is a MERGEABILITY fact about the branch's relationship to
@@ -444,10 +451,16 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
  *
  * AND THIS IS THE PATH THAT RESOLVES FIRST. A configured `resolve_conflict` resolver is invoked
  * here, in the scratch worktree `git apply --3way` just left the markers in, bounded by
- * `MAX_CONFLICT_ROUNDS`. The local-mode merge path has a human present who could reconcile the
- * branch by hand; this one is autonomous and has nobody, so it is exactly where auto-resolution
- * earns its keep. `TridentRebaseConflict` remains the outcome when no resolver is configured,
- * when the resolver declines/escalates, and when the round bound is exhausted.
+ * `MAX_CONFLICT_ROUNDS` AND by a per-round progress requirement. The local-mode merge path has a
+ * human present who could reconcile the branch by hand; this one is autonomous and has nobody, so
+ * it is exactly where auto-resolution earns its keep. `TridentRebaseConflict` remains the outcome
+ * when no resolver is configured, when the resolver declines/escalates, when a round makes no
+ * progress, when the round bound is exhausted, and when a "resolution" empties the branch's delta.
+ *
+ * THE RESOLVER'S WORD IS NEVER THE EVIDENCE. A claimed RESOLVED is checked against git twice —
+ * the unmerged set (`--diff-filter=U`) AND the staged bytes (`--cached`, scanned for added
+ * conflict markers), because `git add` clears the unmerged bit for a path whose markers are still
+ * inside it.
  *
  * A RESOLVED REBASE IS NOT AN APPROVED ONE. Resolution is a MERGEABILITY operation, not a
  * verdict — the branch still faces the full review gate afterwards, exactly as an unconflicted
@@ -498,6 +511,14 @@ export async function rebaseOntoObservedBase(
 ): Promise<{ head: string; rebased: boolean; baseSha: string }> {
   // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
   //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
+  //
+  //     THIS OBSERVATION AGES. Auto-resolution can now sit between here and the commit for minutes
+  //     (a Forge turn is bounded at 8 of them), so the published head can be based on a `main` that
+  //     has since moved. That is SAFE but not free: the branch move is still a compare-and-swap and
+  //     the lease push re-observes the branch, so nothing is overwritten — the branch simply
+  //     arrives at review stale and gets replayed again on the next publish, which is the ordinary
+  //     behaviour for any branch cut before a sibling landed. It is the reason the resolution loop
+  //     below bails on the FIRST round that makes no progress instead of spending the full bound.
   const observedBase = await run_host(
     ['git', '-C', repoPath, 'ls-remote', '--heads', 'origin', `refs/heads/${base}`],
     repoPath,
@@ -652,22 +673,62 @@ export async function rebaseOntoObservedBase(
     await run_host(['git', '-C', repoPath, 'worktree', 'remove', '--force', scratchDir], repoPath)
   }
   try {
+    /** Non-null once auto-resolution landed, carrying every path it ever touched (for diagnosis). */
+    let autoResolved: string[] | null = null
     const applied = await run_host(['git', '-C', scratchDir, 'apply', '--3way', '--index', diffFile], scratchDir)
     if (!applied.ok) {
       // Best-effort: name the files a human has to look at. Failing to read them is not itself
       // a different failure — the conflict is the event. Read in a LOOP now: it is also how a
       // claimed resolution is verified.
+      //
+      // `-z` + `core.quotePath=false` BECAUSE THIS LIST IS MACHINE-CONSUMED. It becomes the
+      // resolver's `CONFLICTED FILES` and the pathspec of the staged-marker scan below, and git's
+      // default C-quoting renders `ünicode file.txt` as `"\303\274nicode file.txt"` — a name that
+      // opens nothing and matches no pathspec. `-z` emits the raw bytes, NUL-separated.
       const readUnmerged = async (): Promise<string[]> => {
         try {
           const unmerged = await run_host(
-            ['git', '-C', scratchDir, 'diff', '--name-only', '--diff-filter=U'],
+            ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '-z', '--name-only', '--diff-filter=U'],
             scratchDir,
           )
-          if (unmerged.ok) return unmerged.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
+          if (unmerged.ok) return unmerged.stdout.split('\0').filter((l) => l !== '')
         } catch {
           // paths stay empty; the message says so.
         }
         return []
+      }
+      /**
+       * THE UNMERGED BIT IS NOT PROOF OF RESOLUTION. `git add <path>` clears the unmerged bit for
+       * the WHOLE path regardless of what is still inside the file, so a resolver that fixes hunk
+       * 1 of 2 and stages reads as RESOLVED to `--diff-filter=U` — and the orchestrator would then
+       * commit `<<<<<<<` and force-push it to the shared branch. Realistic, not theoretical: the
+       * resolver's own contract tells it to `git add` every conflicted file.
+       *
+       * So the STAGED CONTENT is scanned too: any candidate path whose staged delta ADDS a
+       * conflict-marker line is still unresolved and goes back into the loop. Only ADDED lines
+       * count (a marker that was already in the base is the base's problem, not this replay's),
+       * and only the paths that ever conflicted are scanned (a fixture elsewhere in the repo that
+       * legitimately contains marker text is none of our business).
+       */
+      const stagedMarkerFiles = async (candidates: string[]): Promise<string[]> => {
+        if (candidates.length === 0) return []
+        const res = await run_host(
+          ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--', ...candidates],
+          scratchDir,
+        )
+        if (!res.ok) return []
+        const marked: string[] = []
+        let current: string | null = null
+        for (const line of res.stdout.split('\n')) {
+          const header = /^\+\+\+ (?:b\/)?(.+)$/.exec(line)
+          if (header !== null) {
+            const named = header[1]
+            current = named === undefined || named === '/dev/null' ? null : named
+            continue
+          }
+          if (current !== null && CONFLICT_MARKER_ADDED.test(line) && !marked.includes(current)) marked.push(current)
+        }
+        return marked
       }
       let paths = await readUnmerged()
       // A FAILED APPLY WITH NOTHING UNMERGED IS NOT A CONFLICT. `git apply` refuses a malformed or
@@ -696,9 +757,9 @@ export async function rebaseOntoObservedBase(
       if (resolve === undefined) throw new TridentRebaseConflict(branch, base, paths)
       // Bounded auto-resolution, mirroring `rebaseBranchOntoBase`. `repo_path` is the SCRATCH
       // worktree — the tree holding the markers — never the shared checkout other lanes build in.
-      // Re-reading the unmerged set after a claimed RESOLVED is the lie-detector: a resolver that
-      // reports success without staging anything loops until the bound and ends in the same
-      // attention state.
+      // Re-reading the unresolved set after a claimed RESOLVED is the lie-detector: the resolver's
+      // word is never the evidence, git's index and git's staged bytes are.
+      const everConflicted = new Set(paths)
       let rounds = 0
       while (paths.length > 0) {
         if (rounds >= MAX_CONFLICT_ROUNDS) throw new TridentRebaseConflict(branch, base, paths)
@@ -709,13 +770,29 @@ export async function rebaseOntoObservedBase(
           base_branch: base,
           run: resolve.run,
           conflicted_files: paths,
+          // The tree is a detached replay worktree, NOT a rebase in progress, and it has no
+          // installed dependencies. The resolver's contract differs on both counts.
+          mode: 'replay',
         })
         if (!outcome.resolved) throw new TridentRebaseConflict(branch, base, paths)
-        paths = await readUnmerged()
+        const remaining = [
+          ...new Set([...(await readUnmerged()), ...(await stagedMarkerFiles([...everConflicted]))]),
+        ]
+        // EVERY ROUND MUST SHRINK THE SET. `rebaseBranchOntoBase` can afford 12 rounds because
+        // each one is a DIFFERENT commit that `git rebase --continue` advanced onto; here there is
+        // exactly one apply, so a round that leaves the same work undone will leave it undone
+        // twelve times. Each round is a real Forge turn bounded at 8 minutes, awaited inside the
+        // serial tick sweep — so 12 no-progress rounds is ~96 minutes during which no other run in
+        // the process makes any progress at all. Zero progress once is the answer.
+        if (remaining.length > 0 && remaining.length >= paths.length)
+          throw new TridentRebaseConflict(branch, base, remaining)
+        for (const p of remaining) everConflicted.add(p)
+        paths = remaining
       }
       // Resolved: fall through to the ordinary commit + compare-and-swap below. The resolver's
       // contract has it `git add` its resolutions and forbids committing, so the replay commits
       // exactly as an unconflicted apply would — and still faces the full review gate.
+      autoResolved = [...everConflicted]
     }
     const committed = await run_host(
       [
@@ -732,7 +809,27 @@ export async function rebaseOntoObservedBase(
       ],
       scratchDir,
     )
-    if (!committed.ok) throw new Error(publishFailureReason('commit the rebase of', branch, committed.stderr))
+    if (!committed.ok) {
+      // GIT'S DIAGNOSIS, WHEREVER GIT PUT IT. `git commit` writes "nothing to commit" to STDOUT,
+      // and forwarding only stderr collapsed the single most informative failure on this path into
+      // a bare `outer publisher could not commit the rebase of branch X` — no cause, and the
+      // `finally` below has already deleted the tree that held it. Same defect class as the
+      // wholesale-apply carve-out above: never discard what git actually said.
+      const said = [committed.stderr, committed.stdout]
+        .map((s) => s.trim())
+        .filter((s) => s !== '')
+        .join(' — ')
+      // A RESOLUTION THAT LEFT NOTHING TO COMMIT IS AN ATTENTION STATE, NOT A GIT FAILURE. It means
+      // the resolver took the base's side of every hunk verbatim, so the branch now contributes
+      // nothing — exactly the silent-tautology outcome the #290 hand-resolution shows is the
+      // dangerous one. It is a mergeability fact about the branch, so it gets the same non-verdict
+      // typed failure the conflict it came from would have got.
+      if (autoResolved !== null && /nothing (?:added )?to commit|no changes added/i.test(said))
+        throw new TridentRebaseConflict(branch, base, autoResolved)
+      throw new Error(
+        publishFailureReason('commit the rebase of', branch, said || `git commit exited ${committed.exit_code}`),
+      )
+    }
     const replayed = await run_host(['git', '-C', scratchDir, 'rev-parse', 'HEAD'], scratchDir)
     if (!replayed.ok) throw new Error(publishFailureReason('read the replayed tip of', branch, replayed.stderr))
     const newHead = replayed.stdout.trim()

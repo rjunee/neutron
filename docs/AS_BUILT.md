@@ -19,16 +19,38 @@ What shipped: the same `resolve_conflict` resolver the composer already builds
 (`open/composer.ts`, gated on the live-credential predicate) is now threaded through
 `publishBuiltCommit` into `rebaseOntoObservedBase` and invoked at the throw site, IN
 the scratch worktree the failed apply left the conflict markers in — never the shared
-checkout. The loop is bounded by `MAX_CONFLICT_ROUNDS` (12, now exported from
-`trident/merge.ts`), and the unmerged set (`git diff --name-only --diff-filter=U`) is
-re-read after every claimed RESOLVED, so a resolver that reports success without
-staging anything cannot commit an unresolved tree — it exhausts the bound and lands
-in the same attention state.
+checkout. It is handed `mode: 'replay'`, which swaps the resolver's prompt for one that
+describes THAT tree: no rebase to `--continue`, no `node_modules` to test against (a
+test run there resolves its imports out of whatever checkout sits above the worktree —
+a tree other lanes are building in, so "green" would measure code the resolver never
+touched), the outer publisher commits, and every path it touches stays under its cwd.
+
+THE RESOLVER'S WORD IS NEVER THE EVIDENCE. A claimed RESOLVED is checked against git
+twice. First the unmerged set (`git diff -z --name-only --diff-filter=U`, read with
+`core.quotePath=false` so a non-ASCII filename arrives as a name the resolver can
+actually open). Then the STAGED BYTES (`git diff --cached -U0` over the paths that ever
+conflicted, scanned for added `<<<<<<<` / `>>>>>>>` lines) — because `git add` clears
+the unmerged bit for a whole path regardless of what is still inside the file, so the
+realistic failure (fix hunk 1 of 2, stage, report RESOLVED — precisely what the
+resolver's contract tells it to do) would otherwise commit and force-push marker text
+to the shared branch. Proven against real git in
+`trident/publish-rebase-realgit.test.ts`, not just against a stub.
+
+Bounded twice over: `MAX_CONFLICT_ROUNDS` (12, now exported from `trident/merge.ts`) is
+the ceiling, but EVERY ROUND MUST SHRINK the unresolved set or the loop bails at once.
+`rebaseBranchOntoBase` can afford 12 rounds because each one is a different commit that
+`git rebase --continue` advanced onto; here there is exactly one apply, so a round that
+changes nothing will change nothing twelve times — and each round is a real Forge turn
+bounded at 8 minutes, awaited inside the SERIAL tick sweep, so the bound ported
+unmodified would have blocked every other run in the process for ~96 minutes.
 
 Invariants kept: a conflict is still an ATTENTION state, never a `REQUEST_CHANGES`
 verdict — no reviewer read the code. `TridentRebaseConflict` keeps its exact message
 and remains the outcome when no resolver is configured, when the resolver declines,
-or when it exhausts its rounds. A resolved rebase is NOT an approved one: the
+when a round makes no progress, when the bound is exhausted, and when a "resolution"
+empties the branch's delta (taking the base's side of every hunk leaves nothing to
+commit — git says so on STDOUT, which the failure reason now forwards alongside stderr
+instead of dropping). A resolved rebase is NOT an approved one: the
 replayed head still faces the full review gate (resolution is a mergeability
 operation, not a verdict — asserted by a stub-host test in
 `trident/orchestrator.test.ts` in which the run only reaches `done` through a second
@@ -40,8 +62,9 @@ Proof: the stub-host suite (`trident/orchestrator.test.ts`) covers all six accep
 criteria; the real-git suite (`trident/publish-rebase-realgit.test.ts`) proves a
 resolver reading genuine `<<<<<<<` markers in the scratch worktree can stage a
 resolution that commits, lands in the CAS-moved head's tree (neither side's text
-verbatim), and leaves the checkout clean — and that a declining resolver leaves the
-branch ref unmoved with the scratch worktree removed.
+verbatim), and leaves the checkout clean; that a declining resolver leaves the branch
+ref unmoved with the scratch worktree removed; and that a resolver which `git add`s a
+file with the markers STILL IN IT moves nothing at all.
 
 The hand-resolution of #290 is the worked example and the bar: five of six hunks were
 mechanical, one was subtle — main's `publishHead: oidClaim(branchHead)` and the
