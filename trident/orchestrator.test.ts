@@ -231,6 +231,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('a rebased branch publishes, and the lease is pinned to the sha actually observed', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const preRebase = '2222222222222222222222222222222222222222'
+    const baseTip = '4444444444444444444444444444444444444444'
     let lsRemotes = 0
     let fires = 0
     const h = buildHarness({
@@ -244,6 +245,10 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        // T1d — the rebase step is a NO-OP here (the branch already contains the base tip), so
+        // these four lease cases keep asserting exactly what they asserted before it existed.
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return ok()
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
           lsRemotes += 1
           // Before the push the remote still holds the PRE-REBASE tip; after it, the new one.
@@ -274,11 +279,16 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // THE TEST THAT MAKES THE FEATURE MEAN SOMETHING. Delete it and a bare `--force` passes.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const theirs = '3333333333333333333333333333333333333333'
+    const baseTip = '4444444444444444444444444444444444444444'
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        // T1d — the rebase step is a NO-OP here (the branch already contains the base tip), so
+        // these four lease cases keep asserting exactly what they asserted before it existed.
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return ok()
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${theirs}\trefs/heads/feat-x`)
         if (joined.includes(' push ')) {
           return failWith('! [rejected]   feat-x -> feat-x (stale info)\nerror: failed to push some refs')
@@ -301,6 +311,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // Empty is meaningful to git ("this ref must not exist"), not a missing argument. Without
     // this case the lease fix would regress every brand-new card in order to rescue rebased ones.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '4444444444444444444444444444444444444444'
     let lsRemotes = 0
     let fires = 0
     const h = buildHarness({
@@ -313,6 +324,10 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        // T1d — the rebase step is a NO-OP here (the branch already contains the base tip), so
+        // these four lease cases keep asserting exactly what they asserted before it existed.
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return ok()
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
           lsRemotes += 1
           return ok(lsRemotes === 1 ? '' : `${head}\trefs/heads/feat-x`)
@@ -334,11 +349,16 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // never measured; this one MEASURED the cause and threw it away. Recovering that one line
     // cost a DB read, a hand merge-base comparison and a credentialed dry-run push.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '4444444444444444444444444444444444444444'
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        // T1d — the rebase step is a NO-OP here (the branch already contains the base tip), so
+        // these four lease cases keep asserting exactly what they asserted before it existed.
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return ok()
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes(' push ')) return failWith('! [rejected] feat-x -> feat-x (non-fast-forward)')
         return ok()
@@ -351,6 +371,165 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // …and it stays distinguishable from the OTHER publish failures by reading it alone.
     expect(final.failure_reason).toContain('could not push')
     expect(final.failure_reason).not.toContain('could not confirm')
+  })
+
+  /**
+   * A STALE BRANCH IS NOT A REJECTED BUILD.
+   *
+   * Measured 2026-08-14: every open build PR but one read `mergeable: CONFLICTING`, because `main`
+   * absorbed five PRs while those branches were building and NOTHING rebased them. The repaired
+   * readiness probe then correctly refused to review — so the whole board was blocked on staleness,
+   * and a restart just rebuilt the same stale branch. The publisher now replays the branch onto the
+   * OBSERVED base tip before it pushes, in a throwaway worktree (the shared checkout is SHALLOW,
+   * governance #574 — `git rebase` there conflicts on every file).
+   */
+  test('a branch behind main is replayed onto the observed base tip and the REBASED head is published', async () => {
+    const oldHead = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newHead = '5555555555555555555555555555555555555555'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    const preRebase = '2222222222222222222222222222222222222222'
+    let lsRemotesBranch = 0
+    let fires = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: oldHead } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotesBranch += 1
+          // The lease is pinned to the PRE-rebase remote tip; the witness after the push sees the
+          // replayed one.
+          return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
+        }
+        // `main` is NOT an ancestor of the branch — this is the genuinely-behind case.
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('rev-parse HEAD')) return ok(newHead)
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(oldHead)
+        if (joined.includes('gh pr list')) return ok('42')
+        // The merge-base that is HONEST on a shallow checkout: the forge's, not ours.
+        if (joined.includes('gh pr diff')) return ok('diff --git a/changed.ts b/changed.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    // The replay happens in an ISOLATED worktree checked out AT THE OBSERVED BASE TIP — never in
+    // the shared working tree, which other lanes are building in.
+    expect(calls.some((c) => c.includes('worktree add --detach --force') && c.endsWith(newBaseSha))).toBe(true)
+    expect(calls.some((c) => c.includes('apply --3way --index'))).toBe(true)
+    // NEVER `git rebase` against the shared repo: `.git/shallow` makes merge-base lie there.
+    expect(calls.some((c) => /\bgit -C \/repo rebase\b/.test(c))).toBe(false)
+    // The branch ref moves by COMPARE-AND-SWAP: refused if anything moved it underneath us.
+    expect(calls.some((c) => c.includes(`update-ref refs/heads/feat-x ${newHead} ${oldHead}`))).toBe(true)
+    // The push still carries the lease pinned to the sha OBSERVED on the remote…
+    expect(calls.some((c) => c.includes(`--force-with-lease=refs/heads/feat-x:${preRebase}`))).toBe(true)
+    // …and no push ever falls back to a bare force (the scratch worktree's own --force is ours).
+    expect(calls.filter((c) => c.includes(' push ')).some((c) => /\s--force(\s|$)/.test(c))).toBe(false)
+    // The REBASED head — not the head the build reported — is what review is re-fired against.
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${newHead}:0:1`)
+    expect(h.inputs[1]?.resume_checkpoint).toBe(`outer-published:${newHead}:0:1`)
+    // The lease observation still precedes the push it certifies.
+    const observeAt = calls.findIndex((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))
+    const pushAt = calls.findIndex((c) => c.includes(' push '))
+    expect(observeAt).toBeGreaterThanOrEqual(0)
+    expect(pushAt).toBeGreaterThan(observeAt)
+  })
+
+  test('a branch already containing the base tip is a NO-OP — no worktree, no replay, head unchanged', async () => {
+    // The anti-churn half: a branch that already has main's tip must not be squashed and
+    // force-pushed for nothing. (The anti-FAKE half — a branch genuinely behind a moved main on a
+    // real SHALLOW clone — is the real-git test, T2.)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '4444444444444444444444444444444444444444'
+    let fires = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls.some((c) => c.includes('worktree add'))).toBe(false)
+    expect(calls.some((c) => c.includes('apply --3way'))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr diff'))).toBe(false)
+    // The build's own head is published, untouched.
+    expect(calls.some((c) => c.includes(`--force-with-lease=refs/heads/feat-x:${head}`))).toBe(true)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a rebase CONFLICT is an attention state naming the paths — never REQUEST_CHANGES, never auto-resolved', async () => {
+    // A conflicting branch is a MERGEABILITY fact about its relationship to `main`, not a
+    // judgement about the code. Reporting it as REQUEST_CHANGES tells the owner his build was
+    // rejected when no reviewer read a line of it.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    let resolverCalls = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      resolve_conflict: async () => {
+        resolverCalls += 1
+        return { resolved: true }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
+        if (joined.includes('diff --name-only --diff-filter=U')) return ok('shared.ts\nother.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('REBASE CONFLICT')
+    expect(final.failure_reason).toContain('needs attention')
+    // It names the files a human has to look at.
+    expect(final.failure_reason).toContain('shared.ts')
+    expect(final.failure_reason).toContain('other.ts')
+    // …and it is NOT dressed up as a review verdict: what a human reads is the attention state,
+    // named as a PUBLISH-step failure. (The row's `inner_verdict` column is the INNER loop's own
+    // last word — production's `writeTerminalResult` normalises every non-APPROVE result to
+    // REQUEST_CHANGES before this step ever runs; the rebase stamps no verdict of its own.)
+    expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
+    expect(final.failure_reason).not.toContain('REQUEST_CHANGES')
+    // Nothing is auto-resolved: the Forge resolver belongs to local-mode merges, not to this.
+    expect(resolverCalls).toBe(0)
+    expect(calls.some((c) => c.includes('rebase --continue'))).toBe(false)
+    // Nothing is published on a conflict.
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+    // And the scratch worktree is torn down even on the failing path.
+    expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
   test('an empty base-to-head diff terminates before review re-fire', async () => {

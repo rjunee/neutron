@@ -68,6 +68,70 @@ one-character head-slice shift and under a one-character tail edit, both new tes
 RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
 gap this task existed to close.
 
+## 2026-08-15 — a pr-mode build rebases onto observed main before review
+
+`trident/orchestrator.ts` `publishBuiltCommit` now rebases the built branch onto
+the observed tip of its base branch before the lease push, so the readiness probe
+reads `MERGEABLE` instead of deferring on staleness. The rebase sits in the OUTER
+publisher — between the local-tip verification and the `ls-remote` lease
+observation — because only the outer loop holds a push credential; and because the
+publisher runs after every build/fix round, every post-round-1 fix is written
+against the tree it will merge into.
+
+The shared build checkout is shallow (`.git/shallow`, governance #574/#571), so a
+naive `git rebase` there replays the whole history and reports false conflicts.
+The implementation never rebases in place: `rebaseOntoObservedBase` replays the
+branch's own diff (`gh pr diff <n>` when a PR exists — server-side merge-base,
+shallow-immune; two-dot `git diff <base>..<branch>` on first publish) onto the
+observed base tip in a throwaway detached worktree with `git apply --3way`,
+commits, and moves `refs/heads/<branch>` by compare-and-swap (`update-ref new
+old`). The replay squashes the branch to one commit, which the `--squash` PR
+merge already does.
+
+A failed 3-way apply is an attention state, never a review verdict:
+`TridentRebaseConflict` fails the run with `REBASE CONFLICT — needs attention:`
+naming the branch, base, and conflicting paths, states that no reviewer judged
+the code, and never invokes the local-mode `resolve_conflict` Forge resolver. The
+re-push keeps the existing lease discipline —
+`--force-with-lease=refs/heads/<branch>:<sha>` pinned to an `ls-remote`-observed
+sha — so a remote advanced by a third party refuses the push.
+
+Verified by 59 tests: fake-host units in `trident/orchestrator.test.ts` (behind →
+rebased publish; up-to-date → no-op; conflict → attention; lease ordering
+preserved) and real-git integration in `trident/publish-rebase-realgit.test.ts`,
+which asserts `.git/shallow` exists in the build checkout before exercising
+anything, seeds a branch genuinely behind a moved main, proves the pushed head
+contains both sides and is an ancestor-descendant of main's tip in a full clone,
+proves a conflicting seed throws the attention error naming the path without
+moving the ref, and proves a third-party advance makes the pinned lease push
+refuse against a real remote.
+
+## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
+
+`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
+build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
+>30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
+the host-held part files into a temp dir, the real workflow composes the forge:build
+prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
+by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
+then concatenated in the listed order and measured against the prompt's
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
+recomputes before it spends a token. Chained with the by-path suite in
+`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
+reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
+agent retyping anywhere in the path. Test-only; no production file changed.
+
+Two findings from building it. First, the chunk blocks may NOT have their paths
+rewritten wholesale: the coda forming the `.a2` segment names
+`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
+bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
+the assembled brief is asserted to mention neither segment path. Second, dropping the
+trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
+`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
+newline; the sensitivity check therefore uses mutations that move a real byte. Under a
+one-character head-slice shift and under a one-character tail edit, both new tests go
+RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
+gap this task existed to close.
 ## 2026-08-14 — review-round readiness is checked before reviewer spend
 
 `trident/inner-workflow.mjs` now refuses to dispatch a review panel when GitHub

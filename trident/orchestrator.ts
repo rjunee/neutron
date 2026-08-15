@@ -60,6 +60,7 @@
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
+import { writeFileSync } from 'node:fs'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -382,6 +383,178 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
     : `outer publisher could not ${step} branch ${branch}: ${said}`
 }
 
+/**
+ * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
+ *
+ * A branch conflicting with its base is a MERGEABILITY fact about the branch's relationship to
+ * `main` — not a judgement about the code. Recording it as `REQUEST_CHANGES` tells the owner his
+ * build was rejected when no reviewer read a line of it. So this is a typed failure carrying the
+ * conflicting paths, and NOTHING on this path invokes the `resolve_conflict` resolver (that
+ * belongs to local-mode merges, where a human asked for a merge).
+ */
+export class TridentRebaseConflict extends Error {
+  constructor(
+    public branch: string,
+    public base: string,
+    public paths: string[],
+  ) {
+    super(
+      `REBASE CONFLICT — needs attention: branch ${branch} conflicts with ${base} in: ${paths.length > 0 ? paths.join(', ') : '(paths unreadable)'}. Nothing was auto-resolved and no reviewer judged this code — the branch needs a human (or a fresh build) to reconcile it with ${base}.`,
+    )
+  }
+}
+
+/**
+ * Replay `branch` onto the ls-remote-OBSERVED tip of `base`, shallow-safely.
+ *
+ * ⚠️ THE SHARED BUILD CHECKOUT IS SHALLOW (governance #574/#571). `.git/shallow` is present, so
+ * `merge-base` LIES there: a naive `git rebase` replays the entire history and conflicts on every
+ * file. Hence NO `git rebase` here, ever, and never in the shared working tree (other lanes share
+ * it). Instead: take the branch's own diff from a source that knows the true merge-base — the
+ * FORGE (`gh pr diff <n>`, computed server-side against a full history) when a PR exists, or the
+ * two-dot `git diff <base>..<branch>` for a first publish — and `git apply --3way` it onto the
+ * observed base tip in a THROWAWAY detached worktree. The branch ref then moves by
+ * compare-and-swap (`update-ref <new> <old>`): if anything moved the branch underneath us we
+ * refuse rather than force.
+ *
+ * The replay SQUASHES the branch into one commit. Deliberate — the PR merge is `--squash` anyway.
+ */
+export async function rebaseOntoObservedBase(
+  run_host: RunHostCommand,
+  repoPath: string,
+  branch: string,
+  base: string,
+  pr: number | null,
+  scratchDir: string,
+): Promise<{ head: string; rebased: boolean }> {
+  // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
+  //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
+  const observedBase = await run_host(
+    ['git', '-C', repoPath, 'ls-remote', '--heads', 'origin', `refs/heads/${base}`],
+    repoPath,
+  )
+  if (!observedBase.ok) {
+    throw new Error(publishFailureReason('read the remote base of', branch, observedBase.stderr))
+  }
+  const readHead = async (): Promise<string> => {
+    const head = await run_host(['git', '-C', repoPath, 'rev-parse', `refs/heads/${branch}`], repoPath)
+    if (!head.ok) throw new Error(publishFailureReason('read the local tip of', branch, head.stderr))
+    return head.stdout.trim()
+  }
+  let baseSha = observedBase.stdout.trim().split(/\s+/)[0] ?? ''
+  // No remote base at all → there is nothing to rebase ONTO. Not an error (a brand-new origin).
+  if (baseSha === '') return { head: await readHead(), rebased: false }
+
+  // (b) The branch tip we are about to move, captured BEFORE anything touches it — it is the
+  //     compare-and-swap expectation in (h).
+  const oldHead = await readHead()
+
+  // (c) Already contains the base tip → nothing to do. On a SHALLOW checkout this check may ERROR
+  //     rather than answer (the commit is beyond the shallow boundary); any non-ok is read as
+  //     "behind". A redundant replay is safe; a skipped one strands the branch as CONFLICTING.
+  const contains = await run_host(
+    ['git', '-C', repoPath, 'merge-base', '--is-ancestor', baseSha, `refs/heads/${branch}`],
+    repoPath,
+  )
+  if (contains.ok) return { head: oldHead, rebased: false }
+
+  // (d) Make the base tip a real local object. `--no-tags` and NOT `--unshallow`: deepening the
+  //     shared checkout is minutes of network for every lane on this box.
+  const fetchBase = async () => run_host(['git', '-C', repoPath, 'fetch', '--no-tags', 'origin', base], repoPath)
+  let fetched = await fetchBase()
+  let present = await run_host(['git', '-C', repoPath, 'rev-parse', '--verify', `${baseSha}^{commit}`], repoPath)
+  if (!present.ok) {
+    // The base moved between the observation and the fetch — re-observe ONCE and adopt it.
+    const reObserved = await run_host(
+      ['git', '-C', repoPath, 'ls-remote', '--heads', 'origin', `refs/heads/${base}`],
+      repoPath,
+    )
+    const reSha = reObserved.ok ? (reObserved.stdout.trim().split(/\s+/)[0] ?? '') : ''
+    if (reSha !== '') baseSha = reSha
+    fetched = await fetchBase()
+    present = await run_host(['git', '-C', repoPath, 'rev-parse', '--verify', `${baseSha}^{commit}`], repoPath)
+    if (!present.ok) {
+      throw new Error(publishFailureReason('fetch the base tip for', branch, present.stderr || fetched.stderr))
+    }
+  }
+
+  // (e) The branch's own changes, from a source with an HONEST merge-base. Never a local
+  //     three-dot diff — that is exactly the computation the shallow boundary corrupts.
+  const diffFile = `/tmp/trident-rebase-${branch.replace(/[^A-Za-z0-9._-]/g, '-')}.diff`
+  const patch =
+    pr !== null
+      ? await run_host(['gh', 'pr', 'diff', String(pr)], repoPath)
+      : await run_host(['git', '-C', repoPath, 'diff', `refs/heads/${base}..refs/heads/${branch}`], repoPath)
+  if (!patch.ok) throw new Error(publishFailureReason('read the diff of', branch, patch.stderr))
+  if (patch.stdout.trim() === '') throw new Error('outer publisher refused to rebase an empty diff')
+  // RESTORE THE TRAILING NEWLINE. `spawnCapture` TRIMS command output, which is harmless for every
+  // other reader — and fatal here: a patch whose last hunk line lost its newline is not a patch,
+  // and `git apply` rejects the whole thing with `corrupt patch at line N` (exit 128). That is
+  // indistinguishable, upstream, from a genuine conflict, so EVERY rebase would have been reported
+  // as an attention state. Caught by the real-git suite; the stubbed host never wrote a file.
+  writeFileSync(diffFile, patch.stdout.endsWith('\n') ? patch.stdout : `${patch.stdout}\n`)
+
+  // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
+  //     poison every other lane's build.
+  const added = await run_host(
+    ['git', '-C', repoPath, 'worktree', 'add', '--detach', '--force', scratchDir, baseSha],
+    repoPath,
+  )
+  if (!added.ok) throw new Error(publishFailureReason('provision a rebase worktree for', branch, added.stderr))
+  // The scratch worktree is OURS and disposable, so this `--force` removal is safe on every exit.
+  const dropScratch = async () => {
+    await run_host(['git', '-C', repoPath, 'worktree', 'remove', '--force', scratchDir], repoPath)
+  }
+  try {
+    const applied = await run_host(['git', '-C', scratchDir, 'apply', '--3way', '--index', diffFile], scratchDir)
+    if (!applied.ok) {
+      // Best-effort: name the files a human has to look at. Failing to read them is not itself
+      // a different failure — the conflict is the event.
+      let paths: string[] = []
+      try {
+        const unmerged = await run_host(
+          ['git', '-C', scratchDir, 'diff', '--name-only', '--diff-filter=U'],
+          scratchDir,
+        )
+        if (unmerged.ok) paths = unmerged.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
+      } catch {
+        // paths stay empty; the message says so.
+      }
+      throw new TridentRebaseConflict(branch, base, paths)
+    }
+    const committed = await run_host(
+      [
+        'git',
+        '-C',
+        scratchDir,
+        '-c',
+        'user.name=trident',
+        '-c',
+        'user.email=trident@neutron.local',
+        'commit',
+        '-m',
+        `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`,
+      ],
+      scratchDir,
+    )
+    if (!committed.ok) throw new Error(publishFailureReason('commit the rebase of', branch, committed.stderr))
+    const replayed = await run_host(['git', '-C', scratchDir, 'rev-parse', 'HEAD'], scratchDir)
+    if (!replayed.ok) throw new Error(publishFailureReason('read the replayed tip of', branch, replayed.stderr))
+    const newHead = replayed.stdout.trim()
+
+    // (h) COMPARE-AND-SWAP. `update-ref <ref> <new> <old>` fails if the branch is no longer at
+    //     `<old>` — something else moved it, so we refuse instead of overwriting it.
+    const swapped = await run_host(
+      ['git', '-C', repoPath, 'update-ref', `refs/heads/${branch}`, newHead, oldHead],
+      repoPath,
+    )
+    if (!swapped.ok) throw new Error(publishFailureReason('advance', branch, swapped.stderr))
+    return { head: newHead, rebased: true }
+  } finally {
+    await dropScratch()
+  }
+}
+
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
   result: Pick<InnerResult, 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause'>,
@@ -504,6 +677,38 @@ export function buildTridentOrchestrator(
       }
       return result
     }
+    // THE REBASE ONTO CURRENT `main` HAPPENS HERE, BEFORE THE REVIEW IS RE-FIRED.
+    //
+    // WHEN. In the OUTER publisher, between the local-tip verification above and the lease
+    // observation below. Only the outer loop holds a push credential (the Forge sandbox strips
+    // `*TOKEN*`), so "rebase and re-push before the readiness probe" can only happen here. And
+    // because this publisher fires after EVERY build/fix round and before EVERY review re-fire,
+    // every fix round re-enters a branch already based on current `main` — post-round-1 code IS
+    // written against the tree it merges into. That is the closest to "before build" the
+    // credential boundary allows.
+    //
+    // ON CONFLICT. An ATTENTION state (`TridentRebaseConflict`), never `REQUEST_CHANGES` and never
+    // auto-resolved. The failure names the conflicting paths and says plainly that no reviewer
+    // judged the code; the `resolve_conflict` resolver is NEVER invoked on this path.
+    //
+    // SHALLOW (governance #574). The shared build checkout has a `.git/shallow` boundary, where
+    // `merge-base` lies and a naive `git rebase` conflicts on every file. So this is a diff-replay
+    // in a throwaway worktree — never `git rebase`, never the shared working tree.
+    //
+    // The PR probe moves UP so the replay can use `gh pr diff` (a server-side, shallow-immune
+    // merge-base); its result is reused by the "open a PR if none" step below, unchanged.
+    const prBefore = await detectExistingPr({ ...run, branch })
+    const rebased = await rebaseOntoObservedBase(
+      opts.run_host,
+      run.repo_path,
+      branch,
+      await resolveBase(run),
+      prBefore,
+      `${run.repo_path}/.trident-worktrees/rebase-${run.id}`,
+    )
+    // Everything downstream publishes the REBASED head: the post-push confirm, the review diff,
+    // and the `outer-published:<head>` checkpoint the re-fired workflow reads back.
+    const headToPublish = rebased.head
     // THE BUILD REBASES ONTO CURRENT `main`, SO THE PUSH IS NOT A FAST-FORWARD.
     //
     // Measured on run `2aacf419` (2026-08-14): the build SUCCEEDED and the plain push here was
@@ -548,11 +753,11 @@ export function buildTridentOrchestrator(
       ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
     )
     const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
-    if (remoteHead !== requestedHead) {
-      throw new Error(`outer publisher could not confirm commit ${requestedHead} on origin`)
+    if (remoteHead !== headToPublish) {
+      throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
     }
 
-    let pr = await detectExistingPr({ ...run, branch })
+    let pr = prBefore
     if (pr === null) {
       const base = await resolveBase(run)
       const created = await runWithRetries(
@@ -566,18 +771,18 @@ export function buildTridentOrchestrator(
     const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
     const base = await resolveBase(run)
     const changed = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${requestedHead}`],
+      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${headToPublish}`],
       run.repo_path,
     )
     if (!changed.ok || changed.stdout.trim() === '') {
       throw new Error('outer publisher refused to dispatch reviewers for an empty diff')
     }
     const diff = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${requestedHead}`],
+      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${headToPublish}`],
       run.repo_path,
     )
     if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
-    return { pr, head: requestedHead }
+    return { pr, head: headToPublish }
   }
 
   function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {

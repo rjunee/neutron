@@ -2902,7 +2902,15 @@ actionable `dispatchConstraint` describing the wrapper or executor required to w
     pushes an explicit refspec through its credentialed host runner, and independently
     runs `git ls-remote --heads origin` before it accepts `REMOTE_HEAD`. It similarly
     reads an existing PR or creates one and reads it back. Only after both facts exist
-    does it re-fire the workflow from `outer-published:<sha>` for review. The credential
+    does it re-fire the workflow from `outer-published:<sha>` for review.
+    Before the lease observation the outer loop also REBASES the branch onto the
+    observed base tip (`rebaseOntoObservedBase`): the shared checkout is shallow
+    (#574), so it replays the branch's own diff (`gh pr diff` when a PR exists,
+    two-dot diff on first publish) onto the base tip in a throwaway worktree with
+    `git apply --3way` and moves the branch ref by compare-and-swap — a stale branch
+    reaches review as `MERGEABLE`, and a replay conflict is an ATTENTION failure
+    (`TridentRebaseConflict`, naming the conflicting paths), never a
+    `REQUEST_CHANGES` and never auto-resolved. The credential
     is injected at the host-command boundary in `open/composer.ts`; it never enters the
     wrapper command, the Forge transcript, or any process below the inner workflow.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
