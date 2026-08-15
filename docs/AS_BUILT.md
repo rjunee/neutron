@@ -257,6 +257,20 @@ and reproduces on `main` with no diff applied; the fix is to assert on
 `githubProcessEnv` instead of the merged env), and the codex forge route still cannot
 report `deviatedFromSpec` until `trident/codex-build.sh` grows a seventh trailer line.
 
+## 2026-08-15 — build-completion heads are read from git
+
+Both Forge completion sites now read the local branch ref with a retried, single-command
+`git rev-parse --verify` probe. That git-read OID is the source for checkpoints and
+`reviewedHead`; a Forge-reported OID is only an independent prefix cross-check. A
+disagreement stops as a typed infra-only result naming both values, while a permanently
+unreadable round-one local head stops boundedly and preserves the finished branch.
+
+Reading the head ONCE IN CODE AT BUILD COMPLETION is not the same operation as re-probing
+it at publish time. `reviewedHead` keeps its meaning — read once, at build completion,
+never re-probed — so a later push cannot be certified as reviewed. `publishBuiltCommit`'s
+refusal remains correct and was not loosened; PR-mode handoffs still let that outer,
+in-code read remain the publishing authority.
+
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 
 `renderHostDeployApprovalBody`'s last line said "Tap Approve or Deny. Typing anything

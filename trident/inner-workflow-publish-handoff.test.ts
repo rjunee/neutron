@@ -48,6 +48,10 @@ async function runPublish(commitSha: string): Promise<PublishRun> {
   const agent = async (_prompt: string, opts?: { label?: string }): Promise<unknown> => {
     const label = opts?.label
     if (label !== undefined) labels.push(label)
+    if (String(label).startsWith('head-probe-round-built-')) {
+      const claim = /^[0-9a-fA-F]{7,40}$/.test(commitSha) ? commitSha.toLowerCase() : 'c'
+      return { head: claim.padEnd(40, '0') }
+    }
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       return {
         prNumber: null,

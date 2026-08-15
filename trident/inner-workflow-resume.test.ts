@@ -87,6 +87,9 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
     labels.push(label)
     prompts.push({ label, prompt })
     if (label === 'head-probe-round-resume') return { head: currentHead }
+    if (label.startsWith('head-probe-round-built-')) {
+      return { head: round === 1 ? FRESH_BUILD : FIX_SHA(round) }
+    }
     if (label.startsWith('head-probe-round-')) {
       // A fix round's did-it-land probe: report the sha that round committed.
       return { head: FIX_SHA(round) }

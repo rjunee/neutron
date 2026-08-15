@@ -3084,6 +3084,26 @@ ${cmd}`,
   return (res && typeof res.head === 'string' ? res.head : '').trim()
 }
 
+/** The head of refs/heads/<forgeBranch> read from the LOCAL ref store the moment a
+ *  build/fix agent exits — the source `branchHead`/`reviewedHead`/checkpoint heads
+ *  are pinned to. LOCAL deliberately (not ls-remote): at build completion the commit
+ *  exists only locally; "pushed" is the outer publisher's concern. One retry for a
+ *  transient read failure; '' after that means genuinely unreadable. */
+async function readBuiltHead(tag) {
+  const cmd = `cd ${shSingleQuote(repoPath)} && git rev-parse --verify ${shSingleQuote(`refs/heads/${forgeBranch}`)}`
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = await seatAttempt(`head-probe-round-built-${tag}`, () =>
+      agent(
+        `Run EXACTLY this single Bash command and report the sha it prints via the schema. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.\n${cmd}`,
+        withModel({ label: `head-probe-round-built-${tag}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
+      ),
+    )
+    const head = normalizeOid(res && res.head)
+    if (head !== '') return head
+  }
+  return ''
+}
+
 /** The one fact the resume-diff step returns: how big the diff it wrote is. */
 const RESUME_DIFF_SCHEMA = {
   type: 'object',
@@ -4011,6 +4031,11 @@ try {
   let reviewedHead = ''
   let roundLostItsWork = null
   let roundLostItsDiff = null
+  const builtHeadStop = async (checkpointName, cause) => {
+    const stop = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: checkpointName, blockKind: 'infra-only', terminalCause: redactProbeText(cause).slice(0, 300), remainingTasks: 0 }
+    await writeTerminalResult(stop)
+    return stop
+  }
 
   if (resumeMode === 'review' || resumeMode === 'fix') {
     // ── SKIP THE BUILD ────────────────────────────────────────────────────────
@@ -4256,36 +4281,41 @@ ${task}${reflectionGuidance}`,
     const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
     const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
     diffFile = forgeDiff
+    const builtHead = await readBuiltHead('r1')
+    const claim = oidClaim(forgeSha)
+    if (builtHead !== '' && claim !== null && !builtHead.startsWith(claim.toLowerCase()))
+      return await builtHeadStop('forge-done', `forge:build reported commit '${forgeSha}' but refs/heads/${forgeBranch} resolves to '${builtHead}' — wrong branch or wrong worktree; refusing to publish or review either`)
+    if (builtHead === '' && !isPr)
+      return await builtHeadStop('forge-done', `could not read the head of refs/heads/${forgeBranch} after forge:build (retried); the build reported ${forgeSha === '' ? 'no sha' : `'${forgeSha}'`}; the branch is preserved — re-run when the read succeeds`)
     // The baseline for the did-this-round-land check below. Round 1's own commit is
     // the starting point; every fix round must move the branch past it.
-    branchHead = forgeSha
+    branchHead = builtHead
     // THE EXACT BOOLEAN ONLY (fail-closed, as `pr_merged` is decoded): a string
     // 'true', a 1, or any other truthy stand-in is a field that did not arrive in
     // the shape the schema asks for, and reading one as a deviation would spend the
     // full 287 s survey on the next iteration for nothing.
     if (ralph === true && forge.deviatedFromSpec === true) taskDeviated = true
 
-    // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
-    // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
-    // (both are required FORGE_SCHEMA fields, so this is always populated on a
-    // healthy build). Carried out in the terminal result and passed to
+    // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM.
+    // It is read from git ONCE, at build completion, and cross-checked against the
+    // builder's independent claim. It is carried out in the terminal result and
+    // passed to
     // `--match-head-commit` at merge, so a head that moved fails LOUDLY instead of
     // silently shipping code no reviewer saw (observed on PR #171: the head went
     // clean → dirty mid-review).
     //
-    // DELIBERATELY NOT A FRESH PROBE OF THE REMOTE HEAD. A commit pushed between
-    // Forge's push and the probe would be read back and recorded as `reviewedHead`,
+    // DELIBERATELY NEVER RE-PROBED AT PUBLISH OR MERGE TIME. A commit pushed after
+    // the build and before such a probe would be read back and recorded as `reviewedHead`,
     // and the merge would then pin to it and SUCCEED — certifying as reviewed a
     // commit whose code is not in the diff anyone read. That is the same lie the
     // crash-resume shortcut was fixed to stop telling, and a pinned merge of an
     // unreviewed commit is worse than an unpinned one because the pin manufactures
-    // confidence nobody earned. A sha that is merely STALE cannot mis-merge:
-    // `--match-head-commit` just REFUSES. Empty (Forge reported no sha) records
-    // nothing and the outer merge refuses too — fail-closed either way.
+    // confidence nobody earned. Reading once at build completion preserves #545's
+    // reviewed-commit identity; a later branch movement makes the pinned merge refuse.
     reviewedHead = branchHead
 
     // C1 checkpoint — Forge done (PR + branch persisted), recorded against the
-    // commit Forge reported so a resume can tell whether this build is still the
+    // commit read from git so a resume can tell whether this build is still the
     // code on the branch.
     await checkpoint('forge-done', { pr, head: branchHead })
     if (isPr) {
@@ -4294,7 +4324,7 @@ ${task}${reflectionGuidance}`,
       // which the outer publisher `rev-parse --verify`s to get the real head.
       // `publishHead` is a best-effort CROSS-CHECK only, so a missing or
       // abbreviated claim must never discard a build that is already committed.
-      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: oidClaim(branchHead), remainingTasks: ralphRemaining, deviatedFromSpec: taskDeviated }
+      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: oidClaim(forgeSha), remainingTasks: ralphRemaining, deviatedFromSpec: taskDeviated }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -4366,12 +4396,9 @@ ${task}${reflectionGuidance}`,
   // Merge and Ralph re-fire are settled first: either can legitimately finish a
   // build invocation without producing a reviewable diff.
   if (resumeMode === 'rebuild') {
-    if (branchHead === '' || diffFile === '') {
-      const missing = [branchHead === '' ? 'commitSha' : null, diffFile === '' ? 'diffFile' : null]
-        .filter((m) => m !== null)
-        .join(' and ')
+    if (diffFile === '') {
       throw new Error(
-        `forge:build completed but produced no ${missing} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
+        `forge:build completed but produced no diffFile — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
       )
     }
     await checkpoint('forge-done', { pr, head: branchHead })
@@ -4436,9 +4463,13 @@ TASK:
 ${task}${reflectionGuidance}`,
       `r${round}`,
     )
+    const fixClaim = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
+    const fixHead = await readBuiltHead(`r${round}`)
+    if (fixHead !== '' && oidClaim(fixClaim) !== null && !fixHead.startsWith(fixClaim.toLowerCase()))
+      return await builtHeadStop(`fix-round-${round}`, `forge:fix-round-${round} reported commit '${fixClaim}' but refs/heads/${forgeBranch} resolves to '${fixHead}' — wrong branch or wrong worktree; refusing to publish or review either`)
     await checkpoint(`fix-round-${round}`, {
       pr,
-      head: typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : '',
+      head: fixHead,
     })
     if (isPr) {
       // Best-effort claim, same as the build handoff: the branch name is the
@@ -4494,13 +4525,15 @@ ${task}${reflectionGuidance}`,
       break
     }
     diffFile = fixDiff
-    // …and the commit THIS round's review judges is, exactly as in round 1, the
-    // one the fix agent reported committing — NOT `headAfter` (#545). The remote
+    // …and the commit THIS round's review judges is pinned to the head read from
+    // git at THIS round's completion, cross-checked against the fix agent's claim
+    // above — NOT `headAfter` (#545). The remote
     // probe above answers a different question ("did the branch move?"), and a
     // third party's push satisfies it just as well as the fix agent's own commit;
     // recording that push as `reviewedHead` would pin the merge to code the
-    // upcoming review never sees. Empty → fail-closed, same as round 1.
-    reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
+    // upcoming review never sees. Empty → fail-closed at merge, same as an
+    // unreported sha did before.
+    reviewedHead = fixHead
     synthesis = await runReviewRound(diffFile, round, pr)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)
