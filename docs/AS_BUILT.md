@@ -760,6 +760,124 @@ name, so the mirror cannot rot silently. The exit also resolves the PR link BEFO
 "re-run when the read succeeds" is advice a human follows by opening the PR the recorded
 commit is on, and the terminal row used to be written with `pr: null`.
 
+## 2026-08-15 — the build finally asks the runner for the parallelism it already had
+
+`scripts/run-tests.sh` has shipped `NEUTRON_TEST_JOBS` since T0 and the build never set
+it, so the canary ran thirteen general chunks one after another under a `timeout 590`
+wrapper. T1 derived the budget (`trident/test-strategy.ts`), T2 threaded it into both
+build contracts. This entry is the measurement that closes the card: the same suite,
+same worktree, same box, twice.
+
+**Before / after, measured (branch `trident/the-build-re-runs-1-273-test-files` @
+`1526441`, 8 cores / 30 GB, 25.65 GiB MemAvailable):**
+
+| run | command | wall clock | load avg at start → end |
+|---|---|---|---|
+| sequential baseline | `bash scripts/run-tests.sh` | **1322 s = 22.0 min** | 2.61 → 4.90 |
+| parallel | `NEUTRON_TEST_JOBS=8 bash scripts/run-tests.sh` | **670 s = 11.2 min** | 3.57 → 4.91 |
+
+**1.97x, 10.9 minutes saved per suite run**, and every fix round re-pays that suite.
+This box is SHARED with other build lanes — the load averages above are printed because
+they are the honest conditions, not an idle-box number. Swap use was unchanged (1 GB
+before and after): `JOBS=8 × CHUNK_SIZE=100` did not push a 30 GB box into swapping.
+
+The 1.97x is Amdahl, not a disappointing scheduler. Summing the runner's own per-process
+durations: the three PGLite lane attempts plus the device lane are **407 s sequential /
+377 s parallel** — a serial floor of ~6.3 minutes that `JOBS` cannot touch by design. The
+*general chunks* went **915 s → 293 s, a 3.12x speedup**. The reason it is 3.1x and not
+8x is visible in the same numbers: the sum of all reported process durations is 1311 s
+sequentially but 1673 s in the parallel run (+28%), i.e. eight chunks on eight cores
+contend and each individually runs slower. Sequential wall clock ≈ the sum of its parts
+(1322 vs 1311 s), which is the control that proves the baseline really was serial.
+
+**The budget formula**, printed from the committed code rather than recomputed by hand
+(`readHostBudget()` returned `{cores: 8, mem_available_bytes: 27544817664}` = 25.65 GiB):
+
+> `jobs = min( floor(cores / active_runs), floor(mem_available × 0.8 / (chunk_size × 24 MiB)) )`, floor 1
+
+| concurrent trident runs | `computeTestJobs(...)` | total bun chunk processes |
+|---|---|---|
+| 1 | **8** | 8 × 1 = 8 ≤ 8 cores |
+| 2 | **4** | 4 × 2 = 8 ≤ 8 cores |
+| 4 | **2** | 2 × 4 = 8 ≤ 8 cores |
+| 8 | **1** | 1 × 8 = 8 ≤ 8 cores |
+
+That is acceptance criterion 2 at N=1 and N=4: the box never runs more than one chunk
+process per core no matter how wide trident fans out. The RAM term is the binding
+constraint only on a smaller box — here it evaluates to 8 as well
+(0.8 × 25.65 GiB ÷ 2.4 GiB per chunk).
+
+**The coverage audit survives `JOBS>1` (criterion 3).** From `par.log`, byte-identical to
+the sequential run's:
+
+```
+declared files: 1273   bun-discovered: 1273   assigned here: 1273   files executed: 1273 (1219 general + 20 PGLite + 34 device)
+lanes: 13 general chunks + PGLite lane + device lane
+```
+
+**The isolation lanes stayed serial and isolated (criterion 6).** Also from the parallel
+log, with `jobs=8` in force for the general pool:
+
+```
+run-tests: bun=bun max-concurrency=8 timeout=15000ms jobs=8
+==== PGLite quarantine lane: 20 files (attempt 1/3, max-concurrency=1, timeout=90000ms) ====
+==== device-harness isolation lane: 34 files (own process) ====
+```
+
+Both lane headers appear *after* `==== chunk 13/13 ====`, with `max-concurrency=1` and
+the full 3-attempt retry budget intact. `JOBS` reaches the general pool only.
+
+**Honesty about the result: this suite is RED on this box, in both runs, identically.**
+Exit 1 both times; lanes 6, 7, 9, 11, 12 and the PGLite lane failed in each. Extracting
+every `(fail)` line from both logs and diffing them gives **125 failures in each and zero
+lines of difference** — parallelism changed the wall clock and nothing else. The failures
+are environment-shaped and pre-existing, not this card's: app/gateway surface tests get
+`401 missing_bearer` from an unauthenticated harness, the composer logs
+`provider_openai_no_key`, the `install.sh` probes need a network. None of them are in this
+card's diff, and the card's own 188 tests (`test-strategy`, `inner-loop`, `orchestrator`,
+`inner-workflow-assembly`, `trident-active-runs-wiring`) are green. **No speedup is
+claimed on a green run, because there was not one to claim it on** — what is claimed is
+that the identical failing set completed in half the time.
+
+One finding worth recording rather than fixing here: the PGLite lane burned all three
+attempts (~305 s of both runs) on a *deterministic* failure —
+`buildGBrainMemory > gbrain truly absent everywhere → emits the DISABLED warning` — which
+the runner retried as if it were the transient WASM-init flake the budget exists for.
+Retrying a deterministic failure three times is ~5 minutes of the remaining 11. Out of
+scope for this card; the lane's retry budget is correct for what it was built for.
+
+**Criterion 7 — what `timeout 590` becomes.** It becomes banned. `NO_TIMEOUT_WRAPPER` in
+`trident/test-strategy.ts` is spliced into the Forge contract and states it directly: do
+not wrap the suite in a timeout wrapper, start it in the background redirected to a log
+file, poll the log tail until the runner prints its summary, and budget up to 40 minutes
+before declaring a hang. The measurement is the argument. A 590 s cap is 9.8 minutes; the
+sequential suite is 22.0 minutes and **even the parallel suite is 11.2 minutes**, so the
+cap was shorter than the suite *before* this card and would still be shorter than it
+*after*. Every full run under that wrapper was killed mid-flight and read as a test
+failure. No amount of speedup fixes that — only removing the wrapper does.
+
+**Criteria 4 and 5 — the two-stage gate, as shipped in the prompt block.** Stage 1 runs
+only the diff-reachable tests and can fail the round in minutes; `STAGE_1_REJECT_ONLY`
+("Stage 1 can only reject early; it can never approve.") and `FULL_SUITE_REQUIRED` (no
+`testsPassed=true` without the full run *and its coverage-audit line* in the log tail) are
+pinned verbatim and asserted against the EXECUTED prompt, not against the source string.
+The capture tests live in `trident/inner-workflow-assembly.test.ts`: the block reaches
+`forge:build`, reaches EVERY fix round (the round that re-pays the suite), reaches NO
+reviewer or planner prompt (the trust boundary), makes the full suite a precondition of
+`testsPassed=true`, and with no strategy argument the contract is the LEGACY one verbatim.
+
+**PART 2 — what this does NOT claim.** Everything above was measured on neutron-open,
+whose runner is neutron-open's own. Nothing here was measured on neutron-enterprise: its
+repository is unreadable from this tenant (different unix user), so no enterprise speedup
+is claimed and none should be inferred. What is guaranteed there is the degradation path,
+which is tested rather than measured: `buildTestStrategy` resolves the project's test
+command from `package.json` `scripts.test` (then fenced invocations in the agent docs),
+statically probes it for parallel knobs without ever spawning it, and when it finds none
+emits the command **UNCHANGED** — sequential, no `JOBS`, no error, no defer — plus one
+line: `parallel knobs not found in the project test runner — running it unchanged
+(sequential)`. A throughput optimisation that breaks a project it does not understand is
+a regression, so the no-knob repo simply keeps building exactly as it did.
+
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 
 `renderHostDeployApprovalBody`'s last line said "Tap Approve or Deny. Typing anything
