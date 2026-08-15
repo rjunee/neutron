@@ -1895,8 +1895,11 @@ describe('orchestrator — the resume live head is read in code, never relayed b
   })
 
   // A read that never succeeds is bounded at 3 attempts and reports '' — reserved
-  // exclusively for "could not tell", never for "the branch is not there".
-  test('a read that never succeeds is bounded at three attempts and reports ""', async () => {
+  // exclusively for "could not tell", never for "the branch is not there". PART 2b:
+  // and '' at THIS boundary ends the run here, because the fire it would pay for has
+  // exactly one outcome (`classifyResume` → the bounded stop). The checkpoint columns
+  // are left untouched so a re-run after the read recovers resumes at this point.
+  test('a read that never succeeds stops the run at the boundary — no fire, checkpoint preserved', async () => {
     let dead = 0
     const broken = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
@@ -1906,10 +1909,69 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         return { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
       },
     })
-    await resumeRun()
+    const run = await resumeRun()
     await launchOnce(broken)
-    expect(broken.inputs[0]!.resume_live_head).toBe('')
+
     expect(dead).toBe(3)
+    expect(broken.inputs).toHaveLength(0)
+
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('review never ran (infra-only)')
+    expect(final.failure_reason).toContain('could not read the head of feat-x')
+    expect(final.failure_reason).toContain(HEAD)
+    expect(final.failure_reason).toContain('re-run when the read succeeds')
+    // Argus never ran; the reason for this class must never claim it did.
+    expect(final.failure_reason).not.toContain('without Argus APPROVE')
+    expect(final.inner_checkpoint).toBe('forge-done')
+    expect(final.inner_checkpoint_head).toBe(HEAD)
+  })
+
+  // `classifyResume` resolves a 'pr-merged' checkpoint to `merged` BEFORE it looks at
+  // the head, so the fast-exit must not steal that run: it fires and the inner loop
+  // finishes the merge.
+  test("a 'pr-merged' checkpoint is exempt — the fire still happens on an unreadable head", async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+          : ok(),
+    })
+    await resumeRun({ inner_checkpoint: 'pr-merged' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_live_head).toBe('')
+  })
+
+  // Local mode reaches '' by a different route (a failed rev-parse under an UNHEALTHY
+  // git); it takes the same exit.
+  test('a local-mode unreadable head takes the same boundary exit — no fire', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (
+          joined.includes('rev-parse --verify refs/heads/feat-x^{commit}') ||
+          joined.includes('rev-parse --git-dir')
+        ) {
+          return { ok: false, stdout: '', stderr: 'fatal: not a git repository', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await resumeRun({}, 'local' as MergeMode)
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('review never ran (infra-only)')
+    expect(final.failure_reason).toContain('could not read the head of feat-x')
+    expect(final.failure_reason).toContain(HEAD)
+    expect(final.failure_reason).not.toContain('without Argus APPROVE')
+    expect(final.inner_checkpoint).toBe('forge-done')
+    expect(final.inner_checkpoint_head).toBe(HEAD)
   })
 
   test("an OK read with no output is the remote SAYING the branch is gone → 'absent'", async () => {

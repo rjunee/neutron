@@ -981,6 +981,33 @@ export function buildTridentOrchestrator(
             merge_mode: run.merge_mode,
           })
         : undefined
+    // PART 2b, OUTER FAST-EXIT — the launcher itself just failed 3 code reads of the
+    // head. Firing the workflow now would spend a fire only to have `classifyResume`
+    // return the bounded stop ({ mode: 'stop', reason: 'head-unreadable' }) for every
+    // checkpoint except 'pr-merged' (resolved to `merged` BEFORE the head check —
+    // exempted here for exactly that reason). classifyResume stays the single semantic
+    // decider; this is only the cheap exit for the one case whose outcome is already
+    // known at this boundary. `failedRun` spreads `run`, so inner_checkpoint /
+    // inner_checkpoint_head / inner_checkpoint_findings survive untouched — a re-run
+    // after the read recovers resumes at exactly this point.
+    if (resume_live_head === '' && (resume_checkpoint ?? '').trim() !== 'pr-merged') {
+      const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
+      return {
+        run: failedRun(
+          run,
+          innerTerminalFailureReason(run, {
+            round: run.round,
+            checkpoint: resume_checkpoint,
+            block_kind: 'infra-only',
+            terminal_cause: cause,
+          }),
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (resume head unreadable — bounded stop, no fire)`,
+      }
+    }
     const existingPr = run.pr ?? (await detectExistingPr(run))
     const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
 

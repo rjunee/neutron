@@ -11492,3 +11492,28 @@ real workflow for every declared group, GPT-build/Opus-review, configured but
 unavailable Codex CLI behavior, Claude retry success and exhaustion, and same-family
 warning semantics. Mutation checks made each corresponding guard red before the
 production behavior was restored.
+
+## 2026-08-15 — an unreadable resume head stops the run before the fire
+
+`launch()` (`trident/orchestrator.ts`) already reads the live branch head in code
+(`resolveResumeLiveHead`, three attempts, tri-state `40-hex` / `absent` / `''`). When
+that read comes back `''` — the launcher itself could not tell — firing the workflow
+bought nothing: `classifyResume` returns the bounded stop
+(`{ mode: 'stop', reason: 'head-unreadable' }`) for every checkpoint except
+`pr-merged`, which it resolves to `merged` before it ever looks at the head. The
+launcher now takes that one known outcome at the boundary: no fire, the run is failed
+through `innerTerminalFailureReason` with `block_kind: 'infra-only'` and the inner
+stop's wording verbatim ("could not read the head of `<branch>`; the recorded work is
+at `<oid>`; re-run when the read succeeds"), so the persisted `failure_reason` is
+byte-identical to the one `applyResult` writes for the inner stop and never reads
+"without Argus APPROVE" for a run Argus never reached.
+
+`classifyResume` remains the single semantic decider — this is only the cheap
+fast-exit, and `pr-merged` is exempted for exactly the reason above. `failedRun`
+spreads the row, so `inner_checkpoint` / `inner_checkpoint_head` /
+`inner_checkpoint_findings` survive untouched and a re-run after the read recovers
+resumes at exactly this point. Coverage lives in the "the resume live head is read in
+code, never relayed by a model" block of `trident/orchestrator.test.ts`: the
+never-succeeding read now asserts three attempts, zero fires, the persisted reason,
+and the preserved checkpoint columns; `pr-merged` and the local-mode `''` route have
+their own tests; a successful OID read and an `absent` answer still fire unchanged.
