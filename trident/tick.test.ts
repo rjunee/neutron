@@ -482,3 +482,49 @@ describe('TridentTickLoop — on_transition (M1 UX REDESIGN live-progress fan)',
     expect(loop.stats().transitions).toBe(0) // a throwing fan does not count
   })
 })
+
+describe('TridentTickLoop.wake', () => {
+  /** Poll until `done()` or the bound elapses (the wake path is fire-and-forget). */
+  async function waitFor(done: () => boolean, budgetMs = 2_000): Promise<void> {
+    const deadline = Date.now() + budgetMs
+    while (!done() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
+  }
+
+  test('wake() fires the full tick body without waiting for the 90 s interval', async () => {
+    const store = new TridentRunStore(db)
+    const r = await store.create({ slug: 'w', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    const stepped: string[] = []
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> => {
+      stepped.push(run.id)
+      return { run, changed: false, waiting: true, note: 'waiting' }
+    }
+
+    // Default tick_interval_ms (90 s) — the periodic timer CANNOT fire inside
+    // this test, so any tick observed here came from `wake()`.
+    const loop = new TridentTickLoop({ store, step })
+    loop.start()
+    loop.wake()
+    await waitFor(() => stepped.length >= 1)
+    await loop.stop()
+
+    expect(stepped).toEqual([r.id])
+  })
+
+  test('wake() before start() is a no-op', async () => {
+    const store = new TridentRunStore(db)
+    await store.create({ slug: 'w2', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    const stepped: string[] = []
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> => {
+      stepped.push(run.id)
+      return { run, changed: false, waiting: true, note: 'waiting' }
+    }
+
+    const loop = new TridentTickLoop({ store, step })
+    loop.wake() // never started → dropped
+    await new Promise((r) => setTimeout(r, 50))
+    expect(stepped.length).toBe(0)
+    await loop.stop() // safe pre-start
+  })
+})

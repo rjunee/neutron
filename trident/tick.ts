@@ -208,6 +208,16 @@ export class TridentTickLoop {
     this.loop.start()
   }
 
+  /**
+   * Fire one full tick now instead of waiting out the 90 s interval — the
+   * wake-on-change accelerator (the interval stays armed as the backstop).
+   * Delegates to {@link SupervisedLoop.wake}: not-lost when a tick is in
+   * flight, and a no-op unless the loop is started.
+   */
+  wake(): void {
+    this.loop.wake()
+  }
+
   /** §F2 — live LoopRegistry descriptor (name `trident`, cadence
    *  `tick_interval_ms`). Call after `start()`. */
   describe(): LoopDescriptor {
