@@ -407,6 +407,53 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     expect(worktrees.length).toBe(1)
   }, 60_000)
 
+  test('a LONGER marker under `conflict-marker-size` is still caught — the gate matches seven OR MORE', async () => {
+    // `.gitattributes` can widen the markers git writes for a path. The staged-byte scan is the
+    // ONLY thing standing between a half-resolved file and a force-push to the shared branch, so a
+    // marker length it cannot see is a marker it waves through. An exact-seven pattern rejects a
+    // 32-character marker because the eighth character is another `<`, not the space it demands.
+    //
+    // git is asked to produce the long marker itself, via the attribute — hand-writing one would
+    // only prove the fixture. The resolver then stages the file with that marker still inside,
+    // which is the case the index cannot catch.
+    const world = await seedWorld({ conflicting: true })
+    writeFileSync(join(world.checkout, '.gitattributes'), 'lib.txt conflict-marker-size=32\n')
+    const scratchDir = scratch(world.checkout, 't7b')
+    const run = resolverRun('realgit-long-marker', world)
+
+    let seen = ''
+    const resolve_conflict: MergeConflictResolver = async (input) => {
+      writeFileSync(join(input.repo_path, '.gitattributes'), 'lib.txt conflict-marker-size=32\n')
+      // Re-run the merge for this path so git rewrites the markers at the attribute's width.
+      seen = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+      const wide = '<'.repeat(32)
+      writeFileSync(
+        join(input.repo_path, 'lib.txt'),
+        `line1\n${wide} ours\nline2-from-branch\n${'>'.repeat(32)} theirs\nline3\n`,
+      )
+      await git(input.repo_path, 'add', 'lib.txt')
+      return { resolved: true }
+    }
+
+    let caught: unknown = null
+    try {
+      await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+        run,
+        resolve_conflict,
+      })
+    } catch (err) {
+      caught = err
+    }
+
+    expect(seen).toContain('<<<<<<<')
+    expect(caught).toBeInstanceOf(TridentRebaseConflict)
+    expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
+    // THE BRANCH NEVER MOVED and no marker of ANY width reached it.
+    expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
+    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<<<<<<<')
+    expect(existsSync(scratchDir)).toBe(false)
+  }, 60_000)
+
   test('a resolver that DECLINES leaves a REAL conflict an attention state — branch unmoved, scratch worktree gone', async () => {
     const world = await seedWorld({ conflicting: true })
     const scratchDir = scratch(world.checkout, 't6')

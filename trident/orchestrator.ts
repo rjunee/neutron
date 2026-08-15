@@ -438,8 +438,16 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
  * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
  * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
  * so matching those would fail closed on ordinary prose. Seven of either, then a space or EOL.
+ *
+ * SEVEN OR MORE, not exactly seven. `.gitattributes` can set `conflict-marker-size=32` for a
+ * path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
+ * eighth character is another `<` rather than the space the pattern demands. This regex is the
+ * ONLY gate standing between a half-resolved staged file and a force-push to the shared branch,
+ * so a marker length it cannot see is a marker it waves through. Found by codex cross-model
+ * review. The boundary test uses real git with `conflict-marker-size` set, not a hand-written
+ * long marker, so it proves git's behaviour rather than the fixture's.
  */
-const CONFLICT_MARKER_ADDED = /^\+(?:<{7}|>{7})(?: |\t|$)/
+const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|$)/
 
 /**
  * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
