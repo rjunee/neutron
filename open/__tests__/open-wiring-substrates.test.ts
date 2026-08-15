@@ -132,6 +132,44 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.skip_permissions).toBe(true)
   })
 
+  test('the spawn-env resolver reaches ONLY cc-agent-*, and is called at SPAWN not at wiring', async () => {
+    // The credential this carries (`GH_TOKEN`) must not reach a substrate whose
+    // input is user-controlled — that is the same escalation the tool-bridge
+    // invariant above refuses.
+    let calls = 0
+    const { ctx, captured } = makeCtx()
+    ctx.resolveAgentSpawnEnv = async () => {
+      calls += 1
+      return { GH_TOKEN: 'probe-value' }
+    }
+    const w = wireSubstrates(ctx)
+
+    // WIRING ALONE MUST NOT CALL IT. The composer closes over state it builds
+    // later in its own scope, so an eager call would be a temporal-dead-zone
+    // crash at boot rather than a wrong token.
+    expect(calls).toBe(0)
+
+    await drain(w.liveAgentSubstrate!)
+    expect(calls).toBeGreaterThan(0)
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+    expect(agent!.env!['GH_TOKEN']).toBe('probe-value')
+
+    // …and the phase-spec substrate, whose input is onboarding text, never sees it.
+    const before = calls
+    await drain(w.llmCallSubstrate!)
+    expect(calls).toBe(before)
+    const llm = captured.find((o) => o.substrate_instance_id === 'cc-llm-owner')
+    expect(llm!.env!['GH_TOKEN']).toBeUndefined()
+  })
+
+  test('no resolver ⇒ the spawn env is byte-for-byte unchanged', async () => {
+    const { ctx, captured } = makeCtx()
+    const w = wireSubstrates(ctx)
+    await drain(w.liveAgentSubstrate!)
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+    expect(agent!.env!['GH_TOKEN']).toBeUndefined()
+  })
+
   test('makeComposeSubstrate: per-project ISOLATED compose session — keyed by project_id, distinct pool key from cc-agent, TOOLLESS (#377/#378 white-box)', async () => {
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)

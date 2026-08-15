@@ -983,6 +983,21 @@ export function buildOpenGraphComposer(
       owner_handle,
       owner_home,
       project_slug,
+      // `gh` in the live-chat agent's Bash. The instance already held a working
+      // GitHub credential and only the trident paths could reach it, so an
+      // ordinary agent answered "what PRs are open" out of documentation
+      // (`ISSUES.md` #576) — a doc-derived answer to a live question, which reads
+      // exactly as authoritative as a real one.
+      //
+      // Resolved PER SPAWN, never captured: a token connected after boot must
+      // work, and a rotated one must not go stale until restart. Same discipline
+      // as `makeLazyCredentialedHostRunner` below.
+      //
+      // ⚠️ `secretsStore` is constructed further down this same scope. That is
+      // safe ONLY because this closure is invoked at spawn time, long after
+      // composition returns — never during it. Pinned by a test.
+      resolveAgentSpawnEnv: async () =>
+        githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
       env,
       db,
       prewarmSubstrate,
