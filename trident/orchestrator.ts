@@ -71,6 +71,7 @@ import {
 import {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  MAX_CONFLICT_ROUNDS,
   runWorktreePath,
   TridentMergeConflictEscalation,
   type MergeConflictResolver,
@@ -184,12 +185,15 @@ export interface BuildTridentOrchestratorOptions {
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /**
-   * Bounded Forge merge-conflict resolver (#342). Threaded into the default
-   * `buildMergeCleanupDeps` so a LOCAL-mode merge that hits a rebase conflict
-   * (a 2nd/3rd same-project build replaying onto a sibling's merge) is
-   * auto-resolved rather than hard-failing. Ignored when `merge_deps` is
-   * supplied (the override owns its own resolver). Absent → a conflict
-   * escalates to chat immediately (no auto-resolve).
+   * Bounded Forge merge-conflict resolver (#342). Serves BOTH conflict paths:
+   *   - LOCAL mode — threaded into the default `buildMergeCleanupDeps`, so a merge
+   *     that hits a rebase conflict (a 2nd/3rd same-project build replaying onto a
+   *     sibling's merge) is auto-resolved rather than hard-failing. Ignored when
+   *     `merge_deps` is supplied (the override owns its own resolver).
+   *   - PR mode — threaded into `rebaseOntoObservedBase` (the AUTONOMOUS publish
+   *     path), where a conflicting replay is resolved in the scratch worktree
+   *     before it can become a `TridentRebaseConflict`.
+   * Absent → a conflict escalates immediately on both paths (no auto-resolve).
    */
   resolve_conflict?: MergeConflictResolver
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
@@ -436,8 +440,18 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
  * A branch conflicting with its base is a MERGEABILITY fact about the branch's relationship to
  * `main` — not a judgement about the code. Recording it as `REQUEST_CHANGES` tells the owner his
  * build was rejected when no reviewer read a line of it. So this is a typed failure carrying the
- * conflicting paths, and NOTHING on this path invokes the `resolve_conflict` resolver (that
- * belongs to local-mode merges, where a human asked for a merge).
+ * conflicting paths.
+ *
+ * AND THIS IS THE PATH THAT RESOLVES FIRST. A configured `resolve_conflict` resolver is invoked
+ * here, in the scratch worktree `git apply --3way` just left the markers in, bounded by
+ * `MAX_CONFLICT_ROUNDS`. The local-mode merge path has a human present who could reconcile the
+ * branch by hand; this one is autonomous and has nobody, so it is exactly where auto-resolution
+ * earns its keep. `TridentRebaseConflict` remains the outcome when no resolver is configured,
+ * when the resolver declines/escalates, and when the round bound is exhausted.
+ *
+ * A RESOLVED REBASE IS NOT AN APPROVED ONE. Resolution is a MERGEABILITY operation, not a
+ * verdict — the branch still faces the full review gate afterwards, exactly as an unconflicted
+ * replay does.
  */
 export class TridentRebaseConflict extends Error {
   constructor(
@@ -479,6 +493,8 @@ export async function rebaseOntoObservedBase(
   base: string,
   pr: number | null,
   scratchDir: string,
+  /** Optional bounded auto-resolution for a conflicting replay. Absent → a conflict throws. */
+  resolve?: { run: TridentRun; resolve_conflict: MergeConflictResolver },
 ): Promise<{ head: string; rebased: boolean; baseSha: string }> {
   // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
   //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
@@ -639,17 +655,21 @@ export async function rebaseOntoObservedBase(
     const applied = await run_host(['git', '-C', scratchDir, 'apply', '--3way', '--index', diffFile], scratchDir)
     if (!applied.ok) {
       // Best-effort: name the files a human has to look at. Failing to read them is not itself
-      // a different failure — the conflict is the event.
-      let paths: string[] = []
-      try {
-        const unmerged = await run_host(
-          ['git', '-C', scratchDir, 'diff', '--name-only', '--diff-filter=U'],
-          scratchDir,
-        )
-        if (unmerged.ok) paths = unmerged.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
-      } catch {
-        // paths stay empty; the message says so.
+      // a different failure — the conflict is the event. Read in a LOOP now: it is also how a
+      // claimed resolution is verified.
+      const readUnmerged = async (): Promise<string[]> => {
+        try {
+          const unmerged = await run_host(
+            ['git', '-C', scratchDir, 'diff', '--name-only', '--diff-filter=U'],
+            scratchDir,
+          )
+          if (unmerged.ok) return unmerged.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
+        } catch {
+          // paths stay empty; the message says so.
+        }
+        return []
       }
+      let paths = await readUnmerged()
       // A FAILED APPLY WITH NOTHING UNMERGED IS NOT A CONFLICT. `git apply` refuses a malformed or
       // unappliable patch WHOLESALE (`corrupt patch at line N`, exit 128) without staging anything,
       // so `--diff-filter=U` legitimately names no files. Reporting that as a conflict produced the
@@ -659,7 +679,9 @@ export async function rebaseOntoObservedBase(
       // discarded. The empty path list WAS the diagnosis and it read like a footnote.
       //
       // So: `TridentRebaseConflict` is reserved for the case where at least one file is genuinely
-      // unmerged. Anything else surfaces git's own words.
+      // unmerged. Anything else surfaces git's own words. THE RESOLVER IS NEVER INVOKED HERE either
+      // — there is nothing unmerged for it to reconcile, so handing it this failure would only
+      // relabel a wrong patch as a conflict, which is the exact defect this carve-out fixed.
       if (paths.length === 0) {
         throw new Error(
           publishFailureReason(
@@ -669,7 +691,31 @@ export async function rebaseOntoObservedBase(
           ),
         )
       }
-      throw new TridentRebaseConflict(branch, base, paths)
+      // No resolver configured → the attention state, byte-identical to the behaviour before
+      // auto-resolution existed.
+      if (resolve === undefined) throw new TridentRebaseConflict(branch, base, paths)
+      // Bounded auto-resolution, mirroring `rebaseBranchOntoBase`. `repo_path` is the SCRATCH
+      // worktree — the tree holding the markers — never the shared checkout other lanes build in.
+      // Re-reading the unmerged set after a claimed RESOLVED is the lie-detector: a resolver that
+      // reports success without staging anything loops until the bound and ends in the same
+      // attention state.
+      let rounds = 0
+      while (paths.length > 0) {
+        if (rounds >= MAX_CONFLICT_ROUNDS) throw new TridentRebaseConflict(branch, base, paths)
+        rounds++
+        const outcome = await resolve.resolve_conflict({
+          repo_path: scratchDir,
+          branch,
+          base_branch: base,
+          run: resolve.run,
+          conflicted_files: paths,
+        })
+        if (!outcome.resolved) throw new TridentRebaseConflict(branch, base, paths)
+        paths = await readUnmerged()
+      }
+      // Resolved: fall through to the ordinary commit + compare-and-swap below. The resolver's
+      // contract has it `git add` its resolutions and forbids committing, so the replay commits
+      // exactly as an unconflicted apply would — and still faces the full review gate.
     }
     const committed = await run_host(
       [
@@ -1050,9 +1096,12 @@ export function buildTridentOrchestrator(
     // written against the tree it merges into. That is the closest to "before build" the
     // credential boundary allows.
     //
-    // ON CONFLICT. An ATTENTION state (`TridentRebaseConflict`), never `REQUEST_CHANGES` and never
-    // auto-resolved. The failure names the conflicting paths and says plainly that no reviewer
-    // judged the code; the `resolve_conflict` resolver is NEVER invoked on this path.
+    // ON CONFLICT. A configured `resolve_conflict` resolver is tried FIRST, in the scratch
+    // worktree, bounded by `MAX_CONFLICT_ROUNDS` — this is the autonomous path, so there is no
+    // human here to reconcile the branch by hand. Absent, declining, or exhausted → an ATTENTION
+    // state (`TridentRebaseConflict`) exactly as before: never `REQUEST_CHANGES`, naming the
+    // conflicting paths and saying plainly that no reviewer judged the code. And a RESOLVED
+    // conflict shortcuts nothing — the replay is published and review is re-fired as usual.
     //
     // SHALLOW (governance #574). The shared build checkout has a `.git/shallow` boundary, where
     // `merge-base` lies and a naive `git rebase` conflicts on every file. So this is a diff-replay
@@ -1068,6 +1117,7 @@ export function buildTridentOrchestrator(
       await resolveBase(run),
       prBefore,
       `${run.repo_path}/.trident-worktrees/rebase-${run.id}`,
+      opts.resolve_conflict !== undefined ? { run, resolve_conflict: opts.resolve_conflict } : undefined,
     )
     // Everything downstream publishes the REBASED head: the post-push confirm, the review diff,
     // and the `outer-published:<head>` checkpoint the re-fired workflow reads back.

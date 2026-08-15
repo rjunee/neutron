@@ -110,7 +110,7 @@ export interface MergeConflictResolver {
 }
 
 /** Bound the rebase-continue loop so a pathological history can't spin forever. */
-const MAX_CONFLICT_ROUNDS = 12
+export const MAX_CONFLICT_ROUNDS = 12
 
 /**
  * Resolve the base branch to merge into. Tries `origin/HEAD`'s symbolic
