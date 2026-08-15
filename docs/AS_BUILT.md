@@ -67,6 +67,43 @@ newline; the sensitivity check therefore uses mutations that move a real byte. U
 one-character head-slice shift and under a one-character tail edit, both new tests go
 RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
 gap this task existed to close.
+## 2026-08-15 — a pr-mode build rebases onto observed main before review
+
+`trident/orchestrator.ts` `publishBuiltCommit` now rebases the built branch onto
+the observed tip of its base branch before the lease push, so the readiness probe
+reads `MERGEABLE` instead of deferring on staleness. The rebase sits in the OUTER
+publisher — between the local-tip verification and the `ls-remote` lease
+observation — because only the outer loop holds a push credential; and because the
+publisher runs after every build/fix round, every post-round-1 fix is written
+against the tree it will merge into.
+
+The shared build checkout is shallow (`.git/shallow`, governance #574/#571), so a
+naive `git rebase` there replays the whole history and reports false conflicts.
+The implementation never rebases in place: `rebaseOntoObservedBase` replays the
+branch's own diff (`gh pr diff <n>` when a PR exists — server-side merge-base,
+shallow-immune; two-dot `git diff <base>..<branch>` on first publish) onto the
+observed base tip in a throwaway detached worktree with `git apply --3way`,
+commits, and moves `refs/heads/<branch>` by compare-and-swap (`update-ref new
+old`). The replay squashes the branch to one commit, which the `--squash` PR
+merge already does.
+
+A failed 3-way apply is an attention state, never a review verdict:
+`TridentRebaseConflict` fails the run with `REBASE CONFLICT — needs attention:`
+naming the branch, base, and conflicting paths, states that no reviewer judged
+the code, and never invokes the local-mode `resolve_conflict` Forge resolver. The
+re-push keeps the existing lease discipline —
+`--force-with-lease=refs/heads/<branch>:<sha>` pinned to an `ls-remote`-observed
+sha — so a remote advanced by a third party refuses the push.
+
+Verified by 59 tests: fake-host units in `trident/orchestrator.test.ts` (behind →
+rebased publish; up-to-date → no-op; conflict → attention; lease ordering
+preserved) and real-git integration in `trident/publish-rebase-realgit.test.ts`,
+which asserts `.git/shallow` exists in the build checkout before exercising
+anything, seeds a branch genuinely behind a moved main, proves the pushed head
+contains both sides and is an ancestor-descendant of main's tip in a full clone,
+proves a conflicting seed throws the attention error naming the path without
+moving the ref, and proves a third-party advance makes the pinned lease push
+refuse against a real remote.
 
 ## 2026-08-14 — review-round readiness is checked before reviewer spend
 
