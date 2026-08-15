@@ -43,23 +43,6 @@ export interface OpenWiringContext {
   substrateFactory?: (opts: ClaudeCodeSubstrateOptions) => Substrate
   /** Frozen single-owner instance handle (== boot slug). Substrate pool key. */
   owner_handle: string
-  /**
-   * Env overlay the owner's LIVE-CHAT substrate layers on every spawn.
-   *
-   * Exists because `gh` authenticates purely from `GH_TOKEN` and nothing put one
-   * in an agent's Bash: the instance held a working GitHub credential that only
-   * the trident paths could reach, so an ordinary agent asked "what PRs are open"
-   * and answered from documentation (`ISSUES.md` #576).
-   *
-   * A FUNCTION, resolved per spawn — a credential captured at composition is
-   * wrong in both directions: an instance that connects GitHub after boot never
-   * sees it, and a rotated token stays stale until restart.
-   *
-   * ⚠️ It is invoked at SPAWN time, never during composition, which is what lets
-   * the composer close over state it constructs later in its own scope.
-   * `substrates.test.ts` pins that.
-   */
-  resolveAgentSpawnEnv?: () => Promise<Record<string, string | undefined>>
   /** Owner HOME base dir (substrate cwd + GBrain/scribe/reflection data root). */
   owner_home: string
   /** Boot-frozen project slug (metering + pool key). */

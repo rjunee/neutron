@@ -245,15 +245,6 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
-          // GH_TOKEN for `gh` in this agent's Bash — THIS SUBSTRATE ONLY.
-          // Deliberately not on `cc-llm-*` (onboarding phase-spec, whose input is
-          // user-controlled text) nor the untrusted-import substrate: handing a
-          // GitHub credential to a surface that reads attacker-influenced input is
-          // the privilege escalation the tool-bridge note above already refuses.
-          // Absent resolver ⇒ field omitted ⇒ byte-for-byte today's spawn env.
-          ...(ctx.resolveAgentSpawnEnv !== undefined
-            ? { extra_env: ctx.resolveAgentSpawnEnv }
-            : {}),
           // Owner's WARM conversational REPL (cc-agent) — TRUSTED live chat.
           // Security knobs live on the profile — see substrate-profiles.ts. Kept
           // DISTINCT from the untrusted-import profile even though identical today.

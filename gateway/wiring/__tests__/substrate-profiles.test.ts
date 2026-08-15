@@ -144,14 +144,29 @@ test('every profile encodes exactly { skip_permissions: true } — except the ON
     // NAME rather than the assertion being relaxed for everyone, so a SECOND
     // profile that starts wiring a field still fails this test — which is the
     // whole reason the test exists.
+    // The GitHub grant is part of the frozen shape ON PURPOSE: flipping a
+    // profile from `false` to `true` hands every substrate on it push access to
+    // the owner's repos, so it must fail here until the change is stated.
+    const GRANTS: Record<string, boolean> = {
+      PROFILE_TOOLLESS_UTILITY: false,
+      PROFILE_WARM_CHAT: true,
+      PROFILE_PHASE_SPEC: false,
+      PROFILE_ISOLATED_COMPOSE: false,
+      PROFILE_UNTRUSTED_IMPORT: false,
+      PROFILE_EPHEMERAL: true,
+      PROFILE_WARM_FIRE: true,
+    }
+    const github_credential = GRANTS[name]
+    expect(github_credential, `${name} has no recorded GitHub grant`).toBeDefined()
     if (name === 'PROFILE_WARM_FIRE') {
       expect({ ...profile }, name).toEqual({
         skip_permissions: true,
+        github_credential: true,
         turn_inactivity_ms: 30 * 60_000,
       })
       continue
     }
-    expect({ ...profile }, name).toEqual({ skip_permissions: true })
+    expect({ ...profile }, name).toEqual({ skip_permissions: true, github_credential: github_credential! })
   }
 })
 
@@ -270,7 +285,7 @@ test('a profile skip_permissions value WINS over the legacy inline field', async
     substrate_instance_id: 'prec',
     cwd: '/w',
     skip_permissions: false,
-    profile: { skip_permissions: true },
+    profile: { skip_permissions: true, github_credential: false },
   })
   expect(opts.skip_permissions).toBe(true)
 })

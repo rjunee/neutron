@@ -65,7 +65,10 @@ import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
-import type { SubstrateProfile } from './substrate-profiles.ts'
+import { createLogger } from '@neutronai/logger'
+import { githubSpawnEnvRef, type SubstrateProfile } from './substrate-profiles.ts'
+
+const substrateLog = createLogger('substrate')
 
 /**
  * Discriminated failure reasons for `resolveScrubbedAuthEnv`. Mirrors the
@@ -705,11 +708,43 @@ export function buildLlmCallSubstrate(
         // here — that is Phase B / Phase D of the redesign.
         const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
         const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
-        const extraEnvResolver = input.profile?.extra_env ?? input.extra_env
+        // THE PROFILE DECIDES, THE INSTANCE SUPPLIES. A profile that opts into the
+        // GitHub credential gets `GH_TOKEN` + the git credential helper; one that
+        // does not is byte-for-byte unchanged. The decision lives on the profile so
+        // a new substrate inherits it rather than re-deciding at a tenth call site
+        // nobody rereads — the failure that produced ISSUES #576 and a private-repo
+        // build dying at `fatal: could not read Username`.
+        //
         // RESOLVED HERE, INSIDE THE PER-SPAWN CLOSURE — never hoisted. A credential
-        // read once outside this would be the boot-time snapshot the function form
-        // exists to prevent.
-        const effectiveExtraEnv = extraEnvResolver === undefined ? undefined : await extraEnvResolver()
+        // read once outside this is the boot-time snapshot that misses a GitHub
+        // connected after boot and goes stale on rotation.
+        // A CREDENTIAL READ THAT FAILS MUST NOT KILL THE SPAWN. Surfaced by CI:
+        // the resolver threw and took the whole substrate down with it, which in
+        // production would mean a locked store or an unreadable secret turning a
+        // chat turn into a dead session. Degrading to "no credential" is strictly
+        // better — `gh` then fails with git's own message, which is the behaviour
+        // of an instance that never connected GitHub, and the log says why.
+        let githubEnv: Record<string, string | undefined> | undefined
+        if (input.profile?.github_credential === true && githubSpawnEnvRef.resolve !== undefined) {
+          try {
+            githubEnv = await githubSpawnEnvRef.resolve()
+          } catch (err) {
+            substrateLog.warn('github_credential_unavailable', {
+              substrate_instance_id: input.substrate_instance_id,
+              reason: err instanceof Error ? err.message : String(err),
+            })
+            githubEnv = undefined
+          }
+        }
+        const extraEnvResolver = input.profile?.extra_env ?? input.extra_env
+        const resolvedExtraEnv = extraEnvResolver === undefined ? undefined : await extraEnvResolver()
+        // `extra_env` wins over the credential on collision: it is the explicit
+        // per-call knob, and a caller that deliberately unsets a var must not be
+        // overridden by an instance-wide default.
+        const effectiveExtraEnv =
+          githubEnv === undefined && resolvedExtraEnv === undefined
+            ? undefined
+            : { ...(githubEnv ?? {}), ...(resolvedExtraEnv ?? {}) }
         // The one profile field that is APPLIED rather than reserved. A profile
         // hosting detached work (`PROFILE_WARM_FIRE`) must not be judged by PTY
         // chatter — see that profile's docblock for the two builds this killed.
