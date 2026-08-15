@@ -1597,3 +1597,113 @@ describe('applyResult stamps harvested_at (the outer loop is the ONLY writer)', 
     expect(isTridentHarvestTerminal(terminated!)).toBe(false)
   })
 })
+
+/**
+ * RUN `f384460d` (2026-08-15) REPLAYED — `prNumber: 0` MUST NEVER ERASE A KNOWN PR.
+ *
+ * The journal is unambiguous: the build SUCCEEDED (`{ commitSha: 9e7dfbe, testsPassed: true,
+ * prNumber: 0 }`), origin was one commit behind, and the run — whose row held `pr = 267` — ended
+ * at `pr = 0` with the finished commit stranded in the worktree. The zero is not a measurement:
+ * the codex wrapper's pr-mode trailer is `PR_NUMBER=0` BY DESIGN ("the outer loop publishes after
+ * this build exits"), i.e. a "no PR yet" sentinel. GitHub PR numbers start at 1, so a non-positive
+ * one is never an answer — and `result.pr_number ?? run.pr` cannot defend itself, because 0 is not
+ * nullish.
+ */
+describe('orchestrator — a prNumber of 0 is a sentinel, never a PR number (run f384460d)', () => {
+  test('the replayed trace publishes the commit, resolves PR 267 from the branch, and dispatches review', async () => {
+    const head = '9e7dfbe0123456789abcdef0123456789abcdef0'
+    const behind = '1a8c51b0123456789abcdef0123456789abcdef0'
+    let fires = 0
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? {
+              // The measured forge result: a good commit, tests passed — and the wrapper's
+              // PR sentinel of 0 riding along beside them.
+              result: {
+                verdict: 'REQUEST_CHANGES',
+                branch: 'feat-x',
+                checkpoint: 'forge-done',
+                publishRequested: true,
+                publishHead: head,
+                prNumber: 0,
+              },
+            }
+          : { result: { verdict: 'APPROVE', prNumber: 267, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          // Origin is ONE COMMIT BEHIND until the publisher pushes (the observed trace).
+          return ok(lsRemotes === 1 ? `${behind}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('267')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    // Tick by hand rather than through `runToTerminal`, so EVERY persisted row is observed:
+    // "the run never read pr 0" is a claim about the intermediate writes, not just the last one.
+    const observedPrs: Array<number | null> = []
+    let final: TridentRun | null = null
+    for (let i = 0; i < 20; i++) {
+      await h.loop.runOnce()
+      await h.complete()
+      const r = store.get(run.id)
+      if (r === null) continue
+      observedPrs.push(r.pr)
+      if (isTerminalPhase(r.phase)) {
+        final = r
+        break
+      }
+    }
+    expect(final).not.toBeNull()
+
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    // The commit was PUBLISHED, with the lease pinned to the sha actually observed on origin.
+    expect(calls).toContain(
+      `git -C /repo push --force-with-lease=refs/heads/feat-x:${behind} origin refs/heads/feat-x:refs/heads/feat-x`,
+    )
+    // …and review was DISPATCHED against the published head (this is what the dead run never did).
+    expect(h.inputs).toHaveLength(2)
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+    // The PR was resolved from the branch, and it travels on the re-fire patch AND the final row.
+    expect(h.refirePatches.map((p) => p.pr)).toEqual([267])
+    expect(h.inputs[1]!.run.pr).toBe(267)
+    expect(final!.pr).toBe(267)
+    expect(final!.phase).toBe('done')
+    // The whole point: at NO persist did the row read 0.
+    expect(observedPrs.some((p) => p === 0)).toBe(false)
+  })
+
+  test('an inner-error harvest carrying prNumber 0 keeps the known PR on the failed row', async () => {
+    // The other half of the same trace: the run went terminal-failed with `checkpoint:
+    // 'inner-error'` and the sentinel still attached. A failed run may lose its verdict — it may
+    // not lose its PR, or the recovery has nothing to point at.
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          round: 1,
+          checkpoint: 'inner-error',
+          prNumber: 0,
+          branch: 'feat-x',
+          remainingTasks: 0,
+        },
+      }),
+      // `detectExistingPr` runs at FIRE time, so this is how the row comes to hold pr=267.
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.pr).toBe(267)
+  })
+})
