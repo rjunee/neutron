@@ -396,18 +396,29 @@ export interface BuildLlmCallSubstrateInput {
    * Extra env overlay layered onto EVERY spawn AFTER the auth-scrub step
    * (`resolveScrubbedAuthEnv`). Values follow the same `string | undefined`
    * contract as the auth env: `undefined` deletes the inherited var, a string
-   * sets it. A general per-substrate spawn knob — e.g. a caller could inject
+   * sets it. A general per-substrate spawn knob — a caller can inject
    * `MAX_THINKING_TOKENS=0` to keep a latency-sensitive classifier spawn from
-   * burning 20-40s on extended thinking. (No production caller sets `extra_env`
-   * today; the onboarding router that once motivated it never wired it and is
-   * being removed — see the K9 entry (2026-07-04) in docs/AS_BUILT.md. Kept as the substrate's
-   * generic env-overlay seam, exercised by the substrate unit test.)
+   * burning 20-40s on extended thinking, or a credential the child's tooling
+   * reads from the environment.
+   *
+   * ── IT IS A FUNCTION, AND THAT IS THE WHOLE POINT ──────────────────────────
+   * This was a plain object until 2026-08-15, which was fine while it had no
+   * production caller. Its first real one is a CREDENTIAL (`GH_TOKEN`, so `gh`
+   * works in an agent's Bash), and a credential captured once at wiring time is
+   * wrong in both directions: an instance that connects GitHub AFTER boot never
+   * sees it, and a rotated token keeps a stale value until the process restarts.
+   * The same reason `makeLazyCredentialedHostRunner` resolves the trident host
+   * runner's credential per call rather than at construction.
+   *
+   * So there is ONE form, resolved per spawn, and no static variant to pick
+   * wrongly. Returning `{}` is the "nothing to add" answer and leaves the spawn
+   * env byte-for-byte unchanged.
    *
    * Scope note: layered per-substrate, so a dedicated substrate can carry this
    * overlay while the shared `llmCallSubstrate` does not. Keys here win over the
    * auth-scrub env on collision (applied last).
    */
-  extra_env?: Record<string, string | undefined>
+  extra_env?: () => Promise<Record<string, string | undefined>>
   /**
    * Argus r4 BLOCKER (2026-06-08) — STATELESS-ONE-SHOT mode. When `true`, every
    * `start(spec)` with no `spec.session` runs on a FRESH disposable REPL that is
@@ -694,7 +705,11 @@ export function buildLlmCallSubstrate(
         // here — that is Phase B / Phase D of the redesign.
         const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
         const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
-        const effectiveExtraEnv = input.profile?.extra_env ?? input.extra_env
+        const extraEnvResolver = input.profile?.extra_env ?? input.extra_env
+        // RESOLVED HERE, INSIDE THE PER-SPAWN CLOSURE — never hoisted. A credential
+        // read once outside this would be the boot-time snapshot the function form
+        // exists to prevent.
+        const effectiveExtraEnv = extraEnvResolver === undefined ? undefined : await extraEnvResolver()
         // The one profile field that is APPLIED rather than reserved. A profile
         // hosting detached work (`PROFILE_WARM_FIRE`) must not be judged by PTY
         // chatter — see that profile's docblock for the two builds this killed.

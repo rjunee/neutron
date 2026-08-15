@@ -105,7 +105,7 @@ export interface SubstrateProfile {
    * `BuildLlmCallSubstrateInput.extra_env`; when a profile sets this the factory
    * uses it in place of the legacy per-call `extra_env` input.
    */
-  readonly extra_env?: Record<string, string | undefined>
+  readonly extra_env?: () => Promise<Record<string, string | undefined>>
   /**
    * RESERVED (Phase D) — native OS sandbox config. `undefined` today; NOT
    * applied by the factory yet (see file header). Shape only.

@@ -375,7 +375,7 @@ test('extra_env overlay is layered onto the spawn env after auth scrub', async (
     substrate_instance_id: 'inst-router',
     cwd: workdir,
     substrateFactory,
-    extra_env: { MAX_THINKING_TOKENS: '0' },
+    extra_env: async () => ({ MAX_THINKING_TOKENS: '0' }),
   })
   const handle = sub!.start(runSpec())
   for await (const _ev of handle.events) {
