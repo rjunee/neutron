@@ -398,12 +398,12 @@ export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean 
  * setting, which the wrapper does not expose — so the pane renders that cell disabled
  * and config parsing drops a stale effort paired with a newly selected CLI tier.
  *
- * THIS ANSWERS FOR THE PHASE'S DEFAULT TIER — "could this row ever have an effort
- * control", not "does it have one right now". A phase with a second executor
- * with multiple dispatch groups can be moved to a tier whose effort is inert while
- * this still returns true, so a pane must ALSO ask the chosen tier (the surface ships
- * `effort_supported` per tier for exactly that) and `parsePhaseModelConfig` drops the
- * effort when the chosen tier cannot use it.
+ * THIS ANSWERS FOR THE PHASE'S WIRED EXECUTORS — "could this row ever have an effort
+ * control", not "does it have one right now". A phase with multiple dispatch groups
+ * can be moved to a tier whose effort is inert while this still returns true, so a
+ * pane must ALSO ask the chosen tier (the surface ships `effort_supported` per tier
+ * for exactly that) and `parsePhaseModelConfig` drops the effort when the chosen tier
+ * cannot use it.
  */
 export function phaseSupportsEffort(phase: TridentPhase): boolean {
   return phaseGroups(phase).includes('claude')
@@ -603,10 +603,15 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           continue
         }
         const requestedModel = (value as Record<string, unknown>)['model']
-        const selectedTier = typeof requestedModel === 'string' && isModelTier(requestedModel)
+        const validRequestedModel = typeof requestedModel === 'string' && isModelTier(requestedModel)
+        const selectedTier = validRequestedModel
           ? modelTier(requestedModel)
           : modelTier(phase.default.tier)
-        if (!phaseSupportsEffort(phase) || (requestedModel === undefined && (selectedTier?.transport === 'cli' || selectedTier?.group === 'none'))) {
+        if (
+          !phaseSupportsEffort(phase) ||
+          (requestedModel !== undefined && !validRequestedModel) ||
+          (requestedModel === undefined && (selectedTier?.transport === 'cli' || selectedTier?.group === 'none'))
+        ) {
           // Storing an effort no dispatch reads would be a control the owner sets and
           // nothing honours — the exact shape this module exists to prevent.
           errors.push(

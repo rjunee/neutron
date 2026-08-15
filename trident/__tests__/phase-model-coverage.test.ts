@@ -451,8 +451,15 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(errors[0]).toContain('not settable')
   })
 
+  it('a retired stored model cannot leave an inert effort-only override behind', () => {
+    const parsed = parsePhaseModelConfig({ review_codex: { model: 'retired', effort: 'max' } })
+    expect(parsed.config).toEqual({})
+    expect(parsed.errors.some((error) => error.includes("'retired' is not a model tier"))).toBe(true)
+    expect(parsed.rejected.review_codex).toEqual({ model: 'retired', effort: 'max' })
+  })
+
   it('DROPS — never rejects — an effort paired with a codex model on the build row', () => {
-    // `build` HAS an effort control, because its default executor reads one. Move the
+    // `build` HAS an effort control, because a wired executor reads one. Move the
     // row to the codex executor and that stops being true: a CLI picks its own
     // reasoning effort. The effort is a LEFTOVER from the executor the owner just
     // left, not a bad value, so it is dropped into `rejected` and the write SUCCEEDS.

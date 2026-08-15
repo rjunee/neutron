@@ -144,7 +144,7 @@ function vocabulary(connections: CrossModelConnections): object {
       // that now genuinely reaches them.
       groups: phaseGroups(p),
       dispatch_constraint: p.dispatchConstraint ?? null,
-      // Could this step EVER have an effort control — i.e. does its default executor
+      // Could this step EVER have an effort control — i.e. does any wired executor
       // read one. Whether the cell is live right now also depends on the tier the
       // owner has chosen (see `effort_supported` on each tier below), because the
       // build's second executor is a CLI that picks its own reasoning effort.

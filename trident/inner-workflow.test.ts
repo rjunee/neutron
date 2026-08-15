@@ -556,7 +556,11 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       // truncation readback is a tail of that same command line, so a prefix that
       // shifted or broke its quoting has to be able to fail this.
       'CODEX_ENV_PREFIX',
-      [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
+      [
+        grabFunction('shSingleQuote'),
+        grabFunction('codexReviewerPrompt'),
+        "return (diffFile) => codexReviewerPrompt(diffFile, { lane: 'seat-1', envPrefix: CODEX_ENV_PREFIX })",
+      ].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
     return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '', "CODEX_REVIEW_MODEL='gpt-5.6-sol' ")(
       '/tmp/some-diff.diff',
@@ -566,10 +570,12 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
   /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */
   const runReadback = (errContent: string | null): string => {
     const runId = `truncation-readback-${process.pid}`
-    const errFile = `/tmp/trident-codex-${runId}.err`
+    const errFile = `/tmp/trident-codex-seat-1-${runId}.err`
     rmSync(errFile, { force: true })
     if (errContent !== null) writeFileSync(errFile, errContent)
     const command = codexBridgeCommand(runId)
+    expect(command).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
+    expect(command).toContain(`/tmp/trident-codex-seat-1-${runId}.err`)
     const at = command.indexOf('if grep -q')
     if (at === -1) throw new Error('the bridge command no longer greps stderr for the truncation marker')
     const nl = command.indexOf('\n', at)
@@ -1004,6 +1010,13 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
       // and still yields a legitimate reduced panel. Only the DEFAULT changed.
       expect(crossModelPeerStatus(3, v, 'kimiStatus')).toBe('not_connected')
       expect(crossModelPeerStatus(2, [{}, {}, { codexStatus: 'deferred' }], 'codexStatus')).toBe('deferred')
+    })
+
+    test('a Claude review seat maps a usable verdict to connected, not the verdict token', () => {
+      const { crossModelPeerStatus } = gate()
+      expect(crossModelPeerStatus(2, [{}, {}, { verdict: 'APPROVE' }], 'verdict')).toBe('connected')
+      expect(crossModelPeerStatus(2, [{}, {}, { verdict: 'REQUEST_CHANGES' }], 'verdict')).toBe('connected')
+      expect(crossModelPeerStatus(2, [{}, {}, null], 'verdict')).toBe('deferred')
     })
 
     test('end to end: a DEAD configured peer now blocks an APPROVE; an ABSENT one does not', () => {

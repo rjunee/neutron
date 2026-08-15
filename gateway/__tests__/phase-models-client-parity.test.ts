@@ -314,7 +314,7 @@ describe('the agreement is real, not vacuous', () => {
 })
 
 describe('effortSettable — both clients disable the same cell', () => {
-  // THE BUG THIS PINS. `effort_supported` on the PHASE answers for its DEFAULT tier,
+  // THE BUG THIS PINS. `effort_supported` on the PHASE answers for its wired tiers,
   // so the build row kept a live effort dropdown after the owner moved it to codex —
   // and `applyRowEdit` then merged the stale effort into the PUT, which the server
   // refused. The whole save failed, taking every other row's pending edit with it.

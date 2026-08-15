@@ -356,8 +356,8 @@ describe('the HTTP surface', () => {
   })
 
   it('says PER TIER whether picking it leaves the effort cell live', async () => {
-    // `effort_supported` on a PHASE answers for its default executor. That was the
-    // whole answer while every row had one; the build row has two, and a pane that
+    // `effort_supported` on a PHASE answers whether any wired executor supports it.
+    // That was the whole answer while every row had one; the build row has two, and a pane that
     // asked only the phase kept a live effort dropdown after the owner moved the row
     // to codex — then posted the effort alongside the model, and the server refused
     // the entire save. The per-tier flag is the missing half, derived here so the

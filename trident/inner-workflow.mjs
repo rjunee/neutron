@@ -412,8 +412,8 @@ const kimiReviewRoute = (route, modelId) => ({
 // recorded in the verdict.
 //
 // The effort is the owner's when a config carries one and the phase's stated default
-// otherwise: these two rows have no live effort cell (their DEFAULT executor is a CLI,
-// which is what `phaseSupportsEffort` answers), so the common path is the default.
+// otherwise. These rows can have a live effort cell because they have a wired Claude
+// route; the selected tier decides whether the pane enables that cell.
 const claudeReviewRoute = (route, modelId, effort) => ({
   ...route,
   model: modelId,
@@ -671,7 +671,7 @@ function withModel(opts, tag) {
   // progress group and is deliberately a different field.
   const overridden = route.phaseKey !== null && phaseOverrideFor(route.phaseKey) !== undefined
   log(
-    `trident.agent label=${opts.label} model=${route.model} effort=${route.effort} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}${tag ? ` tag=${tag}` : ''}`,
+    `trident.agent label=${opts.label} model=${route.model} effort=${route.effort} transport=${route.transport} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}${tag ? ` tag=${tag}` : ''}`,
   )
   // A CLI-TRANSPORT ROUTE NEVER SETS agent() OPTS. Its model belongs to a subprocess
   // (see `crossModelEnvPrefix`); putting it on the spawn would ask Claude Code's
@@ -3297,8 +3297,11 @@ TASK: ${task}`
       ),
     )
   }
+  // Warn about what the owner SELECTED, not which external credentials happen to be
+  // usable on this machine. Availability controls dispatch above; it must not rewrite
+  // the composition shown here or make a stock mixed-family panel look Claude-only.
   const enabledPanelFamilies = [rubricRoute, adversarialRoute, slotOneRoute, slotTwoRoute]
-    .filter((route) => !route.disabled && routeAvailable(route))
+    .filter((route) => !route.disabled)
     .map((route) => route.group || 'claude')
   if (enabledPanelFamilies.length > 1 && new Set(enabledPanelFamilies).size === 1) {
     log(`trident.panel-single-family WARNING family=${enabledPanelFamilies[0]} seats=${enabledPanelFamilies.length} configuration-accepted=true`)

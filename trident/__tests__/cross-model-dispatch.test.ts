@@ -485,6 +485,26 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     expect(captured.some((c) => c.label === 'argus:kimi')).toBe(true)
     expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=4 configuration-accepted=true'))).toBe(true)
   })
+
+  test('the warning measures the selected panel, not currently usable credentials', async () => {
+    const args = productionArgs(null)
+    args['codexHome'] = null
+    args['kimiConfigured'] = false
+    const { logs } = await runWorkflow(args)
+    expect(logs.some((line) => line.includes('panel-single-family'))).toBe(false)
+  })
+
+  test('the two CLI seats use distinct output lanes when assigned the same family', async () => {
+    const { captured } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'sol' }, review_kimi: { model: 'terra' } }),
+    )
+    const first = promptFor(captured, 'argus:codex')
+    const second = promptFor(captured, 'argus:kimi')
+    expect(first).toContain('/tmp/trident-codex-seat-1-')
+    expect(first).not.toContain('/tmp/trident-codex-seat-2-')
+    expect(second).toContain('/tmp/trident-codex-seat-2-')
+    expect(second).not.toContain('/tmp/trident-codex-seat-1-')
+  })
 })
 
 describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () => {
