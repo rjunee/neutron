@@ -31,8 +31,15 @@ import { fileURLToPath } from 'node:url'
 import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 
 import { buildWorkflowArgs } from '../inner-loop.ts'
+import { TRIDENT_PHASES } from '../phase-models.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
+
+const sourceFunction = (name: string): ((...args: unknown[]) => unknown) => {
+  const match = new RegExp(`function ${name}\\([^]*?\\n\\}`).exec(SRC)
+  if (match === null) throw new Error(`missing production helper ${name}`)
+  return Function('CORE_SEAT_STATUS_KEY', `return (${match[0]})`)('verdict') as (...args: unknown[]) => unknown
+}
 
 interface Captured {
   label: string | undefined
@@ -195,7 +202,7 @@ async function runWorkflow(
       return { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
     }
     if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
-      if (opts.model !== undefined) return { verdict: 'APPROVE', findings: [] }
+      if (o?.['model'] !== undefined) return { verdict: 'APPROVE', findings: [] }
       return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
     }
     if (label === 'argus:synthesis') {
@@ -309,9 +316,11 @@ describe('THE DEFAULT PATH — an install that never opened the pane', () => {
     // now stated by the dispatch instead of left to the CLI's default.
     expect(promptFor(captured, 'argus:codex')).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
     expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
+    expect(promptFor(captured, 'argus:codex')).toContain('/tmp/trident-codex-seat-1-')
+    expect(promptFor(captured, 'argus:kimi')).toContain('/tmp/trident-kimi-seat-2-')
   })
 
-  test('the KIMI lane is left exactly as it was — the build move did not touch it', async () => {
+  test('the Kimi CLI route still dispatches through its bridge', async () => {
     // Kimi is OUT OF SCOPE for this change, and "out of scope" has to be visible in the
     // dispatch and not just in a commit message: the seat runs, on its own tier, through
     // its own wrapper, with the model threaded exactly the way it was before the build
@@ -350,19 +359,22 @@ describe('THE DEFAULT PATH — an install that never opened the pane', () => {
 })
 
 describe('AN OVERRIDE REACHES THE DISPATCH', () => {
+  test('a Claude-seat verdict is connected even though it has no CLI status field', () => {
+    const status = sourceFunction('crossModelPeerStatus')
+    expect(status(0, [{ verdict: 'APPROVE', findings: [] }], 'verdict')).toBe('connected')
+    expect(status(0, [null], 'verdict')).toBe('deferred')
+  })
+
   test('both generic seats dispatch every executor family they declare', async () => {
-    const cases = [
-      { tier: 'none', group: 'none' },
-      { tier: 'opus', group: 'claude' },
-      { tier: 'terra', group: 'codex' },
-      { tier: 'k3', group: 'kimi' },
-    ] as const
+    const tierForGroup = { none: 'none', claude: 'opus', codex: 'terra', kimi: 'k3' } as const
 
     for (const [phase, label] of [
       ['review_codex', 'argus:codex'],
       ['review_kimi', 'argus:kimi'],
     ] as const) {
-      for (const { tier, group } of cases) {
+      const declaredGroups = TRIDENT_PHASES.find((candidate) => candidate.key === phase)!.dispatchGroups
+      for (const group of declaredGroups) {
+        const tier = tierForGroup[group]
         const { captured } = await runWorkflow(productionArgs({ [phase]: { model: tier } }))
         const seat = captured.find((call) => call.label === label)
         if (group === 'none') {
@@ -443,6 +455,9 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     expect(seat.opts['schema']).toMatchObject({ required: ['verdict', 'findings'] })
     expect(logs.filter((line) => line.includes('trident.agent label=argus:codex') && line.includes(`model=${getBestModel()}`))).toHaveLength(1)
     expect(logs.some((line) => line.includes('panel-single-family'))).toBe(false)
+    const synthesis = captured.find((c) => c.label === 'argus:synthesis')!
+    expect(synthesis.prompt).toContain(`Cross-model review 1, claude/${getBestModel()}`)
+    expect(synthesis.prompt).toContain('treat as a full panelist')
   })
 
   test('a configured Codex seat whose CLI is unavailable never falls back to Claude', async () => {
@@ -463,7 +478,12 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     expect(retry.opts).toMatchObject({ model: SONNET_MODEL, effort: 'medium' })
     expect(retry.opts['schema']).toMatchObject({ required: ['verdict', 'findings'] })
     expect(retry.prompt).toContain('an independent, read-only reviewer')
+    expect(retry.prompt.toLowerCase()).toContain('evidence-gate every claim')
+    expect(retry.prompt).toContain('TEST-QUALITY discipline')
     expect(retry.prompt).not.toContain('CODEX CROSS-MODEL REVIEW bridge')
+    const synthesis = captured.find((c) => c.label === 'argus:synthesis')!
+    expect(synthesis.prompt).toContain(`Cross-model review 1, claude/${SONNET_MODEL}`)
+    expect(synthesis.prompt).toContain('treat as a full panelist')
   })
 
   test('a Claude seat that exhausts its retry is blocked as Claude, not misreported as Codex', async () => {
@@ -483,7 +503,23 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     )
     expect(captured.some((c) => c.label === 'argus:codex')).toBe(true)
     expect(captured.some((c) => c.label === 'argus:kimi')).toBe(true)
-    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=4 configuration-accepted=true'))).toBe(true)
+    // FIVE, not four: the BUILD counts as a panel family (owner-decided
+    // 2026-08-15). The property this warning protects is that the reviewer does
+    // not share the blind spots of whatever WROTE the code, so the producer is
+    // part of the set — build + rubric + adversarial + both cross-model seats.
+    // Counting reviewers alone got both real cases backwards: it stayed silent
+    // when a Claude build was reviewed only by Claude, and it warned about
+    // build-on-GPT + Opus-reviewing, which is the cross-family panel the design
+    // wants.
+    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=5 configuration-accepted=true'))).toBe(true)
+  })
+
+  test('the same-family warning describes the panel that actually dispatched', async () => {
+    const args = productionArgs(null)
+    args['codexHome'] = null
+    args['kimiConfigured'] = false
+    const { logs } = await runWorkflow(args)
+    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=3 configuration-accepted=true'))).toBe(true)
   })
 })
 
