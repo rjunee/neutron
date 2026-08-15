@@ -1197,6 +1197,13 @@ export class NeutronChatController {
     // through the new project's socket (Codex P2).
     const session = this.session
     const [msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
+    // SPLIT ON PURPOSE. The single `transcript` mark covered BOTH the store read
+    // and everything after it, so a slow switch could not say which. Measured on
+    // the owner's box the biggest topic holds 533 messages — far too few for a
+    // copy-and-sort to cost a second — so the two halves needed separating before
+    // anything was optimised. `transcript_read` is the data; `transcript` is the
+    // data PLUS the publish that renders it.
+    this.switchTimer?.mark('transcript_read')
     if (this.session !== session) return
     this.msgs = msgs
     this.pending = pending
