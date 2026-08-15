@@ -111,3 +111,10 @@ export {
   DEFAULT_RESUME_FALLBACK_MS,
   type WebChatSessionOptions,
 } from './web-session.ts'
+
+export {
+  WarmSessionCache,
+  MAX_WARM_SESSIONS,
+  SESSION_BUILD_TIMEOUT_MS,
+  type CacheableChatSession,
+} from './session-cache.ts'
