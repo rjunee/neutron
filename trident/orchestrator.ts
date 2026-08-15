@@ -598,6 +598,71 @@ export async function rebaseOntoObservedBase(
   }
 }
 
+/**
+ * MID-LOOP RESUME — read the LIVE head of `run.branch` IN CODE, at the credentialed
+ * host boundary, so the fact the resume decision turns on is never relayed by a model.
+ * Same rule as the publisher's `rev-parse` (Part 1 of this card): a commit OID is not
+ * something to be *reported*, it is something to be *read*. Before this, the live head
+ * came from a haiku probe agent (`head-probe-round-resume`) whose failed read was
+ * classified `head-unreadable` → a full rebuild of already-committed work.
+ *
+ * TRI-STATE RETURN — each value means exactly one thing, and they are NOT
+ * interchangeable (the workflow's `classifyResume` gives them different consequences):
+ *   - a 40-hex lowercase OID → the authority answered; this IS the live head.
+ *   - `'absent'`             → the authority answered SUCCESSFULLY that the branch does
+ *                              not exist. A real fact, not a failure: the recorded work
+ *                              is gone from the authority, so a rebuild is correct and
+ *                              can be named truthfully (`head-branch-absent`).
+ *   - `''`                   → the read FAILED after 3 attempts. Reserved exclusively
+ *                              for "could not read", never for "not there", so Part 2b
+ *                              of this card can give it a bounded STOP consequence.
+ *
+ * The authority split mirrors the workflow's own `readBranchHead`: in `pr` mode the
+ * REMOTE is the authority (an unpushed local branch is not the shared truth); in
+ * `local` mode the local ref is. Retries are attempt-only (no sleeps) — `run_host` is
+ * the seam, and the tests must stay fast.
+ */
+export async function resolveResumeLiveHead(
+  run_host: RunHostCommand,
+  run: { repo_path: string; branch: string; merge_mode: 'local' | 'pr' },
+): Promise<string> {
+  const ref = `refs/heads/${run.branch}`
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (run.merge_mode === 'pr') {
+      const res = await run_host(
+        ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', ref],
+        run.repo_path,
+      )
+      if (res.ok) {
+        // An OK ls-remote with no output is the remote SAYING the branch is gone.
+        if (res.stdout.trim() === '') return 'absent'
+        const token = res.stdout.trim().split('\n')[0]?.trim().split(/\s+/)[0] ?? ''
+        if (/^[0-9a-f]{40}$/i.test(token)) return token.toLowerCase()
+        // Malformed output is not an answer — retry rather than believe it.
+      }
+    } else {
+      const res = await run_host(
+        ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${ref}^{commit}`],
+        run.repo_path,
+      )
+      if (res.ok) {
+        const oid = res.stdout.trim()
+        if (/^[0-9a-f]{40}$/i.test(oid)) return oid.toLowerCase()
+      } else {
+        // A failed rev-parse is ambiguous: a missing branch and a broken/absent repo
+        // both fail. Ask git whether it is healthy — if it is, the branch is genuinely
+        // gone (a real answer); if it is not, this was a failed READ.
+        const health = await run_host(
+          ['git', '-C', run.repo_path, 'rev-parse', '--git-dir'],
+          run.repo_path,
+        )
+        if (health.ok) return 'absent'
+      }
+    }
+  }
+  return ''
+}
+
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
   result: Pick<InnerResult, 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause'>,
@@ -888,6 +953,31 @@ export function buildTridentOrchestrator(
     // whether the branch still holds the code that verdict was about.
     const resume_checkpoint_head = run.inner_checkpoint_head
     const resume_findings = run.inner_checkpoint_findings
+    // MID-LOOP RESUME — READ the live branch head HERE, in the outer loop, because
+    // THIS is the credentialed host boundary: `opts.run_host` already runs every other
+    // git command for this run. The workflow's `head-probe-round-resume` agent seat
+    // survives only as a fallback for launchers that predate this arg. Derive the
+    // recorded OID EXACTLY as the workflow does (inner-workflow.mjs, resume site): the
+    // `outer-published:<oid>:r:t` capture takes precedence over the checkpoint column.
+    const published =
+      typeof resume_checkpoint === 'string'
+        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
+        : null
+    const recorded = (published?.[1] ?? resume_checkpoint_head ?? '').trim().toLowerCase()
+    // Only read when the answer can change a decision: no checkpoint, no recorded OID
+    // to compare against, or no branch → the workflow rebuilds regardless, and a fresh
+    // launch must stay byte-identical (no extra git command, no extra arg).
+    const resume_live_head =
+      resume_checkpoint !== null &&
+      /^[0-9a-f]{40}$/.test(recorded) &&
+      typeof run.branch === 'string' &&
+      run.branch.length > 0
+        ? await resolveResumeLiveHead(opts.run_host, {
+            repo_path: run.repo_path,
+            branch: run.branch,
+            merge_mode: run.merge_mode,
+          })
+        : undefined
     const existingPr = run.pr ?? (await detectExistingPr(run))
     const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
 
@@ -928,6 +1018,9 @@ export function buildTridentOrchestrator(
       max_rounds: run.max_rounds,
       resume_checkpoint,
       resume_checkpoint_head,
+      // OMITTED entirely on a non-resume launch — the workflow then probes exactly as
+      // it always did, so nothing about a fresh run changes.
+      ...(resume_live_head !== undefined ? { resume_live_head } : {}),
       resume_findings,
       // Prefer the per-run resolver (store-backed, self-healing), and FALL BACK to
       // the static dir when it has no answer — null from the resolver is "nothing

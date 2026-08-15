@@ -7,7 +7,11 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
-import { buildTridentOrchestrator, isTridentHarvestTerminal } from './orchestrator.ts'
+import {
+  buildTridentOrchestrator,
+  isTridentHarvestTerminal,
+  resolveResumeLiveHead,
+} from './orchestrator.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
@@ -1750,5 +1754,213 @@ describe('applyResult stamps harvested_at (the outer loop is the ONLY writer)', 
     expect(terminated?.phase).toBe('failed')
     expect(terminated?.harvested_at).toBeNull() // terminalTransition never sets it
     expect(isTridentHarvestTerminal(terminated!)).toBe(false)
+  })
+})
+
+/**
+ * A GIT FACT IS READ BY CODE, NEVER RELAYED BY A MODEL (Part 2a of the "git truth
+ * comes from git" card).
+ *
+ * The live head a resume decision turns on used to come from a haiku PROBE AGENT
+ * inside the workflow; when that read failed, `classifyResume` called it
+ * `head-unreadable` and REBUILT already-committed work (measured: 3,813 → 84,875 →
+ * 133,169 cumulative output tokens on the neutron-enterprise #439 run). The launcher
+ * is the credentialed host boundary and already runs every other git command for the
+ * run, so it reads the head itself and threads the answer in.
+ */
+describe('orchestrator — the resume live head is read in code, never relayed by a model', () => {
+  const HEAD = 'a'.repeat(40)
+
+  /** Fire ONE launch and stop, so the only host calls are the launch's own. */
+  async function launchOnce(h: Harness): Promise<void> {
+    await h.loop.runOnce()
+    await h.complete()
+  }
+
+  /** A run orphaned mid-flight with a checkpoint + recorded OID → a resume launch.
+   *  Each call gets its own slug: `(project_slug, slug)` is unique among live runs. */
+  let seq = 0
+  async function resumeRun(
+    over: Partial<Parameters<TridentRunStore['update']>[1]> = {},
+    merge_mode: MergeMode = 'pr' as MergeMode,
+  ): Promise<TridentRun> {
+    seq += 1
+    const run = await createRun({ merge_mode, slug: `add-thing-${seq}` })
+    await store.update(run.id, {
+      subagent_run_id: 'stale-id-from-prior-process',
+      subagent_status: 'running',
+      pr: 42,
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      ...over,
+    })
+    return run
+  }
+
+  test('a pr-mode resume reads the branch head with ls-remote and threads the OID', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    await resumeRun()
+    await launchOnce(h)
+
+    expect(h.hostCalls).toContainEqual([
+      'git',
+      '-C',
+      '/repo',
+      'ls-remote',
+      '--heads',
+      'origin',
+      'refs/heads/feat-x',
+    ])
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
+  })
+
+  test('a transient read failure is retried, and three failures mean "could not read" — not "gone"', async () => {
+    let reads = 0
+    const flaky = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        if (!cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')) return ok()
+        reads += 1
+        return reads <= 2
+          ? { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+          : ok(`${HEAD}\trefs/heads/feat-x\n`)
+      },
+    })
+    await resumeRun()
+    await launchOnce(flaky)
+    expect(flaky.inputs[0]!.resume_live_head).toBe(HEAD)
+    expect(reads).toBe(3)
+  })
+
+  // A read that never succeeds is bounded at 3 attempts and reports '' — reserved
+  // exclusively for "could not tell", never for "the branch is not there".
+  test('a read that never succeeds is bounded at three attempts and reports ""', async () => {
+    let dead = 0
+    const broken = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        if (!cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')) return ok()
+        dead += 1
+        return { ok: false, stdout: '', stderr: 'fatal: could not read from remote', exit_code: 128 }
+      },
+    })
+    await resumeRun()
+    await launchOnce(broken)
+    expect(broken.inputs[0]!.resume_live_head).toBe('')
+    expect(dead).toBe(3)
+  })
+
+  test("an OK read with no output is the remote SAYING the branch is gone → 'absent'", async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x') ? ok('') : ok(),
+    })
+    await resumeRun()
+    await launchOnce(h)
+    expect(h.inputs[0]!.resume_live_head).toBe('absent')
+  })
+
+  test('the recorded OID may come from the outer-published checkpoint name alone', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    await resumeRun({ inner_checkpoint: `outer-published:${HEAD}:0:1`, inner_checkpoint_head: null })
+    await launchOnce(h)
+    expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
+  })
+
+  test('a FRESH launch is byte-identical: no head read, no field at all', async () => {
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
+    await createRun({ merge_mode: 'pr' as MergeMode })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect('resume_live_head' in h.inputs[0]!).toBe(false)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls.some((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))).toBe(false)
+    expect(calls.some((c) => c.includes('rev-parse'))).toBe(false)
+  })
+
+  test('a local-mode resume asks the LOCAL ref', async () => {
+    const found = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('rev-parse --verify refs/heads/feat-x^{commit}') ? ok(HEAD) : ok(),
+    })
+    await resumeRun({}, 'local' as MergeMode)
+    await launchOnce(found)
+    expect(found.hostCalls).toContainEqual([
+      'git',
+      '-C',
+      '/repo',
+      'rev-parse',
+      '--verify',
+      'refs/heads/feat-x^{commit}',
+    ])
+    expect(found.inputs[0]!.resume_live_head).toBe(HEAD)
+  })
+
+  // A failed rev-parse is ambiguous — a HEALTHY git that still cannot find the ref
+  // is a real answer ("the branch is gone"), not a failed read.
+  test('a local-mode resume whose ref is missing under a HEALTHY git is absent', async () => {
+    const gone = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/heads/feat-x^{commit}')) {
+          return { ok: false, stdout: '', stderr: 'fatal: Needed a single revision', exit_code: 128 }
+        }
+        if (joined.includes('rev-parse --git-dir')) return ok('.git')
+        return ok()
+      },
+    })
+    await resumeRun({}, 'local' as MergeMode)
+    await launchOnce(gone)
+    expect(gone.inputs[0]!.resume_live_head).toBe('absent')
+  })
+
+  test('resolveResumeLiveHead: a malformed answer is not an answer — it is a failed attempt', async () => {
+    const calls: string[][] = []
+    const host = async (cmd: string[]): Promise<HostCommandResult> => {
+      calls.push(cmd)
+      // A plausible-looking but ABBREVIATED sha is exactly the mangling this card
+      // exists to stop being believed.
+      return ok('1d731ad\trefs/heads/feat-x\n')
+    }
+    const out = await resolveResumeLiveHead(host, {
+      repo_path: '/repo',
+      branch: 'feat-x',
+      merge_mode: 'pr',
+    })
+    expect(out).toBe('')
+    expect(calls).toHaveLength(3)
+  })
+
+  test('resolveResumeLiveHead: an unhealthy git in local mode is a failed read, never "absent"', async () => {
+    const host = async (): Promise<HostCommandResult> => ({
+      ok: false,
+      stdout: '',
+      stderr: 'fatal: not a git repository',
+      exit_code: 128,
+    })
+    expect(
+      await resolveResumeLiveHead(host, {
+        repo_path: '/repo',
+        branch: 'feat-x',
+        merge_mode: 'local',
+      }),
+    ).toBe('')
   })
 })

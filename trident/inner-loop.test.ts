@@ -267,6 +267,22 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(buildWorkflowArgs(input(), parts).briefParts).toBe(parts)
   })
 
+  /**
+   * The live head the launcher READ from git (never a model's report of it). The key's
+   * PRESENCE is the signal that a code-read answer exists, so it must be absent — not
+   * null — when the launcher did not read one, or the workflow could not tell an old
+   * launcher apart from an unreadable head.
+   */
+  test('the launcher-read resume head is threaded verbatim, and omitted when there is none', () => {
+    const HEAD = 'a'.repeat(40)
+    expect(buildWorkflowArgs(input({ resume_live_head: HEAD })).resumeLiveHead).toBe(HEAD)
+    expect('resumeLiveHead' in buildWorkflowArgs(input())).toBe(false)
+    // '' ("could not read") and 'absent' ("the authority says it is gone") are DIFFERENT
+    // facts with different consequences — neither may be normalised into the other.
+    expect(buildWorkflowArgs(input({ resume_live_head: '' })).resumeLiveHead).toBe('')
+    expect(buildWorkflowArgs(input({ resume_live_head: 'absent' })).resumeLiveHead).toBe('absent')
+  })
+
   test('writes launcher-held strings and threads the returned manifest into the prompt', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const parts: BriefParts = {

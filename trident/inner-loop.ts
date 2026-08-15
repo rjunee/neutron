@@ -80,6 +80,19 @@ export interface InnerLoopInput {
    */
   resume_checkpoint_head?: string | null
   /**
+   * MID-LOOP RESUME — the LIVE head of `run.branch`, read IN CODE by the launcher at
+   * fire time (`resolveResumeLiveHead`), never relayed by a model. Tri-state, and the
+   * three values are NOT interchangeable:
+   *   - a full 40-hex lowercase OID → the authority's answer for the branch head.
+   *   - `'absent'` → the authority answered SUCCESSFULLY that the branch does not
+   *     exist; the recorded work is gone from it, so a rebuild is correct.
+   *   - `''` → the launcher tried 3 times and COULD NOT READ the head. Exclusively
+   *     "could not tell", never "not there".
+   * FIELD ABSENT → an old launcher, or not a resume with a recorded head: the workflow
+   * falls back to its own `head-probe-round-resume` agent probe, exactly as before.
+   */
+  resume_live_head?: string
+  /**
    * MID-LOOP RESUME — the persisted `inner_checkpoint_findings` (raw JSON as
    * stored). Decoded by `parseCheckpointFindings` before it reaches the workflow,
    * where it seeds a resumed fix round. Null/unparseable → the workflow re-reviews
@@ -365,6 +378,10 @@ export function buildWorkflowArgs(
     // about different code (re-review), and it is the ONLY value a resumed run may
     // take a `reviewedHead` from (#545). Null/empty → the workflow rebuilds.
     resumeCheckpointHead: input.resume_checkpoint_head ?? null,
+    // The live head the LAUNCHER read from git. Key present (even as '' or 'absent') →
+    // the workflow uses it and dispatches no head-probe agent; key ABSENT (never null,
+    // which would be indistinguishable from an unreadable head) → it probes as before.
+    ...(typeof input.resume_live_head === 'string' ? { resumeLiveHead: input.resume_live_head } : {}),
     resumeFindings: parseCheckpointFindings(input.resume_findings),
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
