@@ -214,6 +214,42 @@ export class ApprovalManager {
   }
 
   /**
+   * Record the id of the button prompt this grant was surfaced as, merged into
+   * the row's `args_json` (every other stored argument is preserved).
+   *
+   * THE GRANT→PROMPT LINK. A host-deploy grant dies after its TTL, but the
+   * `button_prompts` row it was rendered as does not (its `expires_at` is a
+   * decade out), so the owner is left staring at a button that is still drawn,
+   * still tappable and connected to nothing. The host-deploy expiry sweep
+   * (`open/host-deploy.ts` → `sweepExpiredGrants`) uses this link to RETIRE that
+   * prompt when it expires the grant. Written AFTER the emit rather than at
+   * insert time because the prompt id does not exist until the prompt has been
+   * delivered — the row must already be pending for the emit to reference it.
+   *
+   * No-op for an unknown id. A row whose `args_json` will not parse is replaced
+   * with `{ prompt_id }` — the link is what this method owes the sweep, and
+   * unparseable arguments were already unreadable to every other caller.
+   */
+  async recordPromptLink(id: string, prompt_id: string): Promise<void> {
+    const row = this.get(id)
+    if (row === null) return
+    let args: Record<string, unknown>
+    try {
+      const parsed = JSON.parse(row.args_json) as unknown
+      args = parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      args = {}
+    }
+    args['prompt_id'] = prompt_id
+    // Async `run` — the same per-instance mutex path `cancelPending` uses, so
+    // this write serializes behind the INSERT rather than racing it.
+    await this.db.run(`UPDATE tool_approvals SET args_json = ? WHERE id = ?`, [
+      JSON.stringify(args),
+      id,
+    ])
+  }
+
+  /**
    * Look up a row by id. Used by the channel adapter when rendering a
    * decision-confirmation reply ("you approved tool X").
    */

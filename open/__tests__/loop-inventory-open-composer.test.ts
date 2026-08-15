@@ -46,6 +46,11 @@ const EXPECTED_RUNNING_LOOPS = [
   'credential-usage',
   'cron',
   'dispatch-lifecycle-watchdog',
+  // T5 (2026-08-15) — the host-deploy approval sweeper. Armed inside
+  // `hostDeployInstall`, which the graph's approval module always calls, so it
+  // is unconditional like the probes above. HOST-DEPLOY-SCOPED on purpose: a
+  // global `expireStale()` tick would also kill pending ritual grants.
+  'host-deploy-approval-sweeper',
   // The Kimi gauge, armed on the SAME unconditional terms as the credential
   // probe: a tick with no key stored does one cheap store read and no network
   // call, so a key entered in Settings starts being metered without a restart.
@@ -201,9 +206,9 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all eleven running loops + the dormant set', () => {
+test('the ONE boot line names all twelve running loops + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('12 loop(s) running')
+  expect(line).toContain('13 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

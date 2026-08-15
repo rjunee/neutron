@@ -182,6 +182,49 @@ describe('ApprovalManager', () => {
     expect(await promise).toBe('approved')
   })
 
+  test('recordPromptLink merges prompt_id into args_json and keeps the rest', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    const p = mgr.requestApproval({
+      id: 'link-1',
+      project_slug: 't1',
+      topic_id: 'app:owner',
+      tool_name: 'host-deploy',
+      args: { ref: 'origin/main', target_sha: 'abc', description: 'deploy the host' },
+      policy: 'prompt-user',
+    })
+    await new Promise((r) => setTimeout(r, 5))
+
+    await mgr.recordPromptLink('link-1', 'bp-42')
+
+    const args = JSON.parse(mgr.get('link-1')!.args_json) as Record<string, unknown>
+    // The link the expiry sweep reads — added, never at the cost of what was there.
+    expect(args['prompt_id']).toBe('bp-42')
+    expect(args['ref']).toBe('origin/main')
+    expect(args['target_sha']).toBe('abc')
+    expect(args['description']).toBe('deploy the host')
+    void p
+  })
+
+  test('recordPromptLink on an unknown id is a no-op', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    await expect(mgr.recordPromptLink('nope', 'bp-1')).resolves.toBeUndefined()
+    expect(mgr.get('nope')).toBeNull()
+  })
+
+  test('recordPromptLink replaces unparseable args with the link itself', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    await db.run(
+      `INSERT INTO tool_approvals
+         (id, project_slug, topic_id, tool_name, args_json, status, requested_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+      ['bad-1', 't1', 'app:owner', 'host-deploy', '{not json', Date.now() / 1000],
+    )
+
+    await mgr.recordPromptLink('bad-1', 'bp-7')
+
+    expect(JSON.parse(mgr.get('bad-1')!.args_json)).toEqual({ prompt_id: 'bp-7' })
+  })
+
   test('findApproved returns only approved rows matching (slug, tool_name)', async () => {
     const mgr = new ApprovalManager(db, recordingNotifier())
     // approved + matching (the one we want) — approve two so ORDER BY decided_at is exercised

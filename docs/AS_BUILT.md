@@ -7064,6 +7064,60 @@ Mutation checks (each production guard was removed independently and restored):
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
 
+## 2026-08-15 — a dead host-deploy grant is swept without a tap, and its button dies with it
+
+Measured before the change: two host-deploy `tool_approvals` rows sat `pending` at 684 s
+and 1029 s against a 300 s TTL, because nothing on this box called
+`ApprovalManager.expireStale()` — the TTL was enforced only on the ANSWER. Their
+`button_prompts` rows carried `expires_at` in 2036, so the Approve button stayed drawn
+and tappable while the grant behind it was dead, and the "Approval requested […]" banner
+(a one-shot live frame, no retraction) stayed with it.
+
+`HostDeployService.sweepExpiredGrants()` now retires those rows without a tap: it scans
+`findByToolName(project_slug, 'host-deploy')`, claims each pending row past
+`HOST_DEPLOY_APPROVAL_TTL_MS` with `cancelPending(id)` (the identical pending→'expired'
+transition, atomic, so a tick and a tap can never both count one row), retires the linked
+`button_prompts` row, and posts an INERT notice on the grant's own topic naming the
+expiry. It touches `dispatch` on no path — an unattended tick must never be able to
+deploy — and it does not re-raise either; a replacement grant still requires a tap, which
+is evidence the owner is present. The composer arms it as a `SupervisedLoop` named
+`host-deploy-approval-sweeper` (60 s; register-before-start, quiescing stop on shutdown),
+so a dead grant lingers at most TTL + one tick.
+
+JUDGMENT CALL, deliberate: the sweep is SCOPED to host-deploy rows and is NOT a caller of
+`ApprovalManager.expireStale()`. A global five-minute sweep would also expire every
+pending RITUAL grant (`reminders/ritual-registration.ts`) — rows the owner may legitimately
+answer days later, with no re-raise path of their own — so the global call the plan card
+originally asked for would have been a regression. A test asserts a pending `ritual:*` row
+100× older than the TTL survives the sweep untouched.
+
+The grant→prompt link that makes button retirement possible: the emit seam now returns
+`deliver`'s `prompt_id` and `ApprovalManager.recordPromptLink` merges it into
+`tool_approvals.args_json` (post-emit, because the prompt id does not exist at insert
+time; best-effort, because a failed link may cost a retirement but must never cost the
+request). Retirement itself is `buildHostDeployPromptRetirer`
+(`open/wiring/host-deploy-prompt-retirer.ts`): a `__timeout__` sentinel resolve with
+`SYSTEM_SPEAKER_USER_ID` — the shape `ButtonStore.sweepExpired` already synthesizes, so the
+row reads as system-resolved rather than as an answer the owner gave — followed by
+`AppWsAdapter.recordPromptChoice`, whose `prompt_resolved` fan is what actually collapses
+the button on connected surfaces. The two halves are independently guarded: a missing store
+row must not cost the live fan. A client that missed the frame and taps anyway lands in
+T2/T4's expired branch, which explains and re-raises.
+
+`buildAppWsApprovalNotifier` gained a TTL guard (`ttl_ms`, wired to
+`APPROVAL_DEFAULT_TTL_MS`): a row already past its lifetime broadcasts to zero topics. The
+banner has no retraction path, so one born pointing at a dead grant can only be cleared by
+a page reload — T6 owns the retraction; this owns not creating the problem.
+
+Tests: linkage persisted into `args_json` (existing keys preserved, malformed replaced);
+an aged grant swept exactly once with the right prompt id, the grant's OWN topic, a body
+containing "expired" and "nothing was deployed", and zero dispatches; a young grant
+untouched; a row decided between scan and claim neither counted nor announced; a ritual row
+preserved; a swept grant's late tap answered with dedupe/re-raise; the retirer's sentinel,
+speaker, channel kind, topic-derived `project_id` and its resolve-throws-fan-still-runs
+path; the notifier's three TTL cases; both loop inventories updated (10 running in the
+composer, 11 through the boot shell).
+
 ## 2026-08-14 — launcher-held build brief segments travel by path
 
 Task and reflection brief segments now travel by path via the `briefParts` manifest
