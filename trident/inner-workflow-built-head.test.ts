@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { innerTerminalFailureReason } from './orchestrator.ts'
+import { TERMINAL_CAUSE_MAX } from './inner-loop.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 const H = 'c'.repeat(40)
@@ -19,6 +20,8 @@ interface Options {
   verdicts?: Array<'APPROVE' | 'REQUEST_CHANGES'>
   fixClaim?: string
   buildDiff?: string
+  /** The diff path the FIX round reports — '' is a round that produced nothing. */
+  fixDiff?: string
   /** Drive a mid-loop RESUME (the only way a pr-mode run reaches a fix round). */
   resumeCheckpoint?: string
   resumeLiveHead?: string
@@ -44,7 +47,7 @@ async function runBuiltHead(opts: Options = {}) {
     if (label === 'forge:build') return { prNumber: null, branch, diffFile: opts.buildDiff ?? '/tmp/built.diff', worktreePath: '/wt', commitSha: opts.claim ?? '', testsPassed: true }
     if (label.startsWith('forge:fix-round-')) {
       round = Number(label.slice('forge:fix-round-'.length))
-      return { prNumber: null, branch, diffFile: '/tmp/fix.diff', worktreePath: '/wt', commitSha: opts.fixClaim ?? FIX, testsPassed: true }
+      return { prNumber: null, branch, diffFile: opts.fixDiff ?? '/tmp/fix.diff', worktreePath: '/wt', commitSha: opts.fixClaim ?? FIX, testsPassed: true }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') return { verdict: 'APPROVE', findings: [] }
     if (label === 'argus:synthesis') {
@@ -273,6 +276,26 @@ describe('a fix round stops on an unreadable head, exactly as round 1 does', () 
     expect(checkpoint(out, 'fix-round-2')).toBe('')
   })
 
+  /**
+   * …AND ONLY WHEN THE ROUND WROTE SOMETHING (Argus r4). Round 1 gates its identical stop on
+   * `forgeDiff !== ''`, because "re-run when the read succeeds" is advice that can only pay
+   * off if there is work the read is hiding. This twin was UNGATED: a fix round that
+   * produced nothing — its edits already dead with its throwaway worktree — was told to
+   * re-run a read that recovers nothing. With the gate it falls through to the round's own
+   * honest reporting instead.
+   */
+  test('a fix round that produced NO diff is not an unreadable-head stop — the read is not what failed', async () => {
+    const out = await runBuiltHead({ probes: [H, ...UNREADABLE], verdicts: ['REQUEST_CHANGES'], fixDiff: '' })
+    expect(out.result.terminalCause ?? '').not.toContain('re-run when the read succeeds')
+    expect(out.result.verdict).not.toBe('APPROVE')
+    // The honest report for a round that left no trace: it is told as a lost round, not as
+    // an infra read failure, and the operator is pointed at the round rather than the probe.
+    expect(out.logs.some((l) => l.includes('round=2') && (l.includes('LEFT NO DIFF') || l.includes('DID NOT LAND')))).toBe(true)
+    // …and the CONTROL: the same failing probes WITH a diff are still the bounded stop.
+    const withDiff = await runBuiltHead({ probes: [H, ...UNREADABLE], verdicts: ['REQUEST_CHANGES'] })
+    expect(withDiff.result.blockKind).toBe('infra-only')
+  })
+
   test('PR mode does NOT stop on a PERMANENTLY unreadable head — the publisher rev-parses it (the `!isPr` carve-out)', async () => {
     // The case the carve-out exists for, and the one the suite did not cover: EVERY
     // read failed, so this is not the transient path. In `pr` mode the workflow hands
@@ -443,7 +466,9 @@ describe('the stop advice survives a realistic branch name', () => {
     })
     const cause = String(out.result.terminalCause)
     expect(cause).toContain('re-run when the read succeeds')
-    // …and the cap still holds, so an unbounded path cannot flood the row.
-    expect(cause.length).toBeLessThanOrEqual(500)
+    // …and the cap still holds, so an unbounded path cannot flood the row. The number is
+    // READ from the TS constant, not restated: the .mjs mirrors it by hand and the smaller
+    // of the two decides (guarded in `inner-loop.test.ts`).
+    expect(cause.length).toBeLessThanOrEqual(TERMINAL_CAUSE_MAX)
   })
 })

@@ -2325,8 +2325,13 @@ async function reviewRoundOrInfraBlock(runRound) {
  * guaranteed to reproduce the previous findings. So the caller stops.
  */
 function roundLanded(headBefore, headAfter) {
-  const before = typeof headBefore === 'string' ? headBefore.trim() : ''
-  const after = typeof headAfter === 'string' ? headAfter.trim() : ''
+  // LOWERCASED ON BOTH SIDES. git prints lowercase, so this is theoretical today — but
+  // one of the two heads compared here now comes back through `readBuiltHead`, which
+  // lowercases, and the other through `readBranchHead`, which does not. An uppercase
+  // relay of the SAME commit would compare unequal and read as a landed round: the one
+  // direction of this comparison that certifies work nobody did.
+  const before = typeof headBefore === 'string' ? headBefore.trim().toLowerCase() : ''
+  const after = typeof headAfter === 'string' ? headAfter.trim().toLowerCase() : ''
   // An unreadable/absent AFTER is NOT treated as landed — a fetch that failed
   // must not read as progress. An unreadable BEFORE is the only permissive case:
   // with no baseline there is nothing to compare, so don't invent a failure.
@@ -3030,7 +3035,11 @@ const BRANCH_HEAD_SCHEMA = {
   additionalProperties: false,
   required: ['head'],
   properties: {
-    /** The 40-char sha, or '' when the command could not produce one. */
+    /** ONE token, and the seat prompts ask for exactly one of three: a 40-char sha, the
+     *  literal `absent` (git ANSWERED that the branch does not exist), or '' when the
+     *  command printed nothing or errored. The two probes that use this schema
+     *  (`readBranchHead`, `readBuiltHead`) both consume all three — `absent` and '' earn
+     *  OPPOSITE consequences and must not be collapsed. */
     head: { type: 'string' },
   },
 }
@@ -4037,9 +4046,13 @@ try {
   // work exists; only the READ failed (already retried 3x in code by the launcher's
   // resolveResumeLiveHead). Rebuilding here redoes committed work and can fork a
   // divergent commit — the exact double-failure of the neutron-enterprise #439 run.
-  // The recorded checkpoint is passed through UNTOUCHED so a re-run after the read
-  // recovers resumes at exactly this point. blockKind 'infra-only' + terminalCause
-  // make the outer failure reason name the measurement, never "without Argus APPROVE".
+  // The recorded checkpoint is passed through UNTOUCHED so the failed row still says
+  // WHAT was built and WHERE — evidence for whoever picks this up. It is not an input
+  // to a re-run: a re-run is a fresh dispatch with null checkpoints and it rebuilds
+  // (see `resolveResumeLiveHead` in orchestrator.ts for the whole trade). What this
+  // stop buys is that the rebuild is ASKED FOR rather than spent automatically on a
+  // read that failed. blockKind 'infra-only' + terminalCause make the outer failure
+  // reason name the measurement, never "without Argus APPROVE".
   if (resumeMode === 'stop') {
     const stopCause = `could not read the head of ${forgeBranch}; the recorded work is at ${recordedResumeHead}; re-run when the read succeeds`
     log(`trident-v2 resume STOP (bounded): ${stopCause} — not rebuilding already-recorded work`)
@@ -4186,7 +4199,7 @@ try {
   // an earlier one. Both callers reach this with no head worth recording: either the
   // read failed, or git and the builder named different commits and this run refuses to
   // believe either. `null` leaves the row's last genuinely-recorded (name, OID) pair
-  // intact — which is also the point a re-run resumes from — and the PHASE is not lost:
+  // intact — the durable record of what this branch last had — and the PHASE is not lost:
   // `terminalCause` names it verbatim ("after forge:fix-round-2").
   //
   // `remainingTasks: 0` IS ALSO DELIBERATE IN A RALPH RUN, even when `plan:fable` already
@@ -4195,8 +4208,8 @@ try {
   // re-firing a run that just failed to read its own head spends another whole iteration
   // on the condition that stopped this one. A stop is a stop. The remaining count is not
   // lost: Ralph's queue lives in the committed `IMPLEMENTATION_PLAN.md`, which the next
-  // run re-reads, and the checkpoint columns this stop leaves untouched are where it
-  // resumes from.
+  // run re-reads, and the checkpoint columns this stop leaves untouched record where the
+  // branch actually got to.
   const builtHeadStop = async (cause) => {
     const stop = { ok: false, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: null, blockKind: 'infra-only', terminalCause: infraCause(cause), remainingTasks: 0 }
     await writeTerminalResult(stop)
@@ -4706,6 +4719,8 @@ ${task}${reflectionGuidance}`,
     // ONE READ OF THE CLAIM, THROUGH `oidClaim`, EXACTLY AS ROUND 1 DOES — the raw
     // `fix.commitSha` is not consulted again below.
     const fixClaim = oidClaim(fix?.commitSha)
+    // …AND ONE READ OF THE DIFF THE ROUND CLAIMS TO HAVE WRITTEN, for the gate below.
+    const fixDiff = typeof fix?.diffFile === 'string' ? fix.diffFile.trim() : ''
     const fixHead = await readBuiltHead(`r${round}`)
     // Round 1's mismatch rules, unchanged: two OIDs that disagree is the whole
     // measurement, and in `pr` mode `publishBuiltCommit` makes the same comparison in real
@@ -4719,7 +4734,15 @@ ${task}${reflectionGuidance}`,
     // `'absent'` is NOT stopped here: for a fix round a vanished branch is the merge /
     // round-lost question, which `roundOutcome` below already asks and answers.
     // The wording claims nothing about a checkout this read never saw — see round 1.
-    if (fixHead === '' && !isPr)
+    //
+    // GATED ON THE ROUND HAVING WRITTEN A DIFF, EXACTLY AS ROUND 1 IS (Argus r4). A round
+    // that produced NOTHING did not lose its work to the failed read — it lost it (or never
+    // had it) in a throwaway worktree, and "re-run when the read succeeds" is advice that
+    // cannot recover anything. Round 1 refuses to give it for the same reason; this twin
+    // was ungated. With no diff the round falls through to `roundOutcome`, whose round-lost
+    // path already reports the honest thing: the round left no trace on the branch, and
+    // here is where to look for it.
+    if (fixHead === '' && !isPr && fixDiff !== '')
       return await builtHeadStop(`could not read the head of refs/heads/${forgeBranch} after forge:fix-round-${round} (${BUILT_HEAD_READ_ATTEMPTS} attempts) — re-run when the read succeeds; this run published, re-reviewed and approved nothing; the round reported ${fixClaim === null ? 'no sha' : `'${fixClaim}'`}`)
     // The recorded head, with the SAME claim fallback round 1 uses and for the same
     // reason: in `pr` mode an unreadable head does not stop the round, and writing '' here
@@ -4780,8 +4803,8 @@ ${task}${reflectionGuidance}`,
     // the round-1 variable: it is the only value that is a measurement of THIS
     // round (for a codex build the wrapper measured it after the build exited and
     // reports it empty when the file is missing or empty), and reusing round 1's
-    // path is precisely how an absent file goes unnoticed.
-    const fixDiff = typeof fix?.diffFile === 'string' ? fix.diffFile.trim() : ''
+    // path is precisely how an absent file goes unnoticed. Read ONCE, at the top of
+    // this round, because the unreadable-head stop above is gated on the same fact.
     if (fixDiff === '') {
       log(`trident-v2 fix loop: round=${round} LEFT NO DIFF — stopping`)
       roundLostItsDiff = round
@@ -4795,9 +4818,10 @@ ${task}${reflectionGuidance}`,
     // probe above answers a different question ("did the branch move?"), and a
     // third party's push satisfies it just as well as the fix agent's own commit;
     // recording that push as `reviewedHead` would pin the merge to code the
-    // upcoming review never sees. It cannot be empty here: an unreadable head stopped
-    // the round above, and `'absent'` cannot reach this line either (the branch has to
-    // have MOVED for `roundOutcome` to return 'landed').
+    // upcoming review never sees. It cannot be empty here: this line is past the
+    // empty-diff break, so `fixDiff !== ''`, which is exactly the condition under which
+    // an unreadable head stopped the round above. `'absent'` cannot reach this line
+    // either (the branch has to have MOVED for `roundOutcome` to return 'landed').
     reviewedHead = fixHead
     synthesis = await runReviewRound(diffFile, round, pr)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord

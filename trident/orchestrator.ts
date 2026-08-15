@@ -465,6 +465,12 @@ export class TridentRebaseConflict extends Error {
  * refuse rather than force.
  *
  * The replay SQUASHES the branch into one commit. Deliberate — the PR merge is `--squash` anyway.
+ *
+ * RETURNS THE OBSERVED BASE TIP as well as the head, because the caller needs BOTH to describe
+ * what was built: the review diff is `<baseSha>..<head>`, and `baseSha` is the only value in the
+ * process that is guaranteed to be the tip the head sits on. `''` means the remote has no such
+ * base branch at all. See the review-diff comment in `publishBuiltCommit` for what taking the
+ * LOCAL `<base>` ref instead cost.
  */
 export async function rebaseOntoObservedBase(
   run_host: RunHostCommand,
@@ -473,7 +479,7 @@ export async function rebaseOntoObservedBase(
   base: string,
   pr: number | null,
   scratchDir: string,
-): Promise<{ head: string; rebased: boolean }> {
+): Promise<{ head: string; rebased: boolean; baseSha: string }> {
   // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
   //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
   const observedBase = await run_host(
@@ -490,7 +496,7 @@ export async function rebaseOntoObservedBase(
   }
   let baseSha = observedBase.stdout.trim().split(/\s+/)[0] ?? ''
   // No remote base at all → there is nothing to rebase ONTO. Not an error (a brand-new origin).
-  if (baseSha === '') return { head: await readHead(), rebased: false }
+  if (baseSha === '') return { head: await readHead(), rebased: false, baseSha: '' }
 
   // (b) The branch tip we are about to move, captured BEFORE anything touches it — it is the
   //     compare-and-swap expectation in (h).
@@ -503,7 +509,10 @@ export async function rebaseOntoObservedBase(
     ['git', '-C', repoPath, 'merge-base', '--is-ancestor', baseSha, `refs/heads/${branch}`],
     repoPath,
   )
-  if (contains.ok) return { head: oldHead, rebased: false }
+  //     `contains.ok` also PROVES `baseSha` is a local object — git could only answer the
+  //     ancestry question by reading it — which is what makes it safe to hand back as a
+  //     diff base on a shallow checkout that never reaches the fetch below.
+  if (contains.ok) return { head: oldHead, rebased: false, baseSha }
 
   // (d) Make the base tip a real local object. `--no-tags` and NOT `--unshallow`: deepening the
   //     shared checkout is minutes of network for every lane on this box.
@@ -596,7 +605,7 @@ export async function rebaseOntoObservedBase(
       repoPath,
     )
     if (!swapped.ok) throw new Error(publishFailureReason('advance', branch, swapped.stderr))
-    return { head: newHead, rebased: true }
+    return { head: newHead, rebased: true, baseSha }
   } finally {
     await dropScratch()
   }
@@ -639,10 +648,22 @@ export async function rebaseOntoObservedBase(
  *
  * THE WINDOW IS ~1.25 s IN TOTAL, AND IT IS NOT CLAIMED TO BE MORE. It covers a sub-second
  * blip; it does not outlive a sustained outage, and this docblock previously said otherwise.
- * The failure it leaves behind is terminal but RECOVERABLE — `failedRun` spreads the row, so
- * the checkpoint columns survive and a re-run resumes at exactly this point — which is why
- * the number is left small rather than grown by guess: every second here is also a second a
- * genuinely-dead branch stalls.
+ *
+ * WHAT THE FAILURE IT LEAVES BEHIND ACTUALLY COSTS, STATED WITHOUT THE CLAIM THIS COMMENT USED
+ * TO MAKE (Argus r4): the run is terminal, and re-running the card is a FRESH DISPATCH — a new
+ * row with NULL checkpoint columns (`store.ts` `create`), because a terminal row is never
+ * advanced again (`step()` short-circuits on `isTerminalPhase`). So the re-run REBUILDS. The
+ * checkpoint columns preserved on the failed row are evidence for a human, not an input to
+ * anything. There is no resume-a-terminal-run path today; adding one is a separate card
+ * (IMPLEMENTATION_PLAN.md, follow-ups).
+ *
+ * THAT IS STILL THE TRADE THIS CARD ASKED FOR, and it is deliberate rather than free: before
+ * this change the same blip rebuilt AUTOMATICALLY, so the regression is availability, not work
+ * lost — the branch and its commits are untouched. "Could not tell" must not silently spend a
+ * max-effort rebuild of already-pushed work (measured: 3,813 → 84,875 → 133,169 output tokens on
+ * the neutron-enterprise run), so the rebuild now needs a human to ask for it. The number here
+ * is left small rather than grown by guess: every second is also a second a genuinely-dead
+ * branch stalls, and the constant is exported so the trade can be made with evidence.
  */
 export const RESUME_HEAD_RETRY_DELAYS_MS = [250, 1000] as const
 
@@ -753,9 +774,16 @@ export function innerTerminalFailureReason(
   // THE GATE WIDENS BY EXACTLY THAT ONE VALUE — `null` — and no further. 'code',
   // 'round-lost' and 'none' are REVIEW verdicts, whose findings describe the DIFF; quoting
   // one as a terminal cause would re-invent the inference this function refuses to make, so
-  // they keep the generic sentence (see the test that pins each of them). And `null` cannot
-  // be a legacy row leaking through: `terminal_cause` and `block_kind` were added together,
-  // so a row with a cause and no kind can only have come from the catch path.
+  // they keep the generic sentence (see the test that pins each of them).
+  //
+  // `null` IS NOT ONLY "THE CATCH PATH" — and an earlier revision of this comment said it
+  // was (Argus r4). `parseInnerResult` decodes `block_kind` FAIL-CLOSED: the four strings the
+  // workflow writes decode, and ANY other value — garbled, truncated, from a future writer —
+  // becomes `null` too. Which is precisely why this branch is safe to widen to it: the
+  // sentence `null` selects states the failure and quotes the measured cause, and claims
+  // NOTHING about the review panel. Only 'infra-only' licenses "review never ran", and only
+  // an exact-match decode produces it. A garbled kind therefore lands in the honest sentence,
+  // never the specific one (pinned by the garbled-kind test).
   //
   // The kind also decides WHICH sentence, because it is the only thing that licenses the
   // claim "review never ran". Without it the reason states the failure and quotes the
@@ -974,7 +1002,22 @@ export function buildTridentOrchestrator(
     if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
 
     const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
-    const base = await resolveBase(run)
+    // THE REVIEW DIFF IS TAKEN AGAINST THE OBSERVED BASE TIP, NOT AGAINST THE LOCAL `main` REF.
+    //
+    // MEASURED (Argus r4, run 25b2327d): the published artifact was 15,154 lines across ~100
+    // files while the branch's own work was 20 files / 1,738 lines. The shared build checkout's
+    // local `main` was 8 merges behind `origin/main`, and `git diff main..<head>` on a branch
+    // built from CURRENT origin therefore shows every commit merged in between as part of this
+    // card. ~87% of that artifact was already-merged unrelated code — one reviewer diffed the
+    // stale base, vetoed the branch over bugs in files it does not touch, and the round was lost.
+    //
+    // `rebaseOntoObservedBase` already `ls-remote`s the base tip (the same observation the push
+    // lease uses) and the head it returns is replayed directly onto it, so that sha is the exact
+    // left-hand side of this branch's own diff. It is a local object on BOTH paths that return a
+    // non-empty one: the replay fetches it, and the already-contains path could only have been
+    // answered by reading it. An empty one means there is no remote base at all (a brand-new
+    // origin), which is the one case the base NAME is still the best available answer.
+    const base = rebased.baseSha !== '' ? rebased.baseSha : await resolveBase(run)
     const changed = await opts.run_host(
       ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${headToPublish}`],
       run.repo_path,
@@ -1054,8 +1097,10 @@ export function buildTridentOrchestrator(
     // exempted here for exactly that reason). classifyResume stays the single semantic
     // decider; this is only the cheap exit for the one case whose outcome is already
     // known at this boundary. `failedRun` spreads `run`, so inner_checkpoint /
-    // inner_checkpoint_head / inner_checkpoint_findings survive untouched — a re-run
-    // after the read recovers resumes at exactly this point.
+    // inner_checkpoint_head / inner_checkpoint_findings survive untouched — which
+    // preserves the EVIDENCE (what was built, and where), and nothing more: a re-run is
+    // a fresh dispatch with null checkpoints, so it rebuilds. See `resolveResumeLiveHead`
+    // for why that is the trade, and IMPLEMENTATION_PLAN.md for the resume follow-up.
     //
     // TWO CHECKPOINT NAMES ARE EXEMPT, each because classifyResume answers them BEFORE
     // it looks at the head, so this exit would pre-empt a decision it does not share:

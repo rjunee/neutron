@@ -667,8 +667,9 @@ describe('mid-loop resume — an unreadable head is a bounded STOP, never a rebu
 
     expect(out.result.ok).toBe(false)
     expect(out.result.verdict).toBe('REQUEST_CHANGES')
-    // The RECORDED checkpoint is passed through untouched, so re-running once the
-    // read succeeds resumes at exactly this point.
+    // The RECORDED checkpoint is passed through untouched, so the failed row still says
+    // WHAT was built and WHERE. It is evidence, not a resume input: a re-run is a fresh
+    // dispatch with null checkpoints and rebuilds (corrected at Argus r4).
     expect(out.result.checkpoint).toBe('forge-done')
     expect(out.result.blockKind).toBe('infra-only')
     // The cause names the two facts a human (or a re-run) needs, verbatim.

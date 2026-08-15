@@ -17,6 +17,8 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   buildWorkflowFirer,
   buildWorkflowArgs,
@@ -228,6 +230,21 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       ).toBeNull()
     }
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.terminal_cause).toBeNull()
+  })
+  /**
+   * THE TWO CAPS MUST AGREE, AND NOTHING WAS CHECKING THAT (Argus r4). `TERMINAL_CAUSE_MAX`
+   * is declared HERE and hand-mirrored in `inner-workflow.mjs` (a Workflow script cannot
+   * import TS), and the SMALLER of the two is what actually decides — so a drift is silent
+   * and one-directional. It has already cost the round-1 unreadable-head cause its only
+   * actionable clause at the previous 300/300 pair. The mirror is scraped from the .mjs
+   * rather than restated, the same way `inner-workflow-built-head.test.ts` reads
+   * `BUILT_HEAD_READ_ATTEMPTS`.
+   */
+  test('the .mjs mirror of TERMINAL_CAUSE_MAX is the same number', () => {
+    const src = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+    const mirrored = /const TERMINAL_CAUSE_MAX = (\d+)/.exec(src)?.[1]
+    expect(mirrored).toBeDefined()
+    expect(Number(mirrored)).toBe(TERMINAL_CAUSE_MAX)
   })
   test('a cause is clamped — it is persisted and then read in a chat row', () => {
     const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(900)}  ` }))

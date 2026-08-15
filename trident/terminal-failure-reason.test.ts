@@ -38,6 +38,7 @@
 import { describe, expect, test } from 'bun:test'
 import { innerTerminalFailureReason, publishFailureReason, redactPushError } from './orchestrator.ts'
 import { interpretFailure } from './delivery.ts'
+import { parseInnerResult } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
 
 const run = (over: Partial<TridentRun> = {}): TridentRun =>
@@ -371,6 +372,35 @@ describe('innerTerminalFailureReason — a THROW reports what it threw, not the 
       thrown('plan:fable returned null (planner terminal error)'),
     )
     expect(interpretFailure(run({ failure_reason: reason })).klass).not.toBe('review-unresolved')
+  })
+
+  /**
+   * `null` IS NOT ONLY THE CATCH PATH (Argus r4). `parseInnerResult` decodes `block_kind`
+   * FAIL-CLOSED — the four strings the workflow writes decode and ANY other value becomes
+   * `null` — so a garbled/truncated/future kind enters the SAME widened branch as a throw.
+   * The comment above the branch used to claim only the catch path could produce it. The
+   * behaviour is safe, and this pins WHY: the sentence `null` selects quotes the measured
+   * cause and says nothing about the review panel, which only 'infra-only' licenses.
+   */
+  test('a GARBLED block kind decodes to null and gets the honest sentence, never "review never ran"', () => {
+    const raw = JSON.stringify({
+      verdict: 'REQUEST_CHANGES',
+      round: 2,
+      checkpoint: 'forge-done',
+      blockKind: 'INFRA-ONLY-ish',
+      terminalCause: 'could not read the head of refs/heads/trident/x after forge:build (3 attempts)',
+    })
+    const decoded = parseInnerResult(raw)
+    expect(decoded?.block_kind).toBeNull() // the fail-closed decode, not an assumption
+    const reason = innerTerminalFailureReason(run({ round: 2 }), {
+      round: decoded?.round ?? 0,
+      checkpoint: decoded?.checkpoint ?? null,
+      block_kind: decoded?.block_kind ?? null,
+      terminal_cause: decoded?.terminal_cause ?? null,
+    })
+    expect(reason).toContain('could not read the head of refs/heads/trident/x')
+    expect(reason).not.toContain('review never ran')
+    expect(reason).not.toContain('without Argus APPROVE')
   })
 })
 

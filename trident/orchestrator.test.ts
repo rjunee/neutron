@@ -248,6 +248,59 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(h.inputs[1]!.resume_live_head).toBe(head)
   })
 
+  /**
+   * THE REVIEW DIFF IS TAKEN AGAINST THE OBSERVED BASE TIP, NOT THE LOCAL `main` REF.
+   *
+   * MEASURED (Argus r4, run 25b2327d): the published artifact was 15,154 lines / ~100 files
+   * while the branch's own work was 20 files / 1,738 lines. The shared build checkout's local
+   * `main` was 8 merges behind `origin/main`, so `git diff main..<head>` presented every
+   * commit merged in between as part of this card — ~87% already-merged unrelated code. One
+   * reviewer diffed that stale base and vetoed the branch over files it does not touch; the
+   * round was lost. `rebaseOntoObservedBase` already ls-remotes the true base tip, so the
+   * publisher uses THAT sha and never the local ref name.
+   */
+  test('the published review diff is computed from the ls-remote-observed base tip, never the local base ref', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const stale = '9'.repeat(40)
+    const baseTip = '7'.repeat(40)
+    let lsRemotes = 0
+    let prLists = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        // The branch ALREADY contains the observed base tip → no replay, and git could only
+        // have answered that by reading the object, so it is local and diffable.
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes('gh pr list')) {
+          prLists += 1
+          return ok(prLists > 1 ? '42' : '')
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    const diffs = calls.filter((c) => c.includes(' diff ') && c.includes(`..${head}`))
+    expect(diffs.length).toBeGreaterThan(0)
+    for (const c of diffs) expect(c).toContain(`${baseTip}..${head}`)
+    // The positive control for the defect: not one of them names the local ref.
+    expect(calls.some((c) => c.includes(`main..${head}`))).toBe(false)
+    expect(calls.some((c) => c.includes(`--output=/tmp/trident-outer-published-${run.id}.diff`))).toBe(true)
+  })
+
   test('a successful push without a matching origin witness fails closed', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const other = '1111111111111111111111111111111111111111'
@@ -2129,6 +2182,31 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(waits).toEqual([...RESUME_HEAD_RETRY_DELAYS_MS])
     expect(waits.every((ms) => ms > 0)).toBe(true)
   })
+
+  /**
+   * THE PRODUCTION DEFAULT IS THE ONE THING EVERY OTHER TEST HERE REPLACES (Argus r4). The
+   * suite injects a no-op `sleep` everywhere, and `gateway/composition/build-core-modules.ts`
+   * never passes `opts.sleep` — so the value that actually runs in production, the default
+   * parameter, was exercised by nothing. If it were `async () => {}` the three attempts would
+   * fire back to back in production and every test above would still pass. This one spends
+   * the real ~1.25 s once, to pin that it does not.
+   */
+  test('resolveResumeLiveHead: the DEFAULT sleep is a real wait (no stub injected)', async () => {
+    const host = async (): Promise<HostCommandResult> => ({
+      ok: false,
+      stdout: '',
+      stderr: 'ssh: Could not resolve hostname github.com',
+      exit_code: 128,
+    })
+    const started = Date.now()
+    // No third argument: exactly how production calls it.
+    const out = await resolveResumeLiveHead(host, { repo_path: '/repo', branch: 'feat-x', merge_mode: 'pr' })
+    const elapsed = Date.now() - started
+    expect(out).toBe('')
+    const total = RESUME_HEAD_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0)
+    // A timer can fire a hair early; anything near zero means the default is not sleeping.
+    expect(elapsed).toBeGreaterThanOrEqual(total - 50)
+  }, 10_000)
 
   test('resolveResumeLiveHead: a read that SUCCEEDS first time never waits at all', async () => {
     const waits: number[] = []

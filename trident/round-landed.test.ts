@@ -92,6 +92,20 @@ describe('roundLanded — did the branch actually move?', () => {
     expect(roundLanded(A, undefined)).toBe(false)
   })
 
+  /**
+   * THE TWO HEADS COMPARED HERE COME FROM DIFFERENT PROBES (Argus r4). `branchHead` is
+   * `readBuiltHead`, which lowercases through `normalizeOid`; `headAfter` is
+   * `readBranchHead`, which lowercases only for its `absent` test. git prints lowercase,
+   * so an uppercase relay is theoretical — but the failure it would produce is the one
+   * direction this gate must never fail in: the SAME commit reading as a landed round.
+   */
+  test('case does not fake movement — the same commit in either case did NOT land', () => {
+    expect(roundLanded(A, A.toUpperCase())).toBe(false)
+    expect(roundLanded(A.toUpperCase(), A)).toBe(false)
+    // …and a genuinely different commit still lands, whatever case it arrives in.
+    expect(roundLanded(A, B.toUpperCase())).toBe(true)
+  })
+
   test('an unreadable BEFORE is permissive — no baseline, so invent no failure', () => {
     // Round 1's Forge is the only source of the baseline. If it reported no
     // commitSha we know nothing, and failing the run on that would block builds
