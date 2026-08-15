@@ -219,8 +219,21 @@ with cross-references noted inline.
     `gateway/cores/mount-open-cores.ts:177-277`, `gateway/boot-helpers.ts:1163-1180`.
     Protects: **D5**, **X2**.
 41. Reminder dispatcher degrades to `literalFallback` on ANY LLM failure so a reminder always
-    delivers; outbound is persist-before-send with swallowed live-push throws.
-    `reminders/dispatcher.ts:203,232,237`, `reminders/outbound.ts:7-18`. (Cross-ref #22.)
+    delivers — but the degrade is BOUNDED: stored intent over `MAX_DEGRADED_INTENT_CHARS`
+    (300) is replaced by a generic line naming the reminder id, and a COMPOSED body over
+    `MAX_NUDGE_BODY_CHARS` (2000) is refused as a composition failure rather than posted.
+    A failed compose must NEVER post `row.message` (#293 defect B). Outbound is
+    persist-before-send with swallowed live-push throws.
+    `reminders/message-shape.ts` (`literalFallbackResult` / `overBoundNudgeBody`),
+    `reminders/dispatcher.ts` (`fallbackBody` / `compose`). (Cross-ref #22.)
+    Protects: **F1**.
+41b. A FIRED reminder is delivered to the topic that owns the work: `app:<owner>:<project>`
+    when its stored destination names an EXISTING project, General otherwise — and EVERY
+    downgrade to General is logged with a reason, never silent. The project lister must not
+    swallow read errors into "no projects exist" (that reroutes every project reminder), and
+    the resolver must never throw (a throw before the post makes the tick loop re-fire
+    forever). `open/wiring/reminder-topic.ts`, `open/composer.ts` (`listProjectIds` /
+    `resolveAppWsReminderTopic`).
     Protects: **F1**.
 42. Engagement gate fails soft to `all_messages` — a DB read error must never drop a chat turn.
     `gateway/http/chat-bridge.ts:2749-2791`.

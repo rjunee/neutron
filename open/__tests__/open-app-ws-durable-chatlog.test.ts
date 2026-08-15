@@ -58,6 +58,13 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_HOME', 'OWNER_HOME', 'NEUTRON_DB_PATH', 'NEUTRON_INSTANCE_SLUG',
   'NEUTRON_LANDING_STATIC_DIR', 'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'NOTIFY_SOCKET',
+  // A LIVE instance's identity config leaks in through `process.env` when the
+  // suite runs on a provisioned box: `NEUTRON_IDENTITY_JWKS_URL` puts the app-ws
+  // auth resolver in `jwks` mode, which rejects the `dev:owner` bearer this
+  // harness connects with (`channels/adapters/app-ws/auth.ts`), and all six
+  // tests here fail at `ws.onerror`. The two sibling app-ws harnesses that cite
+  // this file as their pattern source already scrub both.
+  'NEUTRON_IDENTITY_JWKS_URL', 'NEUTRON_IDENTITY_AUDIENCE',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -101,6 +108,8 @@ beforeEach(() => {
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-chatlog'
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env['NOTIFY_SOCKET']
+  delete process.env['NEUTRON_IDENTITY_JWKS_URL']
+  delete process.env['NEUTRON_IDENTITY_AUDIENCE']
 })
 
 afterEach(async () => {

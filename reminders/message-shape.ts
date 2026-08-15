@@ -160,11 +160,35 @@ export function classifyReminderMessage(message: string): ReminderShape {
  * substrate is available we post that verbatim rather than the composition
  * instruction itself. Falls back to the whole instruction for a hand-authored
  * `[smart] ...` body that carries no such marker.
+ *
+ * A SINGLE FORWARD SCAN, not a regex. The regex this replaces —
+ * `/(?:^|\n)Original reminder:\s*([\s\S]+?)\s*$/i` — is QUADRATIC on adversarial
+ * input: the leading `\s*`, the lazy `[\s\S]+?` and the trailing `\s*$` are
+ * mutually ambiguous, so a body of "Original reminder:" followed by many spaces
+ * makes the engine retry every split (CodeQL `js/polynomial-redos`, HIGH; the
+ * same lesson already written down in `skill-forge/distiller.ts` and
+ * `doc-search/chunk.ts`). A stored reminder `message` is attacker-shaped as far
+ * as this package is concerned — any tool caller can write one — and the
+ * fire-time degrade path runs it on the tick loop. `indexOf` + `slice` + `trim`
+ * is O(n) and preserves the regex's semantics EXACTLY: the FIRST line-initial
+ * marker wins, and its payload is whitespace-trimmed (empty → no match).
  */
-const ORIGINAL_REMINDER_RE = /(?:^|\n)Original reminder:\s*([\s\S]+?)\s*$/i
+const ORIGINAL_REMINDER_MARKER = 'original reminder:'
+function originalReminderPayload(instruction: string): string {
+  const haystack = instruction.toLowerCase()
+  let from = 0
+  for (;;) {
+    const at = haystack.indexOf(ORIGINAL_REMINDER_MARKER, from)
+    if (at < 0) return ''
+    // Line-initial only — a marker mid-line is prose, not the composer's tail.
+    if (at === 0 || instruction[at - 1] === '\n') {
+      return instruction.slice(at + ORIGINAL_REMINDER_MARKER.length).trim()
+    }
+    from = at + 1
+  }
+}
 function smartWrapLiteralLine(instruction: string): string {
-  const m = ORIGINAL_REMINDER_RE.exec(instruction)
-  const original = (m?.[1] ?? '').trim()
+  const original = originalReminderPayload(instruction)
   return original.length > 0 ? original : instruction
 }
 
@@ -181,10 +205,65 @@ function patternLiteralLine(block: string): string {
 }
 
 /**
- * The body to post when no LLM substrate is available (graceful degrade).
- * Always returns something deliverable — never the raw pattern scaffolding.
+ * The upper bound, in characters, on a COMPOSED nudge body. A reminder nudge is
+ * one to three sentences; a composed body past this bound is prima facie not a
+ * nudge but a composition failure (#293 acceptance criterion 4: "a 3,400-character
+ * nudge is prima facie a composition failure"), and the dispatcher refuses it
+ * rather than posting it.
+ *
+ * NOT a token cap — `DEFAULT_MAX_TOKENS` in `dispatcher.ts` caps what the model
+ * is ASKED for; this caps what actually reaches the owner. The ritual path has
+ * its own, far wider budget (`RITUAL_MAX_TOKENS`) and is deliberately EXEMPT:
+ * a morning brief is supposed to be long.
  */
-export function literalFallback(shape: ReminderShape): string {
+export const MAX_NUDGE_BODY_CHARS = 2000
+
+/**
+ * The FAR TIGHTER bound on how much STORED INTENT may be posted verbatim when
+ * composition did not produce a body (no substrate, a thrown/empty compose, or a
+ * composed body refused by {@link MAX_NUDGE_BODY_CHARS}).
+ *
+ * WHY THIS IS NOT `MAX_NUDGE_BODY_CHARS` (Argus round 1, confirmed x2). The two
+ * bounds guard different things and must not be the same number. The composed
+ * bound asks "is this plausibly a nudge?" of text the MODEL wrote — text that has
+ * already been through the composer and carries no raw intent. This bound asks a
+ * strictly harder question of text the OWNER wrote for an AGENT to read: how much
+ * of a private operational payload may reach the owner's chat when nothing
+ * rendered it? #293's leaked fires were 3.3k and 3.4k chars, but 29% of live
+ * reminder rows sit in the 1001–2000 bucket — every one of them would still have
+ * posted verbatim under a single 2000-char bound, which is exactly the leak the
+ * card says must NEVER happen ("NEVER the raw intent").
+ *
+ * 300 chars ≈ the one-to-three sentences a nudge is. "take out the trash"
+ * degrading byte-identically is the DESIGNED behaviour and stays; a multi-paragraph
+ * "OVERNIGHT BUILD DRIVER (wake 15) — …" does not.
+ */
+export const MAX_DEGRADED_INTENT_CHARS = 300
+
+/**
+ * What is posted instead when the degrade body is itself over the bound.
+ *
+ * It carries ZERO bytes of the stored `message` — that message reaching the
+ * owner's chat IS the defect. It DOES name the reminder id, which is a
+ * content-free UUID: without it a recurring over-bound reminder posts an
+ * identical, unactionable sentence every fire with no way to tell which reminder
+ * to go fix (Argus round 1, confirmed x2). The id is the handle the reminders
+ * tab and `reminders_cancel` both take.
+ */
+export function overBoundNudgeBody(reminder_id: string | null): string {
+  const id = (reminder_id ?? '').trim()
+  const which = id.length > 0 ? `Reminder ${id}` : 'A scheduled reminder'
+  return `${which} fired, but its message could not be rendered as a nudge. Open the reminders tab to read it.`
+}
+
+/**
+ * The id-less refusal line — see {@link overBoundNudgeBody}. Kept as a constant
+ * for callers (and tests) that have no reminder in hand.
+ */
+export const OVER_BOUND_NUDGE_BODY = overBoundNudgeBody(null)
+
+/** The unbounded degrade text for a shape — see {@link literalFallbackResult}. */
+function rawLiteralFallback(shape: ReminderShape): string {
   switch (shape.kind) {
     case 'literal':
       return shape.body
@@ -193,4 +272,37 @@ export function literalFallback(shape: ReminderShape): string {
     case 'pattern':
       return patternLiteralLine(shape.block)
   }
+}
+
+/**
+ * The body to post when composition did not produce one (graceful degrade), plus
+ * whether the shape's own text was REFUSED for exceeding
+ * {@link MAX_DEGRADED_INTENT_CHARS}. The dispatcher needs the flag to log the
+ * refusal against the reminder id; every other caller wants {@link literalFallback}.
+ *
+ * A body at or under the bound passes through BYTE-IDENTICAL — "take out the
+ * trash" degrading verbatim is the designed behaviour, not the leak. Pass the
+ * reminder id so the refusal line can name which reminder went unrendered.
+ */
+export function literalFallbackResult(
+  shape: ReminderShape,
+  reminder_id: string | null = null,
+): {
+  body: string
+  refused: boolean
+} {
+  const raw = rawLiteralFallback(shape)
+  if (raw.length > MAX_DEGRADED_INTENT_CHARS) {
+    return { body: overBoundNudgeBody(reminder_id), refused: true }
+  }
+  return { body: raw, refused: false }
+}
+
+/**
+ * The body to post when composition did not produce one (graceful degrade).
+ * Always returns something deliverable — never the raw pattern scaffolding, and
+ * never more than {@link MAX_DEGRADED_INTENT_CHARS} characters of stored intent.
+ */
+export function literalFallback(shape: ReminderShape): string {
+  return literalFallbackResult(shape).body
 }

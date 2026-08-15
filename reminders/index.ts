@@ -170,6 +170,11 @@ export { buildStatusMdContextSource } from './context.ts'
 export {
   classifyReminderMessage,
   literalFallback,
+  literalFallbackResult,
   KNOWN_REMINDER_PATTERNS,
+  MAX_DEGRADED_INTENT_CHARS,
+  MAX_NUDGE_BODY_CHARS,
+  overBoundNudgeBody,
+  OVER_BOUND_NUDGE_BODY,
 } from './message-shape.ts'
 export type { ReminderShape } from './message-shape.ts'

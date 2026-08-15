@@ -31,7 +31,7 @@
  *     (and re-throws the original error)
  */
 
-import type { NeutronManifest } from '@neutronai/cores-sdk'
+import type { NeutronManifest, ToolCallContext } from '@neutronai/cores-sdk'
 
 import { CapabilityDeniedError } from './errors.ts'
 import type { SecretAuditLog } from './secret-audit.ts'
@@ -144,18 +144,25 @@ export class CapabilityGuard {
    * Wrap a Core-author tool handler so the guard runs on every dispatch.
    * The returned function:
    *   - calls `assertOrDeny` first (audited + throws on deny)
-   *   - awaits `fn(input)` and writes outcome='ok' on success
+   *   - awaits `fn(input, ctx)` and writes outcome='ok' on success
    *   - writes outcome='error' on inner throw and rethrows
+   *
+   * The registry's per-call {@link ToolCallContext} (`mcp/server.ts` populates it
+   * with the BOUND TOPIC's `project_id`) is forwarded VERBATIM to the wrapped
+   * handler. It used to be dropped here, so a Core tool physically could not see
+   * which project its caller was talking in — which is why `reminders_create`
+   * had to be told a `project_id` explicitly or default to General (#293). A
+   * one-argument handler stays assignable and ignores it.
    */
   wrapToolHandler<I, O>(
-    input: ToolCheckInput & { fn: (toolInput: I) => Promise<O> },
-  ): (toolInput: I) => Promise<O> {
+    input: ToolCheckInput & { fn: (toolInput: I, ctx?: ToolCallContext) => Promise<O> },
+  ): (toolInput: I, ctx?: ToolCallContext) => Promise<O> {
     const tool_name = input.tool_name
     const capability_required = input.capability_required
-    return async (toolInput: I): Promise<O> => {
+    return async (toolInput: I, ctx?: ToolCallContext): Promise<O> => {
       await this.assertOrDeny({ tool_name, capability_required })
       try {
-        const out = await input.fn(toolInput)
+        const out = await input.fn(toolInput, ctx)
         await this.audit.recordToolCall({
           owner_slug: this.owner_slug,
           core_slug: this.core_slug,

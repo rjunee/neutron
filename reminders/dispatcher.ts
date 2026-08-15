@@ -26,7 +26,14 @@ import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { collectTokensToString } from '@neutronai/runtime/collect-tokens.ts'
-import { classifyReminderMessage, literalFallback, type ReminderShape } from './message-shape.ts'
+import {
+  classifyReminderMessage,
+  literalFallback,
+  literalFallbackResult,
+  MAX_DEGRADED_INTENT_CHARS,
+  MAX_NUDGE_BODY_CHARS,
+  type ReminderShape,
+} from './message-shape.ts'
 import { buildReminderPrompt } from './prompt.ts'
 import type { Reminder } from './store.ts'
 import type { ReminderDispatcher } from './tick.ts'
@@ -331,13 +338,36 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
     }
   }
 
+  /**
+   * The degrade body for a nudge, with the bound that keeps a failed compose
+   * from posting the owner's stored intent (#293 defect B). When the shape's own
+   * text is over `MAX_DEGRADED_INTENT_CHARS` the generic refusal line — which
+   * NAMES THE REMINDER ID and carries none of its bytes — is substituted, and
+   * the refusal is said out loud: a silently-swapped body is how the original
+   * leak went unnoticed for a night.
+   */
+  function fallbackBody(reminder: Reminder, shape: ReminderShape): string {
+    const result = literalFallbackResult(shape, reminder.id)
+    if (result.refused) {
+      dispatcherLog.warn('nudge_refused', {
+        reminder: reminder.id,
+        reason: 'over MAX_DEGRADED_INTENT_CHARS',
+        max_chars: MAX_DEGRADED_INTENT_CHARS,
+      })
+      log(
+        `reminder ${reminder.id} nudge refused: stored intent over MAX_DEGRADED_INTENT_CHARS (${MAX_DEGRADED_INTENT_CHARS}) — posting the generic line`,
+      )
+    }
+    return result.body
+  }
+
   async function compose(
     reminder: Reminder,
     shape: ReminderShape,
     project_id: string,
   ): Promise<string> {
     if (llm === null) {
-      return literalFallback(shape)
+      return fallbackBody(reminder, shape)
     }
     {
       let context = ''
@@ -362,7 +392,17 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       })
       if (!outcome.ok) {
         log(`reminder ${reminder.id} composed nothing (${outcome.reason}) — using literal fallback`)
-        return literalFallback(shape)
+        return fallbackBody(reminder, shape)
+      }
+      // An over-long "nudge" IS a composition failure, not a long nudge — the
+      // model was asked for one to three sentences. Treat it exactly like a
+      // thrown compose: fall through to the bounded degrade. Never post it, and
+      // never truncate-and-post (a truncated intent is still the intent).
+      if (outcome.text.length > MAX_NUDGE_BODY_CHARS) {
+        log(
+          `reminder ${reminder.id} composed ${outcome.text.length} chars, over MAX_NUDGE_BODY_CHARS (${MAX_NUDGE_BODY_CHARS}) — refusing the composed body, using literal fallback`,
+        )
+        return fallbackBody(reminder, shape)
       }
       return outcome.text
     }
