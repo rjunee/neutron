@@ -978,6 +978,49 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
+  test('a WHOLESALE apply failure (nothing unmerged) is never handed to the resolver, even with one configured', async () => {
+    // THE SEAM BETWEEN THE TWO FIXES. #292 established that a failed apply leaving ZERO unmerged
+    // paths is not a merge conflict at all — `git apply` refused the patch outright — and must
+    // surface git's own stderr rather than `conflicts with main in: (paths unreadable)`. Adding
+    // auto-resolution must not walk that back: there is nothing unmerged for a resolver to
+    // reconcile, so it is not called, and the failure keeps its wholesale wording.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    let resolverCalls = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      resolve_conflict: async () => {
+        resolverCalls += 1
+        return { resolved: true }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr diff')) return ok('diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: corrupt patch at line 42')
+        // Nothing was staged, so nothing is unmerged — the signature of a wholesale refusal.
+        if (joined.includes('diff --name-only --diff-filter=U')) return ok('')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(resolverCalls).toBe(0)
+    expect(final.phase).toBe('failed')
+    // git's own words, and the explicit denial that this is a conflict.
+    expect(final.failure_reason).toContain('corrupt patch at line 42')
+    expect(final.failure_reason).toContain('failed WHOLESALE')
+    expect(final.failure_reason).not.toContain('REBASE CONFLICT')
+    expect(final.failure_reason).not.toContain('paths unreadable')
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
+  })
+
   test('an empty base-to-head diff terminates before review re-fire', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const stale = '9'.repeat(40)
