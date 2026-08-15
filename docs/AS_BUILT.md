@@ -2,6 +2,54 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — a publish-path rebase conflict is resolved, not escalated
+
+`rebaseOntoObservedBase` (`trident/orchestrator.ts`) threw `TridentRebaseConflict`
+unconditionally whenever `git apply --3way --index` failed, while the bounded Forge
+conflict resolver (`trident/conflict-resolver.ts`) was wired only to the LOCAL merge
+path (`trident/merge.ts`) — the path where a human is present and could resolve it
+themselves. The autonomous publish path, where no human is present, escalated every
+conflict to the owner instead. Three builds died this way on 2026-08-15, all
+`publish failed: REBASE CONFLICT`: runs `25b2327d` (#290, 13:26Z), `5a17ec86` (#290,
+13:56Z), `9e813276` (#289, 14:07Z); a human resolved all three by hand. Root cause of
+the conflicts themselves: #291 merged at 13:07Z and rewrote `trident/inner-workflow.mjs`,
+the file all three branches were editing.
+
+What shipped: the same `resolve_conflict` resolver the composer already builds
+(`open/composer.ts`, gated on the live-credential predicate) is now threaded through
+`publishBuiltCommit` into `rebaseOntoObservedBase` and invoked at the throw site, IN
+the scratch worktree the failed apply left the conflict markers in — never the shared
+checkout. The loop is bounded by `MAX_CONFLICT_ROUNDS` (12, now exported from
+`trident/merge.ts`), and the unmerged set (`git diff --name-only --diff-filter=U`) is
+re-read after every claimed RESOLVED, so a resolver that reports success without
+staging anything cannot commit an unresolved tree — it exhausts the bound and lands
+in the same attention state.
+
+Invariants kept: a conflict is still an ATTENTION state, never a `REQUEST_CHANGES`
+verdict — no reviewer read the code. `TridentRebaseConflict` keeps its exact message
+and remains the outcome when no resolver is configured, when the resolver declines,
+or when it exhausts its rounds. A resolved rebase is NOT an approved one: the
+replayed head still faces the full review gate (resolution is a mergeability
+operation, not a verdict — asserted by a stub-host test in
+`trident/orchestrator.test.ts` in which the run only reaches `done` through a second
+workflow fire's `outer-published:<head>` checkpoint plus APPROVE). The
+`update-ref <new> <old>` compare-and-swap and the pinned
+`--force-with-lease=<ref>:<sha>` lease are untouched.
+
+Proof: the stub-host suite (`trident/orchestrator.test.ts`) covers all six acceptance
+criteria; the real-git suite (`trident/publish-rebase-realgit.test.ts`) proves a
+resolver reading genuine `<<<<<<<` markers in the scratch worktree can stage a
+resolution that commits, lands in the CAS-moved head's tree (neither side's text
+verbatim), and leaves the checkout clean — and that a declining resolver leaves the
+branch ref unmoved with the scratch worktree removed.
+
+The hand-resolution of #290 is the worked example and the bar: five of six hunks were
+mechanical, one was subtle — main's `publishHead: oidClaim(branchHead)` and the
+branch's `oidClaim(forgeSha)` were identical on main but diverge once the branch's
+git-truth fix lands. Taking main's text verbatim would have silently converted a
+cross-check into a tautology. The resolver must reach that conclusion or correctly
+decline (declining is the escalation path, unchanged).
+
 
 Measured on PR #284's card (the #283 build), 2026-08-15, one inner workflow, fully
 serial — the sum of agent time equals wall clock exactly: head probe 5 s, `plan:fable`
