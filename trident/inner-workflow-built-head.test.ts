@@ -22,9 +22,13 @@ interface Options {
   /** Drive a mid-loop RESUME (the only way a pr-mode run reaches a fix round). */
   resumeCheckpoint?: string
   resumeLiveHead?: string
+  /** The branch the run builds on — the length of this name is load-bearing for the
+   *  cap tests (a real one is 43 characters). */
+  branch?: string
 }
 
 async function runBuiltHead(opts: Options = {}) {
+  const branch = opts.branch ?? 'trident/built-head'
   const labels: string[] = []
   const logs: string[] = []
   const prompts: Array<{ label: string; prompt: string }> = []
@@ -37,10 +41,10 @@ async function runBuiltHead(opts: Options = {}) {
     prompts.push({ label, prompt })
     if (label.startsWith('head-probe-round-built-')) return { head: probes.shift() ?? FIX }
     if (label.startsWith('head-probe-round-')) return { head: FIX }
-    if (label === 'forge:build') return { prNumber: null, branch: 'trident/built-head', diffFile: opts.buildDiff ?? '/tmp/built.diff', worktreePath: '/wt', commitSha: opts.claim ?? '', testsPassed: true }
+    if (label === 'forge:build') return { prNumber: null, branch, diffFile: opts.buildDiff ?? '/tmp/built.diff', worktreePath: '/wt', commitSha: opts.claim ?? '', testsPassed: true }
     if (label.startsWith('forge:fix-round-')) {
       round = Number(label.slice('forge:fix-round-'.length))
-      return { prNumber: null, branch: 'trident/built-head', diffFile: '/tmp/fix.diff', worktreePath: '/wt', commitSha: opts.fixClaim ?? FIX, testsPassed: true }
+      return { prNumber: null, branch, diffFile: '/tmp/fix.diff', worktreePath: '/wt', commitSha: opts.fixClaim ?? FIX, testsPassed: true }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') return { verdict: 'APPROVE', findings: [] }
     if (label === 'argus:synthesis') {
@@ -52,7 +56,7 @@ async function runBuiltHead(opts: Options = {}) {
   const parallel = async (fns: Array<() => Promise<unknown>>) => Promise.all(fns.map((f) => f()))
   const args = {
     repoPath: '/repo', task: 'Ship it', baseBranch: 'main', slug: 'built-head', maxRounds: 3,
-    ralph: false, mergeMode: opts.mode ?? 'local', prNumber: null, branch: 'trident/built-head',
+    ralph: false, mergeMode: opts.mode ?? 'local', prNumber: null, branch,
     dbPath: '/tmp/no.db', runId: 'built-head-run', codexHome: null,
     resumeCheckpoint: opts.resumeCheckpoint ?? null,
     ...(opts.resumeLiveHead !== undefined ? { resumeLiveHead: opts.resumeLiveHead } : {}),
@@ -85,7 +89,7 @@ describe('build-completion heads come from git', () => {
 
   test('mismatch stops infra-only, names both values, and never dispatches review', async () => {
     const claim = 'd'.repeat(40)
-    const out = await runBuiltHead({ mode: 'pr', claim })
+    const out = await runBuiltHead({ claim })
     expect(out.result.blockKind).toBe('infra-only')
     expect(out.result.terminalCause).toContain(claim)
     expect(out.result.terminalCause).toContain(H)
@@ -98,6 +102,37 @@ describe('build-completion heads come from git', () => {
     expect(reason).toContain(claim)
     expect(reason).toContain(H)
     expect(reason).not.toContain('without Argus APPROVE')
+  })
+
+  /**
+   * TWO OIDs THAT DISAGREE IS ALL THE RUN MEASURED. The cause used to end "— wrong branch
+   * or wrong worktree", which is a deduction and not even the likeliest one: an amending
+   * commit hook, or a second commit landing between the builder's own `rev-parse` and this
+   * probe, produce exactly the same signal. The shipped Part-1 twin (`publishBuiltCommit`)
+   * names both OIDs and stops there.
+   */
+  test('the mismatch cause names both OIDs and deduces no cause for them', async () => {
+    const out = await runBuiltHead({ claim: 'd'.repeat(40) })
+    expect(out.result.terminalCause).not.toContain('wrong branch')
+    expect(out.result.terminalCause).not.toContain('wrong worktree')
+    expect(out.result.terminalCause).toContain('refusing to publish or review either')
+  })
+
+  /**
+   * …AND IN `pr` MODE THE CHECK DOES NOT RUN AT ALL, the same `!isPr` carve-out the
+   * unreadable-head stop has. `publishBuiltCommit` (trident/orchestrator.ts) makes the
+   * identical comparison in REAL CODE against a `rev-parse` the host ran itself, moments
+   * later; here BOTH sides arrive through a model seat, so a garbled relay could veto a
+   * build the publisher would have validated. Delete `!isPr &&` and this test fails.
+   */
+  test('a pr-mode mismatch defers to the publisher instead of vetoing the build', async () => {
+    const claim = 'd'.repeat(40)
+    const out = await runBuiltHead({ mode: 'pr', claim })
+    expect(out.result.publishRequested).toBe(true)
+    // The claim travels out UNCHANGED, so the publisher makes the same comparison with the
+    // real OID and refuses loudly if it still disagrees (acceptance criterion 3).
+    expect(out.result.publishHead).toBe(claim)
+    expect(out.result.blockKind).toBeUndefined()
   })
 
   test('a transient failure is retried and proceeds — the budget is not spent on success', async () => {
@@ -194,6 +229,34 @@ describe('an empty build is never reported as an unreadable head', () => {
     expect(out.result.blockKind).toBe('infra-only')
     expect(out.result.terminalCause).toContain('re-run when the read succeeds')
     expect(out.logs.some((l) => l.includes('inner THREW'))).toBe(false)
+  })
+
+  /**
+   * …AND THE SENTENCE REACHES THE OPERATOR. Every one of these exits is a THROW, and the
+   * catch path used to persist `{checkpoint: 'inner-error'}` with no cause at all — so the
+   * measured sentence died in the log and the row read "without Argus APPROVE" for a build
+   * Argus never saw. That is acceptance criterion 5's other half, and it was the exact
+   * shape of run 3d2696c3.
+   */
+  test('the thrown sentence travels out as the terminal cause, not just to the log', async () => {
+    const out = await runBuiltHead({ probes: ['absent'] })
+    expect(out.result.terminalCause).toContain('nothing was built')
+    expect(out.result.terminalCause).toContain('no commit on trident/built-head')
+    // A throw is not a review verdict, so no block kind is asserted beside it.
+    expect(out.result.blockKind).toBeUndefined()
+    const reason = innerTerminalFailureReason(
+      { max_rounds: 3, round: 1, inner_checkpoint: null },
+      { round: 1, checkpoint: 'inner-error', block_kind: null, terminal_cause: out.result.terminalCause },
+    )
+    expect(reason).toContain('nothing was built')
+    expect(reason).not.toContain('without Argus APPROVE')
+    // …and it does not claim the review panel refused to run, either — an unmeasured fact.
+    expect(reason).not.toContain('review never ran')
+  })
+
+  test('the "not measured" clause is what reaches the row when the read failed', async () => {
+    const out = await runBuiltHead({ probes: UNREADABLE, buildDiff: '' })
+    expect(out.result.terminalCause).toContain('whether a commit exists was not measured')
   })
 })
 
@@ -315,7 +378,7 @@ describe('a bounded built-head stop claims no checkpoint it did not write', () =
   })
 
   test('the mismatch stop reports checkpoint null too — neither value was believed', async () => {
-    const out = await runBuiltHead({ mode: 'pr', claim: 'd'.repeat(40) })
+    const out = await runBuiltHead({ claim: 'd'.repeat(40) })
     expect(out.result.checkpoint).toBeNull()
     expect(checkpoint(out, 'forge-done')).toBe('')
   })
@@ -334,9 +397,53 @@ describe('the two bounded stops agree on `ok` — one failure class, one shape',
    * raw while this one redacted + capped — two instances of what the code calls "ONE
    * failure class … one shape" disagreeing about the shape.
    */
-  test('both causes go through the same redact + cap helper', async () => {
+  test('every cause goes through the same redact + cap helper', async () => {
+    // Three: the resume bounded stop, the build-completion bounded stop, and the catch
+    // path's thrown message. One failure class each, ONE shape for all of them.
     const uses = SRC.match(/terminalCause: infraCause\(/g) ?? []
-    expect(uses).toHaveLength(2)
+    expect(uses).toHaveLength(3)
     expect(SRC).not.toContain('terminalCause: stopCause')
+  })
+})
+
+/**
+ * A CAUSE THAT LOSES ITS TAIL MUST LOSE DETAIL, NEVER THE INSTRUCTION.
+ *
+ * MEASURED (Argus r3): the round-1 unreadable-head cause composes to 331 characters with a
+ * REAL 43-char branch name (`trident/` + the 35 chars `slugify-task` caps a slug at) — and
+ * the cap it was written through was 300, so the trailing "re-run when the read succeeds"
+ * never reached the operator. The guard test above passed only because its fixture branch
+ * was short, which is exactly how a length bug hides. Two defences are asserted here: the
+ * cap is wide enough for the sentence, and the advice sits near the front so a
+ * model-supplied diff path (unbounded) can only ever cost detail.
+ */
+describe('the stop advice survives a realistic branch name', () => {
+  const LONG = `trident/${'x'.repeat(35)}`
+
+  test('a 43-character branch keeps the re-run advice and the branch name', async () => {
+    const out = await runBuiltHead({
+      branch: LONG,
+      probes: UNREADABLE,
+      claim: H,
+      buildDiff: `/tmp/${LONG.replace('/', '-')}.diff`,
+    })
+    const cause = String(out.result.terminalCause)
+    expect(cause).toContain('re-run when the read succeeds')
+    expect(cause).toContain(`refs/heads/${LONG}`)
+    // The positive control for the bug: at the old cap this cause was over the line.
+    expect(cause.length).toBeGreaterThan(300)
+  })
+
+  test('the advice comes before the model-supplied diff path, which has no length bound', async () => {
+    const out = await runBuiltHead({
+      branch: LONG,
+      probes: UNREADABLE,
+      claim: H,
+      buildDiff: `/tmp/${'d'.repeat(400)}.diff`,
+    })
+    const cause = String(out.result.terminalCause)
+    expect(cause).toContain('re-run when the read succeeds')
+    // …and the cap still holds, so an unbounded path cannot flood the row.
+    expect(cause.length).toBeLessThanOrEqual(500)
   })
 })

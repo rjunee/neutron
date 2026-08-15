@@ -135,7 +135,7 @@ describe('the loop honours the gate', () => {
   test('the check runs BEFORE the re-review, not after', () => {
     // Order is the point. Checking after the review would still have paid for four
     // reviewers on unchanged code — the exact cost being eliminated.
-    const probeAt = SRC.indexOf('const headAfter = await readBranchHead(round)')
+    const probeAt = SRC.indexOf('const headAfterRead = await readBranchHead(round)')
     // `lastIndexOf` on purpose: the FIRST `reviewAndSynthesize(diffFile, round)` is
     // the pre-loop review (`let synthesis = await …`), which of course precedes the
     // probe. The one that must come after is the RE-review inside the fix loop, and
@@ -168,7 +168,16 @@ describe('the loop honours the gate', () => {
 
   test('the head probe asks the REMOTE in PR mode', () => {
     // "Pushed" is the property that matters: a local ref can be ahead of anything
-    // a reviewer or the merge will ever see.
-    expect(SRC).toContain('git ls-remote origin')
+    // a reviewer or the merge will ever see. `--exit-code` so the probe can tell a
+    // branch the remote says is GONE (exit 2) from a read that failed — the tri-state
+    // `classifyResume` gives opposite consequences to.
+    expect(SRC).toContain('git ls-remote --exit-code origin')
+  })
+
+  test("a branch the authority says is GONE is not read as this round's progress", () => {
+    // The probe is tri-state now, and `roundLanded` compares STRINGS: a literal
+    // 'absent' differs from the round-1 head and would read as a landed round. It is
+    // collapsed to '' at this one call site — "the branch is gone" is not "it moved".
+    expect(SRC).toContain("const headAfter = headAfterRead === 'absent' ? '' : headAfterRead")
   })
 })

@@ -675,10 +675,27 @@ describe('the terminal result emits terminalCause for infra-only stops only', ()
     expect(SRC).toContain('...(isInfraOnlyStop ? { terminalCause } : {}),')
   })
 
-  test('the THROWN-workflow failure result does NOT invent one', () => {
-    // A crash is not a measured infra-only stop; giving it a cause would re-create the
-    // exact defect (a specific message without the measurement behind it).
+  /**
+   * A THROW CARRIES THE MESSAGE IT THREW — AND NOTHING ELSE.
+   *
+   * This used to assert the opposite (`failureResult` must carry NO `terminalCause`), on
+   * the reasoning that a crash is not a measured infra-only stop. Half of that is right and
+   * is still pinned below: a crash has no BLOCK KIND, so it must never claim the code was
+   * judged or that "review never ran". But the thrown MESSAGE is a measurement — the
+   * workflow composed it at the point the fact was known — and dropping it is what left run
+   * 3d2696c3 ("forge:build completed without a full local commit OID") reported to the
+   * operator as "…without Argus APPROVE" on a path Argus never reached.
+   */
+  test('the THROWN-workflow failure result carries the message, and no block kind', () => {
     const failure = SRC.slice(SRC.indexOf('const failureResult = {'), SRC.indexOf('\n  }', SRC.indexOf('const failureResult = {')))
-    expect(failure).not.toContain('terminalCause')
+    // The thrown text, through the same redact + cap helper every other cause uses…
+    expect(failure).toContain('terminalCause: infraCause(thrownMessage)')
+    // …and NOT a fabricated block kind: that field is what licenses the outer loop's
+    // "review never ran (infra-only)" sentence, and a crash measured no such thing.
+    // (The PROPERTY, not the word — the comment beside it names the field on purpose.)
+    expect(failure).not.toContain('blockKind:')
+    // The message reported to the log and the message persisted are ONE value, so the
+    // transcript and the row cannot disagree about why the run died.
+    expect(SRC).toContain('log(`trident-v2 inner THREW: ${thrownMessage}`)')
   })
 })

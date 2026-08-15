@@ -196,9 +196,13 @@ export interface InnerResult {
    */
   block_kind: 'none' | 'code' | 'infra-only' | 'round-lost' | null
   /**
-   * The MEASURED cause of an infra-only stop — the probe's/lane's own words, already
-   * redacted by the workflow. null when absent/empty/not a string; the reason then stays
-   * generic, which is the whole point (never assert a cause that was not measured).
+   * The MEASURED cause of a terminal stop — the probe's/lane's/thrown error's own words,
+   * already redacted by the workflow. null when absent/empty/not a string; the reason then
+   * stays generic, which is the whole point (never assert a cause that was not measured).
+   *
+   * NOT limited to infra-only stops any more: the workflow also carries the message it
+   * composed at the point a THROW was raised, and `innerTerminalFailureReason` uses
+   * `block_kind` only to choose which sentence frames it.
    */
   terminal_cause: string | null
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
@@ -534,6 +538,16 @@ Settle your turn the instant the Workflow tool returns. The build continues in t
 }
 
 /**
+ * How much of a terminal cause is persisted. THE SAME NUMBER AS `TERMINAL_CAUSE_MAX` in
+ * `trident/inner-workflow.mjs` — that file cannot import TS, so the constant is mirrored
+ * rather than shared, and the two MUST agree: the workflow caps the sentence it composes,
+ * this caps whatever arrives, and the smaller of the two is the one that actually decides.
+ * At 300 the round-1 unreadable-head cause (331 chars with a real 43-character branch name)
+ * lost its trailing "re-run when the read succeeds" — the only actionable clause in it.
+ */
+export const TERMINAL_CAUSE_MAX = 500
+
+/**
  * Decode the workflow's TYPED terminal result from the `inner_result` column.
  * Returns null when the column is null/empty or not a parseable object — i.e.
  * the workflow has NOT yet written a terminal result (still in flight). This is
@@ -588,7 +602,7 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // to the generic sentence rather than to an empty quotation.
     terminal_cause:
       typeof p.terminalCause === 'string' && p.terminalCause.trim() !== ''
-        ? p.terminalCause.trim().slice(0, 300)
+        ? p.terminalCause.trim().slice(0, TERMINAL_CAUSE_MAX)
         : null,
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:

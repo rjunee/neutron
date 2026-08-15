@@ -24,6 +24,7 @@ import {
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
+  TERMINAL_CAUSE_MAX,
   WORKFLOW_FIRE_TOOL_NAMES,
   type FireInnerWorkflow,
   type FireInnerWorkflowInput,
@@ -229,8 +230,23 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.terminal_cause).toBeNull()
   })
   test('a cause is clamped — it is persisted and then read in a chat row', () => {
-    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(400)}  ` }))
-    expect(out?.terminal_cause?.length).toBe(300)
+    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(900)}  ` }))
+    expect(out?.terminal_cause?.length).toBe(TERMINAL_CAUSE_MAX)
+  })
+  /**
+   * THE CLAMP MUST NOT CUT A REAL CAUSE OFF AT THE KNEES. At 300 the workflow's round-1
+   * unreadable-head sentence — 331 chars with the longest branch name `slugify-task` can
+   * produce — lost its trailing "re-run when the read succeeds", i.e. the clamp deleted
+   * the only actionable clause in it. This is the composed sentence, at full length.
+   */
+  test('the longest realistic composed cause survives the clamp whole', () => {
+    const branch = `trident/${'x'.repeat(35)}` // slugify-task caps the slug at 35
+    const cause =
+      `could not read the head of refs/heads/${branch} after forge:build (3 attempts) — re-run when the read succeeds; ` +
+      `this run rebuilt, published and reviewed nothing; the build reported '${'a'.repeat(40)}' and wrote a diff to /tmp/${branch.replace('/', '-')}.diff`
+    const out = parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', terminalCause: cause }))
+    expect(out?.terminal_cause).toBe(cause)
+    expect(out?.terminal_cause).toContain('re-run when the read succeeds')
   })
   // A COMMIT OID IS READ, NOT REPORTED (defect 2026-08-14). `publishHead` is the build's
   // CLAIM, kept only so the outer publisher can CHECK it against `rev-parse`. Requiring a

@@ -631,11 +631,18 @@ export async function rebaseOntoObservedBase(
  * THE RETRIES ARE SPACED, AND THE SPACING IS AN INJECTED SEAM. In `pr` mode the read is
  * `git ls-remote` — a NETWORK call — and the consequence of `''` is a terminal, non-
  * self-healing run failure at the fast-exit in `launch()`. Three attempts fired back to
- * back complete inside a few milliseconds, which is short enough that a DNS blip or a
- * momentary GitHub 5xx fails all three and kills a run whose work is intact. So the
- * attempts are separated by `RESUME_HEAD_RETRY_DELAYS_MS`, through an injected `sleep`
- * the tests replace with a no-op — the delay is real in production and free in the
- * suite. `run_host` remains the seam for the READ; this is the seam for the WAIT.
+ * back complete inside a few milliseconds, which is short enough that one dropped packet
+ * fails all three and kills a run whose work is intact. So the attempts are separated by
+ * `RESUME_HEAD_RETRY_DELAYS_MS`, through an injected `sleep` the tests replace with a
+ * no-op — the delay is real in production and free in the suite. `run_host` remains the
+ * seam for the READ; this is the seam for the WAIT.
+ *
+ * THE WINDOW IS ~1.25 s IN TOTAL, AND IT IS NOT CLAIMED TO BE MORE. It covers a sub-second
+ * blip; it does not outlive a sustained outage, and this docblock previously said otherwise.
+ * The failure it leaves behind is terminal but RECOVERABLE — `failedRun` spreads the row, so
+ * the checkpoint columns survive and a re-run resumes at exactly this point — which is why
+ * the number is left small rather than grown by guess: every second here is also a second a
+ * genuinely-dead branch stalls.
  */
 export const RESUME_HEAD_RETRY_DELAYS_MS = [250, 1000] as const
 
@@ -728,15 +735,38 @@ export function innerTerminalFailureReason(
   // unauthenticated `gh` made the readiness probe say `gh auth login`, no review seat ever
   // ran, and this function reported ten rounds' worth of review that never happened. So the
   // specific message ships WITH that measured signal, and ONLY with it: the branch below is
-  // the one permitted specific message, gated on BOTH the block kind and a non-null cause.
+  // the one permitted specific message, gated on a non-null cause.
   // Everything else — every inferred cause, every result carrying no measurement — still
   // gets the generic sentence above, for all the reasons R1/R2 record.
   // …and ONLY when the cause survives redaction with something left to read. An
   // over-redacted (or whitespace-only) cause is not a measurement, and appending a
   // dangling colon to the sentence would report one where none exists.
-  if (result.block_kind === 'infra-only' && result.terminal_cause !== null) {
+  //
+  // 2026-08-15 — A THROWN WORKFLOW ALSO MEASURES A CAUSE, and it was being discarded.
+  // `block_kind: 'infra-only'` is emitted only by the review-stop paths, so requiring it
+  // meant every exit that THREW — including the one this card was raised for — fell through
+  // to the sentence below. Run 3d2696c3 threw "forge:build completed without a full local
+  // commit OID for the outer publisher" and the operator was told "…without Argus APPROVE"
+  // about a run Argus never saw. The catch path now carries the sentence the workflow
+  // composed where the fact was known, with NO block kind (a throw is not a review verdict).
+  //
+  // THE GATE WIDENS BY EXACTLY THAT ONE VALUE — `null` — and no further. 'code',
+  // 'round-lost' and 'none' are REVIEW verdicts, whose findings describe the DIFF; quoting
+  // one as a terminal cause would re-invent the inference this function refuses to make, so
+  // they keep the generic sentence (see the test that pins each of them). And `null` cannot
+  // be a legacy row leaking through: `terminal_cause` and `block_kind` were added together,
+  // so a row with a cause and no kind can only have come from the catch path.
+  //
+  // The kind also decides WHICH sentence, because it is the only thing that licenses the
+  // claim "review never ran". Without it the reason states the failure and quotes the
+  // measurement, and says nothing at all about the review panel.
+  if (result.terminal_cause !== null && (result.block_kind === 'infra-only' || result.block_kind === null)) {
     const cause = redactPushError(result.terminal_cause).trim()
-    if (cause !== '') return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${cause}`
+    if (cause !== '') {
+      return result.block_kind === 'infra-only'
+        ? `review never ran (infra-only) at round ${reported} of ${ceiling}: ${cause}`
+        : `inner workflow failed at round ${reported} of ${ceiling}: ${cause}`
+    }
   }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`

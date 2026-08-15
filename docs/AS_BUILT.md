@@ -277,10 +277,13 @@ changed is the SOURCE — the value is produced by `git rev-parse`, not composed
 builder. The seat itself can die (a 529 on the shared account), and `seatAttempt` returns
 null for that exactly as it does for a garbled answer, so a transient seat death is
 indistinguishable here from a genuinely unreadable head. Three things follow, all
-deliberate: the budget is `BUILT_HEAD_READ_ATTEMPTS = 3` — the same budget
-`resolveResumeLiveHead` spends on the same question at the launcher boundary, and each
-attempt is a fresh agent dispatch, so the retries are spread over real time without a
-sleep this runtime does not provide; every failed attempt is logged with its tag, so the
+deliberate: the ATTEMPT COUNT is `BUILT_HEAD_READ_ATTEMPTS = 3` — the same count
+`resolveResumeLiveHead` spends on the same question at the launcher boundary, though NOT
+the same budget, and this paragraph used to imply otherwise: the launcher waits
+`RESUME_HEAD_RETRY_DELAYS_MS` between its attempts and this runtime has no sleep at all, so
+these three fire back to back, separated only by whatever a fresh agent dispatch costs
+(real time, but an unmeasured amount of it, so no claim is made about which outages it
+covers); every failed attempt is logged with its tag, so the
 transcript distinguishes a one-attempt blip from a three-attempt outage; and the
 consequence of giving up is fail-closed and bounded. The outer publisher independently
 `rev-parse`s in real code at the credentialed boundary (Part 1), and `--match-head-commit`
@@ -312,9 +315,49 @@ redacting and the other passing its sentence through raw.
 **The stop wording promises nothing about a checkout the read never saw.** In a directory
 that is not a git repo the compound probe prints nothing and lands on the same `''`, so
 "the branch is preserved — re-run when the read succeeds" was an assertion about something
-unobserved. The message now says what the run DID: "this run rebuilt, published and
-reviewed nothing — re-run when the read succeeds". The "nothing was built" throw likewise
+unobserved. The message now says what the run DID: "re-run when the read succeeds; this
+run rebuilt, published and reviewed nothing". The "nothing was built" throw likewise
 says when a commit's absence was inferred from the sentence's shape rather than measured.
+And a MISMATCH names the two OIDs and nothing else — it used to end "wrong branch or wrong
+worktree", a deduction, and not even the likeliest one: an amending commit hook, or a
+second commit landing between the builder's own `rev-parse` and the probe, produce exactly
+the same signal.
+
+**The advice comes BEFORE the detail, because the text is capped.** Measured: with the
+longest branch name `slugify-task` can produce (`trident/` + 35 chars = 43), a 40-hex claim
+and a `/tmp/trident-<slug>.diff` path, the round-1 unreadable-head cause composes to 331
+characters — and the cap it was written through was 300, so the trailing "re-run when the
+read succeeds" was deleted on its way to the operator. The earlier guard test passed only
+because its fixture branch was short, which is how a length bug hides. Two defences now,
+because the diff path is model-supplied and has no length bound at all: `TERMINAL_CAUSE_MAX`
+is 500 (mirrored in `trident/inner-loop.ts`, which clamps again on the way into the DB — the
+SMALLER of the two is what actually decides, so both had to move), and every composed cause
+puts its re-run advice near the front so truncation can only ever cost detail.
+
+**A THROW carries the sentence it threw.** Every "nothing was built" exit is a throw, and
+the catch used to persist `{checkpoint: 'inner-error'}` with no cause at all — so the
+measured sentence died in the log and the row read "inner workflow ended at round N of M …
+without Argus APPROVE" for a build Argus never saw. That was run `3d2696c3` verbatim, and
+it is the acceptance criterion this card states in its own words ("the reason recorded for
+THIS class of failure must not read 'without Argus APPROVE'. Argus never ran."). The catch
+now carries `terminalCause` through the same redact+cap helper as the two bounded stops,
+and carries NO `blockKind`, because a throw is not a review verdict.
+`innerTerminalFailureReason` widens by exactly one value — `block_kind === null`, which can
+only have come from this path since the two columns were added together — and reports
+"inner workflow failed at round N of M: `<cause>`". `'code'` / `'round-lost'` / `'none'` keep
+the generic sentence (a finding title describes the DIFF, not a terminal cause), and
+`'infra-only'` remains the only kind licensed to say "review never ran".
+
+**The legacy `readBranchHead` probe learned the same tri-state.** It ran a bare
+`git rev-parse <branch>` in local mode — which PRINTS THE BRANCH NAME and exits 128 for a
+missing branch — and a plain `ls-remote` in pr mode, which prints nothing. Both reached
+`classifyResume` as `''` = "could not read", and since Part 2b gives `''` a bounded STOP, a
+genuinely DELETED branch became a permanent stop no re-run could clear, on exactly the
+launchers with no `resume_live_head` to rescue them. It now uses `rev-parse --verify --quiet`
+plus the `--git-dir` health check (local) and `ls-remote --exit-code`'s documented exit 2
+(pr). `'absent'` is collapsed back to `''` at ONE call site — the fix round's did-it-land
+question — because `roundLanded` compares strings and a literal `'absent'` would differ from
+the round-1 head and read as progress.
 
 The probe is TRI-STATE, mirroring the launcher's `resolveResumeLiveHead`, because "not
 there" and "could not tell" earn opposite consequences. `absent` is git ANSWERING that the
@@ -332,6 +375,16 @@ refusal remains correct and was not loosened; PR-mode handoffs still let that ou
 in-code read remain the publishing authority, which is why the empty-head stop carries an
 explicit `&& !isPr` carve-out (covered directly in
 `trident/inner-workflow-built-head.test.ts`).
+
+**The MISMATCH check has that carve-out too, and for the sharper version of the same
+reason.** In `pr` mode `publishBuiltCommit` makes the identical comparison, in real code,
+against a `rev-parse` the host ran itself, moments after the handoff. Inside the workflow
+BOTH sides of it arrive through a model seat, so the inner check is a strictly less
+trustworthy copy of one that is about to happen anyway — and a garbled relay of either
+value would veto a build the publisher would have validated. Acceptance criterion 3 is
+untouched by this: the claim travels out verbatim as `publishHead`, and the publisher still
+fails loudly naming both values. In `local` mode there is no publisher, so the check stands
+there.
 
 ## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
 
@@ -11586,10 +11639,19 @@ their own tests; a successful OID read and an `absent` answer still fire unchang
 **THE RETRIES ARE SPACED, AND THE SPACING IS A SEAM.** The consequence of `''` here is a
 TERMINAL, non-self-healing run failure, and in `pr` mode the read is `git ls-remote` — a
 NETWORK call. Three attempts fired back to back complete inside a few milliseconds, which
-a DNS blip or a momentary GitHub 5xx outlives comfortably: the retry existed but did not
-cover the one class that is actually transient. `resolveResumeLiveHead` now waits
-`RESUME_HEAD_RETRY_DELAYS_MS` (`[250, 1000]`) BETWEEN attempts — never before the first,
-never after the last — through an injected `sleep` (`BuildTridentOrchestratorOptions.sleep`)
-that the suite replaces with a no-op, so the delay is real in production and free in the
-tests. The failure remains terminal and the run remains re-runnable from its preserved
-checkpoint columns; what changed is that a blip no longer decides it.
+is short enough that a single dropped packet fails all three.
+`resolveResumeLiveHead` waits `RESUME_HEAD_RETRY_DELAYS_MS` (`[250, 1000]`) BETWEEN
+attempts — never before the first, never after the last — through an injected `sleep`
+(`BuildTridentOrchestratorOptions.sleep`) that the suite replaces with a no-op, so the
+delay is real in production and free in the tests.
+
+**WHAT THAT WINDOW ACTUALLY COVERS, STATED HONESTLY** (an earlier revision of this
+paragraph claimed a "momentary GitHub 5xx", which ~1.25 s of total spacing does not
+credibly outlive): it covers a sub-second blip — one dropped packet, a DNS retry, a single
+connection reset — and nothing longer. A sustained outage still fails all three attempts.
+That is a tuning question rather than a correctness one, and deliberately left where it is:
+the failure is terminal but RECOVERABLE, because `failedRun` spreads the row and leaves
+`inner_checkpoint` / `inner_checkpoint_head` / `inner_checkpoint_findings` untouched, so a
+re-run resumes at exactly this point. Widening the window trades a longer stall on every
+genuinely-dead branch for a rarer manual re-run; the numbers live in one exported constant
+so that trade can be made with evidence rather than by guess.

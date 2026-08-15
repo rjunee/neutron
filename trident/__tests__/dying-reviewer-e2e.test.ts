@@ -114,7 +114,8 @@ async function runWorkflow(script: Script): Promise<RunOut> {
     // The branch moved iff a Forge round ran, so a fix round LANDS and the loop can
     // reach its second review (`roundLanded`).
     if (label === 'head-probe-round-resume') return { head: '0123456789abcdef0123456789abcdef01234567' }
-    if (label.startsWith('head-probe-round-built-')) return { head: String(calls['forge'] ?? 0).padStart(40, '0') }
+    // ONE stub for both head probes (`head-probe-round-built-r1` and `head-probe-round-2`):
+    // the prefix below matches both and they want the same answer here.
     if (label.startsWith('head-probe-round-')) return { head: String(calls['forge'] ?? 0).padStart(40, '0') }
     return ''
   }

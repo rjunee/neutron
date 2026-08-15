@@ -246,10 +246,10 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     }
   })
 
-  test('a cause WITHOUT infra-only is still the generic sentence — the pair gates together', () => {
+  test('a cause on a REVIEW verdict is still the generic sentence — a finding title is not a terminal cause', () => {
     // A code rejection carries findings too. Their titles describe the DIFF, and quoting
     // one as the terminal cause would re-invent the inference this function refuses to make.
-    for (const kind of ['code', 'round-lost', 'none', null] as const) {
+    for (const kind of ['code', 'round-lost', 'none'] as const) {
       expect(
         innerTerminalFailureReason(run({ round: 1 }), {
           round: 1,
@@ -302,6 +302,74 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
   test('it does not read as a review outcome to the owner', () => {
     // The misclassification the whole card is about: nobody rejected this work.
     const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly('REVIEW DEFERRED — gh auth login'))
+    expect(interpretFailure(run({ failure_reason: reason })).klass).not.toBe('review-unresolved')
+  })
+})
+
+/**
+ * A THROWN WORKFLOW MEASURED A CAUSE TOO — and it used to be dropped on the floor.
+ *
+ * MEASURED, run `3d2696c3` (2026-08-14): the build was written, staged and committed, the
+ * inner loop threw "forge:build completed without a full local commit OID for the outer
+ * publisher", and the card was filed REQUEST_CHANGES reading *"…at checkpoint 'inner-error'
+ * without Argus APPROVE"*. Argus never ran. The workflow's catch path now carries the
+ * sentence it composed where the fact was known (`terminalCause`), with NO `blockKind`,
+ * because a throw is not a review verdict — and this function stops throwing it away.
+ */
+describe('innerTerminalFailureReason — a THROW reports what it threw, not the review panel', () => {
+  const thrown = (cause: string | null) => ({
+    round: 1,
+    checkpoint: 'inner-error' as string | null,
+    block_kind: null,
+    terminal_cause: cause,
+  })
+
+  test('HEADLINE: run 3d2696c3 reads as the build failure it was', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1, inner_checkpoint: 'inner-error' }),
+      thrown('forge:build completed but produced no commit on trident/x — nothing was built'),
+    )
+    expect(reason).toContain('nothing was built')
+    expect(reason).toContain('at round 1 of 10')
+    expect(reason).not.toContain('without Argus APPROVE')
+    // …and it does not claim the review panel refused to run either — that is a fact this
+    // path did not measure. Only the infra-only stop is licensed to say that.
+    expect(reason).not.toContain('review never ran')
+  })
+
+  test('the "not measured" clause survives the trip to the row', () => {
+    // The clause the empty-build throw adds when the head read FAILED. It exists to stop
+    // the sentence asserting a missing commit nobody looked for — useless if it is dropped
+    // between the workflow and the operator.
+    const reason = innerTerminalFailureReason(
+      run({ round: 1 }),
+      thrown(
+        'forge:build completed but produced no diffFile (the head read failed, so whether a commit exists was not measured) — nothing was built',
+      ),
+    )
+    expect(reason).toContain('whether a commit exists was not measured')
+  })
+
+  test('a throw that measured NOTHING is still the generic sentence, verbatim', () => {
+    expect(innerTerminalFailureReason(run({ round: 1 }), thrown(null))).toBe(
+      "inner workflow ended at round 1 of 10 at checkpoint 'inner-error' without Argus APPROVE",
+    )
+  })
+
+  test('a credential in a thrown message never reaches the persisted reason', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1 }),
+      thrown("push failed: https://x-access-token:ghp_abc123@github.com/o/r"),
+    )
+    expect(reason).not.toContain('ghp_abc123')
+    expect(reason).toContain('***@')
+  })
+
+  test('it does not read as a review outcome to the owner either', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1 }),
+      thrown('plan:fable returned null (planner terminal error)'),
+    )
     expect(interpretFailure(run({ failure_reason: reason })).klass).not.toBe('review-unresolved')
   })
 })

@@ -603,6 +603,33 @@ describe('mid-loop resume — the launcher-read head replaces the probe agent', 
     const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED })
     expect(out.labels).toContain('head-probe-round-resume')
   })
+
+  /**
+   * …AND THE FALLBACK SPEAKS THE SAME TRI-STATE. It did not: `readBranchHead` ran a bare
+   * `git rev-parse <branch>` (local), which PRINTS THE BRANCH NAME and exits 128 for a
+   * missing branch, and a plain `ls-remote` (pr), which prints nothing. Both reached
+   * `classifyResume` as `''` = "could not read" — and since Part 2b gives `''` a bounded
+   * STOP, a genuinely DELETED branch became a permanent stop no re-run could ever clear,
+   * on exactly the launchers that have no `resume_live_head` to rescue them.
+   */
+  test('a LEGACY probe that says the branch is gone REBUILDS — it does not stop', async () => {
+    const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, currentHead: 'absent' })
+    expect(out.labels).toContain('head-probe-round-resume')
+    expect(built(out.labels)).toBe(true)
+    // It ran to a real verdict rather than the bounded infra stop `''` earns.
+    expect(out.result.blockKind).not.toBe('infra-only')
+    expect(out.result.terminalCause).toBeUndefined()
+  })
+
+  test('the probe command can tell "no such branch" from a failed read', () => {
+    // The two halves of the tri-state, asserted on the command the seat is handed: git is
+    // asked to VERIFY (so a missing ref is an error, not an echoed argument) and the
+    // repository's own health is what distinguishes `absent` from silence.
+    expect(SRC).toContain('git rev-parse --verify --quiet ')
+    expect(SRC).toContain('git ls-remote --exit-code origin ')
+    // The bare form that printed the branch name back is gone.
+    expect(SRC).not.toMatch(/git rev-parse \$\{shSingleQuote\(forgeBranch\)\}/)
+  })
 })
 
 /**
