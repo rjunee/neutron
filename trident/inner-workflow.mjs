@@ -834,6 +834,13 @@ const FORGE_SCHEMA = {
     prNumber: { type: ['number', 'null'] },
     diffFile: { type: 'string' },
     testsPassed: { type: 'boolean' },
+    // OPTIONAL — deliberately NOT in `required`. Forge reports true only when it
+    // MATERIALLY deviated from the Ralph exec spec, which makes the plan the
+    // previous iteration committed a document that no longer describes reality:
+    // the next iteration must then pay for the full survey instead of taking the
+    // cheap `plan:next` continuation. Absent/null decodes as false everywhere, so
+    // an executor that never mentions it keeps today's behaviour exactly.
+    deviatedFromSpec: { type: ['boolean', 'null'] },
   },
 }
 
@@ -1564,7 +1571,8 @@ function ralphExecuteNote(plan) {
 ${plan.executionSpec}
 - Persist the plan: write IMPLEMENTATION_PLAN.md at the repo root with EXACTLY this body, but with the task above marked '- [x]':
 ${plan.implementationPlan}
-- Commit IMPLEMENTATION_PLAN.md together with your code + tests.`
+- Commit IMPLEMENTATION_PLAN.md together with your code + tests.
+- Report \`deviatedFromSpec: true\` in your structured result ONLY if you materially deviated from the EXECUTION SPEC above (different target files, a different design, or the task as built is not the task as specced) — a true here forces the next iteration to re-derive the whole plan, so do not set it for cosmetic drift. Otherwise report false or omit it.`
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -2222,7 +2230,10 @@ function classifyResume(input) {
   // From here the recorded OID and the live head are the SAME commit, so the
   // prior phase's outcome is about exactly the code this run is looking at.
   if (name === 'argus-approved') return { mode: 'approved', reason: 'head-unchanged' }
-  if (/^outer-published:[0-9a-f]{40}:\d+:\d+$/.test(name)) {
+  // The optional `:deviated` suffix is about the NEXT iteration's PLANNER, not
+  // about whether THIS invocation may skip its own re-build — so a deviated
+  // publish checkpoint classifies exactly as a clean one does.
+  if (/^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)) {
     return { mode: 'review', reason: 'outer-published-head-unchanged' }
   }
   if (name === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(name)) {
@@ -3676,7 +3687,7 @@ try {
   // facts it compares.
   const checkpointText = resumeCheckpoint
   const publishedResume = typeof checkpointText === 'string'
-    ? checkpointText.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
+    ? checkpointText.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)(:deviated)?$/)
     : null
   // The outer publisher's encoded OID is the newer, independently witnessed
   // record and takes precedence over the companion checkpoint column. It still
@@ -3788,6 +3799,12 @@ try {
   // Opus). Only in Ralph mode; a plain (non-ralph) task has no plan doc and
   // forge:build executes it directly (routed to Opus by the missing-tag default).
   let complexityTag = null
+  // Did THIS iteration's Forge materially deviate from the exec spec it was given?
+  // If so the IMPLEMENTATION_PLAN.md it committed may no longer describe reality,
+  // so the NEXT iteration must re-derive the whole plan from the code instead of
+  // reading the committed one. Declared here (ahead of the outer-published resume
+  // parse below) because both the resume path and the build path set it.
+  let taskDeviated = false
   // RALPH RE-FIRE (#362) — the count of tasks still UNCHECKED after the one this
   // iteration builds. >0 means the outer loop must re-fire a FRESH inner iteration
   // for the next task instead of merging after task 1 (the bug this fixes). Stays 0
@@ -3796,6 +3813,9 @@ try {
   if (publishedResume !== null) {
     round = Number(publishedResume[3])
     ralphRemaining = Number(publishedResume[2])
+    // The publish handoff carried the previous invocation's deviation fact across
+    // the process boundary (see the checkpoint format below).
+    if (publishedResume[4] !== undefined) taskDeviated = true
   }
   // The diff the reviewers read, the branch head the did-this-round-land check
   // baselines against, and the commit the merge is pinned to. Filled in by the
@@ -3949,6 +3969,11 @@ ${task}${reflectionGuidance}`,
     // The baseline for the did-this-round-land check below. Round 1's own commit is
     // the starting point; every fix round must move the branch past it.
     branchHead = forgeSha
+    // THE EXACT BOOLEAN ONLY (fail-closed, as `pr_merged` is decoded): a string
+    // 'true', a 1, or any other truthy stand-in is a field that did not arrive in
+    // the shape the schema asks for, and reading one as a deviation would spend the
+    // full 287 s survey on the next iteration for nothing.
+    if (ralph === true && forge.deviatedFromSpec === true) taskDeviated = true
 
     // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
     // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
@@ -3979,7 +4004,7 @@ ${task}${reflectionGuidance}`,
       // which the outer publisher `rev-parse --verify`s to get the real head.
       // `publishHead` is a best-effort CROSS-CHECK only, so a missing or
       // abbreviated claim must never discard a build that is already committed.
-      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: oidClaim(branchHead), remainingTasks: ralphRemaining }
+      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: oidClaim(branchHead), remainingTasks: ralphRemaining, deviatedFromSpec: taskDeviated }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -4023,8 +4048,15 @@ ${task}${reflectionGuidance}`,
   // (`classifyResume` sends this checkpoint name to rebuild however the head
   // compares, because the next task is still unbuilt).
   if (ralph === true && ralphRemaining > 0) {
+    // A DEVIATED HANDOFF IS A DIFFERENT CHECKPOINT NAME, and that is the whole
+    // mechanism: the cheap `plan:next` selection requires the EXACT name
+    // 'ralph-task-built', so 'ralph-task-built-deviated' fails that check and falls
+    // into `classifyResume`'s unknown-checkpoint → rebuild. The next iteration
+    // therefore runs the full `plan:fable` and re-derives the plan from the code,
+    // which is the correct price when the committed plan may no longer be true.
+    const builtCheckpoint = taskDeviated ? 'ralph-task-built-deviated' : 'ralph-task-built'
     log(`trident-v2 ralph: task built, ${ralphRemaining} task(s) remain → hand back to outer loop for re-fire`)
-    await checkpoint('ralph-task-built', { pr, head: branchHead })
+    await checkpoint(builtCheckpoint, { pr, head: branchHead })
     const refireResult = {
       ok: true,
       prNumber: pr,
@@ -4033,7 +4065,7 @@ ${task}${reflectionGuidance}`,
       // merges, on remainingTasks>0). Kept non-APPROVE as belt-and-suspenders.
       verdict: 'REQUEST_CHANGES',
       round,
-      checkpoint: 'ralph-task-built',
+      checkpoint: builtCheckpoint,
       remainingTasks: ralphRemaining,
     }
     await writeTerminalResult(refireResult)

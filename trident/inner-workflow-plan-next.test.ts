@@ -61,13 +61,35 @@ interface Opts {
   probe?: ProbeAnswer
   /** `true` → the `plan:next` seat returns nothing (planner terminal error). */
   planNextDead?: boolean
+  /** `true` → the mocked `forge:build` reports `deviatedFromSpec: true`, i.e. it
+   *  materially built something other than what its exec spec described. */
+  forgeDeviates?: boolean
+  /** What BOTH planner seats report as still unchecked AFTER this task. `0` (the
+   *  default) runs the iteration through to review; `>0` makes it hand back to the
+   *  outer loop, which is the only path that writes a `ralph-task-built*`
+   *  checkpoint. */
+  remainingTasks?: number
+  /** `'pr'` exercises the publish handoff (the build invocation exits early and the
+   *  deviation must ride the result out); `'local'` (default) writes the checkpoint
+   *  itself. */
+  mergeMode?: 'local' | 'pr'
+  /** `true` threads a dbPath/runId so `checkpoint()` actually dispatches its Bash
+   *  seat — which is the only way the CHECKPOINT NAME (as opposed to the returned
+   *  result field) shows up in the captured labels. */
+  withDb?: boolean
 }
 
 interface Out {
   captured: Captured[]
   labels: string[]
   logs: string[]
-  result: { ok: boolean; verdict: string | null; checkpoint: string; remainingTasks: number }
+  result: {
+    ok: boolean
+    verdict: string | null
+    checkpoint: string
+    remainingTasks: number
+    deviatedFromSpec?: boolean
+  }
 }
 
 async function run(opts: Opts = {}): Promise<Out> {
@@ -93,10 +115,11 @@ async function run(opts: Opts = {}): Promise<Out> {
         topTask: 'T2 — the task THIS iteration must pick up',
         executionSpec: 'TARGET FILES: t2.ts',
         complexity: 'reasoning',
-        // 0 so the iteration flows into forge:build + review instead of handing
-        // straight back to the outer loop for a re-fire — the planner choice is
-        // what is under test, and the re-fire path would cut the run short.
-        remainingTasks: 0,
+        // 0 by default so the iteration flows into forge:build + review instead of
+        // handing straight back to the outer loop for a re-fire — the planner choice
+        // is what is under test, and the re-fire path would cut the run short. The
+        // deviation tests set it >0, because the re-fire IS the path they exercise.
+        remainingTasks: opts.remainingTasks ?? 0,
       }
     }
     if (label === 'plan:fable') {
@@ -105,7 +128,7 @@ async function run(opts: Opts = {}): Promise<Out> {
         topTask: 'T2 — the task THIS iteration must pick up',
         executionSpec: 'TARGET FILES: t2.ts',
         complexity: 'reasoning',
-        remainingTasks: 0,
+        remainingTasks: opts.remainingTasks ?? 0,
       }
     }
     if (label === 'forge:build' || label.startsWith('forge:fix-round-')) {
@@ -116,6 +139,9 @@ async function run(opts: Opts = {}): Promise<Out> {
         worktreePath: '/wt',
         commitSha: OTHER_HEAD,
         testsPassed: true,
+        // Absent unless the test asks for it — the field is OPTIONAL in FORGE_SCHEMA,
+        // and the default path must behave exactly as it did before this card.
+        ...(opts.forgeDeviates === true ? { deviatedFromSpec: true } : {}),
       }
     }
     if (label.startsWith('head-probe-round-')) return { head: OTHER_HEAD }
@@ -142,11 +168,12 @@ async function run(opts: Opts = {}): Promise<Out> {
     ralph: opts.ralph !== false,
     // local mode keeps the panel small and stops the run short of the pr-mode
     // publish handoff; the planner choice is git-mode independent.
-    mergeMode: 'local',
+    mergeMode: opts.mergeMode ?? 'local',
     prNumber: opts.prNumber ?? null,
     branch: opts.branch ?? 'trident/plan-next-run',
-    dbPath: null, // → checkpoint()/writeTerminalResult() no-op; the RETURN carries the result
-    runId: null,
+    // null → checkpoint()/writeTerminalResult() no-op; the RETURN carries the result.
+    dbPath: opts.withDb === true ? '/tmp/plan-next.db' : null,
+    runId: opts.withDb === true ? 'run-plan-next' : null,
     resumeCheckpoint: opts.resumeCheckpoint ?? null,
     resumeCheckpointHead: opts.resumeCheckpointHead ?? null,
     resumeFindings: null,
@@ -349,6 +376,125 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
     expect(
       out.logs.some((l) => l.includes('plan:next returned null (planner terminal error)')),
     ).toBe(true)
+  })
+})
+
+/**
+ * A DEVIATED FORGE INVALIDATES THE COMMITTED PLAN. `plan:next`'s whole saving rests
+ * on the assumption that the IMPLEMENTATION_PLAN.md the previous iteration committed
+ * still describes the code. When Forge materially built something other than what its
+ * exec spec said, that assumption is false and the cheap planner would hand the next
+ * iteration a stale document. The mechanism is one checkpoint NAME: the deviated
+ * variant fails T1's exact-name predicate and lands in `classifyResume`'s
+ * unknown-checkpoint → rebuild, which is the full `plan:fable`.
+ */
+describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkpoint', () => {
+  test('LOCAL mode: a deviating Forge writes ralph-task-built-deviated', async () => {
+    const out = await run({
+      ralph: true,
+      ralphRound: 0,
+      remainingTasks: 2,
+      forgeDeviates: true,
+      withDb: true,
+    })
+
+    expect(out.result.checkpoint).toBe('ralph-task-built-deviated')
+    expect(out.result.remainingTasks).toBe(2)
+    // The RECORDED name matters as much as the returned one: the next invocation
+    // reads the row, not this object.
+    expect(out.labels).toContain('checkpoint:ralph-task-built-deviated')
+    expect(out.labels).not.toContain('checkpoint:ralph-task-built')
+  })
+
+  test('LOCAL mode: a Forge that did NOT deviate still writes ralph-task-built', async () => {
+    // The default guard. Nothing about the handoff may change for the overwhelmingly
+    // common case, or every iteration pays the survey and the card achieves nothing.
+    const out = await run({ ralph: true, ralphRound: 0, remainingTasks: 2, withDb: true })
+
+    expect(out.result.checkpoint).toBe('ralph-task-built')
+    expect(out.labels).toContain('checkpoint:ralph-task-built')
+    expect(out.labels).not.toContain('checkpoint:ralph-task-built-deviated')
+  })
+
+  test('the NEXT iteration after a deviated handoff pays for the full survey', async () => {
+    // THE ACCEPTANCE CRITERION, asserted where it is observable: which planner seat
+    // the following iteration dispatches. Everything else in this file is plumbing
+    // that exists to make this line true.
+    const out = await run({
+      ralph: true,
+      ralphRound: 3,
+      resumeCheckpoint: 'ralph-task-built-deviated',
+      resumeCheckpointHead: HEAD,
+      resumeLiveHead: HEAD,
+    })
+
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:probe')
+    expect(out.labels).not.toContain('plan:next')
+  })
+
+  test('the same iteration after a CLEAN handoff still takes the cheap path', async () => {
+    // The contrast that makes the test above mean something: identical round,
+    // identical heads — only the checkpoint name differs.
+    const out = await run(cleanHandoff(3))
+
+    expect(out.labels).toContain('plan:next')
+    expect(out.labels).not.toContain('plan:fable')
+  })
+
+  test('PR mode: the deviation rides the publish handoff out of the build invocation', async () => {
+    // In pr mode this invocation EXITS at the publish handoff — it never reaches the
+    // checkpoint that names the deviation. The result field is the only channel.
+    const deviated = await run({
+      ralph: true,
+      ralphRound: 0,
+      mergeMode: 'pr',
+      remainingTasks: 2,
+      forgeDeviates: true,
+    })
+
+    expect(deviated.result.checkpoint).toBe('forge-done')
+    expect(deviated.result.deviatedFromSpec).toBe(true)
+
+    const clean = await run({ ralph: true, ralphRound: 0, mergeMode: 'pr', remainingTasks: 2 })
+    expect(clean.result.checkpoint).toBe('forge-done')
+    expect(clean.result.deviatedFromSpec).toBe(false)
+  })
+
+  test('PR mode: an outer-published resume carrying :deviated writes the deviated checkpoint', async () => {
+    // The SECOND invocation. It skips the build entirely (classifyResume must still
+    // read the suffixed name as a review-eligible publish checkpoint), so the only
+    // thing it knows about the deviation is the suffix the outer publisher appended.
+    const out = await run({
+      ralph: true,
+      ralphRound: 2,
+      mergeMode: 'pr',
+      resumeCheckpoint: `outer-published:${HEAD}:2:1:deviated`,
+      resumeLiveHead: HEAD,
+      withDb: true,
+    })
+
+    expect(out.labels).not.toContain('forge:build')
+    expect(out.result.checkpoint).toBe('ralph-task-built-deviated')
+    expect(out.result.remainingTasks).toBe(2)
+    expect(out.labels).toContain('checkpoint:ralph-task-built-deviated')
+  })
+
+  test('PR mode: an outer-published resume WITHOUT the suffix is unchanged', async () => {
+    // The byte-identical-old-format guard: the suffix is optional, and its absence
+    // must leave the existing publish→review→re-fire path exactly as it was.
+    const out = await run({
+      ralph: true,
+      ralphRound: 2,
+      mergeMode: 'pr',
+      resumeCheckpoint: `outer-published:${HEAD}:2:1`,
+      resumeLiveHead: HEAD,
+      withDb: true,
+    })
+
+    expect(out.labels).not.toContain('forge:build')
+    expect(out.result.checkpoint).toBe('ralph-task-built')
+    expect(out.result.remainingTasks).toBe(2)
   })
 })
 

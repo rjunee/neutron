@@ -211,6 +211,16 @@ export interface InnerResult {
    * of truth for an OID. `null` = no plausible claim arrived — still publishable.
    */
   publish_head?: string | null
+  /**
+   * Forge reported that it MATERIALLY deviated from the Ralph exec spec it was given,
+   * so the IMPLEMENTATION_PLAN.md it committed may no longer describe the code. In pr
+   * mode the orchestrator suffixes the `outer-published:` checkpoint with `:deviated`,
+   * the resumed invocation writes the `ralph-task-built-deviated` checkpoint variant,
+   * and the NEXT iteration pays for the full `plan:fable` survey instead of the cheap
+   * continuation planner. The EXACT boolean only — absent/garbled → false, because a
+   * false positive here costs ~5 minutes of re-planning per iteration.
+   */
+  deviated_from_spec: boolean
 }
 
 /** The terminal outcome of FIRING the workflow (NOT the build result). */
@@ -552,6 +562,10 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // workflow writes, and this flag SKIPS the merge — so an accidental true would
     // silently strand an unmerged PR as "done".
     pr_merged: p.prMerged === true,
+    // Same exact-boolean rule, for the same reason in the opposite direction: a
+    // truthy stand-in read as a deviation forces the next Ralph iteration back onto
+    // the whole-repo survey this card exists to stop paying for.
+    deviated_from_spec: p.deviatedFromSpec === true,
     publish_requested: p.publishRequested === true,
     // A CLAIM, NOT THE SOURCE. Anything that could plausibly be an OID — 7 to 40 hex
     // chars, either case — is kept VERBATIM for the outer publisher to CHECK against

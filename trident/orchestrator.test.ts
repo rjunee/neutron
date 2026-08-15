@@ -189,6 +189,61 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
   })
 
+  /**
+   * THE DEVIATION SUFFIX IS THE ONLY THING THAT SURVIVES THE PROCESS BOUNDARY in pr
+   * mode. The build invocation exits at the publish handoff, so the Forge that
+   * reported it deviated from its exec spec is long gone by the time the SECOND
+   * invocation writes `ralph-task-built*`. The outer publisher's checkpoint string
+   * is the only channel between them — drop the suffix here and the next iteration
+   * silently plans from a document the build no longer matches.
+   */
+  test('a publish handoff carrying deviatedFromSpec suffixes the outer-published checkpoint', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const stale = '9'.repeat(40)
+    let fires = 0
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? {
+              result: {
+                verdict: 'REQUEST_CHANGES',
+                branch: 'feat-x',
+                checkpoint: 'forge-done',
+                publishRequested: true,
+                publishHead: head,
+                remainingTasks: 2,
+                deviatedFromSpec: true,
+              },
+            }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes('gh pr list')) return ok('42')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+
+    await runToTerminal(h, run.id)
+
+    // Both the persisted patch and the relaunch input carry it — the row is what a
+    // crashed outer loop re-reads, the input is what the workflow actually parses.
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:2:1:deviated`)
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:2:1:deviated`)
+    // …and the suffix must not break the recorded-OID extraction the live-head read
+    // is gated on, or the resume would rebuild for the wrong reason.
+    expect(h.inputs[1]!.resume_live_head).toBe(head)
+  })
+
   test('a successful push without a matching origin witness fails closed', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const other = '1111111111111111111111111111111111111111'
