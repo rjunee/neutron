@@ -239,6 +239,19 @@ function WorkBoardBody({
     };
   }, [activityClient, projectId]);
 
+  // The board's own slow poll, for the same reason and only while it is needed:
+  // `inline_active` arrives DERIVED from a 90 s evidence window, so it expires by
+  // the clock with no write to push a fresh snapshot. Without this the pane would
+  // hold the last frame it was sent — a card pulsing with ▶ suppressed on a board
+  // where nothing is happening. Gated on a card actually reading inline-active,
+  // so a quiet board never polls.
+  const hasInlineActive = items.some((it) => it.inline_active);
+  useEffect(() => {
+    if (!hasInlineActive) return;
+    const t = setInterval(refresh, ACTIVITY_POLL_MS);
+    return () => clearInterval(t);
+  }, [hasInlineActive, refresh]);
+
   const activityState: ActivityState = workActivityState({
     snapshot: activitySnapshot,
     rows: activityRows,

@@ -288,12 +288,13 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
  * two-clause form (`!isLinkedRunning && status !== 'done'`) does not mention
  * inline_active. This extension prevents launching a competing Trident build
  * while an inline agent action is already executing. The old staleness caveat is
- * RESOLVED: the SERVER now derives `inline_active` from inspector evidence at
- * every read boundary (WS `work_board_changed` frame, HTTP list + echoes, rail
- * extras, per-turn fragment, agent `work_board_list`), so a crashed session's
- * stale flag heals on the wire within `INLINE_EVIDENCE_WINDOW_MS` (90 s) and the
- * permanent pulse+no-▶ state can no longer occur. This client keeps reading the
- * wire field unchanged.
+ * narrowed, NOT abolished: the SERVER now derives `inline_active` from
+ * write-class evidence at every read boundary (WS `work_board_changed` frame,
+ * HTTP list + echoes, rail extras, per-turn fragment, agent `work_board_list`),
+ * so a crashed session's stale flag reads false on the NEXT read. It heals on a
+ * clock, not on an event, so a client that stops re-reading keeps showing the
+ * last frame it was sent — which is why the board screen re-polls while any card
+ * reads inline-active. This helper keeps reading the wire field unchanged.
  */
 export function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;

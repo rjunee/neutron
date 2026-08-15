@@ -360,7 +360,7 @@ describe('work_board_list derived inline activity', () => {
   let seenProjectIds: string[] = []
   const dep = (items: WorkBoardItem[], project_id: string): WorkBoardItem[] => {
     seenProjectIds.push(project_id)
-    return withDerivedInlineActive(items, { lastRealActivityAt: () => evidenceAt }, project_id, now)
+    return withDerivedInlineActive(items, { lastWriteActivityAt: () => evidenceAt }, project_id, now)
   }
 
   function wired(): ToolRegistry {

@@ -500,7 +500,7 @@ import { buildTridentTerminator, type TridentTerminator } from '@neutronai/tride
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
 import {
-  withDerivedInlineActive,
+  makeInlineActivityDeriver,
   type InlineEvidenceReader,
 } from '@neutronai/work-board/inline-activity.ts'
 import { buildNexusReaderSeam } from './wiring/nexus-reader-seam.ts'
@@ -2238,6 +2238,14 @@ export function buildOpenGraphComposer(
     // Same late-binding shape as buildClarifyPoster: these rail/WS closures are
     // defined before ActivityInspector, but dereference the holder at fire time.
     const inlineEvidenceReader: InlineEvidenceReader = {}
+    // ONE deriver for every read boundary (rail extras, the WS frame, the HTTP
+    // surface, the per-turn fragment, the agent's `work_board_list`). The scope
+    // key and the clock are decided HERE, once, so no call site can pass the
+    // wrong scope or a stale `now` — see makeInlineActivityDeriver's header.
+    const deriveInlineActivity = makeInlineActivityDeriver({
+      reader: inlineEvidenceReader,
+      scopeKey: inspectorScopeKey,
+    })
     // M1 UX REDESIGN — the rail-redesign per-project derived fields
     // (`activity` / `preview` / `preview_from` / `live_runs`). Pure derivation in
     // `open/project-rail.ts`; here we only COLLECT the signals from the project's
@@ -2259,12 +2267,7 @@ export function buildOpenGraphComposer(
       try {
         const scopeKey = workBoardScopeKey(project_slug, project_id)
         const nowMs = Date.now()
-        const items = withDerivedInlineActive(
-          workBoardStore.list(scopeKey),
-          inlineEvidenceReader,
-          inspectorScopeKey(project_id),
-          nowMs,
-        )
+        const items = deriveInlineActivity(workBoardStore.list(scopeKey), project_id)
         // Item-level signals (pure, unit-tested via scanItemsForRailSignals):
         // catches runless-but-failed items (cleared link / research/dispatch)
         // AND still-bound terminal-failed runs. See open/project-rail.ts.
@@ -3713,12 +3716,7 @@ export function buildOpenGraphComposer(
         const frame: AppWsOutboundWorkBoardChanged = {
           v: 1,
           type: 'work_board_changed',
-          items: withDerivedInlineActive(
-            workBoardStore.list(changedKey),
-            inlineEvidenceReader,
-            inspectorScopeKey(framePid),
-            nowMs,
-          ).map((it) => {
+          items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
             const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
             return {
@@ -3993,8 +3991,7 @@ export function buildOpenGraphComposer(
       // the correct post-crash semantics). `inspectorScopeKey('general') ===
       // 'general'` matches the tap's General scope, so the URL project_id feeds
       // straight through. Display-only: it gates nothing.
-      derive_inline_active: (items, project_id) =>
-        withDerivedInlineActive(items, inlineEvidenceReader, inspectorScopeKey(project_id), Date.now()),
+      derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
       // The board scope and the DOCS project id are separate arguments on purpose:
       // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a
@@ -4052,8 +4049,8 @@ export function buildOpenGraphComposer(
         }
       },
     })
-    inlineEvidenceReader.lastRealActivityAt = (scope): number =>
-      activityInspector.lastRealActivityAt(scope)
+    inlineEvidenceReader.lastWriteActivityAt = (scope): number =>
+      activityInspector.lastWriteActivityAt(scope)
     // The tool tap: `activity-tap.ts` (a Pre/PostToolUse hook running in the CC
     // subprocess) POSTs each tool start/finish to the substrate sink's `/activity`
     // route, which dispatches this closure. THIS is where the panel's real content
@@ -5003,18 +5000,19 @@ export function buildOpenGraphComposer(
             // (no project_id) → the owner slug, as before.
             //
             // The injected board carries the DERIVED inline activity (T4): the
-            // fragment's `·inline` marker now reads inspector evidence, so the
-            // agent cannot be lied to by its OWN stale flag — a crashed session's
-            // stuck `inline_active` reads not-active, and live inline work reads
-            // active with no `work_board_update` anywhere in the path. ONE O(1)
-            // evidence read per turn; display-only, it gates nothing.
+            // fragment's `·inline` marker reads the inspector's WRITE clock, so
+            // the agent cannot be lied to by its OWN stale flag — a crashed
+            // session's stuck `inline_active` reads not-active, and live inline
+            // work reads active with no `work_board_update` anywhere in the path.
+            // The clock being write-only is what keeps this marker meaningful
+            // here: the previous turn's `reply` is a `token` row, so a
+            // back-to-back conversation does NOT report every card as ·inline.
+            // ONE O(1) evidence read per turn; display-only, it gates nothing.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
-                withDerivedInlineActive(
+                deriveInlineActivity(
                   workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
-                  inlineEvidenceReader,
-                  inspectorScopeKey(project_id),
-                  Date.now(),
+                  project_id,
                 ),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
@@ -5877,8 +5875,7 @@ export function buildOpenGraphComposer(
         store: workBoardStore,
         spec_doc: workBoardSpecDoc,
         chat_ack: workBoardChatAck,
-        derive_inline_active: (items, project_id) =>
-          withDerivedInlineActive(items, inlineEvidenceReader, inspectorScopeKey(project_id), Date.now()),
+        derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
       },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path

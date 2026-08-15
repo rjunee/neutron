@@ -96,15 +96,26 @@ harvest-before-reap is preserved: a crashed row that already carries a terminal
 ## 2026-08-14 — inline activity is derived from evidence; the stored flag is a hint
 
 A Work Board card's `inline_active` used to be a promise the agent had to both make
-and retract. It now reads the world: every read boundary maps its items through
-`withDerivedInlineActive` (`work-board/inline-activity.ts`) before they leave the
-server — the project-rail extras, the WS `work_board_changed` frame, the HTTP list /
-reorder / create / update / complete responses (`gateway/http/work-board-surface.ts`),
-the per-turn `<work_board>` fragment the agent is grounded on, and the agent's own
-`work_board_list` tool. The stored column is untouched by any read; where the flag
-and the evidence disagree, the evidence wins. Clients (`app/`, `landing/`) are
-unchanged — they keep reading the wire field, which is now the derived value, so the
-old `canPlay` staleness caveat is retired rather than worked around.
+and retract. It now reads the world: every read boundary maps its items through one
+deriver (`makeInlineActivityDeriver`, `work-board/inline-activity.ts`) before they
+leave the server — the project-rail extras, the WS `work_board_changed` frame, the
+HTTP list / reorder / create / update / complete responses
+(`gateway/http/work-board-surface.ts`), the per-turn `<work_board>` fragment the
+agent is grounded on, and the agent's own `work_board_list` tool. The stored column
+is untouched by any read; where the flag and the evidence disagree, the evidence
+wins.
+
+WHAT COUNTS AS EVIDENCE, precisely: the inspector's THIRD clock,
+`lastWriteActivityAt(scope)` — advanced only by a row a mapper classified
+write-class (`isWriteClassTool`: the file-mutating tools, and a shell call whose
+command mutates — `git commit`, `rm`, `sed -i`, an output redirect). It is
+deliberately NOT `last_real_activity_at`, the wedge clock, which every `turn_start`,
+every status notice and the agent's own reply advance: wired to that clock, asking
+the agent an unrelated question marked every runless in-progress card as being
+worked on for 90 s, which is the stored flag's original lie with an extra step. The
+classifier fails CLOSED — an unrecognised shell form is not write-class, so the
+board under-claims rather than over-claims (acceptance (c) beats acceptance (a) on a
+tie).
 
 Evidence is TIER 1 ONLY: one O(1) in-memory `ActivityInspector` Map read per board
 render, keyed by `inspectorScopeKey(project_id)`, fed by the PreToolUse/PostToolUse
@@ -112,9 +123,15 @@ tap that was already running. Never per row, never a shell-out, no I/O on the re
 path — the helper is BATCH-shaped precisely so the reader cannot be called inside the
 per-item loop. Tiers 2 and 3 of the card (commits on the card's branch, a dirty
 worktree) are recorded non-goals; they would shell out per row per render. The
-freshness window is `INLINE_EVIDENCE_WINDOW_MS = 90_000`, aligned with the inspector's
-`WEDGE_AFTER_MS`, and synthetic keepalives are excluded from the clock, so a stalled
-session cannot hold the signal on.
+freshness window is `INLINE_EVIDENCE_WINDOW_MS = 90_000`, held equal to the
+inspector's `WEDGE_AFTER_MS` by a test (the module is a dependency-free leaf and
+cannot import it).
+
+KNOWN GRANULARITY, stated rather than implied: the clock is per PROJECT, because a
+card carries no session binding. A write in a project therefore marks every runless
+in-progress card of that project active for the window — it cannot say WHICH of two
+simultaneously in-progress cards is being written. Narrowing that needs a
+card↔session binding on the row and is a separate change.
 
 The crashed-session heal is by construction, not by a reconciler: the inspector's
 buffer dies with the process, so after a restart evidence reads 0 and every stale
@@ -122,17 +139,35 @@ flag reads not-active. A late-bound `inlineEvidenceReader` holder in `open/compo
 gives the same fail-soft answer before the inspector exists (unset ⇒ evidence 0 ⇒ not
 active), which is why construction order does not matter at any of the five call sites.
 
+IT HEALS ON A CLOCK, NOT ON AN EVENT. Expiry produces no write, so nothing fans a
+frame: a client that stops re-reading keeps rendering the last board it was sent.
+Both clients therefore re-poll every 15 s while any card reads inline-active
+(`landing/chat-react/WorkBoardTab.tsx`, `app/app/projects/[id]/workboard.tsx`) — the
+existing live-run poll cannot cover it, since a derived-inline card is runless by
+construction (rule R2). A quiet board still polls nothing.
+
+ONE DELIBERATE ASYMMETRY: the HTTP echoes of create/update/complete derive, while
+the AGENT-TOOL mutation echoes (`work-board/agent-tool.ts`) return the raw stored
+hint. Those echoes are transactional acks of the write just performed — the agent
+asked for a value and gets back what was stored — whereas the HTTP echo is what a
+client paints straight into the board. The read surfaces the agent sees (the
+`<work_board>` fragment and `work_board_list`) do derive.
+
 Nothing here blocks, denies, delays or gates a tool call — this is the display-only
 salvage of the cancelled PreToolUse-gate plan, and the agent-tool dep is threaded as
 an optional opt (absent ⇒ byte-identical raw passthrough on legacy boxes). Mutant
-pins: `work-board/inline-activity.test.ts` (unconditional-true, the latch, the
-keepalive, the exact window boundary), `work-board/agent-tool.test.ts`
-(activation with no `work_board_update` in the path, the stale-flag heal, the
-no-latch expiry, dep-absent passthrough, the General scope id, and an
-`inline_active` write still returning `ok`), `gateway/http/work-board-surface.test.ts`
-(acceptance a–e per response shape) and `open/__tests__/inline-activity-wiring.test.ts`
-(the five composer call sites, the fragment site by name, the late binding, and the
-`build-core-modules.ts` threading).
+pins: `work-board/inline-activity.test.ts` (unconditional-true, the latch, the exact
+window boundary, and the deriver's scope-key + per-call-clock contract),
+`open/activity-inspector.test.ts` (the write clock vs the wedge clock on a
+no-write turn, the keepalive mutant, the classifier, the window equality),
+`work-board/agent-tool.test.ts` (activation with no `work_board_update` in the path,
+the stale-flag heal, the no-latch expiry, dep-absent passthrough, the General scope
+id, and an `inline_active` write still returning `ok`),
+`gateway/http/work-board-surface.test.ts` (acceptance a–e per response shape, with
+(d) asserting the mutations actually landed) and
+`open/__tests__/inline-activity-wiring.test.ts` (real tap → real inspector → real
+deriver for a–c, plus the five composer call sites, the fragment site by name, the
+late binding, and the `build-core-modules.ts` threading).
 
 ## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
 

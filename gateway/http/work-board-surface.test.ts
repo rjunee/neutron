@@ -716,7 +716,7 @@ describe('work-board HTTP surface — per-project scoping (Bug 3)', () => {
  */
 describe('derived inline activity on the HTTP surface', () => {
   const NOW = 1_000_000
-  /** ms epoch of the last real (non-keepalive) tap; 0 = none ever. */
+  /** ms epoch of the last WRITE-CLASS tap; 0 = none ever. */
   let evidenceAt = 0
   let readerCalls = 0
   let wired: WorkBoardSurface
@@ -725,7 +725,7 @@ describe('derived inline activity on the HTTP surface', () => {
     evidenceAt = 0
     readerCalls = 0
     const reader: InlineEvidenceReader = {
-      lastRealActivityAt: () => {
+      lastWriteActivityAt: () => {
         readerCalls++
         return evidenceAt
       },
@@ -850,16 +850,14 @@ describe('derived inline activity on the HTTP surface', () => {
         req('POST', `/api/app/projects/${project}/work-board/${id}/complete`, {}),
       )
       const completedText = await completed!.text()
-      // No response may carry a denial/gating shape — this work is display-only.
-      for (const text of [
-        createdText,
-        await patched!.text(),
-        await reordered!.text(),
-        completedText,
-      ]) {
-        expect(text).not.toContain('denied')
-        expect(text).not.toContain('blocked')
-      }
+      // Every mutation ACTUALLY LANDED — the load-bearing form of "nothing is
+      // gated". A substring hunt for 'denied' over an `{item:{…}}` body proves
+      // nothing; a write that the derivation suppressed would show up here as a
+      // missing item or an unchanged status.
+      const patchedBody = JSON.parse(await patched!.text()) as { item: { status: string } }
+      expect(patchedBody.item.status).toBe('in_progress')
+      const reorderedBody = JSON.parse(await reordered!.text()) as { items: { id: string }[] }
+      expect(reorderedBody.items.map((i) => i.id)).toContain(id)
       // `complete` flips status to 'done', so its echo derives false via R1.
       const completedBody = JSON.parse(completedText) as { item: { inline_active: boolean } }
       expect(completedBody.item.inline_active).toBe(false)
