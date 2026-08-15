@@ -2,6 +2,27 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
+
+`renderHostDeployApprovalBody`'s last line said "Tap Approve or Deny. Typing anything
+else will NOT approve this deploy" — true, but the one string that DOES work when the
+buttons are unreachable (`hdp:<token>:a` / `:d`) was visible only inside
+`button_prompts.options_json`, which no surface renders. An owner locked out of the
+buttons had no recoverable path; the message told him only what would fail.
+
+`request()` now computes `approve_value`/`deny_value` ONCE, before building either the
+`ButtonOption[]` or the rendered body, and passes the same two strings into both — the
+render function's input type makes them required, so no future caller can ship a body
+without the fallback. The body prints each as inline code (the token alphabet is
+`[A-Za-z0-9_-]`, so a single backtick can never be escaped) with a one-line explanation
+of which approves and which denies.
+
+Three tests prove it end-to-end rather than by shape: the body contains the exact
+strings the emitted `options[]` carry (no separately-typed literal to drift); a token
+extracted with a regex FROM THE RENDERED BODY (not from the options array) drives a
+real approval through `handleOwnerButtonAnswer`; and the fallback lines render after
+the "bound to `<sha>`" sentence with the commit fence still intact.
+
 ## 2026-08-15 — the review gate waits as long as GitHub actually takes
 
 `REVIEW_READINESS_ATTEMPTS = 3` x `REVIEW_READINESS_RETRY_MS = 15000` gave the

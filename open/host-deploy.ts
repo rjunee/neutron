@@ -407,6 +407,10 @@ export function renderHostDeployApprovalBody(input: {
   /** `target..current` — what a rollback/sideways move would REMOVE. */
   removed?: readonly HostDeployCommit[]
   removed_total?: number
+  /** The EXACT option value that approves — printed in the body as the typed fallback. */
+  approve_value: string
+  /** The EXACT option value that denies. */
+  deny_value: string
 }): string {
   const { ref, current_sha, target_sha, commits, total } = input
   const removed = input.removed ?? []
@@ -456,7 +460,18 @@ export function renderHostDeployApprovalBody(input: {
     'Nothing is deployed unless you tap Approve. This approval is bound to ' +
       `${shortSha(target_sha)} — if ${ref} moves before you answer, it is refused and you are asked again.`,
   )
-  parts.push('Tap Approve or Deny. Typing anything else will NOT approve this deploy.')
+  // The token alphabet is `[A-Za-z0-9_-]` (HOST_DEPLOY_VALUE_RE), so a single
+  // backtick inline code span can never be escaped by it — no safeFence needed.
+  // Inline code stops Markdown from mangling the `_`/`-` characters and makes
+  // the string copy-typable. These MUST be the same strings the buttons carry
+  // (computed once in `request()`) — that identity is the whole point: both
+  // resolve through the same `handleOwnerButtonAnswer` exact-match path.
+  parts.push(
+    'Tap Approve or Deny. If the buttons are not visible where you are reading this, type one of these exact lines instead:',
+  )
+  parts.push(`- \`${input.approve_value}\` — approves this deploy`)
+  parts.push(`- \`${input.deny_value}\` — denies it`)
+  parts.push('Any other text will NOT approve this deploy.')
   return parts.join('\n')
 }
 
@@ -665,16 +680,20 @@ export function createHostDeployService(
 
     // ── (d) emit the CODE-rendered approval prompt carrying the commit list.
     try {
+      // Computed ONCE so the buttons and the typed fallback printed in the body
+      // can never drift apart — both resolve through the same exact-match path.
+      const approve_value = `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:a`
+      const deny_value = `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:d`
       const options: ButtonOption[] = [
         {
           label: 'Approve',
           body: 'Approve this host deploy',
-          value: `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:a`,
+          value: approve_value,
         },
         {
           label: 'Deny',
           body: 'Deny this host deploy',
-          value: `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:d`,
+          value: deny_value,
         },
       ]
       await emit({
@@ -687,6 +706,8 @@ export function createHostDeployService(
           total: range.total,
           removed: rolled_back.commits,
           removed_total: rolled_back.total,
+          approve_value,
+          deny_value,
         }),
         options,
         idempotency_key: `host-deploy-approval:${approval_id}`,

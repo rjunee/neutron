@@ -62,6 +62,10 @@ const MOVED_SHA = '99887766554433221100ffeeddccbbaa99887766'
 const URL = 'https://control.example.test/v1/deploy'
 const TOKEN = 'hdp-secret-token-9f3a2b1c8d7e6f5a4b3c2d1e'
 
+/** Fixed option values for tests that call `renderHostDeployApprovalBody` directly. */
+const APPROVE_VALUE = 'hdp:AAAAAAAAAAAAAAAAAAAAAA:a'
+const DENY_VALUE = 'hdp:AAAAAAAAAAAAAAAAAAAAAA:d'
+
 let tmp: string
 let db: ProjectDb
 let approvals: ApprovalManager
@@ -410,6 +414,50 @@ describe('the approval body carries the ACTUAL commit list', () => {
     }
   })
 
+  test('the typed fallback in the body is the SAME string the buttons carry — no drift', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+
+    const emit = h.emits[0]!
+    expect(emit.body).toContain(emit.options[0]!.value)
+    expect(emit.body).toContain(emit.options[1]!.value)
+    expect(emit.body).not.toContain('Typing anything else will NOT approve this deploy')
+  })
+
+  test('the approve string printed in the body actually approves, end to end', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+
+    const emit = h.emits[0]!
+    const m = emit.body.match(/hdp:[A-Za-z0-9_-]{22}:a/)
+    expect(m).not.toBeNull()
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: m![0],
+      topic_id: emit.topic_id,
+      prior_option_values: emit.options.map((o) => o.value),
+    })
+    expect(h.dispatchCalls).toHaveLength(1)
+    expect(out!.body).toContain('Deploy requested')
+  })
+
+  test('the typed fallback appears after the binding sentence, and the fence still holds', async () => {
+    const h = harness()
+    await h.service.request({})
+    const body = h.emits[0]!.body
+
+    const boundIdx = body.indexOf('This approval is bound to')
+    const fallbackIdx = body.indexOf('type one of these exact lines instead')
+    expect(boundIdx).toBeGreaterThan(-1)
+    expect(fallbackIdx).toBeGreaterThan(boundIdx)
+
+    // The commit list still renders inside a fence.
+    expect(body).toContain('```')
+  })
+
   test('an over-cap range counts the remainder instead of silently truncating', () => {
     const body = renderHostDeployApprovalBody({
       ref: 'origin/main',
@@ -417,6 +465,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: COMMITS.slice(0, 2),
       total: 57,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('57 commits would land:')
     expect(body).toContain('… and 55 more commits')
@@ -429,6 +479,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [],
       total: 0,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('SIDEWAYS or BACKWARD')
     expect(body).toContain('(no new commits)')
@@ -470,6 +522,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       total: 3,
       removed: COMMITS,
       removed_total: 3,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('3 commits would land:')
     expect(body).not.toContain('ROLLED BACK')
@@ -484,6 +538,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       total: 0,
       removed: [],
       removed_total: 0,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('Nothing would be rolled back either')
   })
@@ -513,6 +569,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [{ sha: COMMITS[0]!.sha, subject: hostile }],
       total: 1,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).not.toContain('\r')
   })
@@ -528,6 +586,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [{ sha: COMMITS[0]!.sha, subject: hostile }],
       total: 1,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).not.toContain('\u202E')
     expect(body).not.toContain('\u200B')
@@ -540,6 +600,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [{ sha: COMMITS[0]!.sha, subject: 'fix: ``` then **bold** injected' }],
       total: 1,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     // The fence must be LONGER than the longest backtick run inside it.
     expect(body).toContain('````')
