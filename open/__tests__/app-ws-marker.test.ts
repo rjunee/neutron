@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 
-import { parseAppWsSendMarker } from '../wiring/app-ws-marker.ts'
+import { parseAppWsSendMarker, shouldNotifyForSend } from '../wiring/app-ws-marker.ts'
 
 describe('parseAppWsSendMarker', () => {
   test('a live marker is delivered, durable, and carries its id', () => {
@@ -87,5 +87,50 @@ describe('parseAppWsSendMarker', () => {
     for (const m of ['app-ws:1', 'app-ws:dropped:1', 'app-ws:lost:1']) {
       expect(parseAppWsSendMarker(m).delivered_live).toBe(live(m))
     }
+  })
+})
+
+/**
+ * Whether a send notifies. Extracted from the composer because a decision only
+ * reachable by booting a 6000-line composer is a decision nothing tests.
+ */
+describe('shouldNotifyForSend', () => {
+  const live = parseAppWsSendMarker('app-ws:m1')
+  const dropped = parseAppWsSendMarker('app-ws:dropped:m2')
+  const lost = parseAppWsSendMarker('app-ws:lost:m3')
+  const none = parseAppWsSendMarker(undefined)
+  const base = { owns_notify: true, system_notice: false }
+
+  test('a live reply notifies', () => {
+    expect(shouldNotifyForSend({ ...base, sent: live })).toBe(true)
+  })
+
+  test('a DROPPED reply notifies — nobody was listening, which is the point', () => {
+    expect(shouldNotifyForSend({ ...base, sent: dropped })).toBe(true)
+  })
+
+  test('a LOST reply does NOT — there is no row for the tap to open', () => {
+    expect(shouldNotifyForSend({ ...base, sent: lost })).toBe(false)
+  })
+
+  test('nothing sent does not notify', () => {
+    expect(shouldNotifyForSend({ ...base, sent: none })).toBe(false)
+  })
+
+  test('a call site that does NOT own the notification stays silent', () => {
+    // `deliver` notifies from its own seam. Without this the E2E saw 2 pushes
+    // for one delivered post.
+    expect(shouldNotifyForSend({ ...base, owns_notify: false, sent: live })).toBe(false)
+    expect(shouldNotifyForSend({ ...base, owns_notify: false, sent: dropped })).toBe(false)
+  })
+
+  test('a transient system notice never notifies, even when it owns the send', () => {
+    expect(shouldNotifyForSend({ ...base, system_notice: true, sent: live })).toBe(false)
+  })
+
+  test('a durable marker with no id does not notify — an anchor of null opens nothing', () => {
+    expect(
+      shouldNotifyForSend({ ...base, sent: { delivered_live: true, durable: true, message_id: null } }),
+    ).toBe(false)
   })
 })

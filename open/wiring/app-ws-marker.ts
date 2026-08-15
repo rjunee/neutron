@@ -69,3 +69,40 @@ export function parseAppWsSendMarker(marker: unknown): AppWsSendMarker {
 function idOrNull(value: string): string | null {
   return value.length > 0 ? value : null
 }
+
+/** What the send knows when it decides whether to notify his devices. */
+export interface NotifyDecisionInput {
+  /**
+   * Does THIS call site own the notification?
+   *
+   * The send has two callers and they are not peers: a live agent turn calls it
+   * directly, and `deliver` calls it as its live fan-out — and `deliver`
+   * notifies from its own seam, with the dedup and the `delivered_at` stamp that
+   * belong there. Without this flag a delivered post buzzes TWICE, which is not
+   * a hypothetical: the push E2E caught exactly that (expected 1, received 2).
+   */
+  owns_notify: boolean
+  /** A transient live-only pill — never persisted, so nothing to open. */
+  system_notice: boolean
+  /** The parsed adapter marker. */
+  sent: AppWsSendMarker
+}
+
+/**
+ * Whether an app-ws send should notify the owner's devices.
+ *
+ * Extracted from the composer closure because a decision that can only be
+ * exercised by booting a 6000-line composer is a decision nothing tests — the
+ * same reason `push-observability.ts` and `push-foreground-policy.ts` exist.
+ *
+ * ⚠️ THE DURABILITY TEST IS `durable`, NOT `!delivered_live`, and the difference
+ * is the whole point: `app-ws:dropped:<id>` is durable-but-nobody-listening, the
+ * case a notification exists FOR, while `app-ws:lost:<id>` has no row for a tap
+ * to open. The predicate this replaced could not tell them apart.
+ */
+export function shouldNotifyForSend(input: NotifyDecisionInput): boolean {
+  if (!input.owns_notify) return false
+  if (input.system_notice) return false
+  if (!input.sent.durable) return false
+  return input.sent.message_id !== null
+}

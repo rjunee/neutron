@@ -395,7 +395,7 @@ import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-tel
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
-import { parseAppWsSendMarker } from './wiring/app-ws-marker.ts'
+import { parseAppWsSendMarker, shouldNotifyForSend } from './wiring/app-ws-marker.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
 import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
 import {
@@ -5177,8 +5177,22 @@ export function buildOpenGraphComposer(
     // `(out) => void` wiring contract (app-ws.ts) — a rejection must not escape into
     // sendSafe's SYNC-only guard.
     const buildAppWsSendReplyResult =
-      (channel_topic_id: string, project_id?: string) =>
+      (channel_topic_id: string, project_id?: string, opts?: { notify?: boolean }) =>
       async (out: ChatOutbound): Promise<boolean> => {
+        // WHO OWNS THE NOTIFICATION FOR THIS SEND, stated at the call site.
+        //
+        // This function has exactly two callers and they are NOT peers: a live
+        // agent turn calls it DIRECTLY, and `deliver` calls it as its live
+        // fan-out (`push.app`). So a delivered post passes through here too —
+        // and `deliver` already notifies from its own seam, with the dedup and
+        // the delivered_at stamp that belong to it.
+        //
+        // Notifying unconditionally here therefore BUZZED HIM TWICE for every
+        // out-of-turn post, which is exactly what the push E2E caught: expected
+        // 1 push, received 2. Defaulting to false and letting the live-turn call
+        // site opt IN keeps one notification per message with the ownership
+        // written down, rather than inferred from which stack frame you are in.
+        const ownsNotify = opts?.notify === true
         if (out.type !== 'agent_message') return false
         const msg: OutgoingMessage = {
           topic: {
@@ -5245,9 +5259,11 @@ export function buildOpenGraphComposer(
         // those apart. A `system_notice` is live-only by construction and carries
         // no row at all.
         if (
-          out.system_notice !== true &&
-          sent.durable &&
-          sent.message_id !== null &&
+          shouldNotifyForSend({
+            owns_notify: ownsNotify,
+            system_notice: out.system_notice === true,
+            sent,
+          }) &&
           chatMessagePush !== undefined
         ) {
           // Fire-and-forget: a push failure must never cost the reply. The sink
@@ -5294,7 +5310,13 @@ export function buildOpenGraphComposer(
     const buildAppWsSendReply =
       (channel_topic_id: string, project_id?: string) =>
       (out: ChatOutbound): void => {
-        fireAndForget('composer.deref', buildAppWsSendReplyResult(channel_topic_id, project_id)(out))
+        // The LIVE-TURN send owns its notification: nothing else will send one
+        // for an ordinary reply. `deliver`'s call site (above) deliberately does
+        // not, because `deliver` notifies from its own seam.
+        fireAndForget(
+          'composer.deref',
+          buildAppWsSendReplyResult(channel_topic_id, project_id, { notify: true })(out),
+        )
       }
     // ── app-ws receiver + delivery cluster (C3d: carved to open/wiring/app-ws.ts) ─
     // The Path-1 closing/opening delivery (`onboardingMsg` bind), the ephemeral
