@@ -1707,3 +1707,101 @@ describe('orchestrator — a prNumber of 0 is a sentinel, never a PR number (run
     expect(final.pr).toBe(267)
   })
 })
+
+describe('orchestrator — T3: an unpushed finished commit is an ALARM in words', () => {
+  // Run `f384460d` (2026-08-15) built `9e7dfbe`, its tests passed, and the commit never left the
+  // worktree: `worktree-cleanup.sh` refused to delete the branch (`reason=unpushed`, exit 3) and
+  // that refusal — a line of stdout in a journal file — was the ONLY record that real work was
+  // stranded. The owner was told "REQUEST_CHANGES". A terminal-failed pr-mode run now PROBES its
+  // own branch against origin and says so in words, on the row the owner is delivered from.
+  const LOCAL40 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const OTHER40 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+  test('a failed pr-mode run whose branch is ahead of origin carries the alarm', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'inner-error', round: 1 },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(LOCAL40)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${OTHER40}\trefs/heads/feat-x`)
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain(`a finished commit was not published: ${LOCAL40}`)
+    // The MEASURED reason survives — the alarm is appended, never a replacement.
+    expect(final.failure_reason).toContain('inner workflow ended at round')
+  })
+
+  test('a pushed branch appends nothing', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'inner-error', round: 1 },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(LOCAL40)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${LOCAL40}\trefs/heads/feat-x`)
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).not.toContain('was not published')
+  })
+
+  test('local mode never probes', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'inner-error', round: 1 },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(LOCAL40)
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun()).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).not.toContain('was not published')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('ls-remote'))).toBe(false)
+  })
+
+  test('the publish-failed strand (run f384460d shape) carries the alarm', async () => {
+    const HEAD40 = 'cccccccccccccccccccccccccccccccccccccccc'
+    const BEHIND40 = 'dddddddddddddddddddddddddddddddddddddddd'
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: HEAD40,
+        },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(HEAD40)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${BEHIND40}\trefs/heads/feat-x`)
+        if (joined.includes(' push ')) {
+          return { ok: false, stdout: '', stderr: '! [rejected] (non-fast-forward)', exit_code: 1 }
+        }
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('publish failed:')
+    expect(final.failure_reason).toContain(`a finished commit was not published: ${HEAD40}`)
+    // Said ONCE — the alarm is a sentence, not a stutter.
+    expect(final.failure_reason!.match(/a finished commit was not published/g)).toHaveLength(1)
+  })
+})

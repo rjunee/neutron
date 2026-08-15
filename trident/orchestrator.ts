@@ -76,6 +76,7 @@ import {
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
+import { unpublishedCommitAlarm, unpublishedCommitAlarmSentence } from './delivery.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
@@ -708,6 +709,41 @@ export function buildTridentOrchestrator(
     return null
   }
 
+  /**
+   * T3 — does the run's branch hold a commit origin does not have?
+   *
+   * Run `f384460d` built `9e7dfbe`, its tests passed, and the commit stayed in the worktree; the
+   * refusal to delete that branch (`worktree-cleanup.sh`, `reason=unpushed`, exit 3) was the ONLY
+   * trace of it. The refs are observable from here because a git worktree SHARES the ref store of
+   * `run.repo_path` — which is exactly how `9e7dfbe` was recovered by hand.
+   *
+   * Best-effort and `pr`-mode only; never throws, so it can never turn a failure into a worse
+   * failure. An unobservable local ref or remote makes NO claim (null). An ABSENT remote branch
+   * with a present local head IS an unpublished commit — that is the first-push strand.
+   */
+  async function detectUnpublishedCommit(run: TridentRun): Promise<string | null> {
+    if (run.merge_mode !== 'pr') return null
+    const branch = run.branch ?? `trident/${run.slug}`
+    try {
+      const local = await opts.run_host(
+        ['git', '-C', run.repo_path, 'rev-parse', `refs/heads/${branch}`],
+        run.repo_path,
+      )
+      if (!local.ok) return null
+      const localSha = local.stdout.trim()
+      if (!/^[0-9a-f]{40}$/.test(localSha)) return null
+      const remote = await opts.run_host(
+        ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+        run.repo_path,
+      )
+      if (!remote.ok) return null
+      const remoteSha = remote.stdout.trim().split(/\s+/)[0] ?? ''
+      return remoteSha === localSha ? null : localSha
+    } catch {
+      return null
+    }
+  }
+
   async function publishBuiltCommit(run: TridentRun, requestedHead: string): Promise<{ pr: number; head: string }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
     const branch = run.branch ?? `trident/${run.slug}`
@@ -1281,7 +1317,27 @@ export function buildTridentOrchestrator(
     return Math.max(0, n - t)
   }
 
+  /**
+   * T3 — ONE hook over every failed transition. Every terminal failure the orchestrator can
+   * author flows out of `stepInner`: an applyResult failure, a publish failure, a provenance
+   * reject, a garbled/hang/stall reap, a fire failure. Probing here instead of at each of those
+   * sites is what makes the alarm impossible to forget at the next one added.
+   */
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
+    const outcome = await stepInner(run)
+    // Only a NEWLY failed run is probed — an already-terminal no-op (`changed: false`) never
+    // re-probes, so a row the loop keeps seeing costs no git calls and never grows a second alarm.
+    if (!outcome.changed || outcome.run.phase !== 'failed') return outcome
+    if (unpublishedCommitAlarm(outcome.run.failure_reason) !== null) return outcome
+    const sha = await detectUnpublishedCommit(outcome.run)
+    if (sha === null) return outcome
+    const sentence = unpublishedCommitAlarmSentence(sha)
+    const reason = outcome.run.failure_reason
+    const failure_reason = reason === null || reason.trim() === '' ? sentence : `${reason} — ${sentence}`
+    return { ...outcome, run: { ...outcome.run, failure_reason } }
+  }
+
+  async function stepInner(run: TridentRun): Promise<AdvanceOutcome> {
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
