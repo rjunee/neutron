@@ -300,6 +300,31 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
 }
 
 /**
+ * T3 (run `f384460d`) — THE one sentence for a stranded finished commit.
+ *
+ * That run BUILT: commit `9e7dfbe`, tests green. The commit never left the
+ * worktree, and the only record of it was `worktree-cleanup.sh` printing
+ * `reason=unpushed` and exiting 3 into a journal file. The owner was told
+ * "REQUEST_CHANGES". An exit code in a log is not an alarm; a sentence on the
+ * run row that reaches the owner is.
+ *
+ * ONE source, because two would drift: the orchestrator that WRITES this into
+ * `failure_reason` and the composer that READS it back out to surface it
+ * verbatim both go through here, so a reworded alarm can never become an alarm
+ * the delivery silently stops recognising.
+ */
+export function unpublishedCommitAlarmSentence(sha: string): string {
+  return `a finished commit was not published: ${sha}`
+}
+
+/** Extract the alarm sentence from a `failure_reason`, or `null` when it carries none. */
+export function unpublishedCommitAlarm(reason: string | null): string | null {
+  if (reason === null) return null
+  const m = /a finished commit was not published: [0-9a-f]{7,40}/.exec(reason)
+  return m === null ? null : m[0]
+}
+
+/**
  * The human-readable name for the work — the `work_board_items.title` the run
  * was dispatched from (the board build-tool persists the item's linked design
  * doc, else its title, verbatim as `run.task`). Every result message LEADS with
@@ -344,7 +369,14 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
         run.merge_mode === 'pr' && run.pr !== null
           ? `\nPR #${run.pr} left open for review.`
           : ''
-      return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }
+      // T3 — a finished commit that never reached origin is REAL WORK the owner
+      // still has. It is surfaced verbatim (the sha is the whole point: it is
+      // what makes recovery possible) on its own line, and never twice — the
+      // interpreter's unknown-fallback can already echo a short reason as-is.
+      const alarm = unpublishedCommitAlarm(run.failure_reason)
+      let text = `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}`
+      if (alarm !== null && !text.includes(alarm)) text = `${text}\n⚠️ ${alarm}`
+      return { text }
     }
     case 'stopped':
       // `/code stop` flips a row straight to `stopped` via the store (not

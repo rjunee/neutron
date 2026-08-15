@@ -13,6 +13,8 @@ import {
   composeTerminalDelivery,
   interpretFailure,
   topicForRun,
+  unpublishedCommitAlarm,
+  unpublishedCommitAlarmSentence,
   type OutboundSink,
 } from './delivery.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
@@ -409,5 +411,68 @@ describe('buildTridentDelivery.onTerminal', () => {
     })
     await hook.onTerminal(runWith({ phase: 'done', chat_id: '1' }))
     expect(sent[0]!.inline_choices).toEqual([{ label: 'View', callback_data: 'v' }])
+  })
+})
+
+describe('T3 — an unpublished finished commit is an alarm the owner can read', () => {
+  const SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+  test('the composed failure surfaces the sentence verbatim', () => {
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        merge_mode: 'pr',
+        pr: 267,
+        failure_reason:
+          "inner workflow ended at round 1 of 8 at checkpoint 'inner-error' without Argus APPROVE" +
+          ` — a finished commit was not published: ${SHA}`,
+      }),
+    )
+    expect(out).not.toBeNull()
+    // Run f384460d's `9e7dfbe` was recoverable only by reading a cleanup script's stdout in a
+    // journal file. The sha is the thing that makes the alarm actionable — it must survive.
+    expect(out!.text).toContain(`a finished commit was not published: ${SHA}`)
+  })
+
+  test('a failure with no stranded commit says nothing about publishing', () => {
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        merge_mode: 'pr',
+        pr: 267,
+        failure_reason: "inner workflow ended at round 1 of 8 at checkpoint 'inner-error' without Argus APPROVE",
+      }),
+    )
+    expect(out!.text).not.toContain('was not published')
+  })
+
+  test('the alarm is not doubled when the fallback already echoes the reason', () => {
+    // A short, unclassified reason is echoed verbatim by `interpretFailure`'s fallback — so the
+    // sentence is already in the text and appending it again would stutter at the owner.
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        failure_reason: `a finished commit was not published: ${SHA}`,
+      }),
+    )
+    expect(out!.text.match(/a finished commit was not published/g)).toHaveLength(1)
+  })
+})
+
+describe('unpublishedCommitAlarm', () => {
+  const SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+  test('extracts the sentence from a longer reason', () => {
+    expect(unpublishedCommitAlarm(`publish failed: could not push feat-x — a finished commit was not published: ${SHA}`))
+      .toBe(`a finished commit was not published: ${SHA}`)
+  })
+
+  test('null for a null reason and for a reason that does not carry it', () => {
+    expect(unpublishedCommitAlarm(null)).toBeNull()
+    expect(unpublishedCommitAlarm('merge failed: conflict in a.ts')).toBeNull()
+  })
+
+  test('the writer and the reader share one sentence', () => {
+    expect(unpublishedCommitAlarm(unpublishedCommitAlarmSentence(SHA))).toBe(unpublishedCommitAlarmSentence(SHA))
   })
 })
