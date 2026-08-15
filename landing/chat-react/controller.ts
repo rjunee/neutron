@@ -26,6 +26,7 @@
  * over the chat-core contract without a DOM or a socket.
  */
 
+import { SwitchTimer } from './switch-timing.ts'
 import { groupReactions, isColdStartAck, spentChoiceValue } from '@neutronai/chat-core'
 
 import type { ProjectTab } from './config.ts'
@@ -475,6 +476,8 @@ export class NeutronChatController {
    *  still `connecting` after {@link switchConnectingGraceMs}. */
   private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
   private readonly switchConnectingGraceMs: number
+  /** Stopwatch for the in-flight project switch — see `switch-timing.ts`. */
+  private switchTimer: SwitchTimer | null = null
   private awaitingReply = false
   /** Newest activity row for the ACTIVE scope while a turn is in flight. */
   private liveActivity: { label: string; detail?: string } | null = null
@@ -675,6 +678,13 @@ export class NeutronChatController {
    */
   setProject(projectId: string | null): void {
     if (projectId === this.projectId) return
+    // START THE STOPWATCH FIRST — before any teardown, so the measurement covers
+    // everything the user waits through rather than everything after the part we
+    // assumed was free. A switch already in flight is superseded, not dropped:
+    // its partial marks are the record of a switch the user abandoned because it
+    // was slow, which is the case most worth seeing.
+    this.switchTimer?.supersede()
+    this.switchTimer = new SwitchTimer(this.projectId, projectId)
     // Tear down the outgoing per-project socket.
     this.session.stop()
     this.projectId = projectId
@@ -739,6 +749,9 @@ export class NeutronChatController {
     // Publish the empty/scoped VM immediately (instant switch feel), then
     // hydrate the new topic's durable transcript.
     this.publish()
+    // The "instant" claim, measured. If this mark is already hundreds of ms the
+    // problem is the paint, not the data — the opposite fix.
+    this.switchTimer?.mark('vm_published')
     void this.handleChange()
   }
 
@@ -813,6 +826,10 @@ export class NeutronChatController {
 
   private handleStatus(status: ConnStatus): void {
     this.connStatus = status
+    // The fresh socket finished its handshake. Only `open` counts — `connecting`
+    // is the switch still in progress, and a `closed`/`reconnecting` is not the
+    // thing the transcript is waiting on.
+    if (status === 'open') this.switchTimer?.mark('socket_open')
     // Chat-rail stability — the switch latch survives only the fresh socket's
     // INITIAL `connecting`; any other status means the handshake resolved
     // (`open`) or genuinely degraded (`reconnecting` / `closed`), so drop it and
@@ -1180,6 +1197,9 @@ export class NeutronChatController {
     }
     this.markVisibleAgentRead(msgs)
     this.publish()
+    // The transcript is on screen. This is the instant the switch is genuinely
+    // over, whatever the empty frame did earlier.
+    this.switchTimer?.mark('transcript')
   }
 
   /**
