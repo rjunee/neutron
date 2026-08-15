@@ -2,6 +2,45 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — the readiness gate asks the base branch which checks are required
+
+The gate carried `['test', 'lint', 'typecheck']` — THIS repository's job names — frozen
+into a workflow that runs against several repositories. neutron-enterprise emits
+`check`, `frontend`, `license-gate`, `live-postgres`, `sbom`, `upgrade`, `vuln-scan`,
+`review-gate`, and not one of the three exists there. Measured on run `a6da50ea` /
+PR #515: a MERGEABLE PR, 8 of 9 checks green including the 11m23s `check` sweep, and
+the gate spent its full 15-minute budget waiting for a name no workflow in that repo
+will ever emit, then deferred with `REVIEW DEFERRED — required check test has not run`
+before dispatching a single review seat. Review had never run in that repository and
+could not. The sentence was the second defect: it reads as a queue delay, which is why
+it was retried rather than diagnosed, and that cost a day.
+
+Required names are now resolved at probe time from the PR's own base branch — one
+Bookkeeping seat per round (`required-checks-r<n>`, not per readiness attempt: the
+configuration cannot change mid-wait) transcribing three reads, branch protection's
+`required_status_checks`, the branch's rulesets, and the check-run names GitHub has
+reported on the base head. `classifyRequiredChecksProbe` turns that transcript into
+`{mode, required, produced}` in pure JS. A 404 on protection or rules is a definitive
+answer ("not protected"), not a failure; any other read failure is `unknown`, which
+defers quoting the probe's own words rather than silently downgrading a protected repo
+to the unprotected rule.
+
+The unprotected rule is "at least one non-SKIPPED check, and all of them COMPLETED and
+SUCCESS/NEUTRAL". That preserves the property the name list existed for — counting
+successful rows made a CodeQL-only PR look healthy when the real workflow never started
+— because it cannot be satisfied by an empty rollup: zero checks WAITS and then defers,
+and never passes. A required name that is in neither the rollup nor the repository's
+produced checks now fails fast as `config-error`: `required check X is not produced by
+any workflow in this repository`, zero waits, and a deferral that says repair the
+branch-protection/ruleset entry rather than re-run. A name that is declared but merely
+unreported is still `absent` and still waits out the budget, exactly as before — and an
+unreadable check-run list (`produced: null`) disables ONLY the fast-fail, never the
+wait, so the failure direction is always toward waiting.
+
+The guard is asserted in both directions: the neutron-enterprise rollup passes readiness
+on an unprotected base, and under a protection demanding `test` it names the config
+error on the first probe. There is no third outcome, so it can never silently defer.
+
 
 Measured on PR #284's card (the #283 build), 2026-08-15, one inner workflow, fully
 serial — the sum of agent time equals wall clock exactly: head probe 5 s, `plan:fable`

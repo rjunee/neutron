@@ -302,8 +302,16 @@ interface Readiness {
   failed?: string[]
 }
 
+interface RequiredConfig {
+  mode: string
+  required?: string[]
+  produced?: string[] | null
+  cause?: string
+}
+
 function loadReadiness(source = SRC): {
-  classifyReviewReadiness: (probe: unknown) => Readiness
+  classifyReviewReadiness: (probe: unknown, requiredConfig?: unknown) => Readiness
+  classifyRequiredChecksProbe: (probe: unknown) => RequiredConfig
   reviewWithPreconditions: (args: {
     probe: (attempt: number) => Promise<Readiness>
     spend: () => Promise<unknown>
@@ -317,24 +325,39 @@ function loadReadiness(source = SRC): {
   REVIEW_READINESS_ATTEMPTS: number
   readinessBudgetLabel: () => string
 } {
-  // The preamble carries the consts AND the two redaction/excerpt helpers
-  // `classifyReviewReadiness` closes over — they sit between the consts and the
-  // classifier's doc comment, so this one slice is still the whole environment.
-  const required = source.slice(
-    source.indexOf('const REVIEW_REQUIRED_CHECKS'),
-    source.indexOf('/** Classify the fixed', source.indexOf('const REVIEW_REQUIRED_CHECKS')),
-  )
-  // …and if a refactor ever moves them out of that slice, say so HERE rather than
-  // letting `new Function` throw a bare ReferenceError from inside a test.
-  if (!required.includes('function probeCause(') || !required.includes('function redactProbeText(')) {
-    throw new Error('probeCause/redactProbeText are no longer in the readiness preamble slice')
+  // The preamble carries the budget consts AND the helpers `classifyReviewReadiness`
+  // closes over — the two redaction/excerpt ones and `classifyRequiredChecksProbe`.
+  // They sit between the budget const and the classifier's doc comment, so this one
+  // slice is still the whole environment.
+  //
+  // EVERY ANCHOR BELOW IS CHECKED BY NAME. A slice loader that silently produces `-1`
+  // fails as a bare ReferenceError inside an unrelated test, which is how a moved
+  // constant reads as "four tests are broken" instead of "the loader needs updating".
+  const anchor = (needle: string, from = 0): number => {
+    const at = source.indexOf(needle, from)
+    if (at === -1) {
+      throw new Error(
+        `ci-gate.test.ts slice anchor ${JSON.stringify(needle)} is no longer in inner-workflow.mjs — ` +
+          'the readiness slice loader needs updating to the new boundary',
+      )
+    }
+    return at
   }
-  const classifyAt = source.indexOf('function classifyReviewReadiness(')
-  const classifySource = source.slice(classifyAt, source.indexOf('/**\n * Retry only readiness', classifyAt))
-  const reviewAt = source.indexOf('async function reviewWithPreconditions(')
-  const reviewSource = source.slice(reviewAt, source.indexOf('/**\n * CI findings', reviewAt))
+  const preambleAt = anchor('const REVIEW_READINESS_BUDGET_MS')
+  const required = source.slice(preambleAt, anchor('/** Classify the fixed', preambleAt))
+  // …and if a refactor ever moves the helpers out of that slice, say so HERE rather
+  // than letting `new Function` throw a bare ReferenceError from inside a test.
+  for (const helper of ['probeCause(', 'redactProbeText(', 'classifyRequiredChecksProbe(']) {
+    if (!required.includes(`function ${helper}`)) {
+      throw new Error(`${helper} is no longer inside the readiness preamble slice`)
+    }
+  }
+  const classifyAt = anchor('function classifyReviewReadiness(')
+  const classifySource = source.slice(classifyAt, anchor('/**\n * Retry only readiness', classifyAt))
+  const reviewAt = anchor('async function reviewWithPreconditions(')
+  const reviewSource = source.slice(reviewAt, anchor('/**\n * CI findings', reviewAt))
   const factory = new Function(
-    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, reviewWithPreconditions, probeCause, redactProbeText, REVIEW_READINESS_BUDGET_MS, REVIEW_READINESS_RETRY_MS, REVIEW_READINESS_ATTEMPTS, readinessBudgetLabel }`,
+    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, classifyRequiredChecksProbe, reviewWithPreconditions, probeCause, redactProbeText, REVIEW_READINESS_BUDGET_MS, REVIEW_READINESS_RETRY_MS, REVIEW_READINESS_ATTEMPTS, readinessBudgetLabel }`,
   ) as () => ReturnType<typeof loadReadiness>
   return factory()
 }
@@ -344,6 +367,20 @@ const readinessProbe = (
   rows: Array<{ name: string; status: string; conclusion: string | null }>,
 ) => ({ raw: JSON.stringify({ mergeable, statusCheckRollup: rows }), exit_code: 0 })
 
+/**
+ * What the base branch requires, as `classifyRequiredChecksProbe` resolves it.
+ *
+ * `['test','lint','typecheck']` survives in this file as FIXTURE data — those names
+ * are what THIS repository's protection asks for, and the point of the change is that
+ * the workflow reads them from GitHub instead of carrying them as a literal.
+ */
+const requiredCfg = (required: string[], produced: string[] | null = required) => ({
+  mode: 'resolved',
+  required,
+  produced,
+})
+const THIS_REPO = () => requiredCfg(['test', 'lint', 'typecheck'])
+
 const completedChecks = (conclusion: string) =>
   ['test', 'lint', 'typecheck'].map((name) => ({ name, status: 'COMPLETED', conclusion }))
 
@@ -352,7 +389,7 @@ describe('review-round preconditions — refuse before spending', () => {
     const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
     let spent = 0
     const out = await reviewWithPreconditions({
-      probe: async () => classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS'))),
+      probe: async () => classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS')), THIS_REPO()),
       spend: async () => { spent += 1 },
       wait: async () => {},
     })
@@ -363,12 +400,12 @@ describe('review-round preconditions — refuse before spending', () => {
 
   test('absent, passed, and failed are three explicit states; absent spends nothing', async () => {
     const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
-    const absent = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').filter((r) => r.name !== 'test')))
-    const passed = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS')))
-    const failed = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, conclusion: 'FAILURE' } : r)))
+    const absent = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').filter((r) => r.name !== 'test')), THIS_REPO())
+    const passed = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS')), THIS_REPO())
+    const failed = classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, conclusion: 'FAILURE' } : r)), THIS_REPO())
     expect([absent.status, passed.status, failed.status]).toEqual(['absent', 'passed', 'failed'])
     expect(absent.reason).toContain('required check test has not run')
-    expect(classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, conclusion: 'SKIPPED' } : r))).status).toBe('absent')
+    expect(classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, conclusion: 'SKIPPED' } : r)), THIS_REPO()).status).toBe('absent')
     let spent = 0
     await reviewWithPreconditions({ probe: async () => absent, spend: async () => { spent += 1 }, wait: async () => {}, attempts: 1 })
     expect(spent).toBe(0)
@@ -377,7 +414,7 @@ describe('review-round preconditions — refuse before spending', () => {
   test('a queued check retries without spending or incrementing a round, then reviews once', async () => {
     const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
     const queuedRows = completedChecks('SUCCESS').map((r) => r.name === 'test' ? { ...r, status: 'QUEUED', conclusion: null } : r)
-    const answers = [classifyReviewReadiness(readinessProbe('MERGEABLE', queuedRows)), classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS')))]
+    const answers = [classifyReviewReadiness(readinessProbe('MERGEABLE', queuedRows), THIS_REPO()), classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS')), THIS_REPO())]
     let probes = 0
     let waits = 0
     let spent = 0
@@ -393,7 +430,7 @@ describe('review-round preconditions — refuse before spending', () => {
     const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
     for (const rows of [completedChecks('SUCCESS'), completedChecks('SUCCESS').map((r) => r.name === 'lint' ? { ...r, conclusion: 'FAILURE' } : r)]) {
       let spent = 0
-      const out = await reviewWithPreconditions({ probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', rows)), spend: async () => ++spent, wait: async () => {} })
+      const out = await reviewWithPreconditions({ probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', rows), THIS_REPO()), spend: async () => ++spent, wait: async () => {} })
       expect(out.deferred).toBe(false)
       expect(spent).toBe(1)
     }
@@ -428,7 +465,7 @@ describe('review-round preconditions — refuse before spending', () => {
     const ci = queuedUntil(MEASURED_QUEUE_MS)
     let spent = 0
     const out = await reviewWithPreconditions({
-      probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', ci.rows())),
+      probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', ci.rows()), THIS_REPO()),
       spend: async () => { spent += 1; return 'real-review' },
       wait: async () => ci.advance(REVIEW_READINESS_RETRY_MS),
     })
@@ -441,7 +478,7 @@ describe('review-round preconditions — refuse before spending', () => {
     const ci = queuedUntil(MEASURED_QUEUE_MS)
     let spent = 0
     const out = await reviewWithPreconditions({
-      probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', ci.rows())),
+      probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', ci.rows()), THIS_REPO()),
       spend: async () => { spent += 1 },
       wait: async () => ci.advance(OLD_BUDGET_RETRY_MS),
       attempts: OLD_BUDGET_ATTEMPTS,
@@ -464,7 +501,7 @@ describe('review-round preconditions — refuse before spending', () => {
     const { classifyReviewReadiness, reviewWithPreconditions, readinessBudgetLabel } = loadReadiness()
     let probes = 0
     const out = await reviewWithPreconditions({
-      probe: async () => { probes += 1; return classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').filter((r) => r.name !== 'test'))) },
+      probe: async () => { probes += 1; return classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').filter((r) => r.name !== 'test')), THIS_REPO()) },
       spend: async () => { throw new Error('must not review on an absent check') },
       wait: async () => {},
     })
@@ -478,11 +515,291 @@ describe('review-round preconditions — refuse before spending', () => {
 
   test('MUTANTS: delete conflict guard, absent→passed, and absent→failed all go RED', () => {
     const conflictMutant = SRC.replace("if (mergeable === 'CONFLICTING') {", "if (false) {")
-    expect(() => expect(loadReadiness(conflictMutant).classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS'))).status).toBe('conflicting')).toThrow()
+    expect(() => expect(loadReadiness(conflictMutant).classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS')), THIS_REPO()).status).toBe('conflicting')).toThrow()
     const absentPassedMutant = SRC.replace("return { status: 'absent', reason: `required check ${name} has not run` }", "return { status: 'passed', reason: '' }")
-    expect(() => expect(loadReadiness(absentPassedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1))).status).toBe('absent')).toThrow()
+    expect(() => expect(loadReadiness(absentPassedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1)), THIS_REPO()).status).toBe('absent')).toThrow()
     const absentFailedMutant = SRC.replace("return { status: 'absent', reason: `required check ${name} has not run` }", "return { status: 'failed', reason: '', failed: [name] }")
-    expect(() => expect(loadReadiness(absentFailedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1))).status).toBe('absent')).toThrow()
+    expect(() => expect(loadReadiness(absentFailedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1)), THIS_REPO()).status).toBe('absent')).toThrow()
+  })
+})
+
+/**
+ * WHICH CHECKS ARE REQUIRED IS THE BASE BRANCH'S ANSWER, NOT A LITERAL IN THE SOURCE.
+ *
+ * MEASURED, neutron-enterprise run `a6da50ea` / PR #515. The gate carried
+ * `REVIEW_REQUIRED_CHECKS = ['test','lint','typecheck']` — THIS repository's job names
+ * — into a workflow that runs against several repositories. neutron-enterprise emits
+ * `check`, `frontend`, `license-gate`, … and none of the three exists there, so a PR
+ * that was 8-of-9 green (including an 11m23s `check` sweep) burned the whole 15-minute
+ * budget and deferred with `required check test has not run`: a queue-delay sentence
+ * for a configuration fault. Review had never run in that repo and could not.
+ */
+const ENTERPRISE_ROLLUP = [
+  'check',
+  'frontend',
+  'license-gate',
+  'live-postgres',
+  'live-postgres-pooled',
+  'sbom',
+  'upgrade',
+  'vuln-scan',
+  'review-gate',
+].map((name) => ({ name, status: 'COMPLETED', conclusion: 'SUCCESS' }))
+
+/** The three-section transcription `probeRequiredChecks` hands to the classifier. */
+const requiredProbe = (s: {
+  prot: string
+  protExit: number
+  rules: string
+  rulesExit: number
+  runs?: string
+  runsExit?: number
+}) => ({
+  raw:
+    `${s.prot}\n___PROT_EXIT=${s.protExit}\n___SECTION=RULES\n${s.rules}\n___RULES_EXIT=${s.rulesExit}\n` +
+    `___SECTION=RUNS\n${s.runs ?? '[]'}\n___RUNS_EXIT=${s.runsExit ?? 0}\n___EXIT=0`,
+  exit_code: 0,
+})
+const NOT_FOUND = 'gh: Not Found (HTTP 404)'
+
+describe('the required-check set comes from the base branch, not from this repo’s job names', () => {
+  test('HEADLINE: the neutron-enterprise rollup PASSES readiness on an unprotected base', () => {
+    // The exact rollup of PR #515, on a base whose protection endpoint 404s. There is
+    // no `test`/`lint`/`typecheck` anywhere in it, and it is healthy.
+    const { classifyReviewReadiness } = loadReadiness()
+    const out = classifyReviewReadiness(readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP), requiredCfg([], null))
+    expect(out.status).toBe('passed')
+  })
+
+  test('HEADLINE: the same rollup under a protection demanding `test` NAMES the config error', () => {
+    // The other half of the guard: if the base branch really does require a name this
+    // repository never produces, the gate says so in those words — immediately.
+    const { classifyReviewReadiness } = loadReadiness()
+    const out = classifyReviewReadiness(
+      readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
+      requiredCfg(['test'], ['check', 'frontend']),
+    )
+    expect(out.status).toBe('config-error')
+    expect(out.reason).toBe('required check test is not produced by any workflow in this repository')
+  })
+
+  test('…and there is NO third outcome for that rollup: it never defers silently', async () => {
+    // Exhaustive by construction — the only two configs a base branch can produce for
+    // this rollup are "requires nothing" and "requires a name nothing here emits", and
+    // both are answered above. Here: the config error costs ZERO budget.
+    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    let probes = 0
+    let waits = 0
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => {
+        probes += 1
+        return classifyReviewReadiness(
+          readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
+          requiredCfg(['test'], ['check', 'frontend']),
+        )
+      },
+      spend: async () => { spent += 1 },
+      wait: async () => { waits += 1 },
+    })
+    expect({ probes, waits, spent, deferred: out.deferred }).toEqual({ probes: 1, waits: 0, spent: 0, deferred: true })
+    expect(out.readiness.status).toBe('config-error')
+    // The deferral tells the owner to REPAIR the configuration, not to wait again.
+    expect(SRC).toContain('This is a repository configuration error, not a queue delay')
+  })
+
+  test('MUTANT: turning the config error back into an absent WAIT goes RED', () => {
+    const mutant = SRC.replace(
+      "return { status: 'config-error', reason: `required check ${name} is not produced by any workflow in this repository` }",
+      'return { status: \'absent\', reason: `required check ${name} has not run` }',
+    )
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    expect(() =>
+      expect(
+        loadReadiness(mutant).classifyReviewReadiness(
+          readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
+          requiredCfg(['test'], ['check', 'frontend']),
+        ).status,
+      ).toBe('config-error'),
+    ).toThrow()
+  })
+
+  test('UNPROTECTED: at least one check and all of them green — an empty rollup never passes', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    const un = (rows: Array<{ name: string; status: string; conclusion: string | null }>) =>
+      classifyReviewReadiness(readinessProbe('MERGEABLE', rows), requiredCfg([], null))
+    expect(un([{ name: 'check', status: 'COMPLETED', conclusion: 'SUCCESS' }]).status).toBe('passed')
+    // The property the deleted constant existed for: a rollup with nothing in it is
+    // the CodeQL-only PR whose real workflow never started. It waits; it never passes.
+    expect(un([]).status).toBe('absent')
+    expect(un([]).reason).toBe('no checks have run on this PR yet')
+    expect(un([{ name: 'check', status: 'COMPLETED', conclusion: 'SKIPPED' }]).status).toBe('absent')
+    expect(un([{ name: 'check', status: 'QUEUED', conclusion: null }]).status).toBe('pending')
+    const failed = un([
+      { name: 'check', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { name: 'frontend', status: 'COMPLETED', conclusion: 'FAILURE' },
+    ])
+    expect(failed.status).toBe('failed')
+    expect(failed.failed).toEqual(['frontend'])
+  })
+
+  test('an empty rollup on an unprotected base spends the budget and then DEFERS', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', []), requiredCfg([], null)),
+      spend: async () => { spent += 1 },
+      wait: async () => {},
+      attempts: 3,
+    })
+    expect({ deferred: out.deferred, spent }).toEqual({ deferred: true, spent: 0 })
+  })
+
+  test('DECLARED BUT NOT YET REPORTED still waits, exactly as before', () => {
+    // The distinction the whole change turns on: `test` IS produced here, it simply
+    // has not been reported yet. That is a queue delay and it keeps waiting.
+    const { classifyReviewReadiness } = loadReadiness()
+    const missing = classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [{ name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+      requiredCfg(['test'], ['test']),
+    )
+    expect(missing.status).toBe('absent')
+    expect(missing.reason).toBe('required check test has not run')
+    const queued = classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [{ name: 'test', status: 'QUEUED', conclusion: null }]),
+      requiredCfg(['test'], ['test']),
+    )
+    expect(queued.status).toBe('pending')
+    expect(queued.reason).toBe('required check test is still running')
+  })
+
+  test('FAIL-SAFE: an unreadable check-run list waits, it never fails fast', () => {
+    // `produced: null` may only ever DISABLE the config-error fast-fail. Reading "we
+    // could not list this repo's checks" as "this repo produces none" would turn every
+    // unreadable probe into a permanent config error on a perfectly healthy PR.
+    const { classifyReviewReadiness } = loadReadiness()
+    const out = classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [{ name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+      requiredCfg(['test'], null),
+    )
+    expect(out.status).toBe('absent')
+    expect(out.reason).toBe('required check test has not run')
+  })
+
+  test('an UNKNOWN required-check config is never green — it defers quoting the cause', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    const out = classifyReviewReadiness(readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP), {
+      mode: 'unknown',
+      cause: 'gh auth login',
+    })
+    expect(out.status).toBe('unknown')
+    expect(out.reason).toContain('required checks for the base branch could not be read')
+    expect(out.reason).toContain('gh auth login')
+  })
+
+  test('NO REPO-SPECIFIC JOB NAME SURVIVES IN THE WORKFLOW SOURCE', () => {
+    // The defect itself, pinned: this repo's job names in a file that runs against
+    // several repositories. They live in THIS file now, as fixture data.
+    expect(SRC).not.toContain('REVIEW_REQUIRED_CHECKS')
+    expect(SRC).not.toMatch(/'test',\s*'lint',\s*'typecheck'/)
+  })
+})
+
+describe('classifyRequiredChecksProbe — three reads, one answer, judged in code', () => {
+  test('branch protection contexts become the required set', () => {
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["check","frontend"]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: '["check","frontend","sbom"]',
+      }),
+    )
+    expect(out).toEqual({ mode: 'resolved', required: ['check', 'frontend'], produced: ['check', 'frontend', 'sbom'] })
+  })
+
+  test('a 404 on protection is an ANSWER — the ruleset still speaks', () => {
+    // The measured neutron-enterprise shape: the protection endpoint 404s, so a
+    // ruleset (a different GitHub feature) is the only thing that can require a name.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
+        rulesExit: 0,
+        runs: '["review-gate"]',
+      }),
+    )
+    expect(out.mode).toBe('resolved')
+    expect(out.required).toEqual(['review-gate'])
+  })
+
+  test('404 protection + no rulesets is a definitively UNPROTECTED base', () => {
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({ prot: NOT_FOUND, protExit: 1, rules: '[]', rulesExit: 0, runs: '["check"]' }),
+    )
+    expect(out).toEqual({ mode: 'resolved', required: [], produced: ['check'] })
+  })
+
+  test('a NON-404 read failure is unknown, and it quotes what the probe said', () => {
+    // Unauthenticated is not "nothing is required" — that reading turns a protected
+    // repo into an unprotected one on a transient credential fault.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: 'gh: To get started with GitHub CLI, please run: gh auth login',
+        protExit: 1,
+        rules: '[]',
+        rulesExit: 0,
+      }),
+    )
+    expect(out.mode).toBe('unknown')
+    expect(out.cause).toContain('gh auth login')
+    // …and the same for the rules read.
+    const rules = classifyRequiredChecksProbe(
+      requiredProbe({ prot: NOT_FOUND, protExit: 1, rules: 'gh: server error (HTTP 500)', rulesExit: 1 }),
+    )
+    expect(rules.mode).toBe('unknown')
+    expect(rules.cause).toContain('500')
+  })
+
+  test('an unreadable check-run list is `produced: null`, not an unknown', () => {
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["check"]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: 'gh: server error (HTTP 502)',
+        runsExit: 1,
+      }),
+    )
+    expect(out).toEqual({ mode: 'resolved', required: ['check'], produced: null })
+  })
+
+  test('a dead seat, a missing raw, and a shapeless probe are all unknown', () => {
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    for (const p of [null, undefined, {}, { raw: 42, exit_code: 0 }]) {
+      expect(classifyRequiredChecksProbe(p).mode).toBe('unknown')
+    }
+  })
+
+  test('protection `checks[].context` and rulesets UNION, deduped', () => {
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["check"],"checks":[{"context":"check","app_id":1},{"context":"frontend","app_id":1}]}',
+        protExit: 0,
+        rules: '[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"frontend"},{"context":"sbom"}]}}]',
+        rulesExit: 0,
+      }),
+    )
+    expect(out.required).toEqual(['check', 'frontend', 'sbom'])
   })
 })
 
@@ -558,13 +875,13 @@ describe('classifyReviewReadiness — an unreadable probe quotes what it could n
   test('the readable states are untouched — conflicting/pending/absent/passed/failed', () => {
     // The enrichment must not have leaked into any branch that DID read the probe.
     const { classifyReviewReadiness } = loadReadiness()
-    expect(classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS'))).reason).toBe(
+    expect(classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS')), THIS_REPO()).reason).toBe(
       'PR is conflicting with base',
     )
-    expect(classifyReviewReadiness(readinessProbe('UNKNOWN', completedChecks('SUCCESS'))).reason).toBe(
+    expect(classifyReviewReadiness(readinessProbe('UNKNOWN', completedChecks('SUCCESS')), THIS_REPO()).reason).toBe(
       'PR mergeability is still being calculated',
     )
-    expect(classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS'))).status).toBe('passed')
+    expect(classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS')), THIS_REPO()).status).toBe('passed')
   })
 
   test('MUTANT: dropping the excerpt goes RED', () => {
