@@ -522,6 +522,15 @@ interface HostDeployApprovalArgs {
   description?: unknown
 }
 
+/** Read a grant's stored arguments. A row that will not parse reads as empty. */
+function parseApprovalArgs(args_json: string): HostDeployApprovalArgs {
+  try {
+    return (JSON.parse(args_json) as HostDeployApprovalArgs | null) ?? {}
+  } catch {
+    return {}
+  }
+}
+
 export function createHostDeployService(
   opts: HostDeployServiceOptions,
 ): HostDeployService {
@@ -721,6 +730,51 @@ export function createHostDeployService(
     }
   }
 
+  /**
+   * A DEAD GRANT IS NOT A DEAD END. Raise a REPLACEMENT approval on the topic the
+   * owner just tapped in — demonstrably where he is — and return the one sentence
+   * that names it. Deploys NOTHING and approves NOTHING: the fresh grant is a new
+   * pending row with new `hdp:` tokens that needs its own owner tap. Called from
+   * the TTL/stale/swept-expired refusals, which used to end at "Ask again" and
+   * leave a five-minute window the owner could not win (2026-08-15).
+   */
+  async function reraise(ref: string | null, topic_id: string): Promise<string> {
+    if (ref === null) return 'Ask again to see the current commit list.'
+    let fresh: HostDeployRequestResult
+    try {
+      fresh = await request({ ref, topic_id })
+    } catch (err) {
+      return `A fresh approval could not be raised (${errText(err)}) — ask again.`
+    }
+    if (fresh.status === 'pending_approval') {
+      return (
+        `A fresh approval for ${ref} at ${shortSha(fresh.target_sha)} ` +
+        `(${fresh.commit_count} commit${fresh.commit_count === 1 ? '' : 's'}) was just posted in ` +
+        'this chat — tap Approve on that one to deploy.'
+      )
+    }
+    if (fresh.status === 'up_to_date') {
+      return `And nothing is left to deploy — the host is already at ${shortSha(fresh.target_sha)}.`
+    }
+    return `A fresh approval could not be raised: ${fresh.reason}`
+  }
+
+  /**
+   * Is a host-deploy grant for `ref` ALREADY waiting? The dedupe guard on the
+   * re-raise: repeat taps on the same dead button must point at the prompt that
+   * is already there rather than mint a new one per tap.
+   */
+  function pendingGrantForRef(ref: string | null): boolean {
+    if (ref === null) return false
+    return approvals
+      .findByToolName(project_slug, HOST_DEPLOY_APPROVAL_TOOL_NAME)
+      .some((r) => {
+        if (r.status !== 'pending') return false
+        const r_ref = parseApprovalArgs(r.args_json).ref
+        return typeof r_ref === 'string' && r_ref === ref
+      })
+  }
+
   async function handleOwnerButtonAnswer(
     input: HostDeployOwnerAnswerInput,
   ): Promise<{ body: string } | null> {
@@ -740,7 +794,7 @@ export function createHostDeployService(
     // direction that matters (an evicted button deploys nothing), but it is a
     // silence the owner has to interpret. The grant-age gate below makes the same
     // window explicit in time: a late tap on a STILL-eligible button is refused
-    // with a sentence rather than dropped.
+    // with a sentence AND a fresh grant raised on this topic, rather than dropped.
     if (!HOST_DEPLOY_VALUE_RE.test(value)) return null
     if (!input.prior_option_values.includes(value)) return null
 
@@ -768,19 +822,37 @@ export function createHostDeployService(
     ) {
       return { body: 'That deploy request is unknown or no longer valid — nothing was deployed.' }
     }
+    // ── (b1) WHAT WAS APPROVED, read PURELY. Parsed before the status and age
+    // gates because every dead-end branch below now needs the `ref` to raise a
+    // replacement grant; this read has no side effect of its own, so a branch that
+    // does not re-raise is unaffected by it.
+    const args = parseApprovalArgs(row.args_json)
+    const ref = typeof args.ref === 'string' ? args.ref : null
+    const approved_sha = typeof args.target_sha === 'string' ? args.target_sha : null
+
     if (row.status !== 'pending') {
-      // Includes 'expired' — an approval that timed out is NOT an approval, and
-      // re-tapping a decided row never re-runs a deploy.
-      //
-      // The two answers differ because ONE of them would otherwise be false. On
-      // an already-APPROVED row a deploy DID go out on the earlier tap, so
+      // On an already-APPROVED row a deploy DID go out on the earlier tap, so
       // "nothing was deployed" would be a lie in the only record the owner keeps
       // — and it is the sentence a late Deny tap would read.
+      if (row.status === 'approved') {
+        return {
+          body: `That deploy request was already approved and the deploy already went out — this tap changed nothing. Ask again to deploy anything newer.`,
+        }
+      }
+      // An approval that timed out (or was swept) is NOT an approval — but it is
+      // also not a dead end. Re-raise, UNLESS a grant for the same ref is already
+      // waiting: repeat taps on one dead button must not spam prompts.
+      if (row.status === 'expired') {
+        return {
+          body:
+            'That deploy request had already expired — nothing was deployed. ' +
+            (pendingGrantForRef(ref)
+              ? 'A fresh approval is already waiting — tap Approve on the newest prompt.'
+              : await reraise(ref, input.topic_id)),
+        }
+      }
       return {
-        body:
-          row.status === 'approved'
-            ? `That deploy request was already approved and the deploy already went out — this tap changed nothing. Ask again to deploy anything newer.`
-            : `That deploy request was already ${row.status} — nothing was deployed. Ask again to see the current commit list.`,
+        body: `That deploy request was already ${row.status} — nothing was deployed. Ask again to see the current commit list.`,
       }
     }
 
@@ -790,24 +862,31 @@ export function createHostDeployService(
     // so a grant tapped the next morning on an unmoved ref still deployed (Argus
     // r1 minor). The row is expired as it is refused, so the same tap cannot be
     // repeated into a race with a sweep that may never come.
+    //
+    // CLAIM-GATED, because the refusal now has a side effect (a fresh grant).
+    // `cancelPending` reports whether THIS call retired the pending row, so of two
+    // taps racing one dead grant exactly one re-raises; the loser reads the status
+    // the row actually settled at and raises nothing.
     const age_ms = now() - row.requested_at * 1000
     if (age_ms > HOST_DEPLOY_APPROVAL_TTL_MS) {
-      await cancel(id)
+      let claimed: boolean
+      try {
+        claimed = await approvals.cancelPending(id)
+      } catch {
+        claimed = false
+      }
+      if (!claimed) {
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return { body: `That deploy request was already ${settled} — nothing was deployed.` }
+      }
       return {
         body:
           `That deploy request is older than ${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} minutes, ` +
-          `so it has expired — nothing was deployed. Ask again to see the current commit list.`,
+          `so it has expired — nothing was deployed. ` +
+          (await reraise(ref, input.topic_id)),
       }
     }
 
-    let args: HostDeployApprovalArgs
-    try {
-      args = JSON.parse(row.args_json) as HostDeployApprovalArgs
-    } catch {
-      args = {}
-    }
-    const ref = typeof args.ref === 'string' ? args.ref : null
-    const approved_sha = typeof args.target_sha === 'string' ? args.target_sha : null
     if (ref === null || approved_sha === null) {
       await cancel(id)
       return { body: 'That deploy request could not be read back — nothing was deployed. Ask again.' }
@@ -856,13 +935,26 @@ export function createHostDeployService(
     }
     if (live_sha !== approved_sha) {
       // The approval dies with the sha it was bound to — it must never be
-      // replayable against the new target.
-      await cancel(id)
+      // replayable against the new target. Claim-gated for the same reason the age
+      // gate is: the replacement grant must be raised exactly once, and only by
+      // the tap that actually retired this row.
+      let claimed: boolean
+      try {
+        claimed = await approvals.cancelPending(id)
+      } catch {
+        claimed = false
+      }
+      if (!claimed) {
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return { body: `That deploy request was already ${settled} — nothing was deployed.` }
+      }
       return {
         body:
           `Stale approval — nothing was deployed. ${ref} moved from ${shortSha(approved_sha)} ` +
           `(what you approved) to ${shortSha(live_sha)} while this was waiting. ` +
-          `Ask again to see the new commit list and approve that.`,
+          // The fresh grant binds to the NEW sha, so the owner is one tap from the
+          // deploy he asked for instead of one round trip from re-asking.
+          (await reraise(ref, input.topic_id)),
       }
     }
 
