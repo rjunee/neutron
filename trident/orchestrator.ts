@@ -537,10 +537,36 @@ export async function rebaseOntoObservedBase(
   // (e) The branch's own changes, from a source with an HONEST merge-base. Never a local
   //     three-dot diff — that is exactly the computation the shallow boundary corrupts.
   const diffFile = `/tmp/trident-rebase-${branch.replace(/[^A-Za-z0-9._-]/g, '-')}.diff`
+  // THE BRANCH'S OWN WORK IS `<fork point>..<branch>`, AND THE FORK POINT IS THE MERGE-BASE —
+  // not either ref's tip. Both tips are wrong, in opposite directions:
+  //
+  //   `refs/heads/<base>..<branch>`  — the local ref, which step (d) NEVER moves (it fetches into
+  //       `refs/remotes/origin/<base>`). MEASURED 2026-08-15: `refs/heads/main` sat at d8324cc
+  //       while the observed tip was d5ba62b, so the diff carried 103 files instead of the
+  //       branch's own 22 — 236 commits of already-merged work. Applied onto the observed tip,
+  //       every already-present hunk fails, `git apply` stages NOTHING as conflicted, and the
+  //       caller reports `conflicts with main in: (paths unreadable)` — naming a conflict that
+  //       does not exist. Five builds died on this in one day, across two projects.
+  //
+  //   `<baseSha>..<branch>`  — the observed tip. A two-dot diff is "how to turn A into B", so
+  //       this also REVERSES everything the base gained since the fork: replaying it DELETES
+  //       main's own new files, and a genuine conflict applies cleanly as a revert instead of
+  //       raising. `publish-rebase-realgit.test.ts` catches both (a lost `docs.txt`, and a
+  //       conflict that returned null). Do not "simplify" back to it.
+  //
+  // The merge-base is what `gh pr diff` computes server-side, which is why the PR path above has
+  // never had this bug. ⚠️ It is honest only on a checkout deep enough to contain the fork point;
+  // on a shallow one it lies, so the local ref stays the fallback and the failure names which was
+  // used. See the shallow-provisioning card.
+  const forkPoint = await run_host(
+    ['git', '-C', repoPath, 'merge-base', baseSha, `refs/heads/${branch}`],
+    repoPath,
+  )
+  const diffBase = forkPoint.ok && forkPoint.stdout.trim() !== '' ? forkPoint.stdout.trim() : `refs/heads/${base}`
   const patch =
     pr !== null
       ? await run_host(['gh', 'pr', 'diff', String(pr)], repoPath)
-      : await run_host(['git', '-C', repoPath, 'diff', `refs/heads/${base}..refs/heads/${branch}`], repoPath)
+      : await run_host(['git', '-C', repoPath, 'diff', `${diffBase}..refs/heads/${branch}`], repoPath)
   if (!patch.ok) throw new Error(publishFailureReason('read the diff of', branch, patch.stderr))
   if (patch.stdout.trim() === '') throw new Error('outer publisher refused to rebase an empty diff')
   // RESTORE THE TRAILING NEWLINE. `spawnCapture` TRIMS command output, which is harmless for every

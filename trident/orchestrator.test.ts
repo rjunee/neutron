@@ -593,6 +593,79 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(pushAt).toBeGreaterThan(observeAt)
   })
 
+  /**
+   * THE REPLAY DIFF, ON THE FIRST-PUBLISH PATH WHERE NO PR EXISTS YET.
+   *
+   * The test above pins the diff base for a branch that HAS a PR, so it runs `gh pr diff` and
+   * never touches the local-ref branch below it. That branch was the live defect.
+   *
+   * MEASURED 2026-08-15: `refs/heads/main` in the shared build checkout sat at d8324cc while the
+   * observed tip was d5ba62b — 236 commits stale, because step (d) fetches into
+   * `refs/remotes/origin/main` and nothing ever moves `refs/heads/main`. The diff carried 103
+   * files instead of the branch's own 22. Applied onto the observed tip every already-merged hunk
+   * failed, `git apply` staged NOTHING as conflicted, and the run reported `conflicts with main
+   * in: (paths unreadable)` — a conflict that never existed. Five builds across two projects died
+   * on it in a day.
+   */
+  test('the FIRST-PUBLISH replay diff is taken from the observed base sha, never the local base ref', async () => {
+    const oldHead = 'abcdef0123456789abcdef0123456789abcdef01'
+    const newHead = '5555555555555555555555555555555555555555'
+    const newBaseSha = '6666666666666666666666666666666666666666'
+    const preRebase = '2222222222222222222222222222222222222222'
+    const forkPoint = '7777777777777777777777777777777777777777'
+    let lsRemotesBranch = 0
+    let prLists = 0
+    let fires = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: oldHead } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotesBranch += 1
+          return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        // The FORK POINT — what `gh pr diff` computes server-side, and what the replay must use.
+        if (joined.includes('merge-base ')) return ok(forkPoint)
+        if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(oldHead)
+        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+        if (joined.includes('rev-parse HEAD')) return ok(newHead)
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(oldHead)
+        // NO PR AT ALL — this is what forces the local-ref branch of the diff. A first publish
+        // for a card whose PR has not been opened yet is the common case, not an edge one.
+        if (joined.includes('gh pr list')) {
+          prLists += 1
+          return ok('')
+        }
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes(' diff ')) return ok('diff --git a/changed.ts b/changed.ts\n@@ -1 +1 @@\n-a\n+b\n')
+        return ok()
+      },
+    })
+    // Not driven to terminal: with no PR the run cannot merge, and the assertion here is about
+    // the REPLAY, which happens on the first publish tick.
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    const replayDiffs = calls.filter((c) => c.includes(' diff ') && c.includes('..refs/heads/feat-x'))
+    expect(replayDiffs.length).toBeGreaterThan(0)
+    // …and every one of them is anchored to the FORK POINT.
+    for (const c of replayDiffs) expect(c).toContain(`${forkPoint}..refs/heads/feat-x`)
+    // The positive control for the defect that shipped: not one names the stale local ref…
+    expect(calls.some((c) => c.includes('refs/heads/main..refs/heads/feat-x'))).toBe(false)
+    // …and not one names the observed TIP either, which would replay a revert of main's own work.
+    expect(calls.some((c) => c.includes(`${newBaseSha}..refs/heads/feat-x`))).toBe(false)
+  })
+
   test('a branch already containing the base tip is a NO-OP — no worktree, no replay, head unchanged', async () => {
     // The anti-churn half: a branch that already has main's tip must not be squashed and
     // force-pushed for nothing. (The anti-FAKE half — a branch genuinely behind a moved main on a
