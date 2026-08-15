@@ -2399,8 +2399,61 @@ const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING'
 // with only CodeQL look healthy when the conflicting branch had prevented the
 // workflow containing these jobs from starting at all.
 const REVIEW_REQUIRED_CHECKS = Object.freeze(['test', 'lint', 'typecheck'])
-const REVIEW_READINESS_ATTEMPTS = 3
-const REVIEW_READINESS_RETRY_MS = 15000
+
+// HOW LONG THE GATE WAITS FOR A REQUIRED CHECK — A MEASURED BUDGET, NOT A GUESS.
+//
+// MEASURED 2026-08-15 on rjunee/neutron PR #275, commit 6ba7500:
+//     pushed                00:55:56Z
+//     check `test` STARTED  01:01:24Z   (+328 s — GitHub Actions QUEUE time)
+//     check `test` finished 01:01:28Z   (+332 s — the job itself runs in 4 s)
+//
+// Essentially the whole delay is queueing. Until the workflow is created the check
+// is not merely unfinished, it is ABSENT from `statusCheckRollup` — so the gate is
+// asking about a row that does not exist yet, which is why waiting (not failing) is
+// the only correct response.
+//
+// THE OLD BUDGET WAS 3 x 15 s = 30 SECONDS, against a check that takes five and a
+// half minutes to appear. It could not win, and it did not: FOUR consecutive builds
+// of one card (051bcf1f, b122ce3d, 45400961, 0d54d2a3) died with
+// `REVIEW DEFERRED — required check test has not run`. Each threw away a COMPLETE
+// build — Forge, plan, publish — to avoid a wait of a few minutes, and each was
+// reported to the owner as REQUEST_CHANGES on work no reviewer had read.
+//
+// It is deterministic rather than unlucky, and the reason is worth stating: a build's
+// LAST act before this gate is pushing its closing commit, so it invalidates the CI
+// it was green on and then asks about the new head seconds later. Any budget shorter
+// than the queue time fails EVERY time, on EVERY build.
+//
+// 15 minutes is ~3x the measured 328 s. Deliberately generous rather than finely
+// tuned — a tuned number is what failed, and the same lesson is written into
+// `trident/liveness.ts` after a 25-minute reaper killed a healthy build. The cost of
+// being generous is a probe on the Bookkeeping tier every 30 s; the cost of being
+// tight is an entire build.
+//
+// A check still absent after the budget IS a real stop with a real reason: the
+// workflow genuinely never started, and that needs a human, not another wait.
+const REVIEW_READINESS_BUDGET_MS = 900000
+const REVIEW_READINESS_RETRY_MS = 30000
+// Derived, never hand-written — a count and a duration that can disagree is how the
+// doc comment above comes to describe a budget the loop does not actually have. The
+// +1 is the FIRST probe, which happens before any wait.
+const REVIEW_READINESS_ATTEMPTS = Math.ceil(REVIEW_READINESS_BUDGET_MS / REVIEW_READINESS_RETRY_MS) + 1
+
+// The budget as a human duration, derived from the same constant the loop spends —
+// so the sentence the owner reads cannot claim a wait the gate did not perform.
+//
+// A LINE COMMENT ON PURPOSE. `__tests__/ci-gate.test.ts` extracts the classifyCi
+// closure by slicing from `const CI_FAILED_STATES` to the next JSDoc opener, so
+// starting a doc block here silently truncates that slice and `probeCause` vanishes
+// from the evaluated environment — four unrelated tests go red with a bare
+// ReferenceError, and nothing points at the comment that caused it. (Writing the
+// opener sequence inside a line comment does it too; that is not hypothetical
+// either.) Both loaders now assert what they captured, and keeping this a `//` keeps
+// the boundary where every reader expects it.
+function readinessBudgetLabel() {
+  const minutes = REVIEW_READINESS_BUDGET_MS / 60000
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minutes`
+}
 
 // MEASURE THE CAUSE, AND HAVING MEASURED IT, DO NOT THROW IT AWAY (#240). Run
 // 8417b277 held `To get started with GitHub CLI, please run: gh auth login` in the
@@ -2840,10 +2893,14 @@ function reviewPreconditionDeferred(readiness) {
           `${readiness.reason}. No review seat was dispatched and no review round was consumed. ` +
           (readiness.status === 'conflicting'
             ? 'Update the branch against its base and resolve the conflict, then re-run.'
-            : readiness.status === 'absent'
-              ? 'Wait for or restore that workflow job, then re-run once it appears.'
+            : // SAY HOW LONG IT WAITED. Without the duration these two read exactly
+              // like the 30-second version that gave up before GitHub had queued the
+              // job, so the owner cannot tell "we did not wait" from "we waited and it
+              // never came" — and only the second one is his problem to act on.
+              readiness.status === 'absent'
+              ? `The readiness gate waited ${readinessBudgetLabel()} and the check never appeared, so the workflow did not start. Restore or re-trigger that workflow job, then re-run.`
               : readiness.status === 'pending'
-                ? 'The readiness probe retried without incrementing the round; re-run after the check completes.'
+                ? `The readiness gate waited ${readinessBudgetLabel()} without incrementing the round and the check was still running; re-run once it completes.`
                 : 'Restore access to the PR readiness data, then re-run.'),
       },
     ],
