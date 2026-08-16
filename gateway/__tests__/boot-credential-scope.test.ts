@@ -22,6 +22,7 @@ import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { boot } from '../index.ts'
+import type { GraphComposer } from '../boot-composition-types.ts'
 
 const BOOT_SLUG = 'juno'
 const STALE_SLUG = 'dev'
@@ -318,5 +319,59 @@ test('a real FALLBACK boot refuses, says why in the audit row, and leaves the ro
     })
   } finally {
     await handle.shutdown({ force: true })
+  }
+})
+
+// ── THE BOOT → COMPOSER HANDOFF ───────────────────────────────────────────
+/**
+ * A review round found the last hole in this chain: `GraphComposer`'s
+ * `slug_is_fallback` is OPTIONAL, so deleting the property at the boot handoff
+ * still typechecks — and every configured production boot then reaches the
+ * composer with `undefined`, which normalises to fallback and silently refuses
+ * to migrate. The provenance test one layer down cannot see it, because it calls
+ * the composer with literal booleans rather than being handed them by boot.
+ *
+ * The failure is invisible by construction: the wrong answer and the safe
+ * default are the same value. So the only thing that can catch it is a REAL boot
+ * with a composer that records what it was actually given.
+ */
+async function bootCapturingProvenance(): Promise<boolean | undefined> {
+  let seen: boolean | undefined
+  const handle = await boot({
+    port: 0,
+    composer: (({ slug_is_fallback }: { slug_is_fallback?: boolean }) => {
+      seen = slug_is_fallback
+      // Deliberately the narrowest object boot will accept, and cast rather
+      // than filled out: this test is about WHAT BOOT HANDS THE COMPOSER, and
+      // fabricating a whole composition to satisfy the type would add a large
+      // fixture whose every field is irrelevant to the one assertion.
+      return { db: ProjectDb.open(dbPath), project_slug: BOOT_SLUG }
+    }) as unknown as GraphComposer,
+  })
+  await handle.shutdown({ force: true })
+  return seen
+}
+
+test('a CONFIGURED boot hands the composer a configured provenance', async () => {
+  // `beforeEach` wrote `.url_slug`, so this boot knows who it is.
+  expect(await bootCapturingProvenance()).toBe(false)
+})
+
+test('a FALLBACK boot hands the composer a fallback provenance', async () => {
+  rmSync(join(home, '.url_slug'), { force: true })
+  delete process.env['NEUTRON_INSTANCE_SLUG']
+  expect(await bootCapturingProvenance()).toBe(true)
+})
+
+test('an EMPTY instance slug is anonymous, not configured', async () => {
+  // Review repro: `NEUTRON_INSTANCE_SLUG=''` classified as `source:'env'`, so the
+  // guard read `false` and the explicit migration moved rows onto the empty
+  // handle. An empty variable is not an identity.
+  rmSync(join(home, '.url_slug'), { force: true })
+  process.env['NEUTRON_INSTANCE_SLUG'] = '   '
+  try {
+    expect(await bootCapturingProvenance()).toBe(true)
+  } finally {
+    delete process.env['NEUTRON_INSTANCE_SLUG']
   }
 })

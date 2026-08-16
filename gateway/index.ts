@@ -211,9 +211,16 @@ export function resolveOwnerSlugSourceFromConfig(config: BootConfig): OwnerSlugR
       if (fromFile.length > 0) return { slug: fromFile, source: 'file' }
     }
   }
-  if (config.instanceSlug !== undefined && config.instanceSlug !== null) {
-    return { slug: config.instanceSlug, source: 'env' }
-  }
+  // TRIMMED AND NON-EMPTY, exactly like the `.url_slug` branch above — the
+  // asymmetry between them WAS the bug. `NEUTRON_INSTANCE_SLUG=''` is not a
+  // configured identity, it is an empty variable wearing the costume of one,
+  // and classifying it as `'env'` told the credential guard this process knows
+  // who it is. Found by review with a repro: resolve with an empty slug, call
+  // the explicit migration, and rows move off the live handle onto `''`.
+  //
+  // A blank value means nobody said, which is what `'fallback'` means.
+  const fromEnv = config.instanceSlug?.trim() ?? ''
+  if (fromEnv.length > 0) return { slug: fromEnv, source: 'env' }
   return { slug: 'dev', source: 'fallback' }
 }
 
