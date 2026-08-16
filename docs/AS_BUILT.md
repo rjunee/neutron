@@ -263,6 +263,20 @@ reported the driver unavailable: a silent downgrade rather than a loud failure.
 `scripts/install-merge-drivers.sh` has always retried with the plain spelling;
 that call site now does too, resolving a relative answer against the repo.
 
+AND THE FALLBACK NEEDED A GUARD OF ITS OWN, WHICH THE CROSS-MODEL REVIEWER
+SURFACED WHILE IT WAS BEING WRITTEN. A relative `--git-common-dir` is not
+relative to the working tree: in a LINKED worktree the value lives in
+`<main>/.git/worktrees/<name>/commondir` — read directly, verbatim `../..` —
+relative to that file's directory. Resolved against the worktree root it lands
+two levels ABOVE the worktree: a real directory, outside the repository, where an
+attributes file is silently inert. Measured on git 2.50.1 the `-C` form already
+answers absolutely so the branch never runs there, but the branch exists for the
+git that lacks the flag. Both installers now require the resolved directory to
+prove it is a git dir before writing into it, and refuse otherwise — a clone that
+merges the way it always did beats one that believes it is installed and is not.
+The reviewer's own answer was that joining against the repo is correct, hedged
+with "often already absolute"; the recorded `commondir` is what settled it.
+
 `''` MEANT BOTH "NO DATE" AND "THE OLDEST DATE" IN THE PLACEMENT LOOP. Effective
 dates carry forward, so the sentinel survives only where nothing before an entry
 was ever dated — an undated section at the very top. Every `sortDate` compares

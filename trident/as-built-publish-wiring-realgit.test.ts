@@ -387,6 +387,10 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
     writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), '# AS_BUILT\n')
     writeFileSync(join(repo, 'scripts', 'git', 'as-built-log-merge.ts'), '')
+    // A real git dir, because the resolved path must PROVE it is one before anything is written
+    // into it — see the sibling test for what that guard is for.
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    writeFileSync(join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
 
     const calls: string[][] = []
     const oldGit = async (cmd: string[]) => {
@@ -409,6 +413,39 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     // CONTROL — the modern spelling really was tried first and really did fail, so this is the
     // fallback under test and not the ordinary path with an unusual answer.
     expect(calls.some((cmd) => cmd.includes('--path-format=absolute'))).toBe(true)
+  })
+
+  test('…and a relative answer that resolves OUTSIDE the repo is refused, not written to', async () => {
+    // THE TRAP IN THE FALLBACK ITSELF, found by the cross-model reviewer while it was being added.
+    // A relative `--git-common-dir` is NOT relative to the working tree. In a linked worktree the
+    // value is recorded in `<main>/.git/worktrees/<name>/commondir` — measured, verbatim `../..` —
+    // relative to THAT file's directory. Resolved against the worktree root it lands two levels
+    // ABOVE the worktree: a real directory, outside the repository, where an attributes file is
+    // silently inert. Modern git normalises the `-C` form to an absolute path so this never arises
+    // there, but the fallback exists precisely for the git that does not.
+    const parent = mkdtempSync(join(tmpdir(), 'as-built-outside-'))
+    created.push(parent)
+    const repo = join(parent, 'a', 'b')
+    mkdirSync(join(repo, 'docs'), { recursive: true })
+    mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), '# AS_BUILT\n')
+    writeFileSync(join(repo, 'scripts', 'git', 'as-built-log-merge.ts'), '')
+
+    const oldGitInWorktree = async (cmd: string[]) => {
+      if (cmd.includes('--path-format=absolute')) {
+        return { ok: false, exit_code: 129, stdout: '', stderr: 'unknown option: --path-format=absolute' }
+      }
+      if (cmd.includes('--git-common-dir')) return { ok: true, exit_code: 0, stdout: '../..\n', stderr: '' }
+      return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await ensureAsBuiltMergeDriver(oldGitInWorktree, repo)).toBe(false)
+    // Nothing was written into the directory the naive resolution points at.
+    expect(existsSync(join(parent, 'info', 'attributes'))).toBe(false)
+    // CONTROL — that directory really is where `../..` resolves to and really does exist, so the
+    // refusal came from the git-dir check and not from the path being unwritable.
+    expect(existsSync(parent)).toBe(true)
+    expect(join(repo, '../..')).toBe(parent)
   })
 
   test('SECURITY — a bunfig.toml in the checkout cannot preload code into the driver process', async () => {

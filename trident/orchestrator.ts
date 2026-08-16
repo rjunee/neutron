@@ -744,11 +744,23 @@ export async function ensureAsBuiltMergeDriver(
     )
     if (common.ok) commonDir = common.stdout.trim()
     else {
-      // Plain `--git-common-dir` answers relative to the working tree, so it is resolved here.
+      // AND THE FALLBACK'S ANSWER IS CHECKED, BECAUSE A RELATIVE ONE IS NOT RELATIVE TO WHAT YOU
+      // WOULD GUESS. In a LINKED worktree the common dir is recorded in
+      // `<main>/.git/worktrees/<name>/commondir` as `../..` — relative to THAT file's directory, not
+      // to the working tree. Measured here: modern git normalises the `-C` form to an absolute path
+      // (`/…/neutron-open/.git`) so this branch never runs, but the whole point of this branch is a
+      // git old enough not to have `--path-format`, and resolving `../..` against `repoPath` would
+      // land two levels above the WORKTREE — a real directory, outside the repository, where an
+      // attributes file would be silently inert. So the resolved directory has to prove it is a git
+      // dir before anything is written into it; if it cannot, this returns false and the caller is
+      // exactly where it was. Writing to the wrong place is worse than not writing.
       const plain = await run_host(['git', '-C', repoPath, 'rev-parse', '--git-common-dir'], repoPath)
       if (!plain.ok) return false
       const raw = plain.stdout.trim()
-      commonDir = raw === '' ? '' : isAbsolute(raw) ? raw : join(repoPath, raw)
+      if (raw === '') return false
+      const resolved = isAbsolute(raw) ? raw : join(repoPath, raw)
+      if (!existsSync(join(resolved, 'HEAD'))) return false
+      commonDir = resolved
     }
     if (commonDir === '') return false
 

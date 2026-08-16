@@ -99,10 +99,24 @@ fi
 
 # The COMMON git dir, not the per-worktree one: a linked worktree has its own $GIT_DIR but reads
 # attributes and config from the common one, so installing there serves every worktree at once.
+#
+# `--path-format=absolute` arrived in git 2.31, hence the fallback — AND THE FALLBACK'S ANSWER IS
+# CHECKED. In a linked worktree the common dir is recorded in `<main>/.git/worktrees/<name>/commondir`
+# as `../..`, relative to THAT file's directory rather than to the working tree. Measured on git
+# 2.50.1 the `-C` form already answers absolutely, so the fallback never runs here; on the old git it
+# exists for, resolving `../..` against $ROOT would land two levels above the worktree — a real
+# directory, outside the repository, where an attributes file is silently inert. So the resolved
+# directory has to prove it is a git dir. If it cannot, this refuses: a clone that merges the way it
+# always did beats one that believes it is installed and is not.
 COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
 if [ -z "$COMMON" ]; then
   COMMON="$(git -C "$ROOT" rev-parse --git-common-dir)"
   case "$COMMON" in /*) ;; *) COMMON="$ROOT/$COMMON" ;; esac
+  if [ ! -f "$COMMON/HEAD" ]; then
+    echo "install-merge-drivers: NOT INSTALLED — could not locate the common git dir." >&2
+    echo "                       'rev-parse --git-common-dir' gave '$COMMON', which is not one." >&2
+    exit 2
+  fi
 fi
 ATTRS="$COMMON/info/attributes"
 
