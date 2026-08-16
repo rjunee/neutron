@@ -153,16 +153,12 @@ mkdir -p "$(dirname "$ATTRS")" || fail "could not create $(dirname "$ATTRS")"
 remove_attr_line
 printf '%s\n' "$ATTR_LINE" >> "$ATTRS" || fail "could not append '$ATTR_LINE' to $ATTRS"
 
-# Prove the pair actually landed rather than trusting that it did — this is the
-# same check `--check` runs, and it is the difference between reporting success
-# and having succeeded.
-if [ -z "$(git -C "$ROOT" config --get "merge.$DRIVER_NAME.driver" 2>/dev/null)" ]; then
-  fail "merge.$DRIVER_NAME.driver is unset after writing it"
-fi
-if ! grep -q -x -F "$ATTR_LINE" "$ATTRS" 2>/dev/null; then
-  fail "'$ATTR_LINE' is missing from $ATTRS after writing it"
-fi
-
+# A first draft ALSO re-read both halves here before printing success — the same
+# pair `--check` reads. It is deleted rather than kept: mutating it away left the
+# whole suite green, because every reachable failure is already caught at the
+# write above, and a second mechanism no test can distinguish from its absence is
+# not a defence, it is something to maintain. (Same call, and the same reason, as
+# the empty-`--template=` dance dropped from the attributes probe.)
 echo "merge drivers: installed"
 echo "       driver → $BUN $DRIVER_SCRIPT %O %A %B %L %P"
 echo "       path   → $ATTR_LINE"

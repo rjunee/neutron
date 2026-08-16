@@ -31,8 +31,12 @@ to `merge=as-built-log`: `.name` set with `.driver` unset is
 `.driver` set with `.name` unset merges fine at exit 0. That asymmetry is the
 fix, not just the checks — `.driver` is now written FIRST, so an interruption
 between the two leaves a clone that merges rather than one that cannot. Every
-step is checked, a failure rolls the pair back and exits 1, and the result is
-verified before success is printed. A test makes `.git` read-only (the config
+step is checked and a failure rolls the pair back and exits 1. A first draft
+also re-read both halves before printing success; mutating that block away left
+the whole suite green, because every reachable failure is already caught at the
+write, so it is deleted rather than kept — the same call, for the same reason, as
+the empty-`--template=` dance dropped from the attributes probe one round ago.
+A test makes `.git` read-only (the config
 LOCK file is what needs the directory, not the config file's own mode: measured
 `could not lock config file .git/config: Permission denied`, exit 255) and
 asserts the installer fails loudly leaving neither key set.
@@ -97,6 +101,15 @@ of the four and by names that are not logs, and is now pinned as the exact set;
 and every fixture commit pins `commit.gpgsign=false`, so the suite does not reach
 for a signing key on a maintainer's machine or block on a pinentry prompt in a
 run that is supposed to be unattended.
+
+Eleven mutations were run with the unmutated suite green as the control, each
+reverting exactly one property above: `|| true` on the workflow step, the
+`GIT_NO_REPLACE_OBJECTS` pin, the probe's case pin, `presentAsBuiltLogs` failing
+open, governedness back to disk-only, the installer's `.name`-first ordering with
+unchecked writes, the half-install note reading only `.driver`, the wildcard
+override back to "the LAST wins", a dropped `AS_BUILT_CANDIDATES` entry, and the
+`-merge` diagnostic losing the macro spelling. Ten turn a test red. The eleventh
+is the deleted verification block above, and its deletion is the finding.
 
 The version acceptance test asserted `git version 2.` under a docblock claiming
 it existed "because 'measured on 2.50.1' stops being a true statement the moment
