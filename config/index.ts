@@ -472,10 +472,20 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * reads as design documentation, and the next reader trusts it instead of
  * checking.
  *
- * So the claim is now bounded by a command anyone can re-run rather than by a
- * list anyone can fall off:
+ * Round 3 replaced the list with a grep — and the grep had the same hole one
+ * level down. It matched only the LITERAL forms (`.OWNER_HOME`, `OWNER_HOME']`),
+ * so `buildPromptVars` (`prompts/template.ts`), which reads the variable through
+ * the exported `OWNER_HOME_KEY` constant, was invisible to it. Worse than
+ * invisible: the command DID print `prompts/template.ts`, at the docblock line
+ * that merely mentions `env.OWNER_HOME` — so the file appeared in the output,
+ * looked audited, and the untrimmed read below it was never opened. A check that
+ * returns a hit it cannot justify is the same defect as a check that returns a
+ * negative it cannot justify; this one just wears a tick instead of a cross.
  *
- *   grep -rn --include='*.ts' "NEUTRON_HOME'\]\|\.NEUTRON_HOME\|OWNER_HOME'\]\|\.OWNER_HOME\|NEUTRON_DB_PATH'\]\|\.NEUTRON_DB_PATH" .
+ * So the claim is bounded by a command anyone can re-run rather than by a list
+ * anyone can fall off — and the command now covers the constant-key form:
+ *
+ *   grep -rn --include='*.ts' "NEUTRON_HOME'\]\|\.NEUTRON_HOME\|OWNER_HOME'\]\|\.OWNER_HOME\|NEUTRON_DB_PATH'\]\|\.NEUTRON_DB_PATH\|OWNER_HOME_KEY" .
  *
  * Every non-test hit either trims its predicate or is a WRITE. The readers, all
  * fixed: {@link resolveOwnerSlugSourceFromConfig}'s `instanceSlug` branch and
@@ -486,8 +496,9 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * (`gbrain-memory/gbrain-doctor.ts`); the env shim's fill predicate
  * (`open/server.ts`); `main`'s `--home` guard (`scripts/email-accounts.ts`);
  * the REPL supervision home (`runtime/adapters/claude-code/index.ts`);
- * `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`); and
- * `DEFAULT_M2_FEEDBACK_PATH` (`onboarding/feedback/m2-week-4-collector.ts`).
+ * `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`);
+ * `DEFAULT_M2_FEEDBACK_PATH` (`onboarding/feedback/m2-week-4-collector.ts`); and
+ * `buildPromptVars` (`prompts/template.ts`) — the constant-key one.
  *
  * The list is documentation. The GUARD is
  * `open/__tests__/owner-slug-agreement.test.ts`, which drives blank values

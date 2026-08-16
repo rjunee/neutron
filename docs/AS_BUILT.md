@@ -45,6 +45,65 @@ only, never argus or synthesis; the non-parts whole-file receipt is
 unweakened; the TypeScript and JavaScript `briefIntegrity` twins remain
 parity-pinned; and `.a2` coda chunk blocks never have non-redirect-target paths
 rewritten.
+## 2026-08-16 — the docblock said every sibling identity read trims, and each round's proof was narrower than its claim
+
+Landed via PR #333.
+
+`config/index.ts` asserted that every read of `NEUTRON_HOME` / `OWNER_HOME` /
+`NEUTRON_DB_PATH` in this tree treats a blank value as unset. It did not, and the
+interesting part is how the claim kept surviving: each round proved a smaller thing
+than it stated, and the gap between the two was always where the next defect lived.
+
+**Nine readers brought onto the rule.** `resolveOpenDbPath` (`migrations/db-path.ts`)
+and `resolveRegistryDbPath` (`gateway/boot-listener-registry.ts`) kept `length > 0` /
+`!== ''` through the change that fixed their neighbours — they read the OTHER two
+variables, which is why a sweep organised around "the identity resolvers" missed them.
+Measured: `NEUTRON_HOME='   '` gave `'   /registry.db'` here while `resolveNeutronHome`
+answered `~/neutron` for the same variable, on the read that tells a booting instance
+its own handle. The env shim's fill predicate (`open/server.ts`) was `=== ''`, so a
+whitespace `OWNER_HOME` was mistaken for an operator pin and left in place while the
+frozen config had already resolved it — and below-seam readers take the env, not the
+config, which is the entire reason the shim exists. That predicate is now
+`applyEnvShim`, extracted so a test can drive it without booting a server. Also fixed:
+`resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`, where a blank
+resolved the skills dir to the FILESYSTEM ROOT), `DEFAULT_M2_FEEDBACK_PATH`
+(`onboarding/feedback/m2-week-4-collector.ts`), the REPL supervision home
+(`runtime/adapters/claude-code/index.ts`), and the `--home` guard
+(`scripts/email-accounts.ts`).
+
+**And one in the other direction.** `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts`) trimmed the value it RETURNED. Leading and trailing
+spaces are legal in a POSIX path, so that silently rewrote a real directory:
+`NEUTRON_HOME=' /real/dir '` put the doctor's record beside a brain dir that lives
+somewhere else. The family rule is now stated once and pinned both ways — trim the
+PREDICATE, return the bytes.
+
+**The claim's scope is a command, and the command had the same hole one level down.**
+Round 3 replaced the enumerated list with a re-runnable grep, which was the right move
+and still under-covered: it matched only literal `.OWNER_HOME` / `OWNER_HOME']`, so
+`buildPromptVars` (`prompts/template.ts`), which reaches the variable through the
+exported `OWNER_HOME_KEY` constant, was invisible to it. Worse than invisible — the
+command DID print that file, at a docblock line that merely mentions the variable, so
+the file looked audited and the untrimmed read below it was never opened. A check that
+returns a hit it cannot justify is the same defect as one that returns a negative it
+cannot justify; it just wears a tick instead of a cross. Measured on the template
+`{{OWNER_HOME}}/entities/x.md`: `''` yields `/entities/x.md` (the filesystem root,
+fails loudly) while `'   '` yields `   /entities/x.md` — a relative directory named
+three spaces, creatable, so an agent handed that prompt writes the owner's entity pages
+into a junk dir under whatever CWD it started in and nothing errors.
+`trident/agent-prompts.ts` defaults its vars to this function, so the path is live.
+
+**The guard is the deliverable, not the list.** `open/__tests__/owner-slug-agreement.test.ts`,
+`gbrain-memory/__tests__/gbrain-doctor.test.ts` and `prompts/template.test.ts` drive
+blank and space-padded values through every reader they can import, each with a
+real-path control so a failure means "a blank was honoured" rather than "the variable
+stopped being read" — a different bug wearing the same green. An earlier round's
+assertion for the `OWNER_HOME` axis passed a real `NEUTRON_HOME` alongside it, so the
+resolver returned on its first branch and the axis under test was never reached;
+reverting the `OWNER_HOME` trim left the suite green. It is now exercised with
+`NEUTRON_HOME` absent, and each trim was mutation-proved: reverting it turns the suite
+red, with the mutation printed first to show it landed.
+
 ## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
 
 Landed via PR #331.
