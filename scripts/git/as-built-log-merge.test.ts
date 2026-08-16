@@ -311,6 +311,40 @@ describe('merge', () => {
     expect(res.text).toBe(log(NEW_TWO, OLD_A, sub, OLD_B))
   })
 
+  test('…and one added under an entry the OTHER SIDE added in the same merge stays under it too', () => {
+    // THE DEFECT THIS PINS, and it is the case the two tests above cannot reach: `attachAfter` was
+    // resolved only against RETAINED entries — the ones the base already had — so a section
+    // continuing an entry ADDED IN THIS SAME MERGE found no anchor and was left to date-sort alone.
+    // It arises whenever both sides write the same heading and only one writes the follow-up under
+    // it: to `theirs` the section is an addition while its own head is not (ours added it too), so
+    // the section starts a run of its own.
+    //
+    // The heading below is chosen so the bug is VISIBLE rather than latent. Both sort at the same
+    // effective date, so the tie breaks on heading bytes, and `(` (0x28) precedes `2` (0x32) — the
+    // section came out ABOVE its own head, reading as a separate top-level entry. A continuation
+    // whose heading happened to sort after its head would have hidden this behind luck.
+    const shared = '## 2026-08-16 — shared heading\n\nshared body\n\n'
+    const sub = '## (addendum) follow-up detail\n\naddendum body\n\n'
+    const base = log(OLD_A)
+    const res = mergeAsBuiltLog(base, log(shared, OLD_A), log(shared, sub, OLD_A))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toBe(log(shared, sub, OLD_A))
+  })
+
+  test('CONTROL — the same section under a head only ONE side added is unaffected', () => {
+    // Identical but for `ours` not writing the shared entry, so the head is an ordinary same-side
+    // addition and the section rides in its run as it always did. This proves the fix above adds a
+    // path rather than re-routing the one that already worked.
+    const shared = '## 2026-08-16 — shared heading\n\nshared body\n\n'
+    const sub = '## (addendum) follow-up detail\n\naddendum body\n\n'
+    const base = log(OLD_A)
+    const res = mergeAsBuiltLog(base, log(OLD_A), log(shared, sub, OLD_A))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toBe(log(shared, sub, OLD_A))
+  })
+
   test('ordering does not depend on locale — same-date additions break ties by heading bytes', () => {
     const base = log(OLD_A)
     // Two same-date additions whose order under a locale-aware compare could differ from a byte
@@ -353,7 +387,41 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
   })
 
   test('a file that is not an entry log is handed back to git', () => {
-    expect(mergeAsBuiltLog('nothing', 'no entries here', 'none here either').ok).toBe(false)
+    // The base is entryless too, which is the whole reason this one may be delegated — see the
+    // pair below, where it is not.
+    const res = mergeAsBuiltLog('nothing', 'no entries here', 'none here either')
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.wouldLoseEntries).toBe(false)
+  })
+
+  test('BOTH sides parsing to zero against an ENTRYFUL base is a refusal git must NOT be asked to finish', () => {
+    // THE DEFECT THIS PINS. The entryless-sides guard returned `wouldLoseEntries: false`
+    // unconditionally, so the driver delegated — and this is the LARGEST history-loss case in the
+    // file, neither side keeping anything, sitting one guard above the rule that refuses the
+    // strictly smaller case of ONE side keeping nothing. The test that covered this line used an
+    // entryless base, so it could not see the difference.
+    //
+    // Measured on `git merge-file` with this exact input: two DIFFERENT truncations conflict
+    // (exit 1) while two matching ones resolve to a file with no entries at all (exit 0, no
+    // markers). The loud outcome was git's accident rather than this file's decision, which is
+    // precisely what `wouldLoseEntries` exists to stop depending on.
+    const base = log(OLD_A, OLD_B)
+    const res = mergeAsBuiltLog(base, `${HEADER}ours truncated\n`, `${HEADER}theirs truncated\n`)
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.wouldLoseEntries).toBe(true)
+    expect(res.reason).toContain('the base had 2')
+  })
+
+  test('CONTROL — an entryless BASE still delegates, so the rule keys on lost history and not on parsing', () => {
+    // Same shape as above with the one variable changed: no entries in the base, so there is
+    // genuinely nothing to lose and git's textual three-way is the right answer. If this went red
+    // the fix would have become "refuse every unparseable merge", which is a different feature.
+    const res = mergeAsBuiltLog(HEADER, `${HEADER}ours truncated\n`, `${HEADER}theirs truncated\n`)
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.wouldLoseEntries).toBe(false)
   })
 
   test('ONE side arriving truncated is a conflict, not a licence to delete the history it lacks', () => {
@@ -417,8 +485,15 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     // The counts are READ FROM THE FILE, never written into the name or the body: the log gains an
     // entry on most days, so "308 entries minus 307" was a name that stopped being true on the next
     // append while the assertion under it went on passing.
+    //
+    // AND THE GUARD BELOW IS DERIVED FOR THE SAME REASON. It used to read `toBeGreaterThan(250)`,
+    // which is that same restated count one level up: it asserts nothing about this test, it forbids
+    // a legitimate future in which the log is archived down, and it would have gone red on a change
+    // with no defect in it. What this test actually needs is only that the base has MORE THAN THE
+    // ONE ENTRY `ours` is truncated to — otherwise the truncation removes nothing and the refusal
+    // below would pass vacuously. That is the property, so that is what is asserted.
     const parsed = parseLog(readFileSync(REAL_LOG, 'utf8'))
-    expect(parsed.entries.length).toBeGreaterThan(250)
+    expect(parsed.entries.length).toBeGreaterThan(1)
 
     const base = serializeLog(parsed)
     const ours = serializeLog({ preamble: parsed.preamble, entries: parsed.entries.slice(0, 1) })
@@ -566,6 +641,31 @@ describe('the driver CLI — what git actually gets back', () => {
     writeFileSync(paths.B, log('## 2026-08-10 — older thing\n\ntheirs\n\n'))
     runDriver([paths.O, paths.A, paths.B, '9', 'docs/AS_BUILT.md'])
     expect(readFileSync(paths.A, 'utf8')).toContain('<'.repeat(9))
+  })
+
+  test('…but a marker size the CHECKOUT chose is clamped, so %L cannot size our output for us', () => {
+    // THE DEFECT THIS PINS. `%L` is git substituting the merged path's `conflict-marker-size`
+    // attribute, and a TRACKED `.gitattributes` in the repository being merged sets it — verified
+    // separately by configuring a driver that does nothing but print `%L`, which received a
+    // committed `conflict-marker-size=2000000` intact. The conflict this driver constructs writes
+    // that many characters three times, so the same refusal grew from 302 bytes to 6,000,281,
+    // linearly, on a number the checkout picks. It is the one checkout-supplied input the driver
+    // takes, and it is now bounded.
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-driver-'))
+    dirs.push(dir)
+    const paths = { O: join(dir, 'base'), A: join(dir, 'ours'), B: join(dir, 'theirs') }
+    writeFileSync(paths.O, log(OLD_A, OLD_B))
+    // A wouldLoseEntries refusal, which is the path that writes markers from THIS process.
+    writeFileSync(paths.A, log(OLD_B))
+    writeFileSync(paths.B, log(OLD_A, OLD_B))
+    expect(runDriver([paths.O, paths.A, paths.B, '2000000', 'docs/AS_BUILT.md'])).not.toBe(0)
+    const result = readFileSync(paths.A, 'utf8')
+    expect(result).toContain('<'.repeat(200))
+    expect(result).not.toContain('<'.repeat(201))
+    expect(result.length).toBeLessThan(10_000)
+    // CONTROL — both sides are still whole, so the clamp bounded the MARKERS and nothing else.
+    expect(result).toContain('body of older thing')
+    expect(result).toContain('body of oldest thing')
   })
 
   test('a missing input file is a conflict, never a silent clean merge', () => {

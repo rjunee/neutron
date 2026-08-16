@@ -638,9 +638,20 @@ function asBuiltDriverCommand(driver: string): string | null {
  * script starts under — see `asBuiltDriverCommand`, where the `--config=/dev/null` and
  * `--env-file=/dev/null` that close those live, with the reproductions. The property to hold onto
  * is the one this whole docblock is about: NOTHING the target checkout contains — not a script, not
- * a config, not an environment file, not a `PATH` — decides what runs on the publisher host. And
+ * a config, not an environment file, not a `PATH` — decides what RUNS on the publisher host. And
  * because that property has been stated confidently and been incomplete twice already, the
  * credential itself is now taken out of the driver's environment as a second, independent control.
+ *
+ * "WHAT RUNS" IS THE EXACT CLAIM, AND IT IS NOT "NOTHING FROM THE CHECKOUT REACHES THE DRIVER".
+ * The word was load-bearing and the sentence above used to lack it, which made it false: git
+ * substitutes `%L` from the merged path's `conflict-marker-size` attribute, and a TRACKED
+ * `.gitattributes` in the checkout sets that. Verified by configuring a driver that does nothing but
+ * print `%L` — a committed `conflict-marker-size=2000000` arrived intact. It selects no code and
+ * executes nothing, but it did size a buffer: the conflict `as-built-merge-driver.ts` constructs
+ * grew from 302 bytes to 6,000,281 on that value, linearly. It is clamped there now
+ * (`MAX_MARKER_SIZE`), so the one checkout-supplied input the driver takes is bounded. The general
+ * lesson is worth more than the fix: an absolute claim about a boundary should be read against
+ * every argument that crosses it, and `%O %A %B %L %P` had five.
  *
  * ONLY WHERE IT APPLIES. Two conditions, both read as DATA and neither executed: the checkout has
  * the log, and it carries this log's merge contract (`scripts/git/as-built-log-merge.ts`), which is

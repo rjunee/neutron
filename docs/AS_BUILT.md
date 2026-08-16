@@ -162,6 +162,66 @@ landed: reverting the fence bound fails the two indentation tests and nothing
 else, restoring the old one-sided-deletion rule fails the two truncation tests
 and nothing else, and each security test produces the credential under the
 control before asserting its absence under the treatment.
+
+A LATER PANEL RETURNED TWO BLOCKERS THAT WERE ALREADY FIXED, AND THREE THAT WERE
+NOT. The two stale ones were re-verified against the branch rather than against
+the review text and found closed — the fence pattern the reviewer quoted was not
+the pattern in the file (`([^\n]*)$`, which matches every CRLF case the quoted
+form returns null on), and the delegate-after-refusal path already terminated a
+`wouldLoseEntries` refusal by constructing its own conflict. The remaining three
+were real and are fixed here.
+
+WHICH KIND A REFUSAL IS DEPENDED ON THE BASE, AND THE GUARD NEVER LOOKED AT IT.
+"Neither side parses as an entry log" returned `wouldLoseEntries: false`
+unconditionally, so it was delegated — while against an ENTRYFUL base it is the
+largest history-loss case there is, neither side keeping anything, sitting one
+guard above the rule that refuses the strictly smaller case of ONE side keeping
+nothing. Measured on a two-entry base with both sides truncated: `git merge-file`
+conflicts when the two truncations differ (exit 1) and resolves to a file with no
+entries at all when they match (exit 0, no markers). The loud outcome was git's
+accident rather than this file's decision, which is exactly what the flag exists
+to stop depending on. The test that covered the line used an entryless base and
+so could not see the difference; it now has an entryful case beside it, plus a
+control proving an entryless base still delegates.
+
+A CONTINUATION COULD DETACH FROM A HEAD THE OTHER SIDE ADDED. `attachAfter` was
+resolved only against RETAINED entries, so an undated section continuing an entry
+added IN THE SAME MERGE found no anchor and date-sorted alone. It arises whenever
+both sides write one heading and only one writes the follow-up under it. Measured:
+an addendum came out ABOVE its own head, reading as a separate top-level entry,
+because the two sort at the same date and the tie breaks on heading bytes. Such a
+run is now folded into the run that owns the entry it names.
+
+%L IS AN INPUT THE CHECKOUT CONTROLS, WHICH MAKES ONE SENTENCE IN THE ORCHESTRATOR
+TOO ABSOLUTE. git derives it from the path's `conflict-marker-size` attribute, and
+a TRACKED attributes file in the merged repo sets it — verified with a driver that
+does nothing but print `%L`, which received a committed `2000000` intact. The
+conflict this driver constructs writes that many characters three times, so one
+refusal grew from 302 bytes to 6,000,281, linearly. Clamped at 200. The claim that
+nothing the checkout contains decides what happens on the publisher host now says
+what RUNS, and names `%L` as the one input that crosses and is bounded. The
+delegated path still passes `%L` through, deliberately: its stated property is
+that it is byte-for-byte an unconfigured repo, and git does not bound it either
+(measured, 6,000,148 bytes from git alone).
+
+Also corrected rather than defended: a restated-count assertion
+(`entries.length > 250`) in the real-log test, which forbids a legitimate future
+and proves nothing about the test — replaced by the property the case actually
+needs, that the base has more than the one entry the truncation keeps. And the
+installer header contradicted itself on which half-state is fatal. Measured on
+git 2.50.1 with a control: attribute plus `merge.<name>.name` and no `.driver` is
+exit 128, attribute with NO config at all is exit 1 with ordinary markers, and
+`.driver` alone merges at exit 0. Only the first is fatal, so the argument for
+keeping the attribute untracked is now the true one — a committed attribute would
+swap this path's `merge=union` for a conflict in every fresh clone, not brick it.
+The same overstatement was fixed in the driver header and in SYSTEM-OVERVIEW.
+
+Each of the three fixes was mutation-tested with a control proving the mutation
+landed: restoring the unconditional `wouldLoseEntries: false` fails the entryful-
+base test and nothing else, disabling the run-folding fails the cross-side
+continuation test and nothing else, and removing the clamp fails the marker-size
+test and nothing else.
+
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
 Landed via PR #325.

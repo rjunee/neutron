@@ -6491,9 +6491,8 @@ The fix is a git merge driver that works on **whole entries**:
   `[^\n]*` and **not** `.`, because JavaScript's `.` excludes a carriage return:
   with `(.*)` the pattern matched **nothing at all** on a CRLF file, so no fence
   ever opened there and the tracker silently did not run on the one input class
-  where its absence corrupts the file.
-  interleaving inside one entry is what produced broken TypeScript in an earlier
-  incident.
+  where its absence corrupts the file. (Interleaving inside one entry is what
+  produced broken TypeScript in an earlier incident — hence entry-aware.)
 - A refusal also records **whether git may be asked to finish it**
   (`wouldLoseEntries`). This is the difference between refusing and refusing
   *effectively*: to a line-based merge a one-sided deletion is a clean hunk, so
@@ -6503,11 +6502,23 @@ The fix is a git merge driver that works on **whole entries**:
   exit, the reason on the marker label), while a textual disagreement — two
   rewrites of one entry, a diverged header, a file that is not this log — is
   still delegated, because there git's own three-way is a real answer and is
-  exactly the pre-driver behaviour.
+  exactly the pre-driver behaviour. **Which kind a refusal is depends on the
+  BASE, not only on the sides.** "Neither side parses as an entry log" was
+  reported as delegable unconditionally — but against an entryful base that is
+  the largest history-loss case in the file, neither side keeping anything, sat
+  one guard above the rule that refuses the strictly smaller case of ONE side
+  keeping nothing. Measured, `git merge-file` conflicts when the two truncations
+  differ and resolves to a file with no entries when they match, so the loud
+  outcome was git's accident rather than the driver's decision.
 - An **added undated section** sorts at the date of the entry it continues, not
   at `''`. Sorting at `''` put it below every real date, i.e. at the very tail of
   the file, hundreds of entries away from the entry whose text it continues; one
-  added under an entry the base already had is emitted directly after that entry.
+  added under an entry the base already had is emitted directly after that entry,
+  and one added under an entry **the other side added in the same merge** is
+  folded into that entry's run. The last case is the one an anchor resolved only
+  against base entries could not see: both sides write the same heading, only one
+  writes the follow-up under it, and the section then date-sorted on its own —
+  measured landing ABOVE its own head, because the tie broke on heading bytes.
 - `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls. A
   TEXTUAL disagreement it will not merge (both sides editing one entry, a
   diverged header, a file that does not parse as a log) is handed to
@@ -6516,20 +6527,35 @@ The fix is a git merge driver that works on **whole entries**:
   conflicted here instead — see `wouldLoseEntries` above. It also checks `%P`, so
   a checkout that points `merge=as-built-log` at other paths through its own
   `.gitattributes` gets git's merge for them rather than this log's semantics.
+  **`%L` is the one input the checkout supplies, and it is clamped.** git derives
+  it from the path's `conflict-marker-size` attribute, which a TRACKED
+  `.gitattributes` in the merged repo sets — verified by handing git a driver
+  that prints `%L` and reading back a committed `2000000`. The conflict this
+  driver constructs writes that many characters three times, so one refusal grew
+  from 302 bytes to 6,000,281, linearly. Capped at 200 (git's default is 7). The
+  cap covers what THIS code writes; `git merge-file` on the delegated path is
+  still handed `%L` unclamped, because that path's stated property is that it is
+  byte-for-byte what an unconfigured repo does — and git does not bound it
+  either, measured at the same 6 MB from git alone.
 - `scripts/install-merge-drivers.sh` — installs the driver config AND the
   binding. **The binding lives in `.git/info/attributes`, not in a tracked
-  `.gitattributes`**, because git treats an attribute naming an unconfigured
-  driver as `fatal: … lacks command line` (exit 128) rather than falling back —
-  for `git merge` and for the `git apply --3way` the publisher uses. A committed
-  attribute would break every fresh clone, outside contributor and CI until each
-  ran an install step they had no reason to know about. Untracked, the attribute
-  is never present without the driver it names — the same rule
-  `install-git-hooks.sh` applies to the leak gate and its denylist. Stated
-  exactly, because the two half-states are not symmetric: **attribute without
-  driver is fatal and is impossible** (written last, and removed again if the
-  driver cannot be read back), while **driver without attribute is inert and IS
-  reachable** (a failed `mkdir`/append exits 3 loudly and leaves the config).
-  The guarantee is "never the fatal half, always loudly" — not "never a half".
+  `.gitattributes`** — and the reason is the measured one rather than the
+  dramatic one this used to give. There are TWO ways to have the attribute
+  without a working driver and they do not behave alike (git 2.50.1):
+  `merge.<name>.name` set with no `.driver` is `fatal: … lacks command line`,
+  exit 128; **no `merge.<name>.*` config at all is not fatal** — git falls back
+  to its built-in text merge, exit 1 with ordinary markers. A fresh clone is the
+  second state, so a committed attribute would not brick it; it would silently
+  swap the `merge=union` this path gets today for a conflict on every concurrent
+  append, for every outside contributor and for CI, and leave each of them one
+  stray `merge.<name>.name` away from the 128. Untracked, the attribute is never
+  present without the driver it names — the same rule `install-git-hooks.sh`
+  applies to the leak gate and its denylist. The two half-states are also not
+  symmetric: **attribute without driver is the bad half and is impossible**
+  (written last, and removed again if the driver cannot be read back), while
+  **driver without attribute is inert and IS reachable** (a failed `mkdir`/append
+  exits 3 loudly and leaves the config). The guarantee is "never the bad half,
+  always loudly" — not "never a half".
 
 **What "the repo merges exactly as it does today" means here, precisely.** It is
 **not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,

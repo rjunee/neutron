@@ -299,9 +299,24 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
   // A file with no entries is not this log — a rename, a truncation, something unexpected. Let
   // git's own merge handle it rather than inventing structure that is not there.
   if (A.entries.length === 0 && B.entries.length === 0) {
-    // Not a history-loss refusal: with no entries on either side there is no entry to lose, and
-    // git's textual three-way is precisely what this path did before the driver existed.
-    return { ok: false, reason: 'neither side parses as an entry log', wouldLoseEntries: false }
+    // WHETHER THIS REFUSAL MAY BE DELEGATED DEPENDS ON THE BASE, WHICH IT USED TO IGNORE. With an
+    // ENTRYLESS base there is genuinely no entry to lose and git's textual three-way is precisely
+    // what this path did before the driver existed, so it is delegated. With an ENTRYFUL base this
+    // is the largest history-loss case in the file — NEITHER side kept anything — and it was
+    // reported as `wouldLoseEntries: false` one guard above the rule that refuses the strictly
+    // SMALLER case of one side keeping nothing. Measured on a two-entry base with both sides
+    // truncated: `git merge-file` conflicts when the two truncations differ (exit 1, markers) and
+    // resolves to a file with no entries at all when they match (exit 0, no markers). The loud
+    // outcome was git's accident, not this file's decision, and a driver whose stated rule is
+    // "a refusal about a missing entry is never handed to git" must not depend on the accident.
+    return {
+      ok: false,
+      reason:
+        O.entries.length > 0
+          ? `neither side parses as an entry log and the base had ${O.entries.length} — refusing to merge away every entry at once`
+          : 'neither side parses as an entry log',
+      wouldLoseEntries: O.entries.length > 0,
+    }
   }
 
   // A WHOLESALE TRUNCATION GETS ITS OWN SENTENCE. The per-entry rule further down already refuses
@@ -386,10 +401,39 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
       }
     }
   }
-  const added = [
+  const sides = [
     ...additionsFrom(A, (entry) => !inO.has(entry.key)),
     ...additionsFrom(B, (entry) => !inO.has(entry.key) && !inA.has(entry.key)),
   ]
+
+  // A CONTINUATION CAN NAME AN ENTRY THAT IS ITSELF AN ADDITION, AND THAT IS THE CROSS-SIDE CASE.
+  // `attachAfter` is resolved against the RETAINED entries further down, which are by definition
+  // the ones the base already had — so an undated section that continues an entry ADDED IN THIS
+  // SAME MERGE found no anchor and was left to date-sort on its own. It arises whenever both sides
+  // wrote the same heading and only one of them wrote the follow-up under it: `theirs`'s section is
+  // an addition, its head is not (ours added it too), so the section starts a run of its own.
+  // Measured: `theirs` adding `## (addendum) follow-up detail` under a shared `## 2026-08-16 —
+  // shared new entry` came out ABOVE its own head, because the two sort at the same date and `(`
+  // precedes `2` in a plain string compare — reading as a separate top-level entry rather than a
+  // continuation. Folding the run into the run that owns the entry it names fixes the anchor at the
+  // only place it is known, and the section then moves wherever its head moves.
+  const ownerOf = new Map<string, Addition>()
+  // The last entry currently attached after a given key, so two runs anchored on the SAME entry
+  // land in the order they were written rather than the second one jumping ahead of the first.
+  const tailOf = new Map<string, string>()
+  const added: Addition[] = []
+  for (const addition of sides) {
+    const owner = addition.attachAfter === null ? undefined : ownerOf.get(addition.attachAfter)
+    if (owner !== undefined && addition.attachAfter !== null) {
+      const anchor = tailOf.get(addition.attachAfter) ?? addition.attachAfter
+      owner.entries.splice(owner.entries.findIndex((entry) => entry.key === anchor) + 1, 0, ...addition.entries)
+      tailOf.set(addition.attachAfter, addition.entries[addition.entries.length - 1]!.key)
+      for (const entry of addition.entries) ownerOf.set(entry.key, owner)
+      continue
+    }
+    added.push(addition)
+    for (const entry of addition.entries) ownerOf.set(entry.key, addition)
+  }
 
   // (3) Place the additions among the retained entries, newest-first. A same-day addition sorts
   //     ABOVE a same-day retained entry, which is where a build prepending by hand would put it —

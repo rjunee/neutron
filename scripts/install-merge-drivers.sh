@@ -15,9 +15,16 @@
 # Stated exactly, because "both halves or neither" is the sentence a reader will trust and it is
 # one word too strong. There are two half-states and they are NOT symmetric:
 #
-#   • ATTRIBUTE WITHOUT DRIVER is FATAL (git exits 128 on any merge of the path) and is IMPOSSIBLE
-#     here: the attribute is written only after the driver config landed, and is removed again by
-#     the verification at the end if the driver is not readable back.
+#   • ATTRIBUTE WITHOUT DRIVER is the bad half, and it has TWO forms that do NOT behave the same —
+#     an earlier version of this paragraph called both of them fatal, which is true of only one.
+#     Measured on git 2.50.1, attribute present in $GIT_COMMON_DIR/info/attributes:
+#       - with `merge.<name>.name` set and no `.driver`: `fatal: custom merge driver as-built-log
+#         lacks command line`, exit 128 — the merge cannot be run at all. THIS is the fatal one.
+#       - with NO `merge.<name>.*` config whatsoever: git silently falls back to its built-in text
+#         merge, exit 1 with ordinary conflict markers. Not fatal; just this path conflicting the
+#         way it did before the driver was written.
+#     Both are IMPOSSIBLE here: the attribute is written only after the driver config landed, and is
+#     removed again by the verification at the end if the driver is not readable back.
 #   • DRIVER WITHOUT ATTRIBUTE is INERT — the config names a command nothing points at, so the path
 #     merges exactly as it did before — and it IS reachable: if `mkdir -p` or the append to the
 #     attributes file fails, the script exits 3 loudly and leaves the config behind. That is the
@@ -28,16 +35,21 @@
 #   2. `docs/AS_BUILT.md merge=as-built-log` in `$GIT_COMMON_DIR/info/attributes` — the binding
 #      from the path to that command.
 #
-# Half (2) deliberately does NOT live in a tracked `.gitattributes`. git treats an attribute naming
-# a driver that is not configured as FATAL, not as a fallback:
+# Half (2) deliberately does NOT live in a tracked `.gitattributes`, and the reason is the measured
+# one rather than the dramatic one. A fresh clone carries no `merge.as-built-log.*` config at all,
+# and in that state git does NOT fail — it silently falls back to its built-in text merge, exit 1
+# with ordinary conflict markers. So committing the attribute would not brick a clone; it would
+# quietly REPLACE the `merge=union` this path gets from the tracked `.gitattributes` today with a
+# conflict on every concurrent append, for every outside contributor and for CI, until each of them
+# ran this script. That is a regression worth avoiding on its own. The genuinely fatal state needs a
+# `merge.<name>.name` with no `.driver` — a half-installed clone —
 #
 #     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
 #
-# — for `git merge` and for the `git apply --3way` the publisher uses. Committing the attribute
-# would therefore break every fresh clone, every outside contributor and CI on any merge touching
-# this file, until each of them ran this script. Keeping it untracked means the attribute and its
-# driver never arrive attribute-first; a clone that never runs this behaves exactly as it does
-# today. Same rule `install-git-hooks.sh` applies to the leak gate and its denylist.
+# — for `git merge` and for the `git apply --3way` the publisher uses, and a committed attribute is
+# what would put every such clone one bad config write away from it. Keeping the attribute untracked
+# means it and its driver never arrive attribute-first; a clone that never runs this behaves exactly
+# as it does today. Same rule `install-git-hooks.sh` applies to the leak gate and its denylist.
 #
 # "NEVER THE FATAL HALF" IS ENFORCED, NOT MERELY INTENDED. This script has no `errexit` (and
 # cannot safely acquire one — `git config --unset` exits 5 on an already-absent key and `grep -v`
@@ -57,8 +69,9 @@
 #     `.name` first and unset it by hand when `.driver` failed — a cleanup performed by a THIRD
 #     write, which the held `config.lock` that caused the failure would have blocked too. Ordering
 #     removes the state; a rollback only apologises for it.
-#   • the attribute written with no config at all — git falls back to its built-in merge SILENTLY,
-#     so the clone reports "installed" and goes on conflicting exactly as before. Reachable with a
+#   • the attribute written with no config at all — git falls back to its built-in merge SILENTLY
+#     (exit 1 with ordinary markers, NOT the 128 above), so the clone reports "installed" and goes
+#     on conflicting exactly as before. Reachable with a
 #     stale `$GIT_COMMON_DIR/config.lock`: the unchecked version appended the attribute after both
 #     config writes had failed and still printed "merge drivers: installed" on exit 0 — the exact
 #     state the paragraph above calls impossible. `--check` and the lock-contention case are both

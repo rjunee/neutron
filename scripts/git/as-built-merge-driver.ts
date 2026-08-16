@@ -8,21 +8,25 @@
  * INSTALLED, NEVER DECLARED IN A TRACKED FILE. The attribute that binds this driver to the path
  * lives in `.git/info/attributes`, written by `scripts/install-merge-drivers.sh` in the SAME step
  * that writes the `merge.as-built-log.driver` config. That pairing is deliberate and it is the
- * reason a tracked `.gitattributes` is NOT used here: a `merge=as-built-log` line committed to the
- * repo would reach every clone, and git treats a declared-but-unconfigured driver as FATAL rather
- * than falling back —
+ * reason a tracked `.gitattributes` is NOT used here. Stated as measured, because an earlier cut of
+ * this paragraph claimed a declared-but-unconfigured driver is always FATAL and that is true of only
+ * one of the two ways to be unconfigured (git 2.50.1, attribute present):
  *
- *     $ git merge --no-edit other        # attribute present, driver not configured
- *     fatal: custom merge driver probe lacks command line.
- *     MERGE_EXIT=128
+ *     $ git merge --no-edit other   # attribute, merge.<name>.name set, no .driver
+ *     fatal: custom merge driver as-built-log lacks command line.        MERGE_EXIT=128
  *
- * — for `git merge` AND for the `git apply --3way` the publisher uses. So a fresh clone, an
- * outside contributor, or CI would hard-fail on any merge touching this file until somebody ran an
- * install step they had no reason to know about. Keeping the attribute untracked means it is never
- * present without the driver it names — the same rule `scripts/install-git-hooks.sh` applies to the
- * leak gate and its denylist: "a control and its pattern source have to be installed together or
- * neither is real." (The reverse half-state, a driver config nothing points at, is inert and IS
- * reachable; `scripts/install-merge-drivers.sh` says exactly when.) Without the install the repo
+ *     $ git merge --no-edit other   # attribute, no merge.<name>.* config at all
+ *     CONFLICT (content): Merge conflict in docs/AS_BUILT.md            MERGE_EXIT=1
+ *
+ * A fresh clone is the SECOND state, so committing the attribute would not hard-fail it — it would
+ * silently swap the `merge=union` this path gets today for a conflict on every concurrent append,
+ * for every outside contributor and for CI, and leave each of them one stray `merge.<name>.name`
+ * away from the 128. Both outcomes are for `git merge` AND for the `git apply --3way` the publisher
+ * uses. Keeping the attribute untracked means it is never present without the driver it names — the
+ * same rule `scripts/install-git-hooks.sh` applies to the leak gate and its denylist: "a control and
+ * its pattern source have to be installed together or neither is real." (The reverse half-state, a
+ * driver config nothing points at, is inert and IS reachable; `scripts/install-merge-drivers.sh`
+ * says exactly when.) Without the install the repo
  * behaves as it does today — `.gitattributes` gives this path `merge=union`, which interleaves
  * rather than conflicting; with the install, `$GIT_COMMON_DIR/info/attributes` takes precedence over
  * the tracked file and concurrent appends merge whole entries instead.
@@ -54,6 +58,27 @@ import { mergeAsBuiltLog } from './as-built-log-merge.ts'
 const LOG_PATH = 'docs/AS_BUILT.md'
 
 /**
+ * The widest conflict marker this process will WRITE, whatever `%L` asks for.
+ *
+ * `%L` is not ours: git derives it from the `conflict-marker-size` attribute of the path, which a
+ * TRACKED `.gitattributes` in the merged repository sets — verified by handing git a driver that
+ * does nothing but print `%L`, which reported `2000000` from a committed attributes file. The
+ * conflict this file constructs writes that many characters three times, so the same refusal that
+ * costs 302 bytes at the default cost 6,000,281 bytes at that setting, scaling linearly with a
+ * number the checkout chooses.
+ *
+ * WHAT THIS DOES AND DOES NOT CLOSE, because the honest version is narrower than "clamped".
+ * `delegateToGit` still passes `%L` to `git merge-file` unclamped, and git does not bound it either
+ * — measured, the same 2000000 produces 6,000,148 bytes from git alone on a three-line file. That
+ * path is deliberately left alone: its stated property is that the fallback is byte-for-byte what
+ * an unconfigured repo does, and clamping it would make that false to fix an amplification the
+ * unconfigured repo has anyway. So this bound covers the output THIS code authors, and the
+ * remaining exposure is git's own, identical with or without this driver installed. Git's default
+ * is 7 and no real setting is near three digits, so 200 is far above any legitimate use.
+ */
+const MAX_MARKER_SIZE = 200
+
+/**
  * Hand the merge back to git. Writes standard conflict markers into `ours` and returns git's exit
  * status, so this floor is byte-for-byte what an unconfigured repo does.
  *
@@ -80,7 +105,7 @@ function delegateToGit(base: string, ours: string, theirs: string, markerSize: s
  */
 function writeConflict(oursPath: string, ours: string, theirs: string, markerSize: string, reason: string): number {
   const size = /^\d+$/.test(markerSize) ? Number(markerSize) : 7
-  const width = Number.isFinite(size) && size >= 7 ? size : 7
+  const width = Number.isFinite(size) && size >= 7 ? Math.min(size, MAX_MARKER_SIZE) : 7
   const withNewline = (text: string): string => (text === '' || text.endsWith('\n') ? text : `${text}\n`)
   writeFileSync(
     oursPath,
