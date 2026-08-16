@@ -107,7 +107,7 @@ describe('every GitHub READ probe goes through it', () => {
     return grab(name)
   }
 
-  for (const probe of ['probeCi', 'probeReviewReadiness', 'probePrMerged']) {
+  for (const probe of ['probeCi', 'probeReviewReadiness', 'probeRequiredChecks', 'probePrMerged']) {
     test(`${probe} composes its command with ghReadCommand, not a bare \`gh\``, () => {
       const src = source(probe)
       expect(src).toContain('ghReadCommand(')

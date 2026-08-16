@@ -98,6 +98,16 @@ async function runWorkflow(script: Script): Promise<RunOut> {
         ? { raw: '[{"name":"test","state":"SUCCESS","link":"x"}]\n___EXIT=0', exit_code: 0 }
         : script.ciProbe(n)
     }
+    // What the base branch requires, in the three-section shape the probe transcribes:
+    // protection 404 (unprotected), no rulesets, and the check names this repo emits.
+    if (label.startsWith('required-checks-r')) {
+      return {
+        raw:
+          'gh: Not Found (HTTP 404)\n___PROT_EXIT=1\n___SECTION=RULES\n[]\n___RULES_EXIT=0\n' +
+          '___SECTION=RUNS\n["test","lint","typecheck"]\n___RUNS_EXIT=0\n___EXIT=0',
+        exit_code: 0,
+      }
+    }
     if (label.startsWith('review-readiness-r')) {
       return {
         raw: JSON.stringify({

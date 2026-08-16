@@ -286,6 +286,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'head-probe-round-', dynamic: true },
       { label: 'ci-probe-round-', dynamic: true },
       { label: 'review-readiness-r', dynamic: true },
+      { label: 'required-checks-r', dynamic: true },
       { label: 'merge-probe-round-', dynamic: true },
       // The mid-loop resume's diff regeneration: one `git diff <base>..<oid>`
       // redirected to a file, reporting only the byte count. Same shape as the
