@@ -40,7 +40,31 @@ describe('parse/serialize', () => {
   test('finds every entry in the real log, and only real ones', () => {
     const text = readFileSync(REAL_LOG, 'utf8')
     const parsed = parseLog(text)
-    expect(parsed.entries.length).toBeGreaterThan(250)
+
+    // THE COUNT IS READ FROM THE FILE, NEVER RESTATED. This assertion used to be
+    // `toBeGreaterThan(250)`, which is the same defect the truncation test below already had fixed
+    // out of it: a restated count asserts nothing about the parse, and it forbids a legitimate
+    // future in which the log is archived down — 200 entries would have gone red with no defect
+    // anywhere. What this test's NAME claims is the property, so it is what is asserted: every
+    // heading line the file contains heads exactly one entry ("finds every entry"), and no entry
+    // was minted from anything else ("only real ones"). Both counts are read from the same bytes,
+    // so archiving, appending and rewriting all move them together.
+    //
+    // It is an EQUALITY rather than a floor because a floor is blind in BOTH directions at small
+    // magnitudes, which is the size real regressions come in. Measured: an over-parse of one entry
+    // (309, the shape of the `##foo` bug that `HEADING` used to have) and an under-parse of three
+    // (305, a fence swallowing headings) BOTH clear `toBeGreaterThan(250)`. The floor only ever
+    // caught the catastrophic case — a stuck fence taking the log from 308 to 13, which it did
+    // notice — while going red on an archive to 200 that has nothing wrong with it. The equality
+    // is the exact opposite: green at 308, 200 and 50, red at 309, 305 and 13.
+    //
+    // The one legitimate change that would move them apart is an entry quoting a `## ` at COLUMN
+    // ZERO inside a code fence, which is sample text and correctly heads no entry. The log has
+    // none today (verified: every one of its heading lines heads an entry) and its quoted markdown
+    // is indented; if one ever lands, subtract the fenced samples here rather than loosening this
+    // to a floor.
+    const atColumnZero = text.split('\n').filter((line) => /^##[ \t]/.test(line)).length
+    expect(parsed.entries.length).toBe(atColumnZero)
     for (const entry of parsed.entries) expect(entry.lines[0]?.startsWith('## ')).toBe(true)
     // The preamble is the title block, never an entry.
     expect(parsed.preamble.join('\n')).toContain('# AS_BUILT')
@@ -214,6 +238,22 @@ describe('parse/serialize', () => {
     expect(parsed.entries.length).toBe(2)
     expect(parsed.entries[0]!.key).not.toBe(parsed.entries[1]!.key)
   })
+
+  test('a body line beginning `##` with no space is body text, not an entry (CommonMark 4.2)', () => {
+    // `/^##[^#]/` accepted it, so an ordinary `##` in prose or a shell comment minted an entry.
+    const parsed = parseLog(log('## 2026-08-16 — has a hash in its body\n\n##not-a-heading\n\ntail\n\n'))
+    expect(parsed.entries.length).toBe(1)
+    expect(parsed.entries[0]!.lines.join('\n')).toContain('##not-a-heading')
+  })
+
+  test('…while a TAB after the hashes still is one, which `/^## /` would have silently missed', () => {
+    // CommonMark accepts a tab as the delimiter, and `as-built-heading-uniqueness.ts` shares this
+    // parser and pins the same case — narrowing to a literal space would make the gate read two
+    // colliding entries as one, which is the silent direction of the same bug.
+    const parsed = parseLog(log('##\t2026-08-16 — tab after the hashes\n\nbody\n\n'))
+    expect(parsed.entries.length).toBe(1)
+    expect(parsed.entries[0]!.lines[0]).toBe('##\t2026-08-16 — tab after the hashes')
+  })
 })
 
 describe('merge', () => {
@@ -263,6 +303,27 @@ describe('merge', () => {
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.text).toBe(log(NEW_TWO, edited, OLD_B))
+  })
+
+  test('editing a body line that begins `##` is an ordinary edit, not a fabricated hard conflict', () => {
+    // THE DEFECT THIS PINS. `HEADING` was `/^##[^#]/`, so this entry's `##not-a-heading` body line
+    // split it into TWO entries and became one of their keys. Editing that line therefore removed
+    // a key from `ours` that `theirs` still had, and the merge came back `ok: false` with
+    // `wouldLoseEntries: true` — the refusal reserved for history loss, raised on a body edit that
+    // loses nothing, and terminated by the driver as a conflict no fallback may resolve.
+    const withHash = '## 2026-08-16 — quotes a hash\n\n##not-a-heading\n\ntail\n\n'
+    const edited = '## 2026-08-16 — quotes a hash\n\n##still-not-a-heading\n\ntail\n\n'
+    const base = log(withHash, OLD_B)
+    const res = mergeAsBuiltLog(base, log(edited, OLD_B), log(NEW_TWO, withHash, OLD_B))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toBe(log(NEW_TWO, edited, OLD_B))
+
+    // CONTROL — the same shape with the edit on a PLAIN body line merged cleanly before this fix
+    // too, which is what made the bug a trap rather than an outage: only the `##` line differed.
+    const plain = '## 2026-08-16 — quotes a hash\n\n##not-a-heading\n\ntail, corrected\n\n'
+    const control = mergeAsBuiltLog(base, log(plain, OLD_B), log(NEW_TWO, withHash, OLD_B))
+    expect(control.ok).toBe(true)
   })
 
   test('a dated addition older than the newest entry slots into date order, not on top', () => {

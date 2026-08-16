@@ -235,6 +235,40 @@ base test and nothing else, disabling the run-folding fails the cross-side
 continuation test and nothing else, and removing the clamp fails the marker-size
 test and nothing else.
 
+THE PARSER'S OWN DOCBLOCK NAMED A CONTRACT THE REGEX DID NOT ENFORCE, AND THE GAP
+FABRICATED THE ONE REFUSAL RESERVED FOR HISTORY LOSS. `HEADING` was `/^##[^#]/`
+while the comment above it said an entry begins at a `## ` heading, so an
+ordinary BODY line starting `##` with no delimiter — a shell comment, an `##` in
+prose — minted an entry of its own. That is not a cosmetic miscount: the split
+changes the entry KEYS, so editing such a line renames a key, the key goes
+missing from one side while the other still has it, and the merge returns
+`wouldLoseEntries: true` — the refusal the driver must never delegate, raised on
+a body edit that loses nothing. Measured on a two-entry base carrying one
+`##not-a-heading` line: three entries parsed, and an ours-side edit of that line
+came back `ok: false, wouldLoseEntries: true`. It is `/^##[ \t]/` now, which is
+CommonMark 4.2 — the run of `#` must be followed by a space, a tab, or the end of
+the line.
+
+The reviewer's suggested fix was the narrower `/^## /`, and that would have been
+a worse bug in the quieter direction. CommonMark accepts a tab, and
+`scripts/git/as-built-heading-uniqueness.ts` shares this parser precisely so a
+gate and a driver can never disagree about where an entry begins; its own test
+file pins `##\ta — one`. Mutation-tested both ways: `/^##[^#]/` fails the two new
+`##`-body tests and nothing else, and `/^## /` fails the tab tests in BOTH files —
+the gate would have read two colliding entries as one and reported clean. Zero
+live occurrences of `^##[^# ]` exist in the tracked markdown (control: 308 for
+`^## ` in this log), so this was a latent trap, not an outage.
+
+And the SECOND restated count, in the test one line above the one already fixed:
+`toBeGreaterThan(250)` on the real log's entry count. A floor is blind in both
+directions at the magnitudes real regressions come in — measured, an over-parse
+of one entry (309, the shape of the `##` bug above) and an under-parse of three
+(305) both clear it, while an archive down to 200 that has nothing wrong with it
+goes red. It now asserts what the test's name claims: the entry count equals the
+number of heading lines the file contains, both read from the same bytes. Green
+at 308, 200 and 50; red at 309, 305, and at 13 (a stuck-open fence, produced by
+mutating the fence-close bound).
+
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
 Landed via PR #325.

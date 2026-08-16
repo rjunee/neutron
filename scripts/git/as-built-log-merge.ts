@@ -64,8 +64,33 @@
  * an ordinary edit to an entry would read as a delete plus an add.
  */
 
-/** An entry begins at a `## ` heading. `#` (the file title) and `### ` (subsections) do not. */
-const HEADING = /^##[^#]/
+/**
+ * An entry begins at a `## ` heading. `#` (the file title) and `### ` (subsections) do not.
+ *
+ * THE DELIMITER AFTER THE `##` IS REQUIRED, AND THE FIRST CUT OF THIS ONLY REQUIRED IT NOT TO BE A
+ * `#`. `/^##[^#]/` accepted `##foo`, which CommonMark 4.2 does not read as a heading at all — the
+ * run of `#` must be followed by a space, a tab, or the end of the line. So an ordinary BODY line
+ * beginning `##` (a shell comment, a C preprocessor line, an `##` in prose) parsed as an entry of
+ * its own, and the consequence was not cosmetic: the split changed the entry KEYS either side of
+ * it, so an edit to that entry's body read as an entry missing from one side and this file
+ * returned `wouldLoseEntries: true` — a hard conflict a human must resolve, fabricated out of a
+ * body edit. Measured on a two-entry base carrying one `##not-a-heading` body line: THREE entries
+ * parsed, and an ours-side edit of that line came back `ok: false, wouldLoseEntries: true` —
+ * "the ours side is missing an entry the other still has … `##not-a-heading 1`" — because the edit
+ * renamed a key. With the delimiter required the same base parses to two and the same merge is
+ * `ok: true`. It fails LOUD rather than lossy, which is why it survived review, and there are zero
+ * live occurrences in the tracked markdown (`git grep -cE '^##[^# ]' -- '*.md'` → none, against a
+ * control of 308 for `^## ` in this log) — so this is a latent trap being closed, not an outage.
+ *
+ * THE TAB IS DELIBERATE AND IT IS NOT THE SAME AS `/^## /`. CommonMark accepts `##\ttitle`, and
+ * `as-built-heading-uniqueness.ts` — which shares this parser precisely so a gate and a driver can
+ * never disagree about where an entry begins — pins that case in its own test file. Narrowing to a
+ * literal space would have counted a real heading as body text, which is the SILENT direction: the
+ * gate would swear two colliding entries are one. A line of exactly `##` with nothing after it is
+ * a valid empty heading to CommonMark and is still not matched here; an entry with no title is not
+ * something this log can carry, and treating one as body text loses nothing.
+ */
+const HEADING = /^##[ \t]/
 /** `## 2026-08-15 — title`. Ten historical sections carry no date; see `effectiveDates`. */
 const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/
 /**
