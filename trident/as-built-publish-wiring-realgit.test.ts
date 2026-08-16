@@ -29,7 +29,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
-import { rebaseOntoObservedBase, TridentRebaseConflict } from './orchestrator.ts'
+import { ensureAsBuiltMergeDriver, rebaseOntoObservedBase, TridentRebaseConflict } from './orchestrator.ts'
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
 const GIT_ID = ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false']
@@ -236,4 +236,26 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     expect(show.stdout).toContain('## 2026-08-16 — the build that published first')
     expect(show.stdout).toContain('## 2026-08-16 — the build that published second')
   }, 60_000)
+
+  test('a failed driver-config write leaves no declared-but-commandless driver behind', () => {
+    // `merge.<name>.name` set with no `.driver` is the one state git refuses outright —
+    // `fatal: custom merge driver as-built-log lacks command line`, exit 128, measured on git
+    // 2.50.1 — so the write that lands first must not survive the write that fails. A `run_host`
+    // that fails only on the `.driver` key reproduces that window without needing a real lock.
+    const calls: string[][] = []
+    const runHost = async (cmd: string[]) => {
+      calls.push(cmd)
+      const ok = !cmd.includes('merge.as-built-log.driver')
+      return { ok, exit_code: ok ? 0 : 255, stdout: '', stderr: ok ? '' : 'could not lock config file' }
+    }
+
+    // Any checkout that satisfies the applicability gate will do; this repo is one.
+    return ensureAsBuiltMergeDriver(runHost, REPO_ROOT).then((installed) => {
+      expect(installed).toBe(false)
+      const rollback = calls.find((cmd) => cmd.includes('--unset') && cmd.includes('merge.as-built-log.name'))
+      expect(rollback).toBeDefined()
+      // …and it never went on to bind a path to the driver it could not configure.
+      expect(calls.some((cmd) => cmd.includes('--git-common-dir'))).toBe(false)
+    })
+  })
 })

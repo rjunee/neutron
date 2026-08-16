@@ -605,7 +605,15 @@ export async function ensureAsBuiltMergeDriver(
       ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.driver`, command],
       repoPath,
     )
-    if (!configured.ok) return false
+    if (!configured.ok) {
+      // A LONE `.name` IS THE ONE STATE GIT REFUSES OUTRIGHT — `fatal: custom merge driver
+      // as-built-log lacks command line`, exit 128, on every merge touching a path bound to it
+      // (measured on git 2.50.1). The attribute below is never written when we get here, so nothing
+      // is bound to it yet; rolling the `.name` back anyway keeps that true for a LATER install
+      // that does write the attribute, and for anyone reading the config by hand.
+      await run_host(['git', '-C', repoPath, 'config', '--unset', `merge.${AS_BUILT_DRIVER_NAME}.name`], repoPath)
+      return false
+    }
 
     // The COMMON git dir, not the per-worktree one: a linked worktree reads attributes from the
     // common one, which is what the publisher's throwaway rebase worktree depends on.
