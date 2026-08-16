@@ -80,6 +80,7 @@ import {
 } from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
+import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
@@ -164,6 +165,26 @@ export interface BuildTridentOrchestratorOptions {
    * resolver degrades to no context and never fails the launch (see `launch()`).
    */
   resolve_reflection_context?: (run: TridentRun) => string | null
+  /**
+   * The count of trident runs currently IN A BUILD PHASE (`forge-init`/`forge-fix`),
+   * INCLUDING the one launching — the live test-running fan-out. Wired from the run
+   * store in `gateway/composition/build-core-modules.ts` (the orchestrator holds no
+   * store; the composer does).
+   *
+   * Consumed by `computeTestJobs` as its RAISE-ONLY term. The bound itself comes from
+   * the CONSTANT `DEFAULT_BUILD_FANOUT`, because a launch-time snapshot cannot bound a
+   * STAGGERED fan-out: the value is frozen into a prompt string, so the run that
+   * launched onto an idle box would keep all the cores for an hour while later runs
+   * divided the same box again (read `computeTestJobs`'s docblock). This count only
+   * shrinks the budget FURTHER, when more builds than planned are genuinely running.
+   *
+   * BEST-EFFORT: a throwing resolver or a non-finite result degrades to 1
+   * (sequential-safe) and NEVER fails the launch. And it must actually be WIRED —
+   * `resolve_phase_models` is the history here: a complete seam whose producer was
+   * missing shipped an inert feature that no test could catch, because every piece
+   * worked in isolation.
+   */
+  resolve_active_runs?: () => number
   /**
    * Is a Kimi K3 key configured? Called PER LAUNCH so a key added after boot is
    * honoured without a restart. Absent → the Kimi panelist never runs, which is
@@ -271,7 +292,9 @@ export interface BuildTridentOrchestratorOptions {
    * checkpoint (`forge-done`, `argus-*`, `fix-round-N`), so it never trips this;
    * only a genuinely wedged agent() (or a stalled orphan) does. This is
    * deliberately SHORTER than `max_inflight_ms` (the 2h absolute ceiling, kept
-   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (25 min).
+   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (90 min —
+   * `trident/liveness.ts`; this comment said 25 min long after the constant was
+   * raised, which is exactly the kind of drift that makes a reader distrust it).
    */
   no_advance_hang_ms?: number
   /**
@@ -1541,6 +1564,47 @@ export function buildTridentOrchestrator(
       }
     }
 
+    // The TEST EXECUTION block, derived here for the same reason and with the same
+    // never-fails shape as the reflection resolve above: it needs the LIVE run count
+    // (the launcher does not hold one) and the host's core/RAM budget, and a build must
+    // never fail because the strategy could not be derived. Null → the workflow's
+    // contract is byte-identical legacy.
+    let test_strategy: string | null = null
+    // The numbers behind that block, carried into this launch's AdvanceOutcome note so
+    // the divisor and the chosen jobs value are VISIBLE. Round-3 review: a box with
+    // enough parked runs to pin every build at `jobs=1` logged nothing at all and was
+    // indistinguishable from a healthy one.
+    let test_strategy_summary: string | null = null
+    try {
+      let active = 1
+      if (opts.resolve_active_runs) {
+        try {
+          const n = opts.resolve_active_runs()
+          if (Number.isFinite(n) && n >= 1) active = Math.floor(n)
+        } catch {
+          // A store hiccup costs the RAISE-ONLY term, not the whole block, and not the
+          // bound: `computeTestJobs` still divides by the constant fan-out, so a lost
+          // count means "assume the planned fan-out" rather than "assume an idle box".
+          // The build also still gets its stage-1 gate and its full-suite rule. The
+          // outer catch below is the last-resort backstop that keeps ANY failure here
+          // from failing the launch.
+          active = 1
+        }
+      }
+      const budget = readHostBudget()
+      const detail = buildTestStrategyDetail(launchRun.repo_path, {
+        cores: budget.cores,
+        active_runs: active,
+        mem_available_bytes: budget.mem_available_bytes,
+        base_branch: base,
+      })
+      test_strategy = detail.block
+      test_strategy_summary = detail.summary
+    } catch {
+      test_strategy = null
+      test_strategy_summary = null
+    }
+
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
@@ -1581,6 +1645,9 @@ export function buildTridentOrchestrator(
       // resolver / nothing learned / a
       // read failed.
       reflection_context,
+      // The rendered TEST EXECUTION block (derived best-effort above), spliced by the
+      // workflow into the FORGE build contract only — never the argus review gate.
+      test_strategy,
       // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
       // and OMITS the argument when nothing valid is configured, so an untouched
       // instance produces byte-identical workflow args.
@@ -1629,7 +1696,9 @@ export function buildTridentOrchestrator(
       run: next,
       changed: true,
       waiting: true,
-      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}`,
+      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}${
+        test_strategy_summary !== null ? ` [${test_strategy_summary}]` : ''
+      }`,
     }
   }
 

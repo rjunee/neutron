@@ -75,6 +75,9 @@ interface ResumeOpts {
   /** Bytes the resume-diff step reports writing. 0 → it could not produce one. */
   diffBytes?: number
   ralph?: boolean
+  /** The rendered TEST EXECUTION block. Omitted → '' (a launcher that derives none),
+   *  which is the arming condition for the full-suite gate. */
+  testStrategy?: string
 }
 
 /** Drive the REAL inner-workflow body through a resume. */
@@ -171,6 +174,7 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
     worktreeCleanupScript: '/repo/trident/worktree-cleanup.sh',
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance: '',
+    ...(opts.testStrategy !== undefined ? { testStrategy: opts.testStrategy } : {}),
   }
 
   const body = SRC.replace('export const meta', 'const meta')
@@ -804,5 +808,79 @@ describe('mid-loop resume — an unreadable head is a bounded STOP, never a rebu
     // …and the published checkpoint survives verbatim, so the re-run reviews the
     // very OID the publisher recorded.
     expect(out.result.checkpoint).toBe(checkpoint)
+  })
+})
+
+/**
+ * THE FULL-SUITE GATE ACROSS A PROCESS BOUNDARY (Argus round 2, confirmed by two
+ * reviewers).
+ *
+ * In PR mode — the default — the build round ENDS at the durable publisher handoff, so
+ * the build's `testsPassed` claim and the review panel that must not APPROVE it live in
+ * DIFFERENT PROCESSES. The gate was therefore structurally unreachable there: the
+ * resumed process has no build report at all. The same hole swallowed the local-mode
+ * crash resume (a process that died between `forge-done` and the panel).
+ *
+ * The claim now travels on the checkpoint's findings column, which the publisher's
+ * re-fire leaves untouched, and arrives here as `resumeFindings`. These tests drive the
+ * REAL body through that resume and assert the VERDICT, because "the finding is
+ * mentioned somewhere" is exactly what the first version could also have claimed.
+ */
+describe('mid-loop resume — a RECORDED unproven suite still cannot be approved', () => {
+  const STRATEGY = 'TEST EXECUTION\n\nfull suite rules'
+  const SUITE_FINDINGS = [
+    {
+      severity: 'blocker',
+      title: 'FULL SUITE NOT PROVEN — the build did not report testsPassed=true',
+      evidence: 'The build reported testsPassed=false.',
+    },
+  ]
+
+  test('the panel runs, APPROVES, and is OVERRIDDEN — no verdict on an unproven suite', async () => {
+    const out = await runResume({
+      checkpoint: 'forge-done',
+      recordedHead: RECORDED,
+      resumeLiveHead: RECORDED,
+      findings: SUITE_FINDINGS,
+      testStrategy: STRATEGY,
+      // Round 1's panel approves; only the recorded blocker can stop it.
+      verdicts: ['APPROVE', 'APPROVE'],
+    })
+
+    expect(built(out.labels)).toBe(false)
+    // The panel is NOT skipped — its findings are what the fix round needs.
+    expect(reviewed(out.labels)).toBe(true)
+    // …and its APPROVE bought exactly one more round rather than a merge.
+    expect(out.labels).toContain('forge:fix-round-2')
+    expect(promptFor(out, 'forge:fix-round-2')).toContain('FULL SUITE NOT PROVEN')
+    // The fix round reports testsPassed: true, so the next panel's APPROVE stands.
+    expect(out.result.verdict).toBe('APPROVE')
+    expect(out.result.round).toBe(2)
+  })
+
+  test('the SAME resume with no recorded blocker approves immediately — no extra round', async () => {
+    const out = await runResume({
+      checkpoint: 'forge-done',
+      recordedHead: RECORDED,
+      resumeLiveHead: RECORDED,
+      testStrategy: STRATEGY,
+      verdicts: ['APPROVE'],
+    })
+    expect(out.labels.some((l) => l.startsWith('forge:fix-round-'))).toBe(false)
+    expect(out.result.verdict).toBe('APPROVE')
+  })
+
+  test('a launcher with NO strategy reads the same row as before — byte-identical', async () => {
+    // The arming condition is repeated at the read site so a row written by a workflow
+    // that never had a strategy cannot be re-read as a gate record.
+    const out = await runResume({
+      checkpoint: 'forge-done',
+      recordedHead: RECORDED,
+      resumeLiveHead: RECORDED,
+      findings: SUITE_FINDINGS,
+      verdicts: ['APPROVE'],
+    })
+    expect(out.labels.some((l) => l.startsWith('forge:fix-round-'))).toBe(false)
+    expect(out.result.verdict).toBe('APPROVE')
   })
 })
