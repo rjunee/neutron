@@ -33,6 +33,14 @@
  * therefore board mutations the owner and the agent can both already perform,
  * durable across restarts, with no second queue to drift.
  *
+ * "ACTIVELY DRIVING" IS A MEASUREMENT, NOT A PHASE. The first cut of that rule
+ * asked only whether the linked run was non-terminal, and a stalled run is
+ * non-terminal forever — so on the owner's instance three parked runs suppressed
+ * every subsequent tick and the loop went quiet after one firing. The selector
+ * (`work-wakeup-selection.ts`) now defers only to a run that has ADVANCED
+ * recently, and hands back the deferrals it made so this sweep can log them:
+ * going quiet is the one forbidden outcome, and a silent skip is going quiet.
+ *
  * THE OWNER-ACTIVITY GATE: a project whose chat has seen a GENUINE owner turn
  * inside `owner_grace_ms` (default 30 min) is skipped — while he is driving, the
  * session does not need a robot poking it, and a wakeup turn would queue ahead
@@ -96,6 +104,22 @@ export interface WakeupWorkItem {
   title: string
 }
 
+/**
+ * One in-progress item this sweep did NOT wake because a live trident run is
+ * still driving it. Carried so the decision is LOGGED rather than silent — the
+ * failure this cured was three items disappearing from the only autonomy
+ * mechanism with nothing written anywhere to say so.
+ */
+export interface WakeupDeferredItem {
+  title: string
+  /** The `code_trident_runs.id` the item is bound to. */
+  run_id: string
+  /** That run's phase, verbatim (`forge-init`, `argus`, …). */
+  phase: string
+  /** ms since the run's `last_advanced_at` — how fresh the deferral's basis is. */
+  since_advance_ms: number
+}
+
 /** Everything the sweep needs to wake ONE project. */
 export interface WakeupProjectWork {
   /** Work Board storage key (bare owner slug for General, project id otherwise). */
@@ -111,6 +135,13 @@ export interface WakeupProjectWork {
   /** Human label for the prompt + failure notices. */
   label: string
   items: WakeupWorkItem[]
+  /**
+   * In-progress items withheld from `items` because a live run is driving them.
+   * Reported, never acted on. A project may legitimately arrive with `items`
+   * EMPTY and this non-empty — that is the "everything is being built" state, and
+   * the sweep still logs it rather than looking like it found no work at all.
+   */
+  deferred: WakeupDeferredItem[]
 }
 
 /**
@@ -158,6 +189,8 @@ export interface WakeupSweepResult {
   woke: number
   skipped_active: number
   failed: number
+  /** Items left to a live run this tick (one `wakeup_deferred_to_live_run` each). */
+  deferred_to_run: number
 }
 
 /** Truncate for a prompt line / a log field — bounded, marked, never thrown. */
@@ -210,7 +243,7 @@ export async function runWorkWakeupSweep(
   const now = deps.now ?? ((): number => Date.now())
   const grace = deps.owner_grace_ms ?? WORK_WAKEUP_OWNER_GRACE_MS
   const turn_timeout = deps.turn_timeout_ms ?? WORK_WAKEUP_TURN_TIMEOUT_MS
-  const result: WakeupSweepResult = { woke: 0, skipped_active: 0, failed: 0 }
+  const result: WakeupSweepResult = { woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0 }
 
   const projects = await deps.listOutstanding()
   // Drop streak entries for projects that no longer have outstanding work, so
@@ -221,6 +254,23 @@ export async function runWorkWakeupSweep(
   }
 
   for (const project of projects) {
+    // SAY WHAT WAS WITHHELD, BEFORE ANY GATE. A deferral is a decision to leave a
+    // work item to another driver, and the tick that made it is the only place
+    // that knows. Logged at INFO (not debug, unlike the owner-active gate) because
+    // this is the line that answers "is anything actually progressing?" — it names
+    // the run and how long since it last moved, so a parked driver is legible as a
+    // parked driver rather than as an empty board. Bounded by the board's
+    // in-progress count, which is the owner's own plan.
+    for (const d of project.deferred) {
+      result.deferred_to_run += 1
+      log.info('wakeup_deferred_to_live_run', {
+        project: project.project_key,
+        item: bound(d.title, 140),
+        run_id: d.run_id,
+        phase: d.phase,
+        since_advance_ms: d.since_advance_ms,
+      })
+    }
     if (project.items.length === 0) continue
 
     // Owner-activity gate: while he is driving this project, stay out of it.

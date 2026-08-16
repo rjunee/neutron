@@ -285,6 +285,7 @@ import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
 } from '@neutronai/gateway/proactive/work-wakeup.ts'
+import { selectWakeupWork } from '@neutronai/gateway/proactive/work-wakeup-selection.ts'
 import { resolveLocalTimezone } from '@neutronai/gateway/proactive/local-timezone.ts'
 import { readSessionCookie } from '@neutronai/landing/session-cookie.ts'
 
@@ -5837,32 +5838,19 @@ export function buildOpenGraphComposer(
     // `listOutstanding` returns [] and every tick is a cheap no-op, so a
     // credential added later starts waking work without a restart.
     const workWakeup = buildWorkWakeupLoop({
+      // An item a live run is driving already has a wakeup driver (the trident
+      // tick) — waking it here would double-drive one work item. "Live" is
+      // measured, not assumed: a run that has stopped advancing is not a driver,
+      // and deferring to one is how this loop went silent after a single firing.
+      // The policy + the evidence live in `work-wakeup-selection.ts`.
       listOutstanding: (): WakeupProjectWork[] => {
         if (liveAgentSubstrate === null) return []
-        const grouped = new Map<string, WakeupProjectWork>()
-        for (const item of workBoardStore.listAllActive()) {
-          if (item.status !== 'in_progress') continue
-          // An item a live run is driving already has a wakeup driver (the
-          // trident tick) — waking it here would double-drive one work item.
-          if (item.linked_run_id !== null) {
-            const run = boardRunStore.get(item.linked_run_id)
-            if (run !== null && run !== undefined && !isTerminalPhase(run.phase)) continue
-          }
-          const key = item.project_slug
-          const project_id = workBoardProjectIdForKey(project_slug, key)
-          const entry = grouped.get(key) ?? {
-            project_key: key,
-            // The live-chat session scope: 'general' for the General board,
-            // the project id verbatim otherwise (`turn.project_id ?? 'general'`,
-            // `gateway/wiring/build-live-agent-turn.ts`).
-            chat_scope: project_id ?? 'general',
-            label: project_id === undefined ? 'your General workspace' : `project "${project_id}"`,
-            items: [],
-          }
-          entry.items.push({ title: item.title })
-          grouped.set(key, entry)
-        }
-        return [...grouped.values()]
+        return selectWakeupWork({
+          items: workBoardStore.listAllActive(),
+          lookupRun: (run_id: string) => boardRunStore.get(run_id),
+          owner_slug: project_slug,
+          now_ms: Date.now(),
+        })
       },
       // Most recent GENUINE owner turn in this project's chat, across both
       // topic roots — the same person-only watermark the idle-nudge sweep

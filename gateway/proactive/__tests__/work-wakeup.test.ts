@@ -24,6 +24,7 @@ function project(over: Partial<WakeupProjectWork> = {}): WakeupProjectWork {
     chat_scope: 'acme',
     label: 'project "acme"',
     items: [{ title: 'Ship the importer' }],
+    deferred: [],
     ...over,
   }
 }
@@ -69,7 +70,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness()
     const result = await runWorkWakeupSweep(h.deps, new Map())
 
-    expect(result).toEqual({ woke: 1, skipped_active: 0, failed: 0 })
+    expect(result).toEqual({ woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0 })
     expect(h.specs).toHaveLength(1)
     const spec = h.specs[0]!
     // The warm-pool key — what lands the turn ON the owner's session.
@@ -92,7 +93,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('owner active inside the grace window → skipped, and the session is NEVER entered', async () => {
     const h = harness({ activity: NOW - (WORK_WAKEUP_OWNER_GRACE_MS - 1) })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0 })
     expect(h.specs).toHaveLength(0)
     expect(h.posts).toHaveLength(0)
   })
@@ -114,8 +115,98 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('a project with zero items is not woken', async () => {
     const h = harness({ projects: [project({ items: [] })] })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0 })
     expect(h.specs).toHaveLength(0)
+  })
+
+  test('a DEFERRED item is never woken, and the skip is COUNTED rather than swallowed', async () => {
+    const h = harness({
+      projects: [
+        project({
+          items: [],
+          deferred: [
+            {
+              title: 'Ship the importer',
+              run_id: 'run-1',
+              phase: 'forge-init',
+              since_advance_ms: 120_000,
+            },
+          ],
+        }),
+      ],
+    })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1 })
+    expect(h.specs).toHaveLength(0)
+  })
+
+  test('OBSERVABILITY — every deferral writes a line naming the run and its phase', async () => {
+    // The owner's complaint was "I can't tell if it's actually autonomously
+    // progressing work". The logger routes info → console.log
+    // (`gateway/wiring/__tests__/resolve-llm-credentials.test.ts` uses the same seam).
+    const lines: string[] = []
+    const originalLog = console.log
+    const originalLevel = process.env['NEUTRON_LOG_LEVEL']
+    process.env['NEUTRON_LOG_LEVEL'] = 'info'
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(' '))
+    }
+    try {
+      const h = harness({
+        projects: [
+          project({
+            items: [],
+            deferred: [
+              {
+                title: 'Ship the importer',
+                run_id: 'run-1',
+                phase: 'forge-init',
+                since_advance_ms: 120_000,
+              },
+              {
+                title: 'Wire the reaper',
+                run_id: 'run-2',
+                phase: 'argus',
+                since_advance_ms: 30_000,
+              },
+            ],
+          }),
+        ],
+      })
+      await runWorkWakeupSweep(h.deps, new Map())
+    } finally {
+      console.log = originalLog
+      if (originalLevel === undefined) delete process.env['NEUTRON_LOG_LEVEL']
+      else process.env['NEUTRON_LOG_LEVEL'] = originalLevel
+    }
+    const deferrals = lines.filter((l) => l.includes('wakeup_deferred_to_live_run'))
+    expect(deferrals).toHaveLength(2)
+    expect(deferrals[0]).toContain('run-1')
+    expect(deferrals[0]).toContain('forge-init')
+    expect(deferrals[0]).toContain('Ship the importer')
+    expect(deferrals[0]).toContain('120000')
+    expect(deferrals[1]).toContain('run-2')
+    expect(deferrals[1]).toContain('argus')
+  })
+
+  test('deferrals are reported even for a project whose owner is actively driving', async () => {
+    const h = harness({
+      activity: NOW - 1_000,
+      projects: [
+        project({
+          deferred: [
+            {
+              title: 'Ship the importer',
+              run_id: 'run-1',
+              phase: 'forge-init',
+              since_advance_ms: 1_000,
+            },
+          ],
+        }),
+      ],
+    })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1 })
   })
 
   test('an over-long report is truncated to the bound, never dropped', async () => {
@@ -189,6 +280,7 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       woke: 0,
       skipped_active: 0,
       failed: 1,
+      deferred_to_run: 0,
     })
   })
 })
