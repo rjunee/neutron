@@ -204,7 +204,7 @@ test('the explicit migrate moves free slots across all three tables and never cl
   const otherCiphertextBefore = ciphertextOf(b.db, STALE, 'other_key')
   expect(otherCiphertextBefore).not.toBeNull()
 
-  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT })
+  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, slug_is_fallback: false })
 
   // (i) THE POINT: the FRESH value still occupies the slot. A clobbering
   // migration would also leave exactly one row here — only the decrypted value
@@ -258,7 +258,7 @@ test('the migration journals credential_scope_migrated with counts only — no s
   await seedAmbiguous(b)
   const { sink, captured } = fakeSink()
 
-  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, sink })
+  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, slug_is_fallback: false, sink })
 
   expect(captured).toHaveLength(1)
   const event = captured[0]!
@@ -289,7 +289,7 @@ test('with every row already on the boot handle the migration moves nothing and 
   await seedApiKeyRow(b.db, BOOT)
   const { sink, captured } = fakeSink()
 
-  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, sink })
+  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, slug_is_fallback: false, sink })
 
   expect(result.total_moved).toBe(0)
   expect(result.moved).toEqual([])
@@ -313,6 +313,7 @@ test('integrations_migrate_orphaned is registered under the advertised name and 
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
     db: b.db,
     startOAuth: async (labels: string[]) => ({
       ok: true as const,
@@ -338,13 +339,14 @@ test('integrations_migrate_orphaned is registered under the advertised name and 
 test('after migrating, the status reports ONLY the skipped colliding row as orphaned', async () => {
   const b = await makeBench()
   await seedAmbiguous(b)
-  await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT })
+  await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, slug_is_fallback: false })
 
   const status = await buildIntegrationsStatus({
     registry: b.registry,
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
     db: b.db,
   })
 
@@ -356,4 +358,55 @@ test('after migrating, the status reports ONLY the skipped colliding row as orph
   const tavily = status.api_keys.find((k) => k.label === 'tavily')
   expect(tavily?.connected).toBe(true)
   expect(tavily?.orphaned).toBe(false)
+})
+
+// ── THE DIRECTION GUARD ON THE EXPLICIT SURFACE ───────────────────────────
+/**
+ * A review found the guard was real and bypassable in one step: the boot path
+ * refused an anonymous fallback, the explicit migration took only a handle and
+ * moved the rows anyway. The repro was one seeded row and one dispatch.
+ *
+ * Asserted THROUGH THE SHARED BRAIN, not by calling a tool handler. Every
+ * surface — the tool, the HTTP route — funnels here, so this is the boundary
+ * where the refusal has to hold; a test that reaches past it into the handler
+ * proves nothing about what a caller actually gets, which is exactly how the
+ * gap survived its original test suite.
+ */
+test('a fallback boot handle cannot claim rows through the explicit migrate either', async () => {
+  const b = await makeBench()
+  // UNAMBIGUOUS on purpose: one stale handle, nothing under the boot handle.
+  // This is the census the reconciler is happiest about, and it is precisely
+  // the dangerous one — all the rows belong to someone else and none belong to
+  // the process asking.
+  await seedSecret(b.secrets, STALE, 'tavily', STALE_VAL)
+  await seedProjectCredential(b.db, STALE)
+  await seedApiKeyRow(b.db, STALE)
+
+  const refused = await migrateOrphanedCredentials({
+    db: b.db,
+    project_slug: BOOT,
+    slug_is_fallback: true,
+  })
+
+  expect(refused.total_moved).toBe(0)
+  expect(refused.message).toContain('Refused')
+  // The rows are untouched where they belong, and the anonymous handle still
+  // owns nothing. Counting only the boot handle would pass against a migration
+  // that DELETED them, so both sides are asserted.
+  expect(countSecrets(b.db, STALE, 'tavily')).toBe(1)
+  expect(countSecrets(b.db, BOOT, 'tavily')).toBe(0)
+  expect(await b.secrets.get({ owner_handle: STALE, kind: 'byo_api_key', label: 'tavily' })).toBe(
+    STALE_VAL,
+  )
+
+  // POSITIVE CONTROL — the same fixture, the same call, provenance the only
+  // difference. Without it this test passes just as well against a migration
+  // that never had anything to move.
+  const allowed = await migrateOrphanedCredentials({
+    db: b.db,
+    project_slug: BOOT,
+    slug_is_fallback: false,
+  })
+  expect(allowed.total_moved).toBeGreaterThan(0)
+  expect(countSecrets(b.db, BOOT, 'tavily')).toBe(1)
 })

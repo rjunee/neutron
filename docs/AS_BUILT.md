@@ -2,6 +2,53 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the guard was on the automatic path only, so the explicit one still moved the rows
+
+A review of the merged #266 found it and the repro is two lines: seed a credential row
+under an explicit handle, boot on the `'dev'` fallback, dispatch the explicit migration.
+`total_moved:1`, and the row now belongs to a process that cannot say who it is. The
+automatic reconciler refused exactly this; `migrateOrphanedCredentialScope` took a handle
+and no provenance at all, so it could not have refused anything. **Closing the direction
+on one sweep closed nothing** — the same sentence that entry was written to record, one
+level up, inside the patch that recorded it. Worse, the integrations status screen
+ADVERTISED the migration as the repair.
+
+**Provenance is a REQUIRED argument, not an option with a safe default.** A
+`CredentialScopeProvenance` is threaded from the boot resolver (`gateway/index.ts`, the
+same `slugResolution` the automatic guard reads) through the composer, the composition
+input, the cores wiring, and both explicit surfaces — the `integrations_migrate_orphaned`
+tool and `POST /api/cores/integrations/migrate-orphaned` — into the brain and the scope
+function. Required, because the failure is silent: a new surface that forgot would
+compile, pass, and quietly do the unguarded thing. Now forgetting is a type error, and
+the compiler enumerated every site rather than a human guessing at them.
+
+**Absent means fallback.** Making it required all the way up touched 89 files, most of
+them composition tests asserting a provenance they have no opinion about, so at the
+composition boundary it is optional and `undefined` reads as anonymous. "This caller did
+not say where its handle came from" and "this process does not know who it is" are the
+same statement, so a composer that forgets is refused rather than trusted — fail-closed,
+and 89 files became 6.
+
+**A surface no longer offers an action the brain will refuse.** On a fallback boot the
+orphan summary carries `migrate_action: null` and a sentence naming the real repair (set
+the handle and restart) instead of pointing at the migration that would take someone
+else's rows.
+
+**And the boot log now says WHY nothing moved.** `credential_scope_orphaned` carried no
+reason, so `ambiguous_census` and `fallback_boot_handle_refused_direction` — which need
+opposite responses — rendered identically, and the operator reading the generic sentence
+was being steered toward the unsafe action. Both the log line and the journal payload
+carry it; the payload assertion is exact equality, because an audit row that grows a
+field silently is how one starts carrying something it should not.
+
+Regression asserted THROUGH THE SHARED BRAIN, not by calling a tool handler — every
+surface funnels there, and a test that reaches past it proves nothing about what a caller
+gets, which is how the gap survived its first suite. It carries the positive control the
+file requires: the same fixture, provenance the only difference, migrates. Mutation-tested
+both directions — disabling the guard fails the new test, refusing unconditionally fails
+five. 44 tests green across the credential and integrations suites; `typecheck-all.sh`
+51/51.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset
@@ -1130,7 +1177,7 @@ gap this task existed to close.
 
 Rows in `secrets` and `project_credentials` are keyed by the frozen owner handle; rows written before provisioning froze a different handle were invisible to the instance and reported as "not connected". Boot now runs `auth/credential-scope-reconcile.ts` (wired in `gateway/index.ts` inside a never-fail-boot guard): when every credential row sits under exactly one non-boot handle and ZERO rows exist under the boot handle, the scope columns are rewritten in one transaction — a pure metadata move, ciphertext bytes untouched — and a `credential_scope_migrated` audit row records handles, tables, and counts only. Any ambiguity (rows under more than one handle, or any row already under the boot handle) migrates NOTHING: a stale row must never overwrite a freshly connected credential. The sweep covers both `SHARED_KEY_ENCRYPTED_TABLES` members plus the `api_keys` metadata twin, and boot never refuses either way.
 
-The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately.
+The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately. **Superseded in one respect by the 2026-08-16 entry: this description omits the fallback exception, and did so because the exception did not exist yet — an explicit migration onto a FALLBACK boot handle is now refused outright, on every surface.**
 
 Tests in `auth/__tests__/credential-scope-reconcile.test.ts`, `gateway/__tests__/boot-credential-scope.test.ts`, `gateway/cores/__tests__/integrations-orphaned.test.ts`, and `gateway/cores/__tests__/integrations-migrate-orphaned.test.ts` pin the acceptance: the unambiguous move reads the token back with unchanged ciphertext bytes plus an audit row; the rotation-hazard case asserts on the decrypted value that the fresh credential survives; a real `boot()` never exits non-zero; a positive control succeeds under the correct handle so deleting the migration turns the suite red; and no secret material reaches logs, status output, or the audit payload. `reminders.project_slug` carries the same stale slug but is a read-filter, not a crypto scope, with no slug-bearing UNIQUE key and hence no rotation hazard; its drop-or-sweep is recorded as a follow-up decision, rows untouched.
 

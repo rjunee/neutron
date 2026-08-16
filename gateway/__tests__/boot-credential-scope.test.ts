@@ -244,8 +244,15 @@ test('(a3) AMBIGUOUS: a real boot changes nothing, the FRESH value survives, and
   const payloads = systemEventPayloads('credential_scope_orphaned')
   expect(payloads).toHaveLength(1)
   assertNoSecretMaterial(payloads[0]!, ['stale-token', 'fresh-token'])
+  // `reason` distinguishes the two ways this event happens, which needed
+  // opposite operator responses and rendered identically before: AMBIGUOUS data
+  // says "look at your credential rows"; a refused direction says "this process
+  // has no configured handle". Asserted by exact equality, like the rest of this
+  // payload — an audit row that grows a field silently is how one starts
+  // carrying something it should not.
   expect(JSON.parse(payloads[0]!)).toEqual({
     from: [STALE_SLUG],
     orphan_counts: [{ table: 'secrets', handle: STALE_SLUG, rows: 1 }],
+    reason: 'ambiguous_census',
   })
 })

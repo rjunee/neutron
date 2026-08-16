@@ -108,8 +108,12 @@ export interface OrphanedCredentialsSummary {
   stale_handles: string[]
   /** Per-(table, handle) breakdown — `project_credentials` orphans show here too. */
   tables: CredentialScopeOrphanCount[]
-  /** The action that repairs it (see {@link MIGRATE_ORPHANED_ACTION}). */
-  migrate_action: string
+  /**
+   * The action that repairs it (see {@link MIGRATE_ORPHANED_ACTION}), or `null`
+   * when there is no safe action to offer — a fallback boot must not be invited
+   * to claim rows it cannot prove are its own.
+   */
+  migrate_action: string | null
   /** One human/agent-readable sentence, safe to print verbatim. */
   message: string
 }
@@ -316,6 +320,12 @@ export function collectApiKeySlots(
 }
 
 export interface BuildIntegrationsStatusInput {
+  /**
+   * True when `project_slug` is the bare FALLBACK rather than a configured
+   * handle. The status surface uses it to withhold a repair action the brain
+   * would refuse (see `buildOrphanAnnotation`).
+   */
+  slug_is_fallback: boolean
   registry: IntegrationsRegistryView
   tokens: OAuthTokenManager
   secretsStore: SecretsStore
@@ -351,7 +361,11 @@ const NO_ORPHANS: OrphanAnnotation = {
  * lookups. Read-only: no writes, no decrypt, and the only `secrets` columns read
  * are `kind`/`label` (slot identifiers this surface already renders).
  */
-function buildOrphanAnnotation(db: ProjectDb, boot_handle: string): OrphanAnnotation {
+function buildOrphanAnnotation(
+  db: ProjectDb,
+  boot_handle: string,
+  slug_is_fallback: boolean,
+): OrphanAnnotation {
   const { stale_handles, orphan_counts } = censusCredentialScope(db, boot_handle)
   if (stale_handles.length === 0) return NO_ORPHANS
 
@@ -360,11 +374,18 @@ function buildOrphanAnnotation(db: ProjectDb, boot_handle: string): OrphanAnnota
     total_rows,
     stale_handles,
     tables: orphan_counts,
-    migrate_action: MIGRATE_ORPHANED_ACTION,
-    message:
-      `${total_rows} credential row(s) are scoped to a previous owner handle ` +
-      `(${stale_handles.join(', ')}), not missing — run the ${MIGRATE_ORPHANED_ACTION} ` +
-      `action to move them to '${boot_handle}'.`,
+    // A surface must not offer an action the brain will refuse. On a fallback
+    // boot the migration is the WRONG repair — it would move someone else's
+    // rows onto an anonymous handle — so the slot advertises nothing and the
+    // sentence names the actual fix instead.
+    migrate_action: slug_is_fallback ? null : MIGRATE_ORPHANED_ACTION,
+    message: slug_is_fallback
+      ? `${total_rows} credential row(s) belong to ${stale_handles.join(', ')}, and this ` +
+        `process booted on the fallback owner handle '${boot_handle}'. Set the instance ` +
+        `handle and restart — migrating them here would attach them to an unnamed process.`
+      : `${total_rows} credential row(s) are scoped to a previous owner handle ` +
+        `(${stale_handles.join(', ')}), not missing — run the ${MIGRATE_ORPHANED_ACTION} ` +
+        `action to move them to '${boot_handle}'.`,
   }
 
   const services = new Set<string>()
@@ -399,7 +420,7 @@ export async function buildIntegrationsStatus(
   const apiKeySlots = collectAllApiKeySlots(input.registry)
   const orphans =
     input.db !== undefined
-      ? buildOrphanAnnotation(input.db, input.project_slug)
+      ? buildOrphanAnnotation(input.db, input.project_slug, input.slug_is_fallback)
       : NO_ORPHANS
 
   // One row per CONNECTED ACCOUNT. A service the owner has connected three
@@ -473,6 +494,13 @@ export interface MigrateOrphanedCredentialsInput {
   /** The frozen boot owner handle rows are moved ONTO. */
   project_slug: string
   /**
+   * True when {@link project_slug} is the bare FALLBACK rather than a
+   * configured handle. Required, not optional: an explicit action by an
+   * anonymous process is still an anonymous process, and a surface that forgot
+   * to say would otherwise compile and quietly migrate.
+   */
+  slug_is_fallback: boolean
+  /**
    * System-events sink. Omitted ⇒ the ambient sink (`resolveSystemEventSink`),
    * which the gateway registers once at boot. Pass `null` to journal nothing;
    * tests pass a fake to assert exactly one row landed.
@@ -498,7 +526,9 @@ export interface MigrateOrphanedCredentialsInput {
 export async function migrateOrphanedCredentials(
   input: MigrateOrphanedCredentialsInput,
 ): Promise<MigrateOrphanedCredentialsResult> {
-  const r = await migrateOrphanedCredentialScope(input.db, input.project_slug)
+  const r = await migrateOrphanedCredentialScope(input.db, input.project_slug, {
+    slug_is_fallback: input.slug_is_fallback,
+  })
   const total_moved = r.moved.reduce((sum, m) => sum + m.rows, 0)
   const total_skipped = r.skipped.reduce((sum, s) => sum + s.rows, 0)
 
@@ -516,7 +546,16 @@ export async function migrateOrphanedCredentials(
   }
 
   let message: string
-  if (r.stale_handles.length === 0) {
+  if (r.refused_direction === true) {
+    // Deliberately NOT phrased as a failure: nothing is broken, the process
+    // simply has no name, and the repair is to give it one. Pointing the owner
+    // at the migration again would be pointing at the thing that just refused.
+    message =
+      `Refused: this process booted on the fallback owner handle ` +
+      `'${r.boot_handle}', so it cannot claim ${r.skipped.reduce((s, x) => s + x.rows, 0)} ` +
+      `credential row(s) belonging to ${r.stale_handles.join(', ')}. ` +
+      `Set the instance handle and restart, then run this again.`
+  } else if (r.stale_handles.length === 0) {
     message = 'No credential rows are scoped to a previous owner handle.'
   } else {
     message =

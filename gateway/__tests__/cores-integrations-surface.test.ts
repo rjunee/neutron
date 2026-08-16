@@ -90,6 +90,7 @@ async function makeBench() {
     // migrate-orphaned route needs the credential tables.
     db,
     project_slug: OWNER,
+    slug_is_fallback: false,
     auth,
   })
   const server = Bun.serve({

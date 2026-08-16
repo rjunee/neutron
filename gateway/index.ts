@@ -452,12 +452,22 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         }),
       )
     } else if (credentialScope.action === 'orphaned') {
+      // WHY the reason is on the line and not just in the return value: these
+      // two situations need opposite responses and were rendering identically.
+      // AMBIGUOUS data says "look at your credential rows"; a REFUSED direction
+      // says "this process has no configured handle — set it and restart", and
+      // an operator handed the generic sentence was being pointed at the
+      // migration, which is the one action that must not be taken here.
       log.warn('credential_scope_orphaned', {
         boot_handle: credentialScope.boot_handle,
         handles: credentialScope.stale_handles.join(','),
         tables: credentialScope.orphan_counts
           .map((o) => `${o.table}@${o.handle}:${o.rows}`)
           .join(' '),
+        reason:
+          credentialScope.refused_direction === true
+            ? 'fallback_boot_handle_refused_direction'
+            : 'ambiguous_census',
       })
       fireAndForget(
         'gateway.credential_scope_journal',
@@ -469,6 +479,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
           payload: {
             from: credentialScope.stale_handles,
             orphan_counts: credentialScope.orphan_counts,
+            reason:
+              credentialScope.refused_direction === true
+                ? 'fallback_boot_handle_refused_direction'
+                : 'ambiguous_census',
           },
         }),
       )
@@ -551,7 +565,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   }
   if (options.composer !== undefined) {
     try {
-      const composition = await options.composer({ db, project_slug })
+      const composition = await options.composer({
+        db,
+        project_slug,
+        slug_is_fallback: slugResolution.source === 'fallback',
+      })
       if (composition.realmode_cleanups !== undefined) {
         realmode_cleanups = composition.realmode_cleanups
       }

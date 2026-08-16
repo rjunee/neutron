@@ -61,6 +61,12 @@ export interface CoresIntegrationsSurfaceOptions {
   db?: ProjectDb
   /** Frozen owner_handle for this instance. */
   project_slug: string
+  /**
+   * True when `project_slug` is the bare FALLBACK rather than a configured
+   * handle. Threaded to the credential brain, which refuses to migrate rows
+   * onto an anonymous process — see `auth/credential-scope-reconcile.ts`.
+   */
+  slug_is_fallback: boolean
   /** App bearer resolver. */
   auth: AppWsAuthResolver
 }
@@ -87,7 +93,7 @@ function ownsPath(pathname: string): boolean {
 export function createCoresIntegrationsSurface(
   opts: CoresIntegrationsSurfaceOptions,
 ): CoresIntegrationsSurface {
-  const { registry, tokens, secretsStore, db, project_slug, auth } = opts
+  const { registry, tokens, secretsStore, db, project_slug, slug_is_fallback, auth } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -129,7 +135,7 @@ export function createCoresIntegrationsSurface(
         // The migration is a metadata move over the credential tables' scope
         // columns — same brain the chat tool calls; the result already carries
         // `ok: true` and counts only (never a secret value).
-        const result = await migrateOrphanedCredentials({ db, project_slug })
+        const result = await migrateOrphanedCredentials({ db, project_slug, slug_is_fallback })
         return jsonResponse(200, result)
       }
 
@@ -146,6 +152,7 @@ export function createCoresIntegrationsSurface(
           tokens,
           secretsStore,
           project_slug,
+        slug_is_fallback,
           // Threaded so the panel distinguishes "scoped to a previous owner
           // handle" from "not connected" (card 2026-08-14).
           ...(db !== undefined ? { db } : {}),

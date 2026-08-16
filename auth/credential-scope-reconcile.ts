@@ -190,6 +190,23 @@ export type CredentialScopeReconcileResult =
       refused_direction?: true
     }
 
+/**
+ * Where the boot handle CAME FROM. Carried separately from the handle itself
+ * because the handle alone cannot answer the only question that matters here:
+ * a fallback `'dev'` and a configured `'dev'` are the same string and opposite
+ * situations.
+ */
+export interface CredentialScopeProvenance {
+  /**
+   * True when the boot handle is the bare fallback — env/config absent, not
+   * explicitly set. A fallback identity may never pull rows off an explicit
+   * handle, on ANY surface: not at boot, and not when an owner-driven action
+   * asks for it, because a process that does not know who it is has no owner
+   * to have been asked by.
+   */
+  slug_is_fallback: boolean
+}
+
 /** Options for one boot-time credential-scope reconciliation. */
 export interface CredentialScopeReconcileOptions {
   /**
@@ -207,6 +224,13 @@ export interface CredentialScopeReconcileOptions {
  * `service` VALUE, never ciphertext, never plaintext (acceptance (d)).
  */
 export interface CredentialScopeMigrateResult {
+  /**
+   * Present only when the DIRECTION guard refused: the boot handle was the
+   * fallback, so nothing moved and every orphan is reported as skipped. Callers
+   * render a different sentence for this than for a collision — "set the
+   * handle" rather than "the slot is taken".
+   */
+  refused_direction?: true
   boot_handle: string
   /** Every non-boot handle seen in the census (whether or not anything moved). */
   stale_handles: string[]
@@ -474,11 +498,41 @@ export async function reconcileCredentialScope(
 export async function migrateOrphanedCredentialScope(
   db: ProjectDb,
   boot_handle: string,
+  provenance: CredentialScopeProvenance,
 ): Promise<CredentialScopeMigrateResult> {
   const census = censusCredentialScopeTables(db, boot_handle)
   const { stale_handles } = census
   if (stale_handles.length === 0) {
     return { boot_handle, stale_handles: [], moved: [], skipped: [] }
+  }
+
+  // THE DIRECTION GUARD, ON THIS SIDE TOO — and the reason it is a REQUIRED
+  // argument rather than an option with a safe default.
+  //
+  // The boot path refused an anonymous fallback and this one did not, so the
+  // guard was real and bypassable in one step: boot as the `'dev'` fallback,
+  // call the explicit migration, and every row moves off the live handle. A
+  // review found it; the repro is one seeded row and one dispatch. Closing the
+  // direction on the automatic sweep closed nothing while an explicit surface
+  // sat beside it doing the same write with no question asked — the same
+  // mistake as the two-reconcilers one, one level up.
+  //
+  // "Explicit" is not the property that makes a move safe. The owner asking is
+  // only meaningful when the process knows WHO it is; a fallback handle means
+  // nobody said, so there is no owner to have asked. An anonymous process
+  // asking itself politely is still an anonymous process.
+  //
+  // Required, not optional-defaulting-to-false, because the failure is silent:
+  // a new surface that forgets it would compile, pass, and quietly do the
+  // unguarded thing. This way forgetting is a type error.
+  if (provenance.slug_is_fallback) {
+    return {
+      boot_handle,
+      stale_handles,
+      moved: [],
+      skipped: orphanCountsOf(census),
+      refused_direction: true,
+    }
   }
 
   // ONE transaction for the whole move, same as the boot path: a partial

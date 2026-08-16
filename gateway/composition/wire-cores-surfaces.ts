@@ -179,6 +179,10 @@ export async function wireCoresSurfaces(
           registry: coresState.registry,
           tokens,
           secretsStore,
+          // Absent means "nobody said", which is the same thing as "this process does
+          // not know who it is" — so it reads as a fallback and the credential
+          // surfaces refuse. Forgetting fails CLOSED.
+          slug_is_fallback: input.slug_is_fallback ?? true,
           db: input.db,
           project_slug: input.project_slug,
           auth,
@@ -202,6 +206,10 @@ export async function wireCoresSurfaces(
         tokens,
         secretsStore,
         project_slug: input.project_slug,
+        // Absent means "nobody said", which is the same thing as "this process does
+          // not know who it is" — so it reads as a fallback and the credential
+          // surfaces refuse. Forgetting fails CLOSED.
+          slug_is_fallback: input.slug_is_fallback ?? true,
         db: input.db,
         startOAuth,
       })

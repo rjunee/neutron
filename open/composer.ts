@@ -841,7 +841,7 @@ export function buildOpenGraphComposer(
 ): GraphComposer {
   const env = options.env ?? process.env
 
-  return async ({ db, project_slug }): Promise<OpenComposition> => {
+  return async ({ db, project_slug, slug_is_fallback }): Promise<OpenComposition> => {
     const owner_home = resolveNeutronHome(env)
     const static_dir = resolveLandingStaticDir(env)
     // Single-owner: the frozen instance handle IS the boot slug.
@@ -5846,6 +5846,9 @@ export function buildOpenGraphComposer(
     return {
       db,
       project_slug,
+      // `exactOptionalPropertyTypes`: an explicit `undefined` is not the same as
+      // absent, and only ABSENT means "nobody said" downstream.
+      ...(slug_is_fallback !== undefined ? { slug_is_fallback } : {}),
       // RA2 (gbrain live-or-loud) — surface the memory backend's boot-time
       // health so `boot()` can fold it into the terminal `/healthz`: a box whose
       // `gbrain` binary is missing now reports `status:'degraded'` +

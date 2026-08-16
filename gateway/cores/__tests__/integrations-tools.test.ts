@@ -96,6 +96,7 @@ async function makeBench() {
     tokens,
     secretsStore: secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
     db,
     startOAuth,
   })
