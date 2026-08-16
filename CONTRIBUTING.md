@@ -116,9 +116,14 @@ LEAK_GATE_PR_BODY="$(cat pr-body.md)" bash scripts/ci/leak-gate.sh --messages-on
 
 ```sh
 bash scripts/install-merge-drivers.sh            # install
-bash scripts/install-merge-drivers.sh --check    # is it installed?
+bash scripts/install-merge-drivers.sh --check    # is THE CURRENT driver installed?
 bash scripts/install-merge-drivers.sh --uninstall
 ```
+
+`--check` compares the command your clone actually has against the one the
+installer writes today, so a clone that ran an older version of this script is
+reported `STALE` rather than `installed`. The remedy it prints is the install
+command above — it is idempotent, so re-running it is always safe.
 
 `docs/AS_BUILT.md` is newest-first, so every change prepends its entry at the
 same offset under the same header lines. Two branches doing that conflict by
