@@ -1,6 +1,17 @@
-# AS_BUILT
+# AS_BUILT — CLOSED for new entries
 
 Running log of what shipped, newest first. One entry per merged change.
+
+**Do not add an entry here.** Write it as its own file: `docs/as-built/<YYYY-MM-DD>-<slug>.md`.
+Every build used to insert at the same offset — right here, under these header lines —
+so two builds finishing in the same window conflicted by construction. This file was
+closed on 2026-07-28 for exactly that reason (`docs/as-built/README.md`), kept taking
+entries anyway for eighteen days because nothing checked, and is now enforced by
+`scripts/ci/as-built-closed-log-guard.sh`: a PR that adds a `##` entry heading below
+fails CI.
+
+Nothing is migrated out — every byte of history stays here, and this file is the tail
+of the log. Read the whole thing, newest-first, with `bun scripts/render-as-built.ts`.
 
 ## 2026-08-15 — the fired reminder lands on the topic that asked, and never posts its own raw intent
 

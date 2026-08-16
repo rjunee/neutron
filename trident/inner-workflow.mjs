@@ -1148,6 +1148,23 @@ function forgePushStep(reenter) {
 }
 const FORGE_PR_LINE = isPr ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
+// THE CHANGELOG ENTRY IS A NEW FILE, NEVER AN EDIT TO A SHARED ONE.
+//
+// The as-built log used to be one newest-first file that every build appended to at
+// the SAME offset — directly under its three header lines. Two builds finishing in the
+// same window therefore wrote different bytes against identical context, which is a
+// guaranteed conflict, not a probable one: on 2026-08-15T23:20Z three concurrent
+// builds all failed at publish on `docs/AS_BUILT.md` and on nothing else. The plan file
+// had the same shape and was fixed the same way (`.trident/plans/<branch>.md`).
+//
+// So the entry is now a per-entry FILENAME (`scripts/as-built-log.ts`), and this rule is
+// how a build learns that. It is conditional on the directory EXISTING because trident
+// builds whatever repo it is pointed at, and a repo without the convention must not be
+// told to invent one.
+const AS_BUILT_ENTRY_RULE = `CHANGELOG
+- If the repo has a \`docs/as-built/\` directory and this change warrants a log entry, add it as a NEW FILE: \`docs/as-built/<YYYY-MM-DD>-<slug>.md\` (lowercase hyphenated slug), holding the WHOLE entry and opening with its own \`## <YYYY-MM-DD> — <title>\` heading. Commit it with your code.
+- NEVER append to \`docs/AS_BUILT.md\`. It is the frozen archive; two concurrent builds inserting at its top conflict every time, which is the exact failure the per-entry files removed. Read the whole log with \`bun scripts/render-as-built.ts\`.`
+
 // `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
 function forgeBuildContract(reenter) {
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
@@ -1163,7 +1180,8 @@ CONTRACT
 6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
-   WORKTREE=<your worktree pwd>`
+   WORKTREE=<your worktree pwd>
+${AS_BUILT_ENTRY_RULE}`
 }
 
 // ── THE BUILD, ON THE CODEX EXECUTOR ─────────────────────────────────────────
@@ -1668,11 +1686,11 @@ function planFablePrompt(resuming) {
   // redo/overwrite that work (Codex [P2]). Before this split the fused in-Forge
   // planner ran inside the re-entered worktree and saw branch state for free.
   const resumeNote = resuming
-    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
+    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:.trident/plans/${forgeBranch}.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
   return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):${resumeNote}
-1. Read SPEC.md (the master spec) at the repo root and the changelog docs/AS_BUILT.md if present, and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
+1. Read SPEC.md (the master spec) at the repo root and the changelog if present — it is stored one file per entry under docs/as-built/ (newest-first by \`<YYYY-MM-DD>-<slug>.md\`), with docs/AS_BUILT.md as the frozen pre-split archive — and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
 2. Diff the SPEC against the code to find what is still MISSING or WRONG. Regenerate the full IMPLEMENTATION_PLAN.md body as a PRIORITIZED '- [ ] <task>' checklist (mark already-satisfied items '- [x]'). Return it as \`implementationPlan\` (do NOT write it to disk — the executor persists it).
 3. Choose the SINGLE top-priority UNCHECKED task to build THIS iteration (the Ralph one-task discipline). Return it as \`topTask\`.
 4. For that ONE task, emit an EXECUTION SPEC as \`executionSpec\`: the exact TARGET FILES, the ACCEPTANCE CRITERION (what "done" means), and the TEST PLAN (which tests to write/run). Make it precise enough that a cheaper model executes it WITHOUT re-reasoning the design.
@@ -4368,7 +4386,7 @@ try {
             planProbe === null
               ? 'the plan probe returned nothing'
               : planProbe.planFound !== true
-                ? `no committed IMPLEMENTATION_PLAN.md on ${planProbeRef}`
+                ? `no committed .trident/plans/${forgeBranch}.md on ${planProbeRef}`
                 : typeof planProbe.planBody !== 'string' || planProbe.planBody.trim().length === 0
                   ? 'the committed plan is empty'
                   : planProbe.uncheckedCount < 1 || !Number.isSafeInteger(planProbe.uncheckedCount)

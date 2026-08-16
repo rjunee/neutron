@@ -183,6 +183,14 @@ jobs:
       # field being MOVED into the unwired allowlist, which deletes the assertion
       # and takes the capability dark with CI green.
       - run: bash scripts/ci/composition-field-ratchet-guard.sh
+      # `docs/AS_BUILT.md` is closed for new entries — every build inserted at the
+      # same offset in it, so two builds finishing in the same window conflicted by
+      # construction (three of them did on 2026-08-15). The one-file-per-entry rule
+      # had been written in docs/as-built/README.md since 2026-07-28 and was ignored
+      # for eighteen days straight, because prose is not a gate. This is the gate.
+      # Here rather than in `purity` for the same reason as the guards above: the
+      # layering job is the one checked out with full history.
+      - run: bash scripts/ci/as-built-closed-log-guard.sh
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:

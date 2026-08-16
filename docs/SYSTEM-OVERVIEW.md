@@ -1,9 +1,9 @@
 # System Overview
 
 High-level map of how Neutron Open boots and where the major runtime
-pieces live. Keep this short; deep detail belongs in `docs/AS_BUILT.md` (and the
-archived history in `docs/research/AS-BUILT-archive-2026-07.md`) and the
-per-module headers.
+pieces live. Keep this short; deep detail belongs in the as-built log —
+`docs/as-built/` (one file per entry) plus the closed `docs/AS_BUILT.md` and
+the older `docs/research/AS-BUILT-archive-2026-07.md` — and the per-module headers.
 
 ## Boot path
 
@@ -6373,10 +6373,11 @@ window, so a fresh agent each iteration cannot forget what was agreed.
      `IMPLEMENTATION_PLAN.md`, commits code + tests. (Historical prompt:
      `renderRalphTaskPrompt`, since folded into `trident/inner-workflow.mjs`;
      the folded executor writes `IMPLEMENTATION_PLAN.md`, NOT the changelog —
-     `docs/AS_BUILT.md` is the single consolidated as-built record that the
-     planner READS (`inner-workflow.mjs:361`) and that unit PRs append to, not
-     an executor-written artifact. Restoring an executor changelog-write would
-     be a separate trident-loop change under self-surgery discipline.)
+     `docs/as-built/` holds the as-built record, one file per entry, that the
+     planner READS and that unit PRs add a NEW FILE to (`docs/AS_BUILT.md` is
+     the closed pre-split log), not an executor-written artifact. Restoring an
+     executor changelog-write would be a separate trident-loop change under
+     self-surgery discipline.)
   4. Repeat 2 ⇄ 3 until a planning pass reports `REMAINING_TASKS=0`, then →
      `argus` → the normal fix/merge loop reviews + merges the accumulated
      branch.

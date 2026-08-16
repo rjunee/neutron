@@ -34,8 +34,9 @@ code; they NEVER rewrite it — the owner owns it.
 | Concern | Doc |
 |---|---|
 | Decisions + architecture + roadmap (this file) | `/SPEC.md` |
-| Current build queue (agent-regenerated on demand, disposable; may be absent when idle) | `/IMPLEMENTATION_PLAN.md` |
-| Chronological build log (append-only provenance) | `docs/AS_BUILT.md` |
+| Current build queue (agent-regenerated on demand, disposable; one file per build) | `.trident/plans/<branch>.md` |
+| Chronological build log (append-only provenance; one file per entry, newest-first) | `docs/as-built/<YYYY-MM-DD>-<slug>.md` |
+| Build log through 2026-07-28 (CLOSED for new entries; CI-enforced) | `docs/AS_BUILT.md` |
 | How it works NOW (living architecture detail, under this spec) | `docs/SYSTEM-OVERVIEW.md` |
 | Load-bearing invariants (per-merge checklist) | `docs/INVARIANTS.md` |
 | Public-facing positioning + self-host quickstart | `README.md` |
@@ -884,7 +885,8 @@ references decisions by date; none is a second home for a decision.
 |---|---|
 | `docs/SYSTEM-OVERVIEW.md` | Living architecture truth — the boot path, module graph, substrate, memory, Cores mechanics |
 | `docs/INVARIANTS.md` | The per-merge load-bearing invariant checklist |
-| `docs/AS_BUILT.md` | Chronological build log (agent-appended provenance) |
+| `docs/as-built/` | Chronological build log — one file per entry, so two concurrent builds never write the same bytes (`docs/as-built/README.md`; render with `bun scripts/render-as-built.ts`) |
+| `docs/AS_BUILT.md` | The build log through 2026-07-28 — history only; closed for new entries and enforced by `scripts/ci/as-built-closed-log-guard.sh` |
 | `docs/plans/2026-07-02-world-class-refactor-plan.md` | The world-class refactor unit backlog |
 | `docs/plans/wave3-tabbed-interface-build-plan.md` | The P5 tabbed project interface build |
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from Phases → Steps) |
