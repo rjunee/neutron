@@ -458,6 +458,35 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
     : `outer publisher could not ${step} branch ${branch}: ${said}`
 }
 
+/** The publish-failure classes readable from a STORED reason alone (card rbbjj2, acceptance a).
+ *  'publish-credential' is the first member of the auto-retry class list (card 01KZZQ2J9MJFG0PXC8AA6D6EV4);
+ *  'publish-ref-rejected' and 'publish-unknown' must NEVER auto-retry. */
+export type PublishFailureClass = 'publish-credential' | 'publish-ref-rejected' | 'publish-unknown'
+
+export const PUBLISH_CREDENTIAL_CLASS = 'publish-credential' as const
+
+/** Pure, total, case-insensitive. REJECTION EVIDENCE OUTRANKS CREDENTIAL EVIDENCE: a server that
+ *  rejected a ref did authenticate, so mixed evidence is a rejection and stays terminal. Anything
+ *  unrecognised is 'publish-unknown' — conservatism here is what keeps a genuine failure from
+ *  ever entering an auto-retry loop. Matches WORDS only (never bare numbers — a 40-hex sha can
+ *  contain '401'). */
+export function classifyPublishFailure(text: string): PublishFailureClass {
+  const t = text.toLowerCase()
+  const refRejected = ['[rejected]', 'non-fast-forward', 'stale info'].some((p) => t.includes(p))
+  if (refRejected) return 'publish-ref-rejected'
+  const credential = [
+    'could not read username',
+    'could not read password',
+    'authentication failed',
+    'bad credentials',
+    'invalid username or',
+    'terminal prompts disabled',
+    'http basic: access denied',
+  ].some((p) => t.includes(p))
+  if (credential) return 'publish-credential'
+  return 'publish-unknown'
+}
+
 /**
  * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
  * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
