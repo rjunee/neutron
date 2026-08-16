@@ -1371,6 +1371,9 @@ else
     # the silent wrong-source install this guard exists to stop (ISSUES #316).
     assert_clone_origin "$CLONE_DIR" "$NEUTRON_REPO"
     info "updating existing checkout in $CLONE_DIR"
+    if [ "$(git -C "$CLONE_DIR" rev-parse --is-shallow-repository)" = "true" ]; then
+      git -C "$CLONE_DIR" fetch --unshallow origin || die "git fetch --unshallow failed in $CLONE_DIR"
+    fi
     git -C "$CLONE_DIR" pull --ff-only || die "git pull failed in $CLONE_DIR"
   elif [ -d "$CLONE_DIR" ] && [ "$(ls -A "$CLONE_DIR" 2>/dev/null || true)" != "" ]; then
     die "$CLONE_DIR exists and is not a Neutron checkout — pass --dir <empty path> or remove it"
@@ -1378,7 +1381,7 @@ else
     confirm "clone $NEUTRON_REPO into $CLONE_DIR?"
     info "cloning $NEUTRON_REPO into $CLONE_DIR"
     mkdir -p "$(dirname "$CLONE_DIR")"
-    git clone --depth 1 "$NEUTRON_REPO" "$CLONE_DIR" || die "git clone failed"
+    git clone "$NEUTRON_REPO" "$CLONE_DIR" || die "git clone failed"
   fi
   SRC_DIR=$CLONE_DIR
   [ -f "$SRC_DIR/open/server.ts" ] || die "clone did not produce open/server.ts — wrong NEUTRON_REPO?"
