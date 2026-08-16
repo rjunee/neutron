@@ -598,6 +598,117 @@ only, never argus or synthesis; the non-parts whole-file receipt is
 unweakened; the TypeScript and JavaScript `briefIntegrity` twins remain
 parity-pinned; and `.a2` coda chunk blocks never have non-redirect-target paths
 rewritten.
+
+## 2026-08-16 — the docblock said every sibling identity read trims, and each round's proof was narrower than its claim
+
+Landed via PR #333.
+
+`config/index.ts` asserted that every read of `NEUTRON_HOME` / `OWNER_HOME` /
+`NEUTRON_DB_PATH` in this tree treats a blank value as unset. It did not, and the
+interesting part is how the claim kept surviving: each round proved a smaller thing
+than it stated, and the gap between the two was always where the next defect lived.
+
+**Nine readers brought onto the rule.** `resolveOpenDbPath` (`migrations/db-path.ts`)
+and `resolveRegistryDbPath` (`gateway/boot-listener-registry.ts`) kept `length > 0` /
+`!== ''` through the change that fixed their neighbours — they read the OTHER two
+variables, which is why a sweep organised around "the identity resolvers" missed them.
+Measured: `NEUTRON_HOME='   '` gave `'   /registry.db'` here while `resolveNeutronHome`
+answered `~/neutron` for the same variable, on the read that tells a booting instance
+its own handle. The env shim's fill predicate (`open/server.ts`) was `=== ''`, so a
+whitespace `OWNER_HOME` was mistaken for an operator pin and left in place while the
+frozen config had already resolved it — and below-seam readers take the env, not the
+config, which is the entire reason the shim exists. That predicate is now
+`applyEnvShim`, extracted so a test can drive it without booting a server. Also fixed:
+`resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`, where a blank
+resolved the skills dir to the FILESYSTEM ROOT), `DEFAULT_M2_FEEDBACK_PATH`
+(`onboarding/feedback/m2-week-4-collector.ts`), the REPL supervision home
+(`runtime/adapters/claude-code/index.ts`), and the `--home` guard
+(`scripts/email-accounts.ts`).
+
+**And one in the other direction.** `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts`) trimmed the value it RETURNED. Leading and trailing
+spaces are legal in a POSIX path, so that silently rewrote a real directory:
+`NEUTRON_HOME=' /real/dir '` put the doctor's record beside a brain dir that lives
+somewhere else. The family rule is now stated once and pinned both ways — trim the
+PREDICATE, return the bytes.
+
+**The claim's scope is a command, and the command had the same hole one level down.**
+Round 3 replaced the enumerated list with a re-runnable grep, which was the right move
+and still under-covered: it matched only literal `.OWNER_HOME` / `OWNER_HOME']`, so
+`buildPromptVars` (`prompts/template.ts`), which reaches the variable through the
+exported `OWNER_HOME_KEY` constant, was invisible to it. Worse than invisible — the
+command DID print that file, at a docblock line that merely mentions the variable, so
+the file looked audited and the untrimmed read below it was never opened. A check that
+returns a hit it cannot justify is the same defect as one that returns a negative it
+cannot justify; it just wears a tick instead of a cross. Measured on the template
+`{{OWNER_HOME}}/entities/x.md`: `''` yields `/entities/x.md` (the filesystem root,
+fails loudly) while `'   '` yields `   /entities/x.md` — a relative directory named
+three spaces, creatable, so an agent handed that prompt writes the owner's entity pages
+into a junk dir under whatever CWD it started in and nothing errors.
+`trident/agent-prompts.ts` defaults its vars to this function, so the path is live.
+
+**And the claim now stops where the check stops.** The command is
+`--include='*.ts'`, so what it bounds is a claim about TypeScript — the docblock
+says so, and names the readers it does NOT cover: `install.sh` honours a
+whitespace-only `NEUTRON_DB_PATH` via `!= ""`, and `neutron-service.sh` /
+`neutron-backup.sh` resolve the data dir with `[ -n ... ]`, true for three spaces.
+An installer and the server it installs can still disagree, one language over.
+Left unfixed on purpose: those are the install / uninstall / backup entrypoints,
+a different blast radius from a resolver. Written down rather than implied,
+because a claim wider than its proof is the defect this entry is about.
+
+**The guard is the deliverable, not the list.** `open/__tests__/owner-slug-agreement.test.ts`,
+`gbrain-memory/__tests__/gbrain-doctor.test.ts` and `prompts/template.test.ts` drive
+blank and space-padded values through every reader they can import, each with a
+real-path control so a failure means "a blank was honoured" rather than "the variable
+stopped being read" — a different bug wearing the same green. An earlier round's
+assertion for the `OWNER_HOME` axis passed a real `NEUTRON_HOME` alongside it, so the
+resolver returned on its first branch and the axis under test was never reached;
+reverting the `OWNER_HOME` trim left the suite green. It is now exercised with
+`NEUTRON_HOME` absent, and each trim was mutation-proved: reverting it turns the suite
+red, with the mutation printed first to show it landed.
+
+**AND THE SAME CLAIM WAS TOO WIDE ONE MORE TIME, WHICH IS THE POINT.** The sentence
+above was first written when it was true of six sites out of ten. A panel measured the
+other four and reverting each left its suite GREEN: `resolveSkillsDir`
+(`gateway/wiring/build-phase-spec-resolver.ts`), the M2 default path
+(`onboarding/feedback/m2-week-4-collector.ts`), the REPL supervision home
+(`runtime/adapters/claude-code/index.ts`) and the `--home` guard
+(`scripts/email-accounts.ts`). Two of them were not merely unpinned but UNPINNABLE —
+a module-private function, and a constant computed from `process.env` at import time,
+which no test can vary. So they were given seams rather than a narrower sentence:
+`resolveSkillsDir` is exported for the guard, and the path computation became
+`resolveM2FeedbackPath(env)` with the constant calling it. All four are now pinned,
+each mutation run with a control proving the mutation landed. A fourth round of
+"the proof was narrower than the claim" inside the change about that exact defect is
+the strongest argument that the guard, not the prose, is the deliverable.
+
+**One of those four was hiding a real fail-closed bug.** The supervision home was
+trimmed while `options.cwd` was still forwarded RAW to the child. `persistent/pool.ts`
+records the session as `options.cwd ?? process.cwd()` — `??` falls through on
+`undefined` but not on `'   '` — and `persistent/supervision.ts` then refuses any
+respawn whose `existsSync(record.cwd)` is false, returning `invalid-cwd`. Every crash
+recovery for that session would decline, silently, for the life of the process: a
+half-applied trim converted a loud wrong-path bug into an invisible no-recovery one.
+Both slots are now normalized once, in `resolveReplCwdAndHome`.
+
+**Which of these a live path can reach, stated rather than implied.** Reachable today:
+`resolveNeutronHome`, `resolveOpenDbPath`, `resolveOwnerHome`, `resolveOwnerHomeFromEnv`,
+`resolveStatePath`, the env-shim pair, and `buildPromptVars` (via
+`trident/agent-prompts.ts`). Published surfaces with NO in-tree invocation:
+`resolveRegistryDbPath` — re-exported from `gateway/index.ts` and
+`gateway/composer-contract.ts`, both re-exports, no caller — and `resolveM2FeedbackPath`,
+whose collector has no non-test instantiation. Defensive on a live path whose current
+callers all pass a real value: `resolveReplCwdAndHome` and `resolveSkillsDir`. The
+family consistency is worth having either way, but hardening and bug-fixing are
+different claims, and an earlier draft of this entry described the registry read as
+"the read that tells a booting instance its own handle" without noting that nothing
+in this tree calls it. Also narrowed, not widened: `skill-forge/registrar.ts` declared
+itself a "mirror" of `resolveSkillsDir` and stopped mirroring it when that function
+moved onto the rule. It has no fallback chain to copy — trimming there would turn
+`'   '` into `'/skills'`, the filesystem root, which is worse than the junk path — so
+the self-description was corrected instead.
+
 ## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
 
 Landed via PR #331.

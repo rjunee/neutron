@@ -74,7 +74,50 @@ function discover(...accounts: readonly (readonly [string, string | null])[]): v
   }
 }
 
+/**
+ * Same subprocess harness, but with the home passed EXPLICITLY rather than
+ * appended — the blank arms need to control that flag's value, and `run` always
+ * supplies a real one.
+ */
+async function runWithHome(home_: string, ...args: string[]): Promise<{ code: number; err: string }> {
+  const proc = Bun.spawn(['bun', SCRIPT, ...args, '--home', home_], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const err = await new Response(proc.stderr).text()
+  const code = await proc.exited
+  return { code, err }
+}
+
 describe('email-accounts CLI', () => {
+  test('a blank --home is REFUSED, not treated as a directory', async () => {
+    // BLANK IS UNSET — the rule `effectiveOwnerHome` (`config/index.ts`)
+    // documents for this same variable. The guard was `length === 0`, which
+    // accepts `'   '`: the CLI then opened a project DB under a directory named
+    // three spaces, relative to the CWD, and reported an empty mailbox list for
+    // an install that has mailboxes. The operator is told the wrong thing, which
+    // is exactly the failure class this file exists to pin.
+    //
+    // Pinned here because the trim was previously asserted by a comment and by
+    // nothing else — reverting it left every suite green.
+    for (const blank of ['', '   ', '\t\n']) {
+      const r = await runWithHome(blank, 'list')
+      expect(r.code).toBe(2)
+      expect(r.err).toContain('no owner home')
+    }
+  })
+
+  test('a REAL --home passes the same guard — the control for the arm above', async () => {
+    // Without this, the assertions above would also pass for a CLI that refused
+    // EVERY home, which is a different and louder bug. `list` with no command
+    // would exit 2 as well, so the distinguishing signal is WHICH message the
+    // operator gets: usage, never "no owner home".
+    const r = await runWithHome(home)
+    expect(r.code).toBe(2)
+    expect(r.err).not.toContain('no owner home')
+    expect(r.err).toContain('usage:')
+  })
+
   test('a mistyped disable on a fresh install is inert — it changes nothing', async () => {
     const r = await run('disable', 'typo')
 

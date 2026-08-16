@@ -456,10 +456,86 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * the `.url_slug` lookup then ran against a directory named three spaces, found
  * nothing, and a correctly renamed instance resolved to the anonymous fallback
  * again — the same defect as the empty string, one space away from it and past
- * the fix for it. Every sibling identity read in this repo trims (the
- * `instanceSlug` branch of {@link resolveOwnerSlugSourceFromConfig},
- * `open/server.ts`), so this one does too, and `resolveNeutronHome` was fixed
- * in the same change so the two still agree.
+ * the fix for it. So this predicate trims, and so does every other TYPESCRIPT
+ * read of `OWNER_HOME` / `NEUTRON_HOME` / `NEUTRON_DB_PATH` in the repo.
+ *
+ * THE SCOPE OF THAT CLAIM IS A GREP, NOT A MEMORY — this sentence has been
+ * wrong twice, and both times because it was written from a mental model of
+ * "the identity resolvers" while the divergent readers sat just outside it.
+ * Round 1 said "every sibling trims" while three did not (`resolveOpenDbPath`,
+ * `resolveRegistryDbPath`, and the return half of `resolveStatePath` — they
+ * were on the OTHER two variables, which is why the sweep missed them). Round 2
+ * enumerated seven sites and called the list exhaustive; five more readers were
+ * outside it, and one of the seven — `open/server.ts` — was NAMED as trimming
+ * while the file contained no `trim()` at all. A docblock asserting a property
+ * the repo lacks is worse than no docblock: it is confidently specific, it
+ * reads as design documentation, and the next reader trusts it instead of
+ * checking.
+ *
+ * Round 3 replaced the list with a grep — and the grep had the same hole one
+ * level down. It matched only the LITERAL forms (`.OWNER_HOME`, `OWNER_HOME']`),
+ * so `buildPromptVars` (`prompts/template.ts`), which reads the variable through
+ * the exported `OWNER_HOME_KEY` constant, was invisible to it. Worse than
+ * invisible: the command DID print `prompts/template.ts`, at the docblock line
+ * that merely mentions `env.OWNER_HOME` — so the file appeared in the output,
+ * looked audited, and the untrimmed read below it was never opened. A check that
+ * returns a hit it cannot justify is the same defect as a check that returns a
+ * negative it cannot justify; this one just wears a tick instead of a cross.
+ *
+ * So the claim is bounded by a command anyone can re-run rather than by a list
+ * anyone can fall off — and the command now covers the constant-key form:
+ *
+ *   grep -rn --include='*.ts' "NEUTRON_HOME'\]\|\.NEUTRON_HOME\|OWNER_HOME'\]\|\.OWNER_HOME\|NEUTRON_DB_PATH'\]\|\.NEUTRON_DB_PATH\|OWNER_HOME_KEY" .
+ *
+ * Every non-test hit either trims its predicate or is a WRITE. The readers, all
+ * fixed: {@link resolveOwnerSlugSourceFromConfig}'s `instanceSlug` branch and
+ * this function here; `resolveNeutronHome` + `resolveOpenDbPath`
+ * (`migrations/db-path.ts`); `resolveRegistryDbPath` + `resolveOwnerHome`
+ * (`gateway/boot-listener-registry.ts`); `resolveOwnerHomeFromEnv`
+ * (`onboarding/overnight/register.ts`); `resolveStatePath`
+ * (`gbrain-memory/gbrain-doctor.ts`); the env shim's fill predicate
+ * (`open/server.ts`); `main`'s `--home` guard (`scripts/email-accounts.ts`);
+ * `resolveReplCwdAndHome` (`runtime/adapters/claude-code/index.ts`);
+ * `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`);
+ * `resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`); and
+ * `buildPromptVars` (`prompts/template.ts`) — the constant-key one.
+ *
+ * WHICH OF THEM A LIVE PATH REACHES, because "brought onto the rule" and "fixed
+ * a reachable defect" are different claims and this docblock has already been
+ * burned by conflating two things that sounded alike. Reachable today:
+ * `resolveNeutronHome`, `resolveOpenDbPath`, `resolveOwnerHome`,
+ * `resolveOwnerHomeFromEnv`, `resolveStatePath`, the env shim pair, and
+ * `buildPromptVars` (via `trident/agent-prompts.ts`). Published surfaces with no
+ * in-tree invocation — `resolveRegistryDbPath` (re-exported at
+ * `gateway/index.ts` and `gateway/composer-contract.ts`, both re-exports, no
+ * caller) and `resolveM2FeedbackPath` (its collector has no non-test
+ * instantiation). Defensive on a live path whose only current callers pass a
+ * real value: `resolveReplCwdAndHome` and `resolveSkillsDir`. Consistency across
+ * a family is the point either way, but the unreachable ones are hardening, not
+ * bug fixes, and saying so is cheaper than the next reviewer re-deriving it.
+ *
+ * WHAT THE COMMAND DOES NOT COVER, STATED RATHER THAN IMPLIED. It is
+ * `--include='*.ts'`, so the claim it bounds is a claim about TYPESCRIPT. The
+ * repo has readers of these same three variables in other languages, and they do
+ * NOT follow this rule: `install.sh` honours a whitespace-only `NEUTRON_DB_PATH`
+ * via `!= ""`, and `neutron-service.sh` / `neutron-backup.sh` resolve the data
+ * dir with `[ -n "$DATA_DIR" ]`, which is true for three spaces. So an installer
+ * and the server it installs can still disagree about which database exists —
+ * the same split, one language over. That is deliberately NOT fixed here: the
+ * shell entrypoints are the install / uninstall / backup paths, they are a
+ * different blast radius from a resolver, and folding them into a TypeScript
+ * change would make this diff unreviewable.
+ *
+ * It is written down because the alternative is the defect this docblock keeps
+ * committing — a claim wider than its proof. Three rounds of that produced three
+ * rounds of real bugs hiding in the gap; the fix is not a better sweep, it is a
+ * claim that stops at the edge of what was actually checked.
+ *
+ * The list is documentation. The GUARD is
+ * `open/__tests__/owner-slug-agreement.test.ts`, which drives blank values
+ * through the readers it can import and pins the answers, each with a
+ * real-path control — so a reader that stops trimming goes red instead of
+ * going unnoticed until the next review reads this paragraph.
  *
  * The RETURN is verbatim, not trimmed: a blank value means unset, but a value
  * that is genuinely a path is published back to `OWNER_HOME` byte-for-byte
@@ -726,10 +802,14 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
  */
 export function envShimFromBootConfig(config: BootConfig): Record<string, string> {
   const out: Record<string, string> = {}
-  // Via {@link effectiveOwnerHome}, so an empty `OWNER_HOME` is repaired here
-  // too. `open/server.ts:130` fills a slot that is `undefined` OR `''`, so the
-  // old `??` re-wrote the empty string over itself and left every below-seam
-  // reader of `process.env.OWNER_HOME` holding `''`.
+  // Via {@link effectiveOwnerHome}, so a BLANK `OWNER_HOME` is repaired here
+  // too. What this function COMPUTES is only half of it: `applyEnvShim`
+  // (`open/server.ts`) decides what actually reaches the env, and it filled a
+  // slot that was `undefined` OR `''` — so the old `??` re-wrote the empty
+  // string over itself, and a whitespace-only value was mistaken for an
+  // operator pin and left in place while this function had already resolved it
+  // to the real home. Both halves now agree that blank is unset; the pair is
+  // pinned together in `open/__tests__/owner-slug-agreement.test.ts`.
   out['OWNER_HOME'] = effectiveOwnerHome(config)
   out['NEUTRON_DB_PATH'] = config.dbPath
   if (config.onboardingChatCookieSecret !== undefined) {
