@@ -45,7 +45,7 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()!()
 })
 
-async function makeBench() {
+async function makeBench(opts: { slug_is_fallback?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'neutron-integrations-surface-'))
   cleanups.push(() => rmSync(home, { recursive: true, force: true }))
   const dbDir = join(home, 'db')
@@ -90,7 +90,7 @@ async function makeBench() {
     // migrate-orphaned route needs the credential tables.
     db,
     project_slug: OWNER,
-    slug_is_fallback: false,
+    slug_is_fallback: opts.slug_is_fallback ?? false,
     auth,
   })
   const server = Bun.serve({
@@ -253,4 +253,80 @@ test('GET /api/cores/integrations/migrate-orphaned returns 405 (POST-only mutati
   const res = await authed(b.base, MIGRATE_PATH)
   expect(res.status).toBe(405)
   expect((await res.json() as { code: string }).code).toBe('method_not_allowed')
+})
+
+// ── THE PUBLIC BOUNDARY OF THE DIRECTION GUARD ────────────────────────────
+/**
+ * The guard was already asserted against the shared brain. A review pointed out
+ * that proves the inside of the boundary and not the boundary — which is the
+ * SAME shape as the bug it was written for: the automatic path was guarded and
+ * the explicit one was not, because nobody exercised the explicit one.
+ *
+ * So this drives the real HTTP route on a server composed exactly as
+ * `wireCoresSurfaces` composes it for a fallback boot, and reads the rows back
+ * out of the database rather than trusting the response body.
+ */
+test('the migrate route REFUSES on a fallback boot, and says what to do instead', async () => {
+  const b = await makeBench({ slug_is_fallback: true })
+  await b.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+
+  const res = await authed(b.base, MIGRATE_PATH, { method: 'POST' })
+  // Deliberately still 200: the request was well-formed and the server did
+  // exactly what it should. Failing the request would invite a retry, and the
+  // retry would be just as refused.
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as { ok: boolean; total_moved: number; message: string }
+  expect(body.total_moved).toBe(0)
+  expect(body.message).toContain('Refused')
+  expect(body.message).not.toContain('tvly-stale')
+
+  // ON THE DATA, not the response: a body claiming zero while the row moved is
+  // precisely the failure this whole change exists to prevent.
+  expect(
+    await b.secrets.get({ owner_handle: STALE_HANDLE, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBe('tvly-stale')
+  expect(
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBeNull()
+})
+
+test('the status route stops advertising a migration it would refuse', async () => {
+  const b = await makeBench({ slug_is_fallback: true })
+  await b.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+
+  const res = await authed(b.base, '/api/cores/integrations')
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as {
+    orphaned_credentials: { migrate_action: string | null; message: string } | null
+  }
+  const orphans = body.orphaned_credentials
+  expect(orphans).not.toBeNull()
+  // The whole point of the branch: no action offered, and the sentence names
+  // the repair that actually works instead of the one that refuses.
+  expect(orphans!.migrate_action).toBeNull()
+  expect(orphans!.message).toContain('fallback')
+
+  // POSITIVE CONTROL — the same fixture on a configured boot DOES advertise it,
+  // so this test cannot pass by the summary being absent or inert.
+  const configured = await makeBench()
+  await configured.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+  const ok = (await (await authed(configured.base, '/api/cores/integrations')).json()) as {
+    orphaned_credentials: { migrate_action: string | null } | null
+  }
+  expect(ok.orphaned_credentials!.migrate_action).not.toBeNull()
 })
