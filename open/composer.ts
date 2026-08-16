@@ -473,7 +473,12 @@ import {
   CodexCredentialService,
   codexExecutorAvailability,
 } from '@neutronai/trident/codex-credential.ts'
-import { defaultGitModeProbe, detectMergeMode, makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
+import {
+  defaultGitModeProbe,
+  detectMergeMode,
+  makeLazyCredentialedHostRunner,
+  type PublisherCredentialSource,
+} from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { setGithubSpawnEnvResolver } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
@@ -842,7 +847,7 @@ export function buildOpenGraphComposer(
 ): GraphComposer {
   const env = options.env ?? process.env
 
-  return async ({ db, project_slug }): Promise<OpenComposition> => {
+  return async ({ db, project_slug, slug_is_fallback }): Promise<OpenComposition> => {
     const owner_home = resolveNeutronHome(env)
     const static_dir = resolveLandingStaticDir(env)
     // Single-owner: the frozen instance handle IS the boot slug.
@@ -2038,11 +2043,36 @@ export function buildOpenGraphComposer(
     // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
-    const tridentHostRunner = makeLazyCredentialedHostRunner(async () =>
-      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
-    )
+    // ONE credential resolution, shared by the thing that PUBLISHES and the
+    // thing that PROBES whether publishing is possible.
+    //
+    // This site was ALREADY credentialed before the publisher-probe fix, and
+    // saying otherwise was the round-2 overclaim: what refused the owner's board
+    // builds was not this wiring but the QUESTION the probe asked — an unscoped
+    // `gh auth status`, which exits non-zero when any account on any host is
+    // broken, including one the publisher never uses (measured: a valid token
+    // printed `✓ Logged in … (GH_TOKEN)` and still exited 1 because of a stale
+    // `default` account). The scoping fix lives in `trident/git-mode.ts`
+    // (`PUBLISHER_AUTH_COMMAND`).
+    //
+    // What sharing the credential here DOES buy is that the probe and the
+    // publisher can never disagree about whose token is in play, and it is
+    // resolved per call, so a credential the owner connects from chat takes
+    // effect on the next probe rather than the next boot.
+    const tridentGithubEnv = async (): Promise<Record<string, string>> =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle)))
+    const tridentPublisherCredential: PublisherCredentialSource = {
+      owner_handle,
+      source: 'the instance secrets store',
+      load: tridentGithubEnv,
+    }
+    const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
+    // ONE probe object, shared by `/code`, the HTTP ▶ route and the agent-native
+    // board seam. Shared rather than re-derived so a wiring test can assert the
+    // credential the board seam closes over by identity, not by `typeof`.
+    const tridentMergeModeProbe = defaultGitModeProbe(tridentPublisherCredential)
     const resolveTridentMergeMode = (repoPath: string) =>
-      detectMergeMode(repoPath, defaultGitModeProbe(tridentHostRunner))
+      detectMergeMode(repoPath, tridentMergeModeProbe)
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
         // No credential → no substrate → the tick loop can never advance a run
@@ -5847,6 +5877,13 @@ export function buildOpenGraphComposer(
     return {
       db,
       project_slug,
+      // ALWAYS set, never conditionally spread. A field the composer assigns
+      // only sometimes is exactly the ambiguity `composition-field-coverage`
+      // exists to catch, and it caught this. Normalising here also puts the
+      // fail-closed reading in ONE place: a caller that did not say where the
+      // handle came from has told us as much as a process that does not know
+      // who it is, so it resolves to `true` and the credential surfaces refuse.
+      slug_is_fallback: slug_is_fallback ?? true,
       // RA2 (gbrain live-or-loud) — surface the memory backend's boot-time
       // health so `boot()` can fold it into the terminal `/healthz`: a box whose
       // `gbrain` binary is missing now reports `status:'degraded'` +
@@ -6122,6 +6159,10 @@ export function buildOpenGraphComposer(
       // discards this boolean — see `safeDeliver` — but the contract should be
       // honest regardless.)
       onboarding_overnight_cron: {
+        // Overnight builds detect merge mode through the SAME credential the
+        // publisher uses. Without this the overnight seam built an
+        // uncredentialed probe and refused every GitHub-backed overnight build.
+        publisher_credential: tridentPublisherCredential,
         // `general_topic_id` is not a nicety — it is the other half of the fix.
         // The reporter's fallback reads the topic out of the onboarding row,
         // and Open's production onboarding path NEVER writes that key (the
@@ -6320,7 +6361,7 @@ export function buildOpenGraphComposer(
               work_board: workBoardStore,
               repo_path: owner_home,
               channel_kind: 'app_socket' as const,
-              resolveMergeMode: resolveTridentMergeMode,
+              merge_mode_probe: tridentMergeModeProbe,
               // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.

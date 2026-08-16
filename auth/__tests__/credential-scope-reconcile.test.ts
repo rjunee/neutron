@@ -158,7 +158,7 @@ test('(a) a DB seeded entirely under an old handle migrates onto the boot handle
     }),
   ).toBeNull()
 
-  const result = await reconcileCredentialScope(db, 'juno')
+  const result = await reconcileCredentialScope(db, 'juno', { slug_is_fallback: false })
   expect(result.action).toBe('migrated')
   if (result.action !== 'migrated') throw new Error('unreachable')
   expect(result.stale_handles).toEqual(['dev'])
@@ -208,7 +208,7 @@ test('a DB already entirely on the boot handle is a noop', async () => {
     label: 'primary',
     plaintext: 'bot-token',
   })
-  const result = await reconcileCredentialScope(db, 'juno')
+  const result = await reconcileCredentialScope(db, 'juno', { slug_is_fallback: false })
   expect(result.action).toBe('noop')
   expect(countRows('secrets', 'project_slug', 'juno')).toBe(1)
 })
@@ -230,7 +230,7 @@ test('(a2) stale + fresh rows for the SAME (kind,label): nothing moves and the F
     plaintext: 'fresh-token',
   })
 
-  const result = await reconcileCredentialScope(db, 'juno')
+  const result = await reconcileCredentialScope(db, 'juno', { slug_is_fallback: false })
   expect(result.action).toBe('orphaned')
   if (result.action !== 'orphaned') throw new Error('unreachable')
   expect(result.stale_handles).toEqual(['dev'])
@@ -273,7 +273,7 @@ test('(a2) a boot-handle row in ANY swept table blocks the automatic branch', as
   // "zero rows under the boot handle in EVERY swept table", not just `secrets`.
   await seedApiKey('juno', 'openai', 'prod', 'some-other-secret-id')
 
-  const result = await reconcileCredentialScope(db, 'juno')
+  const result = await reconcileCredentialScope(db, 'juno', { slug_is_fallback: false })
   expect(result.action).toBe('orphaned')
   expect(countRows('secrets', 'project_slug', 'dev')).toBe(1)
   expect(countRows('secrets', 'project_slug', 'juno')).toBe(0)
@@ -303,7 +303,7 @@ test('two stale handles with zero boot-handle rows: orphaned, zero writes', asyn
   })
   await seedProjectCredential('staging', 'apify', store.encryptPlaintext('apify-token'))
 
-  const result = await reconcileCredentialScope(db, 'juno')
+  const result = await reconcileCredentialScope(db, 'juno', { slug_is_fallback: false })
   expect(result.action).toBe('orphaned')
   if (result.action !== 'orphaned') throw new Error('unreachable')
   expect(result.stale_handles).toEqual(['dev', 'staging'])
@@ -363,7 +363,7 @@ test('a fallback boot handle may never pull rows off an explicit one', async () 
   await seedProjectCredential('live-owner', 'apify', store.encryptPlaintext('apify-token'))
   await seedApiKey('live-owner', 'anthropic', 'prod', secretId)
 
-  const result = await reconcileCredentialScope(db, 'dev', { currentSlugIsFallback: true })
+  const result = await reconcileCredentialScope(db, 'dev', { slug_is_fallback: true })
 
   expect(result.action).toBe('orphaned')
   if (result.action !== 'orphaned') throw new Error('unreachable')
@@ -387,7 +387,7 @@ test('a fallback boot handle may never pull rows off an explicit one', async () 
   // POSITIVE CONTROL, per this file's own rule: prove the fixture is one the
   // reconciler WOULD have moved, so the assertions above are the guard doing
   // its job rather than a census that was never actionable.
-  const unguarded = await reconcileCredentialScope(db, 'dev')
+  const unguarded = await reconcileCredentialScope(db, 'dev', { slug_is_fallback: false })
   expect(unguarded.action).toBe('migrated')
   expect(countRows('secrets', 'project_slug', 'dev')).toBe(1)
 })

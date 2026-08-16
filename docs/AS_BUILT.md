@@ -121,6 +121,232 @@ from the six real merges in the same file, which re-measure every claim on
 whatever git is present. `2.50.1` in the docblocks is provenance; the merges are
 what keep it true.
 
+## 2026-08-16 — the guard was on the automatic path only, so the explicit one still moved the rows
+
+A review of the merged #266 found it and the repro is two lines: seed a credential row
+under an explicit handle, boot on the `'dev'` fallback, dispatch the explicit migration.
+`total_moved:1`, and the row now belongs to a process that cannot say who it is. The
+automatic reconciler refused exactly this; `migrateOrphanedCredentialScope` took a handle
+and no provenance at all, so it could not have refused anything. **Closing the direction
+on one sweep closed nothing** — the same sentence that entry was written to record, one
+level up, inside the patch that recorded it. Worse, the integrations status screen
+ADVERTISED the migration as the repair.
+
+**Provenance is a REQUIRED argument, not an option with a safe default.** A
+`CredentialScopeProvenance` is threaded from the boot resolver (`gateway/index.ts`, the
+same `slugResolution` the automatic guard reads) through the composer, the composition
+input, the cores wiring, and both explicit surfaces — the `integrations_migrate_orphaned`
+tool and `POST /api/cores/integrations/migrate-orphaned` — into the brain and the scope
+function. Required, because the failure is silent: a new surface that forgot would
+compile, pass, and quietly do the unguarded thing. Now forgetting is a type error, and
+the compiler enumerated every site rather than a human guessing at them.
+
+**Absent means fallback.** Making it required all the way up touched 89 files, most of
+them composition tests asserting a provenance they have no opinion about, so at the
+composition boundary it is optional and `undefined` reads as anonymous. "This caller did
+not say where its handle came from" and "this process does not know who it is" are the
+same statement, so a composer that forgets is refused rather than trusted — fail-closed,
+and 89 files became 6.
+
+**A surface no longer offers an action the brain will refuse.** On a fallback boot the
+orphan summary carries `migrate_action: null` and a sentence naming the real repair (set
+the handle and restart) instead of pointing at the migration that would take someone
+else's rows.
+
+**And the boot log now says WHY nothing moved.** `credential_scope_orphaned` carried no
+reason, so `ambiguous_census` and `fallback_boot_handle_refused_direction` — which need
+opposite responses — rendered identically, and the operator reading the generic sentence
+was being steered toward the unsafe action. Both the log line and the journal payload
+carry it; the payload assertion is exact equality, because an audit row that grows a
+field silently is how one starts carrying something it should not.
+
+Regression asserted THROUGH THE SHARED BRAIN, not by calling a tool handler — every
+surface funnels there, and a test that reaches past it proves nothing about what a caller
+gets, which is how the gap survived its first suite. It carries the positive control the
+file requires: the same fixture, provenance the only difference, migrates. Mutation-tested
+both directions — disabling the guard fails the new test, refusing unconditionally fails
+five. A later review round added the boundary the first pass missed — the HTTP route,
+the agent-facing tool and the status response each driven for real, plus a fallback boot
+asserting the audit row's `reason` by exact equality, plus the composition chain itself
+(delete the composer's propagation and every configured boot silently refuses, which the
+field-coverage gate cannot see because the safe default and the wrong answer are the same
+literal). Gate results for the whole entry are recorded ONCE, at its end — an earlier
+draft stated `typecheck-all.sh` twice with two different counts, which leaves a reader no
+way to know which run was the real one.
+
+**A LATER ROUND FOUND THE GUARD FAILING THE OTHER WAY, AND IT WAS LIVE.** The refusal is
+silent in both directions — a broken guard silently steals rows, and a guard that
+misreads its own configuration silently refuses every migration on a correct machine.
+`resolveOwnerSlugSourceFromConfig` read the effective owner home as `config.ownerHome ??
+config.neutronHome`, and `??` falls through on `undefined` but NOT on `''`. So
+`OWNER_HOME=''` resolved the home to the empty string, the guard on the next line
+rejected that as unusable, and the `.url_slug` lookup was SKIPPED rather than falling
+back to `NEUTRON_HOME` — collapsing all three slug resolvers onto the bare `'dev'`
+fallback at once. A correctly renamed instance then journalled its own handle as
+orphaned and answered `Refused` to every explicit migration, telling the owner to set a
+handle that was already set. `resolveNeutronHome` (`migrations/db-path.ts`) has always
+treated an empty value as unset, so the two halves of one identity resolution disagreed
+about what empty means, ten lines apart. There is now ONE `effectiveOwnerHome` in
+`config/index.ts` that both the slug resolver and the env shim call — the shim was the
+second live site, and because `open/server.ts` fills a slot that is `undefined` OR `''`
+it re-wrote the empty string over itself, leaving every below-seam reader of
+`process.env.OWNER_HOME` holding `''`. Fixing only the resolver would have left the
+running server's owner home empty. The agreement suite could not see this axis by
+construction: it varies `NEUTRON_INSTANCE_SLUG` and never passes an empty `OWNER_HOME`,
+and all three resolvers were wrong the SAME way, so they agreed perfectly on the wrong
+answer.
+
+**`neutron doctor` escaped its `{ok:false}` contract again, on the same line.** The
+previous round closed the ZodError path and opened a filesystem one: the `.url_slug` read
+behind `existsSync` was unguarded, and `existsSync` is true for a chmod-000 file and for
+a DIRECTORY of that name — the read then throws EACCES / EISDIR out of a function
+`open/diagnostics-cli-impl.ts` calls OUTSIDE the try that produces `{ok:false}`. Both
+variants were reproduced against the branch.
+
+**THE FIRST FIX FOR THAT WAS WRONG, AND THE NEXT ROUND MEASURED WHY.** It made the
+resolver SWALLOW the read error and fall through to `NEUTRON_INSTANCE_SLUG`, so `doctor`
+stopped throwing. On the exact configuration `open/owner-identity.ts` documents — a
+renamed instance, `.url_slug` holding the new handle and the env var still holding the
+old one — the fall-through answers `{slug:'old-handle', source:'env'}`. That is a
+CONFIGURED provenance, so `slug_is_fallback` reaches the direction guard as `false` and
+the sweep migrates the owner's credential rows BACKWARD onto the name they were renamed
+away from, with no log line and no journal row. EACCES on `.url_slug` is a recorded real
+deployment failure, not a hypothetical. It also deleted a pinned invariant repo-wide:
+`gateway/__tests__/boot-init-cleanup.test.ts` asserts boot FAILS LOUDLY on an
+unresolvable slug, and the swallow turned that suite red on `main`'s own test.
+
+An unreadable rename file is now an ERROR, not an absence: the resolver throws
+`OwnerSlugUnreadableError` (`config/index.ts`), boot rejects as it always did, and the
+ONE caller that would rather have an answer than the truth — `neutron doctor` — catches
+it and renders its documented `{ok:false}` with the errno, which is what `main` returned
+before this branch existed. A substituted slug was never acceptable there either: the
+slug filters every event and job in the report, so `{ok:true}` with the wrong identity
+renders a healthy instance as empty. A file that reads successfully and is BLANK is still
+the absent case; only a file that could not be read at all is unknown.
+
+The EACCES fixtures prove the mode really denies the read before asserting the deny-path
+behaviour, because `chmod 000` is advisory against root — and where they previously
+bailed with a bare `return` when it did not bite (a test named for the EACCES axis
+passing green on a root runner having asserted nothing), they now assert the correct
+outcome for whichever world they are in: root still reads the file, and then the file
+must WIN. The EISDIR case denies root too and carries the axis unconditionally.
+
+**The canonical resolver moved out of the gateway ENTRY module.** It was defined on
+`gateway/index.ts` and `open/owner-identity.ts` imported it from there, which put the
+entry into `open/composer.ts`'s own static import graph — the one edge
+`gateway/composer-contract.ts` forbids by name, because entry↔composer is the
+top-level-await cycle that completes under Bun's current loader and can deadlock under a
+strict reading of the ESM TLA spec. No mechanical gate saw it: the depcruise rule that
+looks closest exempts `^open` outright, and the no-cycles rule only fires once a cycle
+COMPLETES. The resolver now lives in the `config` leaf beside the `IdentityConfig` it
+consumes and the `effectiveOwnerHome` it calls; `gateway/index.ts` re-exports it for its
+own importers. `open/__tests__/composer-graph-excludes-gateway-entry.test.ts` walks the
+real static graph through `Bun.resolveSync` and names the offending module — it carries
+a positive control (the same walker, seeded at a file that really does import the entry,
+must find it) so a walker that resolved nothing cannot read as a clean graph.
+
+**Whitespace is empty too.** `effectiveOwnerHome` and `resolveNeutronHome` both guarded
+`length > 0`, so `OWNER_HOME='   '` was answered as a home: the `.url_slug` lookup ran
+against a directory named three spaces and a correctly renamed instance resolved
+anonymous again — the identical defect, one space past the fix for it, and through an
+input no empty-string case can reach. Both trim now; both still return the value
+verbatim, because blank means unset and a real path is published back byte-for-byte.
+
+**The fail-closed default in the wiring was dead.** `wire-cores-surfaces.ts` reads
+`input.slug_is_fallback ?? true` at both handoffs and the comment above each says
+forgetting fails closed — but `open/composer.ts` normalises the field and always sets it,
+so no test ever produced the absent case and mutating `?? true` to `?? false` left every
+suite green. The integration test now composes with the DANGEROUS value and deletes the
+field before composing the graph, which is the only way to reach that default; the same
+mutation reds exactly that test and nothing else.
+
+**The refusal is data now, not prose.** `MigrateOrphanedCredentialsResult` carried no
+field for it — `refused_direction` was consumed only to build a sentence and the call
+still returned `ok:true`, so `POST /api/cores/integrations/migrate-orphaned` answered a
+refusal with `200 {ok:true,total_moved:0}`, structurally identical to a collision skip
+and to a clean no-op. Five assertions guarding a security-relevant refusal were
+`message).toContain('Refused')`, so editing one English sentence disarmed all five while
+leaving the guard untested. The flag now propagates to the result and out over the wire,
+and those assertions are structural; the operator-facing sentence stays pinned once,
+deliberately, rather than being the sole evidence in five places. **And the refusal
+leaves an audit row.** The journal emit was gated on `total_moved > 0` and a refusal
+moves nothing, so the one security-relevant outcome reachable from HTTP and from an agent
+tool wrote nothing at all while the automatic path journalled a reasoned row. It now
+emits `credential_scope_orphaned` with boot's own
+`reason: 'fallback_boot_handle_refused_direction'` plus a `surface` key, asserted by
+exact payload equality with the no-secret-material sweep.
+
+Mutations, each performed and reverted with a control proving it landed: reinstating the
+`??`, dropping the structural flag, suppressing the audit emit, and disarming the
+direction guard itself — the last one proving the suite still catches rows actually
+MOVING, not merely a missing marker. Four more in the round that fixed the swallow:
+restoring the swallow reds 6 tests across three files (including the boot invariant it
+had broken); reverting either trim to `length > 0` reds the whitespace case; re-adding the
+`gateway/index.ts` import to `open/owner-identity.ts` reds the graph walker, which names
+the module; mutating `?? true` to `?? false` at both wiring handoffs reds only the new
+absent-field case. Removing the composer's `slug_is_fallback` assignment reds the
+FIELD-SPECIFIC ratchet by name (`composition-field-coverage.test.ts` over `WIRED_FIELDS`),
+not merely the count floor — measured, because a review reported the opposite.
+
+**A LATER ROUND FOUND THE PIN FOR ONE OF THOSE TRIMS ASSERTING NOTHING.** A review
+mutation-proved it: revert the `OWNER_HOME` trim in `resolveNeutronHome`
+(`migrations/db-path.ts`) and the suite stayed green, because the assertion that named
+that property passed `NEUTRON_HOME` too — which wins at the line above and RETURNS, so
+the line under test never ran. The positive control (the same mutation on the
+`NEUTRON_HOME` branch) WAS caught, which is what made the gap legible rather than
+invisible. The property is now asserted with `NEUTRON_HOME` ABSENT, where only the trim
+can produce the documented `~/neutron` default, plus a control that a real `OWNER_HOME`
+path still resolves verbatim so the case cannot pass by the variable going unread.
+An assertion that cannot fail for the property it names is not coverage.
+
+**AND THE DOCBLOCK'S CLAIM ABOUT ITS SIBLINGS WAS FALSE.** `config/index.ts` stated that
+every sibling identity read in the repo trims; two did not — `resolveOwnerHome`
+(`gateway/boot-listener-registry.ts`) and its inlined twin `resolveOwnerHomeFromEnv`
+(`onboarding/overnight/register.ts`), both `length > 0`. With `OWNER_HOME='   '`, config
+and identity fell back while those two answered a directory named three spaces: one
+variable, two homes, and the overnight engine enumerating projects somewhere nothing had
+ever written. Fixed at the two call sites rather than by narrowing the sentence, because
+the split brain was the defect and the prose was only the evidence. The adjacent
+`NEUTRON_DB_PATH` guards got the same treatment — `dirname(dirname('   '))` is `'.'`, so a
+blank pin resolved owner_home to the process CWD, the identical defect one line down that
+fixing only the first line would have left live.
+
+`ReconcileInstanceScopeOptions.currentSlugIsFallback` is now REQUIRED, matching the
+explicit path's `provenance` argument. It was optional and the guard fires only on an
+explicit `true`, so an omitted flag failed OPEN — and the demonstration of the permissive
+call was sitting in the guard's own test file, where an omission and a deliberate `false`
+were indistinguishable. Optional provenance on a safety decision is a way to forget.
+
+`ENOENT` from the `.url_slug` read is deliberately NOT special-cased, and the reasoning is
+recorded at the call site: a review proposed falling through when the read races an
+unlink, but the fall-through answers with `NEUTRON_INSTANCE_SLUG`, which on a renamed box
+holds the OLD handle — so it would hand the credential guard "this process knows who it
+is" at the exact moment something is rewriting the file that says who it is.
+
+Mutations this round, each applied and reverted with a control proving it landed and a
+baseline proving the suite was green first (23 pass / 0 fail): reverting the
+`OWNER_HOME` trim in `resolveNeutronHome` reds the new absent-`NEUTRON_HOME` case;
+reverting either sibling's `OWNER_HOME` trim reds that sibling's assertion by name;
+reverting either `NEUTRON_DB_PATH` trim reds the CWD case; and dropping
+`currentSlugIsFallback` from one call site is now a TS2345 compile error naming the
+missing property, which is the whole point of making it required.
+
+Suites: `open/__tests__/owner-slug-agreement.test.ts` 23 pass, `migrations/` +
+`onboarding/overnight/` 110 pass across 14 files, gateway boot-credential-scope +
+boot-init-cleanup + `config/` 48 pass across 4 files, and the four direction-guard
+suites together 40 pass. `open/__tests__/` as a whole ran 750 across 98 files; the three
+failures there are load-sensitive and NOT this branch — the identical two
+(`projects_changed` live-refresh, the `#514` watchdog reap) reproduce on the untouched
+base worktree at `81548e81` under the same three-file load, the third
+(`sanitizeInboundAttachments`) does not recur, and the watchdog case passes 30/30 when its
+file runs alone. The failure SET differenced against untouched main is empty; the count
+alone would have read as a regression.
+
+`lint.sh` clean (7 gates). `typecheck-all.sh` 50/51 with the one failure
+(`app/tsconfig.json`, `TS2688 Cannot find type definition file for 'node'`) reproduced
+identically on the untouched base worktree at `81548e81` — a local install artifact
+(`app/node_modules/@types` holds only `react`), unchanged by this work. Differenced as a
+failure SET, not counted.
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
 Landed via PR #325.
@@ -628,6 +854,374 @@ look like noise.** Adding four test files shifted every file's index, which move
 test between shards run to run; that is why the same failure looked like it "moved around" and why it
 was tempting to call it flaky. The discriminator was never the shard: it was whether the bundle got
 built inside a loaded chunk at all.
+## 2026-08-15 — the publisher auth probe asked an un-credentialed CLI whether it was credentialed
+
+A build was refused at creation with `could not prepare the build workspace for
+"<project>": GitHub origin detected but the outer publisher cannot authenticate;
+refusing to silently weaken the PR merge gate`. The refusal is correct and stays
+(`trident/git-mode.ts` `detectMergeMode`) — selecting local mode there would drop the PR
+and CI gates. It fired while a valid credential existed, and it did not say why.
+
+THE ROOT CAUSE, REPRODUCED ON THE HOST (gh 2.97.0) — and it is none of the mechanisms the
+first two drafts of this entry named. The probe ran `gh auth status` with NO flags. Per
+that command's own `--help`, it "tests the authentication state of each known account on
+each known GitHub host" and "if an account on any host … has authentication issues, the
+command will exit with 1". Run with a VALID publisher token injected, it printed
+
+    ✓ Logged in to github.com account <handle> (GH_TOKEN)
+    X Failed to log in to github.com account <handle> (default)
+      - The token in default is invalid.
+
+and exited 1. The probe was `return res.ok`, so a good credential plus one stale account
+the publisher never uses produced "the outer publisher cannot authenticate", and every
+board build was refused. The same token with `--hostname github.com --active` exits 0.
+The probe now asks that scoped question (`PUBLISHER_AUTH_COMMAND`, `trident/git-mode.ts`):
+`--hostname github.com` is the only host the publisher targets, and `--active` is the only
+account it would use — with `GH_TOKEN` set that IS the injected credential, and with an
+empty env it is the ambient login the publisher inherits, so the mirror property holds in
+both directions. A `gh` too old for the flags (`--active` is gh >= 2.41) answers
+`unknown flag` and is classified `publisher_cli_unavailable`, never as a bad token.
+
+WHAT WAS ALSO MEASURED, because the first draft of this entry overclaimed and the
+overclaim is the more useful record. It said "every board-dispatched build was refused
+because the probe was uncredentialed". That is false: at `bb90794b`, `open/composer.ts`
+already passed a credentialed `resolveMergeMode` into `trident_build_dispatch`, which is
+the seam `work_board_start` runs through (`gateway/composition/build-core-modules.ts:241`
+→ `trident/work-board-build-tool.ts`). The uncredentialed `defaultGitModeProbe()` default
+was taken by `onboarding/overnight/register.ts` and by `board-dispatch.ts`'s own `??`
+fallback, which production did not reach. Two distinct paths produce the identical
+refusal, and only naming both explains the symptom:
+
+  1. NO CREDENTIAL AT ALL. `defaultGitModeProbe` defaulted its runner to a plain
+     `spawnCapture` and asked `gh auth status` about the gateway's own environment. The
+     gateway holds no `GH_TOKEN` by design — it arrives PER SPAWN via
+     `setGithubSpawnEnvResolver` (`open/composer.ts:1002`) — so the answer was a truthful
+     "not authenticated" about a process that structurally cannot be.
+  2. A CREDENTIALED RUNNER THAT RESOLVED TO NOTHING. When the token lookup missed (the
+     row filed under a different handle), `githubProcessEnv(null)` returned `{}`,
+     `spawnCapture` omits `env` entirely for an empty extra-env, and the credentialed
+     runner degraded silently into exactly the same bare `gh auth status` — reported to
+     the owner as an authentication failure rather than as "not connected".
+
+`defaultGitModeProbe(credential, run?)` now REQUIRES a `PublisherCredentialSource`
+(`{owner_handle, source, load()}`, `trident/git-mode.ts:312`), so path 1 is
+unrepresentable rather than merely unused, and the probe always knows whose credential it
+asked for — which closes path 2, because "the lookup returned nothing" is now a distinct
+answer instead of an indistinguishable one. `open/composer.ts:2061` builds ONE probe,
+shared by `/code`, the HTTP route, the agent-native board seam
+(`open/composer.ts:6326`) and the overnight seam (`open/composer.ts:6130`).
+
+The board seam takes the PROBE, not a resolver function: `merge_mode_probe: GitModeProbe`
+replaced `resolveMergeMode: (path) => Promise<MergeMode>` on `TridentBuildToolDeps` and on
+the `trident_build_dispatch` composition input. An opaque function satisfies its type with
+or without a credential, so a wiring test could only assert `typeof … === 'function'` —
+which the buggy composition also passed. A probe carries its `credential` — the SOURCE
+OBJECT, not a copy of its labels — so which credential the seam closes over is assertable
+BY IDENTITY. That distinction is load-bearing: round 2 exposed a `publisher` snapshot of
+`{owner_handle, source}` and the wiring test compared those two strings, which a probe
+backed by the WRONG STORE with matching labels satisfies. A composition with nothing to
+give uses
+`unwiredPublisherCredential()` (`trident/git-mode.ts:140`), which takes no handle: its one
+caller had none and was passing the PROJECT SLUG, so the refusal named an identity that
+was never looked up.
+
+THE PROBE IS A MIRROR OF THE PUBLISHER, NOT A STRICTER GATE IN FRONT OF IT. It runs the
+same command in the same environment the publisher will use, including when that
+environment is empty. An earlier revision short-circuited an empty store straight to
+`no_credential_available` without asking anything, which would have started refusing every
+host where the owner had run `gh auth login` and never connected GitHub in-app — hosts
+that publish fine, because the publisher inherits that session. That traded the original
+false negative for a new one.
+
+The refusal names WHICH cause and under WHICH owner handle the lookup was made (five at
+first, seven after the correction round below adds `credential_verdict_unavailable` and
+`github_rate_limited`):
+`no_credential_available` (nothing stored AND no ambient session — "not an expired
+token"), `credential_rejected` (expired/revoked/scope), `could_not_reach_github`,
+`publisher_cli_unavailable` (spawn failure, exit -1), `probe_failed`. `gh auth status`
+makes a live API round-trip, so DNS failure, an offline host, a proxy and a GitHub 5xx all
+exit non-zero with a good token; so does our own 60s watchdog kill, which is why
+`spawnCapture` now records `timed_out` (`trident/git-mode.ts:473`) — the exit code alone
+cannot distinguish a kill from a verdict. Every one of those used to render as "your token
+was REJECTED — expired, revoked, or missing a scope", sending the owner to rotate a
+working credential during an outage.
+
+THE CLASSIFIER IS INVERTED FROM ITS FIRST SHAPE, WHICH WAS BACKWARDS IN THE EXPENSIVE
+DIRECTION. It whitelisted transport failures (`looksLikeGithubUnreachable`) and let
+everything ELSE fall through to `credential_rejected` — described in the code as
+"conservative", when the fallthrough destination was the single cause that costs the owner
+a token rotation. An x509/TLS error matches no transport pattern, so "certificate signed
+by unknown authority" arrived as "expired, revoked, or missing a scope": confident,
+specific, and about a token nothing had been learned about. `credential_rejected` now
+requires POSITIVE evidence that `gh` refused the credential, and an unclassifiable failure
+reports `probe_failed` naming the command and exit code. (The evidence list that first
+shipped here — `bad credentials`, `is invalid`, `failed to log in`, `HTTP 401/403`,
+missing scopes — was itself wrong in three places and is corrected in the round below.)
+Two related honesty fixes ride along: `gh` reporting NO authentication while the probe HAD
+resolved a token means the host runner dropped the environment (`EnvCapableHostRunner`'s
+third parameter is optional, so a two-parameter runner type-checks and silently discards
+it) — that is now reported as a wiring fault, not a rejection; and `probe_failed`'s text
+tells the owner not to rotate on that signal.
+
+THE CLASSIFIER WAS STILL WRONG ABOUT THREE OF THE FIVE CAUSES, AND A WRONG CAUSE IS WORSE
+THAN THE VAGUE MESSAGE IT REPLACED — it converts a correct refusal into confident
+misdirection. All four defects were in the new classify/message logic, all measured
+against real `gh version 2.97.0 (2026-07-31)` rather than reasoned about:
+
+1. **A TRANSPORT FAILURE WAS SOLD AS A BAD TOKEN.** Measured: `gh auth status --hostname
+   github.com --active` behind a dead proxy — GitHub never reached, token irrelevant —
+   prints stderr BYTE-IDENTICAL to a genuinely invalid token:
+
+       github.com
+         X Failed to log in to github.com using token (GH_TOKEN)
+         - Active account: true
+         - The token in GH_TOKEN is invalid.
+
+   `is invalid` matched the REJECTION list, and the `dial tcp`/`no such host` strings
+   `looksLikeGithubUnreachable` looks for are emitted only under `GH_DEBUG` — so ordering
+   the unreachable check first could not rescue it. There is NO signal here that separates
+   the two, so the honest answer is that there is no verdict: the ambiguous wordings now
+   route to a new `credential_verdict_unavailable` (`trident/git-mode.ts`
+   `looksLikeAmbiguousLoginFailure`) whose refusal says the output does not say WHICH, and
+   sends the owner to check network/DNS/proxy FIRST. What remains `credential_rejected` is
+   only wording a LIVE RESPONSE BODY must exist to produce (`bad credentials`, a scope
+   list, `requires authentication`, `resource not accessible by`) — a dead network cannot
+   fabricate those.
+2. **A RATE-LIMITED 403 WAS A REJECTION.** GitHub returns **403**, not 429, for both the
+   primary and secondary rate limit, and returns it to a request whose credential it
+   ACCEPTED and counted; `gh auth status` makes a live round-trip, so it hits this. The
+   blanket `/\bhttp 40[13]\b/` therefore told a rate-limited owner to rotate a working
+   token. New `looksLikeGithubRateLimited` is subtracted inside
+   `looksLikeCredentialRejected` AND branches first in the probe — two independent guards,
+   mutation-tested separately — and the new `github_rate_limited` refusal says the limit is
+   evidence the token is FINE and the action is to wait.
+3. **THE CAUSE WAS KEYED ON THE CONFIGURED SOURCE, NOT ON WHAT HAPPENED.** The rejection
+   branch computed `token.length === 0 ? 'no_credential_available' : 'credential_rejected'`,
+   which is self-contradicting: control only reaches it on positive evidence a credential
+   WAS presented and refused, so "no credential available" denies the observation that
+   selected the branch. Real case, not hypothetical — a stale ambient account whose
+   `hosts.yml` token is invalid lands exactly there with an empty store. An empty store
+   does not mean nothing was tried; it means `gh` fell back to the host's AMBIENT login, so
+   that fact moved into the detail (`describeWhichCredential`) where it tells the owner
+   which credential to go fix, and the message no longer claims the stored one.
+4. **MULTI-LINE `gh` STDERR WAS TRUNCATED TO ITS FIRST LINE.** `result.detail.split('\n')[0]`
+   — and gh's first line is the BARE HOSTNAME, so the refusal kept the one line that
+   diagnoses nothing, discarded all three that do, and ended `…missing a scope:
+   github.com`. `renderAuthFailureDetail` now flattens every non-empty line (`; `-joined),
+   bounded at `MAX_AUTH_FAILURE_DETAIL_CHARS`. **Why the suite could not see it: every
+   stubbed detail was single-line, so `[0]` WAS the whole string and the defect was
+   invisible by construction.** The fixtures are now real captured multi-line `gh` output,
+   which is the part that keeps the next regression visible.
+
+Each of the four has a test asserting BOTH the classification and the owner-facing
+message, and each was mutation-tested by re-introducing the exact defect: 3 red for (1),
+1 red for the classifier guard and 4 more for the probe-ordering guard in (2), 4 red for
+(3), 2 red for (4). Narrowing the rejection list also silently widened
+`looksLikeNoGithubAuth`, whose `gh auth login` hint was only trusted when nothing else in
+the output was a verdict — its exclusion now covers the ambiguous wordings too, with a
+control asserting an "invalid token … run: gh auth login" output does not read as "nothing
+stored". `git-mode.test.ts` + `git-mode-credential-seam.test.ts` go 53 → 71 tests.
+
+Guards. `trident/git-mode-credential-seam.test.ts` drives a REAL `SecretsStore` on a temp
+db through the composer's exact construction: a stored token makes the probe available on
+a host with no ambient login (control: the token reached the call), an EMPTY store on a
+host that IS logged in stays available (control: the store was empty and the host was
+consulted with an empty env), an empty store on a host with no session refuses by name,
+and a credential connected AFTER composition takes effect with no restart. `process.env`
+is never mutated — setting `GH_TOKEN` on the test process would exercise the ambient read
+being removed and would pass for the broken code too.
+
+The reported bug is guarded directly, reduced to its mechanism: a host stub carrying a
+stale second account answers the UNSCOPED question with failure and the SCOPED one with
+success, so a valid token resolves to `'pr'`, and the CONTROL runs the SAME host against
+the pre-fix unscoped question and gets the refusal the owner saw. The exact argv is
+asserted, so the flags cannot be dropped as incidental.
+
+THE BOOT-WIRING GUARD NOW EXERCISES THE PATH IT NAMES. Round 2 called
+`dispatchBoardBoundBuild` with a hardcoded `resolveMergeMode: async () => 'local'`, which
+bypassed the composed probe entirely, then asserted two strings. It now drives the exact
+expression `work_board_start` uses (`detectMergeMode(path, tbd.merge_mode_probe)`) — the
+temp workspace is not a git repo, so `hasGithubOrigin` fails first and no `gh` or network
+call is reachable — and proves the credential BY ROUND-TRIP: a token planted through
+`composition.cores.secretsStore` comes back out of the probe's own credential, which a
+probe wired to any other store cannot fake. Mutation-tested BOTH layers independently:
+pointing the composer's probe at a different source carrying IDENTICAL labels reddens the
+identity assertion, and with that assertion disabled the store round-trip reddens on its
+own (`Expected: "ghp_BOOT_WIRING_SENTINEL_0001" / Received: undefined`) — the case round
+2's string comparison accepted.
+
+`spawnCapture`'s watchdog is now testable rather than asserted-by-stub: the 60s budget
+moved into a `timeoutMs` parameter (`DEFAULT_HOST_COMMAND_TIMEOUT_MS`), and the suite
+kills a REAL child (`sleep 5` at 50 ms) to assert `timed_out`, with a control proving the
+same budget does not flag a fast command, plus an end-to-end case where a real timeout
+reaches the owner as `could_not_reach_github`. Previously every positive assertion
+injected the flag via a stubbed result, so deleting the watchdog left the suite green.
+
+Verification for this round: `bash scripts/ci/typecheck-all.sh` → 51/51 tsconfigs pass.
+Full suite via the CI sharding (`scripts/run-tests.sh`, 4 shards) → 15,892 tests across
+1,300 files. The 15 failures are IDENTICAL to untouched `main` at `f99d6d49`, differenced
+file-by-file rather than counted: `trident/merge-realgit.test.ts` (2) and
+`trident/worktree-cleanup-sh.test.ts` (12) reproduce failure-for-failure on a clean
+baseline worktree, as does the commit-trailer case — all real-`git` shell tests, none
+touching this change. Note the shard partition is NOT comparable across the two trees:
+this branch declares 1,300 test files to main's 1,299, which shifts the assignment, so
+the comparison was made per-file.
+
+ROUND 4 — the taxonomy was right and three of its verdicts were still wrong, because
+`gh auth status` cannot answer the question the classifier was asking it. Measured on
+this host against `gh version 2.97.0 (2026-07-31)`, each run with an isolated
+`GH_CONFIG_DIR` so the host's own login was neither read nor disturbed: an invalid token,
+a proxy that refuses the connection, a proxy host that does not resolve, and a blackholed
+proxy ALL print the identical four lines, ending `- The token in GH_TOKEN is invalid.`
+That is structural rather than incidental — `gh` renders a fixed failure entry and never
+prints the underlying API or transport error (`pkg/cmd/auth/status/status.go` L90-108 in
+v2.97.0), and `Missing required token scopes` is printed only by the SUCCESS entry (L86).
+
+Two consequences, opposite in direction and identical in root. A network outage matched
+`is invalid` and was sold to the owner as a bad token; and `credential_rejected` was
+UNREACHABLE from real output, so a genuinely expired token was reported as "we could not
+tell — check your network first". No regex over that output can fix either, because the
+distinguishing information is not in it. So the probe now asks a SECOND question on the
+ambiguous branch only — `PUBLISHER_REACHABILITY_COMMAND` (`gh api --hostname github.com
+/zen`) — which does not flatten: measured, it answers `gh: Bad credentials (HTTP 401)`
+for the refusal, `proxyconnect tcp … connection refused` for the dead proxy, `error
+connecting to <host>` / `check your internet connection` for the DNS failure, and
+`proxyconnect tcp … i/o timeout` for the blackhole. Same binary, same env, same proxy
+handling, deliberately: a `fetch`/`curl` reachability check would answer about a
+different network path and could convert a transport outage into "your token was
+rejected". `credential_verdict_unavailable` survives as the last resort when both
+measurements are mute, which is the honest answer rather than the default one
+(`trident/git-mode.ts` `classifyGithubReachability`).
+
+Also in this round: the blanket `/\bhttp 40[13]\b/` narrowed to `401`, because GitHub
+returns 403 TO A REQUEST WHOSE TOKEN IT ACCEPTED for both rate limits, SAML/SSO
+authorization and resource restrictions — the rate-limit subtraction only rescued the
+403s that said "rate limit", so a bare `HTTP 403: Forbidden` still read as "expired,
+revoked, or missing a scope". A 403 still reads as a refusal when the WORDING says so,
+which required naming GraphQL's `has not been granted the required scopes` explicitly,
+since the status-code test had been covering it by accident. `gh`'s third rendering
+state (`Timeout trying to log in`, L110-117) now classifies as `could_not_reach_github`
+instead of falling through to `probe_failed`.
+
+The fixtures were the reason none of this was caught: three of them were labelled
+"copied from gh version 2.97.0" and could not have been — the rejection CONTROL certifying
+that `credential_rejected` still worked mixed the failure entry's header with the success
+entry's scope lines, and both rate-limit blocks embedded an HTTP status into a block that
+structurally cannot carry one. Every fixture now states MEASURED (with the command that
+produced it) or CONSTRUCTED (with what it was built from and why it could not be
+measured). The rate-limit cases moved onto the reachability surface, where a 403 can
+actually arrive. `every refusal keeps the original guard sentence` now iterates all seven
+members of `PublisherAuthFailureCause` rather than sampling one, joined by two more
+enumerations: every cause names the handle/source/detail and renders a DISTINCT sentence,
+and only the two causes the owner can act on mention repairing the credential.
+
+Verification: `trident/git-mode.test.ts` 84 pass / 0 fail (254 assertions), up from 66;
+`trident/git-mode-credential-seam.test.ts` 5 pass / 0 fail, still asserting through the
+token-store seam that a stored token with no ambient login resolves to `'pr'`.
+`bash scripts/ci/typecheck-all.sh` → 51/51 tsconfigs pass; `bash scripts/ci/lint.sh` → all
+gates 0 findings. The leak gate's finding SET was differenced against untouched `main` at
+`f99d6d49` rather than counted: zero new findings (main reports more, not fewer). Eight
+mutation proofs, each reverted after: re-widening to `40[13]` reddens 2; deleting the
+reachability call reddens 15; guessing `refused` when it is mute reddens 4; letting a rate
+limit say REJECTED reddens 3; collapsing two causes onto one message reddens 2; dropping
+the TIMEOUT entry reddens 1; dropping the scope-list verdict reddens 5 — confirming the
+corrected CONTROL fixture still bites. Across the whole `trident/` directory 17 tests fail
+and 16 are identical on untouched `main`; the residue is flaky rather than differential,
+reproduced by running the same two files three times on unchanged code and getting three
+different failing subsets — all real-`git`/network shell tests, none touching this change.
+
+### Round 5 — the message and the classifier were reading different bytes
+
+Five review findings, and four of them are the same shape: a classifier that had been
+fixed, standing next to a MESSAGE or a TEST that had not. That shape is worse than an
+unfixed classifier, because a refusal whose wording contradicts its own verdict invites
+the owner to overrule a correct answer.
+
+1. **THE RATE-LIMIT REFUSAL CLAIMED THE CREDENTIAL WAS GOOD.** It read "GitHub returns a
+   rate limit WITH a working credential, so this is evidence the token is fine" — a
+   POSITIVE claim about a credential nothing had verified. GitHub 403-rate-limits
+   UNAUTHENTICATED requests too, against the source IP, and `gh` has documented modes
+   (cli/cli#13317) where a keychain error silently drops the credential and the request
+   goes out unauthenticated. The same 403 is therefore equally consistent with "fine" and
+   with "no credential was sent at all". The refusal now states the one-directional
+   reading — not evidence of rejection, not evidence of acceptance — and the docblock on
+   `looksLikeGithubRateLimited` and the entry in `PublisherAuthFailureCause` were corrected
+   with it. The AS-BUILT paragraph above that says "evidence the token is FINE" describes
+   round 4 and is superseded here.
+2. **THE EVIDENCE SENTENCE READ STDERR WHILE THE CLASSIFIER READ BOTH STREAMS.**
+   `classifyGithubReachability` reads `stderr + stdout`; the owner-facing sentence branched
+   on `reach.stderr` alone and fell back to "exited N without printing anything". MEASURED
+   on gh 2.97.0 in this round: `gh api /zen` on SUCCESS writes its body to STDOUT and 0
+   bytes to stderr, and on a bad token writes the 112-byte JSON error body to STDOUT with
+   only a 31-byte summary on stderr — so the fuller diagnostic was the one being discarded,
+   and a call that plainly answered was reported as mute. `describeReachabilityAnswer` now
+   derives the sentence from the same two streams, and says "printed nothing" only when
+   both are genuinely empty.
+3. **A SUCCESSFUL REACHABILITY CALL WAS CALLED INCONCLUSIVE.** A `gh api /zen` that exits 0
+   proves GitHub answered AND accepted this credential. Round 4 returned `'inconclusive'`
+   for it, so a probe whose second measurement had just succeeded told the owner to "Check
+   network/DNS/proxy FIRST". New `'reachable'` verdict → new cause
+   `github_reachable_but_login_failed`, which points at the host's local `gh` login state
+   and says not to rotate.
+4. **x509/TLS INTERCEPTION RENDERED AS "the probe itself failed".** The round-4 docblock
+   cited x509 as its motivating example and no pattern matched it. The Go TLS vocabulary
+   (`x509:`, untrusted root, self-signed, expired cert, `tls: handshake failure`) now
+   classifies as `could_not_reach_github` — a handshake that never completed carried no
+   credential to GitHub. Deliberately the TLS vocabulary and NOT the bare word
+   `certificate`, with a control asserting a 401 that happens to mention one is still a
+   rejection.
+5. **A SAML/SSO 403 HAD NO BRANCH AT ALL.** Named in a docblock, handled nowhere, so it
+   fell to the unclassified tail and reported "nothing was learned about the credential"
+   when the single most actionable thing had been learned: GitHub accepted WHO the token
+   is and refused WHAT it asked for. New cause `credential_needs_sso_authorization` tells
+   the owner to authorize the token he has, because rotating produces another unauthorized
+   one.
+
+Two more, both about guards that could not have failed:
+
+- **`ALL_CAUSES` was a `readonly Cause[]`, which any subset satisfies.** The two causes
+  added in this round would have compiled while going unasserted — the exact failure the
+  list exists to prevent. It is now derived from a `satisfies Record<PublisherAuthFailure
+  Cause, …>` map, so omitting a member is a compile error naming it. Mutation-proved with
+  `tsc`: deleting one key yields `TS1360: Property 'github_reachable_but_login_failed' is
+  missing`, control run passes.
+- **Every `gh api` fixture hardcoded `stdout: ''`.** The classifier reads both streams, so
+  no fixture could exercise half of its input and a regression dropping stdout moved no
+  test. Fixtures are now two-stream captures with the measured split, `ghHost` spreads the
+  capture instead of forcing an empty stdout, and a direct guard asserts a verdict that
+  lands ONLY on stdout is still read.
+- **The `never dropped` test name contradicted the length cap standing next to it.**
+  Renamed to what it actually guarantees — no line is ever SELECTED BETWEEN — with a
+  companion test pinning the cap as the only thing that removes characters, from the tail.
+- **The follow-up call doubled the worst case to 120s.** The docblock said "one extra `gh`
+  invocation", which is true as a COUNT and silent about the time; the blackholed-proxy
+  case hangs for the full budget and no caller imposes a deadline (`open/composer.ts`,
+  `trident/work-board-build-tool.ts`, `onboarding/overnight/register.ts` all just await
+  it). `EnvCapableHostRunner` gained an optional 4th `timeoutMs` — a three-parameter runner
+  still satisfies the type, so no existing double changed — and the reachability call now
+  asks for `PUBLISHER_REACHABILITY_TIMEOUT_MS` (15s). Worst case 60s + 15s, asserted at the
+  seam rather than in prose.
+
+**Mutation acceptance is now a checked-in test, not a claim in this file.**
+`trident/git-mode-mutation.test.ts` copies `git-mode.ts` and its suite into a gitignored
+dot-directory, re-introduces each defect as an exact substring edit, runs the real suite
+against the copy, and asserts it goes RED *and names the specific guard that caught it* —
+so a mutation that reddens something unrelated does not count. 11 mutations, all caught,
+plus a POSITIVE CONTROL that runs the unmutated copy first. The control earned its keep
+immediately: bun skips dot-directories in discovery, so the first draft's bare
+`.trident-mutants/…` filter matched no files and exited 1, which is indistinguishable from
+a red suite — every mutation would have been reported as caught while nothing ran.
+
+Verification (this round): `trident/git-mode.test.ts` 100 pass / 0 fail (355 assertions),
+up from 84; `trident/git-mode-mutation.test.ts` 12 pass / 0 fail; `trident/git-mode-
+credential-seam.test.ts` unchanged at 5 pass / 0 fail, still asserting through the
+token-store seam that a stored token with NO ambient login resolves to `'pr'`, with
+`process.env` never mutated. `bash scripts/ci/typecheck-all.sh` → 51/51 pass. A review of
+round 4 reported `app/tsconfig.json` failing `TS2688 Cannot find type definition file for
+node` and self-flagged it as possibly environmental; it is — the same script on UNTOUCHED
+`main` at `f99d6d49` passes 51/51 including `app/`, so the finding was an unpopulated
+`app/node_modules` in the review worktree and not a branch regression. Test failures were
+differenced against that same main baseline rather than counted.
 
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
@@ -2023,7 +2617,7 @@ gap this task existed to close.
 
 Rows in `secrets` and `project_credentials` are keyed by the frozen owner handle; rows written before provisioning froze a different handle were invisible to the instance and reported as "not connected". Boot now runs `auth/credential-scope-reconcile.ts` (wired in `gateway/index.ts` inside a never-fail-boot guard): when every credential row sits under exactly one non-boot handle and ZERO rows exist under the boot handle, the scope columns are rewritten in one transaction — a pure metadata move, ciphertext bytes untouched — and a `credential_scope_migrated` audit row records handles, tables, and counts only. Any ambiguity (rows under more than one handle, or any row already under the boot handle) migrates NOTHING: a stale row must never overwrite a freshly connected credential. The sweep covers both `SHARED_KEY_ENCRYPTED_TABLES` members plus the `api_keys` metadata twin, and boot never refuses either way.
 
-The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately.
+The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately. **Superseded in one respect by the 2026-08-16 entry: this description omits the fallback exception, and did so because the exception did not exist yet — an explicit migration onto a FALLBACK boot handle is now refused outright, on every surface.**
 
 Tests in `auth/__tests__/credential-scope-reconcile.test.ts`, `gateway/__tests__/boot-credential-scope.test.ts`, `gateway/cores/__tests__/integrations-orphaned.test.ts`, and `gateway/cores/__tests__/integrations-migrate-orphaned.test.ts` pin the acceptance: the unambiguous move reads the token back with unchanged ciphertext bytes plus an audit row; the rotation-hazard case asserts on the decrypted value that the fresh credential survives; a real `boot()` never exits non-zero; a positive control succeeds under the correct handle so deleting the migration turns the suite red; and no secret material reaches logs, status output, or the audit payload. `reminders.project_slug` carries the same stale slug but is a read-filter, not a crypto scope, with no slug-bearing UNIQUE key and hence no rotation hazard; its drop-or-sweep is recorded as a follow-up decision, rows untouched.
 

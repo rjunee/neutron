@@ -90,10 +90,26 @@ export type SystemEventName =
   //     pre-provisioning owner handle were unambiguously moved onto the boot
   //     handle (a repair to the owner's database; the durable record of which
   //     tables moved and how many rows).
-  //   - `credential_scope_orphaned` — the AMBIGUOUS case: rows under two
-  //     handles, or stale rows coexisting with boot-handle rows. NOTHING was
-  //     written; the row exists so a scope miss is distinguishable from "never
-  //     connected", which is the expensive half of the defect.
+  //   - `credential_scope_orphaned` — NOTHING was written, for one of TWO
+  //     reasons, which the payload's `reason` names because they call for
+  //     opposite responses and used to render identically:
+  //       `ambiguous_census` — rows under two handles, or stale rows coexisting
+  //         with boot-handle rows. Look at the credential rows.
+  //       `fallback_boot_handle_refused_direction` — this process booted on the
+  //         bare fallback handle and may not claim rows belonging to an explicit
+  //         one. Set the instance handle; do NOT run the migration, which is
+  //         what a reader of the generic sentence was being steered toward.
+  //     Either way the row exists so a scope miss is distinguishable from
+  //     "never connected", which is the expensive half of the defect.
+  //     BOTH the automatic reconciler and the EXPLICIT owner-driven migration
+  //     (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`) emit the
+  //     refusal row, with the same `reason`, so one query over this event finds
+  //     every refusal regardless of which surface asked. The explicit one adds
+  //     `surface: 'explicit_migrate'` to tell them apart — the same shape as
+  //     `credential_scope_migrated`, where the explicit path already carries a
+  //     `skipped` key the boot payload does not have. The explicit refusal used
+  //     to journal NOTHING, because that path's emit was gated on
+  //     `total_moved > 0` and a refusal moves nothing.
   // Payload is COUNTS + HANDLES + TABLE NAMES only — never a secret kind/label,
   // never ciphertext, never plaintext.
   | 'credential_scope_migrated'

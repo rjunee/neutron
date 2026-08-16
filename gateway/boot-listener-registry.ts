@@ -301,12 +301,28 @@ export async function bindHttpListener(opts: {
  * yields owner_home). Dev fallback: `~/.local/share/neutron/`. (This is the
  * Managed owner-home derivation; the single-owner DB path itself is resolved by
  * `config`/`migrations/db-path.ts` since C1.)
+ *
+ * BLANK IS UNSET HERE TOO. `effectiveOwnerHome` (`config/index.ts`) and
+ * `resolveNeutronHome` (`migrations/db-path.ts`) both treat an empty OR
+ * whitespace value as unset, and the former's docblock claimed every sibling
+ * identity read in the repo did the same. This one did not: a review measured
+ * `OWNER_HOME='   '` resolving config and identity to their fallbacks while
+ * THIS function answered a directory named three spaces — one variable, two
+ * homes, and the listener registry looking for its state somewhere nothing had
+ * ever written. The claim is now true rather than narrowed, because the
+ * split-brain is the defect and the docblock was only the evidence of it.
+ *
+ * `NEUTRON_DB_PATH` gets the same treatment on the next line: `dirname(dirname('  '))`
+ * is `'.'`, so a blank pin silently resolves owner_home to the process's CWD.
+ * Fixing one and leaving the other is the asymmetry this whole change exists to
+ * remove. RETURNS stay verbatim — blank means unset, a real path is passed
+ * through byte-for-byte.
  */
 export function resolveOwnerHome(env: NodeJS.ProcessEnv): string {
   const fromEnv = env['OWNER_HOME']
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv
+  if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) return fromEnv
   const dbPath = env['NEUTRON_DB_PATH']
-  if (typeof dbPath === 'string' && dbPath.length > 0) {
+  if (typeof dbPath === 'string' && dbPath.trim().length > 0) {
     return dirname(dirname(dbPath))
   }
   return join(homedir(), '.local', 'share', 'neutron')
