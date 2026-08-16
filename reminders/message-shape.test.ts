@@ -3,7 +3,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   classifyReminderMessage,
   literalFallback,
+  literalFallbackResult,
   KNOWN_REMINDER_PATTERNS,
+  MAX_DEGRADED_INTENT_CHARS,
+  MAX_NUDGE_BODY_CHARS,
+  OVER_BOUND_NUDGE_BODY,
 } from './message-shape.ts'
 
 describe('classifyReminderMessage', () => {
@@ -172,5 +176,117 @@ describe('literalFallback', () => {
   test('pattern with no recognizable line → neutral degrade', () => {
     const out = literalFallback(classifyReminderMessage('PATTERN: nag-until-done\nrandom: stuff'))
     expect(out).toBe('You have a reminder due.')
+  })
+})
+
+// #293 defect B: a fire whose compose step failed posted 3.4k characters of the
+// owner's private operational `message` into his chat, because the degrade path
+// had no bound. The degrade is still verbatim for a real reminder; what changes
+// is that an over-long one is REFUSED rather than posted.
+//
+// The bound on the DEGRADE is `MAX_DEGRADED_INTENT_CHARS` (300), NOT the
+// composed-body bound `MAX_NUDGE_BODY_CHARS` (2000) — Argus round 1, confirmed
+// x2: 29% of live reminder rows sit in the 1001–2000 bucket and would have
+// posted verbatim under a single 2000-char bound, which is the leak the card
+// says must NEVER happen.
+describe('literalFallback — MAX_DEGRADED_INTENT_CHARS bound', () => {
+  test('a short literal degrades byte-identically — the designed behaviour', () => {
+    expect(literalFallback(classifyReminderMessage('take out the trash'))).toBe(
+      'take out the trash',
+    )
+  })
+
+  test('a fallback of exactly MAX_DEGRADED_INTENT_CHARS passes verbatim; one char more is refused', () => {
+    const at_bound = 'x'.repeat(MAX_DEGRADED_INTENT_CHARS)
+    const at = literalFallbackResult(classifyReminderMessage(at_bound))
+    expect(at.refused).toBe(false)
+    expect(at.body).toBe(at_bound)
+
+    const over = literalFallbackResult(
+      classifyReminderMessage('x'.repeat(MAX_DEGRADED_INTENT_CHARS + 1)),
+    )
+    expect(over.refused).toBe(true)
+    expect(over.body).toBe(OVER_BOUND_NUDGE_BODY)
+  })
+
+  // THE REGRESSION THE ROUND-1 BOUND MISSED. A 1,900-char private intent is
+  // under the composed-body bound and was posted verbatim; it is the modal
+  // shape of the leaked rows, not an outlier.
+  test('a 1900-char intent — under MAX_NUDGE_BODY_CHARS — is still refused', () => {
+    const intent = `LEAK_MARKER_XYZ `.repeat(119)
+    expect(intent.length).toBeGreaterThan(MAX_DEGRADED_INTENT_CHARS)
+    expect(intent.length).toBeLessThan(MAX_NUDGE_BODY_CHARS)
+    const out = literalFallback(classifyReminderMessage(intent))
+    expect(out).not.toContain('LEAK_MARKER_XYZ')
+    expect(out).toBe(OVER_BOUND_NUDGE_BODY)
+  })
+
+  test('an over-bound literal degrades to the generic line, carrying none of the intent', () => {
+    const intent = `LEAK_MARKER_XYZ `.repeat(200)
+    expect(intent.length).toBeGreaterThan(MAX_NUDGE_BODY_CHARS)
+    const out = literalFallback(classifyReminderMessage(intent))
+    expect(out).not.toContain('LEAK_MARKER_XYZ')
+    expect(out).toBe(OVER_BOUND_NUDGE_BODY)
+    expect(out.length).toBeLessThanOrEqual(MAX_DEGRADED_INTENT_CHARS)
+  })
+
+  test('an over-bound smart-wrap "Original reminder:" tail is refused too', () => {
+    const intent =
+      '[smart] Compose a smart version of this reminder using available context.\n\n' +
+      `Original reminder: ${'LEAK_MARKER_XYZ '.repeat(200)}`
+    const out = literalFallback(classifyReminderMessage(intent))
+    expect(out).toBe(OVER_BOUND_NUDGE_BODY)
+    expect(out).not.toContain('LEAK_MARKER_XYZ')
+  })
+
+  // The refusal line NAMES THE REMINDER (Argus round 1, confirmed x2): a
+  // recurring over-bound reminder that posts an identical, id-free sentence
+  // every fire is unactionable. The id is a content-free UUID.
+  test('the refusal line names the reminder id and still carries no intent bytes', () => {
+    const out = literalFallbackResult(
+      classifyReminderMessage(`LEAK_MARKER_XYZ `.repeat(200)),
+      'rem-9f3c',
+    )
+    expect(out.refused).toBe(true)
+    expect(out.body).toContain('rem-9f3c')
+    expect(out.body).not.toContain('LEAK_MARKER_XYZ')
+    expect(out.body.length).toBeLessThanOrEqual(MAX_DEGRADED_INTENT_CHARS)
+  })
+})
+
+// CodeQL `js/polynomial-redos` (HIGH) on the `Original reminder:` extraction —
+// `/(?:^|\n)Original reminder:\s*([\s\S]+?)\s*$/i` is quadratic on a marker
+// followed by many spaces, and a stored `message` is caller-authored text run on
+// the tick loop. The replacement is a single forward scan; these pin BOTH that
+// the semantics survived and that the pathological input is now linear.
+describe('smart-wrap "Original reminder:" extraction is linear', () => {
+  test('the payload is still the trimmed tail after the FIRST line-initial marker', () => {
+    const shape = classifyReminderMessage(
+      '[smart] compose something\n\nOriginal reminder:   walk the dogs   ',
+    )
+    expect(literalFallback(shape)).toBe('walk the dogs')
+  })
+
+  test('a marker mid-line is prose, not the composer tail', () => {
+    const shape = classifyReminderMessage('[smart] the Original reminder: was lost')
+    expect(literalFallback(shape)).toBe('the Original reminder: was lost')
+  })
+
+  test('a whitespace-only payload falls back to the whole instruction', () => {
+    const shape = classifyReminderMessage('[smart] do the thing\nOriginal reminder:    ')
+    expect(literalFallback(shape)).toBe('do the thing\nOriginal reminder:')
+  })
+
+  test('the old quadratic input resolves promptly', () => {
+    const evil = `Original reminder:${' '.repeat(60_000)}`
+    const started = Date.now()
+    literalFallback(classifyReminderMessage(`[smart] x\n${evil}`))
+    // WALL-CLOCK-BOUND-OK: this pins a ReDoS fix, and "does not backtrack
+    // super-linearly" has no deterministic surrogate — the scan and the regex
+    // return the SAME string, so only cost distinguishes them. The margin is not
+    // marginal: the linear scan is sub-millisecond, while the regex this replaced
+    // is O(n^2) over a 60,000-space run (~3.6e9 backtracks, minutes). A 5 s
+    // threshold is >1000x the observed time and cannot redden from runner load.
+    expect(Date.now() - started).toBeLessThan(5_000)
   })
 })

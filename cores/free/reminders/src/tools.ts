@@ -23,7 +23,7 @@ import {
   CapabilityGuard,
   type SecretAuditLog,
 } from '@neutronai/cores-runtime'
-import type { NeutronManifest } from '@neutronai/cores-sdk'
+import type { NeutronManifest, ToolCallContext } from '@neutronai/cores-sdk'
 
 import {
   CORE_SLUG,
@@ -75,7 +75,10 @@ export interface ToolDeps {
 }
 
 export interface BuiltTools {
-  reminders_create: (input: RemindersCreateInput) => Promise<RemindersCreateResult>
+  reminders_create: (
+    input: RemindersCreateInput,
+    ctx?: ToolCallContext,
+  ) => Promise<RemindersCreateResult>
   reminders_list: (input: RemindersListInput) => Promise<RemindersListOutput>
   reminders_snooze: (input: RemindersSnoozeInput) => Promise<RemindersSnoozeResult>
   reminders_cancel: (input: RemindersCancelInput) => Promise<RemindersCancelResult>
@@ -103,8 +106,30 @@ export function buildTools(deps: ToolDeps): BuiltTools {
   const reminders_create = guard.wrapToolHandler<RemindersCreateInput, RemindersCreateResult>({
     tool_name: 'reminders_create',
     capability_required: WRITE_CAPABILITY,
-    fn: async (input: RemindersCreateInput): Promise<RemindersCreateResult> => {
-      return deps.backend.create(input)
+    /**
+     * `project_id` DEFAULTS TO THE CALLING TOPIC'S PROJECT (#293).
+     *
+     * The stored `topic_id` IS the delivery destination
+     * (`backend.ts`: `topic_id: input.project_id ?? null`), so an agent that
+     * omitted `project_id` — which is every agent that did not think to pass it,
+     * because nothing in the tool's shape says a reminder has a home — created a
+     * General reminder while talking inside a project, and the fire landed in
+     * General. That is the likely root cause of the 24 misrouted fires: routing
+     * the FIRE correctly cannot rescue a row that was never told where it belongs.
+     *
+     * The registry hands us the bound topic's project (`mcp/server.ts`
+     * `currentTopicContextOrSystem`). An EXPLICIT `project_id` still wins — a
+     * caller deliberately filing a reminder against another project, or passing
+     * `null` for a genuinely instance-level one, is honoured verbatim.
+     */
+    fn: async (
+      input: RemindersCreateInput,
+      ctx?: ToolCallContext,
+    ): Promise<RemindersCreateResult> => {
+      if (input.project_id !== undefined || ctx?.project_id == null) {
+        return deps.backend.create(input)
+      }
+      return deps.backend.create({ ...input, project_id: ctx.project_id })
     },
   })
 

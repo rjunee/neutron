@@ -1584,9 +1584,14 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    down the socket and stands up a fresh one bound to the new topic, hydrating
 >    that topic's transcript from the shared OPFS store (`main.tsx topicForProject`
 >    / `wsUrlFor`). **Gated on `platform === 'web'`** — mobile keeps its single
->    `app:<user>` socket + `project_id`-field model, unchanged. Reminders/briefs
->    still fan to the bare `app:<user>` (General inbox) topic, so they surface in
->    General (durable rows under `app:<user>`), not the per-project chats.
+>    `app:<user>` socket + `project_id`-field model, unchanged. **Since #293
+>    (2026-08-15)** a fired reminder is delivered to the topic that OWNS the work:
+>    `app:<user>:<project>` when its stored destination names an EXISTING project,
+>    General otherwise (`open/wiring/reminder-topic.ts`). Briefs and ritual posts
+>    carry no destination and still land in General. The durable row and the live
+>    push share that topic, and the deliver seam stamps the project's
+>    `last_activity_at` so the rail pops — an out-of-turn post behaves exactly like
+>    a steady-state agent reply on the same topic.
 >    **Mounted-per-conversation surface cache (#343).** `ChatApp` no longer
 >    remounts the whole chat surface on a project switch (the old `key={convId}`
 >    on the sole runtime host tore down thread + composer, flashed the empty
