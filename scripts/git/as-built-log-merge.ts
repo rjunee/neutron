@@ -89,20 +89,33 @@
  * measured on that fixture, the gate parses ZERO entries and reports the log clean, so a genuine
  * collision goes unreported rather than being reported wrongly.
  *
- * A TITLE IS REQUIRED, WHICH IS THIS LOG'S CONTRACT AND NOT CommonMark'S. `/^##[ \t]/` alone left
- * the original defect standing in a narrower form, found by a cross-model reviewer: it rejects a
- * bare `##` but ACCEPTS `## ` and `##\t`, which are the same empty heading with trailing
- * whitespace. So a whitespace-only `## ` line in a body was still an entry, and the reviewer's
- * scenario reproduces exactly — base carrying one such line parses to THREE entries, and an
- * ours-side edit that merely strips the trailing space returns `ok: false, wouldLoseEntries: true`
- * on key `## 1`. Requiring a non-space character after the delimiter closes all three spellings at
- * once. It is deliberately NARROWER than CommonMark, which also allows up to three leading spaces
- * and an end-of-line straight after the hashes: `docs/AS_BUILT.md` line 3 says "One entry per
- * merged change", an entry with no title is not one, and a line that heads nothing is safer as
- * body text than as an entry whose identity is a stray keystroke. CRLF is handled by construction —
- * `\r` is whitespace, so `## \r` is correctly not a heading while `## title\r` is.
+ * A TITLE IS REQUIRED, WHICH IS THIS LOG'S CONTRACT AND NOT CommonMark'S. `docs/AS_BUILT.md` line 3
+ * says "One entry per merged change"; an entry with no title is not one, and a line that heads
+ * nothing is safer as body text than as an entry whose identity is a stray keystroke. This is
+ * deliberately NARROWER than CommonMark, which reads every one of the rejected forms as a valid
+ * EMPTY heading and additionally allows up to three leading spaces.
+ *
+ * IT TOOK TWO PASSES TO STATE THAT RULE CORRECTLY, AND BOTH MISSES WERE THE SAME DEFECT WEARING A
+ * SHORTER NAME — a cross-model reviewer found each. `/^##[ \t]/` rejects a bare `##` but ACCEPTS
+ * `## ` and `##\t`, the same empty heading with trailing whitespace. Then `/^##[ \t]+\S/` closed
+ * those and still accepted `## #`, `## ##`, `## ###   `: in CommonMark a run of `#` at the END of
+ * an ATX heading is an optional CLOSING sequence, so those render empty too (the spec's own example
+ * is `### ###`). Both reproduce identically — a base carrying one such body line parses to THREE
+ * entries, and an ours-side edit of that line alone (`## ` → `##`, or `## #` → `## ##`) returns
+ * `ok: false, wouldLoseEntries: true`, the refusal reserved for history loss, fabricated by editing
+ * whitespace. The negative lookahead is the rule stated once: after the delimiter there must be
+ * something that is not just a closing sequence. A title may still BEGIN with a hash — `## #303
+ * landed` is a heading with content, because a closing sequence only counts at the end — and that
+ * case is checked rather than assumed. CRLF falls out by construction: `\r` is whitespace, and the
+ * lookahead admits an optional one before the end.
+ *
+ * WHAT IT STILL ADMITS, SO IT IS NOT DISCOVERED AS A SURPRISE: "title" here means "a code point
+ * ECMAScript does not call whitespace", so an invisible-only title (U+200B and friends) is accepted
+ * and can be edited into a fabricated conflict the same way. It is residual rather than introduced —
+ * every earlier cut of this regex accepted it too — and closing it means shipping a unicode
+ * category table into a merge driver. The rule is stated as the lexical one it is.
  */
-const HEADING = /^##[ \t]+\S/
+const HEADING = /^##[ \t]+(?![ \t]*#*[ \t]*\r?$)/
 /** `## 2026-08-15 — title`. Ten historical sections carry no date; see `effectiveDates`. */
 const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/
 /**

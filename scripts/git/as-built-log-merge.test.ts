@@ -53,9 +53,12 @@ describe('parse/serialize', () => {
     //
     // WHAT IT IS AND IS NOT. It compares the parse against a RAW line scan, which has no idea what
     // a fence is, so it is a cross-check between two oracles and not a proof of a bijection — a
-    // simultaneous over- and under-parse could cancel. What it does hold is the property this
-    // test's NAME claims often enough to be worth having, and the per-entry shape check below
-    // covers the "only real ones" half exactly.
+    // simultaneous over- and under-parse could cancel. Nor does the per-entry check below prove
+    // "only real ones" outright: it applies the SAME lexical predicate, so it cannot catch a case
+    // that predicate itself gets wrong, and the two rounds of `HEADING` defects on this branch were
+    // exactly that kind. Those are pinned by the fixture tests further down, which name each
+    // rejected spelling explicitly. What this test covers is the aggregate — fence drift, and the
+    // parse collapsing or inflating against the file it is pointed at.
     //
     // ONE LEGITIMATE CHANGE WOULD MOVE THE TWO APART: an entry quoting a heading at COLUMN ZERO
     // inside a code fence, which is sample text and correctly heads no entry. That is a real cost
@@ -66,7 +69,7 @@ describe('parse/serialize', () => {
     // subtraction the day a fenced sample lands is cheaper than a duplicate parser maintained
     // forever. The log has no such line today: verified, every one of its heading lines heads an
     // entry, and its quoted markdown is indented.
-    const isHeadingLine = (line: string): boolean => /^##[ \t]+\S/.test(line)
+    const isHeadingLine = (line: string): boolean => /^##[ \t]+(?![ \t]*#*[ \t]*\r?$)/.test(line)
     const atColumnZero = text.split('\n').filter(isHeadingLine).length
     expect(parsed.entries.length).toBe(atColumnZero)
     // The same shape the parser uses, NOT `startsWith('## ')`. A literal space here would forbid
@@ -254,15 +257,25 @@ describe('parse/serialize', () => {
     expect(parsed.entries[0]!.lines.join('\n')).toContain('##not-a-heading')
   })
 
-  test('…and so is an EMPTY heading, in all three of its spellings', () => {
-    // `/^##[ \t]/` closed `##foo` and left this: `##` alone was rejected while `## ` and `##\t` —
-    // the same empty heading with trailing whitespace — were accepted, so a stray marker in a body
-    // was still an entry. An entry with no title is not "one entry per merged change", and its
-    // identity would be a keystroke.
-    for (const marker of ['##', '## ', '##\t']) {
+  test('…and so is an EMPTY heading, in every spelling CommonMark has for one', () => {
+    // Two passes of the same defect. `/^##[ \t]/` rejected a bare `##` and accepted `## ` and
+    // `##\t` — the same empty heading with trailing whitespace. `/^##[ \t]+\S/` closed those and
+    // still accepted the CLOSING-SEQUENCE forms: a run of `#` at the end of an ATX heading is
+    // optional punctuation, so `## #` and `## ###   ` render empty too. An entry with no title is
+    // not "one entry per merged change", and its identity would be a keystroke.
+    for (const marker of ['##', '## ', '##\t', '##  ', '## #', '## ##', '## ###   ', '## #\r']) {
       const parsed = parseLog(log(`## 2026-08-16 — has a stray marker\n\n${marker}\n\ntail\n\n`))
       expect(parsed.entries.length).toBe(1)
     }
+  })
+
+  test('…but a title may BEGIN with a hash, because a closing sequence only counts at the end', () => {
+    // The narrowing that rejects `## #` must not reject `## #303 landed`, which is a heading whose
+    // CONTENT starts with a hash. Without this the fix would trade a fabricated conflict for a
+    // dropped entry, which is the direction that loses history.
+    const parsed = parseLog(log('## #303 landed\n\nbody\n\n'))
+    expect(parsed.entries.length).toBe(1)
+    expect(parsed.entries[0]!.lines[0]).toBe('## #303 landed')
   })
 
   test('…while a TAB after the hashes still is one, which `/^## /` would have silently missed', () => {
@@ -346,20 +359,24 @@ describe('merge', () => {
     expect(control.ok).toBe(true)
   })
 
-  test('…and stripping the trailing space off a stray `## ` is an ordinary edit too', () => {
-    // The same defect in its narrower spelling, which survived the first fix and was found by a
-    // cross-model reviewer: `/^##[ \t]/` rejected a bare `##` but accepted `## `, so a
-    // whitespace-only marker in a body was an entry whose key was the whitespace. Reproduced
-    // exactly as reported — the base parsed to THREE entries and this merge returned
-    // `ok: false, wouldLoseEntries: true` on key `## 1`, a fabricated hard conflict raised by an
-    // edit that removed one space.
-    const withBlank = '## 2026-08-16 — has a stray marker\n\n## \n\ntail\n\n'
-    const stripped = '## 2026-08-16 — has a stray marker\n\n##\n\ntail\n\n'
-    const base = log(withBlank, OLD_B)
-    const res = mergeAsBuiltLog(base, log(stripped, OLD_B), log(NEW_TWO, withBlank, OLD_B))
-    expect(res.ok).toBe(true)
-    if (!res.ok) return
-    expect(res.text).toBe(log(NEW_TWO, stripped, OLD_B))
+  test('…and editing a stray EMPTY heading is an ordinary edit too, in both of its shapes', () => {
+    // The same defect in its two narrower spellings, each of which survived one round and was
+    // found by a cross-model reviewer. Reproduced exactly as reported both times: the base parsed
+    // to THREE entries and the merge returned `ok: false, wouldLoseEntries: true` — on key `## 1`
+    // for the whitespace form and `## # 1` for the closing-sequence form — a fabricated hard
+    // conflict raised by an edit that changed one space, or one hash.
+    for (const [before, after] of [
+      ['## ', '##'],
+      ['## #', '## ##'],
+    ] as const) {
+      const withMarker = `## 2026-08-16 — has a stray marker\n\n${before}\n\ntail\n\n`
+      const edited = `## 2026-08-16 — has a stray marker\n\n${after}\n\ntail\n\n`
+      const base = log(withMarker, OLD_B)
+      const res = mergeAsBuiltLog(base, log(edited, OLD_B), log(NEW_TWO, withMarker, OLD_B))
+      expect(res.ok).toBe(true)
+      if (!res.ok) return
+      expect(res.text).toBe(log(NEW_TWO, edited, OLD_B))
+    }
   })
 
   test('a dated addition older than the newest entry slots into date order, not on top', () => {
