@@ -113,6 +113,23 @@ export interface DeliveryEnvelope {
   idempotency_key?: string
   /** Open-shape prompt-level metadata bag threaded onto the reply prompt. */
   metadata?: Record<string, unknown>
+  /**
+   * `'suppress'` ⇒ this post gets its durable row and its live push but NO
+   * native device notification. Absent ⇒ the seam's standing rule holds: a post
+   * that got a durable row notifies.
+   *
+   * This is a deliberate, narrow exception to "a producer can no longer notify
+   * differently" (the 2026-08-09 note above), and it exists for exactly one
+   * producer class: HIGH-FREQUENCY machine progress reports. The work-wakeup
+   * loop posts a report every ~5 minutes all night; the durable row + live push
+   * are the product, and a buzz per tick would be ~96 lock-screen banners per
+   * night — the buzz would get the whole feature turned off. The rule the seam
+   * was built to enforce was "a producer cannot FORGET to notify"; an explicit,
+   * per-envelope opt-out preserves that (forgetting still notifies) while
+   * letting a producer that MEANS quiet say so in the payload the reviewer
+   * reads.
+   */
+  notify?: 'suppress'
 }
 
 export interface DeliveryResult {
@@ -434,7 +451,12 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
     // is redundant against main's early return above, which fires on the same
     // predicate and never reaches this code. Keeping both would be two flags
     // for one fact — the shape that drifts.
-    const notified = await notifyDevices(topic_id, prompt_id, body)
+    // An explicit `notify: 'suppress'` envelope skips the buzz — and ONLY the
+    // buzz; the durable row and the live push above already happened. `notified`
+    // stays false so a suppressed post can never stamp `delivered_at` on the
+    // strength of a notification that was never attempted.
+    const notified =
+      envelope.notify === 'suppress' ? false : await notifyDevices(topic_id, prompt_id, body)
     // RECORD that he was shown it, so the next re-emit of the same
     // `idempotency_key` reads `was_delivered: true` and stays quiet. Gated on the
     // owner having ACTUALLY been reached — by a device notification or by a live
