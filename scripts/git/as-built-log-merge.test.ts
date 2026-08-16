@@ -4,11 +4,13 @@
  * properties that make it SAFE to let it near a 17,000-line file nobody re-reads afterwards.
  */
 
-import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { afterAll, describe, expect, test } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { mergeAsBuiltLog, parseLog, serializeLog } from './as-built-log-merge.ts'
+import { runDriver } from './as-built-merge-driver.ts'
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..', '..')
 const REAL_LOG = join(REPO_ROOT, 'docs', 'AS_BUILT.md')
@@ -182,5 +184,74 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.text).toBe(log(OLD_B))
+  })
+})
+
+describe('the driver CLI — what git actually gets back', () => {
+  const dirs: string[] = []
+  afterAll(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+  })
+
+  /** Lay the three inputs out the way git does and run the driver over them. */
+  function drive(base: string, ours: string, theirs: string): { code: number; result: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-driver-'))
+    dirs.push(dir)
+    const paths = { O: join(dir, 'base'), A: join(dir, 'ours'), B: join(dir, 'theirs') }
+    writeFileSync(paths.O, base)
+    writeFileSync(paths.A, ours)
+    writeFileSync(paths.B, theirs)
+    const code = runDriver([paths.O, paths.A, paths.B, '7', 'docs/AS_BUILT.md'])
+    // git reads the merged result back out of %A, so that is what is asserted — not a return value.
+    return { code, result: readFileSync(paths.A, 'utf8') }
+  }
+
+  test('a clean merge exits 0 and leaves the union in the ours file', () => {
+    const base = log(OLD_A)
+    const { code, result } = drive(base, log(NEW_ONE, OLD_A), log(NEW_TWO, OLD_A))
+    expect(code).toBe(0)
+    expect(result).toBe(log(NEW_ONE, NEW_TWO, OLD_A))
+    expect(result).not.toContain('<<<<<<<')
+  })
+
+  test('THE FLOOR — a refused merge comes back as git\'s own conflict markers, non-zero', () => {
+    // The claim this change rests on is that its failure mode is exactly today's behaviour. That
+    // is only true if the fallback really runs `git merge-file` and really writes markers, so it
+    // is asserted rather than described.
+    const base = log(OLD_A)
+    const ours = log('## 2026-08-10 — older thing\n\nours version\n\n')
+    const theirs = log('## 2026-08-10 — older thing\n\ntheirs version\n\n')
+    const { code, result } = drive(base, ours, theirs)
+    expect(code).not.toBe(0)
+    expect(result).toContain('<<<<<<< ours')
+    expect(result).toContain('=======')
+    expect(result).toContain('>>>>>>> theirs')
+    // Both sides' text is still there for the human who has to reconcile it.
+    expect(result).toContain('ours version')
+    expect(result).toContain('theirs version')
+  })
+
+  test('the marker size git asks for is the marker size it gets', () => {
+    const base = log(OLD_A)
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-driver-'))
+    dirs.push(dir)
+    const paths = { O: join(dir, 'base'), A: join(dir, 'ours'), B: join(dir, 'theirs') }
+    writeFileSync(paths.O, base)
+    writeFileSync(paths.A, log('## 2026-08-10 — older thing\n\nours\n\n'))
+    writeFileSync(paths.B, log('## 2026-08-10 — older thing\n\ntheirs\n\n'))
+    runDriver([paths.O, paths.A, paths.B, '9', 'docs/AS_BUILT.md'])
+    expect(readFileSync(paths.A, 'utf8')).toContain('<'.repeat(9))
+  })
+
+  test('a missing input file is a conflict, never a silent clean merge', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-driver-'))
+    dirs.push(dir)
+    const ours = join(dir, 'ours')
+    writeFileSync(ours, log(OLD_A))
+    expect(runDriver([join(dir, 'nope'), ours, join(dir, 'nope2'), '7', 'docs/AS_BUILT.md'])).not.toBe(0)
+  })
+
+  test('too few arguments is refused rather than guessed at', () => {
+    expect(runDriver([])).toBe(2)
   })
 })

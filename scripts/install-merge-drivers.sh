@@ -49,10 +49,18 @@ if [ -z "$COMMON" ]; then
 fi
 ATTRS="$COMMON/info/attributes"
 
+# The scratch file is PER-PROCESS and the replacement is an atomic rename.
+#
+# Two build lanes sharing a checkout can run this at the same moment — which is the exact situation
+# this whole change exists to serve, so a shared `$ATTRS.tmp` here would be its own concurrency bug:
+# both would write the same scratch path and one could rename a half-written file over the
+# attributes. `$$` makes the scratch private and `mv` within the directory is atomic, so a racing
+# reader sees either the old file or the new one and never a partial one.
 remove_attr_line() {
   [ -f "$ATTRS" ] || return 0
-  grep -v -x -F "$ATTR_LINE" "$ATTRS" > "$ATTRS.tmp" 2>/dev/null || : > "$ATTRS.tmp"
-  mv "$ATTRS.tmp" "$ATTRS"
+  local tmp="$ATTRS.tmp.$$"
+  grep -v -x -F "$ATTR_LINE" "$ATTRS" > "$tmp" 2>/dev/null || : > "$tmp"
+  mv "$tmp" "$ATTRS"
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
