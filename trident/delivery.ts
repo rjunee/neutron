@@ -164,7 +164,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
-  // THE LAUNCHER DIED REPEATEDLY AND THE RECOVERY BUDGET RAN OUT.
+  // THE SUPERVISOR DIED REPEATEDLY AND THE RECOVERY BUDGET RAN OUT.
   // Checked EARLY and by its own token, because this reason deliberately EMBEDS the
   // latched launcher-crash text — whatever the substrate said — and that text is not
   // ours to keyword-proof. Left further down it would be captured by the branches
@@ -175,19 +175,8 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     return {
       klass: 'infra',
       summary:
-        "The build supervisor's launcher process died repeatedly, and I stopped relaunching after " +
+        'The build supervisor was killed repeatedly (gateway restarts), and I stopped relaunching after ' +
         'the recovery budget ran out. The work so far is saved on its branch.',
-      input_needed: `${saved} ${retry}`,
-    }
-  }
-
-  // A positive external process probe is stronger than a self-reported timeout:
-  // the launcher is measured dead. Keep generation ids and timestamps out of the
-  // owner-facing message while preserving an honest infrastructure classification.
-  if (r.includes('external liveness probe') && r.includes('build died without reporting')) {
-    return {
-      klass: 'infra',
-      summary: 'The build launcher process died without reporting a result.',
       input_needed: `${saved} ${retry}`,
     }
   }

@@ -80,14 +80,14 @@ Trident now polls the recorded launcher generation every 15 seconds in the super
 `trident-liveness` loop. `probeLauncherGenerationAlive` checks the live persistent
 pool child first and its durable PID registry fallback; the production wiring derives
 both supervision-path candidates and reports ambiguity or unreadable state as
-`unknown`. Only a positive `dead` answer reaches the existing
-additive `TridentRunStore.failRunningByLauncher` latch, with an honest `inner
-workflow child crashed:` reason.
+`unknown`. Only a positive `dead` answer reaches the existing durable
+`TridentRunStore.crashRunningByLauncher` latch, with an honest `inner workflow
+launcher crashed:` reason.
 
-Positive external death atomically moves the run to `failed` and clears its sub-agent
-claim, making the lane reusable on the same pass. The liveness pass then invokes the
-normal terminal-delivery and board-reconciliation hooks with the committed row. Ordinary
-in-process crash events keep their bounded recovery path. A registry UPSERT can supersede an older generation before
+The launcher is shared infrastructure, not the detached build. Pull and push detection
+therefore converge on the same harvest-first, bounded continuation path: an already-written
+result wins, otherwise the next sweep releases and relaunches the lane from its checkpoint.
+A registry UPSERT can supersede an older generation before
 the probe sees it; that ambiguity remains `unknown` and the existing reaper is retained.
 `trident/liveness-death-e2e.test.ts` proves a stale but positively alive run is untouched.
 

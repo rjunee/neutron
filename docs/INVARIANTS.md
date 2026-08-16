@@ -505,8 +505,9 @@ with cross-references noted inline.
 116. External launcher liveness acts only on positive death evidence: `alive`, `unknown`, or a
     throwing probe does nothing; malformed pids and disagreement between registry homes are
     ambiguous. Every running launcher is probed without the advancement sweep's 50-row cap. A
-    detected death becomes terminal immediately, releases its lane, and runs terminal delivery;
-    pushed crash events retain their durable recovery budget. The 90-minute no-advance and 2-hour
+    detected launcher death uses the same durable crash latch as pushed crash events. The next
+    sweep harvests a completed result first or claims bounded continuation; a dead shared launcher
+    is never treated as proof that its detached build died. The 90-minute no-advance and 2-hour
     max-inflight backstops remain unchanged.
     `trident/tick.ts`, `trident/liveness.ts`, `trident/liveness-death-e2e.test.ts`.
 

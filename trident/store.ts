@@ -565,19 +565,6 @@ export class TridentRunStore {
     })
   }
 
-  /** A positive external death is terminal: fail the run and release its lane now. */
-  async failRunningByLauncher(session_key: string, failure_reason: string): Promise<void> {
-    await this.db.run(
-      `UPDATE code_trident_runs
-          SET phase = 'failed', subagent_status = NULL, subagent_run_id = NULL,
-              workflow_run_id = NULL, failure_reason = ?, last_advanced_at = ?
-        WHERE workflow_run_id = ?
-          AND subagent_status = 'running'
-          AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
-      [failure_reason, this.now(), session_key],
-    )
-  }
-
   /**
    * Atomically CLAIM a crashed run for recovery: clear the crash latch, release the
    * sub-agent slot, null the (tombstoned) launcher generation so `launch()`'s

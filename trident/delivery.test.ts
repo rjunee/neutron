@@ -239,22 +239,6 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
   })
 
-  test('external launcher death → infra summary without raw generation or timestamp', () => {
-    const interp = interpretFailure(
-      runWith({
-        phase: 'failed',
-        failure_reason:
-          'inner workflow child crashed: generation 550e8400-e29b-41d4-a716-446655440000 is dead ' +
-          '(external liveness probe at 2026-08-16T10:11:12.000Z); build died without reporting',
-      }),
-    )
-    expect(interp.klass).toBe('infra')
-    expect(interp.summary).toBe('The build launcher process died without reporting a result.')
-    expect(interp.summary).not.toContain('550e8400')
-    expect(interp.summary).not.toContain('2026-08-16')
-    expect(interp.input_needed.toLowerCase()).toContain('retry')
-  })
-
   test('merge-conflict (authored question) → surfaces the specific question as the input needed', () => {
     const q = "couldn't auto-resolve the merge conflict in flush.ts for `trident/x` — it needs your call before I can land it."
     const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: q }))

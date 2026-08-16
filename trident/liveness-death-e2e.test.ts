@@ -1,4 +1,4 @@
-/** End-to-end pin for external launcher liveness → immediate terminal failure. */
+/** End-to-end pin for external launcher liveness → durable bounded recovery. */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -58,12 +58,12 @@ function harness(
     store,
     step: orchestrator.step,
     probe_launcher_alive: async () => answer,
-    latch_launcher_dead: (key, reason) => store.failRunningByLauncher(key, reason),
+    latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
   })
 }
 
-describe('external launcher death reaches the real orchestrator in one sweep', () => {
-  test('a positively dead generation goes terminal without spending the recovery budget', async () => {
+describe('external launcher death reaches the real orchestrator without killing the build', () => {
+  test('a positively dead generation is latched in seconds then continued by the sweep', async () => {
     await seedRunning('spent', 'generation-dead')
     const loop = harness(
       'dead',
@@ -72,17 +72,18 @@ describe('external launcher death reaches the real orchestrator in one sweep', (
     )
 
     await loop.runLivenessOnce()
-    const after = store.get('spent')!
-    expect(after.phase).toBe('failed')
-    expect(after.subagent_status).toBeNull()
-    expect(after.subagent_run_id).toBeNull()
-    expect(after.workflow_run_id).toBeNull()
-    expect(after.failure_reason).toContain('inner workflow child crashed:')
-    expect(after.failure_reason).toContain('external liveness probe')
-    expect(after.failure_reason).toContain('generation-dead')
-    expect(after.failure_reason).not.toMatch(/suspected agent hang/i)
-    expect(after.failure_reason).not.toMatch(/review rejection|REQUEST_CHANGES|blocking findings/i)
-    expect(after.failure_reason).not.toMatch(/exhausted/i)
+    const latched = store.get('spent')!
+    expect(latched.phase).toBe('ralph-task')
+    expect(latched.subagent_status).toBe('crashed')
+    expect(latched.failure_reason).toContain('inner workflow launcher crashed:')
+    expect(latched.failure_reason).toContain('generation-dead')
+
+    await loop.runOnce()
+    const continued = store.get('spent')!
+    expect(continued.phase).toBe('ralph-task')
+    expect(continued.subagent_status).toBe('running')
+    expect(continued.workflow_run_id).toBe('unused')
+    expect(continued.crash_recoveries).toBe(1)
   })
 
   test('a slow but positively alive run is untouched by the liveness pass and one sweep', async () => {

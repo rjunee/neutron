@@ -545,9 +545,9 @@ export function buildCoreModules(
         tridentWiring?.watch_interval_ms === undefined
           ? {}
           : { watch_interval_ms: tridentWiring.watch_interval_ms }
-      // A positive external death is terminal immediately. Pushed onChildCrash
-      // events retain #267's bounded recovery path; the liveness loop itself fans
-      // terminal delivery and board reconciliation after this latch commits.
+      // The external signal observes the warm launcher, not the detached build.
+      // Route it through #267's durable crash latch so harvest-first continuation
+      // remains authoritative across gateway restarts.
       const livenessOpt: {
         probe_launcher_alive?: TridentLivenessProbe
         latch_launcher_dead?: TridentDeadLauncherLatch
@@ -556,7 +556,7 @@ export function buildCoreModules(
           ? {}
           : {
               probe_launcher_alive: tridentWiring.probe_launcher_alive,
-              latch_launcher_dead: (key, reason) => store.failRunningByLauncher(key, reason),
+              latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
             }
       let loop: TridentTickLoop
       // §F1 — the orchestrator's `drain()` (previously destructured away and

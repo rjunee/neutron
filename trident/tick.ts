@@ -136,9 +136,9 @@ export interface TridentLivenessProbe {
 }
 
 /**
- * Terminally fail one positively-dead launcher generation. Production wires the
- * additive `TridentRunStore.failRunningByLauncher` path; pushed crash events keep
- * using the separate bounded crash-recovery path.
+ * Durably crash one positively-dead launcher generation. Production wires the
+ * same `TridentRunStore.crashRunningByLauncher` path as pushed crash events, so
+ * harvest-first bounded continuation cannot diverge based on which detector wins.
  */
 export interface TridentDeadLauncherLatch {
   (session_key: string, failure_reason: string): Promise<void>
@@ -277,8 +277,8 @@ export interface TridentTickOptions {
    */
   probe_launcher_alive?: TridentLivenessProbe
   /**
-   * Where a POSITIVE death is latched — see {@link TridentDeadLauncherLatch}.
-   * Production wires `TridentRunStore.failRunningByLauncher`.
+   * Where a POSITIVE launcher death is latched — see {@link TridentDeadLauncherLatch}.
+   * Production wires `TridentRunStore.crashRunningByLauncher`.
    */
   latch_launcher_dead?: TridentDeadLauncherLatch
   /**
@@ -509,10 +509,9 @@ export class TridentTickLoop {
    * the lane sits until the 90-minute reaper reports "suspected agent hang" — a
    * sentence that does not say it died.
    *
-   * A positive death is terminal immediately. After the latch commits, this pass
-   * sends the committed row through the same transition and terminal hooks as a
-   * sweep-produced terminal transition, because the next non-terminal sweep cannot
-   * see a row whose phase is already `failed`.
+   * A positive launcher death is durably marked `crashed`; the ordinary sweep then
+   * harvests any result already written or claims bounded continuation. A launcher
+   * is shared infrastructure, not proof that its detached build died.
    *
    * NO CROSS-LOOP GATING WITH THE SWEEP IS NEEDED. The terminal latch predicates
    * its update on the still-running generation, while `saveIfActive` refuses to
@@ -562,51 +561,14 @@ export class TridentTickLoop {
       // `NO_ADVANCE_HANG_MS` reaper and the 2-h `DEFAULT_MAX_INFLIGHT_MS` ceiling,
       // both retained.
       if (verdict !== 'dead') continue
-      // The reason is load-bearing, on three counts:
-      //   • it starts with `inner workflow child crashed:` so the measured cause
-      //     survives into the terminal crash-recovery reason;
-      //   • it says DEAD/DIED and names the generation, so the row states WHAT died
-      //     instead of the reaper's "suspected agent hang" (which would be a lie:
-      //     nothing hung, the process is gone);
-      //   • it must never contain the token `exhausted` — `delivery.ts` routes that
+      // The reason names the launcher (not the detached build) and generation, and
+      // must never contain the token `exhausted` — `delivery.ts` routes that
       //     into the review-unresolved class ("the reviewer still had blocking
       //     findings"), a confident lie about a build whose reviewer may never have
       //     run (same trap as the crash-recovery-budget reason in orchestrator.ts).
-      const reason = `inner workflow child crashed: generation ${key} is dead (external liveness probe at ${new Date(this.now()).toISOString()}); build died without reporting`
+      const reason = `inner workflow launcher crashed: generation ${key} is dead (external liveness probe at ${new Date(this.now()).toISOString()})`
       try {
         await latch(key, reason)
-        // The latch is per-generation, so fan every row it terminally changed. Use
-        // the committed row: this also avoids announcing a terminal transition if
-        // another writer won the predicate race and left the run non-terminal.
-        for (const candidate of runs) {
-          if (candidate.workflow_run_id !== key) continue
-          const terminal = this.store.get(candidate.id)
-          if (terminal === null || !isTerminalPhase(terminal.phase)) continue
-          if (this.on_transition !== null) {
-            try {
-              await this.on_transition.onTransition(terminal)
-              this.transitionCount++
-            } catch (err) {
-              log.error('transition_fan_failed', {
-                run: terminal.id,
-                slug: terminal.slug,
-                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-              })
-            }
-          }
-          if (this.on_terminal !== null) {
-            try {
-              await this.on_terminal.onTerminal(terminal)
-              this.deliveredCount++
-            } catch (err) {
-              log.error('terminal_delivery_failed', {
-                run: terminal.id,
-                slug: terminal.slug,
-                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-              })
-            }
-          }
-        }
       } catch (err) {
         // A failed latch is not fatal and needs no bookkeeping: the generation is
         // still dead on the next cadence, so the probe retries naturally.

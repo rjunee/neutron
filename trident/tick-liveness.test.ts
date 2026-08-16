@@ -10,11 +10,11 @@
  *
  * These cases pin the EXTERNAL signal that fixes it: a polled 'trident-liveness'
  * loop that asks whether the launcher generation recorded on an in-flight row is
- * still a live PROCESS, and terminally fails only a POSITIVE death.
+ * still a live PROCESS, and durably crash-latches only a POSITIVE death.
  *
  * The two halves that must both hold, and each names the mutation that turns it RED:
- *   • a positively-dead generation is terminal in the liveness pass, names the
- *     death, and runs the terminal observers;
+ *   • a positively-dead generation is crash-latched in the liveness pass without
+ *     claiming its detached build died or firing terminal observers;
  *   • 'alive' / 'unknown' / a throwing probe change NOTHING. The separation between
  *     slow and dead is BINARY (process aliveness), never a time threshold, so a
  *     legitimately long-thinking agent can never be reaped by this signal.
@@ -101,8 +101,8 @@ async function seedInFlight(id: string, generation: string): Promise<TridentRun>
 
 describe('T1 — a positively dead launcher is latched ONCE, and honestly', () => {
   test('the reason names the death, the generation, and nothing it does not mean', async () => {
-    // RED-mutation: drop the `inner workflow child crashed:` prefix and delivery.ts
-    // stops classifying this as a crash; add "exhausted" and it is reported as a
+    // RED-mutation: call this a build death and the durable recovery path lies about
+    // what the shared launcher proves; add "exhausted" and it is reported as a
     // review that ran out of rounds — a confident lie about a build whose reviewer
     // may never have run.
     await seedInFlight('dead-1', 'gen-1')
@@ -115,7 +115,7 @@ describe('T1 — a positively dead launcher is latched ONCE, and honestly', () =
     expect(calls.length).toBe(1)
     expect(calls[0]!.key).toBe('gen-1')
     const reason = calls[0]!.reason
-    expect(reason).toMatch(/^inner workflow child crashed:/)
+    expect(reason).toMatch(/^inner workflow launcher crashed:/)
     expect(reason).toContain('gen-1')
     expect(reason).toContain('dead')
     expect(reason.toLowerCase()).not.toContain('exhausted')
@@ -162,8 +162,8 @@ describe('T1 — a positively dead launcher is latched ONCE, and honestly', () =
   })
 })
 
-describe('T2 — TERMINAL in the liveness pass, with owner and board hooks', () => {
-  test('the run fails and fans its committed terminal row while still fresh', async () => {
+describe('T2 — launcher death uses the durable recovery latch', () => {
+  test('the run is marked crashed without inventing a terminal build transition', async () => {
     // RED-mutation: make the probe loop a no-op (or gate 'dead' behind a staleness
     // check) and this run sits `running` until the 90-minute reaper, which would then
     // report "suspected agent hang" — the wrong cause, 90 minutes late.
@@ -174,7 +174,7 @@ describe('T2 — TERMINAL in the liveness pass, with owner and board hooks', () 
       store,
       step: idleStep,
       probe_launcher_alive: probe,
-      latch_launcher_dead: (key, reason) => store.failRunningByLauncher(key, reason),
+      latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
       on_terminal: { onTerminal: async (run) => void delivered.push(run) },
       on_transition: { onTransition: async (run) => void transitioned.push(run) },
     })
@@ -183,36 +183,37 @@ describe('T2 — TERMINAL in the liveness pass, with owner and board hooks', () 
     await loop.runLivenessOnce()
 
     const after = store.get('terminal-1')!
-    expect(after.phase).toBe('failed')
-    // The death is NAMED on the row: the latched probe text survives into the
-    // terminal reason.
+    expect(after.phase).toBe('ralph-task')
+    expect(after.subagent_status).toBe('crashed')
     expect(after.failure_reason ?? '').toContain('external liveness probe')
     expect(after.failure_reason ?? '').toContain('gen-dead')
     expect((after.failure_reason ?? '').toLowerCase()).not.toContain('exhausted')
-    expect(delivered).toEqual([after])
-    expect(transitioned).toEqual([after])
-    expect(loop.stats()).toMatchObject({ delivered: 1, transitions: 1 })
+    expect(delivered).toEqual([])
+    expect(transitioned).toEqual([])
+    expect(loop.stats()).toMatchObject({ delivered: 0, transitions: 0 })
     // AND THE REAPER PLAYED NO PART: the row's progress stamp is nowhere near the
     // 90-minute no-advance threshold, so nothing time-based could have done this.
     const ageMs = Date.now() - Date.parse(after.last_advanced_at)
     expect(ageMs).toBeLessThan(NO_ADVANCE_HANG_MS)
     expect(ageMs).toBeLessThan(60_000)
   })
-  test('terminal outcome is independent of the pushed-crash recovery budget', async () => {
+  test('pull and push use the same idempotent crash state', async () => {
     const { probe } = fixedProbe('dead')
     const loop = new TridentTickLoop({
       store,
       step: idleStep,
       probe_launcher_alive: probe,
-      latch_launcher_dead: (key, reason) => store.failRunningByLauncher(key, reason),
+      latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
     })
     await seedInFlight('terminal-budget-independent', 'gen-dead')
 
     await loop.runLivenessOnce()
 
     const after = store.get('terminal-budget-independent')!
-    expect(after.phase).toBe('failed')
-    expect(after.subagent_status).toBeNull()
+    expect(after.phase).toBe('ralph-task')
+    expect(after.subagent_status).toBe('crashed')
+    await store.crashRunningByLauncher('gen-dead', 'later pushed duplicate')
+    expect(store.get('terminal-budget-independent')).toEqual(after)
     expect(after.crash_recoveries).toBe(0)
     expect(after.round).toBe(2)
     expect(after.ralph_round).toBe(3)

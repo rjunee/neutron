@@ -92,7 +92,7 @@ describe('trident external liveness composition wiring', () => {
     }
   })
 
-  test('positive death terminally fails the run and releases its lane', async () => {
+  test('positive launcher death enters the existing durable recovery path', async () => {
     const mods = buildCoreModules(tridentInput(async () => 'dead'))
     const instance = await mods.tridentModule.init(fakeCtx)
     try {
@@ -100,11 +100,11 @@ describe('trident external liveness composition wiring', () => {
       await seedRunning('dead-run', 'gen-wire-1')
       await instance.loop.runLivenessOnce()
       const after = new TridentRunStore(db).get('dead-run')!
-      expect(after.phase).toBe('failed')
-      expect(after.subagent_status).toBeNull()
-      expect(after.subagent_run_id).toBeNull()
-      expect(after.workflow_run_id).toBeNull()
-      expect(after.failure_reason).toStartWith('inner workflow child crashed:')
+      expect(after.phase).toBe('ralph-task')
+      expect(after.subagent_status).toBe('crashed')
+      expect(after.subagent_run_id).toBe('wf-wire-1')
+      expect(after.workflow_run_id).toBe('gen-wire-1')
+      expect(after.failure_reason).toStartWith('inner workflow launcher crashed:')
       expect(after.failure_reason).toContain('gen-wire-1')
     } finally {
       await mods.tridentModule.shutdown!(instance)
