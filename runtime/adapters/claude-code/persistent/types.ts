@@ -261,6 +261,27 @@ export interface PersistentReplSubstrateOptions {
    * isolates by respawn); if both are set, `ephemeral` wins (no warm REPL to clear).
    */
   reset_context_per_turn?: boolean
+  /**
+   * FRONTIER-MODEL FLOOR — mark this substrate as OWNER-FACING CONVERSATIONAL,
+   * so a spawn can never come up on a model below the frontier tier no matter
+   * what the resolved `spec.model_preference[0]` said.
+   *
+   * It exists because a registry record OVERRIDES the best model
+   * (`record.model ?? getBestModel()` — `pool.ts` / `supervision.ts`) and
+   * `spawn.ts` writes the row back with whatever it spawned on, so one wrong
+   * value survives every respawn. The owner's project chat ran a full day on
+   * Haiku twice on that path; a hand-edit of the row held for hours. Enforced at
+   * the single spawn chokepoint (`spawn.ts` → `applyModelFloor`), so it holds
+   * whatever wrote the record.
+   *
+   * DEFAULT-OFF AND THAT IS DELIBERATE: the scribe extractor, the reflection /
+   * correction judges and the phase-spec rephrasers are `FAST_MODEL` ON PURPOSE.
+   * The distinction is not guessed from the instance-id prefix — it is the
+   * `frontier_model_floor` field of the caller's security profile
+   * (`gateway/wiring/substrate-profiles.ts`), which is required-with-no-default
+   * exactly so a new substrate must state its answer.
+   */
+  frontierModelFloor?: boolean
   /** `claude` binary override. Default `process.env.CLAUDE_BIN ?? 'claude'`. */
   claude_bin?: string
   /** Append `--dangerously-skip-permissions` (managed headless REPLs MUST). */

@@ -378,6 +378,37 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     for (const o of others) expect(o.turn_inactivity_ms).toBeUndefined()
   })
 
+  test('ONLY the owner\u2019s chat substrate carries the frontier-model floor', async () => {
+    // THE WIRING, not the constant \u2014 same reasoning as the fire-window test
+    // directly above. The floor is worthless unless the REAL composition passes
+    // `PROFILE_WARM_CHAT` down to the spawn, and the counter-assertion matters
+    // just as much: scribe/reflection/phase-spec run on FAST_MODEL deliberately,
+    // so a floor leaking onto them would be a quota and latency regression.
+    //
+    // The defect it guards: a REPL registry row OVERRIDES the best model
+    // (`record.model ?? getBestModel()`), and the spawn writes the row back, so a
+    // single wrong value is permanent. The owner's project chat ran a full day on
+    // Haiku on that path, twice in one day.
+    const { ctx, captured } = makeCtx()
+    const w = wireSubstrates(ctx)
+    await drain(w.liveAgentSubstrate!)
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
+    await drain(w.makeWarmFireSubstrate('/repo/alpha'))
+    for (const s of [w.makeComposeSubstrate('proj'), w.llmCallSubstrate]) {
+      if (s !== null) await drain(s)
+    }
+
+    const chat = captured.filter((o) => o.substrate_instance_id === 'cc-agent-owner')
+    expect(chat.length).toBeGreaterThan(0)
+    for (const o of chat) expect(o.frontier_model_floor).toBe(true)
+
+    const others = captured.filter((o) => o.substrate_instance_id !== 'cc-agent-owner')
+    expect(others.length).toBeGreaterThan(0)
+    for (const o of others) {
+      expect(o.frontier_model_floor, o.substrate_instance_id).not.toBe(true)
+    }
+  })
+
   test('production watchdog wiring reaps a capped pid-dead run, then one tick aligns count and board (#514)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'neutron-open-crash-reap-'))
     const db = ProjectDb.open(join(dir, 'project.db'))

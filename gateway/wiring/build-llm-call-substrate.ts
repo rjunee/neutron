@@ -751,6 +751,12 @@ export function buildLlmCallSubstrate(
         // Absent ⇒ the pool's own DEFAULT_TURN_INACTIVITY_MS, so every other
         // profile is byte-for-byte unaffected.
         const effectiveTurnInactivityMs = input.profile?.turn_inactivity_ms
+        // The frontier-model floor — the second APPLIED profile field. Only
+        // `PROFILE_WARM_CHAT` sets it; every other profile is byte-for-byte
+        // unaffected, which is what keeps the deliberate FAST_MODEL callers
+        // (scribe / reflection / phase-spec) on the tier they chose. See the
+        // field's docblock in `substrate-profiles.ts` for the live defect.
+        const effectiveFrontierModelFloor = input.profile?.frontier_model_floor
         // Layer the optional `extra_env` overlay AFTER the auth-scrub env so
         // per-substrate spawn knobs (e.g. a `MAX_THINKING_TOKENS=0` classifier
         // knob) win over inherited vars without disturbing the auth scrubbing. The
@@ -774,6 +780,14 @@ export function buildLlmCallSubstrate(
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
         if (effectiveTurnInactivityMs !== undefined) {
           opts.turn_inactivity_ms = effectiveTurnInactivityMs
+        }
+        // Set ONLY when the profile opts IN. `false` and absent mean the same
+        // thing downstream (`frontier_model_floor?: boolean`, absent ⇒ off), so
+        // emitting `false` would add a key to every option bag for no behaviour —
+        // and the byte-identity net in `__tests__/substrate-profiles.test.ts`
+        // exists precisely to catch a field quietly appearing on all eight sites.
+        if (effectiveFrontierModelFloor === true) {
+          opts.frontier_model_floor = true
         }
         // S3 §2 — fold the SELECTED credential id (#104) + the conversational
         // identity into the warm-pool key. `cred.id` is the `PooledCredential.id`
