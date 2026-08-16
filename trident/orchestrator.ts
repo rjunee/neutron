@@ -494,37 +494,33 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
  * (exact-line, and exempt in markdown, where it is a setext underline). `|||||||` remains
  * unmatched: it only appears under `merge.conflictStyle=diff3`, and catching it is a follow-up.
  *
- * FOUR OR MORE is a deliberate fail-closed boundary, not git's minimum. `.gitattributes` can set
- * `conflict-marker-size=32` for a path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
- * eighth character is another `<` rather than the space the pattern demands. This regex is the
- * ONLY gate standing between a half-resolved staged file and a force-push to the shared branch,
- * so a marker length it cannot see is a marker it waves through. Found by codex cross-model
- * review. The boundary test uses real git with `conflict-marker-size` set, not a hand-written
- * long marker, so it proves git's behaviour rather than the fixture's.
+ * Seven or more matches git's default marker and wider configured markers without mistaking a
+ * legal four-deep Markdown blockquote for conflict residue.
  */
-const CONFLICT_MARKER_ADDED = /^\+(?:<{4,}|>{4,})(?: |\t|\r?$)/
+const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|\r?$)/
 
 /**
  * A `git diff --cached -U1` line that ADDS git's bare conflict SEPARATOR. Unlike `<<<<<<<` and
  * `>>>>>>>`, the separator line git writes carries NO label — it is exactly a run of `=` and
  * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
  * indented docstring underline) never matches. Git permits `conflict-marker-size` to narrow the
- * marker as well as widen it, so four or more is the tested boundary. `\r?` covers a CRLF
- * file. Sizes below four remain a known tradeoff: accepting ordinary one-to-three-character
- * punctuation avoids a much broader false-positive class. This is the residue MOST likely to
+ * marker as well as widen it, but this gate deliberately starts at git's default seven: shorter
+ * punctuation is common generated content and has no reliable corroborating label. `\r?` covers
+ * a CRLF file. This is the residue MOST likely to
  * survive a sloppy hand-resolution: the outer markers
  * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
  * gate entirely.
  */
-const CONFLICT_SEPARATOR_ADDED = /^\+={4,}\r?$/
+const CONFLICT_SEPARATOR_ADDED = /^\+={7,}\r?$/
 
 /**
  * Markdown permits an all-`=` Setext H1 underline. Text around it cannot safely corroborate that
- * interpretation: conflict sides can have the identical title/blank/paragraph shape. Exempt only
- * a nonblank title followed immediately by a blank line or EOF in the resulting file. This admits
- * both an underline-only edit and a newly added Setext section, while refusing a separator whose
- * next surviving line is conflict-side content. Scanning each candidate separately avoids decoding
- * git-quoted path headers.
+ * interpretation: conflict sides can have the identical title/blank/paragraph shape. The narrow
+ * exemption therefore requires affirmative diff evidence that the resolver added the nonblank
+ * title immediately before the underline. Existing text followed by a bare separator is refused,
+ * including at a paragraph break or EOF, because that is exactly the sloppy-resolution residue
+ * this gate exists to catch. Scanning each candidate separately avoids decoding git-quoted path
+ * headers.
  */
 const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
 
@@ -536,18 +532,8 @@ function stagedDiffAddsConflictMarker(diff: string, path: string): boolean {
     if (!CONFLICT_SEPARATOR_ADDED.test(line)) continue
     if (!SETEXT_UNDERLINE_PATHS.test(path)) return true
 
-    let hunkStart = i
-    while (hunkStart >= 0 && !lines[hunkStart]?.startsWith('@@')) hunkStart -= 1
-    let hunkEnd = i + 1
-    while (hunkEnd < lines.length && !lines[hunkEnd]?.startsWith('@@')) hunkEnd += 1
-    let titleLine = i - 1
-    while (titleLine > hunkStart && lines[titleLine]?.startsWith('-')) titleLine -= 1
-    const title = /^[ +](.*)\r?$/.exec(lines[titleLine] ?? '')?.[1] ?? ''
-    let followingLine = i + 1
-    while (followingLine < hunkEnd && lines[followingLine]?.startsWith('-')) followingLine += 1
-    const following = lines[followingLine]
-    const followedByBlankOrEof = followingLine === hunkEnd || /^[ +]\r?$/.test(following ?? '')
-    if (title.trim() === '' || !followedByBlankOrEof) return true
+    const addedTitle = /^\+(.+)\r?$/.exec(lines[i - 1] ?? '')?.[1] ?? ''
+    if (addedTitle.trim() === '') return true
   }
   return false
 }

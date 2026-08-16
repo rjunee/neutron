@@ -1173,66 +1173,68 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
-  test('a resolver that left a wide CRLF separator before surviving markdown content is REFUSED', async () => {
+  test('a resolver that left a separator at a markdown paragraph break or EOF is REFUSED', async () => {
     // THE SEPARATOR IS THE RESIDUE MOST LIKELY TO SURVIVE. `<<<<<<< ours` and `>>>>>>> theirs`
     // are the visually obvious lines; a hand-resolution that keeps both sides and strips the
     // outer markers leaves a bare `=======` sitting between them, and that line used to pass this
     // gate entirely — straight onto the shared branch.
-    const head = 'abcdef0123456789abcdef0123456789abcdef01'
-    const newBaseSha = '6666666666666666666666666666666666666666'
-    let resolverCalls = 0
-    const h = buildHarness({
-      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
-      resolve_conflict: async () => {
-        resolverCalls += 1
-        return { resolved: true }
-      },
-      hostResponder: (cmd) => {
-        const joined = cmd.join(' ')
-        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
-        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
-        if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
-        if (joined.includes('gh pr list')) return ok('42')
-        if (joined.includes('gh pr diff'))
-          return ghPrDiffTo(joined, 'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md\n@@ -1 +1 @@\n-a\n+b\n')
-        if (joined.includes('apply --3way')) return failWith('error: patch failed: docs/AS_BUILT.md:1')
-        // The index says DONE after the resolver's `git add` — this is the lie.
-        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'docs/AS_BUILT.md' : '')
-        // Both sides kept, outer markers gone, separator left behind.
-        if (joined.includes('diff --cached -U1'))
-          return ok(
-            [
-              'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md',
-              '--- a/docs/AS_BUILT.md',
-              '+++ b/docs/AS_BUILT.md',
-              '@@ -1,2 +1,3 @@',
-              ' publishHead: oidClaim(branchHead)',
-              '+============\r',
-              ' publishHead: oidClaim(forgeSha)',
-            ].join('\n'),
-          )
-        return ok()
-      },
-    })
-    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
-    const calls = h.hostCalls.map((c) => c.join(' '))
+    for (const tail of [['+'], []] as const) {
+      const head = 'abcdef0123456789abcdef0123456789abcdef01'
+      const newBaseSha = '6666666666666666666666666666666666666666'
+      let resolverCalls = 0
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+        resolve_conflict: async () => {
+          resolverCalls += 1
+          return { resolved: true }
+        },
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+          if (joined.includes('merge-base --is-ancestor')) return failWith('')
+          if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+          if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
+          if (joined.includes('gh pr list')) return ok('42')
+          if (joined.includes('gh pr diff'))
+            return ghPrDiffTo(joined, 'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md\n@@ -1 +1 @@\n-a\n+b\n')
+          if (joined.includes('apply --3way')) return failWith('error: patch failed: docs/AS_BUILT.md:1')
+          // The index says DONE after the resolver's `git add` — this is the lie.
+          if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'docs/AS_BUILT.md' : '')
+          // Outer markers gone, separator left at the paragraph boundary most likely to hide it.
+          if (joined.includes('diff --cached -U1'))
+            return ok(
+              [
+                'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md',
+                '--- a/docs/AS_BUILT.md',
+                '+++ b/docs/AS_BUILT.md',
+                '@@ -1,2 +1,3 @@',
+                ' publishHead: oidClaim(branchHead)',
+                '+=======\r',
+                ...tail,
+              ].join('\n'),
+            )
+          return ok()
+        },
+      })
+      const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+      const calls = h.hostCalls.map((c) => c.join(' '))
 
-    expect(resolverCalls).toBe(1)
-    expect(final.phase).toBe('failed')
-    expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
-    expect(final.failure_reason).toContain('docs/AS_BUILT.md')
-    // NOTHING IS COMMITTED, NOTHING IS SWAPPED, NOTHING IS PUSHED.
-    expect(calls.some((c) => c.includes(' commit '))).toBe(false)
-    expect(calls.some((c) => c.includes('update-ref refs/heads/feat-x'))).toBe(false)
-    expect(calls.some((c) => c.includes(' push '))).toBe(false)
-    expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
+      expect(resolverCalls).toBe(1)
+      expect(final.phase).toBe('failed')
+      expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
+      expect(final.failure_reason).toContain('docs/AS_BUILT.md')
+      // NOTHING IS COMMITTED, NOTHING IS SWAPPED, NOTHING IS PUSHED.
+      expect(calls.some((c) => c.includes(' commit '))).toBe(false)
+      expect(calls.some((c) => c.includes('update-ref refs/heads/feat-x'))).toBe(false)
+      expect(calls.some((c) => c.includes(' push '))).toBe(false)
+      expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
+    }
   })
 
   test('a markdown setext H1 underline in a resolved doc file is NOT residue — the publish proceeds', async () => {
     // A SETEXT H1 UNDERLINE IS BYTE-IDENTICAL TO GIT'S SEPARATOR. The gate requires the markdown
-    // shape itself: a nonblank title immediately before it and a blank line or EOF immediately
-    // after it. The title may be new in the same hunk; adding a legitimate section must publish.
+    // affirmative diff evidence: the nonblank title itself was added immediately before the
+    // underline. Existing text plus a separator is ambiguous conflict residue and fails closed.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const newHead = '7777777777777777777777777777777777777777'
     const newBaseSha = '6666666666666666666666666666666666666666'
@@ -1348,6 +1350,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
               '+const banner = "======="',
               '+  =======',
               '+=======trailing',
+              '+>>>> quoted',
             ].join('\n'),
           )
         if (joined.includes('diff --name-only')) return ok('changed.ts')
