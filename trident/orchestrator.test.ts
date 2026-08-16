@@ -1011,7 +1011,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
     // The claimed resolution is checked against git TWICE — the unmerged set and the staged bytes.
     expect(calls.some((c) => c.includes('--diff-filter=U'))).toBe(true)
-    expect(calls.some((c) => c.includes('diff --cached -U0'))).toBe(true)
+    expect(calls.some((c) => c.includes('diff --cached -U1'))).toBe(true)
 
     // The replay then commits and the branch moves by the UNCHANGED compare-and-swap.
     expect(calls.some((c) => c.includes(`update-ref refs/heads/feat-x ${newHead} ${head}`))).toBe(true)
@@ -1141,7 +1141,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         // The index says DONE after the resolver's `git add` — this is the lie.
         if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'notes.md' : '')
         // The staged bytes say otherwise. Hunk 1 was resolved, hunk 2 was not.
-        if (joined.includes('diff --cached -U0'))
+        if (joined.includes('diff --cached -U1'))
           return ok(
             [
               'diff --git a/notes.md b/notes.md',
@@ -1173,7 +1173,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
-  test('a resolver that left a wide CRLF separator is REFUSED', async () => {
+  test('a resolver that left a wide CRLF separator between conflict sides in markdown is REFUSED', async () => {
     // THE SEPARATOR IS THE RESIDUE MOST LIKELY TO SURVIVE. `<<<<<<< ours` and `>>>>>>> theirs`
     // are the visually obvious lines; a hand-resolution that keeps both sides and strips the
     // outer markers leaves a bare `=======` sitting between them, and that line used to pass this
@@ -1195,17 +1195,17 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
         if (joined.includes('gh pr diff'))
-          return ghPrDiffTo(joined, 'diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
-        if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
+          return ghPrDiffTo(joined, 'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed: docs/AS_BUILT.md:1')
         // The index says DONE after the resolver's `git add` — this is the lie.
-        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'shared.ts' : '')
+        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'docs/AS_BUILT.md' : '')
         // Both sides kept, outer markers gone, separator left behind.
-        if (joined.includes('diff --cached -U0'))
+        if (joined.includes('diff --cached -U1'))
           return ok(
             [
-              'diff --git a/shared.ts b/shared.ts',
-              '--- a/shared.ts',
-              '+++ b/shared.ts',
+              'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md',
+              '--- a/docs/AS_BUILT.md',
+              '+++ b/docs/AS_BUILT.md',
               '@@ -1,0 +2,3 @@',
               '+publishHead: oidClaim(branchHead)',
               '+============\r',
@@ -1221,7 +1221,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(resolverCalls).toBe(1)
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
-    expect(final.failure_reason).toContain('shared.ts')
+    expect(final.failure_reason).toContain('docs/AS_BUILT.md')
     // NOTHING IS COMMITTED, NOTHING IS SWAPPED, NOTHING IS PUSHED.
     expect(calls.some((c) => c.includes(' commit '))).toBe(false)
     expect(calls.some((c) => c.includes('update-ref refs/heads/feat-x'))).toBe(false)
@@ -1230,10 +1230,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   })
 
   test('a markdown setext H1 underline in a resolved doc file is NOT residue — the publish proceeds', async () => {
-    // A SETEXT H1 UNDERLINE IS BYTE-IDENTICAL TO GIT'S SEPARATOR, and `-U0` output carries no
-    // context that could tell them apart. Refusing it would fail closed on ordinary prose in
-    // exactly the files that conflict most, so `.md`/`.markdown` are exempt from the bare-separator
-    // rule. (Any OUTER marker in the same file still refuses via CONFLICT_MARKER_ADDED.)
+    // A SETEXT H1 UNDERLINE IS BYTE-IDENTICAL TO GIT'S SEPARATOR. One context line lets the gate
+    // require its prose shape: nonblank title before, blank line after. Outer markers and a
+    // separator between two conflict sides still refuse in markdown.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const newHead = '7777777777777777777777777777777777777777'
     const newBaseSha = '6666666666666666666666666666666666666666'
@@ -1268,22 +1267,23 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
         if (joined.includes('gh pr list')) return ok('42')
         if (joined.includes('gh pr diff'))
-          return ghPrDiffTo(joined, 'diff --git a/docs/notes.md b/docs/notes.md\n@@ -1 +1 @@\n-a\n+b\n')
-        if (joined.includes('apply --3way')) return failWith('error: patch failed: docs/notes.md:1')
-        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'docs/notes.md' : '')
-        if (joined.includes('diff --cached -U0'))
+          return ghPrDiffTo(joined, 'diff --git "a/docs/notes\\t.md" "b/docs/notes\\t.md"\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed')
+        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'docs/notes\t.md\0' : '')
+        if (joined.includes('diff --cached -U1'))
           return ok(
             [
-              'diff --git a/docs/notes.md b/docs/notes.md',
-              '--- a/docs/notes.md',
-              '+++ b/docs/notes.md',
-              '@@ -1,0 +2,3 @@',
+              'diff --git "a/docs/notes\\t.md" "b/docs/notes\\t.md"',
+              '--- "a/docs/notes\\t.md"',
+              '+++ "b/docs/notes\\t.md"',
+              '@@ -1,0 +2,4 @@',
               '+Release notes',
               '+=======',
+              '+',
               '+both intents kept',
             ].join('\n'),
           )
-        if (joined.includes('diff --name-only')) return ok('docs/notes.md')
+        if (joined.includes('diff --name-only')) return ok('docs/notes\t.md')
         return ok()
       },
     })
@@ -1292,8 +1292,8 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     const calls = h.hostCalls.map((c) => c.join(' '))
 
     expect(resolverCalls).toBe(1)
-    expect((resolverInput as unknown as { conflicted_files: string[] }).conflicted_files).toEqual(['docs/notes.md'])
-    expect(calls.some((c) => c.includes('diff --cached -U0'))).toBe(true)
+    expect((resolverInput as unknown as { conflicted_files: string[] }).conflicted_files).toEqual(['docs/notes\t.md'])
+    expect(calls.some((c) => c.includes('diff --cached -U1'))).toBe(true)
     // The compare-and-swap happened: the setext underline was never mistaken for residue.
     expect(calls.some((c) => c.includes(`update-ref refs/heads/feat-x ${newHead} ${head}`))).toBe(true)
     expect(final.phase).toBe('done')
@@ -1338,7 +1338,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           return ghPrDiffTo(joined, 'diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
         if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
         if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'shared.ts' : '')
-        if (joined.includes('diff --cached -U0'))
+        if (joined.includes('diff --cached -U1'))
           return ok(
             [
               'diff --git a/shared.ts b/shared.ts',
@@ -1374,7 +1374,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   // test because they fail independently and either one alone is enough to lose the invariant.
   for (const failing of [
     { label: 'the unmerged-path read', match: '--diff-filter=U', stderr: 'fatal: not a git repository' },
-    { label: 'the staged-marker scan', match: 'diff --cached -U0', stderr: 'fatal: bad object HEAD' },
+    { label: 'the staged-marker scan', match: 'diff --cached -U1', stderr: 'fatal: bad object HEAD' },
   ]) {
     test(`a resolver claiming RESOLVED is REFUSED when ${failing.label} cannot run — it never fails open`, async () => {
       const head = 'abcdef0123456789abcdef0123456789abcdef01'
@@ -1400,7 +1400,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           // test would prove nothing about post-resolution verification.
           if (joined.includes(failing.match) && resolverCalls > 0) return failWith(failing.stderr)
           if (joined.includes('--diff-filter=U')) return ok('shared.ts')
-          if (joined.includes('diff --cached -U0')) return ok('')
+          if (joined.includes('diff --cached -U1')) return ok('')
           return ok()
         },
       })

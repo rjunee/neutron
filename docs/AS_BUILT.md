@@ -1126,14 +1126,13 @@ The rule now: an ADDED line that is EXACTLY a run of `=` — `CONFLICT_SEPARATOR
 outer markers which are followed by a branch name; anything suffixed (`=======trailing`,
 `const banner = "======="`) or indented is legitimate content and does not match. `{7,}` rather
 than `{7}` for the same reason as `CONFLICT_MARKER_ADDED`: `conflict-marker-size` widens the
-separator too. `\r?` covers a CRLF file. `.md`/`.markdown` are EXEMPT: a markdown setext H1
-underline is byte-identical to git's separator, and `git diff --cached -U0` carries no context
-that could tell them apart, so matching there would fail closed on ordinary prose in exactly the
-files that conflict most.
+separator too. `\r?` covers a CRLF file. For `.md`/`.markdown`, the scan uses one context line and
+exempts only a corroborated Setext shape: a nonblank title immediately before the underline and a
+blank line or EOF immediately after it. A separator between two conflict sides is therefore still
+refused in markdown, including this canonical AS_BUILT log. Each genuinely-unmerged candidate is
+scanned separately, so quoted patch headers cannot make a markdown path lose its extension.
 
-Residual gap, stated rather than hidden: a markdown file whose ONLY residue is the bare
-separator still passes — though a markdown file with any outer marker still refuses via
-`CONFLICT_MARKER_ADDED`. And the diff3 base marker `|||||||` remains unmatched; a repo with
+The diff3 base marker `|||||||` remains unmatched; a repo with
 `merge.conflictStyle=diff3` can leave the same class of residue, and catching it (same exact-line
 plus width rule, with its own real-git proof under diff3) is a follow-up card. The scan already
 runs only over paths that were genuinely unmerged in this replay, which bounds false positives

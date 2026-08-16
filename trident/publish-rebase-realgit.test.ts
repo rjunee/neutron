@@ -464,12 +464,8 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     let seen = ''
     const resolve_conflict: MergeConflictResolver = async (input) => {
       seen = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
-      const separator = '='.repeat(32)
-      // Keep git's generated separator while deleting both visually-obvious outer markers.
-      writeFileSync(
-        join(input.repo_path, 'lib.txt'),
-        `line1\nline2-from-branch\n${separator}\nline2-from-main\nline3\n`,
-      )
+      // Stage git's generated wide OUTER markers unchanged. This test pins
+      // CONFLICT_MARKER_ADDED independently of the separator-width test.
       await git(input.repo_path, 'add', 'lib.txt')
       return { resolved: true }
     }
@@ -490,7 +486,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
     // THE BRANCH NEVER MOVED and no marker of ANY width reached it.
     expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
-    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('='.repeat(32))
+    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<'.repeat(32))
     expect(existsSync(scratchDir)).toBe(false)
   }, 60_000)
 
