@@ -570,12 +570,48 @@ export async function ensureAsBuiltMergeDriver(
 }
 
 /**
+ * Heal a shallow checkout before replay. On 2026-08-15 five builds died because a depth-1
+ * checkout cannot `git apply --3way`: the blobs named by the diff's index lines do not exist,
+ * and every failure was misreported as `REBASE CONFLICT … (paths unreadable)`.
+ */
+export async function healShallowCheckout(run_host: RunHostCommand, repoPath: string): Promise<void> {
+  const probe = await run_host(['git', '-C', repoPath, 'rev-parse', '--is-shallow-repository'], repoPath)
+  if (!probe.ok) {
+    throw new Error(publishFailureReason('probe the checkout depth of', repoPath, probe.stderr))
+  }
+  if (probe.stdout.trim() === 'false') return
+  if (probe.stdout.trim() !== 'true') {
+    throw new Error(publishFailureReason('probe the checkout depth of', repoPath, `unexpected answer: ${probe.stdout.trim()}`))
+  }
+
+  const fetch = await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
+  if (fetch.ok) return
+
+  let depth = 'unreadable'
+  let boundary = 'unreadable'
+  try {
+    const measured = await run_host(['git', '-C', repoPath, 'rev-list', '--count', 'HEAD'], repoPath)
+    if (measured.ok && measured.stdout.trim() !== '') depth = measured.stdout.trim()
+  } catch {}
+  try {
+    const path = await run_host(['git', '-C', repoPath, 'rev-parse', '--git-path', 'shallow'], repoPath)
+    if (path.ok && path.stdout.trim() !== '') {
+      const read = await run_host(['cat', path.stdout.trim()], repoPath)
+      if (read.ok && read.stdout.trim() !== '') boundary = read.stdout.trim()
+    }
+  } catch {}
+  throw new Error(
+    `Could not heal shallow checkout ${repoPath} (depth ${depth}, shallow boundary ${boundary}): ${redactPushError(fetch.stderr)}; a shallow checkout cannot 3-way replay — the blobs the diff names do not exist`,
+  )
+}
+
+/**
  * Replay `branch` onto the ls-remote-OBSERVED tip of `base`, shallow-safely.
  *
- * ⚠️ THE SHARED BUILD CHECKOUT IS SHALLOW (governance #574/#571). `.git/shallow` is present, so
- * `merge-base` LIES there: a naive `git rebase` replays the entire history and conflicts on every
- * file. Hence NO `git rebase` here, ever, and never in the shared working tree (other lanes share
- * it). Instead: take the branch's own diff from a source that knows the true merge-base — the
+ * The shared build checkout MAY arrive shallow: install.sh used to clone at depth 1, and hand-made
+ * clones still can. `healShallowCheckout` repairs that defect at entry. Regardless of depth, NO
+ * `git rebase` runs here, ever, and never in the shared working tree: other lanes share it and a
+ * failed rebase there poisons every lane. Instead: take the branch's own diff from its true merge-base — the
  * FORGE (`gh pr diff <n>`, computed server-side against a full history) when a PR exists, or the
  * two-dot `git diff <base>..<branch>` for a first publish — and `git apply --3way` it onto the
  * observed base tip in a THROWAWAY detached worktree. The branch ref then moves by
@@ -600,6 +636,8 @@ export async function rebaseOntoObservedBase(
   /** Optional bounded auto-resolution for a conflicting replay. Absent → a conflict throws. */
   resolve?: { run: TridentRun; resolve_conflict: MergeConflictResolver },
 ): Promise<{ head: string; rebased: boolean; baseSha: string }> {
+  // Heal on use — no install-time fix reaches a hand-made clone, and both 2026-08-15 incidents came from hand-made clones.
+  await healShallowCheckout(run_host, repoPath)
   // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
   //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
   //
@@ -642,8 +680,8 @@ export async function rebaseOntoObservedBase(
   //     diff base on a shallow checkout that never reaches the fetch below.
   if (contains.ok) return { head: oldHead, rebased: false, baseSha }
 
-  // (d) Make the base tip a real local object. `--no-tags` and NOT `--unshallow`: deepening the
-  //     shared checkout is minutes of network for every lane on this box.
+  // (d) The entry guard already unshallowed the checkout; this fetch only makes the just-observed
+  //     tip local. Keep `--no-tags` because tags are irrelevant to replay.
   const fetchBase = async () => run_host(['git', '-C', repoPath, 'fetch', '--no-tags', 'origin', base], repoPath)
   let fetched = await fetchBase()
   let present = await run_host(['git', '-C', repoPath, 'rev-parse', '--verify', `${baseSha}^{commit}`], repoPath)
@@ -701,8 +739,8 @@ export async function rebaseOntoObservedBase(
       run_host(['git', '-C', repoPath, 'merge-base', baseSha, `refs/heads/${branch}`], repoPath)
     let forkPoint = await read()
     if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
-      // One bounded deepen, then re-ask. `--unshallow` on an already-complete repo is a cheap
-      // no-op; on a shallow one it is the only thing that can make the fork point exist locally.
+      // Belt-and-braces behind the entry guard: one bounded deepen, then re-ask. Modern git rejects
+      // `--unshallow` on a complete repo; that harmless failure is followed by the decisive re-read.
       await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
       forkPoint = await read()
     }
@@ -1372,9 +1410,8 @@ export function buildTridentOrchestrator(
     // conflicting paths and saying plainly that no reviewer judged the code. And a RESOLVED
     // conflict shortcuts nothing — the replay is published and review is re-fired as usual.
     //
-    // SHALLOW (governance #574). The shared build checkout has a `.git/shallow` boundary, where
-    // `merge-base` lies and a naive `git rebase` conflicts on every file. So this is a diff-replay
-    // in a throwaway worktree — never `git rebase`, never the shared working tree.
+    // The replay heals a shallow checkout on entry (`healShallowCheckout`) and still uses a
+    // diff-replay in a throwaway worktree — never `git rebase`, never the shared working tree.
     //
     // The PR probe moves UP so the replay can use `gh pr diff` (a server-side, shallow-immune
     // merge-base); its result is reused by the "open a PR if none" step below, unchanged.

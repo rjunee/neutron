@@ -97,6 +97,7 @@ function buildHarness(opts: {
   const sim = buildSimFirer(store, opts.plan)
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
+    if (cmd.join(' ').includes('rev-parse --is-shallow-repository')) return ok('false')
     return opts.hostResponder ? opts.hostResponder(cmd) : ok()
   }
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {

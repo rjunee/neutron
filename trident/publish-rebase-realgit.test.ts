@@ -34,9 +34,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { spawnCapture } from './git-mode.ts'
+import { spawnCapture, type RunHostCommand } from './git-mode.ts'
 import { type MergeConflictResolver } from './merge.ts'
-import { rebaseOntoObservedBase, TridentRebaseConflict } from './orchestrator.ts'
+import { healShallowCheckout, rebaseOntoObservedBase, TridentRebaseConflict } from './orchestrator.ts'
 import type { TridentRun } from './store.ts'
 
 const GIT_ID = ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false']
@@ -140,50 +140,56 @@ async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean }
   // trim on the way to disk eats the space, the final hunk comes up one line short of its `@@`
   // count, and `git apply` exits 128 with `corrupt patch at line N`. Run 63b16fb1 died exactly
   // this way on a 746-line patch (2026-08-15).
-  writeFileSync(join(author, 'lib.txt'), opts.trailingBlank ? 'line1\nline2\nline3\n\n' : 'line1\nline2\nline3\n')
+  const baseLib = 'line1\nline2\ncontext-a\ncontext-b\nline3\n'
+  writeFileSync(join(author, 'lib.txt'), opts.trailingBlank ? `${baseLib}\n` : baseLib)
   await git(author, 'add', '.')
   await git(author, ...GIT_ID, 'commit', '-q', '-m', 'init')
   await git(author, 'push', '-q', 'origin', 'main')
   const oldMainTip = (await gitOut(author, 'rev-parse', 'HEAD')).trim()
 
-  // 3. The build checkout — SHALLOW, exactly like the shared one (#574/#571).
-  const clone = await spawnCapture(['git', 'clone', '-q', '--depth=1', `file://${origin}`, checkout], root)
-  if (!clone.ok) throw new Error(`shallow clone failed: ${clone.stderr}`)
-  // THE ANTI-FAKE GUARD FOR (d): without this boundary the test proves nothing about the
-  // environment this code actually runs in.
-  expect(existsSync(join(checkout, '.git', 'shallow'))).toBe(true)
-  await identify(checkout)
-
-  // 4. The Forge build: a branch cut off main, committed in a throwaway worktree that is then
-  //    removed — the exact state the inner workflow leaves behind.
-  const tmp = join(checkout, `.build-${BRANCH.replace(/\W/g, '_')}`)
-  await git(checkout, 'branch', BRANCH, 'main')
-  await git(checkout, 'worktree', 'add', '-q', tmp, BRANCH)
+  // 3. Cut the branch in the FULL author repo at C0, before the shallow checkout exists.
+  await git(author, 'branch', BRANCH, 'main')
+  await git(author, 'checkout', '-q', BRANCH)
   if (opts.conflicting) {
-    writeFileSync(join(tmp, 'lib.txt'), 'line1\nline2-from-branch\nline3\n')
+    writeFileSync(join(author, 'lib.txt'), 'line1\nline2-from-branch\ncontext-a\ncontext-b\nline3\n')
   } else if (opts.trailingBlank) {
     // Edit the MIDDLE of the blank-terminated file so the hunk's trailing context runs all the way
     // to the final blank line. Adding a new file would not — its hunk ends on the added line.
-    writeFileSync(join(tmp, 'lib.txt'), 'line1\nline2-from-branch\nline3\n\n')
+    writeFileSync(join(author, 'lib.txt'), 'line1\nline2-from-branch\ncontext-a\ncontext-b\nline3\n\n')
   } else {
-    writeFileSync(join(tmp, 'feature.txt'), 'feature\n')
+    writeFileSync(join(author, 'lib.txt'), 'line1\nline2-from-branch\ncontext-a\ncontext-b\nline3\n')
+    writeFileSync(join(author, 'feature.txt'), 'feature\n')
   }
-  await git(tmp, 'add', '.')
-  await git(tmp, ...GIT_ID, 'commit', '-q', '-m', `build ${BRANCH}`)
-  await git(checkout, 'worktree', 'remove', '--force', tmp)
-  const branchTip = (await gitOut(checkout, 'rev-parse', `refs/heads/${BRANCH}`)).trim()
-  await git(checkout, 'push', '-q', 'origin', `refs/heads/${BRANCH}:refs/heads/${BRANCH}`)
+  await git(author, 'add', '.')
+  await git(author, ...GIT_ID, 'commit', '-q', '-m', `build ${BRANCH}`)
+  await git(author, 'push', '-q', 'origin', `refs/heads/${BRANCH}:refs/heads/${BRANCH}`)
+  const branchTip = (await gitOut(author, 'rev-parse', 'HEAD')).trim()
 
-  // 5. THE ANTI-FAKE SEED FOR (a): `main` moves AFTER the branch was cut.
+  // 4. Main advances after the fork. Non-conflicting variants edit a different region and add
+  //    the independently asserted docs file; the blank-terminated variant preserves its tail.
+  await git(author, 'checkout', '-q', 'main')
   if (opts.conflicting) {
-    writeFileSync(join(author, 'lib.txt'), 'line1\nline2-from-main\nline3\n')
+    writeFileSync(join(author, 'lib.txt'), 'line1\nline2-from-main\ncontext-a\ncontext-b\nline3\n')
   } else {
+    writeFileSync(join(author, 'lib.txt'), opts.trailingBlank ? 'line1\nline2\ncontext-a\ncontext-b\nline3-from-main\n\n' : 'line1\nline2\ncontext-a\ncontext-b\nline3-from-main\n')
     writeFileSync(join(author, 'docs.txt'), 'intervening\n')
   }
   await git(author, 'add', '.')
   await git(author, ...GIT_ID, 'commit', '-q', '-m', 'intervening main commit')
   await git(author, 'push', '-q', 'origin', 'main')
   const newMainTip = (await gitOut(author, 'rev-parse', 'HEAD')).trim()
+
+  // 5. NOW shallow-clone main and fetch only the branch tip into its local branch ref.
+  const clone = await spawnCapture(['git', 'clone', '-q', '--depth=1', `file://${origin}`, checkout], root)
+  if (!clone.ok) throw new Error(`shallow clone failed: ${clone.stderr}`)
+  expect(existsSync(join(checkout, '.git', 'shallow'))).toBe(true)
+  await identify(checkout)
+  await git(checkout, 'fetch', '--depth=1', 'origin', `refs/heads/${BRANCH}:refs/heads/${BRANCH}`)
+
+  // THE ANTI-FAKE GUARD: the fork-point pre-image blob is genuinely absent.
+  const preimage = (await gitOut(author, 'rev-parse', `${oldMainTip}:lib.txt`)).trim()
+  const hasPreimage = await spawnCapture(['git', '-C', checkout, 'cat-file', '-e', preimage], checkout)
+  expect(hasPreimage.ok).toBe(false)
 
   // 6. PROVE the branch is behind — in the FULL repo, because the shallow one cannot be trusted
   //    to answer. If this ever passes, a no-op rebase would satisfy the suite and the suite is a lie.
@@ -208,6 +214,70 @@ afterAll(() => {
 })
 
 describe('REAL git + REAL shallow — the publish-time rebase onto main', () => {
+  test('healShallowCheckout unshallows a shallow clone and costs a full clone one probe with no fetch', async () => {
+    const world = await seedWorld({ conflicting: false })
+    await healShallowCheckout(spawnCapture, world.checkout)
+    expect(existsSync(join(world.checkout, '.git', 'shallow'))).toBe(false)
+    expect((await gitOut(world.checkout, 'rev-parse', '--is-shallow-repository')).trim()).toBe('false')
+
+    const full = join(world.root, 'full')
+    const cloned = await spawnCapture(['git', 'clone', '-q', `file://${world.origin}`, full], world.root)
+    expect(cloned.ok).toBe(true)
+    const calls: string[][] = []
+    const recordingHost: RunHostCommand = async (cmd, cwd) => {
+      calls.push(cmd)
+      return spawnCapture(cmd, cwd)
+    }
+    await healShallowCheckout(recordingHost, full)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toEqual(['git', '-C', full, 'rev-parse', '--is-shallow-repository'])
+    expect(calls.some((cmd) => cmd.includes('fetch'))).toBe(false)
+  }, 60_000)
+
+  test('healShallowCheckout failure names depth, boundary, checkout, and fetch stderr', async () => {
+    const repoPath = '/broken/shallow-checkout'
+    const host: RunHostCommand = async (cmd) => {
+      const joined = cmd.join(' ')
+      if (joined.includes('--is-shallow-repository')) return { ok: true, stdout: 'true\n', stderr: '', exit_code: 0 }
+      if (joined.includes('fetch --no-tags --unshallow')) return { ok: false, stdout: '', stderr: 'fatal: unable to connect', exit_code: 1 }
+      if (joined.includes('rev-list --count HEAD')) return { ok: true, stdout: '1\n', stderr: '', exit_code: 0 }
+      if (joined.includes('rev-parse --git-path shallow')) return { ok: true, stdout: '/git/shallow\n', stderr: '', exit_code: 0 }
+      if (cmd[0] === 'cat') return { ok: true, stdout: 'deadbeefcafebabe\n', stderr: '', exit_code: 0 }
+      throw new Error(`unexpected command: ${joined}`)
+    }
+    await expect(healShallowCheckout(host, repoPath)).rejects.toThrow(repoPath)
+    await expect(healShallowCheckout(host, repoPath)).rejects.toThrow('depth 1')
+    await expect(healShallowCheckout(host, repoPath)).rejects.toThrow('deadbeefcafebabe')
+    await expect(healShallowCheckout(host, repoPath)).rejects.toThrow('fatal: unable to connect')
+  })
+
+  test('PR replay heals before applying a server-side fork-point diff whose pre-image is absent', async () => {
+    const world = await seedWorld({ conflicting: false })
+    const wrapper: RunHostCommand = async (cmd, cwd) => {
+      // The depth-1 clone already has the observed main tip. Keep step (d) from incidentally
+      // downloading the missing fork-point objects, so only the entry guard can heal this test.
+      if (cmd.join(' ') === `git -C ${world.checkout} fetch --no-tags origin main`) {
+        return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+      }
+      if (cmd[0] === 'sh' && cmd[1] === '-c' && cmd[2]?.startsWith('gh pr diff 7 > ')) {
+        const target = cmd[2].match(/>\s*"([^"]+)"\s*$/)?.[1]
+        if (target === undefined) throw new Error(`missing redirected diff target: ${cmd[2]}`)
+        return spawnCapture(
+          ['git', '-C', world.author, 'diff', `--output=${target}`, `${world.oldMainTip}..refs/heads/${world.branch}`],
+          world.author,
+        )
+      }
+      return spawnCapture(cmd, cwd)
+    }
+    const res = await rebaseOntoObservedBase(wrapper, world.checkout, world.branch, 'main', 7, scratch(world.checkout, 'pr'))
+    expect(res.rebased).toBe(true)
+    const tree = await gitOut(world.checkout, 'ls-tree', '--name-only', res.head)
+    expect(tree).toContain('feature.txt')
+    expect(tree).toContain('docs.txt')
+    expect((await gitOut(world.checkout, 'show', `${res.head}:feature.txt`)).trim()).toBe('feature')
+    expect(existsSync(join(world.checkout, '.git', 'shallow'))).toBe(false)
+  }, 60_000)
+
   test('a branch behind main is replayed onto main OBSERVED tip, re-pushed under a lease, and reads MERGEABLE (acceptance a + d)', async () => {
     const world = await seedWorld({ conflicting: false })
     const scratchDir = scratch(world.checkout, 't1')
@@ -216,6 +286,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
 
     // A NO-OP CANNOT PASS THIS: the branch was genuinely behind, so the head must have moved.
     expect(res.rebased).toBe(true)
+    expect(existsSync(join(world.checkout, '.git', 'shallow'))).toBe(false)
     expect(res.head).not.toBe(world.branchTip)
     // The compare-and-swap actually moved the ref (not just returned a sha).
     expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(res.head)
@@ -276,6 +347,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     // NOTHING unmerged — which is why this asserts success, not a particular error.
     const res = await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir)
     expect(res.rebased).toBe(true)
+    expect(existsSync(join(world.checkout, '.git', 'shallow'))).toBe(false)
     const tree = await gitOut(world.checkout, 'ls-tree', '--name-only', res.head)
     expect(tree).toContain('docs.txt')
     const replayed = await gitOut(world.checkout, 'show', `${res.head}:lib.txt`)
@@ -294,6 +366,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
       caught = err
     }
     expect(caught).toBeInstanceOf(TridentRebaseConflict)
+    expect(existsSync(join(world.checkout, '.git', 'shallow'))).toBe(false)
     const err = caught as TridentRebaseConflict
     expect(err.paths).toContain('lib.txt')
     expect(err.message.startsWith('REBASE CONFLICT — needs attention:')).toBe(true)
@@ -340,6 +413,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
 
     expect(calls).toBe(1)
     expect(res.rebased).toBe(true)
+    expect(existsSync(join(world.checkout, '.git', 'shallow'))).toBe(false)
     expect(res.head).not.toBe(world.branchTip)
 
     // The compare-and-swap really moved the ref.
