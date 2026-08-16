@@ -513,3 +513,51 @@ describe('workBoardScopeKey / workBoardProjectIdForKey (Bug 3 per-project scopin
     expect(keys).toEqual(['acme', 'owner'])
   })
 })
+
+describe('declared blockers (0124)', () => {
+  test('round-trip through create/get/update; absent reads as []', async () => {
+    const store = new WorkBoardStore(db)
+    const plain = await store.create(SLUG, { title: 'no declared dependencies here at all' })
+    expect(plain.blockers).toEqual([])
+    expect(store.get(SLUG, plain.id)?.blockers).toEqual([])
+
+    const dependent = await store.create(SLUG, {
+      title: 'depends on the migration landing first',
+      blockers: ['card-a', 'card-b', 'card-a'], // duplicate collapses
+    })
+    expect(dependent.blockers).toEqual(['card-a', 'card-b'])
+    expect(store.get(SLUG, dependent.id)?.blockers).toEqual(['card-a', 'card-b'])
+
+    const updated = await store.update(SLUG, dependent.id, { blockers: ['card-c'] })
+    expect(updated?.blockers).toEqual(['card-c'])
+    // An empty set clears the declaration.
+    const cleared = await store.update(SLUG, dependent.id, { blockers: [] })
+    expect(cleared?.blockers).toEqual([])
+  })
+
+  test('a card cannot block ITSELF — a self-dependency could never clear', async () => {
+    const store = new WorkBoardStore(db)
+    const item = await store.create(SLUG, { title: 'this card is going to name itself soon' })
+    await expect(store.update(SLUG, item.id, { blockers: [item.id] })).rejects.toBeInstanceOf(
+      WorkBoardValidationError,
+    )
+    await expect(
+      store.create(SLUG, { id: 'self-1', title: 'names itself at create time', blockers: ['self-1'] }),
+    ).rejects.toBeInstanceOf(WorkBoardValidationError)
+  })
+
+  test('rejects more than 20 blockers, empty ids, and over-long ids', async () => {
+    const store = new WorkBoardStore(db)
+    const item = await store.create(SLUG, { title: 'a card that will get bad blocker input' })
+    const tooMany = Array.from({ length: 21 }, (_, i) => `card-${i}`)
+    await expect(store.update(SLUG, item.id, { blockers: tooMany })).rejects.toBeInstanceOf(
+      WorkBoardValidationError,
+    )
+    await expect(store.update(SLUG, item.id, { blockers: ['  '] })).rejects.toBeInstanceOf(
+      WorkBoardValidationError,
+    )
+    await expect(
+      store.update(SLUG, item.id, { blockers: ['x'.repeat(129)] }),
+    ).rejects.toBeInstanceOf(WorkBoardValidationError)
+  })
+})

@@ -30,6 +30,7 @@ import {
   type BoardBoundBuildDeps,
   type TridentBoardBinder,
 } from './board-dispatch.ts'
+import type { DispatchHoldStore } from './dispatch-holds.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { WorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
@@ -64,7 +65,14 @@ const outputSchema: JsonSchemaDocument = {
     ok: { type: 'boolean' },
     run_id: { type: 'string', description: 'The trident run id (track / stop the build with it).' },
     board_item_id: { type: 'string' },
-    status: { type: 'string', description: '"dispatched" on success; the result arrives later.' },
+    status: { type: 'string', description: '"dispatched" on success; "held" when queued behind a blocker.' },
+    held: {
+      type: 'boolean',
+      description:
+        'True when the build is QUEUED behind a declared blocker card or a file another live ' +
+        'build owns. It starts automatically when the blocker clears — do NOT re-fire it; tell ' +
+        'the owner what it is waiting on (the reason is in `error`).',
+    },
     error: { type: 'string', description: 'Set when ok=false — incl. the ask-before-acting guidance.' },
   },
   required: ['ok'],
@@ -128,6 +136,14 @@ export interface TridentBuildToolDeps {
    * path). Absent → unchanged pre-task-4 behaviour (no post).
    */
   chat_ack?: WorkBoardChatAck
+  /**
+   * 0124 — the durable dispatch HOLD QUEUE. When wired, a dispatch held by a
+   * declared blocker or a live run's file claim is QUEUED here and fires itself
+   * once the blocker clears (the terminal-observer sweep), so the orchestrator
+   * never has to hand-serialise two colliding lanes. Absent → the dispatch is
+   * still held, there is just no auto-retry.
+   */
+  holds?: DispatchHoldStore
 }
 
 /** First non-empty line of a task, truncated — the ack title when a board item
@@ -147,7 +163,14 @@ const startOutputSchema: JsonSchemaDocument = {
     ok: { type: 'boolean' },
     run_id: { type: 'string', description: 'The trident run id (track / stop the build with it).' },
     board_item_id: { type: 'string' },
-    status: { type: 'string', description: '"dispatched" on success; the result arrives later.' },
+    status: { type: 'string', description: '"dispatched" on success; "held" when queued behind a blocker.' },
+    held: {
+      type: 'boolean',
+      description:
+        'True when the build is QUEUED behind a declared blocker card or a file another live ' +
+        'build owns. It starts automatically when the blocker clears — do NOT re-fire it; tell ' +
+        'the owner what it is waiting on (the reason is in `error`).',
+    },
     error: { type: 'string', description: 'Set when ok=false — incl. the ask-before-acting guidance.' },
   },
   required: ['ok'],
@@ -205,9 +228,17 @@ export function registerTridentBuildToolSurface(
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        ...(deps.holds !== undefined ? { holds: deps.holds } : {}),
       }
       const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
       if (!result.ok) {
+        // 0124 — a HELD dispatch is not an error: the build is QUEUED behind a
+        // declared blocker or a file a live run owns, and the hold sweep fires
+        // it automatically. Reported as its own status so the agent tells the
+        // owner it is waiting rather than re-firing it by hand.
+        if (result.code === 'held') {
+          return { ok: false, status: 'held', held: true, error: result.message }
+        }
         return { ok: false, error: result.message }
       }
       // #429 task 4 — a chat-dispatched build acks the chat immediately (the
@@ -315,9 +346,14 @@ export function registerTridentBuildToolSurface(
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        ...(deps.holds !== undefined ? { holds: deps.holds } : {}),
       }
       const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
       if (!result.ok) {
+        // 0124 — see the dispatch handler above: held ≠ failed, it is queued.
+        if (result.code === 'held') {
+          return { ok: false, status: 'held', held: true, error: result.message }
+        }
         return { ok: false, error: result.message }
       }
       // #429 task 4 — ack the chat immediately for an agent-native ▶ start.

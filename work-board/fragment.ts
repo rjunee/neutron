@@ -19,6 +19,8 @@ import type { WorkBoardItem, WorkBoardStatus } from './store.ts'
 const MAX_ITEMS_INJECTED = 40
 /** Per-line title cap inside the fragment (the store caps at 256 already). */
 const MAX_TITLE_CHARS = 200
+/** Hold reasons name a card + a path + a run; cap them like a title. */
+const MAX_HELD_REASON_CHARS = 200
 
 /** Escape the three XML-significant chars so a title can't break the tag. */
 function escapeData(text: string): string {
@@ -34,8 +36,19 @@ function statusLabel(status: WorkBoardStatus): string {
  * passes `store.listActive(project_slug)`; completed items are NOT injected).
  * Always returns a block — even an empty board injects the drift-guard so the
  * agent is reminded to add an item before acting.
+ *
+ * `heldReasons` (0124, optional) is the card-id → dispatch-hold-reason map from
+ * `heldReasonsByItem`. A card that has one gets a `·held` badge plus a
+ * `held: <reason>` metadata line carrying the reason VERBATIM — the same text
+ * the dispatch already posted to chat, so the standing state is still readable
+ * once that message has scrolled away. Omitted / empty → every line is
+ * byte-identical to the pre-0124 fragment. The reason is escaped + capped like
+ * a title: it is DATA inside a delimited block, never an instruction stream.
  */
-export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem>): string {
+export function formatWorkBoardFragment(
+  activeItems: ReadonlyArray<WorkBoardItem>,
+  heldReasons?: ReadonlyMap<string, string>,
+): string {
   const lines: string[] = []
   lines.push('<work_board>')
   lines.push(
@@ -51,6 +64,7 @@ export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem
       // kept binding (detachRun #340 preserves linked_run_id and sets
       // status='failed') must NOT show ·building — status='failed' is the
       // durable signal and the agent needs to see it, not an incorrect ·building.
+      const heldReason = heldReasons?.get(item.id)
       const activity =
         item.linked_run_id !== null &&
         item.linked_run_id.length > 0 &&
@@ -58,8 +72,13 @@ export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem
           ? ' ·building'
           : item.inline_active
             ? ' ·inline'
-            : ''
+            : heldReason !== undefined
+              ? ' ·held'
+              : ''
       lines.push(`- [${statusLabel(item.status)}${activity}] (${escapeData(item.id)}) ${title}`)
+      if (heldReason !== undefined) {
+        lines.push(`  held: ${escapeData(heldReason).slice(0, MAX_HELD_REASON_CHARS)}`)
+      }
     }
     if (activeItems.length > MAX_ITEMS_INJECTED) {
       lines.push(`- …and ${activeItems.length - MAX_ITEMS_INJECTED} more`)

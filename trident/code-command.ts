@@ -28,6 +28,7 @@ import { buildTridentTerminator } from './terminate.ts'
 import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
 import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
+import type { DispatchHoldStore } from './dispatch-holds.ts'
 
 export type CodeCommand =
   | { kind: 'dispatch'; task: string; board_item_id?: string }
@@ -162,6 +163,12 @@ export interface TridentCodeContext {
   /** Round caps (else the store defaults: 8 / 20). */
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * 0124 — the durable dispatch HOLD QUEUE. When wired, a `/code` dispatch that
+   * collides with a declared blocker or a live run's file claim is QUEUED and
+   * fires itself once the blocker clears. Absent → still held, just no auto-retry.
+   */
+  holds?: DispatchHoldStore
 }
 
 /** Dispatch the parsed command. */
@@ -221,6 +228,7 @@ async function executeDispatch(
     ...(ctx.channel_kind !== undefined ? { channel_kind: ctx.channel_kind } : {}),
     ...(ctx.max_rounds !== undefined ? { max_rounds: ctx.max_rounds } : {}),
     ...(ctx.max_ralph_rounds !== undefined ? { max_ralph_rounds: ctx.max_ralph_rounds } : {}),
+    ...(ctx.holds !== undefined ? { holds: ctx.holds } : {}),
   }
   const result = await dispatchBoardBoundBuild({ task: cmd.task, board_item_id: cmd.board_item_id }, deps)
 
@@ -239,6 +247,12 @@ async function executeDispatch(
     if (result.code === 'underspecified') {
       // The ask-before-acting gate. The dispatch is BLOCKED; the caller asks.
       return { text: `🛠 ${result.message}`, error: { code: 'malformed', message: result.message } }
+    }
+    if (result.code === 'held') {
+      // NOT an error: the build is QUEUED behind a declared blocker or a file
+      // another live run owns, and the hold sweep fires it automatically. Its
+      // own message, distinct from a failure, so nobody hand-serialises lanes.
+      return { text: `⏸ ${result.message}`, data: { held: true } }
     }
     return {
       text: `\`/code\` ${result.message}`,

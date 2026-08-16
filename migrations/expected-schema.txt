@@ -228,6 +228,10 @@ CREATE INDEX idx_topics_project_id ON topics(project_id)
 [index] idx_topics_status (tbl=topics)
 CREATE INDEX idx_topics_status ON topics(status)
 
+[index] idx_trident_dispatch_holds_item (tbl=code_trident_dispatch_holds)
+CREATE UNIQUE INDEX idx_trident_dispatch_holds_item
+    ON code_trident_dispatch_holds (project_slug, board_item_id)
+
 [index] idx_upload_sessions_expires (tbl=upload_sessions)
 CREATE INDEX idx_upload_sessions_expires
     ON upload_sessions (expires_at)
@@ -550,6 +554,22 @@ CREATE TABLE "code_subagent_registry" (
     boot_id             TEXT NOT NULL
 ) STRICT
 
+[table] code_trident_dispatch_holds (tbl=code_trident_dispatch_holds)
+CREATE TABLE code_trident_dispatch_holds (
+    id                TEXT PRIMARY KEY,
+    project_slug      TEXT NOT NULL,
+    board_item_id     TEXT NOT NULL,
+    task              TEXT NOT NULL,
+    payload           TEXT,
+    claimed_paths     TEXT,
+    hold_kind         TEXT NOT NULL CHECK (hold_kind IN ('blocker', 'path')),
+    hold_reason       TEXT NOT NULL,
+    held_on_run_id    TEXT,
+    held_on_blocker_id TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+)
+
 [table] code_trident_runs (tbl=code_trident_runs)
 CREATE TABLE code_trident_runs (
     id                  TEXT PRIMARY KEY NOT NULL,
@@ -586,7 +606,7 @@ CREATE TABLE code_trident_runs (
     last_advanced_at    TEXT NOT NULL                   -- ISO-8601 UTC
 , channel_kind TEXT NOT NULL DEFAULT 'telegram'
         CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')), workflow_run_id TEXT, inner_checkpoint TEXT, inner_verdict TEXT
-        CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')), inner_result TEXT, harvested_at INTEGER, inner_checkpoint_head TEXT, inner_checkpoint_findings TEXT, crash_recoveries INTEGER) STRICT
+        CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')), inner_result TEXT, harvested_at INTEGER, inner_checkpoint_head TEXT, inner_checkpoint_findings TEXT, crash_recoveries INTEGER, claimed_paths TEXT) STRICT
 
 [table] connect_guest_invites (tbl=connect_guest_invites)
 CREATE TABLE connect_guest_invites (
@@ -1477,7 +1497,7 @@ CREATE TABLE "work_board_items" (
     updated_at      TEXT NOT NULL,                  -- ISO-8601 UTC
     completed_at    TEXT                            -- ISO-8601 UTC; NULL until status='done'
 , task_type TEXT NOT NULL DEFAULT 'build'
-        CHECK (task_type IN ('build', 'research'))) STRICT
+        CHECK (task_type IN ('build', 'research')), blockers TEXT) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

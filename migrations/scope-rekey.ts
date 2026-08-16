@@ -127,6 +127,10 @@ export interface ScopedColumn {
 export const SCOPE_SWEEP_COLUMNS: readonly ScopedColumn[] = [
   { table: 'api_keys', column: 'project_slug' },
   { table: 'code_ritual_runs', column: 'project_slug' },
+  // 0124 — a QUEUED (held) build dispatch. Same axis as the run + board rows it
+  // sits between: strand it on a rename and the card is held forever with no
+  // event that could release it.
+  { table: 'code_trident_dispatch_holds', column: 'project_slug' },
   { table: 'code_trident_runs', column: 'project_slug' },
   { table: 'core_installations', column: 'project_slug' },
   { table: 'cores_oauth_broker_pending', column: 'project_slug' },

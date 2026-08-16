@@ -17809,3 +17809,112 @@ for a queued plan — so an aggressive sweep is contraindicated here) + the know
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
 
+
+## 2026-08-16 — dependency-aware dispatch: a card declares its blockers, and no two builds own the same file
+
+Concurrency was unsafe for a measured reason. On 2026-08-15 PR #289 (test-execution
+strategy) and PR #306 (as-built enforcement) both edited `trident/inner-workflow.mjs`;
+both built, both reached publish, and the only thing that stopped the collision was a
+human noticing and hand-serialising the two lanes. The owner wants 5 concurrent builds
+tonight and 10 soon, and hand-serialising does not scale to 10.
+
+`dispatchBoardBoundBuild` (`trident/board-dispatch.ts`) now enforces FIVE rules instead
+of three. Rules 4 and 5 are HOLDS, not rejections:
+
+- **Rule 4 — declared blockers.** A Work Board card carries `blockers` (migration 0124,
+  `work_board_items.blockers`, compact JSON of sibling card ids; threaded through
+  `work-board/store.ts` and the `work_board_add` / `work_board_update` agent tools). A
+  dispatch is held while any declared blocker card exists with `status !== 'done'`, and
+  the message names the blocker (and says so explicitly when the blocker FAILED, so the
+  owner knows release waits on its retry).
+- **Rule 5 — file contention.** `deriveClaimedPaths` (`trident/claimed-paths.ts`, pure)
+  extracts repo-relative paths from the card's task text plus its plan doc (when
+  `design_doc_ref` is a resolvable `neutron-docs:` ref). The set is recorded on the run
+  row (`code_trident_runs.claimed_paths`) and the next dispatch holds if its own derived
+  set intersects a LIVE run's in the same `repo_path`. There is deliberately no
+  filesystem existence check: a file the build will CREATE collides just as hard.
+
+**The invariant that makes this safe: RELEASE IS BY LIVENESS QUERY.** The contention
+check reads only `TridentRunStore.listNonTerminalByRepo` (`phase NOT IN
+('done','failed','stopped')`). A run going terminal — harvest, `/code stop`, crash-reap,
+anything — releases its claim by definition. No release write exists anywhere in the
+codebase, so there is nothing to be missed: a crashed run cannot strand a claim and a
+stuck claim cannot wedge the queue. `claimed_paths` is write-once at `create` and is
+deliberately absent from `TridentRunUpdate`/`update`/`save`/`saveIfActive`, the same
+single-writer discipline `crash_recoveries` has.
+
+**Held is queued, not rejected.** A held dispatch writes ZERO `code_trident_runs` state
+(preserving the chokepoint's existing invariant); its only durable trace is one row in
+the new `code_trident_dispatch_holds` table, keyed `(project_slug, board_item_id)`, and
+carrying the originating chat/thread/channel + round caps so an auto-fired build reports
+back where the human dispatched it from. `buildDispatchHoldSweep`
+(`trident/dispatch-holds.ts`) drains the queue as a trident TERMINAL OBSERVER, composed
+in `gateway/composition/build-core-modules.ts` **after** `buildBoardReconcileObserver`.
+That ordering is load-bearing: the reconcile writes the blocker card's `status='done'`
+first, so dependents re-evaluating in the same fire see it. Re-dispatch goes back
+through `dispatchBoardBoundBuild` itself, so every gate re-runs and a still-held card
+merely refreshes its hold row. No new `TridentPhase`, no state-machine change.
+
+**Judgment calls, documented so they are not re-litigated:** a blocker id that resolves
+to NO card is treated as CLEARED (the board hard-deletes cards; waiting on a ghost would
+wedge the card and everything behind it). An UNDEFINED card `status` on a partial binder
+is DONE-UNKNOWN and does not block — only a measured `status !== 'done'` on an existing
+card holds. An empty derived path set claims nothing and can never hold: the gate cannot
+hold on what it could not measure. A non-`held` rejection encountered during a sweep
+DROPS the hold with a warn log rather than retrying a rejection that will not clear
+itself. Overlap is scoped to one `repo_path` — different projects build in different
+workspaces and cannot collide on files.
+
+**Known gap, deferred to T3.** The terminal observer covers every run-terminal release,
+but a blocker card completed BY HAND (`work_board_complete` / the owner tapping the
+card) fires no run-terminal event, so its dependents release only on the next unrelated
+terminal event rather than instantly. T3 adds a cheap holds sweep on the existing trident
+tick cadence (one indexed SELECT when the holds table is empty) to close it.
+
+## 2026-08-16 — a held card SAYS it is held, on the board surfaces the owner and the agent actually read
+
+The dispatch hold from the previous entry posts one chat message naming the card, the
+path and the blocker — and then that message scrolls away. The card itself still looked
+like an ordinary `upcoming` card, so the standing state was invisible and the honest
+next move for anyone reading the board was to re-dispatch a build the queue was already
+going to re-fire on its own. This closes that: the two board READ surfaces join against
+`code_trident_dispatch_holds` and show the hold.
+
+`DispatchHoldStore.listByProject(project_slug)` (`trident/dispatch-holds.ts`) is the one
+new read — purely additive, no existing method touched. `project_slug` on a hold row IS
+the work-board scope key (`workBoardScopeKey`), which is what makes the join a single
+indexed lookup and what keeps project A's holds off project B's board.
+
+`work-board/held-cards.ts` is the join: a structural `WorkBoardHoldLookup` (the smallest
+shape `DispatchHoldStore` already satisfies, so `work-board` gains NO dependency on
+`trident`) plus `heldReasonsByItem`, which collapses an unwired lookup, an empty table,
+**or a lookup that throws** to an empty map. That last case is deliberate — a missing
+holds table on an un-migrated box degrades the board to its pre-0124 output instead of
+failing the read.
+
+Both surfaces render the hold's stored `hold_reason` VERBATIM. It was already composed
+by `trident/board-dispatch.ts` to name the blocking card / the contended path / the
+holding run, and re-deriving it here would let the chat message and the board drift
+apart. `work_board_list` (`work-board/agent-tool.ts`) gains an optional `dispatchHolds`
+dep and reports `held: <reason>` on the cards that have a row; the `<work_board>`
+per-turn fragment (`work-board/fragment.ts`) gains an optional `heldReasons` map and
+renders a `·held` badge plus a `held: <reason>` metadata line. The reason is XML-escaped
+and length-capped exactly like a title — it is DATA inside a delimited block, never an
+instruction stream. A card with NO hold renders byte-identical to before on both
+surfaces (pinned by tests that compare full serialized output, not just substrings), and
+an absent dep is byte-identical too, so any call site not yet threaded is unaffected.
+
+Composed in `gateway/composition/build-core-modules.ts` (the list tool gets the SAME
+`DispatchHoldStore` the dispatch writes and the sweep drains, so the list can never
+disagree with the queue) and in `open/composer.ts` for the fragment, where a second
+stateless `DispatchHoldStore` over the same `ProjectDb` reads the same table.
+
+One type hole from the previous entry is closed here rather than left for CI: adding
+`'held'` to `BoardBoundBuildRejectionCode` had made the app ▶ path's
+`WorkBoardStartResult` non-exhaustive. `held` is now in that union and maps to a 409
+carrying the hold reason — the same status a card with a live build already returns,
+because a held card is queued, not broken.
+
+NO lane or status change: `WorkBoardStatus` is untouched and holds stay strictly
+read-only here — nothing on this path writes, deletes or expires a hold row.
+`trident/inner-workflow.mjs` untouched.

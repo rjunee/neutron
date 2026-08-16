@@ -350,3 +350,110 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     expect(out.item?.id).toBeDefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// 0124 T2 — `work_board_list` joins the dispatch HOLD QUEUE, read-only.
+//
+// A held build posts one chat message at dispatch time and then that message
+// scrolls away; the standing state has to be readable off the board itself, or
+// the orchestrator re-dispatches a card the queue is already going to re-fire.
+// ---------------------------------------------------------------------------
+describe('work_board_list — dispatch hold join', () => {
+  /** The smallest shape `DispatchHoldStore.listByProject` already satisfies. */
+  function holdLookup(
+    rows: ReadonlyArray<{ project_slug: string; board_item_id: string; hold_reason: string }>,
+  ): { listByProject: (p: string) => Array<{ board_item_id: string; hold_reason: string }> } {
+    return {
+      listByProject: (p) => rows.filter((r) => r.project_slug === p),
+    }
+  }
+
+  async function seedTwo(reg: ToolRegistry): Promise<{ heldId: string; cleanId: string }> {
+    const add = reg.get(WORK_BOARD_ADD_TOOL)!
+    const held = (await add.handler({ title: 'held card' }, ctx('owner', 'acme'))) as {
+      item: { id: string }
+    }
+    const clean = (await add.handler({ title: 'clean card' }, ctx('owner', 'acme'))) as {
+      item: { id: string }
+    }
+    return { heldId: held.item.id, cleanId: clean.item.id }
+  }
+
+  test('a held card carries `held: <reason>` verbatim; an unheld card carries none', async () => {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store)
+    const { heldId, cleanId } = await seedTwo(reg)
+    const reason = 'held: run-7 already claims trident/board-dispatch.ts'
+
+    const withHolds = new ToolRegistry()
+    registerWorkBoardToolSurface(withHolds, store, {
+      dispatchHolds: holdLookup([
+        // `project_slug` on a hold IS the work-board SCOPE KEY, which for an
+        // active project is the bare project id (`workBoardScopeKey`).
+        { project_slug: 'acme', board_item_id: heldId, hold_reason: reason },
+      ]),
+    })
+    const res = (await withHolds.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))) as {
+      items: Array<{ id: string; held?: string }>
+    }
+    const held = res.items.find((i) => i.id === heldId)!
+    const clean = res.items.find((i) => i.id === cleanId)!
+    expect(held.held).toBe(reason)
+    expect(Object.keys(clean)).not.toContain('held')
+  })
+
+  test('no holds dep, and an empty holds table, both leave the payload byte-identical', async () => {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store)
+    await seedTwo(reg)
+    const baseline = JSON.stringify(
+      await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme')),
+    )
+
+    const empty = new ToolRegistry()
+    registerWorkBoardToolSurface(empty, store, { dispatchHolds: holdLookup([]) })
+    expect(
+      JSON.stringify(await empty.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))),
+    ).toBe(baseline)
+  })
+
+  test("holds are scoped: another project's hold never marks this board", async () => {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store)
+    const { heldId } = await seedTwo(reg)
+    const baseline = JSON.stringify(
+      await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme')),
+    )
+
+    const other = new ToolRegistry()
+    registerWorkBoardToolSurface(other, store, {
+      dispatchHolds: holdLookup([
+        { project_slug: 'zzz', board_item_id: heldId, hold_reason: 'not this board' },
+      ]),
+    })
+    expect(
+      JSON.stringify(await other.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))),
+    ).toBe(baseline)
+  })
+
+  test('a holds lookup that throws degrades to the pre-0124 payload, never a failed read', async () => {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store)
+    await seedTwo(reg)
+    const baseline = JSON.stringify(
+      await reg.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme')),
+    )
+
+    const broken = new ToolRegistry()
+    registerWorkBoardToolSurface(broken, store, {
+      dispatchHolds: {
+        listByProject: () => {
+          throw new Error('holds table missing')
+        },
+      },
+    })
+    expect(
+      JSON.stringify(await broken.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner', 'acme'))),
+    ).toBe(baseline)
+  })
+})

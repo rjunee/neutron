@@ -62,6 +62,9 @@ export interface CreateCardWithSpecInput {
    *  persisted to a spec doc and the card's `design_doc_ref` is set to point at
    *  it. A short one-liner (or absent) spec leaves the card title-only. */
   spec?: string | null
+  /** 0124 — card ids this card depends on; forwarded verbatim to the store,
+   *  which validates them. */
+  blockers?: string[]
 }
 
 export interface SpecDocLog {
@@ -135,6 +138,7 @@ export class WorkBoardSpecDocService {
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.task_type !== undefined ? { task_type: input.task_type } : {}),
       ...(explicit !== null ? { design_doc_ref: explicit } : {}),
+      ...(input.blockers !== undefined ? { blockers: input.blockers } : {}),
     })
 
     // Explicit ref wins; trivial asks stay title-only.

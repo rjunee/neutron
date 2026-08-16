@@ -171,6 +171,25 @@ export interface TridentRun {
    * agent's failure and must not consume its fix rounds.
    */
   crash_recoveries: number
+  /**
+   * FILE-CONTENTION CLAIM (migration 0124) — the repo-relative paths this build
+   * is expected to touch, derived at dispatch time by `deriveClaimedPaths` from
+   * the bound card's task text + plan doc. Legacy rows (NULL) read as `[]` and
+   * claim nothing.
+   *
+   * WRITE-ONCE AT CREATE, SINGLE WRITER: only {@link TridentRunStore.create} ever
+   * writes it. DELIBERATELY absent from `TridentRunUpdate`, `update()`, `save()`
+   * and `saveIfActive()` — same ownership discipline as `crash_recoveries` — so
+   * no full-snapshot save carrying a stale in-memory copy can widen or drop a
+   * claim mid-flight.
+   *
+   * RELEASE IS BY LIVENESS QUERY, NEVER AN EXPLICIT CLEAR. The contention check
+   * reads ONLY non-terminal rows ({@link TridentRunStore.listNonTerminalByRepo}),
+   * so a run going terminal — harvest, cancel, crash-reap, anything — releases its
+   * claim by definition. There is no release write to be missed, which is what
+   * makes a crashed run structurally incapable of stranding a claim.
+   */
+  claimed_paths: string[]
 }
 
 export interface CreateTridentRunInput {
@@ -196,6 +215,13 @@ export interface CreateTridentRunInput {
   thread_id?: string | null
   /** Originating channel of `chat_id`/`thread_id` (#317). Defaults 'telegram'. */
   channel_kind?: Topic['channel_kind']
+  /**
+   * 0124 — the file-contention claim, written ONCE here (see
+   * `TridentRun.claimed_paths`). An explicitly-empty set is stored as `'[]'`
+   * (this run measured its paths and claims none); only a legacy row, written
+   * before the column existed, is NULL.
+   */
+  claimed_paths?: string[]
 }
 
 /**
@@ -260,6 +286,7 @@ interface TridentRunDbRow {
   last_advanced_at: string
   harvested_at: number | null
   crash_recoveries: number | null
+  claimed_paths: string | null
 }
 
 /** Exported solely so tests can pin the column-count invariant. */
@@ -269,7 +296,7 @@ export const COLS =
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
-  'started_at, last_advanced_at, harvested_at, crash_recoveries'
+  'started_at, last_advanced_at, harvested_at, crash_recoveries, claimed_paths'
 
 // Derived from COLS so placeholder-count = column-count BY CONSTRUCTION. A
 // hand-miscounted `?` list silently corrupts every insert and no type error
@@ -351,6 +378,7 @@ export class TridentRunStore {
       last_advanced_at: ts,
       harvested_at: null,
       crash_recoveries: 0,
+      claimed_paths: input.claimed_paths ?? [],
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
@@ -387,6 +415,9 @@ export class TridentRunStore {
         run.last_advanced_at,
         run.harvested_at,
         run.crash_recoveries,
+        // Compact JSON. An explicitly-empty claim is '[]' (measured, claims
+        // nothing); NULL is reserved for pre-0124 rows.
+        JSON.stringify(run.claimed_paths),
       ],
     )
     return run
@@ -472,6 +503,32 @@ export class TridentRunStore {
           LIMIT ?`,
       )
       .all(limit)
+      .map(rowToRun)
+  }
+
+  /**
+   * Every LIVE (non-terminal) run building in `repo_path` — the file-contention
+   * gate's one query (`dispatchBoardBoundBuild` GATE 5 intersects their
+   * `claimed_paths` with the incoming card's).
+   *
+   * THIS LIVENESS PREDICATE IS THE CLAIM RELEASE. A terminal run's row still
+   * carries its `claimed_paths`, and that is fine: it is simply not returned
+   * here, so it blocks nothing. There is deliberately no release write anywhere
+   * — a crashed/cancelled/reaped run cannot strand a claim, and a stuck claim
+   * cannot wedge the queue.
+   *
+   * Scoped to ONE repo on purpose: different projects build in different
+   * workspaces and cannot collide on files.
+   */
+  listNonTerminalByRepo(repo_path: string): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, [string]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE repo_path = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+          ORDER BY started_at ASC`,
+      )
+      .all(repo_path)
       .map(rowToRun)
   }
 
@@ -890,5 +947,22 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     harvested_at: row.harvested_at,
     // Legacy rows predate migration 0123 and read NULL — no budget spent yet.
     crash_recoveries: row.crash_recoveries ?? 0,
+    claimed_paths: parseClaimedPaths(row.claimed_paths),
+  }
+}
+
+/**
+ * Legacy (pre-0124, NULL) and unparseable claims both read as `[]` — an
+ * unreadable claim must not block a dispatch, since the gate can only hold on
+ * paths it actually measured.
+ */
+function parseClaimedPaths(raw: string | null): string[] {
+  if (raw === null || raw === '') return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((p): p is string => typeof p === 'string' && p.length > 0)
+  } catch {
+    return []
   }
 }

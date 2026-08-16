@@ -77,7 +77,14 @@ export type WorkBoardStartResult =
   | { ok: true; run_id: string }
   | {
       ok: false
-      code: 'missing_board_item' | 'unknown_board_item' | 'underspecified' | 'backend_error'
+      /**
+       * 0124 — `held` is the dispatch HOLD: the card is queued behind a declared
+       * blocker or behind a file another live run already claims. It is NOT a
+       * failure (the queue re-fires the card once the blocker clears), so it maps
+       * to the same 409 `already_running` does and its `message` carries the hold
+       * reason — which card, which path, which run — verbatim to the ▶ tap.
+       */
+      code: 'missing_board_item' | 'unknown_board_item' | 'underspecified' | 'backend_error' | 'held'
       message: string
     }
 
