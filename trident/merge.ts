@@ -3,9 +3,11 @@
  *
  * Fills in the `MergeCleanupDeps` bodies the PR-2 `cleanupAfterMerge`
  * seam (git-mode.ts) calls on the `argus APPROVE → done` transition.
- * Both modes are host-command sequences over an injected runner (the
- * same `(cmd, cwd) => HostCommandResult` shape `defaultGitModeProbe`
- * uses), so tests assert the exact git/gh calls without shelling out.
+ * Both modes are host-command sequences over an injected runner (a
+ * `(cmd, cwd) => HostCommandResult`; `defaultGitModeProbe` takes the same
+ * shape widened with an env parameter, so it can inject the publisher's
+ * credential into its own capability call), so tests assert the exact
+ * git/gh calls without shelling out.
  *
  *   • `'pr'`    → `gh pr merge <pr> --squash --match-head-commit <reviewed OID>`,
  *                 then delete the REMOTE branch (`git push origin --delete`) +
