@@ -351,6 +351,8 @@ describe('scheduled full leak-gate scan', () => {
  */
 describe('governed-repo attributes gate is wired into ci.yml', () => {
   const GATE_RUN = 'bun scripts/ci/check-governed-repo-attributes.ts'
+  /** The step line exactly as ci.yml writes it, so a mutation stays valid YAML. */
+  const GATE_STEP = `      - run: ${GATE_RUN} .`
 
   /** The lines of one top-level job, bounded by the next job key. */
   function jobBlock(source: string, name: string): string {
@@ -373,7 +375,13 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
     if (job === '') return 'no layering job'
 
     const lines = job.split('\n')
-    const stepAt = lines.findIndex((l) => new RegExp(`^\\s+- run: ${GATE_RUN.replace(/[/.]/g, '\\$&')} `).test(l))
+    // A STATIC regex for the shape plus a plain substring for the command.
+    // Building the pattern by escaping `GATE_RUN` into a `new RegExp` was an
+    // incomplete escape (it handled `/` and `.` and not `\`) — CodeQL's
+    // js/incomplete-sanitization, flagged high, and it is a real class of bug
+    // even where today's input is a literal. There is no reason to compile a
+    // constant into a pattern.
+    const stepAt = lines.findIndex((l) => /^\s+- run: /.test(l) && l.includes(GATE_RUN))
     if (stepAt === -1) return 'no step runs the gate'
 
     // The step is every line from its `- ` marker until the next one at the
@@ -411,15 +419,28 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
   // gate, and each must be caught — otherwise the test above proves only that a
   // string is present in a file.
   const mutations: Array<[string, (s: string) => string]> = [
-    ['the step is deleted', (s) => s.replace(new RegExp(`^.*${GATE_RUN.replace(/[/.]/g, '\\$&')}.*$`, 'm'), '')],
+    ['the step is deleted', (s) => s.split('\n').filter((l) => !l.includes(GATE_RUN)).join('\n')],
     [
       'the step is disabled with if: false',
-      (s) => s.replace(`      - run: ${GATE_RUN}`, `      - if: false\n        run: ${GATE_RUN}`),
+      (s) => s.replace(GATE_STEP, `      - if: false\n        run: ${GATE_RUN} .`),
     ],
     [
       'the step keeps running but its failure is swallowed',
       (s) =>
-        s.replace(`      - run: ${GATE_RUN}`, `      - continue-on-error: true\n        run: ${GATE_RUN}`),
+        s.replace(GATE_STEP, `      - continue-on-error: true\n        run: ${GATE_RUN} .`),
+    ],
+    // The same two edits written the OTHER way round — the key AFTER the `run:`
+    // line, which is how a person actually edits an existing step. These are the
+    // ones that reach the step-block scan; the two above are caught earlier,
+    // because moving `run:` off the `- ` marker already breaks the anchor.
+    [
+      'if: false is appended to the existing step',
+      (s) => s.replace(GATE_STEP, `${GATE_STEP}\n        if: false`),
+    ],
+    [
+      'continue-on-error is appended to the existing step',
+      (s) =>
+        s.replace(GATE_STEP, `${GATE_STEP}\n        continue-on-error: true`),
     ],
     [
       'the whole job is disabled',

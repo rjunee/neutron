@@ -264,17 +264,27 @@ with clone-verified controls.
 The "checks EVERY log" test was itself vacuous: the candidate ordering made the
 first present log the broken one, so a gate checking only `present[0]` stayed
 green through it. The fixture now makes the FIRST log conformant and a LATER one
-broken, and that mutation now fails. Thirteen mutations in total, each run with
-the unmutated suite green as the control: root-only attributes collection,
+broken, and that mutation now fails. Every safety property here was mutated with
+the unmutated suite green as the control — root-only attributes collection,
 isolation-strips-nothing, `present[0]`-only, set/unset-as-custom-driver,
-overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo,
-deleting the workflow step two ways, the collector inheriting the ambient
-environment, the collector reading an unscrubbed one, dropping the
-`core.attributesFile` argv pin, presence read from disk, and crediting every
-overlay to the installer — every one turns a test red. One mutation did NOT, and
-that is why the code it removed is absent from this change: deleting the
-empty-`--template=` dance left the entire suite green, the argv pin having
-already covered it.
+overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo, the
+collector inheriting the ambient environment, the collector reading an unscrubbed
+one, dropping the `core.attributesFile` argv pin, presence read from disk,
+crediting every overlay to the installer, and disabling the step-scope half of
+the workflow guard — and every one turns a test red. The workflow guard's own six
+bypasses live IN the test file as permanent mutations (delete the step, `if:` or
+`continue-on-error:` before the `run:` key and again after it, disable the whole
+job), each asserting its mutation landed before asserting it was caught.
+
+One mutation did NOT fail, and that is why the code it removed is absent from
+this change: deleting the empty-`--template=` dance left the entire suite green,
+the `-c core.attributesFile` pin having already covered it.
+
+Building the guard's pattern by escaping a constant into a `new RegExp` was
+itself a defect — an incomplete escape (`/` and `.` handled, `\` not), which
+CodeQL flags high as `js/incomplete-sanitization` and which had no reason to
+exist, since the thing being matched is a literal. It is a static regex for the
+line SHAPE plus a plain substring for the command.
 
 ## 2026-08-16 — two builds can append to this file at once
 
