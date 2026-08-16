@@ -78,6 +78,34 @@ export const NO_ADVANCE_HANG_MS = 90 * 60_000
 export const DEFAULT_MAX_INFLIGHT_MS = 2 * 60 * 60_000
 
 /**
+ * Cadence of the trident-liveness probe loop (`trident/tick.ts`). Every
+ * `LIVENESS_PROBE_INTERVAL_MS` the loop asks, for each in-flight run, whether the
+ * launcher generation recorded on its row is still a LIVE PROCESS. It matches the
+ * REPL supervision watchdog's `DEFAULT_WATCHDOG_INTERVAL_MS = 15_000`
+ * (`runtime/adapters/claude-code/persistent/signatures.ts`) — the two are the push
+ * and pull halves of the same question, so they answer it at the same rate.
+ *
+ * CHEAP BY CONSTRUCTION: the probe is a handful of pid/registry checks. It never
+ * touches git, gh or the network, so a 15 s cadence costs nothing next to the 90 s
+ * sweep it accelerates.
+ *
+ * The ordering it must keep:
+ *
+ *   LIVENESS_PROBE_INTERVAL_MS << STALLED_WARN_MS < NO_ADVANCE_HANG_MS < DEFAULT_MAX_INFLIGHT_MS
+ *
+ * i.e. the probe answers long before any display or reap threshold is reached — a
+ * hard death is named in seconds instead of waiting out the 90-minute backstop.
+ *
+ * IT IS NOT A THRESHOLD. Every other constant in this file is a duration compared
+ * against `last_advanced_at`; this one is only a POLL RATE. The probe's answer is
+ * BINARY — the process is alive or it is not — so no amount of slowness can make it
+ * say "dead". A legitimately long-thinking agent can never be reaped by this signal,
+ * which is exactly why it may act in seconds where a timer may not.
+ * Default: 15 seconds.
+ */
+export const LIVENESS_PROBE_INTERVAL_MS = 15_000
+
+/**
  * Launching turn settle timeout. How long the LAUNCHING turn may take to settle
  * (fire + reply). Default 3 min — generous for a cold-spawn fire turn; NOT the
  * build budget. A cold REPL spawn can take ~100s, so the settle budget sits
