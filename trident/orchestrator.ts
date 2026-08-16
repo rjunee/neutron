@@ -494,33 +494,33 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
  * (exact-line, and exempt in markdown, where it is a setext underline). `|||||||` remains
  * unmatched: it only appears under `merge.conflictStyle=diff3`, and catching it is a follow-up.
  *
- * Seven or more matches git's default marker and wider configured markers without mistaking a
- * legal four-deep Markdown blockquote for conflict residue.
+ * Four or more catches the narrowest marker width this gate deliberately supports as well as
+ * git's default and wider configured markers. Because candidates are paths known to have
+ * conflicted in this replay, an added four-wide labelled run fails closed as residue.
  */
-const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|\r?$)/
+const CONFLICT_MARKER_ADDED = /^\+(?:<{4,}|>{4,})(?: |\t|\r?$)/
 
 /**
  * A `git diff --cached -U1` line that ADDS git's bare conflict SEPARATOR. Unlike `<<<<<<<` and
  * `>>>>>>>`, the separator line git writes carries NO label — it is exactly a run of `=` and
  * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
  * indented docstring underline) never matches. Git permits `conflict-marker-size` to narrow the
- * marker as well as widen it, but this gate deliberately starts at git's default seven: shorter
- * punctuation is common generated content and has no reliable corroborating label. `\r?` covers
+ * marker as well as widen it; four is the fail-closed lower bound shared with the outer-marker
+ * scan. Shorter punctuation remains ordinary generated content. `\r?` covers
  * a CRLF file. This is the residue MOST likely to
  * survive a sloppy hand-resolution: the outer markers
  * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
  * gate entirely.
  */
-const CONFLICT_SEPARATOR_ADDED = /^\+={7,}\r?$/
+const CONFLICT_SEPARATOR_ADDED = /^\+={4,}\r?$/
 
 /**
  * Markdown permits an all-`=` Setext H1 underline. Text around it cannot safely corroborate that
  * interpretation: conflict sides can have the identical title/blank/paragraph shape. The narrow
  * exemption therefore requires affirmative diff evidence that the resolver added the nonblank
- * title immediately before the underline. Existing text followed by a bare separator is refused,
- * including at a paragraph break or EOF, because that is exactly the sloppy-resolution residue
- * this gate exists to catch. Scanning each candidate separately avoids decoding git-quoted path
- * headers.
+ * title immediately before the underline, and that the resulting next line is blank or EOF.
+ * Surviving conflict-side content immediately after the separator is therefore refused. Scanning
+ * each candidate separately avoids decoding git-quoted path headers.
  */
 const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
 
@@ -534,6 +534,15 @@ function stagedDiffAddsConflictMarker(diff: string, path: string): boolean {
 
     const addedTitle = /^\+(.+)\r?$/.exec(lines[i - 1] ?? '')?.[1] ?? ''
     if (addedTitle.trim() === '') return true
+
+    // Removed lines do not exist in the staged result. The first context/added line after them is
+    // the line after the underline; a hunk/file boundary means the underline is at EOF.
+    let after = i + 1
+    while ((lines[after] ?? '').startsWith('-') && !lines[after]?.startsWith('---')) after += 1
+    const next = lines[after]
+    const atEof = next === undefined || next === '' || next.startsWith('@@') || next.startsWith('diff --git ')
+    const followedByBlank = next === '+' || next === '+\r' || next === ' ' || next === ' \r'
+    if (!atEof && !followedByBlank) return true
   }
   return false
 }
@@ -887,6 +896,8 @@ export async function rebaseOntoObservedBase(
       const stagedMarkerFiles = async (candidates: string[]): Promise<string[]> => {
         if (candidates.length === 0) return []
         const marked: string[] = []
+        // Deliberate per-path subprocesses: markdown classification needs the candidate path, and
+        // literal pathspecs avoid parsing quoted diff headers. Conflict sets are normally tiny.
         for (const candidate of candidates) {
           let res
           try {

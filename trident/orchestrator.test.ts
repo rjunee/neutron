@@ -1173,12 +1173,12 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
-  test('a resolver that left a separator at a markdown paragraph break or EOF is REFUSED', async () => {
+  test('a markdown separator followed by surviving conflict-side content is REFUSED', async () => {
     // THE SEPARATOR IS THE RESIDUE MOST LIKELY TO SURVIVE. `<<<<<<< ours` and `>>>>>>> theirs`
     // are the visually obvious lines; a hand-resolution that keeps both sides and strips the
     // outer markers leaves a bare `=======` sitting between them, and that line used to pass this
     // gate entirely — straight onto the shared branch.
-    for (const tail of [['+'], []] as const) {
+    for (const tail of [['+theirs'], [' theirs']] as const) {
       const head = 'abcdef0123456789abcdef0123456789abcdef01'
       const newBaseSha = '6666666666666666666666666666666666666666'
       let resolverCalls = 0
@@ -1200,7 +1200,8 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           if (joined.includes('apply --3way')) return failWith('error: patch failed: docs/AS_BUILT.md:1')
           // The index says DONE after the resolver's `git add` — this is the lie.
           if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'docs/AS_BUILT.md' : '')
-          // Outer markers gone, separator left at the paragraph boundary most likely to hide it.
+          // The preceding added line alone must not manufacture a Setext exemption: the surviving
+          // conflict-side content immediately after the separator makes this residue.
           if (joined.includes('diff --cached -U1'))
             return ok(
               [
@@ -1208,7 +1209,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
                 '--- a/docs/AS_BUILT.md',
                 '+++ b/docs/AS_BUILT.md',
                 '@@ -1,2 +1,3 @@',
-                ' publishHead: oidClaim(branchHead)',
+                '+## ours entry',
                 '+=======\r',
                 ...tail,
               ].join('\n'),
@@ -1350,7 +1351,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
               '+const banner = "======="',
               '+  =======',
               '+=======trailing',
-              '+>>>> quoted',
+              '+>>> quoted',
             ].join('\n'),
           )
         if (joined.includes('diff --name-only')) return ok('changed.ts')
