@@ -458,6 +458,35 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
     : `outer publisher could not ${step} branch ${branch}: ${said}`
 }
 
+/** The publish-failure classes readable from a STORED reason alone (card rbbjj2, acceptance a).
+ *  'publish-credential' is the first member of the auto-retry class list (card 01KZZQ2J9MJFG0PXC8AA6D6EV4);
+ *  'publish-ref-rejected' and 'publish-unknown' must NEVER auto-retry. */
+export type PublishFailureClass = 'publish-credential' | 'publish-ref-rejected' | 'publish-unknown'
+
+export const PUBLISH_CREDENTIAL_CLASS = 'publish-credential' as const
+
+/** Pure, total, case-insensitive. REJECTION EVIDENCE OUTRANKS CREDENTIAL EVIDENCE: a server that
+ *  rejected a ref did authenticate, so mixed evidence is a rejection and stays terminal. Anything
+ *  unrecognised is 'publish-unknown' — conservatism here is what keeps a genuine failure from
+ *  ever entering an auto-retry loop. Matches WORDS only (never bare numbers — a 40-hex sha can
+ *  contain '401'). */
+export function classifyPublishFailure(text: string): PublishFailureClass {
+  const t = text.toLowerCase()
+  const refRejected = ['[rejected]', 'non-fast-forward', 'stale info'].some((p) => t.includes(p))
+  if (refRejected) return 'publish-ref-rejected'
+  const credential = [
+    'could not read username',
+    'could not read password',
+    'authentication failed',
+    'bad credentials',
+    'invalid username or',
+    'terminal prompts disabled',
+    'http basic: access denied',
+  ].some((p) => t.includes(p))
+  if (credential) return 'publish-credential'
+  return 'publish-unknown'
+}
+
 /**
  * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
  * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
@@ -1289,6 +1318,35 @@ export function buildTridentOrchestrator(
       throw new Error(
         `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
       )
+    }
+    // FIX-ROUND ANCESTRY GATE (mandated by the Fable arbitration on #289 vs #318).
+    // A fix round carries the head the review verdict was ABOUT; the head it produced
+    // must DESCEND from it. Run fec4d3aa rebuilt from main with no ancestry of the
+    // reviewed head 4523107b and was silently published as a new PR — this gate makes
+    // that a REFUSAL. Evaluated on the PRE-rebase produced head: the replay below
+    // rewrites shas onto the observed base, so this is the only point where "did the
+    // build abandon the reviewed branch?" is still measurable. `--is-ancestor` passes
+    // on equality, so a legitimate RESUME republishing or continuing the reviewed
+    // head passes with no exemption (the recovery-card interaction).
+    if (run.reviewed_head !== null) {
+      const pin = run.reviewed_head.trim().toLowerCase()
+      if (!/^[0-9a-f]{40}$/.test(pin)) {
+        throw new Error(
+          `fix-round refused: the reviewed-head pin '${run.reviewed_head}' is not a 40-hex commit; refusing to publish ${resolvedHead} unverified`,
+        )
+      }
+      const ancestry = await opts.run_host(
+        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', pin, resolvedHead],
+        run.repo_path,
+      )
+      if (!ancestry.ok) {
+        const detail = ancestry.stderr.trim()
+        throw new Error(
+          detail === ''
+            ? `fix-round refused: produced head ${resolvedHead} of branch ${branch} does not descend from the reviewed head ${pin} — the round abandoned the reviewed branch`
+            : `fix-round refused: could not verify that produced head ${resolvedHead} descends from reviewed head ${pin} (${detail}); refusing to publish unverified`,
+        )
+      }
     }
     const runWithRetries = async (command: string[], attempts = 3) => {
       let result = await opts.run_host(command, run.repo_path)
