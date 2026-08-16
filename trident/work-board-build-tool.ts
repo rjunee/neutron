@@ -91,7 +91,12 @@ export interface TridentBuildToolDeps {
   repo_path: string
   /** Resolve the per-project git workspace; defaults to `ensureProjectBuildWorkspace`. */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
+  /**
+   * Resolve the repo's merge mode. REQUIRED, and forwarded unconditionally — a
+   * tool surface that could omit it re-opened the uncredentialed-probe fallback
+   * this whole chain exists to close (see `board-dispatch.ts`).
+   */
+  resolveMergeMode: (repo_path: string) => Promise<MergeMode>
   resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
@@ -199,7 +204,7 @@ export function registerTridentBuildToolSurface(
         project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
-        ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
+        resolveMergeMode: deps.resolveMergeMode,
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
@@ -309,7 +314,7 @@ export function registerTridentBuildToolSurface(
         project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
-        ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
+        resolveMergeMode: deps.resolveMergeMode,
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),

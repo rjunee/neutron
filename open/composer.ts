@@ -472,7 +472,12 @@ import {
   CodexCredentialService,
   codexExecutorAvailability,
 } from '@neutronai/trident/codex-credential.ts'
-import { defaultGitModeProbe, detectMergeMode, makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
+import {
+  defaultGitModeProbe,
+  detectMergeMode,
+  makeLazyCredentialedHostRunner,
+  type PublisherCredentialSource,
+} from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { setGithubSpawnEnvResolver } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
@@ -2037,11 +2042,25 @@ export function buildOpenGraphComposer(
     // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
-    const tridentHostRunner = makeLazyCredentialedHostRunner(async () =>
-      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
-    )
+    // ONE credential resolution, shared by the thing that PUBLISHES and the
+    // thing that PROBES whether publishing is possible. They were separate
+    // before: the host runner carried the token, the probe did not, so the probe
+    // asked a bare `gh auth status` about the gateway's own environment — which
+    // holds no `GH_TOKEN` by design (`setGithubSpawnEnvResolver` above injects it
+    // PER SPAWN) — and truthfully answered "no". Every board-dispatched build was
+    // then refused with "the outer publisher cannot authenticate" while a valid
+    // token sat in the secrets store. Resolved per call, so a credential the
+    // owner connects from chat takes effect on the next probe, not the next boot.
+    const tridentGithubEnv = async (): Promise<Record<string, string>> =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle)))
+    const tridentPublisherCredential: PublisherCredentialSource = {
+      owner_handle,
+      source: 'the instance secrets store',
+      load: tridentGithubEnv,
+    }
+    const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
     const resolveTridentMergeMode = (repoPath: string) =>
-      detectMergeMode(repoPath, defaultGitModeProbe(tridentHostRunner))
+      detectMergeMode(repoPath, defaultGitModeProbe(tridentPublisherCredential))
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
         // No credential → no substrate → the tick loop can never advance a run
@@ -6121,6 +6140,10 @@ export function buildOpenGraphComposer(
       // discards this boolean — see `safeDeliver` — but the contract should be
       // honest regardless.)
       onboarding_overnight_cron: {
+        // Overnight builds detect merge mode through the SAME credential the
+        // publisher uses. Without this the overnight seam built an
+        // uncredentialed probe and refused every GitHub-backed overnight build.
+        publisher_credential: tridentPublisherCredential,
         // `general_topic_id` is not a nicety — it is the other half of the fix.
         // The reporter's fallback reads the topic out of the onboarding row,
         // and Open's production onboarding path NEVER writes that key (the

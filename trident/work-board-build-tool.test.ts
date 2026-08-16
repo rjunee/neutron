@@ -87,6 +87,7 @@ describe('work_board_dispatch_build tool', () => {
       store,
       work_board: board(),
       repo_path: '/repo',
+      resolveMergeMode: async () => 'local',
     })
     const tool = reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
     expect(tool.capability_required).toBe('agent:dispatch_subagent')

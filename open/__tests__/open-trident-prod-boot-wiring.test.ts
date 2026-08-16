@@ -210,6 +210,33 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(board.get('owner', item.id)?.linked_run_id).toBe(res.ok ? res.run.id : '')
     expect(board.get('owner', item.id)?.status).toBe('in_progress')
 
+    // THE MERGE-MODE PROBE IS CREDENTIALED AT THE COMPOSITION ROOT.
+    //
+    // Anti "built-but-not-wired", and the specific regression that refused every
+    // board build: the probe used to be built with NO credential and ask a bare
+    // `gh auth status` about the gateway's own environment — which holds no
+    // `GH_TOKEN` by design, so it truthfully answered "not authenticated" and
+    // `detectMergeMode` refused. `resolveMergeMode` is now REQUIRED on the
+    // dispatch deps (a type-level guarantee that no call site can fall back),
+    // and the credential source the composer builds is asserted here to be the
+    // live secrets store rather than the "nothing wired" placeholder.
+    expect(typeof tbd.resolveMergeMode).toBe('function')
+    const publisherCredential = composition.onboarding_overnight_cron!.publisher_credential
+    expect(publisherCredential.owner_handle).toBe('owner')
+    expect(publisherCredential.source).toBe('the instance secrets store')
+    // Nothing connected yet → empty, and reported as empty.
+    expect(await publisherCredential.load()).toEqual({})
+    // Connect a token through the real credential path; the SAME source picks it
+    // up on the next call, with no re-composition — which is what makes a
+    // chat-time `Connect GitHub` take effect without a restart.
+    const { storeGitHubToken } = await import('@neutronai/github/credential.ts')
+    await storeGitHubToken(
+      composition.cores!.secretsStore,
+      asOwnerHandle('owner'),
+      'ghp_TEST_SENTINEL_12345',
+    )
+    expect((await publisherCredential.load())['GH_TOKEN']).toBe('ghp_TEST_SENTINEL_12345')
+
     // Part B — the Connect Codex surface + agent-tool service are wired, and the
     // trident loop threads the per-project CODEX_HOME (resolveCodexHome). Anti
     // "built-but-not-wired": connect a subscription auth via the wired service →

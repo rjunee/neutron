@@ -38,6 +38,7 @@ import {
   detectMergeMode,
   defaultGitModeProbe,
   type GitModeProbe,
+  type PublisherCredentialSource,
 } from '@neutronai/trident/git-mode.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { OvernightQueueStore, type OvernightItem } from './queue-store.ts'
@@ -102,7 +103,7 @@ export const defaultResultDocWriter: ResultDocWriter = {
  */
 export function buildOvernightTridentSeam(
   tridentStore: TridentRunStore,
-  probe: GitModeProbe = defaultGitModeProbe(),
+  probe: GitModeProbe,
 ): OvernightTridentSeam {
   return {
     async createRun(input) {
@@ -210,6 +211,14 @@ export interface BuildOvernightEngineInput {
   /** Test seams. */
   now?: () => number
   trident_seam?: OvernightTridentSeam
+  /**
+   * The GitHub credential the outer publisher will use, for merge-mode
+   * detection. REQUIRED: this seam used to default to
+   * `defaultGitModeProbe()` — an uncredentialed probe that asked a bare
+   * `gh auth status` about the gateway's own (credential-free by design)
+   * environment and refused every GitHub-backed overnight build.
+   */
+  publisher_credential: PublisherCredentialSource
   io?: StatusMdIO
   result_docs?: ResultDocWriter
   listOptedInProjects?: () => OptedInProject[]
@@ -232,7 +241,11 @@ export function buildOvernightEngineHandler(input: BuildOvernightEngineInput): C
   const tz = input.tz
   const queueStore = new OvernightQueueStore(input.db, () => new Date(now()).toISOString())
   const tridentSeam =
-    input.trident_seam ?? buildOvernightTridentSeam(new TridentRunStore(input.db))
+    input.trident_seam ??
+    buildOvernightTridentSeam(
+      new TridentRunStore(input.db),
+      defaultGitModeProbe(input.publisher_credential),
+    )
   const io = input.io ?? defaultStatusMdIO
   const result_docs = input.result_docs ?? defaultResultDocWriter
   const ownerHome = input.owner_home ?? resolveOwnerHomeFromEnv()

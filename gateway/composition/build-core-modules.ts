@@ -69,6 +69,7 @@ import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
@@ -887,6 +888,15 @@ export function buildCoreModules(
         const overnightCfg = input.onboarding_overnight_cron
         const handler = buildOvernightEngineHandler({
           db: input.db,
+          // Merge-mode detection needs the PUBLISHER'S credential, not the
+          // gateway's ambient `gh` state (which is empty by design — the token
+          // is injected per spawn). A composer that supplied no overnight config
+          // gets the honest "nothing wired" source, which refuses a GitHub-backed
+          // overnight build by NAME instead of asking a bare `gh` and getting a
+          // truthful answer about the wrong process.
+          publisher_credential:
+            overnightCfg?.publisher_credential ??
+            unwiredPublisherCredential(input.project_slug),
           ...(overnightCfg?.deliver !== undefined ? { deliver: overnightCfg.deliver } : {}),
           // The composer's topic beats the onboarding-row read (ISSUES #443 —
           // on Open that row never carries one, so the brief was skipped).

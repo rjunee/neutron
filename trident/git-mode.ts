@@ -5,8 +5,13 @@
  * Ryan-locked decision: Trident supports BOTH a local branch-merge mode
  * and a GitHub PR mode, auto-detected per run with NO user config. A run
  * is `'pr'` mode iff the project repo has a GitHub `origin` remote AND the
- * `gh` CLI is available on the host; otherwise `'local'` (the safe
- * default — branch + merge with no remote).
+ * OUTER PUBLISHER'S OWN CREDENTIAL authenticates; otherwise `'local'` (the
+ * safe default — branch + merge with no remote), except that a GitHub origin
+ * with an unusable credential REFUSES rather than degrading, because silently
+ * choosing local mode would drop the PR and CI gates.
+ *
+ * "the publisher's own credential", not "ambient `gh` login state on the host",
+ * is load-bearing and was the defect: see {@link PublisherCredentialSource}.
  *
  * SCOPE — PR-2 lands the detection helper + the merge/cleanup STUBS. The
  * real branch/merge/PR mechanics (worktree create, `gh pr create`,
@@ -24,16 +29,134 @@ export interface HostCommandResult {
 }
 
 /**
+ * WHY a publisher-authentication failure carries a CAUSE.
+ *
+ * "the outer publisher cannot authenticate" is equally true of four different
+ * situations, and only one of them is the owner's to fix:
+ *
+ *   • `no_credential_available` — the credential source was asked and had
+ *     nothing. GitHub was never connected (or the token is filed under a
+ *     different owner handle). NOT an expired token.
+ *   • `credential_rejected`     — a credential WAS supplied and `gh` refused
+ *     it: expired, revoked, or missing a scope.
+ *   • `publisher_cli_unavailable` — `gh` itself could not be executed, so the
+ *     credential could not be verified either way.
+ *   • `probe_failed`            — the capability probe threw (e.g. the secrets
+ *     store could not be opened). Nothing was learned about the credential.
+ *
+ * The FIFTH cause — "the probe was never handed a credential and so asked a
+ * bare `gh` about ambient state" — is deliberately absent from this list. It
+ * is what actually happened, and it is now unrepresentable: `defaultGitModeProbe`
+ * REQUIRES a {@link PublisherCredentialSource}, so no probe can be built that
+ * consults ambient `gh` login state instead of the publisher's own credential.
+ */
+export type PublisherAuthFailureCause =
+  | 'no_credential_available'
+  | 'credential_rejected'
+  | 'publisher_cli_unavailable'
+  | 'probe_failed'
+
+export type PublisherAuthResult =
+  | { authenticated: true }
+  | { authenticated: false; cause: PublisherAuthFailureCause; detail?: string }
+
+/** Who the publisher credential is looked up for, and where it comes from. */
+export interface PublisherIdentity {
+  /** The owner handle the credential lookup is scoped to. */
+  owner_handle: string
+  /** Short human label for the credential's home, e.g. 'the instance secrets store'. */
+  source: string
+}
+
+/**
+ * The credential the outer publisher will actually use, resolved at CALL time.
+ *
+ * This is the whole fix. The probe used to shell a bare `gh auth status` and
+ * report whatever ambient login state the gateway process happened to have —
+ * and the gateway process has none by design, because the GitHub token is
+ * injected PER SPAWN (`open/composer.ts` `setGithubSpawnEnvResolver`). So the
+ * probe truthfully answered "not authenticated" about an environment that
+ * structurally cannot be authenticated, and every board-dispatched build was
+ * refused while a perfectly valid credential sat in the secrets store.
+ *
+ * `load()` returns the `githubProcessEnv`-shaped environment (`{}` when nothing
+ * is stored). Resolved per call, never captured at boot, so a credential the
+ * owner connects from chat takes effect on the next probe rather than the next
+ * restart.
+ */
+export interface PublisherCredentialSource extends PublisherIdentity {
+  load(): Promise<Record<string, string>>
+}
+
+/**
+ * The honest "nothing was wired here" credential source.
+ *
+ * A composition that has no GitHub credential to give still has to produce a
+ * probe, and the tempting shortcut — let it fall back to a bare `gh` — is
+ * precisely the defect this module was rewritten to remove. This source instead
+ * reports emptiness AS emptiness: `detectMergeMode` refuses with
+ * "no GitHub credential is stored for owner handle X (no credential source was
+ * wired into this composition)", which names both the cause and the handle and
+ * is greppable back to the composition site that owes a real source.
+ *
+ * It never reads ambient `gh` login state, so it cannot reproduce the bug.
+ */
+export function unwiredPublisherCredential(owner_handle: string): PublisherCredentialSource {
+  return {
+    owner_handle,
+    source: 'no credential source was wired into this composition',
+    load: async () => ({}),
+  }
+}
+
+/**
  * Host-process probe used by `detectMergeMode`. Tests inject a stub; the
  * default (`defaultGitModeProbe`) shells out via `Bun.spawn`. Kept narrow
  * — only the two facts detection needs — so the merge-mode decision is
  * statically reasoning-friendly.
  */
 export interface GitModeProbe {
+  /**
+   * Who the publisher credential is looked up for. Named in EVERY refusal: a
+   * refusal that does not say which handle was consulted sends the reader
+   * hunting through the secrets store by hand.
+   */
+  readonly publisher: PublisherIdentity
   /** Whether `repoPath` has an `origin` remote pointing at GitHub. */
   hasGithubOrigin(repoPath: string): Promise<boolean>
-  /** Whether the outer publisher can authenticate to GitHub. */
-  publisherAvailable(): Promise<boolean>
+  /** Whether the outer publisher can authenticate to GitHub, and if not, why. */
+  publisherAvailable(): Promise<PublisherAuthResult>
+}
+
+/** The refusal text, with the cause and the owner handle spelled out. */
+export function describePublisherAuthFailure(
+  publisher: PublisherIdentity,
+  result: { cause: PublisherAuthFailureCause; detail?: string },
+): string {
+  const who = `owner handle "${publisher.owner_handle}" (${publisher.source})`
+  const detail =
+    result.detail !== undefined && result.detail.length > 0
+      ? `: ${result.detail.split('\n')[0]}`
+      : ''
+  switch (result.cause) {
+    case 'no_credential_available':
+      return (
+        `no GitHub credential is stored for ${who} — connect GitHub. ` +
+        `The credential source was read and was empty; this is not an expired token${detail}`
+      )
+    case 'credential_rejected':
+      return (
+        `the stored GitHub credential for ${who} was REJECTED by \`gh auth status\` ` +
+        `— expired, revoked, or missing a scope${detail}`
+      )
+    case 'publisher_cli_unavailable':
+      return (
+        `the \`gh\` CLI could not be executed on this host, so the stored credential ` +
+        `for ${who} could not be verified either way${detail}`
+      )
+    case 'probe_failed':
+      return `the publisher capability probe itself failed for ${who}${detail}`
+  }
 }
 
 /**
@@ -53,15 +176,24 @@ export async function detectMergeMode(
     return 'local'
   }
   if (!hasOrigin) return 'local'
-  let canPublish = false
+  let result: PublisherAuthResult
   try {
-    canPublish = await probe.publisherAvailable()
-  } catch {
+    result = await probe.publisherAvailable()
+  } catch (err) {
     // A GitHub-backed run must fail loudly below. Treating a broken capability
     // probe as permission to merge locally would silently remove the PR gate.
+    result = {
+      authenticated: false,
+      cause: 'probe_failed',
+      detail: err instanceof Error ? err.message : String(err),
+    }
   }
-  if (!canPublish) {
-    throw new Error('GitHub origin detected but the outer publisher cannot authenticate; refusing to silently weaken the PR merge gate')
+  if (!result.authenticated) {
+    throw new Error(
+      'GitHub origin detected but the outer publisher cannot authenticate; ' +
+        'refusing to silently weaken the PR merge gate — ' +
+        describePublisherAuthFailure(probe.publisher, result),
+    )
   }
   return 'pr'
 }
@@ -74,21 +206,60 @@ export function isGithubRemoteUrl(url: string): boolean {
 }
 
 /**
- * Default probe: measures the origin and asks `gh auth status`, via the supplied
- * host runner. Callers that own the GitHub credential must inject that runner;
- * the credential is added only at this outer process boundary.
+ * A host runner that can carry an environment. `spawnCapture` already has this
+ * shape; the probe needs the third parameter because it injects the publisher's
+ * credential into the `gh` call itself rather than trusting the ambient one.
+ */
+export type EnvCapableHostRunner = (
+  cmd: string[],
+  cwd?: string,
+  extraEnv?: Record<string, string>,
+) => Promise<HostCommandResult>
+
+/**
+ * Default probe: measures the origin, then asks `gh auth status` UNDER THE
+ * PUBLISHER'S OWN CREDENTIAL.
+ *
+ * `credential` is REQUIRED and has no default. That is the point: the previous
+ * signature defaulted its runner to a plain `spawnCapture`, so
+ * `defaultGitModeProbe()` compiled, ran a bare `gh auth status` against the
+ * gateway's own (deliberately credential-free) environment, and got a truthful
+ * "not authenticated" about the wrong process. Two call sites took that default
+ * — `board-dispatch.ts` and the overnight seam — and every board-dispatched
+ * build was refused. An optional default is what produced the bug, so the
+ * uncredentialed probe is now unrepresentable rather than merely unused.
+ *
+ * The order below matters. The credential is resolved FIRST, so "nothing is
+ * stored" is reported as itself instead of being laundered through `gh` into an
+ * indistinguishable authentication failure.
  */
 export function defaultGitModeProbe(
-  run: (cmd: string[], cwd?: string) => Promise<HostCommandResult> = spawnCapture,
+  credential: PublisherCredentialSource,
+  run: EnvCapableHostRunner = spawnCapture,
 ): GitModeProbe {
   return {
+    publisher: { owner_handle: credential.owner_handle, source: credential.source },
     hasGithubOrigin: async (repoPath) => {
       const res = await run(['git', '-C', repoPath, 'remote', 'get-url', 'origin'], repoPath)
       return res.ok && isGithubRemoteUrl(res.stdout)
     },
     publisherAvailable: async () => {
-      const res = await run(['gh', 'auth', 'status'])
-      return res.ok
+      const env = await credential.load()
+      const token = env['GH_TOKEN'] ?? ''
+      if (token.length === 0) {
+        return { authenticated: false, cause: 'no_credential_available' }
+      }
+      // Verify UNDER the credential. A host whose ambient `gh` has never been
+      // logged in — which is every gateway process — must still answer "yes"
+      // here, because the publisher this probe speaks for gets the same env.
+      const res = await run(['gh', 'auth', 'status'], undefined, env)
+      if (res.ok) return { authenticated: true }
+      // `spawnCapture` reports a spawn failure (no `gh` on PATH) as -1, which is
+      // a different fact from `gh` running and rejecting the token.
+      if (res.exit_code === -1) {
+        return { authenticated: false, cause: 'publisher_cli_unavailable', detail: res.stderr }
+      }
+      return { authenticated: false, cause: 'credential_rejected', detail: res.stderr }
     },
   }
 }

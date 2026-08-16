@@ -320,7 +320,13 @@ export interface MiscCompositionInput {
      *  `<home>/Projects/<slug>/code` workspace under it (see `board-dispatch.ts`). */
     repo_path: string
     resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-    resolveMergeMode?: (repo_path: string) => Promise<import('@neutronai/trident/store.ts').MergeMode>
+    /**
+     * Resolve the repo's merge mode. REQUIRED — the composer owns the GitHub
+     * credential, so it owns this resolver. Optional here once meant the tool
+     * surface fell through to an uncredentialed `gh auth status` probe and
+     * refused every build (`trident/board-dispatch.ts`).
+     */
+    resolveMergeMode: (repo_path: string) => Promise<import('@neutronai/trident/store.ts').MergeMode>
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number
