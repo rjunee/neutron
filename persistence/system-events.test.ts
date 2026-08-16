@@ -124,7 +124,7 @@ describe('SystemEventsStore.listRecentForScope — scope + limit boundaries (O5)
   })
 })
 
-describe('SystemEventsStore.latestVisibleForScopeAndName — the edge trigger sees the WINDOW', () => {
+describe('SystemEventsStore.listVisibleForScopeAndName — the edge trigger sees the WINDOW', () => {
   const insert = (
     id: string,
     ts: number,
@@ -139,18 +139,23 @@ describe('SystemEventsStore.latestVisibleForScopeAndName — the edge trigger se
     )
   }
 
-  it('returns the newest matching row when it is inside the window', () => {
+  it('returns EVERY matching row inside the window, newest first', () => {
+    // Newest-first ordering matches `listRecentForScope` exactly. Returning the
+    // SET rather than the newest row is what lets the caller ask "is this
+    // payload already on the page" instead of "is it the last line" — the
+    // alternation blocker (Argus r1 on PR #322).
     insert('old', 10, 'demo', 'instance_scope_rekey_refused', '{"n":1}')
     insert('new', 20, 'demo', 'instance_scope_rekey_refused', '{"n":2}')
-    const row = store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50)
-    expect(row?.id).toBe('new')
+    expect(
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50).map((r) => r.id),
+    ).toEqual(['new', 'old'])
   })
 
   it('scopes strictly, and ignores other event names', () => {
     insert('foreign', 30, 'other')
     insert('null-scoped', 31, null)
     insert('wrong-name', 32, 'demo', 'cron_job_error')
-    expect(store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50)).toBeNull()
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50)).toEqual([])
   })
 
   it('THE BLOCKER: a row pushed OUT of the window is not visible, so it is not a repeat', () => {
@@ -160,34 +165,34 @@ describe('SystemEventsStore.latestVisibleForScopeAndName — the edge trigger se
     insert('refusal', 1, 'demo')
     for (let i = 0; i < 50; i++) insert(`filler-${i}`, 100 + i, 'demo', 'cron_job_error')
     expect(store.listRecentForScope('demo', 50).map((r) => r.id)).not.toContain('refusal')
-    expect(store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50)).toBeNull()
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50)).toEqual([])
     // CONTROL — the same query with a window big enough to reach it finds it,
-    // which proves the null above is the WINDOW and not a broken query.
+    // which proves the empty result above is the WINDOW and not a broken query.
     expect(
-      store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 51)?.id,
-    ).toBe('refusal')
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 51).map((r) => r.id),
+    ).toEqual(['refusal'])
   })
 
-  it('non-positive / non-finite windows show nothing → null', () => {
+  it('non-positive / non-finite windows show nothing → []', () => {
     insert('refusal', 1, 'demo')
-    expect(store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 0)).toBeNull()
-    expect(store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', -1)).toBeNull()
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 0)).toEqual([])
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', -1)).toEqual([])
     expect(
-      store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', Number.NaN),
-    ).toBeNull()
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', Number.NaN),
+    ).toEqual([])
     expect(
-      store.latestVisibleForScopeAndName(
+      store.listVisibleForScopeAndName(
         'demo',
         'instance_scope_rekey_refused',
         Number.POSITIVE_INFINITY,
       ),
-    ).toBeNull()
+    ).toEqual([])
   })
 
   it('a corrupt payload THROWS — which is why the caller reads it inside a try', () => {
     insert('bad', 5, 'demo', 'instance_scope_rekey_refused', 'not json')
     expect(() =>
-      store.latestVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50),
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50),
     ).toThrow()
   })
 })

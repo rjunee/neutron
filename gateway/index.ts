@@ -446,7 +446,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       if (
         !shouldJournal(
           () =>
-            systemEventSink.latestVisibleForScopeAndName(
+            systemEventSink.listVisibleForScopeAndName(
               row.scope,
               'instance_scope_rekey_refused',
               DEFAULT_MAX_RECENT_EVENTS,
@@ -547,9 +547,18 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       //     it is edge-triggered too (Argus r2, 2026-08-16). An unconditional
       //     write here lands under the SAME `(scope, event_name)` key the
       //     refused branch dedups on, so a box that alternates between the two
-      //     shapes writes a row every boot and defeats the whole trigger: the
-      //     newest row never matches the payload about to be written. Both
+      //     shapes writes a row every boot and defeats the whole trigger. Both
       //     branches edge-trigger, or neither does.
+      //     AND THAT WAS NOT SUFFICIENT ON ITS OWN (Argus r1 on PR #322,
+      //     2026-08-16): with the trigger comparing against the NEWEST row only,
+      //     an alternating box still wrote every boot, because the newest row is
+      //     the OTHER shape every single time. Repro: an anonymous boot then an
+      //     explicit boot then anonymous… gave `{ambiguous_after_refused: true,
+      //     refused_after_ambiguous: true}` — a row per boot, unbounded, against
+      //     a 50-row window with no retention sweep. The trigger now asks
+      //     whether the payload is already ANYWHERE in the visible window
+      //     (`./scope-refusal-journal.ts` `isNewJournalState`), which settles the
+      //     feed at one row per distinct shape and needs no per-branch knowledge.
       if (credentialScope.refused_direction === true) {
         for (const row of planCredentialRefusalRows({
           owner_scopes: ownerReadableScopes(),
@@ -559,7 +568,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
           if (
             !shouldJournal(
               () =>
-                systemEventSink.latestVisibleForScopeAndName(
+                systemEventSink.listVisibleForScopeAndName(
                   row.scope,
                   'credential_scope_orphaned',
                   DEFAULT_MAX_RECENT_EVENTS,
@@ -593,7 +602,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         if (
           shouldJournal(
             () =>
-              systemEventSink.latestVisibleForScopeAndName(
+              systemEventSink.listVisibleForScopeAndName(
                 project_slug,
                 'credential_scope_orphaned',
                 DEFAULT_MAX_RECENT_EVENTS,

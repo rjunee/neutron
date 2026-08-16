@@ -195,6 +195,80 @@ test('an unchanged repeat writes nothing — the warning cannot starve its own r
   expect(feed(LIVE, 'credential_scope_orphaned')).toHaveLength(1)
 }, 90_000)
 
+test('ALTERNATING boots settle at one row per shape — the starvation hole a same-shape repeat cannot see (Argus r1 blocker)', async () => {
+  // The repeat test above proves the trigger against IDENTICAL boots. Real
+  // starvation does not need identical boots, and the shape that beat the
+  // trigger is the one it could not see: `credential_scope_orphaned` is written
+  // in TWO payload shapes under ONE `(scope, event_name)` key — the direction
+  // REFUSAL (anonymous boot) and the ordinary AMBIGUOUS census (explicit boot).
+  // A unit that intermittently loses its slug env alternates between them, and
+  // with the trigger comparing against the NEWEST row only, each shape saw the
+  // other as the latest and EVERY boot wrote. Unbounded, into a 50-row window
+  // with no retention sweep behind it — the same starvation the trigger exists
+  // to prevent, reached by a route both branches edge-triggering did not close.
+  //
+  // Credentials under BOTH handles, which is what makes the explicit boot's
+  // census ambiguous instead of an unambiguous migrate.
+  const db = openDb()
+  try {
+    await db.run(
+      `INSERT INTO onboarding_state (project_slug, user_id, phase, started_at, last_advanced_at)
+       VALUES (?, 'owner', 'completed', 1, 1)`,
+      [LIVE],
+    )
+    await db.run(
+      `INSERT INTO instance_scope_ledger (id, project_slug, updated_at) VALUES (1, ?, 1)`,
+      [LIVE],
+    )
+    const store = new SecretsStore({ data_dir: home, db })
+    await store.put({
+      owner_handle: asOwnerHandle(FROZEN),
+      kind: 'byo_api_key',
+      label: 'anthropic:old',
+      plaintext: 'a-frozen-handle-secret',
+    })
+    await store.put({
+      owner_handle: asOwnerHandle(LIVE),
+      kind: 'byo_api_key',
+      label: 'anthropic:new',
+      plaintext: 'a-live-handle-secret',
+    })
+  } finally {
+    db.close()
+  }
+
+  const explicitBoot = async (): Promise<void> => {
+    process.env['NEUTRON_INSTANCE_SLUG'] = LIVE
+    const handle = await boot({ port: 0 })
+    await handle.shutdown({ force: true })
+  }
+  const fallbackBoot = async (): Promise<void> => {
+    delete process.env['NEUTRON_INSTANCE_SLUG']
+    await anonymousBoot()
+  }
+
+  for (let i = 0; i < 3; i++) {
+    await fallbackBoot()
+    await explicitBoot()
+  }
+
+  // Nothing moved on either side — both censuses declined, for their own reasons.
+  expect(slugsIn('secrets')).toEqual([LIVE, FROZEN].sort())
+
+  // SIX boots, TWO rows: one per distinct payload shape. Pre-fix this was six.
+  const orphaned = feed(LIVE, 'credential_scope_orphaned')
+  expect(orphaned).toHaveLength(2)
+  expect(orphaned.filter((p) => p['refused_direction'] === true)).toHaveLength(1)
+  expect(orphaned.filter((p) => p['reason'] === 'ambiguous_census')).toHaveLength(1)
+  // …and the re-key refusal, which only the anonymous boots reach, stays at one.
+  expect(feed(LIVE, 'instance_scope_rekey_refused')).toHaveLength(1)
+
+  // CONTROL — both shapes really were produced by these boots, so the `2` above
+  // is two suppressed streams and not one stream that happened to write twice.
+  expect(orphaned.some((p) => p['attempted_by_slug'] === FALLBACK)).toBe(true)
+  expect(orphaned.some((p) => p['attempted_by_slug'] === undefined)).toBe(true)
+}, 180_000)
+
 test('an instance whose own handle IS "dev" still gets its refusal (Argus r2 blocker)', async () => {
   // The owner configured `NEUTRON_INSTANCE_SLUG=dev` — his instance really is
   // called `dev`, so his ledger says `dev` and `dev` is the only string he ever

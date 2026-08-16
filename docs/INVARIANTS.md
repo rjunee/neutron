@@ -174,9 +174,25 @@ with cross-references noted inline.
     Its provenance argument is REQUIRED rather than optional-defaulting-to-false precisely so the
     next surface cannot reintroduce the gap by omission: forgetting it is a type error
     (`auth/credential-scope-reconcile.ts:509-539`).
-    (b) A refusal event is journalled under a handle the OWNER CAN READ — never under the
-    anonymous handle that attempted the move, and never under a FROZEN credential handle whose
-    divergence from the live one is the very thing being reported. `listRecentForScope` is
+    (b) A refusal event is journalled under a handle the OWNER CAN READ, WHENEVER THIS DATABASE
+    RECORDS ONE — never under a FROZEN credential handle whose divergence from the live one is the
+    very thing being reported, and never under the anonymous handle that attempted the move EXCEPT
+    on the one documented floor named below (a database that records no identity at all, which
+    includes a diagnostic read that threw). That exception is stated here, in the first sentence,
+    because the rule previously read as absolute while the code had two lawful paths to the
+    attempting handle — and a claim of coverage the code does not have is worse than no claim, since
+    it is the sentence the next reviewer trusts instead of reading the code (Argus r1 on PR #322,
+    2026-08-16). ON ANY SURFACE, exactly as (a): the boot re-key refusal, the boot credential
+    refusal, AND the EXPLICIT owner-driven migration refusal
+    (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`) all resolve the scope through the
+    same `gateway/scope-refusal-journal.ts` planner. The explicit one is not an exception on the
+    grounds of being owner-initiated: it refuses only when the handle IS the fallback, so writing it
+    under the request's own handle put the audit row for a security-relevant refusal in the same
+    unreadable place. It keeps its own two differences, both deliberate — it is NOT deduped (a
+    repeated owner ATTEMPT is the fact an audit trail exists to preserve, and the reachable surfaces
+    are owner-authenticated, so the row count is bounded by owner actions rather than by traffic),
+    and it adds `surface: 'explicit_migrate'` so one journal query finds both rows and can still
+    tell them apart. `listRecentForScope` is
     strictly `WHERE project_slug = ?` by design (`persistence/system-events.ts`) and the refusal
     deliberately does not re-key the ledger, so the next explicit boot takes the ledger-agrees
     fast path and never sweeps the row back: scoped anywhere else, the guard's only observable
@@ -195,17 +211,25 @@ with cross-references noted inline.
     an instance-scoped feed is the cross-scope disclosure the strict predicate exists to prevent,
     and keys are TRIMMED before they are counted or compared so a padded legacy key does not report
     the reader zero rows of his own); and the journal is EDGE-TRIGGERED AGAINST THE VISIBLE WINDOW
-    (`latestVisibleForScopeAndName` + `shouldJournal`), because the owner's window is 50 rows with
+    (`listVisibleForScopeAndName` + `shouldJournal`), because the owner's window is 50 rows with
     no retention sweep and an unconditional row per anonymous boot evicts the report it is trying to
-    appear in. Three properties of that trigger, each a defect when it was absent: the comparison is
+    appear in. FOUR properties of that trigger, each a defect when it was absent: the comparison is
     bounded to the SAME window the feed returns (measured against unbounded history, a repeat that
     rotated out of the feed is suppressed permanently and silently — strictly worse than the
-    starvation it prevents); the dedup READ is best-effort inside a try (one corrupt historical
+    starvation it prevents), and that window is `DEFAULT_MAX_RECENT_EVENTS`, the diagnostics
+    default, pinned equal by test because suppressing against a window WIDER than the feed's hides a
+    warning the owner cannot see; the dedup READ is best-effort inside a try (one corrupt historical
     `payload_json` row would otherwise abort the boot, since the reader parses with
-    `onCorrupt: 'throw'` and this runs before the boot's own failure cleanup); and BOTH
+    `onCorrupt: 'throw'` and this runs before the boot's own failure cleanup); BOTH
     `credential_scope_orphaned` branches trigger, since the ordinary ambiguous orphan writes under
-    the same `(scope, event_name)` key and an unconditional write there makes the newest row
-    alternate and defeats the trigger for the refusal too. For the same starvation reason the
+    the same `(scope, event_name)` key and an unconditional write there writes a row every boot;
+    and THE COMPARISON IS MEMBERSHIP OF THE VISIBLE SET, NOT EQUALITY WITH ITS NEWEST ROW. That last
+    one is what actually closes the alternation hole, and covering both branches did not (Argus r1
+    on PR #322, 2026-08-16): the two shapes share one `(scope, event_name)` key, so a box that
+    alternates between an anonymous and an explicit boot — a unit that intermittently loses its slug
+    env — sees the OTHER shape as the newest row every time, and every boot writes. Asked "is this
+    payload already anywhere on the page", the feed settles at one row per distinct shape, and any
+    future third shape is covered without anyone noticing it exists. For the same starvation reason the
     refusal's row count EXCLUDES `system_events` — counting the journal's own table makes the
     payload change every boot, which both misreports "rows at stake" and defeats the edge trigger.
     AND THE READER MUST RESOLVE THE SAME SCOPE BOOT FROZE: `neutron doctor`

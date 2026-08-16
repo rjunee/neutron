@@ -133,7 +133,7 @@ export type SystemEventName =
   // cross-scope disclosure that predicate exists to prevent. The attempting
   // handle rides in `attempted_by_slug`. EDGE-TRIGGERED against the VISIBLE
   // window: an unchanged repeat the owner can still see is not re-journalled
-  // (`latestVisibleForScopeAndName` + `shouldJournal`), so a repeating anonymous
+  // (`listVisibleForScopeAndName` + `shouldJournal`), so a repeating anonymous
   // boot cannot starve the 50-row window — while a repeat that has rotated OUT
   // of it is written again, because the owner can no longer see it. The same
   // rule applies to `credential_scope_orphaned` on BOTH its branches.
@@ -349,41 +349,55 @@ export class SystemEventsStore implements SystemEventSink {
   }
 
   /**
-   * Read-only: the newest row for one `(project_slug, event_name)` pair that is
-   * still INSIDE the reader's window — i.e. among the newest `windowSize` rows
-   * {@link listRecentForScope} would return for that scope — or `null`.
+   * Read-only: EVERY row for one `(project_slug, event_name)` pair that is still
+   * INSIDE the reader's window — i.e. the ones among the newest `windowSize`
+   * rows {@link listRecentForScope} would return for that scope. Newest first;
+   * `[]` when none are visible.
    *
    * This is the RISING-EDGE read for a repeating boot-time condition. A degrade
    * that re-fires unchanged on every boot (the scope-direction refusal: an
    * anonymous process pointed at a live database boots as often as someone runs
    * it) would otherwise write one row per boot into a feed that is 50 rows deep
    * with no retention sweep, evicting every other degrade event — a warning that
-   * starves the report it is trying to appear in. Emitters compare the latest
-   * payload against the one they are about to write and skip an exact repeat
-   * (`gateway/scope-refusal-journal.ts` `shouldJournal`).
+   * starves the report it is trying to appear in. Emitters ask whether the
+   * payload they are about to write is ALREADY among these rows and skip it if
+   * so (`gateway/scope-refusal-journal.ts` `shouldJournal`).
    *
-   * THE WINDOW IS THE POINT, and it is why this is not a plain `LIMIT 1` over
+   * IT RETURNS THE SET, NOT THE NEWEST ROW, AND THAT IS THE FIX FOR AN
+   * ALTERNATION HOLE (Argus r1 blocker on PR #322, 2026-08-16). The previous
+   * shape (`latestVisibleForScopeAndName`, `LIMIT 1`) let the caller compare
+   * only against the LAST row, and `credential_scope_orphaned` is written in two
+   * different payload shapes under one `(scope, event_name)` key — the
+   * direction refusal and the ordinary ambiguous census. A box that alternates
+   * between them (an anonymous boot, then an explicit one, then anonymous…)
+   * makes the newest row differ from the payload EVERY time, so every boot
+   * writes and the 50-row window drains anyway. Compared against the whole
+   * visible set, the second occurrence of either shape is already on the page
+   * and is suppressed; the feed settles at one row per distinct shape.
+   *
+   * THE WINDOW IS THE POINT, and it is why this is not an unbounded scan over
    * the table (which is what it was until Argus r2, 2026-08-16). Suppression is
    * only ever justified by "the owner is already looking at this row".
-   * `system_events` has NO retention sweep, so a `LIMIT 1` over unbounded
+   * `system_events` has NO retention sweep, so a match against unbounded
    * history keeps matching a row that rotated out of the feed years ago and
    * suppresses the warning PERMANENTLY — a silent, unrecoverable version of the
    * invisibility the caller exists to fix. Bounded to the same window the
    * reader uses, a row the owner can no longer see is new information again.
    *
-   * `windowSize <= 0` → `null` (an empty window shows nothing, so nothing is
+   * `windowSize <= 0` → `[]` (an empty window shows nothing, so nothing is
    * already visible). Ordering matches {@link listRecentForScope} exactly —
    * `ts DESC, id DESC`; within one millisecond `id` is a random UUID, so the
    * tiebreak is arbitrary but CONSISTENT with what the reader displays, which
-   * is the only property the edge trigger needs.
+   * is the only property the edge trigger needs. Bounded by `windowSize`, so
+   * the caller parses at most one window's worth of payloads.
    */
-  latestVisibleForScopeAndName(
+  listVisibleForScopeAndName(
     project_slug: string,
     eventName: SystemEventName,
     windowSize: number,
-  ): PersistedSystemEvent | null {
-    if (!Number.isFinite(windowSize) || windowSize <= 0) return null
-    const row = this.db.get<SystemEventRow, [string, number, string]>(
+  ): PersistedSystemEvent[] {
+    if (!Number.isFinite(windowSize) || windowSize <= 0) return []
+    const rows = this.db.all<SystemEventRow, [string, number, string]>(
       `SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
          FROM (SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
                  FROM system_events
@@ -391,11 +405,10 @@ export class SystemEventsStore implements SystemEventSink {
                 ORDER BY ts DESC, id DESC
                 LIMIT ?)
         WHERE event_name = ?
-        ORDER BY ts DESC, id DESC
-        LIMIT 1`,
+        ORDER BY ts DESC, id DESC`,
       [project_slug, Math.floor(windowSize), eventName],
     )
-    return row === undefined || row === null ? null : rowToPersisted(row)
+    return rows.map((r) => rowToPersisted(r))
   }
 }
 

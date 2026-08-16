@@ -14,12 +14,12 @@ refuses to migrate the live instance's rows, the refusal was journalled with
 `project_slug` = the FALLBACK handle. Three facts make that row unreadable
 forever, and each was verified in the code rather than reasoned about:
 the refusal deliberately returns before the ledger write
-(`migrations/scope-rekey.ts:620-636`), so the next explicit boot takes the
-ledger-agrees fast path (`:585-594`) and never sweeps `system_events` back even
+(`migrations/scope-rekey.ts:641-657`), so the next explicit boot takes the
+ledger-agrees fast path (`:596-609`) and never sweeps `system_events` back even
 though it is a swept table (`:165`); and the owner's diagnostics feed is
 strictly `WHERE project_slug = ?` by design
-(`persistence/system-events.ts:310-322`, via
-`gateway/diagnostics/instance-sources.ts:90`). So the guard's one signal was
+(`persistence/system-events.ts:337-349`, via
+`gateway/diagnostics/instance-sources.ts:104`). So the guard's one signal was
 scoped to a handle no owner ever opens a page under — the same silent-failure
 class the guard exists to close.
 
@@ -181,6 +181,40 @@ to the documented FLOOR (the attempting handle), so the degraded outcome is
 exactly what shipped before this module existed. Same trade `shouldJournal`
 already makes one function away, and for the same reason: losing the narrowing
 costs a row of precision, losing the boot costs the instance.
+
+A later round found the edge trigger was still starvable, by a route neither
+this branch nor the review that added the trigger had a test for. The trigger
+compared the payload against the NEWEST row for its `(scope, event_name)` pair —
+and `credential_scope_orphaned` is written in TWO payload shapes under that one
+key: the direction refusal (an anonymous boot) and the ordinary ambiguous census
+(an explicit boot). A unit that intermittently loses its slug env alternates
+between them, so each shape saw the OTHER as the newest row and every boot wrote
+— unbounded, into a window that is 50 rows deep with no retention sweep behind
+it. Six alternating boots produced six rows; the same six now produce two.
+Making both branches edge-trigger, which was the previous round's fix, could not
+close it, because the hole was in the COMPARISON rather than in the coverage.
+`persistence/system-events.ts` `latestVisibleForScopeAndName` is therefore
+`listVisibleForScopeAndName` — it returns the matching rows inside the window
+instead of the newest one — and `isNewJournalState` asks whether this payload is
+already ANYWHERE on the page the owner is looking at. That is also the sentence
+the trigger always meant, it generalises to any third shape added later, and it
+keeps the window bound that makes a rotated-out row new information again.
+
+And the EXPLICIT owner-driven migration was journalling its refusal under the
+handle that asked (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`).
+That surface refuses ONLY when the handle is the anonymous fallback — that is
+the guard's whole condition — so the audit row for the one security-relevant
+outcome landed in exactly the unreadable place the boot half of this entry
+exists to fix, on a surface INVARIANTS #116 already claimed ("on ANY surface").
+It now resolves its scope through the same planner boot uses, with the same
+narrowing and the same floor, and keeps its two deliberate differences: it is
+not deduped, because a repeated owner ATTEMPT is what an audit trail is for, and
+it carries `surface: 'explicit_migrate'` so one query finds both rows and can
+still tell them apart. The invariant's opening sentence was absolute where the
+code had two lawful paths to the attempting handle; it now names that floor in
+the first sentence, because a claim of coverage the code does not have is the
+sentence the next reviewer trusts instead of reading the code.
+
 ## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
 
 The launcher now composes reflection guidance ONCE. `trident/inner-loop.ts`

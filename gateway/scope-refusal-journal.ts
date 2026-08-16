@@ -7,7 +7,7 @@
  * pull rows off an EXPLICIT handle. Its only durable, owner-visible signal is a
  * `system_events` row — and `system_events` is read back through
  * `listRecentForScope`, which is strictly `WHERE project_slug = ?` by design
- * (`persistence/system-events.ts:310-322`). So the row's SCOPE decides whether
+ * (`persistence/system-events.ts:337-349`). So the row's SCOPE decides whether
  * the warning is readable at all, and a refusal has more candidate scopes than
  * it has readers:
  *
@@ -16,7 +16,7 @@
  *     means "nobody told me who I am"; no owner opens a diagnostics page under
  *     it, and the refusal deliberately does not re-key the ledger, so the next
  *     explicit boot takes the ledger-agrees fast path
- *     (`migrations/scope-rekey.ts:585-594`) and never sweeps the row back. A row
+ *     (`migrations/scope-rekey.ts:596-609`) and never sweeps the row back. A row
  *     written there is `/dev/null` with a row id.
  *     BUT THE COINCIDENCE IS NOT THE ANONYMITY (Argus r2 blocker, 2026-08-16).
  *     An owner whose instance really IS called `dev` boots explicitly
@@ -69,9 +69,21 @@
  * once, years ago, before 50 other events pushed it off the page" — and the
  * warning is then suppressed FOREVER, which is a strictly worse and completely
  * silent version of the invisibility this module exists to remove. So the read
- * is `latestVisibleForScopeAndName(scope, event, DEFAULT_MAX_RECENT_EVENTS)`:
- * the newest matching row *inside the same window the feed returns*. Rotated
+ * is `listVisibleForScopeAndName(scope, event, DEFAULT_MAX_RECENT_EVENTS)`:
+ * the matching rows *inside the same window the feed returns*. Rotated
  * out ⇒ not visible ⇒ new information ⇒ written again.
+ *
+ * AND AGAINST THE WHOLE PAGE, NOT ITS LAST LINE (Argus r1 blocker on PR #322,
+ * 2026-08-16). `credential_scope_orphaned` carries TWO payload shapes under ONE
+ * `(scope, event_name)` key — this module's refusal and `gateway/index.ts`'s
+ * ordinary ambiguous census — so a box whose boots ALTERNATE between anonymous
+ * and explicit produces a newest row that differs from the payload every single
+ * time. Comparing only against the newest row, both branches then wrote on
+ * every boot and the 50-row window drained exactly as if there were no trigger
+ * at all; making both branches edge-trigger (the r2 fix) did not close it,
+ * because the hole is in the COMPARISON and not in the coverage.
+ * {@link isNewJournalState} therefore asks whether this payload is already
+ * ANYWHERE in the visible set. Two alternating shapes settle at two rows.
  *
  * AND THE READ IS BEST-EFFORT. {@link shouldJournal} owns the try/catch: this
  * runs on the boot path, one corrupt historical `payload_json` row makes the
@@ -113,14 +125,18 @@ function usable(value: string | null | undefined): string | null {
  * owner's gateway boots as. Only when it is absent (a first boot that never
  * completed the backfill) does this fall back to `onboarding_state`, the anchor
  * table the reconciler itself uses to answer the same question
- * (`migrations/scope-rekey.ts:597-605`).
+ * (`migrations/scope-rekey.ts:620-630`).
  *
  * NOTHING IS EXCLUDED BY STRING EQUALITY WITH THE BOOTING PROCESS. If the
  * ledger says this database is `dev`, then `dev` is the handle its owner reads
  * under and the refusal belongs there — even when the process that tripped the
  * guard also resolved to `dev`. The two facts are independent: `source` is what
- * says a boot is anonymous (`gateway/index.ts` `resolveOwnerSlugSourceFromConfig`),
- * and the credential guard arms on `source === 'fallback'` alone
+ * says a boot is anonymous — and that resolver LIVES in `config/index.ts`
+ * `resolveOwnerSlugSourceFromConfig` since #320, `gateway/index.ts` merely
+ * re-exports it, because defining it on the entry module put the entry into the
+ * Open composer's import graph. INVARIANTS #116(a) insists on that precise
+ * pointer for the same reason (Argus r1, 2026-08-16).
+ * The credential guard arms on `source === 'fallback'` alone
  * (`auth/credential-scope-reconcile.ts`), so this coincidence is REACHABLE —
  * an explicitly-`dev` instance whose credentials are frozen under an older
  * handle. Excluding it moved the only readable row to an unreadable scope
@@ -318,32 +334,62 @@ function sortKeysDeep(value: unknown): unknown {
 
 /**
  * EDGE-TRIGGERED: is this refusal a state the scope's VISIBLE feed does not
- * already end with? `latest` is the newest row for that `(scope, event)` pair
- * INSIDE the diagnostics window — see {@link shouldJournal}, which is how
- * production reads it.
+ * ALREADY CONTAIN? `visible` is every row for that `(scope, event)` pair inside
+ * the diagnostics window — see {@link shouldJournal}, which is how production
+ * reads it.
  *
  * Twenty-five anonymous boots are twenty-five identical refusals, and the
  * owner's window is 50 rows deep with no retention sweep behind it — writing
  * every one of them evicts the events the report exists to show. A CHANGE in the
  * refusal (more rows stranded, a different attempting handle) is new
  * information and does get a row.
+ *
+ * THE TEST IS MEMBERSHIP, NOT "IS IT THE LATEST" (Argus r1 blocker on PR #322,
+ * 2026-08-16). `credential_scope_orphaned` is written in TWO payload shapes
+ * under ONE `(scope, event_name)` key — the direction refusal
+ * ({@link planCredentialRefusalRows}) and the ordinary ambiguous census
+ * (`gateway/index.ts`). A box that alternates between them — an anonymous boot,
+ * then an explicit one, then anonymous again, which is what a unit that
+ * intermittently loses its slug env actually does — makes the NEWEST row differ
+ * from the payload on every single boot, so a latest-only comparison writes
+ * every boot and drains the 50-row window regardless. Both branches
+ * edge-triggering does not help; the trigger itself has to look at the page
+ * rather than at its last line. Against the whole visible set the second
+ * occurrence of either shape is already something the owner is looking at, and
+ * the feed settles at one row per distinct shape.
+ *
+ * It also generalises: any future third shape on this event key is covered
+ * without anyone having to notice it exists.
+ *
+ * The window bound is what keeps this recoverable — a row that rotated out is
+ * not visible, so it is new information again (see
+ * `persistence/system-events.ts` `listVisibleForScopeAndName`).
  */
 export function isNewJournalState(
-  latest: PersistedSystemEvent | null,
+  visible: readonly PersistedSystemEvent[],
   payload: Record<string, unknown>,
 ): boolean {
-  if (latest === null) return true
-  return canonical(latest.payload) !== canonical(payload)
+  const wanted = canonical(payload)
+  return !visible.some((row) => canonical(row.payload) === wanted)
 }
 
 /**
- * The production form of the edge trigger: read the newest VISIBLE row for this
+ * The production form of the edge trigger: read the VISIBLE rows for this
  * `(scope, event)` pair, and decide.
  *
- * `readLatest` is the caller's bound
- * `SystemEventsStore.latestVisibleForScopeAndName(scope, event,
+ * `readVisible` is the caller's bound
+ * `SystemEventsStore.listVisibleForScopeAndName(scope, event,
  * DEFAULT_MAX_RECENT_EVENTS)` — window-bounded, because suppression is only
  * ever "the owner is already looking at this".
+ *
+ * THE WINDOW ARGUMENT MUST BE THE SAME ONE THE FEED USES.
+ * `DEFAULT_MAX_RECENT_EVENTS` is the diagnostics default
+ * (`gateway/diagnostics/instance-sources.ts`) and the coupling is the property,
+ * not the number: suppressing against a window WIDER than the feed's suppresses
+ * a warning the owner cannot see, which is this module's own failure mode one
+ * level in. `gateway/__tests__/scope-refusal-journal.test.ts` pins the two
+ * constants equal so a change to either is a red test rather than a silent
+ * re-introduction (Argus r1, 2026-08-16).
  *
  * A THROWN READ MEANS WRITE. This runs synchronously on the boot path, before
  * the boot's own failure cleanup exists, and the reader deserialises stored
@@ -353,14 +399,14 @@ export function isNewJournalState(
  * losing the boot costs the instance.
  */
 export function shouldJournal(
-  readLatest: () => PersistedSystemEvent | null,
+  readVisible: () => readonly PersistedSystemEvent[],
   payload: Record<string, unknown>,
 ): boolean {
-  let latest: PersistedSystemEvent | null = null
+  let visible: readonly PersistedSystemEvent[]
   try {
-    latest = readLatest()
+    visible = readVisible()
   } catch {
     return true
   }
-  return isNewJournalState(latest, payload)
+  return isNewJournalState(visible, payload)
 }

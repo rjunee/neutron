@@ -20,7 +20,11 @@
 import { expect, test } from 'bun:test'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import type { PersistedSystemEvent } from '@neutronai/persistence/system-events.ts'
+import {
+  SystemEventsStore,
+  type PersistedSystemEvent,
+} from '@neutronai/persistence/system-events.ts'
+import { DEFAULT_MAX_RECENT_EVENTS } from '../diagnostics/instance-sources.ts'
 
 import {
   isNewJournalState,
@@ -200,8 +204,75 @@ test('one row per readable scope, each carrying ONLY its own handle and its own 
   expect(JSON.stringify(rows[0]!.payload)).not.toContain('gamma')
   expect(JSON.stringify(rows[1]!.payload)).not.toContain('alpha')
   // And it does not lose the fact that there IS more: a count, never a name.
-  expect(rows[1]!.payload['other_stranded_handles']).toBe(1)
-  expect(rows[1]!.payload['other_stranded_rows']).toBe(4)
+  // THE SECOND ROW IS ASSERTED IN FULL, not just on its `other_*` counts (Argus
+  // r1, 2026-08-16). With only the first row pinned exactly, a mutant that
+  // computed `own` ONCE and reused the first scope's count for every later row
+  // survived the suite — `gamma` would report 4 stranded rows of its own, which
+  // is `alpha`'s number, and nothing was watching.
+  expect(rows[1]!.payload).toEqual({
+    stranded_slug: 'gamma',
+    stranded_rows: 11,
+    other_stranded_handles: 1,
+    other_stranded_rows: 4,
+    attempted_by_slug: FALLBACK,
+  })
+})
+
+test('a suppression window WIDER than the feed hides the warning — why the two are one constant (Argus r1)', () => {
+  // The coupling made executable. Boot suppresses against
+  // `DEFAULT_MAX_RECENT_EVENTS` (`gateway/index.ts`) and the owner's feed is
+  // built with the SAME constant (`gateway/diagnostics/instance-sources.ts` —
+  // neither production caller, `open/composer.ts` nor
+  // `open/diagnostics-cli-impl.ts`, passes `maxRecentEvents`). Nothing in the
+  // type system connects them, so this pins the CONSEQUENCE of letting them
+  // diverge rather than the number: suppress against a window wider than the
+  // feed and a row the owner cannot see counts as one he is already looking at,
+  // which is this module's own failure mode one level in.
+  const db = freshDb()
+  try {
+    const store = new SystemEventsStore({ db })
+    const payload = { stranded_slug: 'alpha', stranded_rows: 4 }
+    db.runSync(
+      `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+       VALUES ('refusal', 1, 'warn', 'gateway', 'instance_scope_rekey_refused', ?, 'alpha', NULL)`,
+      [JSON.stringify(payload)],
+    )
+    for (let i = 0; i < 3; i++) {
+      db.runSync(
+        `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+         VALUES (?, ?, 'warn', 'gateway', 'cron_job_error', '{}', 'alpha', NULL)`,
+        [`filler-${i}`, 100 + i],
+      )
+    }
+
+    // A feed NARROWED to 2 rows no longer shows the refusal…
+    const narrowed = store.listRecentForScope('alpha', 2)
+    expect(narrowed.some((e) => e.event === 'instance_scope_rekey_refused')).toBe(false)
+    // …yet a suppression window of `DEFAULT_MAX_RECENT_EVENTS` still finds it and
+    // would skip the write. THAT is the invisible suppression, reproduced.
+    expect(
+      shouldJournal(
+        () =>
+          store.listVisibleForScopeAndName(
+            'alpha',
+            'instance_scope_rekey_refused',
+            DEFAULT_MAX_RECENT_EVENTS,
+          ),
+        payload,
+      ),
+    ).toBe(false)
+    // CONTROL — matched to the narrowed feed, the same call writes, which proves
+    // the `false` above is the WINDOW MISMATCH and not a payload that never
+    // matched anything.
+    expect(
+      shouldJournal(
+        () => store.listVisibleForScopeAndName('alpha', 'instance_scope_rekey_refused', 2),
+        payload,
+      ),
+    ).toBe(true)
+  } finally {
+    db.close()
+  }
 })
 
 test('no readable scope recorded at all → the attempting handle, never a stranded key', () => {
@@ -319,18 +390,20 @@ test('an unchanged repeat is NOT re-journalled — 25 anonymous boots cannot evi
     stranded_rows_by_key: { alpha: 4 },
     attempted_by_slug: FALLBACK,
   })[0]!.payload
-  expect(isNewJournalState(null, payload)).toBe(true)
-  expect(isNewJournalState(persisted(payload), payload)).toBe(false)
+  expect(isNewJournalState([], payload)).toBe(true)
+  expect(isNewJournalState([persisted(payload)], payload)).toBe(false)
   // Key order must not matter — the stored row comes back through JSON.parse.
   expect(
     isNewJournalState(
-      persisted({
-        attempted_by_slug: FALLBACK,
-        other_stranded_rows: 0,
-        other_stranded_handles: 0,
-        stranded_rows: 4,
-        stranded_slug: 'alpha',
-      }),
+      [
+        persisted({
+          attempted_by_slug: FALLBACK,
+          other_stranded_rows: 0,
+          other_stranded_handles: 0,
+          stranded_rows: 4,
+          stranded_slug: 'alpha',
+        }),
+      ],
       payload,
     ),
   ).toBe(false)
@@ -344,11 +417,14 @@ test('a change INSIDE a nested payload object is a change (Argus r2)', () => {
   // shape (`orphan_counts`), so this is not hypothetical.
   const before = { refused_direction: true, orphan_counts: [{ table: 'secrets', rows: 1 }] }
   const after = { refused_direction: true, orphan_counts: [{ table: 'secrets', rows: 9 }] }
-  expect(isNewJournalState(persisted(before), after)).toBe(true)
-  expect(isNewJournalState(persisted(after), after)).toBe(false)
+  expect(isNewJournalState([persisted(before)], after)).toBe(true)
+  expect(isNewJournalState([persisted(after)], after)).toBe(false)
   // Nested KEY ORDER still must not matter — the stored row is a JSON round-trip.
   expect(
-    isNewJournalState(persisted({ orphan_counts: [{ rows: 9, table: 'secrets' }], refused_direction: true }), after),
+    isNewJournalState(
+      [persisted({ orphan_counts: [{ rows: 9, table: 'secrets' }], refused_direction: true })],
+      after,
+    ),
   ).toBe(false)
 })
 
@@ -363,8 +439,59 @@ test('shouldJournal treats a THROWN read as "not visible" and writes (Argus r2)'
     }, payload),
   ).toBe(true)
   // And with a working read it is still the edge trigger.
-  expect(shouldJournal(() => null, payload)).toBe(true)
-  expect(shouldJournal(() => persisted(payload), payload)).toBe(false)
+  expect(shouldJournal(() => [], payload)).toBe(true)
+  expect(shouldJournal(() => [persisted(payload)], payload)).toBe(false)
+})
+
+test('THE ALTERNATION BLOCKER: two shapes under one event key settle, they do not accumulate (Argus r1)', () => {
+  // `credential_scope_orphaned` is written in TWO payload shapes under ONE
+  // `(scope, event_name)` key: the direction REFUSAL (an anonymous boot) and the
+  // ordinary AMBIGUOUS census (an explicit boot). A unit that intermittently
+  // loses its slug env alternates between them.
+  //
+  // Compared against the NEWEST row only, each shape saw the other one as the
+  // latest and every boot wrote — {ambiguous_after_refused: true,
+  // refused_after_ambiguous: true} — so the trigger suppressed nothing and the
+  // owner's 50-row window drained exactly as if it did not exist. Making both
+  // branches edge-trigger (the r2 fix) did not close it: the hole is in the
+  // COMPARISON, not in the coverage.
+  const refused = planCredentialRefusalRows({
+    owner_scopes: ['alpha'],
+    orphan_counts: [{ table: 'secrets', handle: 'beta', rows: 2 }],
+    attempted_by_slug: FALLBACK,
+  })[0]!.payload
+  const ambiguous = {
+    from: ['beta'],
+    orphan_counts: [{ table: 'secrets', handle: 'beta', rows: 2 }],
+    reason: 'ambiguous_census',
+  }
+
+  // Simulate the alternating feed, newest first, exactly as the reader returns it.
+  const visible: PersistedSystemEvent[] = []
+  const write = (payload: Record<string, unknown>): boolean => {
+    const isNew = shouldJournal(() => visible, payload)
+    if (isNew) visible.unshift(persisted(payload))
+    return isNew
+  }
+
+  expect(write(refused)).toBe(true) // boot 1: anonymous
+  expect(write(ambiguous)).toBe(true) // boot 2: explicit — genuinely new
+  // THE ASSERTION: from here on, alternating forever adds nothing.
+  for (let i = 0; i < 12; i++) {
+    expect(write(refused)).toBe(false)
+    expect(write(ambiguous)).toBe(false)
+  }
+  expect(visible).toHaveLength(2)
+
+  // CONTROL — the same feed still admits a CHANGED refusal, so the `false`s
+  // above are suppression of a repeat and not a trigger that stopped firing.
+  const grown = planCredentialRefusalRows({
+    owner_scopes: ['alpha'],
+    orphan_counts: [{ table: 'secrets', handle: 'beta', rows: 9 }],
+    attempted_by_slug: FALLBACK,
+  })[0]!.payload
+  expect(write(grown)).toBe(true)
+  expect(visible).toHaveLength(3)
 })
 
 test('a CHANGED refusal is new information and does get a row', () => {
@@ -380,5 +507,5 @@ test('a CHANGED refusal is new information and does get a row', () => {
     stranded_rows_by_key: { alpha: 9 },
     attempted_by_slug: FALLBACK,
   })[0]!.payload
-  expect(isNewJournalState(persisted(before), after)).toBe(true)
+  expect(isNewJournalState([persisted(before)], after)).toBe(true)
 })
