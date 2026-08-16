@@ -425,7 +425,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // "everything is dead". A throw here degrades to "credentials stay orphaned",
   // which the surface reports; no cleanup cascade runs.
   try {
-    const credentialScope = await reconcileCredentialScope(db, project_slug)
+    // Same DIRECTION input as the #451 reconciler above, and for the same
+    // reason: these are two sweeps over two different table sets, so the guard
+    // has to be given to both or the anonymous boot simply takes the rows the
+    // other one refused.
+    const credentialScope = await reconcileCredentialScope(db, project_slug, {
+      currentSlugIsFallback: slugResolution.source === 'fallback',
+    })
     if (credentialScope.action === 'migrated') {
       log.warn('credential_scope_migrated', {
         to: credentialScope.boot_handle,

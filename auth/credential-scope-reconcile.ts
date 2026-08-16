@@ -179,7 +179,27 @@ export type CredentialScopeReconcileResult =
       boot_handle: string
       stale_handles: string[]
       orphan_counts: CredentialScopeOrphanCount[]
+      /**
+       * Present only when the DIRECTION guard refused: the boot handle was the
+       * fallback and the rows sit under an explicit one. The counts are
+       * identical to any other orphan report — this flag exists so the log line
+       * says WHY nothing moved, because "ambiguous census" and "anonymous
+       * process" are different problems with different fixes (fix the data vs
+       * set the handle).
+       */
+      refused_direction?: true
     }
+
+/** Options for one boot-time credential-scope reconciliation. */
+export interface CredentialScopeReconcileOptions {
+  /**
+   * True when the boot handle is the bare fallback — env/config absent, not
+   * explicitly set. A fallback identity may never pull rows off an explicit
+   * handle. Mirrors `ReconcileInstanceScopeOptions.currentSlugIsFallback` in
+   * `migrations/scope-rekey.ts`; both are fed from the same `slugResolution`.
+   */
+  currentSlugIsFallback?: boolean
+}
 
 /**
  * What one EXPLICIT (owner-driven) migration did. Like the boot result, this
@@ -363,11 +383,37 @@ export function listOrphanedSecretSlots(
 export async function reconcileCredentialScope(
   db: ProjectDb,
   boot_handle: string,
+  options: CredentialScopeReconcileOptions = {},
 ): Promise<CredentialScopeReconcileResult> {
   const census = censusCredentialScopeTables(db, boot_handle)
   const { stale_handles } = census
 
   if (stale_handles.length === 0) return { action: 'noop' }
+
+  // DIRECTION GUARD — the same one `migrations/scope-rekey.ts` carries, and it
+  // has to be repeated here because this sweep is a SECOND reconciler over a
+  // DIFFERENT set of tables. Closing the direction on one of them closes
+  // nothing: the unambiguous precondition below is satisfied EXACTLY by the
+  // dangerous case (rows under the live handle, none under the anonymous one),
+  // so an unconfigured boot would sail through it and take the credentials the
+  // other guard just refused to take. Measured on this branch before the guard
+  // existed: with an explicit handle seeded and the slug then unset, every
+  // credential row moved onto the fallback.
+  //
+  // A fallback handle means "nobody told me who I am", which is never a
+  // licence to claim someone else's rows. Zero writes; the orphan report is
+  // already the honest description of what this process can see, and the
+  // integrations surface renders it as "scoped to a previous handle" rather
+  // than the "not connected" that sent the owner hunting for a lost token.
+  if (options.currentSlugIsFallback === true) {
+    return {
+      action: 'orphaned',
+      boot_handle,
+      stale_handles,
+      orphan_counts: orphanCountsOf(census),
+      refused_direction: true,
+    }
+  }
 
   // THE UNAMBIGUOUS PRECONDITION — all three clauses, none optional (see the
   // rotation hazard in the module header): exactly one stale handle, it is not

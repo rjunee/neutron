@@ -341,3 +341,53 @@ test('(d) POSITIVE CONTROL: the leak helper flags a deliberately-poisoned payloa
   expect(leaks).toContain('ghp-orphaned-github-token')
   expect(leaks).toContain('ct_b64')
 })
+
+// ── the DIRECTION guard ───────────────────────────────────────────────────
+
+test('a fallback boot handle may never pull rows off an explicit one', async () => {
+  // `migrations/scope-rekey.ts` already refuses this, and that is exactly why
+  // the case is worth its own test HERE: this is a second reconciler over a
+  // different set of tables, so the other guard protects none of these rows.
+  // Before the guard was added to this module, the merge of the two branches
+  // moved every credential row onto the anonymous handle — and the shape of
+  // the bug is that the UNAMBIGUOUS precondition below is satisfied precisely
+  // by the dangerous case: all the rows under the live handle, none under the
+  // fallback. The safest-looking census is the theft.
+  const store = buildStore()
+  const { id: secretId } = await store.put({
+    owner_handle: asOwnerHandle('live-owner'),
+    kind: 'byo_api_key',
+    label: 'anthropic:prod',
+    plaintext: 'the-live-token',
+  })
+  await seedProjectCredential('live-owner', 'apify', store.encryptPlaintext('apify-token'))
+  await seedApiKey('live-owner', 'anthropic', 'prod', secretId)
+
+  const result = await reconcileCredentialScope(db, 'dev', { currentSlugIsFallback: true })
+
+  expect(result.action).toBe('orphaned')
+  if (result.action !== 'orphaned') throw new Error('unreachable')
+  expect(result.refused_direction).toBe(true)
+  expect(result.stale_handles).toEqual(['live-owner'])
+
+  // Nothing moved: the rows are still readable under the handle that owns them,
+  // and the anonymous process can still see nothing.
+  expect(countRows('secrets', 'project_slug', 'live-owner')).toBe(1)
+  expect(countRows('secrets', 'project_slug', 'dev')).toBe(0)
+  expect(countRows('project_credentials', 'owner_slug', 'live-owner')).toBe(1)
+  expect(countRows('project_credentials', 'owner_slug', 'dev')).toBe(0)
+  expect(
+    await store.get({
+      owner_handle: asOwnerHandle('live-owner'),
+      kind: 'byo_api_key',
+      label: 'anthropic:prod',
+    }),
+  ).toBe('the-live-token')
+
+  // POSITIVE CONTROL, per this file's own rule: prove the fixture is one the
+  // reconciler WOULD have moved, so the assertions above are the guard doing
+  // its job rather than a census that was never actionable.
+  const unguarded = await reconcileCredentialScope(db, 'dev')
+  expect(unguarded.action).toBe('migrated')
+  expect(countRows('secrets', 'project_slug', 'dev')).toBe(1)
+})
