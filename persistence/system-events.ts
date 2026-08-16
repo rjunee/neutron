@@ -118,7 +118,25 @@ export type SystemEventName =
   // migrate, because the boot slug was the bare `'dev'` FALLBACK and the
   // database already carried rows under an explicit handle. Nothing moved; the
   // durable record is that an anonymous process was pointed at a real
-  // instance's database. Emitted at most once per boot.
+  // instance's database.
+  //
+  // SCOPE (decision 2026-08-16, INVARIANTS #116(b)): `project_slug` is a handle
+  // an owner can actually READ this database's feed under — the ledger's
+  // handle, or `onboarding_state`'s when the ledger is absent. NOT the anonymous
+  // fallback that attempted the move, and NOT (for the credential half) the
+  // frozen handle the rows are stuck under, since that handle's divergence from
+  // the live one IS the condition being reported. `listRecentForScope` below is
+  // strictly `WHERE project_slug = ?`, so any other choice is unreadable
+  // forever. One row per readable scope, each NARROWED to that scope — its own
+  // handle and its own counts; every other handle is reduced to a count, never a
+  // name, because a foreign key in an instance-scoped feed is exactly the
+  // cross-scope disclosure that predicate exists to prevent. The attempting
+  // handle rides in `attempted_by_slug`. EDGE-TRIGGERED against the VISIBLE
+  // window: an unchanged repeat the owner can still see is not re-journalled
+  // (`latestVisibleForScopeAndName` + `shouldJournal`), so a repeating anonymous
+  // boot cannot starve the 50-row window — while a repeat that has rotated OUT
+  // of it is written again, because the owner can no longer see it. The same
+  // rule applies to `credential_scope_orphaned` on BOTH its branches.
   | 'instance_scope_rekey_refused'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
@@ -328,6 +346,56 @@ export class SystemEventsStore implements SystemEventSink {
       [project_slug, n],
     )
     return rows.map((r) => rowToPersisted(r))
+  }
+
+  /**
+   * Read-only: the newest row for one `(project_slug, event_name)` pair that is
+   * still INSIDE the reader's window — i.e. among the newest `windowSize` rows
+   * {@link listRecentForScope} would return for that scope — or `null`.
+   *
+   * This is the RISING-EDGE read for a repeating boot-time condition. A degrade
+   * that re-fires unchanged on every boot (the scope-direction refusal: an
+   * anonymous process pointed at a live database boots as often as someone runs
+   * it) would otherwise write one row per boot into a feed that is 50 rows deep
+   * with no retention sweep, evicting every other degrade event — a warning that
+   * starves the report it is trying to appear in. Emitters compare the latest
+   * payload against the one they are about to write and skip an exact repeat
+   * (`gateway/scope-refusal-journal.ts` `shouldJournal`).
+   *
+   * THE WINDOW IS THE POINT, and it is why this is not a plain `LIMIT 1` over
+   * the table (which is what it was until Argus r2, 2026-08-16). Suppression is
+   * only ever justified by "the owner is already looking at this row".
+   * `system_events` has NO retention sweep, so a `LIMIT 1` over unbounded
+   * history keeps matching a row that rotated out of the feed years ago and
+   * suppresses the warning PERMANENTLY — a silent, unrecoverable version of the
+   * invisibility the caller exists to fix. Bounded to the same window the
+   * reader uses, a row the owner can no longer see is new information again.
+   *
+   * `windowSize <= 0` → `null` (an empty window shows nothing, so nothing is
+   * already visible). Ordering matches {@link listRecentForScope} exactly —
+   * `ts DESC, id DESC`; within one millisecond `id` is a random UUID, so the
+   * tiebreak is arbitrary but CONSISTENT with what the reader displays, which
+   * is the only property the edge trigger needs.
+   */
+  latestVisibleForScopeAndName(
+    project_slug: string,
+    eventName: SystemEventName,
+    windowSize: number,
+  ): PersistedSystemEvent | null {
+    if (!Number.isFinite(windowSize) || windowSize <= 0) return null
+    const row = this.db.get<SystemEventRow, [string, number, string]>(
+      `SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
+         FROM (SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
+                 FROM system_events
+                WHERE project_slug = ?
+                ORDER BY ts DESC, id DESC
+                LIMIT ?)
+        WHERE event_name = ?
+        ORDER BY ts DESC, id DESC
+        LIMIT 1`,
+      [project_slug, Math.floor(windowSize), eventName],
+    )
+    return row === undefined || row === null ? null : rowToPersisted(row)
   }
 }
 

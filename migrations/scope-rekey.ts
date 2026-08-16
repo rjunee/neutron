@@ -325,7 +325,18 @@ export interface ScopeReconcileResult {
    * fallback and the DB already carries rows under an explicit handle. Nothing
    * was written.
    */
-  refused_direction?: { stranded_keys: string[]; stranded_rows: number }
+  refused_direction?: {
+    stranded_keys: string[]
+    stranded_rows: number
+    /**
+     * The same total, BROKEN DOWN by stranded handle. The journal writes one
+     * row per readable scope and each row must report ITS OWN handle's numbers
+     * — an aggregate in every row discloses (and mis-attributes) one scope's
+     * volume into another's diagnostics feed (Argus r1, 2026-08-16). Keys are
+     * exactly `stranded_keys`.
+     */
+    stranded_rows_by_key: Record<string, number>
+  }
 }
 
 export interface ReconcileInstanceScopeOptions {
@@ -628,7 +639,8 @@ function reconcileOnRawDatabase(
   // must never pull the live instance's rows onto itself. No move, no
   // snapshot, no ledger write; the boot proceeds.
   if (options.currentSlugIsFallback === true && staleKeys.length > 0) {
-    const stranded_rows = countRowsUnderKeys(db, staleKeys)
+    const stranded_rows_by_key = countRowsByKey(db, staleKeys)
+    const stranded_rows = Object.values(stranded_rows_by_key).reduce((a, n) => a + n, 0)
     log.warn('scope_rekey_refused_fallback_direction', {
       fallback_slug: current_slug,
       stranded_keys: staleKeys.join(','),
@@ -641,7 +653,7 @@ function reconcileOnRawDatabase(
       snapshot_path: null,
       moved_total: 0,
       dropped_total: 0,
-      refused_direction: { stranded_keys: staleKeys, stranded_rows },
+      refused_direction: { stranded_keys: staleKeys, stranded_rows, stranded_rows_by_key },
     }
   }
 
@@ -717,16 +729,31 @@ function reconcileOnRawDatabase(
 }
 
 /**
- * How many rows sit under `keys`, across every swept `(table, column)`. Used
- * ONLY by the direction guard, to put a number on the refusal line — a count is
- * what turns "something was stranded" into evidence an owner can act on. Runs
- * on the refusal path alone, so the per-column scan costs nothing on a normal
- * boot.
+ * How many rows sit under EACH of `keys`, across every swept `(table, column)`.
+ * Used ONLY by the direction guard, to put a number on the refusal line — a
+ * count is what turns "something was stranded" into evidence an owner can act
+ * on. PER KEY rather than one total (2026-08-16): the journal emits one row per
+ * readable scope, and a row that reports the aggregate hands scope A a number
+ * that is mostly scope B's. Runs on the refusal path alone, so the per-column
+ * scan costs nothing on a normal boot.
+ *
+ * `system_events` IS swept (a rename must carry the journal forward) but is
+ * excluded from THIS count, and the exclusion is load-bearing rather than
+ * cosmetic: the number computed here is written INTO `system_events`, under one
+ * of these very keys. Counting it makes the refusal self-referential — every
+ * anonymous boot reports a larger number than the last purely because the
+ * previous boot's warning is now one of the rows it is counting. Measured on
+ * 2026-08-16: 1 → 3 → 4 across three identical boots, which also defeats the
+ * edge-triggered journal (`gateway/scope-refusal-journal.ts`), since a payload
+ * that changes every time is never a repeat. "Rows at stake" means the owner's
+ * DATA that would have been taken, not the warning about it.
  */
-function countRowsUnderKeys(db: Database, keys: string[]): number {
-  let total = 0
+function countRowsByKey(db: Database, keys: string[]): Record<string, number> {
+  const out: Record<string, number> = {}
   for (const key of keys) {
+    let total = 0
     for (const { table, column } of SCOPE_SWEEP_COLUMNS) {
+      if (table === 'system_events') continue
       const t = assertIdent(table, 'table')
       const c = assertIdent(column, 'column')
       const row = db
@@ -734,6 +761,7 @@ function countRowsUnderKeys(db: Database, keys: string[]): number {
         .get(key)
       total += row?.n ?? 0
     }
+    out[key] = total
   }
-  return total
+  return out
 }

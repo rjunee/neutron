@@ -13,6 +13,17 @@ import {
   SystemEventsStore,
   pushSystemEventSink,
 } from '@neutronai/persistence/index.ts'
+import {
+  planCredentialRefusalRows,
+  planInstanceRefusalRows,
+  readOwnerReadableScopes,
+  shouldJournal,
+} from './scope-refusal-journal.ts'
+// The journal's edge trigger is measured against the SAME window the owner's
+// diagnostics feed returns, so the constant is imported rather than restated —
+// a dedup bounded to a different window than the reader either suppresses rows
+// the owner cannot see or writes rows he can (Argus r2, 2026-08-16).
+import { DEFAULT_MAX_RECENT_EVENTS } from './diagnostics/instance-sources.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
@@ -388,22 +399,73 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // the wrong name against someone else's database, and that must be visible
   // without anyone having gone looking — the expensive part of this class of bug
   // is that the symptom surfaces three layers away as "not connected".
+  //
+  // WHICH SCOPE THE ROW BELONGS TO (decision 2026-08-16, INVARIANTS #116(b)).
+  // The owner can only ever read ONE scope — the diagnostics feed is strictly
+  // `WHERE project_slug = ?` (persistence/system-events.ts, deliberately so) —
+  // and the handle this process is booting under is not it. Scoped to the
+  // attempting handle the row is unreadable FOREVER: the fallback handle is
+  // anonymous by construction, nobody opens a diagnostics page under it, and the
+  // refusal also never re-keys the ledger, so the next explicit boot takes the
+  // ledger-agrees fast path (migrations/scope-rekey.ts) and never sweeps the row
+  // back. The guard's only observable signal would be invisible to exactly the
+  // instance it protects — the silent-failure class the guard exists to close.
+  //
+  // So it is journalled under the handles this database records as its OWN
+  // (ledger first, `onboarding_state` when the ledger is absent), one narrowed
+  // row each, edge-triggered. Note that "its own" is decided by the EVIDENCE in
+  // those tables and not by string-inequality with `project_slug`: an owner
+  // whose instance really is called `dev` reads under `dev`, and dropping that
+  // scope because the booting process resolved to the same string moved the row
+  // to an unreadable one (Argus r2, 2026-08-16). All of that reasoning —
+  // including why a foreign handle's NAME may not appear in another scope's row,
+  // and why a repeat is not re-written — lives in `./scope-refusal-journal.ts`.
+  // Computed ONCE here and shared with the credential reconciler below, which
+  // needs the same answer and must not disagree with this one.
+  // BEST-EFFORT, and that is load-bearing at THIS position: `bootFailureCleanup`
+  // is not declared until far below, so a throw out of these two SELECTs would
+  // escape `boot()` with the DB open and this boot's sink still on the ambient
+  // stack — the exact half-open boot the hand-rolled guards above exist to
+  // prevent. `readOwnerReadableScopes` degrades to the documented FLOOR instead
+  // (see `./scope-refusal-journal.ts`), which is what shipped before this module.
+  let ownerScopesMemo: string[] | null = null
+  const ownerReadableScopes = (): string[] => (ownerScopesMemo ??= readOwnerReadableScopes(db))
   if (scopeReconcile.refused_direction !== undefined) {
+    const refusal = scopeReconcile.refused_direction
     log.warn('instance_scope_rekey_refused', {
       current_slug: scopeReconcile.current_slug,
-      stranded_keys: scopeReconcile.refused_direction.stranded_keys.join(','),
-      stranded_rows: scopeReconcile.refused_direction.stranded_rows,
+      stranded_keys: refusal.stranded_keys.join(','),
+      stranded_rows: refusal.stranded_rows,
     })
-    fireAndForget(
-      'gateway.scope_rekey_refused_journal',
-      systemEventSink.record({
-        event: 'instance_scope_rekey_refused',
-        module: 'gateway',
-        level: 'warn',
-        project_slug: scopeReconcile.current_slug,
-        payload: scopeReconcile.refused_direction,
-      }),
-    )
+    for (const row of planInstanceRefusalRows({
+      owner_scopes: ownerReadableScopes(),
+      stranded_keys: refusal.stranded_keys,
+      stranded_rows_by_key: refusal.stranded_rows_by_key,
+      attempted_by_slug: scopeReconcile.current_slug,
+    })) {
+      if (
+        !shouldJournal(
+          () =>
+            systemEventSink.latestVisibleForScopeAndName(
+              row.scope,
+              'instance_scope_rekey_refused',
+              DEFAULT_MAX_RECENT_EVENTS,
+            ),
+          row.payload,
+        )
+      )
+        continue
+      fireAndForget(
+        'gateway.scope_rekey_refused_journal',
+        systemEventSink.record({
+          event: 'instance_scope_rekey_refused',
+          module: 'gateway',
+          level: 'warn',
+          project_slug: row.scope,
+          payload: row.payload,
+        }),
+      )
+    }
   }
 
   // CREDENTIAL SCOPE RECONCILIATION (card 2026-08-14) — the OTHER half of the
@@ -468,23 +530,89 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
             ? 'fallback_boot_handle_refused_direction'
             : 'ambiguous_census',
       })
-      fireAndForget(
-        'gateway.credential_scope_journal',
-        systemEventSink.record({
-          event: 'credential_scope_orphaned',
-          module: 'gateway',
-          level: 'warn',
-          project_slug,
-          payload: {
-            from: credentialScope.stale_handles,
-            orphan_counts: credentialScope.orphan_counts,
-            reason:
-              credentialScope.refused_direction === true
-                ? 'fallback_boot_handle_refused_direction'
-                : 'ambiguous_census',
-          },
-        }),
-      )
+      // Same scope decision as the re-key refusal above (INVARIANTS #116(b)),
+      // and it has to be repeated here for the same reason the guard itself is:
+      // this is a SECOND reconciler over a DIFFERENT table set, so scoping one
+      // of them readably scopes nothing. TWO CASES, deliberately different:
+      //   - refused by DIRECTION → `project_slug` is the anonymous fallback and
+      //     no owner can ever read it, so the row goes under the handles this
+      //     database records as its own. Note it does NOT go under the STALE
+      //     credential handles: those are FROZEN owner handles
+      //     (auth/secrets-store.ts), and the reconciler's whole premise is that
+      //     the frozen handle has DIVERGED from the live one — scoping the
+      //     warning there is the same invisibility in a different costume
+      //     (Argus r1 blocker, 2026-08-16).
+      //   - ordinary AMBIGUOUS orphan → the boot handle IS the explicit, live
+      //     handle whose integrations surface reports it. Scope unchanged — but
+      //     it is edge-triggered too (Argus r2, 2026-08-16). An unconditional
+      //     write here lands under the SAME `(scope, event_name)` key the
+      //     refused branch dedups on, so a box that alternates between the two
+      //     shapes writes a row every boot and defeats the whole trigger: the
+      //     newest row never matches the payload about to be written. Both
+      //     branches edge-trigger, or neither does.
+      if (credentialScope.refused_direction === true) {
+        for (const row of planCredentialRefusalRows({
+          owner_scopes: ownerReadableScopes(),
+          orphan_counts: credentialScope.orphan_counts,
+          attempted_by_slug: project_slug,
+        })) {
+          if (
+            !shouldJournal(
+              () =>
+                systemEventSink.latestVisibleForScopeAndName(
+                  row.scope,
+                  'credential_scope_orphaned',
+                  DEFAULT_MAX_RECENT_EVENTS,
+                ),
+              row.payload,
+            )
+          )
+            continue
+          fireAndForget(
+            'gateway.credential_scope_journal',
+            systemEventSink.record({
+              event: 'credential_scope_orphaned',
+              module: 'gateway',
+              level: 'warn',
+              project_slug: row.scope,
+              payload: row.payload,
+            }),
+          )
+        }
+      } else {
+        // `reason` rides the PAYLOAD, not just the log line (#320): the two
+        // situations need opposite operator responses and rendered identically
+        // without it. It is also inside the value `shouldJournal` compares, so
+        // a box that flips between the two shapes re-journals rather than
+        // suppressing the second one as a duplicate of the first.
+        const payload: Record<string, unknown> = {
+          from: credentialScope.stale_handles,
+          orphan_counts: credentialScope.orphan_counts,
+          reason: 'ambiguous_census',
+        }
+        if (
+          shouldJournal(
+            () =>
+              systemEventSink.latestVisibleForScopeAndName(
+                project_slug,
+                'credential_scope_orphaned',
+                DEFAULT_MAX_RECENT_EVENTS,
+              ),
+            payload,
+          )
+        ) {
+          fireAndForget(
+            'gateway.credential_scope_journal',
+            systemEventSink.record({
+              event: 'credential_scope_orphaned',
+              module: 'gateway',
+              level: 'warn',
+              project_slug,
+              payload,
+            }),
+          )
+        }
+      }
     }
   } catch (err) {
     log.error('credential_scope_reconcile_failed', { error: errText(err) })

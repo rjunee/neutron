@@ -397,6 +397,86 @@ describe('collectCliDiagnostics', () => {
   })
 })
 
+/**
+ * THE DOCTOR MUST READ THE SCOPE BOOT WROTE UNDER (Argus r2, 2026-08-16).
+ * `system_events` is read strictly `WHERE project_slug = ?`, so any disagreement
+ * between `resolveOwnerSlug` here and `resolveOwnerSlugSourceFromConfig` at boot
+ * is a silently empty report — on exactly the degrade events whose defect was
+ * being unreadable in the first place.
+ */
+describe('collectCliDiagnostics — the CLI scope agrees with the boot scope', () => {
+  function seedRefusalUnder(dbPath: string, scope: string): void {
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.runSync(
+      `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+       VALUES ('r1', 700, 'warn', 'gateway', 'instance_scope_rekey_refused', ?, ?, NULL)`,
+      [JSON.stringify({ stranded_slug: scope, attempted_by_slug: 'dev' }), scope],
+    )
+    db.close()
+  }
+
+  it('TRIMS a padded NEUTRON_INSTANCE_SLUG, as boot does', () => {
+    const dbPath = join(tmp, 'project.db')
+    seedRefusalUnder(dbPath, 'alpha')
+    const result = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: tmp,
+      NEUTRON_INSTANCE_SLUG: '  alpha  ',
+    } as NodeJS.ProcessEnv)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('alpha')
+    expect(result.report.recent_events.events?.[0]).toMatchObject({
+      event: 'instance_scope_rekey_refused',
+      project_slug: 'alpha',
+    })
+  })
+
+  it('a blank NEUTRON_INSTANCE_SLUG means ABSENT → the same fallback boot uses', () => {
+    const dbPath = join(tmp, 'project.db')
+    seedRefusalUnder(dbPath, 'dev')
+    const result = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: tmp,
+      NEUTRON_INSTANCE_SLUG: '   ',
+    } as NodeJS.ProcessEnv)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('dev')
+    expect(result.report.recent_events.events).toHaveLength(1)
+  })
+
+  it('the .url_slug rename file WINS over the env var, as it does at boot', () => {
+    // The rename orchestrator writes this file and restarts the unit; boot has
+    // always preferred it. A doctor that ignored it reported under the
+    // PRE-rename handle — i.e. found nothing on every renamed box.
+    const dbPath = join(tmp, 'project.db')
+    seedRefusalUnder(dbPath, 'renamed')
+    writeFileSync(join(tmp, '.url_slug'), 'renamed\n')
+    const result = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: tmp,
+      NEUTRON_INSTANCE_SLUG: 'old-handle',
+    } as NodeJS.ProcessEnv)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('renamed')
+    expect(result.report.recent_events.events).toHaveLength(1)
+    // CONTROL — the pre-rename handle really is a different, empty scope, so
+    // the assertion above is about the resolver and not about a lax reader.
+    const stale = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: mkdtempSync(join(tmpdir(), 'o5-cli-nofile-')),
+      NEUTRON_INSTANCE_SLUG: 'old-handle',
+    } as NodeJS.ProcessEnv)
+    expect(stale.ok).toBe(true)
+    if (!stale.ok) return
+    expect(stale.report.project_slug).toBe('old-handle')
+    expect(stale.report.recent_events.events).toEqual([])
+  })
+})
+
 describe('formatDiagnosticsText', () => {
   it('renders a readable multi-section summary', () => {
     const report = composeDiagnostics({
