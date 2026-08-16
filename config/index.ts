@@ -35,6 +35,8 @@
  * existing (already env-injectable) resolvers.
  */
 
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { z } from 'zod'
 
 import { resolveNeutronHome, resolveOpenDbPath } from '@neutronai/migrations/db-path.ts'
@@ -271,7 +273,36 @@ export interface BootConfigSecrets {
   readonly claudeCodeOauthToken: string | undefined
 }
 
-export interface BootConfig {
+/**
+ * THE THREE INPUTS TO "WHICH INSTANCE AM I", and nothing else.
+ *
+ * `resolveOwnerSlugSourceFromConfig` (gateway/index.ts) reads exactly these
+ * three fields off {@link BootConfig} — the effective owner home it looks for
+ * `.url_slug` in, and the raw `NEUTRON_INSTANCE_SLUG`. It never reads a port, a
+ * model id or an upload cap.
+ *
+ * They live in their own interface because ASKING WHO I AM MUST NOT REQUIRE THE
+ * WHOLE ENVIRONMENT TO BE VALID. A prior round made the CLI's slug resolver
+ * delegate to `resolveBootConfig` — correct about the inputs, and it dragged
+ * every unrelated numeric knob's validation along with it, so `NEUTRON_PORT=bad`
+ * made `neutron doctor` THROW out of `collectCliDiagnostics` instead of
+ * returning its documented `{ok:false}` (open/diagnostics-cli-impl.ts:32 calls
+ * the resolver outside the try). A diagnostic that dies on the malformed
+ * configuration it exists to report is the one failure mode it cannot have.
+ *
+ * `BootConfig` structurally satisfies this, so boot keeps passing its frozen
+ * full config and there is still exactly ONE resolver body.
+ */
+export interface IdentityConfig {
+  /** Effective `NEUTRON_HOME` — including the `~/neutron` default. */
+  readonly neutronHome: string
+  /** Raw `OWNER_HOME`; the `.url_slug` lookup prefers it over `neutronHome`. */
+  readonly ownerHome: string | undefined
+  /** Raw `NEUTRON_INSTANCE_SLUG` — `undefined` exactly when the var was absent. */
+  readonly instanceSlug: string | undefined
+}
+
+export interface BootConfig extends IdentityConfig {
   /** Raw `NODE_ENV` (compared `=== 'test'` / `=== 'production'` at read sites). */
   readonly nodeEnv: string | undefined
   /** Resolved deployment role (`NEUTRON_ROLE`, default `open`). */
@@ -280,8 +311,10 @@ export interface BootConfig {
   readonly hostedRelayMetered: boolean
 
   // identity / paths -------------------------------------------------------
-  readonly neutronHome: string
-  readonly ownerHome: string | undefined
+  // `neutronHome` / `ownerHome` / `instanceSlug` are INHERITED from
+  // `IdentityConfig` and deliberately not re-declared: two declarations of the
+  // same field are two places to change it, and the whole point of that
+  // interface is that there is one answer to "which instance am I".
   /**
    * THE resolved SQLite path — `NEUTRON_DB_PATH` else `<neutronHome>/project.db`
    * (the `migrations/db-path.ts` single-source precedence). This unifies the
@@ -290,7 +323,6 @@ export interface BootConfig {
    * brief) — both entrypoints now resolve the SAME file through here.
    */
   readonly dbPath: string
-  readonly instanceSlug: string | undefined
   readonly agentName: string | undefined
   readonly codexHome: string | undefined
   readonly landingStaticDir: string | undefined
@@ -361,6 +393,229 @@ function hostedRelayMarker(raw: string | undefined): boolean {
 }
 
 /**
+ * The identity-only slice of {@link bootEnvSchema} — three raw vars, every one
+ * of them a plain optional string, so parsing it CANNOT fail on a malformed
+ * knob it does not contain.
+ *
+ * `NEUTRON_DB_PATH` is deliberately absent: `resolveNeutronHome`
+ * (`migrations/db-path.ts:35-41`) reads only `NEUTRON_HOME` then `OWNER_HOME`
+ * then the `~/neutron` default — it never looks at the DB path. Passing it
+ * would suggest a precedence that does not exist.
+ */
+const identityEnvSchema = bootEnvSchema.pick({
+  NEUTRON_HOME: true,
+  OWNER_HOME: true,
+  NEUTRON_INSTANCE_SLUG: true,
+})
+
+/**
+ * Resolve ONLY the three identity inputs (see {@link IdentityConfig}).
+ *
+ * `resolveBootConfig` below calls this for its own identity fields, so the
+ * `~/neutron` default that `resolveNeutronHome` materialises when neither
+ * `NEUTRON_HOME` nor `OWNER_HOME` is set is computed in ONE place and boot, the
+ * gateway wrapper and the CLI cannot drift apart on it — which is what the
+ * previous rounds were fixing. What this does NOT do is validate `NEUTRON_PORT`
+ * or any other knob: `neutron doctor`'s whole job is to run on a box whose
+ * configuration is broken.
+ */
+export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig {
+  const e = identityEnvSchema.parse(env)
+  return {
+    neutronHome: resolveNeutronHome({
+      NEUTRON_HOME: e.NEUTRON_HOME,
+      OWNER_HOME: e.OWNER_HOME,
+    }),
+    ownerHome: e.OWNER_HOME,
+    instanceSlug: e.NEUTRON_INSTANCE_SLUG,
+  }
+}
+
+/**
+ * THE EFFECTIVE OWNER HOME — the directory the `.url_slug` rename file is read
+ * from (`gateway/index.ts` `resolveOwnerSlugSourceFromConfig`) AND the value
+ * {@link envShimFromBootConfig} publishes back to `OWNER_HOME`. Those two are
+ * documented as the same value, so they compute it in ONE place.
+ *
+ * AN EMPTY `OWNER_HOME` IS NOT A HOME. This was `config.ownerHome ??
+ * config.neutronHome` at both sites, and `??` falls through on `null`/`undefined`
+ * but NOT on `''` — so `OWNER_HOME=''` resolved the effective home to `''`, the
+ * slug resolver rejected that as unusable and SKIPPED the `.url_slug` lookup
+ * entirely instead of falling back to `neutronHome`. On a correctly renamed
+ * instance that exports an empty `OWNER_HOME`, all three slug resolvers
+ * collapsed onto the bare `'dev'` fallback at once, boot journalled the handle
+ * as orphaned, and every explicit credential migration answered `Refused` —
+ * telling the owner to set a handle that was already set.
+ *
+ * `resolveNeutronHome` (`migrations/db-path.ts`) has always treated an empty
+ * `NEUTRON_HOME`/`OWNER_HOME` as UNSET. The two halves of one identity
+ * resolution now agree about what empty means; they did not before.
+ *
+ * WHITESPACE IS EMPTY TOO, and a `length > 0` guard does not say so. A review
+ * measured `OWNER_HOME='   '` reaching this line and being answered as a home:
+ * the `.url_slug` lookup then ran against a directory named three spaces, found
+ * nothing, and a correctly renamed instance resolved to the anonymous fallback
+ * again — the same defect as the empty string, one space away from it and past
+ * the fix for it. Every sibling identity read in this repo trims (the
+ * `instanceSlug` branch of {@link resolveOwnerSlugSourceFromConfig},
+ * `open/server.ts`), so this one does too, and `resolveNeutronHome` was fixed
+ * in the same change so the two still agree.
+ *
+ * The RETURN is verbatim, not trimmed: a blank value means unset, but a value
+ * that is genuinely a path is published back to `OWNER_HOME` byte-for-byte
+ * (`envShimFromBootConfig`), which is the verbatim-fidelity contract this leaf
+ * is built on.
+ */
+export function effectiveOwnerHome(config: IdentityConfig): string {
+  const ownerHome = config.ownerHome
+  if (typeof ownerHome === 'string' && ownerHome.trim().length > 0) return ownerHome
+  return config.neutronHome
+}
+
+/** Where the boot slug came from — see {@link resolveOwnerSlugSourceFromConfig}. */
+export type OwnerSlugSource = 'file' | 'env' | 'fallback'
+
+/** The boot slug plus its provenance. */
+export interface OwnerSlugResolution {
+  readonly slug: string
+  readonly source: OwnerSlugSource
+}
+
+/**
+ * Thrown when `.url_slug` EXISTS but cannot be read — a chmod-000 file
+ * (a recorded real deployment failure, `docs/AS_BUILT.md`), or a DIRECTORY of
+ * that name (EISDIR). `existsSync` is true for both.
+ *
+ * IT IS A THROW AND NOT A DEGRADE, AND THAT IS THE WHOLE POINT. A round of this
+ * branch swallowed the read error and fell through to `NEUTRON_INSTANCE_SLUG`,
+ * which is the one outcome that must never happen: on a renamed instance the
+ * env var still holds the OLD handle, the fall-through classifies it
+ * `source: 'env'`, `slug_is_fallback` reaches the credential direction guard as
+ * `false`, and the sweep migrates the owner's credential rows BACKWARD onto the
+ * name they were renamed away from. Silently. The unreadable file is the only
+ * evidence that the fall-through answer is wrong, so discarding it converts a
+ * loud, fixable permissions problem into silent data movement.
+ *
+ * Callers that need an answer rather than a throw catch THIS type and decide
+ * for themselves — `neutron doctor` renders its documented `{ok:false}` error
+ * (`open/diagnostics-cli-impl.ts`), and `boot()` fails loudly, which is what it
+ * did before this branch existed and what
+ * `gateway/__tests__/boot-init-cleanup.test.ts` pins.
+ */
+export class OwnerSlugUnreadableError extends Error {
+  /** The `.url_slug` path that exists and could not be read. */
+  readonly slugFile: string
+
+  constructor(slugFile: string, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    super(`owner handle file '${slugFile}' exists but could not be read: ${detail}`, { cause })
+    this.name = 'OwnerSlugUnreadableError'
+    this.slugFile = slugFile
+  }
+}
+
+/**
+ * THE one resolver for "which instance am I", plus the bit a bare string throws
+ * away: WHERE the answer came from.
+ *
+ * The scope reconciler needs to tell "explicitly dev" from "nobody told me who
+ * I am" (defect 2026-08-14: an `NEUTRON_INSTANCE_SLUG`-unset boot that inherited
+ * a live `NEUTRON_HOME` re-keyed every credential row onto the `'dev'` fallback,
+ * and the running gateway — frozen on its real handle — read zero secrets). A
+ * bare string cannot carry that distinction, and `config.instanceSlug` is
+ * `undefined` exactly when the env var was absent ({@link resolveIdentityConfig}),
+ * so it is recoverable HERE and nowhere later.
+ *
+ * Precedence: `.url_slug` file > `instanceSlug` > `'dev'`. An EXPLICIT
+ * `NEUTRON_INSTANCE_SLUG=dev` is `'env'` — deliberately configuring the same
+ * string the fallback happens to use is still configuring it, and the guard
+ * must honour that.
+ *
+ * AN EMPTY OR WHITESPACE VALUE IS `'fallback'`, NOT `'env'`. That sentence used
+ * to say the opposite, and the code used to agree with it: a review found that
+ * `NEUTRON_INSTANCE_SLUG=''` was classified as a configured identity, which
+ * told the credential direction guard this process knows who it is and let an
+ * explicit migration move rows onto the empty handle. An empty variable is not
+ * an identity; it is the absence of one wearing its shape.
+ *
+ * TAKES `IdentityConfig`, NOT `BootConfig`. It only ever read those three
+ * fields, and demanding the whole config forced every caller to VALIDATE the
+ * whole environment first — which is how an unrelated `NEUTRON_PORT=bad` began
+ * throwing out of `neutron doctor`. `BootConfig extends IdentityConfig`, so
+ * boot still passes its frozen config here unchanged and the three resolvers
+ * still share one body.
+ *
+ * IT LIVES IN THIS LEAF, NOT IN `gateway/index.ts`. It was defined on the
+ * gateway ENTRY module, and `open/owner-identity.ts` imported it from there —
+ * putting the entry module into the composer's own import graph, which
+ * `gateway/composer-contract.ts` forbids outright (the entry↔composer
+ * top-level-await cycle). Its only inputs are an {@link IdentityConfig} and the
+ * filesystem, so the identity leaf every band may already depend on is where it
+ * belongs; `gateway/index.ts` re-exports it for its existing importers.
+ *
+ * @throws {OwnerSlugUnreadableError} when `.url_slug` exists and cannot be read.
+ */
+export function resolveOwnerSlugSourceFromConfig(config: IdentityConfig): OwnerSlugResolution {
+  // AN EMPTY `OWNER_HOME` IS NOT A HOME, AND IT USED TO COLLAPSE ALL THREE
+  // RESOLVERS AT ONCE. This read `config.ownerHome ?? config.neutronHome`, and
+  // `??` does not fall through on `''` — so `OWNER_HOME=''` resolved the
+  // effective home to `''`, the guard below rejected it, and the `.url_slug`
+  // lookup was skipped instead of falling back to `neutronHome`. A correctly
+  // renamed instance then booted on the bare `'dev'` fallback and refused every
+  // credential migration, telling the owner to set a handle already set.
+  // `effectiveOwnerHome` is the ONE place that decides, and it agrees with
+  // `resolveNeutronHome` (`migrations/db-path.ts`) about what empty means.
+  const ownerHome = effectiveOwnerHome(config)
+  if (ownerHome.length > 0) {
+    const slugFile = join(ownerHome, '.url_slug')
+    if (existsSync(slugFile)) {
+      // AN UNREADABLE RENAME FILE IS AN ERROR, NOT AN ABSENT ONE. The previous
+      // round caught this read and fell through to the env slug so that
+      // `neutron doctor` would stop throwing; that made a permissions problem
+      // indistinguishable from "no rename has happened", and on a renamed box
+      // the env var holds the OLD handle — so the credential guard was handed
+      // `source: 'env'` and migrated the rows backward. See
+      // {@link OwnerSlugUnreadableError}. The doctor's `{ok:false}` contract is
+      // honoured by CATCHING at the diagnostics caller, which is the only
+      // caller that wants an answer more than it wants the truth.
+      // EVERY errno, INCLUDING `ENOENT` — DELIBERATE, and reviewed. A review
+      // proposed falling through when the read races an unlink (`existsSync`
+      // passed, then the file vanished), on the reasoning that a file which is
+      // no longer there IS the absent case. It is not, and the difference is
+      // the point of this module: the fall-through answers with
+      // `NEUTRON_INSTANCE_SLUG`, which on a renamed box holds the OLD handle,
+      // and hands the credential guard `source: 'env'` — i.e. "this process
+      // knows who it is" — at the exact moment something is rewriting the file
+      // that says who it is. Racing a rename is when to trust the env LEAST.
+      // The window is also tiny in practice, because the writer truncates
+      // rather than unlinks. Throwing costs a loud boot failure on a race that
+      // a retry fixes; falling through costs the owner's credential rows,
+      // silently. Not special-cased, on purpose.
+      let fromFile: string
+      try {
+        fromFile = readFileSync(slugFile, 'utf8').trim()
+      } catch (err) {
+        throw new OwnerSlugUnreadableError(slugFile, err)
+      }
+      // An EMPTY rename file is a different thing from an unreadable one: it
+      // was read successfully and says nothing, which is the absent case.
+      if (fromFile.length > 0) return { slug: fromFile, source: 'file' }
+    }
+  }
+  // TRIMMED AND NON-EMPTY, exactly like the `.url_slug` branch above — the
+  // asymmetry between them WAS the bug. `NEUTRON_INSTANCE_SLUG=''` is not a
+  // configured identity, it is an empty variable wearing the costume of one,
+  // and classifying it as `'env'` told the credential guard this process knows
+  // who it is. Found by review with a repro: resolve with an empty slug, call
+  // the explicit migration, and rows move off the live handle onto `''`.
+  //
+  // A blank value means nobody said, which is what `'fallback'` means.
+  const fromEnv = config.instanceSlug?.trim() ?? ''
+  if (fromEnv.length > 0) return { slug: fromEnv, source: 'env' }
+  return { slug: 'dev', source: 'fallback' }
+}
+
+/**
  * Resolve + validate the process environment ONCE into a frozen BootConfig.
  * Throws (aggregated Zod error) if any numeric knob is malformed — the loud
  * failure that replaces the old silent-`NaN` behavior.
@@ -378,6 +633,11 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
     NEUTRON_DB_PATH: e.NEUTRON_DB_PATH,
   }
 
+  // The identity slice comes from the SAME function the slug-only callers use,
+  // so a full boot and a `neutron doctor` on the same box cannot disagree about
+  // which instance they are looking at.
+  const identity = resolveIdentityConfig(env)
+
   const disableAmbientRaw = e.NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH
   const skipRaw = e.NEUTRON_SKIP_GBRAIN
 
@@ -387,10 +647,10 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
     hostedRelayMetered:
       normalizeRole(e.NEUTRON_ROLE) === 'connect' && hostedRelayMarker(e.NEUTRON_CONNECT_METERED),
 
-    neutronHome: resolveNeutronHome(dbEnv),
-    ownerHome: e.OWNER_HOME,
+    neutronHome: identity.neutronHome,
+    ownerHome: identity.ownerHome,
     dbPath: resolveOpenDbPath(dbEnv),
-    instanceSlug: e.NEUTRON_INSTANCE_SLUG,
+    instanceSlug: identity.instanceSlug,
     agentName: e.NEUTRON_AGENT_NAME,
     codexHome: e.NEUTRON_CODEX_HOME,
     landingStaticDir: e.NEUTRON_LANDING_STATIC_DIR,
@@ -466,7 +726,11 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
  */
 export function envShimFromBootConfig(config: BootConfig): Record<string, string> {
   const out: Record<string, string> = {}
-  out['OWNER_HOME'] = config.ownerHome ?? config.neutronHome
+  // Via {@link effectiveOwnerHome}, so an empty `OWNER_HOME` is repaired here
+  // too. `open/server.ts:130` fills a slot that is `undefined` OR `''`, so the
+  // old `??` re-wrote the empty string over itself and left every below-seam
+  // reader of `process.env.OWNER_HOME` holding `''`.
+  out['OWNER_HOME'] = effectiveOwnerHome(config)
   out['NEUTRON_DB_PATH'] = config.dbPath
   if (config.onboardingChatCookieSecret !== undefined) {
     out['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = config.onboardingChatCookieSecret

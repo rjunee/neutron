@@ -196,6 +196,10 @@ const EXPECTED_COMPOSITION_KEYS = [
   // Executor-mode reminders (plan task 4) — ritual executor factory, set when
   // a credential resolves (llmPool !== null), like `agent_dispatch`/`trident`.
   'skill_forge',
+  // The PROVENANCE of `project_slug`, travelling with it: a fallback 'dev' and a
+  // configured 'dev' are the same string and opposite situations, and only the
+  // boot resolver can tell them apart.
+  'slug_is_fallback',
   'tasks',
   'topic_handler',
   'trident',

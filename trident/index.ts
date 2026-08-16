@@ -60,9 +60,16 @@ export {
   isGithubRemoteUrl,
   cleanupAfterMerge,
   spawnCapture,
+  unwiredPublisherCredential,
+  describePublisherAuthFailure,
 } from './git-mode.ts'
 export type {
   GitModeProbe,
+  PublisherIdentity,
+  PublisherCredentialSource,
+  PublisherAuthResult,
+  PublisherAuthFailureCause,
+  EnvCapableHostRunner,
   RalphModeProbe,
   HostCommandResult,
   MergeCleanupDeps,
