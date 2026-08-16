@@ -23,7 +23,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolveOwnerSlug } from '../owner-identity.ts'
-import { resolveOwnerSlugSourceFromConfig } from '@neutronai/gateway/index.ts'
+import {
+  resolveOwnerSlug as gatewayResolveOwnerSlug,
+  resolveOwnerSlugSourceFromConfig,
+} from '@neutronai/gateway/index.ts'
 
 let home: string
 
@@ -62,7 +65,10 @@ describe('the boot resolver and the CLI resolver agree', () => {
       const env = (value === undefined
         ? {}
         : { NEUTRON_INSTANCE_SLUG: value }) as NodeJS.ProcessEnv
+      // ALL THREE, not two. The previous version never called the gateway
+      // wrapper, and that is exactly where the next divergence turned up.
       expect(resolveOwnerSlug(env)).toBe(bootSlug(env))
+      expect(gatewayResolveOwnerSlug(env)).toBe(bootSlug(env))
     })
   }
 
@@ -76,6 +82,18 @@ describe('the boot resolver and the CLI resolver agree', () => {
     const env = { OWNER_HOME: home, NEUTRON_INSTANCE_SLUG: 'old' } as NodeJS.ProcessEnv
     expect(bootSlug(env)).toBe('renamed')
     expect(resolveOwnerSlug(env)).toBe('renamed')
+    expect(gatewayResolveOwnerSlug(env)).toBe('renamed')
+  })
+
+  it('agrees when `.url_slug` lives under NEUTRON_HOME rather than OWNER_HOME', () => {
+    // The axis that outlived the first collapse: the gateway wrapper hardcoded
+    // `neutronHome: undefined`, so with the file under NEUTRON_HOME it returned
+    // the stale env value while boot and doctor both read the renamed file.
+    writeFileSync(join(home, '.url_slug'), 'renamed\n', 'utf8')
+    const env = { NEUTRON_HOME: home, NEUTRON_INSTANCE_SLUG: 'old' } as NodeJS.ProcessEnv
+    expect(bootSlug(env)).toBe('renamed')
+    expect(resolveOwnerSlug(env)).toBe('renamed')
+    expect(gatewayResolveOwnerSlug(env)).toBe('renamed')
   })
 
   it('agrees that a BLANK `.url_slug` falls through to the env', () => {

@@ -405,3 +405,19 @@ test('an EMPTY instance slug is anonymous, not configured', async () => {
     delete process.env['NEUTRON_INSTANCE_SLUG']
   }
 })
+
+test('an EXPLICIT dev is configured, not a fallback — the two look identical and are opposite', async () => {
+  // The contract's whole point: `'dev'` is both the fallback string AND a slug
+  // someone may deliberately configure. Boot coverage tested configured `juno`,
+  // absent input and whitespace — never the one case where the safe answer and
+  // the wrong answer are the SAME STRING, so misclassifying a deliberately
+  // configured `dev` as anonymous would have stayed green while quietly
+  // refusing every migration on a machine that is configured exactly that way.
+  rmSync(join(home, '.url_slug'), { force: true })
+  process.env['NEUTRON_INSTANCE_SLUG'] = 'dev'
+  try {
+    expect(await bootCapturingProvenance()).toBe(false)
+  } finally {
+    delete process.env['NEUTRON_INSTANCE_SLUG']
+  }
+})

@@ -155,7 +155,12 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
   // for. There is now ONE implementation and the others call it.
   return resolveOwnerSlugSourceFromConfig({
     ownerHome: env['OWNER_HOME'],
-    neutronHome: undefined,
+    // NEUTRON_HOME is read too. Hardcoding `undefined` here made this wrapper
+    // "canonical" in name only: boot falls back to NEUTRON_HOME when OWNER_HOME
+    // is unset, so a renamed instance whose `.url_slug` lives under
+    // NEUTRON_HOME resolved the NEW name at boot and the OLD one here. Three
+    // resolvers agreeing on two of three inputs is still three resolvers.
+    neutronHome: env['NEUTRON_HOME'],
     instanceSlug: env['NEUTRON_INSTANCE_SLUG'],
   } as unknown as BootConfig).slug
 }
