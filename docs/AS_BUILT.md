@@ -440,6 +440,27 @@ the old spelling, so nothing already installed is disturbed. The test builds a
 clone under a directory whose name contains a quote and hands the resulting
 command to `/bin/sh` to parse, with the naive spelling as the control that fails.
 
+AND THE PRE-PUSH GATE STOPPED FAILING PUSHES OVER HISTORY THE AUTHOR CANNOT
+REWRITE. Merging the mainline in to clear the conflict above blocked the push on
+a commit already public on `main`, carrying the `Co-authored-by: <owner>` trailer
+GitHub stamps on a squash merge. The message scan window is `base..head` — a
+single floor — so a branch that MERGES the mainline pulls the mainline's commits
+into its own range. `.githooks/pre-push` already excluded exactly this class on
+the REBASE path, and its own header says why: a gate that cannot be satisfied is
+one people learn to bypass with `--no-verify`, which is strictly worse than no
+gate. A merge hits the identical class and a floor cannot express the exclusion,
+so `scripts/ci/leak-gate.sh` now takes `LEAK_GATE_EXCLUDE_REF` and appends
+`--not <ref>`. It is unset by default, so CI is byte-for-byte unaffected: in CI a
+`--remotes`-style exclusion would drop the PR's OWN commits, which is why this
+takes one explicit ref rather than guessing. The hook sets it to `origin/main`,
+and never when the push TARGET is main — there the new commits are the ones
+landing on main, and excluding main's ref would empty the window. An unresolvable
+ref is ignored rather than obeyed. Tested with controls: without the exclusion
+the merged-in public commit blocks the push (the bug, reproduced); with it the
+window is clean; and a NEW commit of the branch's own carrying the same term is
+still caught with the exclusion set, which is the property that keeps this from
+being a hole.
+
 ## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
 
 The launcher now composes reflection guidance ONCE. `trident/inner-loop.ts`
