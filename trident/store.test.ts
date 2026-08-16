@@ -649,22 +649,36 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the live table: 31 columns, same names as PRAGMA table_info', () => {
+  test('COLS matches the live table: 34 columns, same names as PRAGMA table_info', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
     // COLS corrupts every insert silently (STRICT only catches affinity, not
-    // arity/order). The literal 31 is deliberate — adding a column must be a
+    // arity/order). The literal 34 is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift.
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(31)
+    expect(cols).toHaveLength(34)
     expect(cols).toHaveLength(pragma.length)
     // Same members, order-independent: a rename or a drop goes red.
     expect([...cols].sort()).toEqual([...pragma.map((c) => c.name)].sort())
+  })
+
+  test('FIX-ROUND CONTRACT fields round-trip and default to unconstrained nulls', async () => {
+    const store = new TridentRunStore(db)
+    const reviewedHead = 'a'.repeat(40)
+    const constrained = await store.create({
+      slug: 'contract-set', project_slug: 't1', repo_path: '/r', task: 't',
+      reviewed_head: reviewedHead, bound_pr: 289, fenced_paths: '["trident/tick.ts"]',
+    })
+    expect(store.get(constrained.id)).toMatchObject({
+      reviewed_head: reviewedHead, bound_pr: 289, fenced_paths: '["trident/tick.ts"]',
+    })
+    const legacy = await store.create({ slug: 'contract-null', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(store.get(legacy.id)).toMatchObject({ reviewed_head: null, bound_pr: null, fenced_paths: null })
   })
 
   test('bound-array order and length survive a distinct-value create()/get() round-trip', async () => {
