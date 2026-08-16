@@ -2,6 +2,82 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the review-readiness gate stops failing open
+
+Three defects in the gate that resolves which status checks a PR's base branch
+requires (`trident/inner-workflow.mjs`). It decides whether a review runs at
+all, so every downstream guarantee — the panel, the merge gate — was
+conditional on it, and all three failed toward LETTING THINGS THROUGH or toward
+refusing a legitimate configuration.
+
+**A 404 was treated as proof that a branch is unprotected.** `isMissing` matched
+`/HTTP 404|Not Found|Branch not protected/i` and the classifier returned
+`required: []` — the permissive all-green rule. But
+`branches/{b}/protection/required_status_checks` needs Administration-read, and
+GitHub answers 404 rather than 403 for a resource the credential may not ask
+about, precisely so the endpoint does not disclose that it exists. The same body
+therefore meant two opposite things, and a credential with PR + check scope but
+no Administration-read silently downgraded a PROTECTED base to unprotected and
+reported success. The permissive reading now requires a POSITIVE CONTROL: either
+`branches/{b}` answering `protected:false` (readable with plain pull access, so
+it answers for exactly the credential that cannot read protection) or
+`repos/{o}/{r}` answering `permissions.admin:true` (the credential could have
+read protection, so its 404 is an answer rather than a refusal). Either proof is
+enough; NEITHER is `mode:'unknown'` and the gate defers naming the ambiguity.
+The rulesets read is not ambiguous the same way — `rules/branches/{b}` is
+readable with pull access and answers `[]` — so its 404 keeps its old meaning.
+
+**Successful commit-status checks were rejected as "not produced".**
+`statusCheckRollup` returns TWO row shapes: CheckRun (`name`/`status`/
+`conclusion`) for Actions jobs, and StatusContext (`context`/`state`) for
+classic commit statuses. The gate read only the CheckRun fields, so a
+StatusContext had no name at all and never entered the map — a required check
+named `legacy-ci`, present and SUCCESS, came back as `config-error: required
+check legacy-ci is not produced by any workflow in this repository`. The
+produced-check probe had the matching hole, reading only `check-runs` and never
+`commits/{sha}/status`. A repository on classic statuses could not satisfy its
+own required checks at all. Rows now normalise to `{name, terminal, conclusion}`
+and both shapes are judged by one rule; when both report the SAME name, every
+row is kept and all of them must be terminal and green, because a rollup that
+disagrees with itself is not evidence the check passed. `produced` is the union
+of check runs and commit statuses, and one unreadable list nulls both — a
+partial union looks authoritative while missing exactly the names the failed
+read would have supplied.
+
+**One base-head snapshot cannot prove no workflow emits a name.** `produced` is
+what GitHub has reported on the BASE BRANCH HEAD; a `pull_request`-only job, or
+one gated on a path/branch/event filter, is legitimately absent from it, and on
+a PR's first poll nothing has appeared yet. Read as proof on the first probe, a
+correctly configured repository got a permanent configuration fault seconds
+after the push. The absence must now OUTLAST a settle window
+(`REVIEW_READINESS_CONFIG_GRACE_MS = 480000`) before it is allowed to mean
+never. The floor is the same measurement the budget rests on — the check on
+PR #275 was ABSENT from the rollup for 328 s and then appeared — and 8 minutes
+is ~1.5x that and a little over half the 15-minute budget, so the fast-fail the
+original change added is preserved: a name genuinely no workflow emits still
+stops at 8 minutes, not 15. It must stay STRICTLY below the budget or the
+config-error branch becomes unreachable and the gate silently reverts to burning
+the whole budget on a fault it can already name; the test suite asserts the
+inequality, because that failure is invisible — it looks like patience.
+
+The probe grew from three reads to five, all in the SAME Bookkeeping seat and
+all through `ghReadCommand`, and the transcript is now split by section NAME
+rather than by `indexOf` offsets so an added section cannot mis-slice its
+neighbours. An absent section reads as unreadable rather than being silently
+mis-attributed.
+
+**One existing test asserted the buggy behaviour and had to change.** `404
+protection + no rulesets is a definitively UNPROTECTED base` fed a bare 404 with
+nothing establishing whether the credential was even allowed to ask, and
+required the classifier to answer `required: []`. That test is why the defect
+shipped: the behaviour was pinned, so nothing downstream could notice it. It is
+replaced by tests that assert the DECISION under each reading of the ambiguity —
+404-with-proof resolves, authorization-shaped 404 defers and spends zero review
+seats. Each of the three fixes carries a mutant test that reintroduces the
+defect and asserts the specific WRONG value the mutant returns, rather than only
+that an assertion threw: a mutant that failed to LOAD would satisfy `toThrow()`
+while proving nothing.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset

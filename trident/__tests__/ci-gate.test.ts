@@ -310,7 +310,7 @@ interface RequiredConfig {
 }
 
 function loadReadiness(source = SRC): {
-  classifyReviewReadiness: (probe: unknown, requiredConfig?: unknown) => Readiness
+  classifyReviewReadiness: (probe: unknown, requiredConfig?: unknown, elapsedMs?: number) => Readiness
   classifyRequiredChecksProbe: (probe: unknown) => RequiredConfig
   reviewWithPreconditions: (args: {
     probe: (attempt: number) => Promise<Readiness>
@@ -323,7 +323,9 @@ function loadReadiness(source = SRC): {
   REVIEW_READINESS_BUDGET_MS: number
   REVIEW_READINESS_RETRY_MS: number
   REVIEW_READINESS_ATTEMPTS: number
+  REVIEW_READINESS_CONFIG_GRACE_MS: number
   readinessBudgetLabel: () => string
+  readinessGraceLabel: () => string
 } {
   // The preamble carries the budget consts AND the helpers `classifyReviewReadiness`
   // closes over — the two redaction/excerpt ones and `classifyRequiredChecksProbe`.
@@ -347,7 +349,13 @@ function loadReadiness(source = SRC): {
   const required = source.slice(preambleAt, anchor('/** Classify the fixed', preambleAt))
   // …and if a refactor ever moves the helpers out of that slice, say so HERE rather
   // than letting `new Function` throw a bare ReferenceError from inside a test.
-  for (const helper of ['probeCause(', 'redactProbeText(', 'classifyRequiredChecksProbe(']) {
+  for (const helper of [
+    'probeCause(',
+    'redactProbeText(',
+    'classifyRequiredChecksProbe(',
+    'probeSections(',
+    'normalizeRollupRow(',
+  ]) {
     if (!required.includes(`function ${helper}`)) {
       throw new Error(`${helper} is no longer inside the readiness preamble slice`)
     }
@@ -357,7 +365,7 @@ function loadReadiness(source = SRC): {
   const reviewAt = anchor('async function reviewWithPreconditions(')
   const reviewSource = source.slice(reviewAt, anchor('/**\n * CI findings', reviewAt))
   const factory = new Function(
-    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, classifyRequiredChecksProbe, reviewWithPreconditions, probeCause, redactProbeText, REVIEW_READINESS_BUDGET_MS, REVIEW_READINESS_RETRY_MS, REVIEW_READINESS_ATTEMPTS, readinessBudgetLabel }`,
+    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, classifyRequiredChecksProbe, reviewWithPreconditions, probeCause, redactProbeText, REVIEW_READINESS_BUDGET_MS, REVIEW_READINESS_RETRY_MS, REVIEW_READINESS_ATTEMPTS, REVIEW_READINESS_CONFIG_GRACE_MS, readinessBudgetLabel, readinessGraceLabel }`,
   ) as () => ReturnType<typeof loadReadiness>
   return factory()
 }
@@ -546,7 +554,13 @@ const ENTERPRISE_ROLLUP = [
   'review-gate',
 ].map((name) => ({ name, status: 'COMPLETED', conclusion: 'SUCCESS' }))
 
-/** The three-section transcription `probeRequiredChecks` hands to the classifier. */
+/**
+ * The five-section transcription `probeRequiredChecks` hands to the classifier.
+ *
+ * `branch`/`perm` default to the shape that PROVES the base branch is unprotected
+ * (`protected:false`), so every fixture that is not ABOUT the 404 ambiguity keeps
+ * reading as it did. The tests that are about it pass those fields explicitly.
+ */
 const requiredProbe = (s: {
   prot: string
   protExit: number
@@ -554,10 +568,20 @@ const requiredProbe = (s: {
   rulesExit: number
   runs?: string
   runsExit?: number
+  statuses?: string
+  statusesExit?: number
+  branch?: string
+  branchExit?: number
+  perm?: string
+  permExit?: number
 }) => ({
   raw:
-    `${s.prot}\n___PROT_EXIT=${s.protExit}\n___SECTION=RULES\n${s.rules}\n___RULES_EXIT=${s.rulesExit}\n` +
-    `___SECTION=RUNS\n${s.runs ?? '[]'}\n___RUNS_EXIT=${s.runsExit ?? 0}\n___EXIT=0`,
+    `${s.prot}\n___PROT_EXIT=${s.protExit}\n` +
+    `___SECTION=BRANCH\n${s.branch ?? '{"protected":false}'}\n___BRANCH_EXIT=${s.branchExit ?? 0}\n` +
+    `___SECTION=PERM\n${s.perm ?? '{"admin":false}'}\n___PERM_EXIT=${s.permExit ?? 0}\n` +
+    `___SECTION=RULES\n${s.rules}\n___RULES_EXIT=${s.rulesExit}\n` +
+    `___SECTION=RUNS\n${s.runs ?? '[]'}\n___RUNS_EXIT=${s.runsExit ?? 0}\n` +
+    `___SECTION=STATUSES\n${s.statuses ?? '[]'}\n___STATUSES_EXIT=${s.statusesExit ?? 0}\n___EXIT=0`,
   exit_code: 0,
 })
 const NOT_FOUND = 'gh: Not Found (HTTP 404)'
@@ -575,9 +599,11 @@ describe('the required-check set comes from the base branch, not from this repo�
     // The other half of the guard: if the base branch really does require a name this
     // repository never produces, the gate says so in those words — immediately.
     const { classifyReviewReadiness } = loadReadiness()
+    const { REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
     const out = classifyReviewReadiness(
       readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
       requiredCfg(['test'], ['check', 'frontend']),
+      REVIEW_READINESS_CONFIG_GRACE_MS,
     )
     expect(out.status).toBe('config-error')
     expect(out.reason).toBe('required check test is not produced by any workflow in this repository')
@@ -586,24 +612,37 @@ describe('the required-check set comes from the base branch, not from this repo�
   test('…and there is NO third outcome for that rollup: it never defers silently', async () => {
     // Exhaustive by construction — the only two configs a base branch can produce for
     // this rollup are "requires nothing" and "requires a name nothing here emits", and
-    // both are answered above. Here: the config error costs ZERO budget.
-    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    // both are answered above. Here: the config error spends ZERO review seats, and it
+    // stops on the settle window rather than on the full readiness budget.
+    const {
+      classifyReviewReadiness,
+      reviewWithPreconditions,
+      REVIEW_READINESS_RETRY_MS,
+      REVIEW_READINESS_ATTEMPTS,
+      REVIEW_READINESS_CONFIG_GRACE_MS,
+    } = loadReadiness()
     let probes = 0
     let waits = 0
     let spent = 0
     const out = await reviewWithPreconditions({
-      probe: async () => {
+      probe: async (attempt: number) => {
         probes += 1
         return classifyReviewReadiness(
           readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
           requiredCfg(['test'], ['check', 'frontend']),
+          (attempt - 1) * REVIEW_READINESS_RETRY_MS,
         )
       },
       spend: async () => { spent += 1 },
       wait: async () => { waits += 1 },
     })
-    expect({ probes, waits, spent, deferred: out.deferred }).toEqual({ probes: 1, waits: 0, spent: 0, deferred: true })
+    expect({ spent, deferred: out.deferred }).toEqual({ spent: 0, deferred: true })
     expect(out.readiness.status).toBe('config-error')
+    // It stops the moment the grace has elapsed — not one probe later, and far short of
+    // the full budget. That is the "fail fast" property, stated as arithmetic.
+    expect(probes).toBe(REVIEW_READINESS_CONFIG_GRACE_MS / REVIEW_READINESS_RETRY_MS + 1)
+    expect(probes).toBeLessThan(REVIEW_READINESS_ATTEMPTS)
+    expect(waits).toBe(probes - 1)
     // The deferral tells the owner to REPAIR the configuration, not to wait again.
     expect(SRC).toContain('This is a repository configuration error, not a queue delay')
   })
@@ -614,11 +653,13 @@ describe('the required-check set comes from the base branch, not from this repo�
       'return { status: \'absent\', reason: `required check ${name} has not run` }',
     )
     expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    const { REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
     expect(() =>
       expect(
         loadReadiness(mutant).classifyReviewReadiness(
           readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
           requiredCfg(['test'], ['check', 'frontend']),
+          REVIEW_READINESS_CONFIG_GRACE_MS,
         ).status,
       ).toBe('config-error'),
     ).toThrow()
@@ -737,12 +778,121 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
     expect(out.required).toEqual(['review-gate'])
   })
 
-  test('404 protection + no rulesets is a definitively UNPROTECTED base', () => {
+  // WAS: '404 protection + no rulesets is a definitively UNPROTECTED base'.
+  //
+  // That test asserted the defect. It fed a bare 404 with NOTHING establishing whether
+  // the credential was even allowed to ask, and required the classifier to answer
+  // `required: []` — the permissive all-green rule. It is the reason the bug shipped:
+  // the behaviour was pinned, so nothing downstream could ever notice it.
+  //
+  // The 404 is genuinely ambiguous, so the replacement asserts the DECISION under each
+  // reading rather than the permissive one under both.
+  test('404 + PROOF the branch is unprotected is a definitively UNPROTECTED base', () => {
     const { classifyRequiredChecksProbe } = loadReadiness()
+    // `branches/{b}` says `protected:false`, which plain pull access can read. THAT is
+    // what makes the 404 an answer.
     const out = classifyRequiredChecksProbe(
-      requiredProbe({ prot: NOT_FOUND, protExit: 1, rules: '[]', rulesExit: 0, runs: '["check"]' }),
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: '{"protected":false}',
+        perm: '{"admin":false}',
+        rules: '[]',
+        rulesExit: 0,
+        runs: '["check"]',
+      }),
     )
     expect(out).toEqual({ mode: 'resolved', required: [], produced: ['check'] })
+  })
+
+  test('…and an ADMIN credential’s 404 is an answer too, even on a protected-looking branch', () => {
+    // The other proof: the credential could have read protection, so its 404 is GitHub
+    // saying "there is none" rather than "you may not ask". `protected:true` here is a
+    // ruleset, which the rules read already covers.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: '{"protected":true}',
+        perm: '{"admin":true}',
+        rules: '[]',
+        rulesExit: 0,
+        runs: '["check"]',
+      }),
+    )
+    expect(out).toEqual({ mode: 'resolved', required: [], produced: ['check'] })
+  })
+
+  test('HEADLINE: an AUTHORIZATION-shaped 404 is UNKNOWN — the gate defers, it does not go permissive', async () => {
+    // The failure the old test pinned. A credential with PR + check scope and no
+    // Administration-read gets a 404 from the protection endpoint on a branch that IS
+    // protected, because GitHub answers 404 rather than 403 for a resource you may not
+    // ask about. The branch read proves protection exists; nothing proves the token
+    // could have read it. Answering `required: []` here downgrades a protected base to
+    // the all-green rule and reports success on a review that never ran.
+    const { classifyRequiredChecksProbe, classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    const cfg = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: '{"protected":true}',
+        perm: '{"admin":false}',
+        rules: '[]',
+        rulesExit: 0,
+        runs: '["check"]',
+      }),
+    )
+    expect(cfg.mode).toBe('unknown')
+    expect(cfg.required).toBeUndefined()
+    expect(cfg.cause).toContain('Administration-read')
+    // …and the decision that follows: a fully green rollup does NOT reach a review seat.
+    const readiness = classifyReviewReadiness(readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP), cfg)
+    expect(readiness.status).toBe('unknown')
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => readiness,
+      spend: async () => { spent += 1 },
+      wait: async () => {},
+    })
+    expect({ deferred: out.deferred, spent }).toEqual({ deferred: true, spent: 0 })
+  })
+
+  test('an UNREADABLE branch/permission pair leaves the 404 ambiguous, so it is UNKNOWN', () => {
+    // Neither proof available — the disambiguating reads themselves failed. The honest
+    // answer is "could not tell", never the permissive one.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: 'gh: server error (HTTP 502)',
+        branchExit: 1,
+        perm: 'gh: server error (HTTP 502)',
+        permExit: 1,
+        rules: '[]',
+        rulesExit: 0,
+      }),
+    )
+    expect(out.mode).toBe('unknown')
+  })
+
+  test('MUTANT: restoring "a 404 alone means unprotected" goes RED', () => {
+    const mutant = SRC.replace('if (!unprotectedProven) {', 'if (false) {')
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    // Assert the mutant's ACTUAL answer, not merely that an assertion threw — a mutant
+    // that failed to LOAD would satisfy `toThrow()` while proving nothing.
+    const out = loadReadiness(mutant).classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: '{"protected":true}',
+        perm: '{"admin":false}',
+        rules: '[]',
+        rulesExit: 0,
+      }),
+    )
+    expect({ mode: out.mode, required: out.required }).toEqual({ mode: 'resolved', required: [] })
   })
 
   test('a NON-404 read failure is unknown, and it quotes what the probe said', () => {
@@ -800,6 +950,287 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
       }),
     )
     expect(out.required).toEqual(['check', 'frontend', 'sbom'])
+  })
+
+  test('`produced` is the UNION of check runs and classic commit statuses', () => {
+    // Reading only `check-runs` is what made a status-context name look unproduced.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["legacy-ci"]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: '["check"]',
+        statuses: '["legacy-ci","check"]',
+      }),
+    )
+    expect(out).toEqual({ mode: 'resolved', required: ['legacy-ci'], produced: ['check', 'legacy-ci'] })
+  })
+
+  test('FAIL-SAFE: an unreadable STATUS list nulls the whole union, it never half-answers', () => {
+    // A partial union is the dangerous shape — authoritative-looking and missing exactly
+    // the names the failed read would have supplied, which is a config-error on a name
+    // that is present and green.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const out = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["legacy-ci"]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: '["check"]',
+        statuses: 'gh: server error (HTTP 502)',
+        statusesExit: 1,
+      }),
+    )
+    expect(out.produced).toBeNull()
+  })
+
+  test('MUTANT: dropping commit statuses from `produced` goes RED', () => {
+    const mutant = SRC.replace("const statusNames = listFrom(statusesText, 'STATUSES')", 'const statusNames = []')
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    // The mutant's ACTUAL answer — `legacy-ci` vanishes from `produced`, which is what
+    // then became `not produced by any workflow in this repository`.
+    expect(
+      loadReadiness(mutant).classifyRequiredChecksProbe(
+        requiredProbe({
+          prot: '{"contexts":["legacy-ci"]}',
+          protExit: 0,
+          rules: '[]',
+          rulesExit: 0,
+          runs: '["check"]',
+          statuses: '["legacy-ci"]',
+        }),
+      ).produced,
+    ).toEqual(['check'])
+  })
+})
+
+/**
+ * BOTH ROLLUP SHAPES, OR A CLASSIC-STATUS REPO CAN NEVER SATISFY ITS OWN CHECKS.
+ *
+ * `statusCheckRollup` returns CheckRun rows (`name`/`status`/`conclusion`) for GitHub
+ * Actions jobs and StatusContext rows (`context`/`state`) for classic commit statuses,
+ * and one rollup can hold both — including two rows carrying the SAME name. The gate
+ * read only the CheckRun fields, so a StatusContext had no name at all: a required
+ * check named `legacy-ci`, present and SUCCESS, came back as
+ * `config-error: required check legacy-ci is not produced by any workflow in this
+ * repository`. Not a delay, not a wait — a permanent refusal of a legitimate setup.
+ */
+const statusRow = (context: string, state: string) => ({ __typename: 'StatusContext', context, state })
+const checkRow = (name: string, status: string, conclusion: string | null) => ({
+  __typename: 'CheckRun',
+  name,
+  status,
+  conclusion,
+})
+
+describe('statusCheckRollup carries TWO row shapes and both are judged', () => {
+  test('HEADLINE: a required check present only as a classic commit status PASSES', () => {
+    const { classifyReviewReadiness, REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
+    const cfg = requiredCfg(['legacy-ci'], ['legacy-ci'])
+    // Well past the settle window, so nothing but the shape can explain a failure here.
+    const out = classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [statusRow('legacy-ci', 'SUCCESS')] as never),
+      cfg,
+      REVIEW_READINESS_CONFIG_GRACE_MS,
+    )
+    expect(out.status).toBe('passed')
+    expect(out.reason).toBe('')
+  })
+
+  test('a StatusContext is PENDING, FAILURE and ERROR too — state is the whole answer', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    const one = (state: string) =>
+      classifyReviewReadiness(
+        readinessProbe('MERGEABLE', [statusRow('legacy-ci', state)] as never),
+        requiredCfg(['legacy-ci'], ['legacy-ci']),
+      )
+    expect(one('PENDING').status).toBe('pending')
+    expect(one('EXPECTED').status).toBe('pending')
+    expect(one('FAILURE').status).toBe('failed')
+    expect(one('FAILURE').failed).toEqual(['legacy-ci'])
+    expect(one('ERROR').status).toBe('failed')
+  })
+
+  test('MIXED, SAME NAME: a green CheckRun does not cover a failing StatusContext', () => {
+    // Both rows are kept and BOTH must be green. A rollup that disagrees with itself is
+    // not evidence the check passed, and last-row-wins would have made the answer
+    // depend on GitHub's ordering.
+    const { classifyReviewReadiness } = loadReadiness()
+    const cfg = requiredCfg(['ci'], ['ci'])
+    const bothGreen = classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [checkRow('ci', 'COMPLETED', 'SUCCESS'), statusRow('ci', 'SUCCESS')] as never),
+      cfg,
+    )
+    expect(bothGreen.status).toBe('passed')
+    const statusFailing = classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [checkRow('ci', 'COMPLETED', 'SUCCESS'), statusRow('ci', 'FAILURE')] as never),
+      cfg,
+    )
+    expect(statusFailing.status).toBe('failed')
+    expect(statusFailing.failed).toEqual(['ci'])
+    // …and in the other order, so the answer cannot depend on which row arrived last.
+    expect(
+      classifyReviewReadiness(
+        readinessProbe('MERGEABLE', [statusRow('ci', 'FAILURE'), checkRow('ci', 'COMPLETED', 'SUCCESS')] as never),
+        cfg,
+      ).status,
+    ).toBe('failed')
+    // A still-pending status under a finished check run is still PENDING.
+    expect(
+      classifyReviewReadiness(
+        readinessProbe('MERGEABLE', [checkRow('ci', 'COMPLETED', 'SUCCESS'), statusRow('ci', 'PENDING')] as never),
+        cfg,
+      ).status,
+    ).toBe('pending')
+  })
+
+  test('MIXED, SAME NAME: a SKIPPED check run does not hide a green status', () => {
+    // SKIPPED means "did not run", so it is excluded rather than judged — the name DID
+    // run, under the other shape.
+    const { classifyReviewReadiness } = loadReadiness()
+    expect(
+      classifyReviewReadiness(
+        readinessProbe('MERGEABLE', [checkRow('ci', 'COMPLETED', 'SKIPPED'), statusRow('ci', 'SUCCESS')] as never),
+        requiredCfg(['ci'], ['ci']),
+      ).status,
+    ).toBe('passed')
+  })
+
+  test('the UNPROTECTED rule counts status contexts as checks that ran', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    const un = (rows: unknown[]) => classifyReviewReadiness(readinessProbe('MERGEABLE', rows as never), requiredCfg([], null))
+    expect(un([statusRow('legacy-ci', 'SUCCESS')]).status).toBe('passed')
+    expect(un([statusRow('legacy-ci', 'PENDING')]).status).toBe('pending')
+    const failed = un([statusRow('legacy-ci', 'SUCCESS'), statusRow('deploy', 'FAILURE')])
+    expect(failed.status).toBe('failed')
+    expect(failed.failed).toEqual(['deploy'])
+  })
+
+  test('a row with neither shape is ignored, not counted as a nameless check', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    expect(
+      classifyReviewReadiness(readinessProbe('MERGEABLE', [{ foo: 'bar' }] as never), requiredCfg([], null)).status,
+    ).toBe('absent')
+  })
+
+  test('MUTANT: reading only the CheckRun fields goes RED on the classic-status repo', () => {
+    const mutant = SRC.replace(
+      '  const name =\n' +
+        "    typeof row.name === 'string' && row.name !== ''\n" +
+        '      ? row.name\n' +
+        "      : typeof row.context === 'string' && row.context !== ''\n" +
+        '        ? row.context\n' +
+        "        : ''",
+      "  const name = typeof row.name === 'string' ? row.name : ''",
+    )
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    const { REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
+    // The mutant's ACTUAL answer on the classic-status repo: the green status is
+    // invisible, so a check that ran and passed reads as one nothing here produces.
+    const out = loadReadiness(mutant).classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [statusRow('legacy-ci', 'SUCCESS')] as never),
+      requiredCfg(['legacy-ci'], ['legacy-ci']),
+      REVIEW_READINESS_CONFIG_GRACE_MS,
+    )
+    expect(out.status).toBe('absent')
+    // …and with `produced` from the check-runs-only read, it is the reported repro.
+    expect(
+      loadReadiness(mutant).classifyReviewReadiness(
+        readinessProbe('MERGEABLE', [statusRow('legacy-ci', 'SUCCESS')] as never),
+        requiredCfg(['legacy-ci'], ['check']),
+        REVIEW_READINESS_CONFIG_GRACE_MS,
+      ).reason,
+    ).toBe('required check legacy-ci is not produced by any workflow in this repository')
+  })
+})
+
+/**
+ * ONE BASE-HEAD SNAPSHOT IS EVIDENCE, NOT PROOF.
+ *
+ * `produced` is the names GitHub has reported on the BASE BRANCH HEAD. A
+ * `pull_request`-only job, or one gated on a path/branch/event filter, is legitimately
+ * absent from it — and on a PR's first poll nothing has appeared yet at all. Firing the
+ * config error on that snapshot immediately turns a correct repository into a
+ * permanent configuration fault seconds after the push.
+ *
+ * The absence must OUTLAST the settle window before it means "never". The fast-fail the
+ * original change added is preserved: a name genuinely no workflow emits still stops
+ * well before the full budget.
+ */
+describe('“has not appeared YET” is not “no workflow produces it”', () => {
+  test('HEADLINE: a pull_request-only check absent from the base head WAITS on the first poll', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions, REVIEW_READINESS_RETRY_MS } = loadReadiness()
+    // `pr-only` runs on `pull_request`, so it has never been reported on the base head.
+    const cfg = requiredCfg(['pr-only'], ['check', 'frontend'])
+    const first = classifyReviewReadiness(readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP), cfg, 0)
+    expect(first.status).toBe('absent')
+    expect(first.reason).toBe('required check pr-only has not run')
+    // …and the gate keeps polling: it waits for the check, and reviews it when it lands.
+    let probes = 0
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async (attempt: number) => {
+        probes += 1
+        const rows = attempt < 3 ? ENTERPRISE_ROLLUP : [...ENTERPRISE_ROLLUP, checkRow('pr-only', 'COMPLETED', 'SUCCESS')]
+        return classifyReviewReadiness(readinessProbe('MERGEABLE', rows as never), cfg, (attempt - 1) * REVIEW_READINESS_RETRY_MS)
+      },
+      spend: async () => { spent += 1; return 'reviewed' },
+      wait: async () => {},
+    })
+    expect({ probes, spent, deferred: out.deferred, value: out.value }).toEqual({
+      probes: 3,
+      spent: 1,
+      deferred: false,
+      value: 'reviewed',
+    })
+    expect(out.readiness.status).toBe('passed')
+  })
+
+  test('the SAME absence past the settle window IS the config error', () => {
+    const { classifyReviewReadiness, REVIEW_READINESS_CONFIG_GRACE_MS, REVIEW_READINESS_RETRY_MS } = loadReadiness()
+    const cfg = requiredCfg(['pr-only'], ['check', 'frontend'])
+    const at = (elapsed: number) => classifyReviewReadiness(readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP), cfg, elapsed).status
+    // The boundary from both sides — one retry short of the window still waits.
+    expect(at(REVIEW_READINESS_CONFIG_GRACE_MS - REVIEW_READINESS_RETRY_MS)).toBe('absent')
+    expect(at(REVIEW_READINESS_CONFIG_GRACE_MS)).toBe('config-error')
+  })
+
+  test('the settle window is longer than the MEASURED time for a check to appear', () => {
+    // 328 s on this repository's PR #275 — the number the budget comment is built on. A
+    // grace shorter than that converts a routine queue delay into a config fault.
+    const { REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
+    expect(REVIEW_READINESS_CONFIG_GRACE_MS).toBeGreaterThan(328000)
+  })
+
+  test('the settle window is STRICTLY below the budget, or the fast-fail is unreachable', () => {
+    // Fails CLOSED and invisibly if this ever inverts: the config-error branch stops
+    // firing, the gate burns the whole budget on a fault it can already name, and the
+    // symptom looks like patience.
+    const { REVIEW_READINESS_CONFIG_GRACE_MS, REVIEW_READINESS_BUDGET_MS, readinessGraceLabel } = loadReadiness()
+    expect(REVIEW_READINESS_CONFIG_GRACE_MS).toBeLessThan(REVIEW_READINESS_BUDGET_MS)
+    // The sentence the owner reads is derived from the same constant the loop spends.
+    expect(readinessGraceLabel()).toBe('8 minutes')
+    expect(SRC).toContain('The gate waited ${readinessGraceLabel()} first')
+  })
+
+  test('MUTANT: firing the config error on the first probe goes RED', () => {
+    const mutant = SRC.replace(
+      'elapsedMs >= REVIEW_READINESS_CONFIG_GRACE_MS',
+      'elapsedMs >= 0',
+    )
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    // The mutant's ACTUAL answer on the first poll of a correct repository: a permanent
+    // configuration fault, declared before the job could possibly have appeared.
+    expect(
+      loadReadiness(mutant).classifyReviewReadiness(
+        readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
+        requiredCfg(['pr-only'], ['check', 'frontend']),
+        0,
+      ).status,
+    ).toBe('config-error')
   })
 })
 

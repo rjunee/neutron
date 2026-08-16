@@ -2832,6 +2832,33 @@ const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING'
 // workflow genuinely never started, and that needs a human, not another wait.
 const REVIEW_READINESS_BUDGET_MS = 900000
 const REVIEW_READINESS_RETRY_MS = 30000
+// ONE SNAPSHOT OF THE BASE HEAD CANNOT PROVE THAT NO WORKFLOW EMITS A NAME.
+//
+// The `produced` list is the check names GitHub has reported on the BASE BRANCH HEAD.
+// That is evidence, not proof: a workflow can be `pull_request`-only, or gated on a
+// path/branch/event filter, so a job that legitimately runs on THIS PR may be absent
+// from the base head forever. Read as proof on the first probe — which is what shipped
+// — a perfectly configured repository gets `config-error: required check X is not
+// produced by any workflow in this repository` seconds after the push, and the gate
+// stops. That is the same conflation the budget comment above is about, one level up:
+// "it has not appeared YET" and "it can never appear" are different facts.
+//
+// So absence must PERSIST before it is allowed to mean "never". The measurement that
+// sets the floor is the one above: on this repository's PR #275 the check was ABSENT from
+// the rollup for 328 s and then appeared. A grace shorter than that converts a routine
+// queue delay into a permanent configuration fault.
+//
+// 8 minutes is ~1.5x that 328 s and a little over HALF the 15-minute budget, which
+// keeps both halves of the property the fast-fail was added for: a name no workflow
+// emits still stops well before the full budget (8 min, not 15), and a name that is
+// merely queued is never mistaken for one. Deliberately NOT tuned finer — see the
+// budget comment; the tuned number is what failed.
+//
+// IT MUST STAY STRICTLY BELOW THE BUDGET. At or above it the config-error branch is
+// unreachable and the gate silently reverts to burning the whole budget on a fault it
+// can already name — a failure that is invisible because it looks like patience.
+// `__tests__/ci-gate.test.ts` asserts the inequality.
+const REVIEW_READINESS_CONFIG_GRACE_MS = 480000
 // Derived, never hand-written — a count and a duration that can disagree is how the
 // doc comment above comes to describe a budget the loop does not actually have. The
 // +1 is the FIRST probe, which happens before any wait.
@@ -2854,6 +2881,12 @@ const REVIEW_READINESS_ATTEMPTS = Math.ceil(REVIEW_READINESS_BUDGET_MS / REVIEW_
 // keeping these `//` keeps the boundary where every reader expects it.
 function readinessBudgetLabel() {
   const minutes = REVIEW_READINESS_BUDGET_MS / 60000
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minutes`
+}
+// Same derivation for the settle window, so the config-error sentence cannot claim a
+// wait the gate did not perform either.
+function readinessGraceLabel() {
+  const minutes = REVIEW_READINESS_CONFIG_GRACE_MS / 60000
   return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minutes`
 }
 
@@ -2925,18 +2958,41 @@ function probeCause(raw) {
 //     DEFINITIVE answer ("this branch is not protected"), not a failure; any other
 //     read failure is `mode:'unknown'`, which defers quoting the cause.
 //   * `produced` — the check names GitHub has actually reported on the base branch
-//     head, i.e. what workflows in this repository emit. `null` when that list could
+//     head: BOTH check runs and classic commit statuses. `null` when either list could
 //     not be read, and a null there may only ever disable the config-error fast-fail
 //     (so an unreadable list still WAITS; it can never make the gate fail).
+//
+// SPLIT THE TRANSCRIPT BY NAME, NOT BY OFFSET. The probe grew from three reads to five
+// and a chain of `indexOf` slices gets one boundary wrong the moment a section is
+// added in the middle. Everything before the first marker is the protection read, which
+// is emitted first and unlabelled. An ABSENT section yields '' — its exit reads as
+// null, i.e. unreadable — so an older transcript degrades to "could not tell" rather
+// than being silently mis-sliced.
+function probeSections(raw) {
+  const out = { PROT: '' }
+  const re = /___SECTION=([A-Z]+)/g
+  let key = 'PROT'
+  let last = 0
+  let m
+  while ((m = re.exec(raw)) !== null) {
+    out[key] = (out[key] || '') + raw.slice(last, m.index)
+    key = m[1]
+    last = m.index + m[0].length
+  }
+  out[key] = (out[key] || '') + raw.slice(last)
+  return out
+}
 function classifyRequiredChecksProbe(probe) {
   if (probe === null || typeof probe !== 'object') return { mode: 'unknown', cause: '' }
   const raw = typeof probe.raw === 'string' ? probe.raw : null
   if (raw === null) return { mode: 'unknown', cause: '' }
-  const rulesAt = raw.indexOf('___SECTION=RULES')
-  const runsAt = raw.indexOf('___SECTION=RUNS')
-  const protText = rulesAt >= 0 ? raw.slice(0, rulesAt) : raw
-  const rulesText = rulesAt >= 0 ? raw.slice(rulesAt, runsAt >= 0 ? runsAt : raw.length) : ''
-  const runsText = runsAt >= 0 ? raw.slice(runsAt) : ''
+  const sec = probeSections(raw)
+  const protText = sec.PROT || ''
+  const rulesText = sec.RULES || ''
+  const runsText = sec.RUNS || ''
+  const statusesText = sec.STATUSES || ''
+  const branchText = sec.BRANCH || ''
+  const permText = sec.PERM || ''
   // The LAST occurrence of the marker, because the command's own text can appear in a
   // transcribed error line before the real one.
   const exitOf = (text, key) => {
@@ -2944,8 +3000,38 @@ function classifyRequiredChecksProbe(probe) {
     if (hits === null) return null
     return Number(hits[hits.length - 1].slice(('___' + key + '_EXIT=').length))
   }
-  // A 404 (or `gh`'s own "Branch not protected") is GitHub answering the question:
-  // there is no protection, and no ruleset, so those sources contribute no names.
+  // A 404 FROM THE PROTECTION ENDPOINT IS AMBIGUOUS, AND READING IT AS "UNPROTECTED"
+  // IS THE GATE FAILING OPEN.
+  //
+  // `branches/{b}/protection/required_status_checks` needs Administration-read, and
+  // GitHub's documented behaviour for a resource the credential may not ASK about is
+  // 404 — not 403 — precisely so the endpoint does not disclose that the resource
+  // exists. So the SAME body means two opposite things:
+  //     "there is no branch protection here"                 → required set is empty
+  //     "this credential is not allowed to know"             → required set is UNKNOWN
+  // Taking the first reading unconditionally is how a credential with PR + check scope
+  // but no Administration-read silently downgrades a PROTECTED base to the permissive
+  // all-green rule, and then reports success. A gate that fails open is worse than no
+  // gate. (This is what shipped, and one test asserted it.)
+  //
+  // THE DISAMBIGUATION IS A POSITIVE CONTROL — make something PROVE the permissive
+  // reading before taking it, exactly as a `grep` that returns nothing has to prove it
+  // can return something. Two independent proofs, because each alone has a hole:
+  //   * `branches/{b}` → `protected:false`. Readable with plain pull access, so it
+  //     answers for the credential that CANNOT read protection — the case that matters.
+  //     Not sufficient alone: `protected` also reflects rulesets, so `true` does not
+  //     by itself mean classic protection exists.
+  //   * `repos/{o}/{r}` → `permissions.admin:true`. The credential COULD have read
+  //     protection, so its 404 is GitHub answering the question rather than refusing
+  //     it. Not sufficient alone: a token can hold Administration-read without the
+  //     admin role.
+  // Either proof is enough. NEITHER means `mode:'unknown'`, and the gate defers with
+  // the ambiguity named — deferring on an unknown is a stop the owner can act on;
+  // proceeding on the permissive branch is a review that never happened.
+  //
+  // The rulesets read is NOT ambiguous in the same way: `rules/branches/{b}` is
+  // readable with pull access and answers `[]` for "no rules", so its 404 keeps the
+  // old meaning.
   const isMissing = (text) => /HTTP 404|Not Found|Branch not protected/i.test(String(text))
   const names = []
   const add = (value) => {
@@ -2961,13 +3047,31 @@ function classifyRequiredChecksProbe(probe) {
       return null
     }
   }
+  const objectFrom = (text, key) => {
+    if (exitOf(text, key) !== 0) return null
+    const parsed = between(text, '{', '}')
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  }
+  const branchObj = objectFrom(branchText, 'BRANCH')
+  const permObj = objectFrom(permText, 'PERM')
+  const unprotectedProven =
+    (branchObj !== null && branchObj.protected === false) || (permObj !== null && permObj.admin === true)
   const protExit = exitOf(protText, 'PROT')
   if (protExit === 0) {
     const parsed = between(protText, '{', '}')
     if (parsed === null || typeof parsed !== 'object') return { mode: 'unknown', cause: probeCause(protText) }
     if (Array.isArray(parsed.contexts)) for (const c of parsed.contexts) add(c)
     if (Array.isArray(parsed.checks)) for (const c of parsed.checks) add(c && typeof c === 'object' ? c.context : '')
-  } else if (!isMissing(protText)) {
+  } else if (isMissing(protText)) {
+    if (!unprotectedProven) {
+      return {
+        mode: 'unknown',
+        cause:
+          'branch protection answered 404, which is also how GitHub answers a credential ' +
+          'without Administration-read, and nothing proved the base branch is unprotected',
+      }
+    }
+  } else {
     return { mode: 'unknown', cause: probeCause(protText) }
   }
   const rulesExit = exitOf(rulesText, 'RULES')
@@ -2983,18 +3087,73 @@ function classifyRequiredChecksProbe(probe) {
   } else if (!isMissing(rulesText)) {
     return { mode: 'unknown', cause: probeCause(rulesText) }
   }
-  // FAIL-SAFE TOWARD WAITING. An unreadable check-run list is `produced: null`, which
-  // only turns the config-error fast-fail off; it never turns a wait into a failure.
-  let produced = null
-  if (exitOf(runsText, 'RUNS') === 0) {
-    const parsed = between(runsText, '[', ']')
-    if (Array.isArray(parsed)) produced = parsed.filter((n) => typeof n === 'string')
+  // WHAT THE REPOSITORY PRODUCES IS BOTH CHECK RUNS AND CLASSIC COMMIT STATUSES.
+  // Reading only `check-runs` made every status-context name look unproduced, so a repo
+  // on classic statuses could never satisfy its own required checks — the config-error
+  // fired on a name that was present and green under the other shape.
+  //
+  // FAIL-SAFE TOWARD WAITING, AND BOTH READS MUST SUCCEED. `produced: null` only turns
+  // the config-error fast-fail off; it never turns a wait into a failure. A PARTIAL
+  // union is the dangerous shape — it looks authoritative and is missing exactly the
+  // names the failed read would have supplied — so one unreadable list nulls both.
+  const listFrom = (text, key) => {
+    if (exitOf(text, key) !== 0) return null
+    const parsed = between(text, '[', ']')
+    return Array.isArray(parsed) ? parsed.filter((n) => typeof n === 'string') : null
   }
+  const runNames = listFrom(runsText, 'RUNS')
+  const statusNames = listFrom(statusesText, 'STATUSES')
+  const produced =
+    runNames === null || statusNames === null
+      ? null
+      : [...runNames, ...statusNames.filter((n) => !runNames.includes(n))]
   return { mode: 'resolved', required: names, produced }
 }
 
+// `statusCheckRollup` RETURNS TWO ROW SHAPES AND THE GATE ONLY UNDERSTOOD ONE.
+//
+// A modern GitHub Actions job arrives as a CheckRun: `{name, status, conclusion}`.
+// A classic commit status — the older API that CI services still post to — arrives as
+// a StatusContext: `{context, state}`, with no `status` and no `conclusion` at all.
+// One rollup can contain BOTH, including two rows carrying the SAME name.
+//
+// Reading only the CheckRun fields gave a StatusContext an empty name, so it never
+// entered the map: a required check named `legacy-ci`, present and SUCCESS, read as
+// "not produced by any workflow in this repository". A repository on classic statuses
+// could not satisfy its own required checks at all.
+//
+// Normalising to `{name, terminal, conclusion}` is what lets both shapes be judged by
+// one rule. StatusContext has no separate "is it finished" field — the state IS the
+// answer — so PENDING/EXPECTED are the non-terminal ones and everything else is a
+// verdict. When both shapes report the same name, each row is kept and BOTH must be
+// terminal and green: the conservative reading, because a rollup that disagrees with
+// itself is not evidence that the check passed.
+const STATUS_CONTEXT_PENDING_STATES = new Set(['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'])
+function normalizeRollupRow(row) {
+  if (row === null || typeof row !== 'object') return null
+  const upper = (v) => (typeof v === 'string' ? v.toUpperCase() : '')
+  const name =
+    typeof row.name === 'string' && row.name !== ''
+      ? row.name
+      : typeof row.context === 'string' && row.context !== ''
+        ? row.context
+        : ''
+  if (name === '') return null
+  // `__typename` when GitHub sent it; otherwise the shape decides. `status` is the
+  // CheckRun-only field, so its absence beside a `state` is the StatusContext tell.
+  const hasCheckRunShape = typeof row.status === 'string' && row.status !== ''
+  const isStatusContext =
+    upper(row.__typename) === 'STATUSCONTEXT' || (!hasCheckRunShape && typeof row.state === 'string' && row.state !== '')
+  if (isStatusContext) {
+    const state = upper(row.state)
+    return { name, terminal: state !== '' && !STATUS_CONTEXT_PENDING_STATES.has(state), conclusion: state }
+  }
+  const conclusion = upper(row.conclusion)
+  return { name, terminal: upper(row.status) === 'COMPLETED' && conclusion !== '', conclusion }
+}
+
 /** Classify the fixed `gh pr view` readiness probe before any review seat runs. */
-function classifyReviewReadiness(probe, requiredConfig) {
+function classifyReviewReadiness(probe, requiredConfig, elapsedMs = 0) {
   const config =
     requiredConfig === null || requiredConfig === undefined || typeof requiredConfig !== 'object'
       ? { mode: 'resolved', required: [], produced: null }
@@ -3045,13 +3204,19 @@ function classifyReviewReadiness(probe, requiredConfig) {
   if (mergeable !== 'MERGEABLE') {
     return { status: 'pending', reason: 'PR mergeability is still being calculated' }
   }
+  // Both rollup shapes, keyed by name; a name reported by BOTH keeps both rows.
   const byName = new Map()
   for (const row of parsed.statusCheckRollup) {
-    const name = row && typeof row.name === 'string' ? row.name : ''
-    if (name !== '') byName.set(name, row)
+    const norm = normalizeRollupRow(row)
+    if (norm === null) continue
+    const rows = byName.get(norm.name)
+    if (rows === undefined) byName.set(norm.name, [norm])
+    else rows.push(norm)
   }
-  const conclusionOf = (row) => (row && typeof row.conclusion === 'string' ? row.conclusion.toUpperCase() : '')
-  const statusOf = (row) => (row && typeof row.status === 'string' ? row.status.toUpperCase() : '')
+  // SKIPPED is "did not run", so it is excluded here rather than judged below. A name
+  // skipped under one shape and green under another therefore DID run.
+  const ranRows = (name) => (byName.get(name) || []).filter((r) => r.conclusion !== 'SKIPPED')
+  const isGreen = (r) => r.conclusion === 'SUCCESS' || r.conclusion === 'NEUTRAL'
   if (required.length > 0) {
     for (const name of required) {
       if (byName.has(name)) continue
@@ -3059,27 +3224,28 @@ function classifyReviewReadiness(probe, requiredConfig) {
       // DOES produce is merely not reported yet — GitHub queues for minutes, so that
       // waits. A name no workflow here produces can never arrive: waiting for it spends
       // the whole budget to learn nothing, which is exactly what cost a day on
-      // neutron-enterprise PR #515. That one stops NOW, and says so as a config fault.
-      if (produced !== null && !produced.includes(name)) {
+      // neutron-enterprise PR #515. That one stops early, and says so as a config fault.
+      //
+      // BUT NOT ON THE FIRST PROBE. `produced` is one snapshot of the BASE HEAD, and a
+      // `pull_request`-only or path-filtered job is legitimately missing from it, so on
+      // its own it cannot tell "never emitted here" from "has not appeared yet". The
+      // absence has to OUTLAST the grace window before it is allowed to mean never —
+      // see REVIEW_READINESS_CONFIG_GRACE_MS. Until then this is an ordinary wait.
+      if (produced !== null && !produced.includes(name) && elapsedMs >= REVIEW_READINESS_CONFIG_GRACE_MS) {
         return { status: 'config-error', reason: `required check ${name} is not produced by any workflow in this repository` }
       }
       return { status: 'absent', reason: `required check ${name} has not run` }
     }
     for (const name of required) {
-      const row = byName.get(name)
-      const status = statusOf(row)
-      const conclusion = conclusionOf(row)
-      if (conclusion === 'SKIPPED') {
+      const rows = ranRows(name)
+      if (rows.length === 0) {
         return { status: 'absent', reason: `required check ${name} has not run (reported SKIPPED)` }
       }
-      if (status !== 'COMPLETED' || conclusion === '') {
+      if (rows.some((r) => !r.terminal)) {
         return { status: 'pending', reason: `required check ${name} is still running` }
       }
     }
-    const failed = required.filter((name) => {
-      const conclusion = conclusionOf(byName.get(name))
-      return conclusion !== 'SUCCESS' && conclusion !== 'NEUTRAL'
-    })
+    const failed = required.filter((name) => ranRows(name).some((r) => !isGreen(r)))
     return { status: failed.length > 0 ? 'failed' : 'passed', reason: '', failed }
   }
   // UNPROTECTED BASE — "at least one check, and all of them green". The empty rollup is
@@ -3087,20 +3253,16 @@ function classifyReviewReadiness(probe, requiredConfig) {
   // started looks identical to a healthy PR if you only count successful rows), and this
   // rule cannot be satisfied by one: zero checks WAITS, and then defers. It never passes.
   const ran = []
-  for (const [name, row] of byName) {
-    if (conclusionOf(row) !== 'SKIPPED') ran.push(name)
+  for (const name of byName.keys()) {
+    if (ranRows(name).length > 0) ran.push(name)
   }
   if (ran.length === 0) return { status: 'absent', reason: 'no checks have run on this PR yet' }
   for (const name of ran) {
-    const row = byName.get(name)
-    if (statusOf(row) !== 'COMPLETED' || conclusionOf(row) === '') {
+    if (ranRows(name).some((r) => !r.terminal)) {
       return { status: 'pending', reason: `check ${name} is still running` }
     }
   }
-  const ranFailed = ran.filter((name) => {
-    const conclusion = conclusionOf(byName.get(name))
-    return conclusion !== 'SUCCESS' && conclusion !== 'NEUTRAL'
-  })
+  const ranFailed = ran.filter((name) => ranRows(name).some((r) => !isGreen(r)))
   return { status: ranFailed.length > 0 ? 'failed' : 'passed', reason: '', failed: ranFailed }
 }
 
@@ -3528,11 +3690,18 @@ ${cmd}`,
 /**
  * ASK THE BASE BRANCH WHAT IT REQUIRES — the only authority on the question.
  *
- * Three reads in one command, transcribed verbatim like every other probe: branch
- * protection's `required_status_checks`, the branch's rulesets, and the check-run
- * names GitHub has reported on the base branch head (i.e. what this repository's
- * workflows actually produce). `gh api` resolves `{owner}`/`{repo}` from the cwd repo,
- * so this works in every repository trident builds without being told which one it is.
+ * Five reads in one command, transcribed verbatim like every other probe: branch
+ * protection's `required_status_checks`, the branch itself, the repository (for the
+ * credential's own permissions), the branch's rulesets, and the names GitHub has
+ * reported on the base branch head as BOTH check runs and classic commit statuses
+ * (i.e. what this repository actually produces). `gh api` resolves `{owner}`/`{repo}`
+ * from the cwd repo, so this works in every repository trident builds without being
+ * told which one it is.
+ *
+ * The branch and repository reads exist to disambiguate a 404 from the protection
+ * endpoint, which GitHub returns both for "no protection" and for "you may not ask" —
+ * see `classifyRequiredChecksProbe`. Both are cheap, both are readable with plain pull
+ * access, and they ride in the SAME seat as the other three.
  *
  * ONE SEAT PER ROUND, not per readiness attempt: the configuration cannot change
  * mid-wait, and re-asking on all 31 attempts would spend 30 extra seats to learn the
@@ -3541,7 +3710,7 @@ ${cmd}`,
 async function probeRequiredChecks(prForReview, round) {
   if (!isPr || prForReview === null || prForReview === undefined) return null
   const base = encodeURIComponent(baseBranch)
-  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(`api repos/{owner}/{repo}/branches/${base}/protection/required_status_checks`)} 2>&1; echo "___PROT_EXIT=$?"; echo "___SECTION=RULES"; ${ghReadCommand(`api repos/{owner}/{repo}/rules/branches/${base}`)} 2>&1; echo "___RULES_EXIT=$?"; echo "___SECTION=RUNS"; ${ghReadCommand(`api 'repos/{owner}/{repo}/commits/${base}/check-runs?per_page=100' --jq '[.check_runs[].name]'`)} 2>&1; echo "___RUNS_EXIT=$?"; echo "___EXIT=0"`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(`api repos/{owner}/{repo}/branches/${base}/protection/required_status_checks`)} 2>&1; echo "___PROT_EXIT=$?"; echo "___SECTION=BRANCH"; ${ghReadCommand(`api repos/{owner}/{repo}/branches/${base} --jq '{protected:.protected}'`)} 2>&1; echo "___BRANCH_EXIT=$?"; echo "___SECTION=PERM"; ${ghReadCommand(`api repos/{owner}/{repo} --jq '{admin:.permissions.admin}'`)} 2>&1; echo "___PERM_EXIT=$?"; echo "___SECTION=RULES"; ${ghReadCommand(`api repos/{owner}/{repo}/rules/branches/${base}`)} 2>&1; echo "___RULES_EXIT=$?"; echo "___SECTION=RUNS"; ${ghReadCommand(`api 'repos/{owner}/{repo}/commits/${base}/check-runs?per_page=100' --jq '[.check_runs[].name]'`)} 2>&1; echo "___RUNS_EXIT=$?"; echo "___SECTION=STATUSES"; ${ghReadCommand(`api 'repos/{owner}/{repo}/commits/${base}/status?per_page=100' --jq '[.statuses[].context]'`)} 2>&1; echo "___STATUSES_EXIT=$?"; echo "___EXIT=0"`
   const res = await seatAttempt(`required-checks-r${round}`, () =>
     agent(
       `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM — every section marker and every ___*_EXIT= line — and the number after ___EXIT= in \`exit_code\`. Do NOT interpret which checks are required, do NOT run anything else, do NOT modify any file.\n${cmd}`,
@@ -3566,7 +3735,12 @@ async function probeReviewReadiness(prForReview, round, attempt, requiredConfig)
       withModel({ label: `review-readiness-r${round}-${attempt}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
     ),
   )
-  return classifyReviewReadiness(res, requiredConfig)
+  // How long this gate has ALREADY waited, derived from the attempt number rather than
+  // a clock — the +1 in REVIEW_READINESS_ATTEMPTS is the first probe, which has waited
+  // nothing. Only the config-error fast-fail reads it, and only to refuse to fire
+  // before the settle window has actually elapsed.
+  const elapsedMs = Math.max(0, (Number(attempt) || 1) - 1) * REVIEW_READINESS_RETRY_MS
+  return classifyReviewReadiness(res, requiredConfig, elapsedMs)
 }
 
 function reviewPreconditionDeferred(readiness) {
@@ -3583,7 +3757,7 @@ function reviewPreconditionDeferred(readiness) {
           (readiness.status === 'conflicting'
             ? 'Update the branch against its base and resolve the conflict, then re-run.'
             : readiness.status === 'config-error'
-            ? 'This is a repository configuration error, not a queue delay — the base branch requires a check that no workflow in this repository produces, so no amount of waiting can supply it and the readiness budget was not spent. Fix the branch-protection/ruleset entry or add the workflow that produces it, then re-run.'
+            ? `This is a repository configuration error, not a queue delay — the base branch requires a check that no workflow in this repository produces, so no amount of waiting can supply it. The gate waited ${readinessGraceLabel()} first (long enough for a queued job to appear) and then stopped without spending the rest of the readiness budget. Fix the branch-protection/ruleset entry or add the workflow that produces it, then re-run.`
             : // SAY HOW LONG IT WAITED. Without the duration these two read exactly
               // like the 30-second version that gave up before GitHub had queued the
               // job, so the owner cannot tell "we did not wait" from "we waited and it
