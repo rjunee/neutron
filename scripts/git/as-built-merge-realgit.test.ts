@@ -1227,36 +1227,110 @@ describe('the installer under a locked config — the FATAL half-state must be i
      *
      * A LINE NUMBER IS STILL ALLOWED WHERE IT CANNOT MOVE — against an immutable commit. The
      * predecessor-command citation below is of that kind and is kept, now pinned to a sha; it named
-     * a branch first, which is a moving target wearing a fixed target's clothes.
+     * a branch first, which is a moving target wearing a fixed target's clothes. The exemption is
+     * only worth having if the pin RESOLVES, so it is resolved: an arbitrary hex-looking word next
+     * to a line number would otherwise buy the exemption without pinning anything.
+     *
+     * WHAT THIS DELIBERATELY DOES NOT MATCH: the prose form, "line 715 of `orchestrator.ts`". Narrative
+     * that DESCRIBES a citation is not a citation, and the paragraphs above are made of exactly that
+     * — a check that flagged them would flag the explanation of its own rule. The machine-readable
+     * forms are the ones a reader clicks, and those are the ones covered.
      */
     test('cross-file citations name a symbol that resolves, or pin an immutable commit', () => {
       const cluster = ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts', 'scripts/git/as-built-merge-driver.ts']
+      const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
 
-      // A citation that names a file and then a line number is only durable when the same line also
-      // names the commit it is relative to. Anything else points into a file that edits above it
-      // will silently renumber. (Spelling the offending form out literally here would trip this
-      // very check — which is the check working, so the description stays in words.)
+      // A citation that names a file and then a line locator is only durable when the same line also
+      // pins the commit it is relative to — AND that pin resolves to a real commit whose copy of the
+      // file is actually that long. Without the resolution step the exemption is bought by any hex
+      // word at all, which is an escape hatch shaped exactly like the rot it is meant to permit.
+      // (Spelling an offending form out literally here would trip this very check — which is the
+      // check working — so the description stays in words.)
+      const LOCATOR = /([\w./-]+\.(?:ts|tsx|js|mjs|sh|md|json))(?::|#L)(\d+)/
       const offenders: string[] = []
       for (const rel of cluster) {
-        const text = readFileSync(join(REPO_ROOT, rel), 'utf8')
-        text.split('\n').forEach((line, i) => {
-          if (!/[\w./-]+\.(?:ts|sh):\d+/.test(line)) return
-          if (/\b[0-9a-f]{8,40}\b/.test(line)) return // pinned to a sha — cannot move
-          offenders.push(`${rel}:${i + 1} — ${line.trim()}`)
+        read(rel).split('\n').forEach((line, i) => {
+          const cite = line.match(LOCATOR)
+          if (!cite) return
+          const where = `${rel} line ${i + 1} — ${line.trim()}`
+          const pin = line.match(/\b([0-9a-f]{7,40})\b/)
+          if (!pin) return void offenders.push(`${where}   [no commit pin]`)
+          const [, path, lineNo] = cite as unknown as [string, string, string]
+          const sha = pin[1]!
+          if (!run(REPO_ROOT, ['git', 'cat-file', '-e', `${sha}^{commit}`]).ok) {
+            return void offenders.push(`${where}   [pin ${sha} is not a commit]`)
+          }
+          const blob = run(REPO_ROOT, ['git', 'show', `${sha}:${path}`])
+          if (!blob.ok) return void offenders.push(`${where}   [${path} does not exist at ${sha}]`)
+          if (blob.stdout.split('\n').length < Number(lineNo)) {
+            offenders.push(`${where}   [${path} has no line ${lineNo} at ${sha}]`)
+          }
         })
       }
       expect(offenders, `citations into a living file must name a symbol, not a line:\n${offenders.join('\n')}`).toEqual([])
 
-      // …and the symbols those citations now name have to be findable in the file they name.
-      const anchors: Array<[string, string]> = [
-        ['trident/orchestrator.ts', 'function asBuiltDriverCommand'],
-        ['trident/orchestrator.ts', 'export async function rebaseOntoObservedBase'],
-        ['trident/orchestrator.ts', "basename(process.execPath).replace(/\\.exe$/i, '')"],
+      // …and every symbol these docblocks cite has to exist at BOTH ends: in the file it is
+      // attributed to, and in the file doing the citing. Checking only the target is the weaker
+      // half and it passes the failure that matters most — misspell the symbol in the CITATION and
+      // the correct spelling is still sitting in the target, so a target-only check sees nothing.
+      //
+      // `definition` is checked rather than the bare `symbol`, because a symbol still appears at its
+      // own call sites after the DEFINITION is renamed — measured: renaming `function
+      // asBuiltDriverCommand` left the name in a call and a comment, and a bare-symbol check passed
+      // a function that no longer exists under that name.
+      const anchors: Array<{ symbol: string; definition: string; definedIn: string; citedBy: string[] }> = [
+        {
+          symbol: 'asBuiltDriverCommand',
+          definition: 'function asBuiltDriverCommand',
+          definedIn: 'trident/orchestrator.ts',
+          citedBy: ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts'],
+        },
+        {
+          symbol: 'rebaseOntoObservedBase',
+          definition: 'export async function rebaseOntoObservedBase',
+          definedIn: 'trident/orchestrator.ts',
+          citedBy: ['scripts/git/as-built-merge-realgit.test.ts'],
+        },
+        {
+          symbol: 'basename(process.execPath)',
+          definition: "basename(process.execPath).replace(/\\.exe$/i, '')",
+          definedIn: 'trident/orchestrator.ts',
+          citedBy: ['scripts/install-merge-drivers.sh'],
+        },
       ]
-      for (const [rel, symbol] of anchors) {
-        const text = readFileSync(join(REPO_ROOT, rel), 'utf8')
-        expect(text.includes(symbol), `${rel} no longer contains the cited \`${symbol}\``).toBe(true)
+      for (const { symbol, definition, definedIn, citedBy } of anchors) {
+        expect(read(definedIn).includes(definition), `${definedIn} no longer defines the cited \`${symbol}\``).toBe(true)
+        for (const citer of citedBy) {
+          expect(read(citer).includes(symbol), `${citer} no longer cites \`${symbol}\` — renamed at one end only`).toBe(true)
+        }
       }
+
+      // …AND THE CHECK ABOVE IS STILL THE WEAK ONE ON ITS OWN, because it asks whether the symbol
+      // appears ANYWHERE in the citing file. `asBuiltDriverCommand` is cited twice in the installer,
+      // so misspelling ONE of them leaves the other to satisfy the substring and the rot survives.
+      // Measured: that exact mutation passed the file-level check. So each SITE is checked where it
+      // sits — every backticked mention of a cited file must have a backticked identifier on its own
+      // line or the one above, and at least one of those has to exist in the file being cited.
+      //
+      // Scoped to the files the anchors above name, deliberately. A citation that names no symbol at
+      // all is legitimate prose ("the way `trident/publish-rebase-realgit.test.ts` does") and is left
+      // alone; widening this to every path mentioned anywhere would trade a real guard for noise.
+      const unresolved: string[] = []
+      for (const rel of cluster) {
+        const lines = read(rel).split('\n')
+        for (const target of [...new Set(anchors.map((a) => a.definedIn))]) {
+          const targetText = read(target)
+          lines.forEach((line, i) => {
+            if (!line.includes(`\`${target}\``)) return
+            const near = `${lines[i - 1] ?? ''}\n${line}`
+            const named = [...near.matchAll(/`([A-Za-z_][A-Za-z0-9_]*)`/g)].map((m) => m[1]!)
+            if (named.length === 0) return // prose that cites a file and names nothing in it
+            if (named.some((id) => targetText.includes(id))) return
+            unresolved.push(`${rel} line ${i + 1} cites ${target} naming ${named.join(', ')} — none of which is in it`)
+          })
+        }
+      }
+      expect(unresolved, `a citation names a symbol its target does not have:\n${unresolved.join('\n')}`).toEqual([])
     }, 30_000)
   })
 })
