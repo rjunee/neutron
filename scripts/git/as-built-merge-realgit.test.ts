@@ -653,13 +653,16 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // left exactly as the installer left it, so the command is the ONLY thing under test.
       //
       // Spelled with the RESOLVED bun and driver paths, because that is what the predecessor
-      // actually wrote (commit 63a342b2, scripts/install-merge-drivers.sh:145 — `"$BUN
-      // $DRIVER_SCRIPT %O %A %B %L %P"`, both already absolute). A literal `bun` here would be a
-      // command no release of this script has ever installed.
+      // actually wrote — the `merge.$DRIVER_NAME.driver` write in `scripts/install-merge-drivers.sh`
+      // at commit 63a342b2 passed `"$BUN $DRIVER_SCRIPT %O %A %B %L %P"`, both already absolute. A
+      // literal `bun` here would be a command no release of this script has ever installed.
       //
-      // PINNED TO A SHA RATHER THAN TO `origin/main`, which is what this said first. A branch name
-      // plus a line number is a citation whose target moves on its own: the same words became false
-      // the moment the fix merged, and `origin/main`'s line 145 now reads `DRIVER_RELPATH=...`.
+      // NAMED BY COMMIT AND BY THE WRITE ITSELF, not by a line number, and not by `origin/main` —
+      // which is what this said first. A branch name plus a line number is a citation whose target
+      // moves on its own: those words became false the moment the fix merged. The line number is
+      // gone too, and deliberately: see the citation test at the foot of this file, which had to
+      // reach into git history to check a pinned line and could not on the shallow checkout CI
+      // gives the test shards. A citation nothing can verify is the thing this file is against.
       const { bun, driver } = words(hardened)
       const predecessor = `${bun} ${driver} %O %A %B %L %P`
       expect(predecessor).not.toBe(hardened)
@@ -1225,11 +1228,12 @@ describe('the installer under a locked config — the FATAL half-state must be i
      * symbol, and this test resolves each one: a rename or a deletion fails here, and reflowing the
      * file above them cannot.
      *
-     * A LINE NUMBER IS STILL ALLOWED WHERE IT CANNOT MOVE — against an immutable commit. The
-     * predecessor-command citation below is of that kind and is kept, now pinned to a sha; it named
-     * a branch first, which is a moving target wearing a fixed target's clothes. The exemption is
-     * only worth having if the pin RESOLVES, so it is resolved: an arbitrary hex-looking word next
-     * to a line number would otherwise buy the exemption without pinning anything.
+     * NO LINE LOCATOR SURVIVES ANYWHERE IN THE CLUSTER, INCLUDING AGAINST AN IMMUTABLE COMMIT. That
+     * exemption existed for one citation and was withdrawn when CI showed it could not be verified
+     * where it runs — the shards check out shallow, the pinned object is not fetched, and the check
+     * called a correct citation a bad pin. The full argument is at the rule below; the short form is
+     * that an exemption nothing can check is worth less than no exemption. The one historical
+     * citation now names its commit and the config write, and gives up its line number.
      *
      * WHAT THIS DELIBERATELY DOES NOT MATCH: the prose form, "line 715 of `orchestrator.ts`". Narrative
      * that DESCRIBES a citation is not a citation, and the paragraphs above are made of exactly that
@@ -1240,31 +1244,29 @@ describe('the installer under a locked config — the FATAL half-state must be i
       const cluster = ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts', 'scripts/git/as-built-merge-driver.ts']
       const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
 
-      // A citation that names a file and then a line locator is only durable when the same line also
-      // pins the commit it is relative to — AND that pin resolves to a real commit whose copy of the
-      // file is actually that long. Without the resolution step the exemption is bought by any hex
-      // word at all, which is an escape hatch shaped exactly like the rot it is meant to permit.
+      // NO LINE LOCATOR AT ALL, WITH NO EXEMPTION — and the exemption is gone for a measured reason
+      // rather than a tidiness one. The first cut allowed a locator when the same line pinned a
+      // commit, and resolved that pin through git so an arbitrary hex word could not buy the pass.
+      // CI proved the resolution unrunnable: `actions/checkout@v4` gives the test shards a SHALLOW
+      // clone (only two jobs in `.github/workflows/ci.yml` set `fetch-depth: 0`), the pinned object
+      // is simply not fetched there, and the check reported a correct citation as `[pin ... is not a
+      // commit]` — a false verdict manufactured by an incomplete clone, which is the exact failure
+      // shape this repository keeps writing rules about.
+      //
+      // Keying the skip on `--is-shallow-repository` would not have saved it either: this clone is
+      // shallow too and still holds the object, so the skip would fire locally and take the
+      // mutation proof with it. An unverifiable exemption is worth less than no exemption, so the
+      // rule is now absolute and needs no git at all. The historical citation above gives up its
+      // line number and names the config write instead, which greps.
+      //
       // (Spelling an offending form out literally here would trip this very check — which is the
       // check working — so the description stays in words.)
       const LOCATOR = /([\w./-]+\.(?:ts|tsx|js|mjs|sh|md|json))(?::|#L)(\d+)/
       const offenders: string[] = []
       for (const rel of cluster) {
         read(rel).split('\n').forEach((line, i) => {
-          const cite = line.match(LOCATOR)
-          if (!cite) return
-          const where = `${rel} line ${i + 1} — ${line.trim()}`
-          const pin = line.match(/\b([0-9a-f]{7,40})\b/)
-          if (!pin) return void offenders.push(`${where}   [no commit pin]`)
-          const [, path, lineNo] = cite as unknown as [string, string, string]
-          const sha = pin[1]!
-          if (!run(REPO_ROOT, ['git', 'cat-file', '-e', `${sha}^{commit}`]).ok) {
-            return void offenders.push(`${where}   [pin ${sha} is not a commit]`)
-          }
-          const blob = run(REPO_ROOT, ['git', 'show', `${sha}:${path}`])
-          if (!blob.ok) return void offenders.push(`${where}   [${path} does not exist at ${sha}]`)
-          if (blob.stdout.split('\n').length < Number(lineNo)) {
-            offenders.push(`${where}   [${path} has no line ${lineNo} at ${sha}]`)
-          }
+          if (!LOCATOR.test(line)) return
+          offenders.push(`${rel} line ${i + 1} — ${line.trim()}`)
         })
       }
       expect(offenders, `citations into a living file must name a symbol, not a line:\n${offenders.join('\n')}`).toEqual([])
