@@ -61,6 +61,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -487,6 +488,36 @@ export class TridentRebaseConflict extends Error {
 }
 
 /**
+ * Install the entry-aware `docs/AS_BUILT.md` merge driver into a build checkout, if that checkout
+ * is one that has it.
+ *
+ * ONLY WHERE IT APPLIES. Trident builds several repositories, and most have no such log and no
+ * such installer. The presence of `scripts/install-merge-drivers.sh` in the checkout IS the
+ * condition — a repo without it is left completely untouched, so nothing here imposes one repo's
+ * changelog layout on another. (Argus, round 1: an earlier cut of this work told every target
+ * repo to adopt a layout only this one has.)
+ *
+ * BEST EFFORT, NEVER FATAL. A failure to install leaves the checkout merging exactly as it does
+ * today — a conflict on the log — which is the same outcome as not calling this at all. Publishing
+ * must not be blocked by an optimisation to publishing.
+ *
+ * Returns whether the driver is installed and usable afterwards.
+ */
+export async function ensureAsBuiltMergeDriver(
+  run_host: RunHostCommand,
+  repoPath: string,
+): Promise<boolean> {
+  const installer = join(repoPath, 'scripts', 'install-merge-drivers.sh')
+  if (!existsSync(installer)) return false
+  try {
+    const res = await run_host(['bash', installer], repoPath)
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/**
  * Replay `branch` onto the ls-remote-OBSERVED tip of `base`, shallow-safely.
  *
  * ⚠️ THE SHARED BUILD CHECKOUT IS SHALLOW (governance #574/#571). `.git/shallow` is present, so
@@ -684,6 +715,16 @@ export async function rebaseOntoObservedBase(
   }
   if (!existsSync(diffFile) || readFileSync(diffFile, 'utf8').trim() === '')
     throw new Error('outer publisher refused to rebase an empty diff')
+
+  // (e2) TEACH THIS CHECKOUT TO MERGE THE AS_BUILT LOG BEFORE ANY REPLAY TOUCHES IT.
+  //      The log is newest-first and every build prepends at the same offset under the same three
+  //      header lines, so two concurrent builds conflict on it by construction — three publishes
+  //      died on that file and nothing else on 2026-08-15T23:20Z. The entry-aware driver in
+  //      `scripts/git/as-built-merge-driver.ts` unions whole entries instead, and `git apply
+  //      --3way` below DOES consult it (verified against real git, not assumed). Installed here
+  //      rather than assumed present because the binding lives in `.git/info/attributes`, which is
+  //      untracked by design — see the driver's docblock for why committing it would be fatal.
+  await ensureAsBuiltMergeDriver(run_host, repoPath)
 
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
   //     poison every other lane's build.

@@ -112,6 +112,35 @@ you publish it:
 LEAK_GATE_PR_BODY="$(cat pr-body.md)" bash scripts/ci/leak-gate.sh --messages-only
 ```
 
+### Merge driver for the AS_BUILT log (anyone)
+
+```sh
+bash scripts/install-merge-drivers.sh            # install
+bash scripts/install-merge-drivers.sh --check    # is it installed?
+bash scripts/install-merge-drivers.sh --uninstall
+```
+
+`docs/AS_BUILT.md` is newest-first, so every change prepends its entry at the
+same offset under the same header lines. Two branches doing that conflict by
+construction rather than by bad luck — on 2026-08-15 three concurrent builds
+failed to publish on that file and nothing else. This installs an **entry-aware**
+merge driver: it unions whole entries, so two branches that each added one get
+both, newest first, with neither spliced into the other. Anything it will not
+merge cleanly (both sides editing the same entry, a changed header) falls back
+to `git merge-file` and the ordinary conflict markers.
+
+Unlike the hook above, this needs no secret and is useful to anyone who rebases
+a branch that touches the log. It is optional: **the attribute that binds the
+driver to the path is written to `.git/info/attributes`, not to a tracked
+`.gitattributes`**, so a clone that never runs this behaves exactly as it does
+today. That is deliberate — git treats an attribute naming an unconfigured
+driver as `fatal: … lacks command line` (exit 128) rather than falling back, so
+committing the attribute would break every clone that had not run the installer.
+The attribute and its driver arrive together or neither does.
+
+Trident's publisher runs this itself before replaying a branch, so builds get it
+without anyone remembering.
+
 ## Pull requests
 
 - Keep PRs focused: one concern per PR.
