@@ -20,18 +20,48 @@ therefore meant two opposite things, and a credential with PR + check scope but
 no Administration-read silently downgraded a PROTECTED base to unprotected and
 reported success. The permissive reading now requires a POSITIVE CONTROL, and it
 has to come from a read PLAIN PULL ACCESS can do, because the credential that
-cannot read protection is the entire case. `branches/{b}` is that read and it
-answers on two fields: `protected:false` (nothing guards the branch at all) or
-`protection.enabled:false` (no CLASSIC protection specifically). The second field
-is the load-bearing one — `protected` is TRUE whenever a RULESET applies, so it
-alone can never clear a ruleset-governed branch. Measured on the base branch this
-gate runs against, with a credential holding no admin role: protection → 404,
-branch → `{"protected":true,"protection":{"enabled":false,…}}`, rules → `["test"]`.
-Both fields come back to a non-admin caller, so the required set resolves to
-`["test"]`. NEITHER field proving it is `mode:'unknown'` and the gate defers
-naming the ambiguity. The rulesets read is not ambiguous the same way —
-`rules/branches/{b}` is readable with pull access and answers `[]` — so its 404
-keeps its old meaning.
+cannot read protection is the entire case. `branches/{b}` is that read, it is
+readable with plain pull access, and it answers on THREE fields in order:
+
+1. `protection.required_status_checks.contexts` — THE ANSWER ITSELF. The branch
+   payload embeds the very list the 404'd subresource would have returned, so
+   when it is present there is no ambiguity left to settle.
+2. `protection.enabled:false` — no CLASSIC protection specifically, which is
+   exactly what the 404 was about. `protected` is TRUE whenever a RULESET
+   applies, so it can never clear a ruleset-governed branch on its own.
+3. `protected:false` — nothing guards the branch at all.
+
+Rung 1 exists because rungs 2-3 alone DEADLOCK the common case, and that was the
+shape of the over-correction: reading only the two flags turns every genuinely
+classic-protected base into `unknown`, and `unknown` defers the round — every
+round, forever, with zero rounds spent. Fail-open became fail-closed; both report
+a review that never happened. Measured with a credential holding no admin role,
+protection subresource → HTTP 404 on all three: this gate's own base branch →
+`{"protected":true,"protectionEnabled":false,"contexts":[]}` (rung 2 clears it,
+rules supply `["test"]`); `rails/rails` @ main → `{"protected":true,
+"protectionEnabled":true,"contexts":[]}` (rung 1 resolves it, rungs 2-3 could
+not); `microsoft/vscode` @ main → the same with 23 contexts, each carrying an
+`app_id` — the exact data the deferral was throwing away.
+
+An ABSENT `contexts` key is not an empty one. Rung 1 fires only on an ARRAY:
+present-and-empty is an answer, absent is a silence, and a silence that rungs 2-3
+cannot clear either is still `mode:'unknown'` with the ambiguity named. The
+rulesets read is not ambiguous the same way — `rules/branches/{b}` is readable
+with pull access and answers `[]` — so its 404 keeps its old meaning.
+
+**A required check can name its producer, and the name alone does not.** Branch
+protection and rulesets both bind a required check to one App
+(`{"context":"test","integration_id":15368}` on this repository's own ruleset,
+`{"app_id":15368,"context":"Linux / CLI"}` on vscode's branch payload — both
+measured). Keying satisfaction on the context alone let anything carrying the name
+satisfy it, including a commit status from a different producer. The binding is
+now carried through to the classifier as `appBound`, and an app-bound requirement
+can only be satisfied by a CheckRun row. What this CANNOT do is stated in the
+source rather than implied: `gh pr view --json statusCheckRollup` carries no app
+or check-suite identity for a CheckRun (measured), so a check run from the WRONG
+app with the right name still passes. The row SHAPE is the one half of the
+producer this data can testify about; narrowing further needs producer identity in
+the probe.
 
 `permissions.admin` is NOT a proof and is no longer read. A repository ROLE and a
 token's permission set are different things: a fine-grained token can carry the
@@ -68,9 +98,26 @@ after the push.
 Waiting cannot turn that snapshot into proof, so the stop no longer claims it is
 one. What waiting buys is the OTHER half of the evidence: the name is also absent
 from this PR's OWN rollup, which is exactly where a `pull_request`-only job would
-appear. The config error therefore needs all three — absent from the PR's rollup,
-absent from a base head that reported OTHER checks, and absent for longer than
-the settle window — and the sentence it returns states that evidence instead of
+appear. But a settle window alone only DELAYED the ambiguity — a required job that
+was queued or running at minute 10 was still called a configuration fault. GitHub
+creates a check run when the job is QUEUED, so a job that exists and is merely
+slow IS in the PR's rollup as a non-terminal row, and that is the evidence the
+stop was missing. The config error therefore needs all four — absent from the PR's
+rollup, absent from a base head that reported OTHER checks, absent for longer than
+the settle window, and THIS PR'S ROLLUP HAS STOPPED MOVING (every row terminal).
+What remains unprovable is small and named: a job created after everything else on
+the PR has finished.
+
+The base-head snapshot is also no longer allowed to be stale at the moment it
+stops a build. `produced` is resolved ONCE per round and reused by every attempt,
+so by the time the fast-fail fires it can be a full settle window old.
+`confirmedConfigError` re-derives the verdict from a FRESH read before the only
+terminal snapshot-based stop is allowed to stand — one extra seat, on the one
+attempt of the one round where the stop would otherwise fire — and a fresh read
+that did not RESOLVE leaves the original verdict alone rather than letting a
+transient credential failure overwrite it.
+
+The sentence it returns states that evidence instead of
 asserting "is not produced by any workflow in this repository", a claim this data
 cannot support and one that sends the owner hunting for a workflow that may exist
 and simply be conditional. The deferral text now names the conditional-filter case
@@ -81,10 +128,15 @@ whose CI never ran, or whose checks expired — and it can no longer fire the
 fast-fail however long it persists.
 
 `REVIEW_READINESS_CONFIG_GRACE_MS` is DERIVED from the budget (two thirds of it,
-10 minutes at the current 15) rather than hand-written. Two tuned durations beside
-each other is how the budget comment came to argue for a 3x margin over the
-measured 328 s appearance time while the number next to it was 1.5x; as a ratio it
-moves WITH the budget and the fast-fail stays reachable by construction. It must
+snapped UP to a whole number of retries — 10 minutes at the current 15) rather
+than hand-written. Two tuned durations beside each other is how the budget comment
+came to argue for a 3x margin over the measured 328 s appearance time while the
+number next to it was 1.5x; as a ratio it moves WITH the budget and the fast-fail
+stays reachable by construction. The snap matters because the gate cannot spend a
+fraction of a sleep: an un-snapped window is crossed LATE, so the sentence the
+owner reads claims a shorter wait than the loop performed and the guard's attempt
+arithmetic stops being an integer (measured at a mutant budget of 600000 ms:
+14.33 probes asserted against 15 actually spent). It must
 stay STRICTLY below the budget or the config-error branch becomes unreachable and
 the gate silently reverts to burning the whole budget on a fault it can already
 name; the test suite asserts the inequality anyway, because that failure is
@@ -95,12 +147,24 @@ Both produced-list reads also ask for GitHub's `total_count` beside the names.
 a base head reporting more than 100 checks would silently drop names — and a
 dropped name is indistinguishable from one no workflow emits, which is the single
 reading that STOPS a build. A count larger than what arrived now nulls the list
-out, which can only ever disable the fast-fail.
+out, which can only ever disable the fast-fail. That safety is not free and the
+cost is now written down where the guard is: on a base head with more than 100
+checks (`microsoft/vscode` measured at 120) a genuinely mis-named required check
+no longer stops early — it burns the full budget and defers as `absent`, which
+reads like a queue problem rather than a configuration one. The fix when it bites
+is pagination in the probe, not a looser guard.
 
 The probe grew from three reads to five, all in the SAME Bookkeeping seat and
-all through `ghReadCommand`, and the transcript is now split by section NAME
-rather than by `indexOf` offsets so an added section cannot mis-slice its
-neighbours. An absent section reads as unreadable rather than being silently
+all through `ghReadCommand`, and the transcript is split by section NAME rather
+than by `indexOf` offsets — taking each marker's LAST occurrence, for the same
+reason `exitOf` already did. Splitting on the FIRST had its own version of the
+offset bug: the probe's own command line carries all four markers, so ONE echoed
+command moved every boundary to the echo and mis-assigned every section (measured:
+a transcript with the command echoed in front classified as `unknown` where the
+identical clean transcript resolved). The JSON extractor inside a section is
+tolerant of the same echo — it tries candidate `{` positions from the outermost in
+rather than assuming the first brace is the payload's, because `repos/{owner}/
+{repo}` is not. An absent section reads as unreadable rather than being silently
 mis-attributed. `elapsedMs` counts the sleeps and not the probe round-trips
 between them, so it is a FLOOR — the safe direction for its one consumer, since
 the fast-fail can only fire later than the window and never earlier — and every
@@ -113,10 +177,18 @@ required the classifier to answer `required: []`. That test is why the defect
 shipped: the behaviour was pinned, so nothing downstream could notice it. It is
 replaced by tests that assert the DECISION under each reading of the ambiguity —
 404-with-proof resolves, authorization-shaped 404 defers and spends zero review
-seats. Each fix carries a mutant test that reintroduces the defect and asserts
-the specific WRONG value the mutant returns, rather than only that an assertion
-threw: a mutant that failed to LOAD would satisfy `toThrow()` while proving
-nothing.
+seats.
+
+**And the mutation tests had the same defect one level up.** Several asserted the
+MUTANT'S OWN answer (`expect(mutantAnswer).toBe('config-error')`), which documents
+that the mutant behaves differently and stops there — it never shows that any
+guard in the file would CATCH it, so those tests stayed green against their own
+mutants. Asserting only that something threw is worse: a mutant whose source no
+longer parses throws on LOAD, so `toThrow()` passes while the mutation never ran.
+Every mutant now proves three things through one shared helper — the replacement
+MATCHED, the mutant LOADS, and the real guard's own assertion replayed against it
+goes RED — and records the wrong answer as documentation rather than as the
+assertion carrying the test.
 
 **A shared fixture defaulted to a branch state GitHub never emits.** Every
 `requiredProbe` case defaulted `branch` to `{"protected":false}`, and a
