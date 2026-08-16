@@ -6606,11 +6606,35 @@ The fix is a git merge driver that works on **whole entries**:
   `driver_command` the install uses, and requires the rebuild to reproduce the
   configured string byte for byte. Every hardening token is still exact; the two
   free words are validated for what they must BE — the driver is an
-  `as-built-merge-driver.ts` that exists, the bun is executable — which also
-  catches a dangling command that parses perfectly and cannot run, and means the
-  check no longer needs a bun on `PATH` at all. Install resolves the driver from
+  `as-built-merge-driver.ts` that exists, the bun is a regular executable file
+  whose final component is `bun` — which also catches a dangling command that
+  parses perfectly and cannot run, and means the check no longer needs a bun on
+  `PATH` at all. Install resolves the driver from
   the MAIN worktree, so a throwaway checkout cannot write a path that dies with
   it.
+- **…and three things that PARSE correctly still are not an install.** Each of
+  these rebuilt byte-for-byte and reported `installed`. (1) The interpreter was
+  gated on `[ -x ]`, which is true of nearly every file on a unix box:
+  `/usr/bin/true`, the DIRECTORY `/usr/bin`, and `/bin/sh` all passed. That is
+  not cosmetic — git ran `true`, which exits 0 having written nothing to `%A`, so
+  git took the merge as SUCCESSFUL and one side's entries left the log with no
+  conflict and no message (measured on git 2.50.1: the mainline heading present,
+  zero of the side's). The word must now be a regular executable file named
+  `bun`, judged by NAME rather than by running it — executing a binary named in
+  repo config to decide whether it is safe to let git execute it answers the
+  question by doing the thing. The same three conditions apply at install time,
+  so the check can never reject a command the installer wrote. (2) The attribute
+  line's PRESENCE was being read as the path's BINDING; attributes are
+  last-match-wins, so a later `docs/AS_BUILT.md merge=union` overrides the driver
+  while a `grep -x -F` for the installed line still matches. The verdict now
+  comes from `git check-attr`, the resolver git itself uses. (3) The command
+  names the MAIN worktree's copy on purpose, so the path can be current while the
+  CODE behind it is an older revision; the contents are compared against the
+  invoking checkout's copy. That last one reports STALE for a linked worktree on
+  a differing revision, which is true rather than a false alarm, and its message
+  says re-running will NOT change it — the installer would rewrite the same path.
+  `--check` has no programmatic caller (`CONTRIBUTING.md:118-120` and this
+  document describe it as a human command), so no build gates on that verdict.
 
 **What "the repo merges exactly as it does today" means here, precisely.** It is
 **not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,
