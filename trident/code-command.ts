@@ -28,7 +28,7 @@ import { buildTridentTerminator } from './terminate.ts'
 import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
 import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
-import type { DispatchHoldStore } from './dispatch-holds.ts'
+import { buildDispatchHoldSweep, type DispatchHoldStore } from './dispatch-holds.ts'
 
 export type CodeCommand =
   | { kind: 'dispatch'; task: string; board_item_id?: string }
@@ -290,8 +290,31 @@ async function executeStop(
     typeof ctx.work_board.detachRun === 'function'
       ? buildBoardReconcileObserver(ctx.work_board as TridentBoardReconciler)
       : null
-  const observer =
-    reconcile !== null ? composeTerminalHook({ onTerminal: async (): Promise<void> => {} }, [reconcile]) : null
+  const holdSweep = ctx.holds === undefined
+    ? null
+    : buildDispatchHoldSweep({
+        holds: ctx.holds,
+        board: ctx.work_board,
+        makeDispatchDeps: (hold) => ({
+          store: ctx.store,
+          board: ctx.work_board,
+          project_slug: hold.project_slug,
+          repo_path: ctx.repo_path,
+          holds: ctx.holds!,
+          ...(ctx.resolveBuildRepo !== undefined ? { resolveBuildRepo: ctx.resolveBuildRepo } : {}),
+          ...(ctx.resolveMergeMode !== undefined ? { resolveMergeMode: ctx.resolveMergeMode } : {}),
+          ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
+          ...(hold.payload?.chat_id !== undefined ? { chat_id: hold.payload.chat_id } : {}),
+          ...(hold.payload?.thread_id !== undefined ? { thread_id: hold.payload.thread_id } : {}),
+          ...(hold.payload?.channel_kind !== undefined ? { channel_kind: hold.payload.channel_kind } : {}),
+        }),
+      })
+  const observers = [reconcile, holdSweep].filter(
+    (candidate): candidate is (run: TridentRun) => Promise<void> => candidate !== null,
+  )
+  const observer = observers.length > 0
+    ? composeTerminalHook({ onTerminal: async (): Promise<void> => {} }, observers)
+    : null
   const result = await buildTridentTerminator({ store: ctx.store, observer }).terminate(target.id, 'stopped', {})
   // The `resolveStopTarget` read can go stale in the await gap: the tick loop may
   // finish the run first, so the atomic transition LOSES (`won:false`). Report

@@ -262,9 +262,19 @@ export function buildDispatchHoldSweep(deps: {
           await deps.holds.deleteByItem(hold.project_slug, hold.board_item_id)
           continue
         }
+        const dispatchDeps = deps.makeDispatchDeps(hold)
+        if (item.linked_run_id !== null && item.linked_run_id !== undefined) {
+          const linked = dispatchDeps.store.get(item.linked_run_id)
+          if (linked !== null && !['done', 'failed', 'stopped'].includes(linked.phase)) {
+            // A successful dispatch through any entry point owns the card now.
+            // Drop a stale hold rather than attaching a second concurrent run.
+            await deps.holds.deleteByItem(hold.project_slug, hold.board_item_id)
+            continue
+          }
+        }
         const result = await dispatchBoardBoundBuild(
           { task: hold.task, board_item_id: hold.board_item_id },
-          deps.makeDispatchDeps(hold),
+          dispatchDeps,
         )
         if (result.ok) {
           // The dispatch itself already cleared the hold; the delete is

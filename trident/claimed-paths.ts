@@ -38,7 +38,7 @@ const BACKTICKED = /`([^`\n]{1,200})`/g
  * segment followed by a `name.ext` leaf. Anchored on a boundary so a URL's
  * `//host/…` tail and a mid-word match are not picked up as their own token.
  */
-const BARE_PATH = /(?:^|[\s'"(\[{])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})/g
+const BARE_PATH = /(?:^|[\s,'"(\[{])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}(?::\d+(?::\d+)?)?)/g
 
 /**
  * Normalize one candidate token, or return null when it is not a repo-relative
@@ -57,8 +57,16 @@ function normalize(raw: string): string | null {
   if (token.length === 0) return null
   if (token.includes('://')) return null
   if (token.startsWith('/')) return null
+  if (token.startsWith('~') || token.startsWith('@')) return null
   if (token.includes('..')) return null
-  if (token.includes('/')) return token
+  // Source references commonly carry a line suffix; it is not part of the path.
+  token = token.replace(/:\d+(?::\d+)?$/, '')
+  if (token.includes('/')) {
+    const leaf = token.slice(token.lastIndexOf('/') + 1)
+    const dot = leaf.lastIndexOf('.')
+    if (dot <= 0 || !KNOWN_EXTENSIONS.has(leaf.slice(dot + 1).toLowerCase())) return null
+    return token
+  }
   // No slash: only a bare repo-root file with a known extension qualifies.
   const dot = token.lastIndexOf('.')
   if (dot <= 0) return null
@@ -72,7 +80,6 @@ function normalize(raw: string): string | null {
  * gate cannot hold on what it could not measure.
  */
 export function deriveClaimedPaths(sources: { task: string; planDoc?: string | null }): string[] {
-  const text = `${sources.task}\n${sources.planDoc ?? ''}`
   const seen = new Set<string>()
   const out: string[] = []
   const take = (candidate: string): void => {
@@ -82,8 +89,19 @@ export function deriveClaimedPaths(sources: { task: string; planDoc?: string | n
     seen.add(path)
     out.push(path)
   }
-  // Backticked tokens first: an author who marked it up meant it.
-  for (const m of text.matchAll(BACKTICKED)) take(m[1] ?? '')
-  for (const m of text.matchAll(BARE_PATH)) take(m[1] ?? '')
+  // Claims come only from actionable sentences. Design docs routinely mention
+  // reference files, historical evidence and explicit "do not touch" guard
+  // rails; treating every slash token as an intended edit serialises unrelated
+  // lanes. Split backtick spans and comma/"and" lists into individual paths.
+  const text = `${sources.task}\n${sources.planDoc ?? ''}`
+  for (const line of text.split('\n')) {
+    if (/\b(?:do not|don't|never|avoid|without (?:editing|touching|changing))\b/i.test(line)) continue
+    if (!/\b(?:add|append|build|change|create|edit|fix|implement|modify|move|publish|remove|rename|replace|rewrite|touch|update|wire)\b/i.test(line)) continue
+    for (const m of line.matchAll(BACKTICKED)) {
+      const span = m[1] ?? ''
+      for (const candidate of span.split(/\s+(?:and|or)\s+|\s*,\s*/i)) take(candidate)
+    }
+    for (const m of line.matchAll(BARE_PATH)) take(m[1] ?? '')
+  }
   return out
 }

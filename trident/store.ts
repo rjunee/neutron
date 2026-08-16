@@ -423,6 +423,26 @@ export class TridentRunStore {
     return run
   }
 
+  /**
+   * Atomically admit a run only when none of its paths is owned by a live run
+   * in the same repository.  The read and INSERT share one SQLite transaction,
+   * closing the check-then-create race between concurrent dispatches.
+   */
+  async createIfClaimsAvailable(
+    input: CreateTridentRunInput,
+  ): Promise<{ ok: true; run: TridentRun } | { ok: false; holding_run: TridentRun; path: string }> {
+    return this.db.transaction(async () => {
+      const wanted = new Set(input.claimed_paths ?? [])
+      if (wanted.size > 0) {
+        for (const live of this.listNonTerminalByRepo(input.repo_path)) {
+          const path = live.claimed_paths.find((candidate) => wanted.has(candidate))
+          if (path !== undefined) return { ok: false as const, holding_run: live, path }
+        }
+      }
+      return { ok: true as const, run: await this.create(input) }
+    })
+  }
+
   get(id: string): TridentRun | null {
     const row = this.db
       .prepare<TridentRunDbRow, [string]>(

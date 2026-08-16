@@ -46,8 +46,26 @@ describe('deriveClaimedPaths', () => {
   })
 
   test('caps at 64 paths', () => {
-    const task = Array.from({ length: 100 }, (_, i) => `pkg/file${i}.ts`).join(' ')
+    const task = `Edit ${Array.from({ length: 100 }, (_, i) => `pkg/file${i}.ts`).join(' ')}`
     expect(deriveClaimedPaths({ task })).toHaveLength(64)
+  })
+
+  test('does not claim guard rails, package specifiers, directories, or incidental references', () => {
+    expect(deriveClaimedPaths({
+      task: 'Avoid `trident/inner-workflow.mjs` entirely. Import @neutronai/logger. See docs/AS_BUILT.md.',
+    })).toEqual([])
+    expect(deriveClaimedPaths({ task: 'Edit docs/as-built/ and `@neutronai/logger`.' })).toEqual([])
+  })
+
+  test('normalizes line references and extracts lists as distinct claims', () => {
+    expect(deriveClaimedPaths({
+      task: 'Update `trident/store.ts and trident/tick.ts`, plus gateway/composition/build-core-modules.ts:621,work-board/store.ts.',
+    })).toEqual([
+      'trident/store.ts',
+      'trident/tick.ts',
+      'gateway/composition/build-core-modules.ts',
+      'work-board/store.ts',
+    ])
   })
 
   test('empty input derives nothing (and therefore can never hold a dispatch)', () => {

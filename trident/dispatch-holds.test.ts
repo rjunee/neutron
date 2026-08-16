@@ -36,6 +36,7 @@ interface StubCard {
   design_doc_ref: string | null
   status: string
   blockers?: string[]
+  linked_run_id?: string | null
 }
 
 interface StubBoard extends TridentBoardBinder {
@@ -94,6 +95,29 @@ function runCount(): number {
 }
 
 describe('OVERLAP HELD — two cards naming the same file cannot both be in flight', () => {
+  test('concurrent dispatches atomically admit only one overlapping run', async () => {
+    const board = stubBoard([
+      { id: 'A', title: 'first concurrent card with a detailed implementation', design_doc_ref: 'neutron-docs:a', status: 'upcoming' },
+      { id: 'B', title: 'second concurrent card with a detailed implementation', design_doc_ref: 'neutron-docs:b', status: 'upcoming' },
+    ])
+    let arrivals = 0
+    let release!: () => void
+    const rendezvous = new Promise<void>((resolve) => { release = resolve })
+    const readPlanDoc = async (): Promise<string> => {
+      arrivals += 1
+      if (arrivals === 2) release()
+      await rendezvous
+      return 'Edit trident/race.ts.'
+    }
+    const [a, b] = await Promise.all([
+      dispatchBoardBoundBuild({ task: 'Implement A', board_item_id: 'A' }, deps(board, { readPlanDoc })),
+      dispatchBoardBoundBuild({ task: 'Implement B', board_item_id: 'B' }, deps(board, { readPlanDoc })),
+    ])
+    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1)
+    expect(runCount()).toBe(1)
+    expect(holds.list()).toHaveLength(1)
+  })
+
   test('the second dispatch is held, names the path + the holding run, and writes NO run row', async () => {
     const board = stubBoard([
       { id: 'A', title: 'rework the claim gate inside the dispatcher module', design_doc_ref: null, status: 'upcoming' },
@@ -341,6 +365,17 @@ describe('CLEAN CARD UNAFFECTED — no regression to the normal path', () => {
 })
 
 describe('STUCK CLAIM CANNOT WEDGE THE QUEUE', () => {
+  test('a stale hold cannot dispatch a second run for a card already linked to a live run', async () => {
+    const live = await store.create({ slug: 'live', project_slug: SLUG, repo_path: REPO, task: 'build', claimed_paths: [] })
+    const board = stubBoard([
+      { id: 'B', title: 'a card already attached to its running build', design_doc_ref: null, status: 'in_progress', linked_run_id: live.id },
+    ])
+    await holds.upsert({ project_slug: SLUG, board_item_id: 'B', task: 'Edit trident/other.ts', hold_kind: 'path', hold_reason: 'stale' })
+    await buildDispatchHoldSweep({ holds, board, makeDispatchDeps: () => deps(board) })({ id: 'terminal' } as never)
+    expect(runCount()).toBe(1)
+    expect(holds.list()).toEqual([])
+  })
+
   test('a terminal run that still carries its claims blocks nothing', async () => {
     const dead = await store.create({
       slug: 'dead-run',

@@ -337,36 +337,9 @@ export async function dispatchBoardBoundBuild(
     // An unreadable plan doc degrades to the task text alone — never a throw.
     paths = deriveClaimedPaths({ task: input.task })
   }
-  if (paths.length > 0) {
-    const wanted = new Set(paths)
-    for (const live of deps.store.listNonTerminalByRepo(repo_path)) {
-      const clash = live.claimed_paths.find((p) => wanted.has(p))
-      if (clash === undefined) continue
-      const message =
-        `"${clash}" is claimed by live run ${live.id.slice(0, 8)} (${live.slug}) — ` +
-        'this build will start automatically when that run goes terminal.'
-      await deps.holds?.upsert({
-        project_slug: deps.project_slug,
-        board_item_id,
-        task: input.task,
-        payload: holdPayload,
-        claimed_paths: paths,
-        hold_kind: 'path',
-        hold_reason: message,
-        held_on_run_id: live.id,
-      })
-      return {
-        ok: false,
-        code: 'held',
-        message,
-        hold: { kind: 'path', holding_run_id: live.id, path: clash },
-      }
-    }
-  }
-
   try {
     const slug = slugifyTask(input.task)
-    const run = await deps.store.create({
+    const admission = await deps.store.createIfClaimsAvailable({
       slug,
       project_slug: deps.project_slug,
       repo_path,
@@ -383,6 +356,28 @@ export async function dispatchBoardBoundBuild(
       ...(deps.thread_id !== undefined ? { thread_id: deps.thread_id } : {}),
       ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     })
+    if (!admission.ok) {
+      const message =
+        `"${admission.path}" is claimed by live run ${admission.holding_run.id.slice(0, 8)} ` +
+        `(${admission.holding_run.slug}) — this build will start automatically when that run goes terminal.`
+      await deps.holds?.upsert({
+        project_slug: deps.project_slug,
+        board_item_id,
+        task: input.task,
+        payload: holdPayload,
+        claimed_paths: paths,
+        hold_kind: 'path',
+        hold_reason: message,
+        held_on_run_id: admission.holding_run.id,
+      })
+      return {
+        ok: false,
+        code: 'held',
+        message,
+        hold: { kind: 'path', holding_run_id: admission.holding_run.id, path: admission.path },
+      }
+    }
+    const run = admission.run
     // BIND: light the item up (fork ⑂ + in_progress) the instant the build starts.
     // The durable loop fires + harvests by runId; terminal-reconcile clears it.
     await deps.board.attachRun(deps.project_slug, item.id, run.id)
