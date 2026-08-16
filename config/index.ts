@@ -456,22 +456,44 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * the `.url_slug` lookup then ran against a directory named three spaces, found
  * nothing, and a correctly renamed instance resolved to the anonymous fallback
  * again — the same defect as the empty string, one space away from it and past
- * the fix for it. Every sibling identity read in this repo trims its PREDICATE
- * (the `instanceSlug` branch of {@link resolveOwnerSlugSourceFromConfig},
- * `open/server.ts`, `resolveNeutronHome` + `resolveOpenDbPath` in
- * `migrations/db-path.ts`, `resolveRegistryDbPath` + `resolveOwnerHome` in
- * `gateway/boot-listener-registry.ts`, `resolveOwnerHomeFromEnv` in
- * `onboarding/overnight/register.ts`, `resolveStatePath` in
- * `gbrain-memory/gbrain-doctor.ts`), so this one does too.
+ * the fix for it. So this predicate trims, and so does every other read of
+ * `OWNER_HOME` / `NEUTRON_HOME` / `NEUTRON_DB_PATH` in the repo.
  *
- * That sentence was previously an unqualified "every sibling trims" written
- * while three of them did not — `resolveOpenDbPath`, `resolveRegistryDbPath` and
- * the return half of `resolveStatePath`. A docblock asserting a property the
- * repo lacks is worse than no docblock: it is confidently specific, it reads as
- * design documentation, and the next reader trusts it instead of checking. The
- * siblings were fixed rather than the claim narrowed, because the split-brain
- * was the defect and the docblock was only the evidence of it. The list is
- * exhaustive as of this change so a future divergence is a visible edit here.
+ * THE SCOPE OF THAT CLAIM IS A GREP, NOT A MEMORY — this sentence has been
+ * wrong twice, and both times because it was written from a mental model of
+ * "the identity resolvers" while the divergent readers sat just outside it.
+ * Round 1 said "every sibling trims" while three did not (`resolveOpenDbPath`,
+ * `resolveRegistryDbPath`, and the return half of `resolveStatePath` — they
+ * were on the OTHER two variables, which is why the sweep missed them). Round 2
+ * enumerated seven sites and called the list exhaustive; five more readers were
+ * outside it, and one of the seven — `open/server.ts` — was NAMED as trimming
+ * while the file contained no `trim()` at all. A docblock asserting a property
+ * the repo lacks is worse than no docblock: it is confidently specific, it
+ * reads as design documentation, and the next reader trusts it instead of
+ * checking.
+ *
+ * So the claim is now bounded by a command anyone can re-run rather than by a
+ * list anyone can fall off:
+ *
+ *   grep -rn --include='*.ts' "NEUTRON_HOME'\]\|\.NEUTRON_HOME\|OWNER_HOME'\]\|\.OWNER_HOME\|NEUTRON_DB_PATH'\]\|\.NEUTRON_DB_PATH" .
+ *
+ * Every non-test hit either trims its predicate or is a WRITE. The readers, all
+ * fixed: {@link resolveOwnerSlugSourceFromConfig}'s `instanceSlug` branch and
+ * this function here; `resolveNeutronHome` + `resolveOpenDbPath`
+ * (`migrations/db-path.ts`); `resolveRegistryDbPath` + `resolveOwnerHome`
+ * (`gateway/boot-listener-registry.ts`); `resolveOwnerHomeFromEnv`
+ * (`onboarding/overnight/register.ts`); `resolveStatePath`
+ * (`gbrain-memory/gbrain-doctor.ts`); the env shim's fill predicate
+ * (`open/server.ts`); `main`'s `--home` guard (`scripts/email-accounts.ts`);
+ * the REPL supervision home (`runtime/adapters/claude-code/index.ts`);
+ * `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`); and
+ * `DEFAULT_M2_FEEDBACK_PATH` (`onboarding/feedback/m2-week-4-collector.ts`).
+ *
+ * The list is documentation. The GUARD is
+ * `open/__tests__/owner-slug-agreement.test.ts`, which drives blank values
+ * through the readers it can import and pins the answers, each with a
+ * real-path control — so a reader that stops trimming goes red instead of
+ * going unnoticed until the next review reads this paragraph.
  *
  * The RETURN is verbatim, not trimmed: a blank value means unset, but a value
  * that is genuinely a path is published back to `OWNER_HOME` byte-for-byte
@@ -738,10 +760,14 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
  */
 export function envShimFromBootConfig(config: BootConfig): Record<string, string> {
   const out: Record<string, string> = {}
-  // Via {@link effectiveOwnerHome}, so an empty `OWNER_HOME` is repaired here
-  // too. `open/server.ts:130` fills a slot that is `undefined` OR `''`, so the
-  // old `??` re-wrote the empty string over itself and left every below-seam
-  // reader of `process.env.OWNER_HOME` holding `''`.
+  // Via {@link effectiveOwnerHome}, so a BLANK `OWNER_HOME` is repaired here
+  // too. What this function COMPUTES is only half of it: `applyEnvShim`
+  // (`open/server.ts`) decides what actually reaches the env, and it filled a
+  // slot that was `undefined` OR `''` — so the old `??` re-wrote the empty
+  // string over itself, and a whitespace-only value was mistaken for an
+  // operator pin and left in place while this function had already resolved it
+  // to the real home. Both halves now agree that blank is unset; the pair is
+  // pinned together in `open/__tests__/owner-slug-agreement.test.ts`.
   out['OWNER_HOME'] = effectiveOwnerHome(config)
   out['NEUTRON_DB_PATH'] = config.dbPath
   if (config.onboardingChatCookieSecret !== undefined) {

@@ -315,7 +315,19 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →
   // `--resume` respawn) + heartbeat run once per registry.
-  const home = options.cwd ?? process.env['NEUTRON_HOME']
+  // BLANK IS UNSET on both slots — the rule `effectiveOwnerHome`
+  // (`config/index.ts`) documents for this family of home values. `??` falls
+  // through on `undefined` but not on `''`/`'   '`, so unfixed a blank
+  // `NEUTRON_HOME` derived the REPL registry + state dir relative to the
+  // process CWD, silently splitting supervision off the instance it supervises.
+  const fromCwd = options.cwd
+  const fromEnv = process.env['NEUTRON_HOME']
+  const home =
+    typeof fromCwd === 'string' && fromCwd.trim().length > 0
+      ? fromCwd
+      : typeof fromEnv === 'string' && fromEnv.trim().length > 0
+        ? fromEnv
+        : undefined
   if (home !== undefined) {
     const paths = deriveReplSupervisionPaths(home)
     // Create the state dir up-front: registry-lock opens `<dir>/.registry.lock`

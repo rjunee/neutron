@@ -494,10 +494,18 @@ function resolveSkillsDir(input: {
   owner_handle: string
   env: NodeJS.ProcessEnv
 }): string {
-  if (input.owner_data_dir !== undefined && input.owner_data_dir.length > 0) {
+  // BLANK IS UNSET ON BOTH SLOTS — the rule `effectiveOwnerHome`
+  // (`config/index.ts`) documents for this same family of home values.
+  // `length > 0` accepted `'   '`, and `??` falls through on `undefined` but NOT
+  // on `''`: unfixed, `NEUTRON_HOME=''` resolved the skills dir to
+  // `/owners/<handle>/skills` — the FILESYSTEM ROOT, not the install — instead
+  // of the documented `/srv/neutron` default.
+  if (input.owner_data_dir !== undefined && input.owner_data_dir.trim().length > 0) {
     return `${trimTrailingSlash(input.owner_data_dir)}/skills`
   }
-  const neutronHome = input.env['NEUTRON_HOME'] ?? '/srv/neutron'
+  const fromEnv = input.env['NEUTRON_HOME']
+  const neutronHome =
+    typeof fromEnv === 'string' && fromEnv.trim().length > 0 ? fromEnv : '/srv/neutron'
   return `${trimTrailingSlash(neutronHome)}/owners/${input.owner_handle}/skills`
 }
 

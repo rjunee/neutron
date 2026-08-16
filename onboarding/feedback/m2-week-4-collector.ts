@@ -38,10 +38,21 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
  * tests and custom installs redirect. One append per response.
  */
 export const DEFAULT_M2_FEEDBACK_PATH = join(
-  process.env.NEUTRON_HOME ?? process.cwd(),
+  // BLANK IS UNSET. `??` falls through on `undefined` but NOT on `''` or `'   '`
+  // — the exact `??`-vs-blank mechanism `effectiveOwnerHome` (`config/index.ts`)
+  // documents as the origin defect, on the same variable. Unfixed,
+  // `NEUTRON_HOME=''` resolved this to the RELATIVE `feedback/m2-week-4.md`
+  // (wherever systemd started the process) and `'   '` to a directory named
+  // three spaces, so the owner's feedback landed somewhere no reader looks.
+  blankIsUnset(process.env.NEUTRON_HOME) ?? process.cwd(),
   'feedback',
   'm2-week-4.md',
 )
+
+/** A blank env value is unset, not a path — see {@link DEFAULT_M2_FEEDBACK_PATH}. */
+function blankIsUnset(value: string | undefined): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
 
 export type M2ResponseKind = SeanEllisResponsePayload['response']
 
