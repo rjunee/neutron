@@ -626,6 +626,22 @@ describe('the installer under a locked config — the FATAL half-state must be i
       return run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()
     }
 
+    /**
+     * The two absolute paths the installed command carries, read back out of it.
+     *
+     * Taken from the command rather than resolved independently so the fixtures below reproduce
+     * what the installer ACTUALLY wrote. The predecessor fixture used to hardcode a bare `bun`,
+     * which no version of this script has ever written — `origin/main` wrote `"$BUN $DRIVER_SCRIPT
+     * …"` with `$BUN` already resolved by `command -v`. A fixture that is not the thing it names
+     * still goes red for the right reason here, but it proves the check rejects a command nobody
+     * has, which is a weaker claim than the one the test makes.
+     */
+    function words(command: string): { bun: string; driver: string } {
+      const m = command.match(/'([^']*)' --config=\/dev\/null --env-file=\/dev\/null '([^']*)'/)
+      if (!m) throw new Error(`could not read the two paths out of: ${command}`)
+      return { bun: m[1]!, driver: m[2]! }
+    }
+
     test('the PREDECESSOR command is reported STALE, and the hardened one still passes', () => {
       const repo = freshRepo()
       expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
@@ -635,7 +651,13 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // The command as it stood before this change: no credential scrub, no `--config`, no
       // `--env-file`. Everything else about the clone — attribute, driver name, script path — is
       // left exactly as the installer left it, so the command is the ONLY thing under test.
-      const predecessor = `bun ${join(repo, 'scripts', 'git', 'as-built-merge-driver.ts')} %O %A %B %L %P`
+      //
+      // Spelled with the RESOLVED bun and driver paths, because that is what the predecessor
+      // actually wrote (`origin/main` scripts/install-merge-drivers.sh:145 — `"$BUN $DRIVER_SCRIPT
+      // %O %A %B %L %P"`, both already absolute). A literal `bun` here would be a command no
+      // release of this script has ever installed.
+      const { bun, driver } = words(hardened)
+      const predecessor = `${bun} ${driver} %O %A %B %L %P`
       expect(predecessor).not.toBe(hardened)
       git(repo, 'config', 'merge.as-built-log.driver', predecessor)
       expect(attributes(repo)).toContain('merge=as-built-log')
@@ -664,12 +686,22 @@ describe('the installer under a locked config — the FATAL half-state must be i
       expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
       const hardened = installed(repo)
 
+      // EVERY separable element, one at a time. The five `-u` names are five independent removals
+      // in the emitted command (scripts/install-merge-drivers.sh `driver_command`), so mutating
+      // two of them and claiming "ANY ONE" was an overclaim: a check keyed on `GH_TOKEN` alone
+      // would have passed a command still leaking `GITHUB_TOKEN` and this table would have been
+      // green. They are enumerated rather than looped so a name added to the scrub without a line
+      // added here shows up as an untested element.
       const mutations: Array<[string, string]> = [
         ['the bunfig preload guard', hardened.replace(' --config=/dev/null', '')],
         ['the .env autoload guard', hardened.replace(' --env-file=/dev/null', '')],
         ['the GH_TOKEN scrub', hardened.replace('-u GH_TOKEN ', '')],
-        ['the GIT_CONFIG credential-helper scrub', hardened.replace('-u GIT_CONFIG_COUNT ', '')],
+        ['the GITHUB_TOKEN scrub', hardened.replace('-u GITHUB_TOKEN ', '')],
+        ['the GIT_CONFIG_COUNT scrub', hardened.replace('-u GIT_CONFIG_COUNT ', '')],
+        ['the GIT_CONFIG_KEY_0 scrub', hardened.replace('-u GIT_CONFIG_KEY_0 ', '')],
+        ['the GIT_CONFIG_VALUE_0 scrub', hardened.replace('-u GIT_CONFIG_VALUE_0 ', '')],
         ['the env wrapper entirely', hardened.replace(/^\S*env(\s+-u\s+\S+)+\s+/, '')],
+        ['the merge placeholders git substitutes', hardened.replace(' %O %A %B %L %P', '')],
       ]
 
       for (const [what, mutated] of mutations) {
@@ -761,6 +793,180 @@ describe('the installer under a locked config — the FATAL half-state must be i
       const naive = `'${join(repo, 'scripts', 'git', 'as-built-merge-driver.ts')}' X X X X X`
       const broken = run(repo, ['sh', '-c', `set -- ${naive}; printf '%s\\n' "$#"`])
       expect(broken.ok).toBe(false)
+    }, 30_000)
+
+    /**
+     * THE BOUNDARY THE REST OF THIS FILE NEVER CROSSES: every other `--check` above runs from the
+     * install root with the PATH it inherited. Both of the command's absolute paths come from the
+     * invoking shell, and the config they are compared against is shared by the whole clone, so
+     * "where is the check run from" is exactly where a byte-for-byte comparison goes wrong — and
+     * it did. These tests run the check from somewhere else.
+     */
+    describe('--check from somewhere other than the shell that installed', () => {
+      /** A repo with a commit, so linked worktrees can be added to it. */
+      function committedRepo(): string {
+        const repo = freshRepo()
+        git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+        git(repo, 'config', 'user.name', 'Trident Test')
+        git(repo, 'config', 'commit.gpgsign', 'false')
+        mkdirSync(join(repo, 'docs'), { recursive: true })
+        writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), '# AS_BUILT\n')
+        git(repo, 'add', '-A')
+        git(repo, 'commit', '-qm', 'base')
+        return repo
+      }
+
+      test('a LINKED WORKTREE reports the shared install as installed, not stale', () => {
+        // REGRESSION. The header promises "installing once serves every worktree", and the first
+        // cut of the WHAT-is-installed comparison quietly broke it: the expected command was built
+        // from `${BASH_SOURCE[0]}`, so the worktree asking rebuilt a DIFFERENT driver path and
+        // called the clone stale. MEASURED on git 2.50.1 at the commit before this fix: exit 1,
+        // the two printed commands differing in nothing but which checkout hosts the driver.
+        const repo = committedRepo()
+        expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+        expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+
+        const wt = join(repo, '.linked-worktree')
+        git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD')
+        const fromWorktree = run(wt, ['bash', join(wt, 'scripts', 'install-merge-drivers.sh'), '--check'])
+        expect(fromWorktree.stderr).not.toContain('STALE')
+        expect(fromWorktree.ok).toBe(true)
+
+        // CONTROL — the check is still capable of saying STALE from in here, so the pass above is
+        // a verdict and not a check that stopped looking once it left its own root.
+        git(repo, 'config', 'merge.as-built-log.driver', 'bun driver.ts %O %A %B %L %P')
+        const mutated = run(wt, ['bash', join(wt, 'scripts', 'install-merge-drivers.sh'), '--check'])
+        expect(mutated.ok).toBe(false)
+        expect(mutated.stderr).toContain('STALE')
+      }, 30_000)
+
+      test('installing FROM a throwaway worktree leaves a path that outlives it', () => {
+        // The publisher installs from a detached rebase worktree it then removes. Deriving the
+        // driver from the invoking checkout wrote THAT path into the clone-wide config, so
+        // `git worktree remove` left every later merge pointing at a driver that is gone — and a
+        // driver git cannot execute is the silent one-side-wins merge this change exists to stop.
+        const repo = committedRepo()
+        const wt = join(repo, '.throwaway')
+        git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD')
+        expect(run(wt, ['bash', join(wt, 'scripts', 'install-merge-drivers.sh')]).ok).toBe(true)
+
+        // The path written names the MAIN checkout, which is the one that outlives the worktree.
+        expect(installed(repo)).toContain(join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
+        expect(installed(repo)).not.toContain(join(wt, 'scripts'))
+
+        git(repo, 'worktree', 'remove', '--force', wt)
+        expect(existsSync(wt)).toBe(false)
+        expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+      }, 30_000)
+
+      test('a driver path that no longer exists is STALE, not installed', () => {
+        // The other half of the same hazard: a clone that took the dangling path from an older
+        // installer must be TOLD, because the command parses perfectly and simply cannot run.
+        const repo = committedRepo()
+        expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+        const hardened = installed(repo)
+        const { driver } = words(hardened)
+
+        const dangling = hardened.replace(driver, join(tmpdir(), 'removed-worktree', 'scripts', 'git', 'as-built-merge-driver.ts'))
+        expect(dangling).not.toBe(hardened)
+        git(repo, 'config', 'merge.as-built-log.driver', dangling)
+        const gone = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+        expect(gone.ok).toBe(false)
+        expect(gone.stderr).toContain('STALE')
+
+        // …and a path that exists but is not this driver is refused too, so the free word cannot
+        // become "any file at all".
+        const elsewhere = join(repo, 'scripts', 'git', 'as-built-log-merge.ts')
+        expect(existsSync(elsewhere)).toBe(true)
+        git(repo, 'config', 'merge.as-built-log.driver', hardened.replace(driver, elsewhere))
+        const wrongScript = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+        expect(wrongScript.ok).toBe(false)
+        expect(wrongScript.stderr).toContain('STALE')
+
+        // CONTROL — restoring the real path restores the pass, so both verdicts are about the
+        // path and not about having written the config twice.
+        git(repo, 'config', 'merge.as-built-log.driver', hardened)
+        expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+      }, 30_000)
+
+      test('a DIFFERENT PATH order at check time is not staleness', () => {
+        // `command -v bun` at check time answered a different absolute path from the one install
+        // resolved, and the byte comparison called that an out-of-date driver. A git hook, a CI
+        // step and a login shell do not share a PATH order, so this fires on a correct clone.
+        const repo = committedRepo()
+        expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+        const hardened = installed(repo)
+        const { bun } = words(hardened)
+
+        // A second, equally real bun ahead of the first on PATH — same binary, different path.
+        const shadow = mkdtempSync(join(tmpdir(), 'as-built-shadow-bun-'))
+        created.push(shadow)
+        Bun.spawnSync(['ln', '-s', bun, join(shadow, 'bun')])
+        expect(existsSync(join(shadow, 'bun'))).toBe(true)
+
+        const shadowed = Bun.spawnSync(['bash', 'scripts/install-merge-drivers.sh', '--check'], {
+          cwd: repo,
+          env: { ...process.env, PATH: `${shadow}:${process.env.PATH ?? ''}` },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        expect(new TextDecoder().decode(shadowed.stderr)).not.toContain('STALE')
+        expect(shadowed.exitCode).toBe(0)
+
+        // CONTROL — that same altered PATH does NOT make the check blind: a genuinely wrong
+        // command is still caught through it.
+        git(repo, 'config', 'merge.as-built-log.driver', hardened.replace(' --env-file=/dev/null', ''))
+        const stillCaught = Bun.spawnSync(['bash', 'scripts/install-merge-drivers.sh', '--check'], {
+          cwd: repo,
+          env: { ...process.env, PATH: `${shadow}:${process.env.PATH ?? ''}` },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        expect(stillCaught.exitCode).not.toBe(0)
+        expect(new TextDecoder().decode(stillCaught.stderr)).toContain('STALE')
+      }, 30_000)
+    })
+
+    test('the two derivations of the driver command agree', () => {
+      // There are exactly two places that build this string: `driver_command` in the installer,
+      // and `asBuiltDriverCommand` in `trident/orchestrator.ts`. The second exists because the
+      // publisher must NOT execute an installer script found in a checkout it does not control —
+      // the credential exposure this whole change is named for — so it cannot simply shell out to
+      // the first. The installer's docblock used to claim there was "deliberately no second copy",
+      // which was false about the repository even while it was true about the file.
+      //
+      // Two derivations that must agree need a test, not a comment: pin them together here so a
+      // flag added to one and not the other fails rather than silently splitting the fleet in two.
+      const repo = freshRepo()
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      const fromScript = installed(repo)
+
+      const orchestrator = readFileSync(join(REPO_ROOT, 'trident', 'orchestrator.ts'), 'utf8')
+      const template = orchestrator.match(/return `(\$\{env\}[^`]*%O %A %B %L %P)`/)
+      expect(template, 'asBuiltDriverCommand no longer builds the command from a template literal').not.toBeNull()
+
+      // Reduce both to their SHAPE — the interpolations on one side, the quoted absolute paths on
+      // the other — so the comparison is about the hardening and not about this machine's paths.
+      const shapeFromOrchestrator = template![1]!
+        .replace('${env}', '<env>')
+        .replace('${scrubbed}', '<scrubbed>')
+        .replace('${shellQuote(process.execPath)}', '<bun>')
+        .replace('${shellQuote(driver)}', '<driver>')
+      const { bun, driver } = words(fromScript)
+      const shapeFromScript = fromScript
+        .replace(`'${bun}'`, '<bun>')
+        .replace(`'${driver}'`, '<driver>')
+        .replace(/^\S*env /, '<env> ')
+        .replace(/-u \S+( -u \S+)*/, '<scrubbed>')
+
+      expect(shapeFromScript).toBe(shapeFromOrchestrator)
+
+      // …and the scrub lists themselves, which the shapes above deliberately collapsed.
+      const scrubbed = fromScript.match(/(-u \S+( -u \S+)*)/)![1]!.split(' -u ').map((s) => s.replace('-u ', ''))
+      const credentialEnv = orchestrator.match(/const CREDENTIAL_ENV = \[([^\]]*)\]/s)
+      expect(credentialEnv, 'CREDENTIAL_ENV is no longer a literal array').not.toBeNull()
+      const names = [...credentialEnv![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
+      expect(scrubbed).toEqual(names)
     }, 30_000)
   })
 })

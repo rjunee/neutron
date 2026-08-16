@@ -97,14 +97,40 @@
 # cannot tell the hardened driver from its predecessor is what keeps every already-installed
 # clone on the vulnerable one.
 #
-# So the configured command is now compared against the one THIS script would write, byte for
-# byte, and a difference is reported as STALE with both strings printed and the one-line remedy.
-# Exact equality rather than a hunt for the individual hardening flags, for two reasons: a
-# substring hunt has to be extended by hand every time a flag is added — which is precisely the
-# maintenance the old check failed at — and re-running the installer is idempotent and cheap, so
-# a false "stale" costs one command while a false "installed" costs the whole property. Both
-# halves are derived by `driver_command` so there is exactly one definition of the command and
-# the check cannot drift from what the install writes.
+# So the configured command is now compared against the one THIS script would write, and a
+# difference is reported as STALE with both strings printed and the one-line remedy. The comparison
+# is a REBUILD rather than a substring hunt for the individual hardening flags, for two reasons: a
+# hunt has to be extended by hand every time a flag is added — precisely the maintenance the old
+# check failed at — and re-running the installer is idempotent and cheap, so a false "stale" costs
+# one command while a false "installed" costs the whole property. Both halves are derived by
+# `driver_command`, so there is one definition of the command and the check cannot drift from what
+# the install writes.
+#
+# WHAT THE REBUILD DELIBERATELY DOES NOT COMPARE, AND WHY THE FIRST CUT WAS WRONG TO. Comparing the
+# whole string byte for byte was the obvious reading of "verify WHAT is installed" and it was too
+# strong by exactly two words — the absolute path of bun, and the absolute path of the driver. Both
+# are properties of the shell that ran the install rather than of the command's hardening, and
+# neither is stable across the ways this script is legitimately invoked:
+#
+#   - the driver path, because the config lives in the COMMON git dir and is therefore shared by
+#     every linked worktree, while the expected string was built from whichever checkout was
+#     asking. MEASURED on git 2.50.1: install from the main checkout, `git worktree add`, `--check`
+#     from the new worktree → STALE, the two commands differing in nothing but the checkout. The
+#     header's promise three paragraphs up — "installing once serves every worktree" — was quietly
+#     false for the check.
+#   - the bun path, because it is resolved from PATH, and a git hook, a CI step and a login shell
+#     do not agree on PATH order.
+#
+# Worse than the false verdict was its remedy: the message says re-run the installer, and doing
+# that from a throwaway worktree wrote THAT worktree's driver path into the shared config, where it
+# dangled the moment the worktree was removed — turning a spurious warning into the silent
+# entry-losing merge this whole change exists to prevent.
+#
+# So the two paths are read back out of the installed command, fed to the same `driver_command`,
+# and the rebuild has to reproduce the configured string byte for byte. Every hardening token stays
+# exact; the two free words are then checked for what they must BE — the driver is a
+# `scripts/git/as-built-merge-driver.ts` that exists, the bun is executable — which also catches
+# the dangling-worktree command that parses perfectly and cannot run.
 #
 # WHY THIS DOES NOT NEED `.name` IN THE COMPARISON: `.name` is cosmetic (see the ordering note
 # above — a lone `.driver` is a working driver), it is deliberately non-fatal on install, and
@@ -116,7 +142,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIVER_NAME="as-built-log"
 LOG_PATH="docs/AS_BUILT.md"
 ATTR_LINE="$LOG_PATH merge=$DRIVER_NAME"
-DRIVER_SCRIPT="$ROOT/scripts/git/as-built-merge-driver.ts"
+DRIVER_RELPATH="scripts/git/as-built-merge-driver.ts"
 
 if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   echo "install-merge-drivers: $ROOT is not a git repository" >&2
@@ -146,6 +172,34 @@ if [ -z "$COMMON" ]; then
 fi
 ATTRS="$COMMON/info/attributes"
 
+# THE DRIVER PATH IS RESOLVED FROM THE MAIN WORKTREE, NOT FROM THIS SCRIPT'S OWN LOCATION.
+#
+# The config this path is written into is SHARED by every worktree of the clone (it lives in the
+# common git dir — see above), but `${BASH_SOURCE[0]}` names whichever checkout invoked the script.
+# Deriving the driver from the invoker therefore writes a PER-WORKTREE path into a SHARED setting,
+# and both directions of that are bugs this file has already shipped:
+#
+#   • installing from the publisher's throwaway rebase worktree wrote that worktree's path into the
+#     shared config, and `git worktree remove` then left the whole clone pointing at a driver that
+#     no longer exists — every later merge of this path silently losing one side's entries.
+#   • `--check` run from any linked worktree rebuilt the expected command with the ASKING
+#     worktree's path and reported a correctly-installed clone STALE. Measured on git 2.50.1:
+#     install from the main checkout, `git worktree add`, `--check` from there → exit 1, the two
+#     commands differing in nothing but which checkout hosts the driver. Worse, the remedy it
+#     printed ("re-run the installer") would have written the throwaway path in, which is the first
+#     bullet.
+#
+# The main worktree is the one that outlives every linked one, so its copy is the stable choice and
+# every worktree agrees on it. The fallback matters for the one shape where there is no such copy —
+# a linked worktree of a BARE clone, whose "main worktree" is the bare dir and carries no checkout
+# at all — and there the invoking checkout's copy is the only one there is.
+MAIN_TREE="$(git -C "$ROOT" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')"
+if [ -n "$MAIN_TREE" ] && [ -f "$MAIN_TREE/$DRIVER_RELPATH" ]; then
+  DRIVER_SCRIPT="$MAIN_TREE/$DRIVER_RELPATH"
+else
+  DRIVER_SCRIPT="$ROOT/$DRIVER_RELPATH"
+fi
+
 # The scratch file is PER-PROCESS and the replacement is an atomic rename.
 #
 # Two build lanes sharing a checkout can run this at the same moment — which is the exact situation
@@ -171,9 +225,29 @@ sq() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-# THE ONE DEFINITION of the command git runs, derived identically for the install and for `--check`.
-# Two spellings of this would let the check pass a clone the installer would have written
-# differently, which is the bug `--check` was just fixed for; there is deliberately no second copy.
+# The exact inverse of `sq`, for reading a path back OUT of an installed command. Non-zero if the
+# word is not a single-quoted one, which is itself a difference worth reporting rather than
+# guessing past. Deliberately NOT `eval`: the string comes from the repo config, and the whole
+# point of this file is that a command found lying around is not a command to execute.
+unsq() {
+  local w="$1"
+  case "$w" in "'"*"'") ;; *) return 1 ;; esac
+  w="${w#\'}"
+  w="${w%\'}"
+  printf '%s' "$w" | sed "s/'\\\\''/'/g"
+}
+
+# THE ONE DEFINITION IN THIS SCRIPT of the command git runs, derived identically for the install
+# and for `--check`. Two spellings within this file would let the check pass a clone the installer
+# would have written differently, which is the bug `--check` was just fixed for.
+#
+# THERE IS EXACTLY ONE OTHER DERIVATION IN THE REPOSITORY, AND IT IS DELIBERATE RATHER THAN DRIFT:
+# `asBuiltDriverCommand` in `trident/orchestrator.ts`. The publisher cannot reach this function,
+# because reaching it would mean executing a `scripts/install-merge-drivers.sh` found in a checkout
+# it does not control — the credential-exposing bug this whole change is named for. So it builds
+# the same string in TypeScript instead. The two are pinned in agreement by a test rather than by
+# this comment (`scripts/git/as-built-merge-realgit.test.ts`, "the two derivations of the driver
+# command agree"), because a comment asserting they match is the thing that goes stale first.
 #
 # `--config=/dev/null` IS NOT OPTIONAL. git runs a merge driver with its cwd at the top of the
 # working tree being merged, and bun reads `bunfig.toml` from its cwd — so without this flag a
@@ -191,10 +265,11 @@ sq() {
 # to find. Two independent controls: one over what can get in, one over what is there to take.
 driver_command() {
   local bun="$1"
+  local driver="$2"
   local env_bin=env
   [ -x /usr/bin/env ] && env_bin=/usr/bin/env
   printf '%s -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 %s --config=/dev/null --env-file=/dev/null %s %%O %%A %%B %%L %%P' \
-    "$env_bin" "$(sq "$bun")" "$(sq "$DRIVER_SCRIPT")"
+    "$env_bin" "$(sq "$bun")" "$(sq "$driver")"
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
@@ -217,24 +292,62 @@ if [ "${1:-}" = "--check" ]; then
   fi
   # WHAT is installed, not merely THAT something is — see the header. Without this a clone still
   # holding a previous version's command answers "installed" and never takes the hardening.
-  check_bun="$(command -v bun 2>/dev/null)"
-  if [ -z "$check_bun" ]; then
-    # Fail closed rather than skip the comparison. The command that would be installed here names
-    # a bun, so with none on PATH there is nothing to compare against and no honest verdict to
-    # give; "installed" would be the same unverified answer this check was fixed for.
-    echo "merge drivers: CANNOT VERIFY — bun is not on PATH, so the installed command cannot be" >&2
-    echo "                       compared against the one this script installs." >&2
-    exit 2
-  fi
-  expected="$(driver_command "$check_bun")"
-  if [ "$configured" != "$expected" ]; then
+  #
+  # Exactly TWO words of the command are absolute paths that legitimately differ between the shell
+  # that installed and the shell now asking, and comparing them for equality is what made the first
+  # cut of this check report correct clones as stale:
+  #
+  #   • WHICH BUN. Resolved from PATH at install time, and a hook, a CI step and a login shell do
+  #     not share a PATH order. Two same-version bun binaries at different paths are not a stale
+  #     install, and reinstalling would only rewrite the path the next shell disagrees with.
+  #   • WHICH CHECKOUT hosts the driver. The config is shared by every worktree, so a linked
+  #     worktree asking about a command the main checkout wrote is the ORDINARY case.
+  #
+  # So both are read back out of the installed command and fed to the same `driver_command` that
+  # writes it, and the rebuild must reproduce the configured string BYTE FOR BYTE. Every token that
+  # carries the hardening is still exact — a missing `-u GITHUB_TOKEN`, a dropped `--env-file`, a
+  # different argument order or a mangled quote all fail to rebuild — while the two free words are
+  # judged on what they have to BE rather than on which one they happen to be. One definition of
+  # the command still, and the check cannot drift from what the install writes.
+  slots="$(driver_command '@@bun@@' '@@driver@@')"
+  head="${slots%%\'@@bun@@\'*}"
+  rest="${slots#*\'@@bun@@\'}"
+  mid="${rest%%\'@@driver@@\'*}"
+  tail="${rest#*\'@@driver@@\'}"
+
+  stale() {
     echo "merge drivers: STALE — this clone holds a DIFFERENT driver command from the one this" >&2
     echo "                       script installs, so it is running an older driver." >&2
+    [ -n "${1:-}" ] && echo "                       ($1)" >&2
     echo "     installed → $configured" >&2
-    echo "     expected  → $expected" >&2
+    echo "     expected  → $(driver_command "${BUN_FOR_MSG:-<bun>}" "$DRIVER_SCRIPT")" >&2
     echo "     Re-run 'bash scripts/install-merge-drivers.sh' to update it (idempotent)." >&2
     exit 1
-  fi
+  }
+  BUN_FOR_MSG="$(command -v bun 2>/dev/null)"
+
+  body="$configured"
+  case "$body" in "$head"*) body="${body#"$head"}" ;; *) stale "the command's leading environment scrub does not match" ;; esac
+  case "$body" in *"$tail") body="${body%"$tail"}" ;; *) stale "the command's trailing merge placeholders do not match" ;; esac
+  case "$body" in *"$mid"*) ;; *) stale "the bun hardening flags are not between the two paths" ;; esac
+  bun_word="${body%%"$mid"*}"
+  driver_word="${body#*"$mid"}"
+
+  bun_path="$(unsq "$bun_word")" || stale "the bun path is not a single-quoted word"
+  driver_path="$(unsq "$driver_word")" || stale "the driver path is not a single-quoted word"
+  [ "$configured" = "$(driver_command "$bun_path" "$driver_path")" ] || stale "it does not rebuild to itself"
+
+  # The two free words still have to be the things they claim to be. A command that parses
+  # perfectly and names a driver deleted with the worktree that installed it is the exact
+  # false-pass this check exists to close — git would run it, `/bin/sh` would fail to find the
+  # file, and the merge would fall back to leaving one side's entries out.
+  case "$driver_path" in
+    "/$DRIVER_RELPATH" | */"$DRIVER_RELPATH") ;;
+    *) stale "it names $driver_path, which is not a $DRIVER_RELPATH" ;;
+  esac
+  [ -f "$driver_path" ] || stale "the driver it names is not there — $driver_path"
+  [ -x "$bun_path" ] || stale "the bun it names is not executable — $bun_path"
+
   echo "merge drivers: installed"
   exit 0
 fi
@@ -264,7 +377,7 @@ fail_unwritable() {
 
 # Derived by `driver_command` above, which `--check` uses too — see its docblock for what each of
 # `env -u`, `--config=/dev/null` and `--env-file=/dev/null` closes, and the reproductions.
-DRIVER_COMMAND="$(driver_command "$BUN")"
+DRIVER_COMMAND="$(driver_command "$BUN" "$DRIVER_SCRIPT")"
 
 # THE LOAD-BEARING HALF FIRST — see the header. A lone `.driver` works; a lone `.name` is fatal.
 if ! git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$DRIVER_COMMAND"; then

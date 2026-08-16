@@ -461,6 +461,75 @@ window is clean; and a NEW commit of the branch's own carrying the same term is
 still caught with the exclusion set, which is the property that keeps this from
 being a hole.
 
+THE FIRST CUT OF "VERIFY WHAT IS INSTALLED" WAS TOO STRONG BY EXACTLY TWO WORDS,
+AND ITS REMEDY WROTE THE BUG IN. Making `--check` compare the configured driver
+command against the one the script would write closed the false-pass above, and
+opened a false-FAIL: it compared the whole string byte for byte, and two of that
+string's words are absolute paths belonging to the shell that happens to be
+asking rather than to the command's hardening. The driver path came from
+`${BASH_SOURCE[0]}`, so a linked worktree rebuilt a different path and called a
+correctly-installed clone STALE — contradicting this script's own header promise
+that installing once serves every worktree. The bun path came from `command -v`
+at check time, so a hook, a CI step and a login shell with different PATH orders
+disagreed about a clone none of them had changed. Measured on git 2.50.1 at the
+previous commit: install from the main checkout, `git worktree add`, `--check`
+from the new worktree → exit 1, the two printed commands differing in nothing but
+which checkout hosts the driver. The dangerous part was the remedy it printed:
+following "re-run the installer" from a throwaway worktree wrote THAT worktree's
+driver path into the clone-wide config, where it dangled the moment the worktree
+was removed — converting a spurious warning into exactly the silent
+one-side-wins merge this change exists to stop. So `--check` now reads the two
+paths back OUT of the installed command, feeds them to the same `driver_command`
+that writes it, and requires the rebuild to reproduce the configured string byte
+for byte. Every token carrying the hardening is still exact; the two free words
+are judged on what they must BE — the driver is an
+`as-built-merge-driver.ts` that exists, the bun is executable — which also
+catches the dangling-worktree command that parses perfectly and cannot run, and
+removes the check's need for a bun on PATH at all. Install now resolves the
+driver from the MAIN worktree rather than from the invoking checkout, so the
+throwaway worktree can no longer poison the shared config in the first place.
+Tested at the boundary the rest of the suite never crossed: `--check` from a
+linked worktree, install from a throwaway worktree that is then removed, and
+`--check` under a PATH carrying a second bun — each with a control proving the
+check can still say STALE through the same seam.
+
+TWO REVIEW FINDINGS ON THE TESTS THEMSELVES, BOTH REAL. The predecessor fixture
+wrote a literal `bun` where every release of the installer wrote an absolute
+`$BUN` resolved by `command -v`, so it was rejecting a command nobody has; it now
+reads both paths out of what the installer actually wrote. And the mutation table
+claimed to drop "ANY ONE hardening element" while never individually removing
+`GITHUB_TOKEN`, `GIT_CONFIG_KEY_0` or `GIT_CONFIG_VALUE_0` — three separable
+removals in the emitted command — so a check keyed on `GH_TOKEN` alone would have
+passed a command still leaking the others and the table would have been green.
+All five scrubbed names plus the merge placeholders are now mutated one at a time.
+
+THE PRE-PUSH EXCLUSION IS NOW EXERCISED THROUGH THE HOOK THAT DECIDES IT, not
+just the variable it sets. The gate-level tests injected `LEAK_GATE_EXCLUDE_REF`
+by hand, which proves the gate honours it and can never catch a hook that fails
+to set it or sets it for the wrong ref. A pair of real `git push` runs now sends
+the SAME denylisted commit twice, varying nothing but the ref: refused at
+`main`, where excluding origin/main would empty the window, and excluded on a
+feature branch that merged it in. A second test pushes a NEW bad commit of the
+branch's own through the same seam and requires it to be blocked, so the
+exclusion cannot pass by excluding too much.
+
+THE "NO SECOND COPY" DOCBLOCK WAS FALSE ABOUT THE REPOSITORY while true about
+the file. `asBuiltDriverCommand` in `trident/orchestrator.ts` derives the same
+command in TypeScript, and it must: the publisher cannot shell out to an
+installer living in a checkout it does not control, which is the exposure this
+whole entry is named for. The comment now says so, and a test pins the two
+derivations in agreement — shape and scrub list — so a flag added to one and not
+the other fails instead of quietly splitting the fleet.
+
+KNOWN AND DEFERRED, NOT FIXED HERE. Two defects the review panel confirmed in
+this file's merge logic are pre-existing on `main` rather than regressions of
+this change, and are left for follow-up rather than widening a security fix that
+has already taken eight rounds: duplicate headings in the BASE are deduplicated
+against history under `ok:true` while the docblock asserts they are preserved
+(`scripts/git/as-built-log-merge.ts`), and the fence tracker follows fenced code
+blocks but not raw HTML, so an entry body containing a raw HTML block can have an
+addition spliced inside it (`scripts/git/as-built-log-merge.ts`).
+
 ## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
 
 The launcher now composes reflection guidance ONCE. `trident/inner-loop.ts`
