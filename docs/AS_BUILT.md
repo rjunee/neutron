@@ -19146,3 +19146,11 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
+
+**Dispatch-time credentialed merge-mode probe.** The direct board-dispatch
+fallback now probes git and gh with the GitHub credential resolved from the
+secrets store. Tests pin authenticated, unauthenticated, per-command resolution,
+injected-resolver precedence, and store-failure behavior. The secrets seam is
+typed as `Pick<SecretsStore, 'get'>`, and the probe is composed through
+`defaultGitModeProbe`. The loadEnv catch deliberately degrades to `{}` because
+a throwing origin probe becomes silent `local`, removing the PR gate.
