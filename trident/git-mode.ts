@@ -56,10 +56,12 @@ export interface HostCommandResult {
  *     offline, a proxy, a GitHub outage, or our own 60s watchdog killing the
  *     call. NOTHING was learned about the credential, and telling the owner to
  *     rotate it would be wrong.
- *   • `publisher_cli_unavailable` — `gh` itself could not be executed, so the
- *     credential could not be verified either way.
- *   • `probe_failed`            — the capability probe threw (e.g. the secrets
- *     store could not be opened). Nothing was learned about the credential.
+ *   • `publisher_cli_unavailable` — `gh` itself could not be executed, or is too
+ *     old to answer the scoped question, so the credential could not be verified
+ *     either way.
+ *   • `probe_failed`            — the probe got no verdict: it threw (e.g. the
+ *     secrets store could not be opened), or `gh` failed in a way that says
+ *     nothing about the credential. Nothing was learned about the credential.
  *
  * The SIXTH cause — "the probe was never handed a credential and so asked a
  * bare `gh` about ambient state" — is deliberately absent from this list. It
@@ -135,7 +137,20 @@ export interface PublisherCredentialSource extends PublisherIdentity {
  * There is no handle to report here by construction: no lookup ran. So it says
  * `unknown`, and the misuse is unrepresentable rather than merely discouraged.
  *
- * It never reads ambient `gh` login state, so it cannot reproduce the bug.
+ * WHAT IT DOES AND DOES NOT PROMISE. It reports that no in-app credential was
+ * wired; it does NOT suppress the host's ambient `gh` session. The probe still
+ * runs the same command in the same (empty) environment the publisher would, so
+ * a host with `gh auth login` done still resolves to `'pr'` mode — the probe is
+ * never stricter than the publisher it speaks for. An earlier draft of this
+ * comment claimed it "never reads ambient `gh` login state", which the ambient
+ * -parity tests in `git-mode.test.ts` directly contradict.
+ *
+ * NO PRODUCTION CALL SITE CONSTRUCTS THIS, and that is the intended end state
+ * rather than dead code: `gateway/composition/build-core-modules.ts` uses it
+ * only as the `??` for a composer that supplied no overnight config, and the
+ * boot-wiring test uses it as the negative control. If a real composition ever
+ * lands on it, the refusal names this function, which is the greppable signal
+ * that a composition site owes a real source.
  */
 export function unwiredPublisherCredential(): PublisherCredentialSource {
   return {
@@ -153,11 +168,21 @@ export function unwiredPublisherCredential(): PublisherCredentialSource {
  */
 export interface GitModeProbe {
   /**
-   * Who the publisher credential is looked up for. Named in EVERY refusal: a
-   * refusal that does not say which handle was consulted sends the reader
-   * hunting through the secrets store by hand.
+   * The credential source this probe consults — the SOURCE, not a copy of its
+   * labels.
+   *
+   * Its `owner_handle`/`source` are named in EVERY refusal: a refusal that does
+   * not say which handle was consulted sends the reader hunting through the
+   * secrets store by hand.
+   *
+   * WHY THE WHOLE SOURCE AND NOT A `PublisherIdentity` SNAPSHOT. A wiring test
+   * that can only read labels can only compare labels, and two separately-built
+   * sources with equal labels — one of them reading the wrong store — compare
+   * equal. Exposing the source means a wiring test can call `load()` against the
+   * store the composition root actually built and watch a token it planted come
+   * back, which a wrong-store probe cannot fake.
    */
-  readonly publisher: PublisherIdentity
+  readonly credential: PublisherCredentialSource
   /** Whether `repoPath` has an `origin` remote pointing at GitHub. */
   hasGithubOrigin(repoPath: string): Promise<boolean>
   /** Whether the outer publisher can authenticate to GitHub, and if not, why. */
@@ -198,7 +223,10 @@ export function describePublisherAuthFailure(
         `for ${who} could not be verified either way${detail}`
       )
     case 'probe_failed':
-      return `the publisher capability probe itself failed for ${who}${detail}`
+      return (
+        `the publisher capability probe itself failed for ${who}, so nothing was ` +
+        `learned about the credential. Do NOT rotate the token on this signal${detail}`
+      )
   }
 }
 
@@ -235,7 +263,7 @@ export async function detectMergeMode(
     throw new Error(
       'GitHub origin detected but the outer publisher cannot authenticate; ' +
         'refusing to silently weaken the PR merge gate — ' +
-        describePublisherAuthFailure(probe.publisher, result),
+        describePublisherAuthFailure(probe.credential, result),
     )
   }
   return 'pr'
@@ -269,6 +297,89 @@ export type EnvCapableHostRunner = (
  * patterns are Go's `net`/`http` surface (which is what `gh` prints) plus
  * GitHub's own 5xx.
  */
+/**
+ * The exact `gh` invocation the probe makes, and WHY it carries two flags.
+ *
+ * MEASURED ROOT CAUSE OF THE REPORTED REFUSAL (reproduced on the host, gh 2.97.0):
+ * `gh auth status` with NO flags tests every account on every known host and,
+ * per its own `--help`, "if an account on any host … has authentication issues,
+ * the command will exit with 1". A host that has a good token AND a stale second
+ * account therefore exits 1 while reporting success for the credential we asked
+ * about. Run against a VALID publisher token, the unscoped call printed
+ *
+ *     ✓ Logged in to github.com account <handle> (GH_TOKEN)
+ *     X Failed to log in to github.com account <handle> (default)
+ *       - The token in default is invalid.
+ *
+ * and exited 1 — so `res.ok` was false, `detectMergeMode` refused, and every
+ * board build was blocked by an account the publisher never uses. The same token
+ * with `--hostname github.com --active` exits 0.
+ *
+ *   • `--hostname github.com` — the only host the publisher ever targets, so an
+ *     enterprise or `github.example.com` entry cannot veto it.
+ *   • `--active`             — only the account that would actually be used.
+ *     With `GH_TOKEN` set that IS the injected credential; with an empty env it
+ *     is the host's ambient login, which is exactly what the publisher inherits.
+ *
+ * Both flags are long-standing (`--active` since gh 2.41); an older CLI reports
+ * `unknown flag` and is classified as `publisher_cli_unavailable` rather than as
+ * a verdict on the token.
+ */
+export const PUBLISHER_AUTH_COMMAND: readonly string[] = [
+  'gh',
+  'auth',
+  'status',
+  '--hostname',
+  'github.com',
+  '--active',
+]
+
+/**
+ * Whether `gh`'s output is a VERDICT that the credential was refused.
+ *
+ * Positive evidence is REQUIRED before `credential_rejected` is emitted, because
+ * that cause is the one that sends the owner to rotate a token. Round 2 had this
+ * backwards: anything unrecognised FELL THROUGH to `credential_rejected`, so an
+ * x509/TLS error, a corporate proxy's own wording, or any future `gh` message we
+ * had not enumerated all arrived as "expired, revoked, or missing a scope" —
+ * confident, specific, and about a token nothing had been learned about.
+ *
+ * The strings are `gh`'s own, captured from a real CLI (see
+ * `PUBLISHER_AUTH_COMMAND`) plus the GitHub API's 401/403 bodies it relays.
+ */
+export function looksLikeCredentialRejected(text: string): boolean {
+  const t = text.toLowerCase()
+  if (t.length === 0) return false
+  return (
+    t.includes('bad credentials') ||
+    t.includes('is invalid') ||
+    t.includes('invalid token') ||
+    t.includes('failed to log in') ||
+    t.includes('requires authentication') ||
+    t.includes('missing required scopes') ||
+    t.includes('insufficient oauth scopes') ||
+    /\bhttp 40[13]\b/.test(t)
+  )
+}
+
+/**
+ * Whether `gh` reports that it had NO credential at all.
+ *
+ * Used as a canary, not just a classifier. When the probe resolved a token and
+ * `gh` nonetheless says it was handed nothing, the credential did not survive
+ * the trip — which is a fault in the host runner, not in the token, and must
+ * never be reported as a rejection.
+ */
+export function looksLikeNoGithubAuth(text: string): boolean {
+  const t = text.toLowerCase()
+  if (t.length === 0) return false
+  return (
+    t.includes('not logged into any github hosts') ||
+    t.includes('no accounts') ||
+    (t.includes('gh auth login') && !looksLikeCredentialRejected(t))
+  )
+}
+
 export function looksLikeGithubUnreachable(text: string): boolean {
   const t = text.toLowerCase()
   if (t.length === 0) return false
@@ -299,22 +410,25 @@ export function looksLikeGithubUnreachable(text: string): boolean {
  * that happen, so the uncredentialed probe is now unrepresentable rather than
  * merely unused.
  *
- * MEASURED SCOPE, so this docblock does not overclaim the way its first draft
- * did: two call sites took that default — `onboarding/overnight/register.ts` and
- * `board-dispatch.ts`'s own `??` fallback. The board path did NOT reach the
- * fallback in production, because `open/composer.ts` passed a credentialed
- * resolver into `trident_build_dispatch`. What the board path DID hit is the
- * other half of the same defect, which the taxonomy above fixes: when the token
- * lookup came back empty, `githubProcessEnv(null)` returned `{}`, `spawnCapture`
- * omitted `env` entirely, and the credentialed runner degraded silently into the
- * SAME bare `gh auth status` — reported as an unexplained "cannot authenticate".
+ * MEASURED SCOPE, so this docblock does not overclaim the way its first two
+ * drafts did. Two call sites took that default — `onboarding/overnight/register.ts`
+ * and `board-dispatch.ts`'s own `??` fallback — but the board path did NOT reach
+ * the fallback in production, because `open/composer.ts` already passed a
+ * credentialed resolver into `trident_build_dispatch`. So requiring the
+ * credential closes a real hole on the OVERNIGHT path and hardens the board one,
+ * and it is NOT what was refusing the owner's builds.
+ *
+ * What refused those is measured in {@link PUBLISHER_AUTH_COMMAND}: the probe
+ * asked an UNSCOPED `gh auth status`, which fails when any account on any host
+ * is broken — including one the publisher never uses. That is the fix for the
+ * reported symptom; the required credential is the fix for the class.
  */
 export function defaultGitModeProbe(
   credential: PublisherCredentialSource,
   run: EnvCapableHostRunner = spawnCapture,
 ): GitModeProbe {
   return {
-    publisher: { owner_handle: credential.owner_handle, source: credential.source },
+    credential,
     hasGithubOrigin: async (repoPath) => {
       const res = await run(['git', '-C', repoPath, 'remote', 'get-url', 'origin'], repoPath)
       return res.ok && isGithubRemoteUrl(res.stdout)
@@ -333,16 +447,41 @@ export function defaultGitModeProbe(
       // publishes fine today and would have started refusing. The probe must be
       // a faithful mirror — the same command, the same environment — or it is
       // just a second, differently-wrong opinion about publishing.
-      const res = await run(['gh', 'auth', 'status'], undefined, env)
+      //
+      // WHAT THIS MIRRORS EXACTLY, AND WHAT IT ONLY MIRRORS IN PRACTICE. The
+      // `gh` half is exact: same argv, same env. The `git push` half is not
+      // carried by this env when the store is empty — `githubProcessEnv(null)`
+      // is `{}`, so no `GIT_CONFIG_*` credential helper is injected
+      // (`github/credential.ts`). On the ambient path that push is served by the
+      // helper `gh auth login` installs into the user's global config
+      // (`credential.https://github.com.helper = !gh auth git-credential`,
+      // verified on the host), which is the normal outcome of logging in but is
+      // declinable. So an empty store plus an ambient login that skipped git
+      // setup can still select 'pr' and then fail at push — with git's own
+      // credential error, which is the correct place to learn it. Tightening
+      // here instead would refuse the far more common host where it works.
+      const res = await run([...PUBLISHER_AUTH_COMMAND], undefined, env)
       if (res.ok) return { authenticated: true }
-      // ORDER IS THE POINT BELOW: every branch above `credential_rejected` is a
-      // condition in which NOTHING was learned about the credential, and the
-      // only reading that must never be emitted on those is "rotate your token".
+      const output = `${res.stderr}\n${res.stdout}`
+      // ORDER IS THE POINT BELOW: `credential_rejected` is emitted ONLY on
+      // positive evidence that `gh` refused the credential, and every other
+      // branch is a condition in which NOTHING was learned about it. The one
+      // reading that must never be guessed is "rotate your token".
       //
       // `spawnCapture` reports a spawn failure (no `gh` on PATH) as -1, which is
       // a different fact from `gh` running and rejecting the token.
       if (res.exit_code === -1) {
         return { authenticated: false, cause: 'publisher_cli_unavailable', detail: res.stderr }
+      }
+      // A `gh` too old to understand the scoped flags never evaluated the
+      // credential at all. Reporting that as a bad token would send the owner to
+      // rotate a good one over a CLI upgrade.
+      if (output.toLowerCase().includes('unknown flag')) {
+        return {
+          authenticated: false,
+          cause: 'publisher_cli_unavailable',
+          detail: `this \`gh\` does not support \`--hostname/--active\` (needs gh >= 2.41): ${res.stderr}`,
+        }
       }
       // Our own 60s watchdog killed it: a hung call, not a verdict. The kill
       // surfaces as an ordinary non-zero exit, so only this flag can tell them
@@ -351,22 +490,62 @@ export function defaultGitModeProbe(
         return {
           authenticated: false,
           cause: 'could_not_reach_github',
-          detail: res.stderr.length > 0 ? res.stderr : 'timed out after 60s',
+          detail:
+            res.stderr.length > 0
+              ? res.stderr
+              : `timed out after ${DEFAULT_HOST_COMMAND_TIMEOUT_MS / 1000}s`,
         }
       }
       // `gh auth status` does a live API round-trip, so DNS failure, an offline
       // host, a blocking proxy and a GitHub outage all exit non-zero with a
       // perfectly good token.
-      if (looksLikeGithubUnreachable(res.stderr) || looksLikeGithubUnreachable(res.stdout)) {
+      if (looksLikeGithubUnreachable(output)) {
         return { authenticated: false, cause: 'could_not_reach_github', detail: res.stderr }
       }
-      // Nothing stored AND ambient `gh` could not authenticate → the honest
-      // report is "connect GitHub", not "your token was rejected"; there is no
-      // token to reject.
-      if (token.length === 0) {
+      // `gh` says it was handed no credential at all.
+      if (looksLikeNoGithubAuth(output)) {
+        // CANARY. We resolved a token, and `gh` still saw none — so it did not
+        // survive the trip. The host runner dropped it: the probe's third
+        // argument is optional on `EnvCapableHostRunner`, so a two-parameter
+        // runner satisfies the type and silently discards the environment. That
+        // is a wiring fault, and reporting it as a rejected credential would
+        // send the owner to rotate a token that never reached `gh`.
+        if (token.length > 0) {
+          return {
+            authenticated: false,
+            cause: 'probe_failed',
+            detail:
+              'a credential was resolved but the host runner did not carry it into `gh`, ' +
+              'which reported no authentication at all — the runner is dropping its ' +
+              `environment argument: ${res.stderr}`,
+          }
+        }
+        // Nothing stored AND ambient `gh` is not logged in → the honest report is
+        // "connect GitHub", not "your token was rejected"; there is no token to
+        // reject.
         return { authenticated: false, cause: 'no_credential_available', detail: res.stderr }
       }
-      return { authenticated: false, cause: 'credential_rejected', detail: res.stderr }
+      // POSITIVE EVIDENCE ONLY. Reached only when `gh` actually said the
+      // credential was refused.
+      if (looksLikeCredentialRejected(output)) {
+        return {
+          authenticated: false,
+          cause: token.length === 0 ? 'no_credential_available' : 'credential_rejected',
+          detail: res.stderr,
+        }
+      }
+      // `gh` failed for a reason we cannot classify. Nothing was learned about
+      // the credential, so say exactly that rather than guessing the one cause
+      // that costs the owner a rotation. Round 2 fell through to
+      // `credential_rejected` here, which is how an x509/TLS error became
+      // "expired, revoked, or missing a scope".
+      return {
+        authenticated: false,
+        cause: 'probe_failed',
+        detail:
+          `\`${PUBLISHER_AUTH_COMMAND.join(' ')}\` exited ${res.exit_code} with no ` +
+          `recognisable verdict about the credential: ${res.stderr}`,
+      }
     },
   }
 }
@@ -436,6 +615,9 @@ export function defaultRalphModeProbe(
  * composer doesn't inject its own. Never throws — a spawn failure resolves
  * to `{ ok:false, exit_code:-1 }`.
  */
+/** Production watchdog budget for a single host command. */
+export const DEFAULT_HOST_COMMAND_TIMEOUT_MS = 60_000
+
 export async function spawnCapture(
   cmd: string[],
   cwd?: string,
@@ -445,6 +627,16 @@ export async function spawnCapture(
    * uses to carry the GitHub credential into `git push` / `gh pr create`.
    */
   extraEnv?: Record<string, string>,
+  /**
+   * Watchdog budget. Defaults to the production 60s.
+   *
+   * A SEAM, not a knob: the 60s was hardcoded inside the closure, so the only
+   * way to reach the `timed_out` branch in a test was to stub the whole result —
+   * which meant deleting the watchdog left the suite green while the publisher
+   * probe went back to reading a hung call as a rejected token. With this,
+   * `git-mode.test.ts` kills a real child and asserts the real flag.
+   */
+  timeoutMs: number = DEFAULT_HOST_COMMAND_TIMEOUT_MS,
 ): Promise<HostCommandResult> {
   try {
     const proc = Bun.spawn(cmd, {
@@ -472,7 +664,7 @@ export async function spawnCapture(
     const timeout = setTimeout(() => {
       timed_out = true
       proc.kill()
-    }, 60_000)
+    }, timeoutMs)
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),

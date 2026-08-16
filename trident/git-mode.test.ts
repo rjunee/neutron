@@ -6,6 +6,7 @@ import {
   isGithubRemoteUrl,
   looksLikeGithubUnreachable,
   spawnCapture,
+  PUBLISHER_AUTH_COMMAND,
   unwiredPublisherCredential,
   type GitModeProbe,
   type HostCommandResult,
@@ -66,11 +67,15 @@ describe('isGithubRemoteUrl', () => {
 })
 
 // A placeholder handle. The owner's real one never enters a test.
-const PUBLISHER = { owner_handle: 'owner-a', source: 'a fake store' } as const
+const PUBLISHER: PublisherCredentialSource = {
+  owner_handle: 'owner-a',
+  source: 'a fake store',
+  load: async () => ({}),
+}
 
 describe('detectMergeMode', () => {
   const probe = (hasOrigin: boolean, canPublish: boolean): GitModeProbe => ({
-    publisher: PUBLISHER,
+    credential: PUBLISHER,
     hasGithubOrigin: async () => hasOrigin,
     publisherAvailable: async () =>
       canPublish
@@ -96,7 +101,7 @@ describe('detectMergeMode', () => {
 
   test('a throwing probe degrades to local, never errors the run', async () => {
     const boom: GitModeProbe = {
-      publisher: PUBLISHER,
+      credential: PUBLISHER,
       hasGithubOrigin: async () => {
         throw new Error('git missing')
       },
@@ -107,7 +112,7 @@ describe('detectMergeMode', () => {
 
   test('a throwing publisher probe on a GitHub repo fails loudly', async () => {
     await expect(detectMergeMode('/repo', {
-      publisher: PUBLISHER,
+      credential: PUBLISHER,
       hasGithubOrigin: async () => true,
       publisherAvailable: async () => { throw new Error('secret store unavailable') },
     })).rejects.toThrow('refusing to silently weaken')
@@ -120,14 +125,18 @@ describe('detectMergeMode', () => {
 // asserts BOTH the cause and the owner handle the lookup was made under, and
 // asserts the OTHER causes are absent so the three can never be confused.
 describe('detectMergeMode names WHY the publisher could not authenticate', () => {
-  const identity = { owner_handle: 'owner-a', source: 'the instance secrets store' }
+  const identity: PublisherCredentialSource = {
+    owner_handle: 'owner-a',
+    source: 'the instance secrets store',
+    load: async () => ({}),
+  }
 
   const refusal = async (
     result: Awaited<ReturnType<GitModeProbe['publisherAvailable']>>,
   ): Promise<string> => {
     try {
       await detectMergeMode('/repo', {
-        publisher: identity,
+        credential: identity,
         hasGithubOrigin: async () => true,
         publisherAvailable: async () => result,
       })
@@ -175,7 +184,7 @@ describe('detectMergeMode names WHY the publisher could not authenticate', () =>
     let msg = ''
     try {
       await detectMergeMode('/repo', {
-        publisher: identity,
+        credential: identity,
         hasGithubOrigin: async () => true,
         publisherAvailable: async () => {
           throw new Error('secrets keyfile unreadable')
@@ -197,7 +206,10 @@ describe('detectMergeMode names WHY the publisher could not authenticate', () =>
 
 describe('defaultGitModeProbe (injected runner)', () => {
   const ok = (stdout: string): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
-  const fail = (): HostCommandResult => ({ ok: false, stdout: '', stderr: 'no', exit_code: 1 })
+  // `gh`'s real wording when it holds no credential at all — the classifier now
+  // reads the OUTPUT, not merely the exit code, so a stub must speak `gh`.
+  const NO_AUTH = 'You are not logged into any GitHub hosts. To log in, run: gh auth login'
+  const fail = (): HostCommandResult => ({ ok: false, stdout: '', stderr: NO_AUTH, exit_code: 1 })
 
   /**
    * A credential source backed by a FAKE TOKEN STORE — the seam every assertion
@@ -238,7 +250,7 @@ describe('defaultGitModeProbe (injected runner)', () => {
     expect(await probe.publisherAvailable()).toEqual({
       authenticated: false,
       cause: 'no_credential_available',
-      detail: 'no',
+      detail: NO_AUTH,
     })
     await expect(detectMergeMode('/repo', probe)).rejects.toThrow('outer publisher cannot authenticate')
   })
@@ -541,15 +553,67 @@ describe('unreachable GitHub is reported as unreachable, not as a bad token', ()
     expect(res.authenticated === false && res.cause).toBe('credential_rejected')
   })
 
-  test('CONTROL — an unrecognised failure falls through to the credential reading', async () => {
+  // THE INVERSION. Round 2 whitelisted transport failures and let EVERYTHING
+  // else fall through to `credential_rejected`, whose text tells the owner the
+  // token is expired or revoked. So any failure mode not enumerated in
+  // `looksLikeGithubUnreachable` — a TLS/x509 error being the concrete one Argus
+  // found — arrived as a confident, specific claim about a token that had been
+  // learned nothing about. `credential_rejected` now requires POSITIVE evidence.
+  test('an x509/TLS failure is NOT reported as a rejected credential', async () => {
+    const probe = defaultGitModeProbe(
+      withToken,
+      ghFails({
+        stdout: '',
+        stderr:
+          'Get "https://api.github.com/": x509: certificate signed by unknown authority',
+        exit_code: 1,
+      }),
+    )
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).not.toBe('credential_rejected')
+    expect(res.authenticated === false && res.cause).toBe('probe_failed')
+    // …and the owner is told, in as many words, not to act on it.
+    const msg = await detectMergeMode('/repo', probe).then(
+      () => '',
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    )
+    expect(msg).toContain('Do NOT rotate the token')
+    expect(msg).not.toContain('REJECTED')
+  })
+
+  test('an unrecognised failure says so instead of guessing the costly cause', async () => {
     const probe = defaultGitModeProbe(withToken, ghFails({ stdout: '', stderr: 'weird', exit_code: 1 }))
     const res = await probe.publisherAvailable()
-    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+    expect(res.authenticated === false && res.cause).toBe('probe_failed')
+    // The detail names the command and the exit code, so an unclassified failure
+    // is still actionable by a reader without being misattributed to the token.
+    expect(res.authenticated === false && res.detail).toContain('no recognisable verdict')
+    expect(res.authenticated === false && res.detail).toContain('gh auth status')
+  })
+
+  // CONTROL that the inversion NARROWED rather than swallowed: every wording
+  // `gh` actually uses to refuse a credential still reaches the owner as one.
+  test('CONTROL — real `gh` rejection wordings are still `credential_rejected`', async () => {
+    for (const stderr of [
+      'HTTP 401: Bad credentials',
+      'The token in GH_TOKEN is invalid.',
+      'X Failed to log in to github.com using token (GH_TOKEN)',
+      'HTTP 403: Resource not accessible by personal access token',
+      'error: missing required scopes: repo',
+    ]) {
+      const probe = defaultGitModeProbe(withToken, ghFails({ stdout: '', stderr, exit_code: 1 }))
+      const res = await probe.publisherAvailable()
+      expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+    }
   })
 
   test('the refusal text tells the owner NOT to rotate the token', async () => {
     const msg = await detectMergeMode('/repo', {
-      publisher: { owner_handle: 'owner-a', source: 'the instance secrets store' },
+      credential: {
+        owner_handle: 'owner-a',
+        source: 'the instance secrets store',
+        load: async () => ({}),
+      },
       hasGithubOrigin: async () => true,
       publisherAvailable: async () => ({
         authenticated: false,
@@ -594,6 +658,161 @@ describe('looksLikeGithubUnreachable', () => {
   })
 })
 
+/**
+ * THE REPORTED BUG, REDUCED — and the reason it was a REFUSAL rather than a
+ * misleading message.
+ *
+ * Measured on the host with gh 2.97.0: `gh auth status` with no flags checks
+ * every account on every known host, and per its own `--help` exits 1 "if an
+ * account on any host … has authentication issues". With a VALID publisher token
+ * injected it printed `✓ Logged in to github.com account <handle> (GH_TOKEN)`
+ * AND `X Failed to log in to github.com account <handle> (default)` — and exited
+ * 1. `res.ok` was false, so `detectMergeMode` refused, and every board build was
+ * blocked by a stale account the publisher never uses. The same token with
+ * `--hostname github.com --active` exits 0.
+ */
+describe('a stale unrelated account cannot veto a valid publisher credential', () => {
+  const withToken: PublisherCredentialSource = {
+    owner_handle: 'owner-a',
+    source: 'a fake token store',
+    load: async () => ({ GH_TOKEN: 't0k' }),
+  }
+
+  /**
+   * A host carrying a second, broken account — the shape measured above. It
+   * answers as the real CLI does: the UNSCOPED question fails (because of the
+   * other account), the SCOPED one succeeds (because our credential is fine).
+   */
+  const hostWithStaleSecondAccount =
+    (seen: { cmds: string[][] }) =>
+    async (cmd: string[], _cwd?: string, extraEnv?: Record<string, string>): Promise<HostCommandResult> => {
+      if (cmd[0] === 'git') {
+        return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
+      }
+      seen.cmds.push(cmd)
+      const scoped = cmd.includes('--active') && cmd.includes('--hostname')
+      const token = extraEnv?.['GH_TOKEN'] ?? ''
+      if (scoped && token.length > 0) {
+        return { ok: true, stdout: 'Logged in to github.com account owner-a (GH_TOKEN)', stderr: '', exit_code: 0 }
+      }
+      return {
+        ok: false,
+        stdout: '',
+        stderr:
+          'X Failed to log in to github.com account owner-a (default)\n' +
+          '  - The token in default is invalid.',
+        exit_code: 1,
+      }
+    }
+
+  test('the probe asks the SCOPED question, so the good token resolves to pr mode', async () => {
+    const seen = { cmds: [] as string[][] }
+    const probe = defaultGitModeProbe(withToken, hostWithStaleSecondAccount(seen))
+    expect(await probe.publisherAvailable()).toEqual({ authenticated: true })
+    expect(await detectMergeMode('/repo', probe)).toBe('pr')
+    // CONTROL that the pass came from the scoping and not from a lenient stub:
+    // the exact flags reached the CLI.
+    expect(seen.cmds.length).toBeGreaterThan(0)
+    expect(seen.cmds[0]).toEqual(['gh', 'auth', 'status', '--hostname', 'github.com', '--active'])
+  })
+
+  test('CONTROL — the SAME host answering the UNSCOPED question refuses, which is the bug', async () => {
+    // Proves the test above measures the scoping. This probe is the pre-fix one:
+    // same host, same valid token, unscoped question → the refusal the owner saw.
+    const unscoped = defaultGitModeProbe(withToken, async (cmd, cwd, extraEnv) =>
+      hostWithStaleSecondAccount({ cmds: [] })(
+        cmd[0] === 'git' ? cmd : ['gh', 'auth', 'status'],
+        cwd,
+        extraEnv,
+      ),
+    )
+    expect((await unscoped.publisherAvailable()).authenticated).toBe(false)
+    await expect(detectMergeMode('/repo', unscoped)).rejects.toThrow('refusing to silently weaken')
+  })
+
+  test('the exported command is the scoped one — the flags are not incidental', () => {
+    expect([...PUBLISHER_AUTH_COMMAND]).toEqual([
+      'gh',
+      'auth',
+      'status',
+      '--hostname',
+      'github.com',
+      '--active',
+    ])
+  })
+
+  test('a `gh` too old for the flags is a CLI problem, never a token verdict', async () => {
+    const probe = defaultGitModeProbe(withToken, async (cmd): Promise<HostCommandResult> => {
+      if (cmd[0] === 'git') {
+        return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
+      }
+      return { ok: false, stdout: '', stderr: 'unknown flag: --active', exit_code: 1 }
+    })
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('publisher_cli_unavailable')
+    expect(res.authenticated === false && res.detail).toContain('gh >= 2.41')
+  })
+})
+
+/**
+ * A CREDENTIAL THAT NEVER REACHED `gh` IS NOT A REJECTED CREDENTIAL.
+ *
+ * `EnvCapableHostRunner`'s third parameter is optional, so a two-parameter
+ * runner — which is exactly the shape `makeLazyCredentialedHostRunner` returns —
+ * satisfies the type and silently discards the environment the probe resolved.
+ * Round 2 then read the resulting bare `gh` failure as `credential_rejected` and
+ * told the owner to rotate a token that had never left the process.
+ */
+describe('a dropped credential is reported as a wiring fault, not a bad token', () => {
+  const withToken: PublisherCredentialSource = {
+    owner_handle: 'owner-a',
+    source: 'a fake token store',
+    load: async () => ({ GH_TOKEN: 't0k' }),
+  }
+
+  test('a runner that ignores extraEnv is named as the fault', async () => {
+    // Two parameters — the credential the probe resolved cannot arrive.
+    const probe = defaultGitModeProbe(withToken, async (cmd: string[], _cwd?: string) => {
+      if (cmd[0] === 'git') {
+        return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
+      }
+      return {
+        ok: false,
+        stdout: '',
+        stderr: 'You are not logged into any GitHub hosts. To log in, run: gh auth login',
+        exit_code: 1,
+      }
+    })
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('probe_failed')
+    expect(res.authenticated === false && res.detail).toContain('did not carry it into')
+    // Never the two readings that send the owner somewhere useless.
+    expect(res.authenticated === false && res.cause).not.toBe('credential_rejected')
+    expect(res.authenticated === false && res.cause).not.toBe('no_credential_available')
+  })
+
+  test('CONTROL — the SAME host with an EMPTY store is `no_credential_available`', async () => {
+    // Same output, no token resolved: now "connect GitHub" is the honest read,
+    // which proves the branch above keys on the credential and not on the text.
+    const probe = defaultGitModeProbe(
+      { owner_handle: 'owner-a', source: 'a fake token store', load: async () => ({}) },
+      async (cmd: string[], _cwd?: string) => {
+        if (cmd[0] === 'git') {
+          return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
+        }
+        return {
+          ok: false,
+          stdout: '',
+          stderr: 'You are not logged into any GitHub hosts. To log in, run: gh auth login',
+          exit_code: 1,
+        }
+      },
+    )
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('no_credential_available')
+  })
+})
+
 describe('spawnCapture flags a timeout only when it caused one', () => {
   test('a fast command carries no `timed_out`', async () => {
     const res = await spawnCapture(['true'])
@@ -602,6 +821,40 @@ describe('spawnCapture flags a timeout only when it caused one', () => {
     // non-zero exit, so a spuriously-set one would relabel every real
     // credential rejection as a network problem.
     expect(res.timed_out).toBeUndefined()
+  })
+
+  // THE POSITIVE PATH, THROUGH THE REAL CODE. Every other assertion about
+  // `timed_out` injects the flag via a stubbed `HostCommandResult`, so deleting
+  // the watchdog — or setting the flag in the wrong closure — left the whole
+  // suite green while the publisher probe went back to calling a hung network
+  // call a rejected token. This kills an actual child process.
+  test('a command that outruns the budget IS flagged, and is not ok', async () => {
+    const res = await spawnCapture(['sleep', '5'], undefined, undefined, 50)
+    expect(res.timed_out).toBe(true)
+    expect(res.ok).toBe(false)
+  })
+
+  test('CONTROL — the SAME budget on a fast command is not flagged', async () => {
+    // Proves the assertion above measured the watchdog rather than the short
+    // budget: same 50ms, a command that finishes inside it.
+    const res = await spawnCapture(['true'], undefined, undefined, 50)
+    expect(res.ok).toBe(true)
+    expect(res.timed_out).toBeUndefined()
+  })
+
+  test('a real timeout reaches the owner as unreachable, never as a bad token', async () => {
+    // End to end over the real watchdog: the probe classifies what `spawnCapture`
+    // actually produced, closing the gap between the flag and its consumer.
+    const probe = defaultGitModeProbe(
+      { owner_handle: 'owner-a', source: 'a fake token store', load: async () => ({ GH_TOKEN: 't0k' }) },
+      async (cmd) =>
+        cmd[0] === 'git'
+          ? { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
+          : spawnCapture(['sleep', '5'], undefined, undefined, 50),
+    )
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
+    expect(res.authenticated === false && res.cause).not.toBe('credential_rejected')
   })
 })
 

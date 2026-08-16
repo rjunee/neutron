@@ -28,13 +28,17 @@ import type { GitModeProbe } from './git-mode.ts'
  * circuits `detectMergeMode` to 'local' before it ever consults the credential,
  * which is what these tests want and what a local project genuinely is.
  *
- * It carries a `publisher` because every probe must: the whole point of the
+ * It carries a `credential` because every probe must: the whole point of the
  * seam taking a probe rather than a bare resolver is that WHOSE credential is in
- * play is always visible.
+ * play is always visible, and inspectable by identity rather than by label.
  */
 function localProbe(): GitModeProbe {
   return {
-    publisher: { owner_handle: 'test-owner', source: 'test stub' },
+    credential: {
+      owner_handle: 'test-owner',
+      source: 'test stub',
+      load: async () => ({}),
+    },
     hasGithubOrigin: async () => false,
     publisherAvailable: async () => ({ authenticated: true }),
   }

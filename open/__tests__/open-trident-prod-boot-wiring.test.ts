@@ -43,6 +43,9 @@ import type { Event } from '@neutronai/runtime/events.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
+/** A synthetic credential — the owner's real token never enters a test. */
+const PLANTED_TOKEN = 'ghp_BOOT_WIRING_SENTINEL_0001'
+
 const SAVED_ENV_KEYS = [
   'NEUTRON_HOME',
   'OWNER_HOME',
@@ -185,6 +188,7 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     const tbd = composition.trident_build_dispatch!
     expect(typeof tbd.repo_path).toBe('string')
     const { dispatchBoardBoundBuild } = await import('@neutronai/trident/board-dispatch.ts')
+    const { detectMergeMode } = await import('@neutronai/trident/git-mode.ts')
     const { WorkBoardStore } = await import('@neutronai/work-board/store.ts')
     const board = new WorkBoardStore(db)
     const item = await board.create('owner', {
@@ -201,7 +205,16 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         // not the real git workspace (covered in build-workspace.test.ts); keep it
         // off the real filesystem.
         resolveBuildRepo: async (home) => home,
-        resolveMergeMode: async () => 'local',
+        // THE COMPOSED PROBE, through the exact expression `work_board_start`
+        // uses (`registerTridentBuildToolSurface` → `detectMergeMode(path,
+        // deps.merge_mode_probe)`). Round 2 hardcoded `async () => 'local'` here,
+        // which bypassed the very path this test claims to guard.
+        //
+        // Hermetic and offline BY CONSTRUCTION rather than by luck: `tmpDir` is
+        // not a git repo, so `hasGithubOrigin` fails first and `detectMergeMode`
+        // returns 'local' without ever reaching `publisherAvailable` — no `gh`,
+        // no network. The credential half is proven below through the store.
+        resolveMergeMode: (path) => detectMergeMode(path, tbd.merge_mode_probe),
         resolveRalph: async () => false,
       },
     )
@@ -219,18 +232,20 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // it will consult, so the wiring is inspectable at the exact seam
     // `work_board_start` runs through (build-core-modules registers the tool
     // surface from this same object).
-    expect(tbd.merge_mode_probe.publisher.owner_handle).toBe('owner')
-    expect(tbd.merge_mode_probe.publisher.source).toBe('the instance secrets store')
+    expect(tbd.merge_mode_probe.credential.owner_handle).toBe('owner')
+    expect(tbd.merge_mode_probe.credential.source).toBe('the instance secrets store')
     // …and specifically NOT the "nothing was wired here" placeholder, which is
     // what an unwired composition would have produced.
-    expect(tbd.merge_mode_probe.publisher.owner_handle).not.toBe('unknown')
+    expect(tbd.merge_mode_probe.credential.owner_handle).not.toBe('unknown')
 
     const publisherCredential = composition.onboarding_overnight_cron!.publisher_credential
     // The board seam and the overnight seam resolve the SAME credential — one
-    // connection in chat serves both. Identity, not shape: two separately-built
-    // sources with equal fields would pass a field comparison while drifting.
-    expect(tbd.merge_mode_probe.publisher.owner_handle).toBe(publisherCredential.owner_handle)
-    expect(tbd.merge_mode_probe.publisher.source).toBe(publisherCredential.source)
+    // connection in chat serves both. IDENTITY, not shape: the previous round
+    // compared `owner_handle`/`source` strings, and `git-mode.ts` cloned those
+    // strings onto the probe, so a probe backed by the WRONG STORE with matching
+    // labels passed. `toBe` on the source object cannot be satisfied that way.
+    expect(tbd.merge_mode_probe.credential).toBe(publisherCredential)
+
     expect(publisherCredential.owner_handle).toBe('owner')
     expect(publisherCredential.source).toBe('the instance secrets store')
     // Nothing connected yet → empty, and reported as empty.
@@ -239,12 +254,23 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // up on the next call, with no re-composition — which is what makes a
     // chat-time `Connect GitHub` take effect without a restart.
     const { storeGitHubToken } = await import('@neutronai/github/credential.ts')
+    // The probe's OWN credential is empty right up to this point, so the
+    // assertion below cannot pass on a pre-existing value.
+    expect(await tbd.merge_mode_probe.credential.load()).toEqual({})
     await storeGitHubToken(
       composition.cores!.secretsStore,
       asOwnerHandle('owner'),
-      'ghp_TEST_SENTINEL_12345',
+      PLANTED_TOKEN,
     )
-    expect((await publisherCredential.load())['GH_TOKEN']).toBe('ghp_TEST_SENTINEL_12345')
+    expect((await publisherCredential.load())['GH_TOKEN']).toBe(PLANTED_TOKEN)
+
+    // AND THE STORE THE `work_board_start` PROBE READS IS THIS BOOT'S OWN,
+    // proven by round-trip rather than by label. The token was planted through
+    // `composition.cores.secretsStore`; it comes back out of the probe's own
+    // credential. A probe wired to any OTHER store — including one carrying
+    // identical `owner_handle`/`source` labels, which is exactly what round 2's
+    // string comparison would have accepted — returns `{}` here.
+    expect((await tbd.merge_mode_probe.credential.load())['GH_TOKEN']).toBe(PLANTED_TOKEN)
 
     // Part B — the Connect Codex surface + agent-tool service are wired, and the
     // trident loop threads the per-project CODEX_HOME (resolveCodexHome). Anti

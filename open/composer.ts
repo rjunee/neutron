@@ -2043,14 +2043,21 @@ export function buildOpenGraphComposer(
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
     // ONE credential resolution, shared by the thing that PUBLISHES and the
-    // thing that PROBES whether publishing is possible. They were separate
-    // before: the host runner carried the token, the probe did not, so the probe
-    // asked a bare `gh auth status` about the gateway's own environment — which
-    // holds no `GH_TOKEN` by design (`setGithubSpawnEnvResolver` above injects it
-    // PER SPAWN) — and truthfully answered "no". Every board-dispatched build was
-    // then refused with "the outer publisher cannot authenticate" while a valid
-    // token sat in the secrets store. Resolved per call, so a credential the
-    // owner connects from chat takes effect on the next probe, not the next boot.
+    // thing that PROBES whether publishing is possible.
+    //
+    // This site was ALREADY credentialed before the publisher-probe fix, and
+    // saying otherwise was the round-2 overclaim: what refused the owner's board
+    // builds was not this wiring but the QUESTION the probe asked — an unscoped
+    // `gh auth status`, which exits non-zero when any account on any host is
+    // broken, including one the publisher never uses (measured: a valid token
+    // printed `✓ Logged in … (GH_TOKEN)` and still exited 1 because of a stale
+    // `default` account). The scoping fix lives in `trident/git-mode.ts`
+    // (`PUBLISHER_AUTH_COMMAND`).
+    //
+    // What sharing the credential here DOES buy is that the probe and the
+    // publisher can never disagree about whose token is in play, and it is
+    // resolved per call, so a credential the owner connects from chat takes
+    // effect on the next probe rather than the next boot.
     const tridentGithubEnv = async (): Promise<Record<string, string>> =>
       githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle)))
     const tridentPublisherCredential: PublisherCredentialSource = {

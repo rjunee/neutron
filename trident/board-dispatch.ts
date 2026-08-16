@@ -103,11 +103,15 @@ export interface BoardBoundBuildDeps {
    * UNCREDENTIALED probe that shelled a bare `gh auth status` in the gateway's
    * own environment. The gateway carries no `GH_TOKEN` by design (the credential
    * is injected per spawn — `open/composer.ts` `setGithubSpawnEnvResolver`), so
-   * that probe truthfully answered "not authenticated" about a process that
-   * structurally cannot be, and every board-dispatched build was refused with
-   * "the outer publisher cannot authenticate" while a valid credential sat in
-   * the secrets store. Requiring it means the composition root — the only place
-   * that holds the credential — has to supply the credentialed resolver.
+   * that probe would truthfully answer "not authenticated" about a process that
+   * structurally cannot be. Requiring the resolver means the composition root —
+   * the only place that holds the credential — has to supply it.
+   *
+   * MEASURED, so this does not repeat round 2's overclaim: production never took
+   * this fallback, because `open/composer.ts` already passed a credentialed
+   * resolver. Removing it closes the hole for any FUTURE caller; it is not what
+   * refused the owner's builds. That was the unscoped `gh auth status` the probe
+   * ran — see `git-mode.ts` `PUBLISHER_AUTH_COMMAND`.
    */
   resolveMergeMode: (repo_path: string) => Promise<MergeMode>
   /**

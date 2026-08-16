@@ -367,7 +367,7 @@ describe('real TridentRunStore seam', () => {
     // The overnight seam now takes an explicit probe — no ambient-`gh` default.
     // This one is a plain local repo, so merge mode is 'local' either way.
     const seam = buildOvernightTridentSeam(tridentStore, {
-      publisher: { owner_handle: 'owner-a', source: 'a fake store' },
+      credential: { owner_handle: 'owner-a', source: 'a fake store', load: async () => ({}) },
       hasGithubOrigin: async () => false,
       publisherAvailable: async () => ({ authenticated: true }),
     })

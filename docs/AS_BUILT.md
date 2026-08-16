@@ -187,7 +187,27 @@ refusing to silently weaken the PR merge gate`. The refusal is correct and stays
 (`trident/git-mode.ts` `detectMergeMode`) — selecting local mode there would drop the PR
 and CI gates. It fired while a valid credential existed, and it did not say why.
 
-WHAT WAS ACTUALLY MEASURED, because the first draft of this entry overclaimed and the
+THE ROOT CAUSE, REPRODUCED ON THE HOST (gh 2.97.0) — and it is none of the mechanisms the
+first two drafts of this entry named. The probe ran `gh auth status` with NO flags. Per
+that command's own `--help`, it "tests the authentication state of each known account on
+each known GitHub host" and "if an account on any host … has authentication issues, the
+command will exit with 1". Run with a VALID publisher token injected, it printed
+
+    ✓ Logged in to github.com account <handle> (GH_TOKEN)
+    X Failed to log in to github.com account <handle> (default)
+      - The token in default is invalid.
+
+and exited 1. The probe was `return res.ok`, so a good credential plus one stale account
+the publisher never uses produced "the outer publisher cannot authenticate", and every
+board build was refused. The same token with `--hostname github.com --active` exits 0.
+The probe now asks that scoped question (`PUBLISHER_AUTH_COMMAND`, `trident/git-mode.ts`):
+`--hostname github.com` is the only host the publisher targets, and `--active` is the only
+account it would use — with `GH_TOKEN` set that IS the injected credential, and with an
+empty env it is the ambient login the publisher inherits, so the mirror property holds in
+both directions. A `gh` too old for the flags (`--active` is gh >= 2.41) answers
+`unknown flag` and is classified `publisher_cli_unavailable`, never as a bad token.
+
+WHAT WAS ALSO MEASURED, because the first draft of this entry overclaimed and the
 overclaim is the more useful record. It said "every board-dispatched build was refused
 because the probe was uncredentialed". That is false: at `bb90794b`, `open/composer.ts`
 already passed a credentialed `resolveMergeMode` into `trident_build_dispatch`, which is
@@ -220,8 +240,12 @@ The board seam takes the PROBE, not a resolver function: `merge_mode_probe: GitM
 replaced `resolveMergeMode: (path) => Promise<MergeMode>` on `TridentBuildToolDeps` and on
 the `trident_build_dispatch` composition input. An opaque function satisfies its type with
 or without a credential, so a wiring test could only assert `typeof … === 'function'` —
-which the buggy composition also passed. A probe carries `publisher`, so which credential
-the seam closes over is assertable. A composition with nothing to give uses
+which the buggy composition also passed. A probe carries its `credential` — the SOURCE
+OBJECT, not a copy of its labels — so which credential the seam closes over is assertable
+BY IDENTITY. That distinction is load-bearing: round 2 exposed a `publisher` snapshot of
+`{owner_handle, source}` and the wiring test compared those two strings, which a probe
+backed by the WRONG STORE with matching labels satisfies. A composition with nothing to
+give uses
 `unwiredPublisherCredential()` (`trident/git-mode.ts:140`), which takes no handle: its one
 caller had none and was passing the PROJECT SLUG, so the refusal named an identity that
 was never looked up.
@@ -243,9 +267,23 @@ exit non-zero with a good token; so does our own 60s watchdog kill, which is why
 `spawnCapture` now records `timed_out` (`trident/git-mode.ts:473`) — the exit code alone
 cannot distinguish a kill from a verdict. Every one of those used to render as "your token
 was REJECTED — expired, revoked, or missing a scope", sending the owner to rotate a
-working credential during an outage. `looksLikeGithubUnreachable`
-(`trident/git-mode.ts:272`) is deliberately conservative: an unrecognised failure falls
-through to the credential reading, so it can only move cases OUT of that advice.
+working credential during an outage.
+
+THE CLASSIFIER IS INVERTED FROM ITS FIRST SHAPE, WHICH WAS BACKWARDS IN THE EXPENSIVE
+DIRECTION. It whitelisted transport failures (`looksLikeGithubUnreachable`) and let
+everything ELSE fall through to `credential_rejected` — described in the code as
+"conservative", when the fallthrough destination was the single cause that costs the owner
+a token rotation. An x509/TLS error matches no transport pattern, so "certificate signed
+by unknown authority" arrived as "expired, revoked, or missing a scope": confident,
+specific, and about a token nothing had been learned about. `credential_rejected` now
+requires POSITIVE evidence that `gh` refused the credential (`looksLikeCredentialRejected`
+— `bad credentials`, `is invalid`, `failed to log in`, `HTTP 401/403`, missing scopes),
+and an unclassifiable failure reports `probe_failed` naming the command and exit code.
+Two related honesty fixes ride along: `gh` reporting NO authentication while the probe HAD
+resolved a token means the host runner dropped the environment (`EnvCapableHostRunner`'s
+third parameter is optional, so a two-parameter runner type-checks and silently discards
+it) — that is now reported as a wiring fault, not a rejection; and `probe_failed`'s text
+tells the owner not to rotate on that signal.
 
 Guards. `trident/git-mode-credential-seam.test.ts` drives a REAL `SecretsStore` on a temp
 db through the composer's exact construction: a stored token makes the probe available on
@@ -254,16 +292,43 @@ host that IS logged in stays available (control: the store was empty and the hos
 consulted with an empty env), an empty store on a host with no session refuses by name,
 and a credential connected AFTER composition takes effect with no restart. `process.env`
 is never mutated — setting `GH_TOKEN` on the test process would exercise the ambient read
-being removed and would pass for the broken code too. `open/__tests__/open-trident-prod-
-boot-wiring.test.ts` asserts the probe reachable from `work_board_start` names the live
-secrets store and not the unwired placeholder. Mutation-tested against a green control of
-42/42 on `trident/git-mode.test.ts` + `trident/git-mode-credential-seam.test.ts`:
-restoring the ambient probe reddens 7, stripping the cause from the refusal reddens 8,
-collapsing `could_not_reach_github` into `credential_rejected` reddens 3, and re-adding
-the empty-store short-circuit reddens 7. Separately, wiring the board seam to
-`defaultGitModeProbe(unwiredPublisherCredential())` reddens the boot-wiring test — which
-the round-1 `typeof … === 'function'` assertion could not do, because the pre-fix
-composition satisfied it too.
+being removed and would pass for the broken code too.
+
+The reported bug is guarded directly, reduced to its mechanism: a host stub carrying a
+stale second account answers the UNSCOPED question with failure and the SCOPED one with
+success, so a valid token resolves to `'pr'`, and the CONTROL runs the SAME host against
+the pre-fix unscoped question and gets the refusal the owner saw. The exact argv is
+asserted, so the flags cannot be dropped as incidental.
+
+THE BOOT-WIRING GUARD NOW EXERCISES THE PATH IT NAMES. Round 2 called
+`dispatchBoardBoundBuild` with a hardcoded `resolveMergeMode: async () => 'local'`, which
+bypassed the composed probe entirely, then asserted two strings. It now drives the exact
+expression `work_board_start` uses (`detectMergeMode(path, tbd.merge_mode_probe)`) — the
+temp workspace is not a git repo, so `hasGithubOrigin` fails first and no `gh` or network
+call is reachable — and proves the credential BY ROUND-TRIP: a token planted through
+`composition.cores.secretsStore` comes back out of the probe's own credential, which a
+probe wired to any other store cannot fake. Mutation-tested BOTH layers independently:
+pointing the composer's probe at a different source carrying IDENTICAL labels reddens the
+identity assertion, and with that assertion disabled the store round-trip reddens on its
+own (`Expected: "ghp_BOOT_WIRING_SENTINEL_0001" / Received: undefined`) — the case round
+2's string comparison accepted.
+
+`spawnCapture`'s watchdog is now testable rather than asserted-by-stub: the 60s budget
+moved into a `timeoutMs` parameter (`DEFAULT_HOST_COMMAND_TIMEOUT_MS`), and the suite
+kills a REAL child (`sleep 5` at 50 ms) to assert `timed_out`, with a control proving the
+same budget does not flag a fast command, plus an end-to-end case where a real timeout
+reaches the owner as `could_not_reach_github`. Previously every positive assertion
+injected the flag via a stubbed result, so deleting the watchdog left the suite green.
+
+Verification for this round: `bash scripts/ci/typecheck-all.sh` → 51/51 tsconfigs pass.
+Full suite via the CI sharding (`scripts/run-tests.sh`, 4 shards) → 15,892 tests across
+1,300 files. The 15 failures are IDENTICAL to untouched `main` at `f99d6d49`, differenced
+file-by-file rather than counted: `trident/merge-realgit.test.ts` (2) and
+`trident/worktree-cleanup-sh.test.ts` (12) reproduce failure-for-failure on a clean
+baseline worktree, as does the commit-trailer case — all real-`git` shell tests, none
+touching this change. Note the shard partition is NOT comparable across the two trees:
+this branch declares 1,300 test files to main's 1,299, which shifts the assignment, so
+the comparison was made per-file.
 
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
