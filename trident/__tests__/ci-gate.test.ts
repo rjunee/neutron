@@ -600,6 +600,31 @@ const ENTERPRISE_ROLLUP = [
  * larger than the array by hand.
  */
 const named = (names: string[], n?: number) => JSON.stringify({ n: n ?? names.length, names })
+/**
+ * A FIXTURE MAY NOT DESCRIBE TWO WORLDS AT ONCE.
+ *
+ * The branch payload and the rulesets payload are two readings of ONE repository, so a
+ * fixture that makes them disagree tests a state GitHub never emits — and a test that
+ * passes on an impossible world defends nothing. Measured on the base branch this gate
+ * runs against: a branch a ruleset governs reports `protected:true` (with
+ * `protection.enabled:false`, no classic protection), never `protected:false`.
+ *
+ * Only enforced where the branch section is LOAD-BEARING — the classifier reads it
+ * solely when the protection subresource 404s. With a readable protection endpoint the
+ * branch text is inert, so pinning it there would be noise rather than a guard.
+ */
+const assertBranchAgreesWithRules = (s: { prot: string; protExit: number; rules: string; branch?: string }) => {
+  const branchIsRead = s.protExit !== 0
+  const rulesRequire = s.rules.includes('required_status_checks')
+  const claimsUnprotected = (s.branch ?? '{"protected":false}').includes('"protected":false')
+  if (branchIsRead && rulesRequire && claimsUnprotected) {
+    throw new Error(
+      'impossible fixture: a branch governed by a ruleset that requires a status check ' +
+        'reports protected:true — pass RULESET_GOVERNED_BRANCH_MEASURED, not protected:false',
+    )
+  }
+  return ''
+}
 const requiredProbe = (s: {
   prot: string
   protExit: number
@@ -613,7 +638,7 @@ const requiredProbe = (s: {
   branchExit?: number
 }) => ({
   raw:
-    `${s.prot}\n___PROT_EXIT=${s.protExit}\n` +
+    `${assertBranchAgreesWithRules(s)}${s.prot}\n___PROT_EXIT=${s.protExit}\n` +
     `___SECTION=BRANCH\n${s.branch ?? '{"protected":false}'}\n___BRANCH_EXIT=${s.branchExit ?? 0}\n` +
     `___SECTION=RULES\n${s.rules}\n___RULES_EXIT=${s.rulesExit}\n` +
     `___SECTION=RUNS\n${s.runs ?? named([])}\n___RUNS_EXIT=${s.runsExit ?? 0}\n` +
@@ -867,11 +892,18 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
   test('a 404 on protection is an ANSWER — the ruleset still speaks', () => {
     // The measured sibling-repository shape: the protection endpoint 404s, so a
     // ruleset (a different GitHub feature) is the only thing that can require a name.
+    //
+    // THE BRANCH PAYLOAD IS STATED, AND IT IS THE RULESET-GOVERNED ONE. This test used
+    // to take the fixture default (`protected:false`) while asserting that a NON-EMPTY
+    // ruleset speaks — a combination GitHub cannot emit, because a branch a ruleset
+    // governs reports `protected:true`. The test passed on a world that does not exist,
+    // which is the same defect class this PR exists to fix, one level up.
     const { classifyRequiredChecksProbe } = loadReadiness()
     const out = classifyRequiredChecksProbe(
       requiredProbe({
         prot: NOT_FOUND,
         protExit: 1,
+        branch: RULESET_GOVERNED_BRANCH_MEASURED,
         rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
         rulesExit: 0,
         runs: named(['review-gate']),
@@ -879,6 +911,53 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
     )
     expect(out.mode).toBe('resolved')
     expect(out.required).toEqual(['review-gate'])
+  })
+
+  test('the fixture builder REFUSES a branch payload that contradicts its own rulesets', () => {
+    // The guard that keeps the test above honest. A ruleset requiring a status check and
+    // a branch reporting `protected:false` describe two different repositories, and the
+    // flagship test asserted exactly that pairing until this round.
+    expect(() =>
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: '{"protected":false}',
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
+        rulesExit: 0,
+      }),
+    ).toThrow(/impossible fixture/)
+    // …and the DEFAULT branch payload is the same impossible claim when the protection
+    // endpoint 404s, so omitting it cannot smuggle the combination back in.
+    expect(() =>
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
+        rulesExit: 0,
+      }),
+    ).toThrow(/impossible fixture/)
+    // THE CONTROLS — proving the guard is discriminating rather than always-on.
+    // A branch a ruleset governs, which is what GitHub actually emits: allowed.
+    expect(() =>
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: RULESET_GOVERNED_BRANCH_MEASURED,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
+        rulesExit: 0,
+      }),
+    ).not.toThrow()
+    // A genuinely unprotected branch with NO ruleset: `protected:false` is the truth.
+    expect(() => requiredProbe({ prot: NOT_FOUND, protExit: 1, rules: '[]', rulesExit: 0 })).not.toThrow()
+    // A READABLE protection endpoint: the branch section is inert, so it is not pinned.
+    expect(() =>
+      requiredProbe({
+        prot: '{"contexts":["check"]}',
+        protExit: 0,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"frontend"}]}}]',
+        rulesExit: 0,
+      }),
+    ).not.toThrow()
   })
 
   // WAS: '404 protection + no rulesets is a definitively UNPROTECTED base'.
@@ -1363,16 +1442,20 @@ describe('statusCheckRollup carries TWO row shapes and both are judged', () => {
     goesRed(() => expect(out.status).toBe('passed'))
     expect(out.status).toBe('absent') // …what it answers instead
     // …and with `produced` from the check-runs-only read, it is the reported repro.
+    //
+    // THE MUTANT MAKES EVERY ROW NAMELESS, so the rollup this classifier can see is
+    // EMPTY — and an empty rollup is exactly the state the config-error fast-fail must
+    // refuse. It used to answer with the configuration sentence (`every other check on
+    // this PR has finished`) over zero checks, which was the vacuous-`rollupSettled`
+    // bug asserted as though it were the specification. The honest answer is that the
+    // check has not run, and the reason no longer claims a settled rollup it cannot see.
     expect(
       mutated.classifyReviewReadiness(
         readinessProbe('MERGEABLE', [statusRow('legacy-ci', 'SUCCESS')] as never),
         requiredCfg(['legacy-ci'], ['check']),
         REVIEW_READINESS_CONFIG_GRACE_MS,
       ).reason,
-    ).toBe(
-      'required check legacy-ci has not appeared after at least 10 minutes, every other check on this PR has finished, ' +
-        'and the base branch head reports 1 other check without it',
-    )
+    ).toBe('required check legacy-ci has not run')
   })
 })
 
@@ -2000,6 +2083,63 @@ describe('the config error waits while this PR is still moving', () => {
     expect(at([checkRow('check', 'COMPLETED', 'SUCCESS'), statusRow('frontend', 'PENDING')])).toBe('absent')
     // SKIPPED is "did not run", so it cannot hold the gate open forever.
     expect(at([checkRow('check', 'COMPLETED', 'SUCCESS'), checkRow('frontend', 'COMPLETED', 'SKIPPED')])).toBe('config-error')
+  })
+
+  /**
+   * AN EMPTY ROLLUP SATISFIED "EVERYTHING HAS FINISHED" VACUOUSLY.
+   *
+   * `rollupSettled` began life as `true` and was falsified only from inside a loop over
+   * the rollup's own rows, so ZERO rows left it true — and the fast-fail then declared a
+   * configuration fault whose sentence read `every other check on this PR has finished`
+   * over a PR where nothing had started. Because config-error is terminal, that also
+   * spent the remaining waits on a state that only needed waiting.
+   *
+   * The trigger is ordinary: a fork / first-time-contributor PR whose workflows sit
+   * `awaiting approval` reports `statusCheckRollup: []` until a maintainer approves.
+   */
+  test('HEADLINE: an EMPTY rollup waits — it is not a settled one', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions, REVIEW_READINESS_CONFIG_GRACE_MS, REVIEW_READINESS_BUDGET_MS } =
+      loadReadiness()
+    const at = (rows: unknown[], elapsed: number) =>
+      classifyReviewReadiness(readinessProbe('MERGEABLE', rows as never), prOnly(), elapsed)
+    // Past the grace, and then past the WHOLE budget: still waiting, never a fault.
+    expect(at([], REVIEW_READINESS_CONFIG_GRACE_MS).status).toBe('absent')
+    expect(at([], REVIEW_READINESS_BUDGET_MS).status).toBe('absent')
+    // …and it does not claim a settled rollup it cannot see.
+    expect(at([], REVIEW_READINESS_BUDGET_MS).reason).toBe('required check pr-only has not run')
+    // THE CONTROL: same clock, same absent required name, on a rollup that HAS rows and
+    // has finished — the fast-fail is genuinely reachable here, so the assertions above
+    // are about emptiness rather than about an unreachable branch.
+    expect(at(settled, REVIEW_READINESS_CONFIG_GRACE_MS).status).toBe('config-error')
+    // The consequence that matters: waits get spent instead of the round dying at once.
+    let waits = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => at([], REVIEW_READINESS_BUDGET_MS),
+      spend: async () => 'reviewed',
+      wait: async () => {
+        waits += 1
+      },
+      attempts: 3,
+    })
+    expect({ deferred: out.deferred, waits }).toEqual({ deferred: true, waits: 2 })
+  })
+
+  test('MUTANT: seeding rollupSettled to `true` again goes RED on the empty rollup', () => {
+    const mutant = SRC.replace('  let rollupSettled = byName.size > 0', '  let rollupSettled = true')
+    // The replacement MATCHED (an unchanged source would silently test nothing)…
+    expect(mutant).not.toBe(SRC)
+    const { REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
+    // …the mutant LOADS…
+    const mutated = mutate(mutant)
+    const out = mutated.classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [] as never),
+      prOnly(),
+      REVIEW_READINESS_CONFIG_GRACE_MS,
+    )
+    // …and the guard's own assertion, replayed against it, goes RED.
+    goesRed(() => expect(out.status).toBe('absent'))
+    expect(out.status).toBe('config-error') // …what it answers instead
+    expect(out.reason).toContain('every other check on this PR has finished') // …over zero checks
   })
 
   test('the deferral sentence states the new evidence', () => {

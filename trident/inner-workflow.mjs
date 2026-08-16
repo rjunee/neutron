@@ -3417,7 +3417,21 @@ function classifyReviewReadiness(probe, requiredConfig, elapsedMs = 0) {
   const isGreen = (r) => r.conclusion === 'SUCCESS' || r.conclusion === 'NEUTRAL'
   // Has THIS PR's own check set finished materialising? Read by the config-error
   // fast-fail below, which must never fire while the rollup is still moving.
-  let rollupSettled = true
+  //
+  // AN EMPTY ROLLUP IS NOT A SETTLED ONE, and initialising to `true` made it satisfy
+  // this vacuously: the falsifying loop below never runs on an empty map, so ZERO
+  // checks read as "everything finished". The fast-fail then emits a sentence that
+  // says `every other check on this PR has finished` while nothing has even started,
+  // and — because config-error is terminal — it spends zero further waits.
+  //
+  // The real trigger is not exotic: a fork / first-time-contributor PR whose workflows
+  // sit `awaiting approval` reports `statusCheckRollup: []` for as long as no
+  // maintainer approves them. That is precisely the case that must WAIT.
+  //
+  // The unprotected-base path below already refuses the empty rollup for this reason
+  // (`ran.length === 0` ⇒ `absent`, :3513 in the sibling branch); the asymmetry was
+  // unintended, so this seeds from the map's own size and both paths now agree.
+  let rollupSettled = byName.size > 0
   for (const rows of byName.values()) {
     for (const r of rows) {
       if (r.conclusion !== 'SKIPPED' && !r.terminal) rollupSettled = false
