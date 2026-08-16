@@ -76,16 +76,35 @@ export class WarmSessionCache<T extends CacheableChatSession> {
   }
 
   /**
-   * Web presence — fan the attention signal to every warm session.
+   * Web presence — only the ON-SCREEN session may claim the owner's attention.
    *
-   * EVERY session, not just the checked-out one, and that is the point: the cache
-   * keeps up to {@link MAX_WARM_SESSIONS} sockets alive across a project switch,
-   * each holding its own presence declaration on the server. Telling only the
-   * active one that the owner walked away would leave the others declaring
-   * `foreground` on their own conversations until the TTL expired them.
+   * EVERY session is told, and that half was always right: the cache keeps up to
+   * {@link MAX_WARM_SESSIONS} sockets alive across a project switch, each holding
+   * its own presence declaration on the server, so telling only the checked-out
+   * one that the owner walked away would leave the others declaring `foreground`
+   * on their own conversations until the TTL expired them.
+   *
+   * WHAT THEY ARE TOLD IS THE FIX (Argus round 2, reproduced end-to-end). The
+   * first cut fanned the SAME value to all of them, and a warm session is by
+   * definition the one the owner is NOT looking at — so an attentive tab on
+   * project A re-declared `foreground` on up to two off-screen sockets, each
+   * carrying its OWN `project_id` at the server
+   * (`gateway/http/app-ws-surface.ts` reports `data.project_id`), and
+   * `gateway/push/web-presence.ts` `isForeground` then suppressed the phone push
+   * for conversations that were nowhere on his screen. Three chats silenced at
+   * once, with every suite green: the fan-out was tested, the fact that it fanned
+   * a LIE was not.
+   *
+   * So `attentive` applies to `active_key` and every other entry is told `false`.
+   * `active_key` is the cache key of the conversation currently rendered
+   * (`landing/chat-react/controller.ts` `topicForProject(this.projectId)`); a key
+   * that is not in the cache simply means nothing claims presence, which is the
+   * direction that notifies.
    */
-  setAttentive(attentive: boolean): void {
-    for (const entry of this.entries.values()) entry.session.setAttentive?.(attentive)
+  setAttentive(attentive: boolean, active_key: string): void {
+    for (const [key, entry] of this.entries) {
+      entry.session.setAttentive?.(attentive && key === active_key)
+    }
   }
 
   clear(): void {

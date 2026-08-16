@@ -652,10 +652,17 @@ export class NeutronChatController {
    * the owner is away — re-silencing his phone by switching tabs. `setActive`
    * has always been replayed onto a switched-in session for the same reason;
    * this is that invariant extended to the signal that now rides beside it.
+   *
+   * THE CURRENT TOPIC IS PASSED, NOT IMPLIED. Attention is a claim about ONE
+   * conversation — the rendered one — and the cache holds up to two others warm
+   * behind it. `WarmSessionCache.setAttentive` uses this key to tell the
+   * off-screen sockets `false` while the on-screen one reports the real answer;
+   * without it they all declared `foreground` on their own projects and the
+   * server suppressed pushes for chats the owner could not see.
    */
   setAttentive(attentive: boolean): void {
     this.attentiveState = attentive
-    this.sessionCache.setAttentive(attentive)
+    this.sessionCache.setAttentive(attentive, this.topicForProject(this.projectId))
   }
 
   /**
@@ -758,14 +765,18 @@ export class NeutronChatController {
       }
     }, this.switchConnectingGraceMs)
     this.session = this.sessionForProject(projectId)
+    // Web presence — re-aim attention at the conversation now on screen, and
+    // take it away from the one that just left it. Two things break without this
+    // single call: the switched-in session would start life on the optimistic
+    // `attentive = true` default even if the owner is away (silencing the chat he
+    // just opened), and the session released a few lines above would keep
+    // declaring `foreground` on ITS project until the server's TTL expired it —
+    // silencing a chat he has walked away from. Ordered BEFORE `start()` so a
+    // fresh socket's `onOpen` declaration already carries the right answer.
+    this.sessionCache.setAttentive(this.attentiveState, this.topicForProject(projectId))
     if (this.started) {
       this.session.start()
       this.session.setActive(this.activeState)
-      // Web presence — replay attention onto the switched-in session too. Without
-      // this, switching projects while the owner is away would hand the new
-      // socket the optimistic `attentive = true` default and silence his phone
-      // for the newly-opened conversation.
-      this.session.setAttentive?.(this.attentiveState)
     }
     // Publish the empty/scoped VM immediately (instant switch feel), then
     // hydrate the new topic's durable transcript.

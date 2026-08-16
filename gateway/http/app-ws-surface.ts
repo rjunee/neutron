@@ -857,13 +857,23 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // silence the owner by accident.
         //
         // SCOPED TO THIS SOCKET'S CONVERSATION. `data.project_id` is captured at
-        // upgrade and a web client holds ONE topic per connection — it reconnects
-        // to switch projects (see `channel_topic_id` above) — so the socket's
-        // project IS the chat on the owner's screen, and it is the only scope
-        // available here that is a fact rather than an inference. Reporting
-        // without it would let one open tab silence every OTHER conversation's
-        // notifications for as long as it stayed open, which is the opposite of
-        // what `app/lib/push-foreground-policy.ts` does on the phone.
+        // upgrade and never changes for the life of the connection (see
+        // `channel_topic_id` above), so it is the only scope available here that
+        // is a fact rather than an inference. Reporting without it would let one
+        // open tab silence every OTHER conversation's notifications for as long
+        // as it stayed open, which is the opposite of what
+        // `app/lib/push-foreground-policy.ts` does on the phone.
+        //
+        // THE SOCKET'S PROJECT IS NOT BY ITSELF "THE CHAT ON HIS SCREEN", and
+        // this comment used to claim it was. A browser holds several of these at
+        // once — `chat-core/session-cache.ts` keeps up to `MAX_WARM_SESSIONS = 3`
+        // sessions warm across a project switch rather than reconnecting — so two
+        // of them are typically bound to conversations he cannot see. What makes
+        // the frame trustworthy is that only the RENDERED session reports
+        // `foreground` (`WarmSessionCache.setAttentive(attentive, active_key)`,
+        // driven by `landing/chat-react/controller.ts`); the warm ones report
+        // `background` and land in the `else` branch below. `web_presence` keeps
+        // only the newest claim per owner as a second line of defence.
         const presence = decodeAppWsPresence(parsed)
         if (presence !== null) {
           if (web_presence !== undefined && data.platform === 'web') {

@@ -69,6 +69,27 @@ export const DEFAULT_ATTENTION_IDLE_MS = 5 * 60_000
  */
 export const ATTENTION_POLL_MS = 5_000
 
+/**
+ * The default clock: monotonic where the browser has one.
+ *
+ * The idle test is a SUBTRACTION (`now() - lastInteraction`), and the server's
+ * twin — `gateway/push/web-presence.ts` `monotonicNow` — was moved off the wall
+ * clock for exactly that reason: an NTP correction or a suspend/resume that steps
+ * `Date.now()` backward turns a difference into nonsense. Here the nonsense is a
+ * NEGATIVE delta, which `decideAttention` already reads as not-attentive (the
+ * direction that notifies), so this is consistency rather than a live bug — but
+ * the two ends of one comparison should not disagree about what a clock is, and
+ * a later edit to that guard would otherwise reintroduce the server-side failure
+ * on the client. `performance.now()` is also unaffected by a laptop waking up
+ * with a corrected clock, which is precisely when a chat tab is left open.
+ */
+function monotonicNow(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now()
+  }
+  return Date.now()
+}
+
 export interface AttentionInputs {
   /** `document.visibilityState === 'visible'`. */
   visible: boolean
@@ -132,11 +153,31 @@ export interface ObserveWebAttentionOptions {
  * stops propagation cannot make the page look idle while the owner is using it;
  * passive so listening for `wheel` / `touchstart` cannot cost a frame of scroll
  * latency.
+ *
+ * AND THEY ARE USER-INPUT EVENTS ONLY — `scroll` IS NOT ONE (Argus round 2).
+ * `scroll` fires for a PROGRAMMATIC scroll exactly as it does for a human one,
+ * and capture-phase window listeners see it even though it targets a descendant
+ * element, so the transcript's auto-scroll-to-bottom on every streamed token was
+ * stamping `lastInteraction` on a tab nobody was touching. The agent's own reply
+ * would then hold an abandoned tab "attentive" for five more minutes and suppress
+ * the push for the very message it was streaming — the silent direction, caused
+ * by the app itself, on a timer that could never wind down while output flowed.
+ * `wheel` / `touchstart` / `keydown` cover human scrolling (wheel, trackpad,
+ * touch drag, space/PageDown) and none of them can be synthesised by a
+ * `scrollTop` write.
  */
 export function observeWebAttention(opts: ObserveWebAttentionOptions): () => void {
-  const now = opts.now ?? ((): number => Date.now())
+  const now = opts.now ?? monotonicNow
   const idle_ms = opts.idle_ms ?? DEFAULT_ATTENTION_IDLE_MS
-  const poll_ms = opts.poll_ms ?? ATTENTION_POLL_MS
+  // A non-finite or non-positive poll would be coerced by `setInterval` to 0 —
+  // an evaluate every event-loop turn — so a nonsense value falls back to the
+  // default rather than being honoured. Same guard, same reason, as
+  // `chat-core/web-session.ts` `armPresenceRefresh` and the server tracker's
+  // `ttl_ms`; this end had been left out.
+  const poll_ms =
+    typeof opts.poll_ms === 'number' && Number.isFinite(opts.poll_ms) && opts.poll_ms > 0
+      ? opts.poll_ms
+      : ATTENTION_POLL_MS
   const setIntervalFn =
     opts.setIntervalFn ?? ((fn: () => void, ms: number): unknown => setInterval(fn, ms))
   const clearIntervalFn =
@@ -167,7 +208,7 @@ export function observeWebAttention(opts: ObserveWebAttentionOptions): () => voi
     evaluate()
   }
 
-  const INTERACTION_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const
+  const INTERACTION_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const
   const passiveCapture = { capture: true, passive: true }
   for (const type of INTERACTION_EVENTS) {
     opts.win.addEventListener(type, onInteraction, passiveCapture)

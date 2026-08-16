@@ -72,6 +72,7 @@ function fakeEnv(init: { visible?: boolean; focused?: boolean } = {}): {
   fire: (type: string) => void
   set: (next: { visible?: boolean; focused?: boolean }) => void
   listenerCount: () => number
+  listenerTypes: () => string[]
 } {
   let visible = init.visible ?? true
   let focused = init.focused ?? true
@@ -104,6 +105,7 @@ function fakeEnv(init: { visible?: boolean; focused?: boolean } = {}): {
       for (const set of listeners.values()) n += set.size
       return n
     },
+    listenerTypes: () => [...listeners.entries()].filter(([, set]) => set.size > 0).map(([t]) => t),
   }
 }
 
@@ -221,6 +223,86 @@ describe('observeWebAttention', () => {
     env.fire('pointerdown') // resets the interaction stamp and re-evaluates
     expect(seen).toEqual([true, false, true])
     stop()
+  })
+
+  // ── The app must not be able to fake the owner's attention (Argus round 2) ──
+  //
+  // `scroll` fires identically for a human dragging a scrollbar and for the
+  // transcript's own auto-scroll-to-bottom, and a capture-phase window listener
+  // sees the latter even though it targets an inner element. Counting it as an
+  // interaction meant a streaming reply kept re-stamping the idle clock on a tab
+  // nobody was touching — so the agent's own output held an abandoned tab
+  // "attentive" and suppressed the push for the message it was streaming. The
+  // idle timer could never wind down while output flowed, which is exactly when
+  // it matters.
+  it('a programmatic scroll does NOT count as the owner interacting', () => {
+    let t = 0
+    const env = fakeEnv()
+    const { seen, timers, stop } = observe(env, { now: () => t })
+    t = DEFAULT_ATTENTION_IDLE_MS + 1
+    timers.tick()
+    expect(seen).toEqual([true, false])
+
+    // The streaming viewport scrolls itself. He is still not here.
+    env.fire('scroll')
+    expect(seen).toEqual([true, false])
+
+    // CONTROL: a real human scroll arrives as `wheel` (or `touchstart`, or a
+    // `keydown` for space/PageDown) and DOES bring him back — so this test is
+    // pinning "ignore synthetic scrolls", not "ignore scrolling".
+    env.fire('wheel')
+    expect(seen).toEqual([true, false, true])
+    stop()
+  })
+
+  it('listens for user-input events only — no `scroll` subscription to be fooled by', () => {
+    const env = fakeEnv()
+    const { stop } = observe(env, { now: () => 0 })
+    expect(env.listenerTypes()).not.toContain('scroll')
+    // Control: the events it DOES listen for are all registered.
+    expect(env.listenerTypes().sort()).toEqual(
+      ['blur', 'focus', 'keydown', 'pointerdown', 'touchstart', 'visibilitychange', 'wheel'].sort(),
+    )
+    stop()
+  })
+
+  it('a nonsense poll interval falls back to the default rather than spinning', () => {
+    // `setInterval` coerces NaN and 0 to "every event-loop turn". The server's
+    // TTL and the session's presence refresh both refuse a non-finite value for
+    // the same reason; this end had been left unguarded.
+    const env = fakeEnv()
+    const intervals: number[] = []
+    const stop = observeWebAttention({
+      doc: env.doc,
+      win: env.win,
+      onChange: () => {},
+      now: () => 0,
+      poll_ms: Number.NaN,
+      setIntervalFn: (_fn, ms) => {
+        intervals.push(ms)
+        return 1
+      },
+      clearIntervalFn: () => {},
+    })
+    expect(intervals).toEqual([ATTENTION_POLL_MS])
+    stop()
+
+    // Control: a sane value is still honoured.
+    const kept: number[] = []
+    const stop2 = observeWebAttention({
+      doc: env.doc,
+      win: env.win,
+      onChange: () => {},
+      now: () => 0,
+      poll_ms: 1_234,
+      setIntervalFn: (_fn, ms) => {
+        kept.push(ms)
+        return 1
+      },
+      clearIntervalFn: () => {},
+    })
+    expect(kept).toEqual([1_234])
+    stop2()
   })
 
   it('teardown removes every listener and the poll', () => {

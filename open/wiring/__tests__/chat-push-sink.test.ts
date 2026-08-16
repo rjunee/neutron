@@ -63,6 +63,7 @@ describe('buildPresenceAwareChatPushSink', () => {
       project_slug: SLUG,
       presence: createWebPresenceTracker(),
       owner_user_id: OWNER,
+      log: () => {},
     })
     expect(await sink(msg(null))).toBe(true)
     expect(fo.pushed).toHaveLength(1)
@@ -76,6 +77,7 @@ describe('buildPresenceAwareChatPushSink', () => {
       project_slug: SLUG,
       presence,
       owner_user_id: OWNER,
+      log: () => {},
     })
     presence.foreground(OWNER, 'conn-1', null)
     expect(await sink(msg(null))).toBe(false)
@@ -92,6 +94,7 @@ describe('buildPresenceAwareChatPushSink', () => {
       project_slug: SLUG,
       presence,
       owner_user_id: OWNER,
+      log: () => {},
     })
     presence.foreground(OWNER, 'conn-a', 'proj-a')
 
@@ -109,6 +112,7 @@ describe('buildPresenceAwareChatPushSink', () => {
       project_slug: SLUG,
       presence,
       owner_user_id: OWNER,
+      log: () => {},
     })
     presence.foreground('some-guest', 'conn-guest', null)
     expect(await sink(msg(null))).toBe(true)
@@ -118,5 +122,31 @@ describe('buildPresenceAwareChatPushSink', () => {
     // above is about the identity and not about a tracker that records nothing.
     presence.foreground(OWNER, 'conn-owner', null)
     expect(await sink(msg(null))).toBe(false)
+  })
+
+  it('a suppression LEAVES A TRACE — the one thing a silent decision owes you', async () => {
+    // Round-2 finding: the log was optional and the only production caller left
+    // it out, so a push that never happened produced no push, no error and no
+    // line anywhere. The parameter is required now; this asserts it is actually
+    // reached, with the conversation named, rather than merely accepted.
+    const fo = recordingFanOut()
+    const presence = createWebPresenceTracker()
+    const lines: string[] = []
+    const sink = buildPresenceAwareChatPushSink({
+      fanOut: fo.fanOut,
+      project_slug: SLUG,
+      presence,
+      owner_user_id: OWNER,
+      log: (line) => lines.push(line),
+    })
+
+    // Control: a push that GOES OUT is not noise in the log.
+    expect(await sink(msg('proj-a', 'sent'))).toBe(true)
+    expect(lines).toEqual([])
+
+    presence.foreground(OWNER, 'conn-a', 'proj-a')
+    expect(await sink(msg('proj-a', 'suppressed'))).toBe(false)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('proj-a')
   })
 })

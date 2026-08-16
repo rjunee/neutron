@@ -144,14 +144,20 @@ describe('createWebPresenceTracker', () => {
 
     // CONTROL: without the clock moving, 50 distinct connections really are all
     // retained. If this were not 50 the assertion below would be vacuous.
-    for (let i = 0; i < 50; i++) tracker.foreground(OWNER, `conn-${i}`, null)
+    //
+    // ONE USER PER CONNECTION, because a second live claim by the SAME user now
+    // replaces the first (see "ONE PAIR OF EYES" below) — so 50 sockets for one
+    // owner would collapse to 1 and the control would prove nothing about the
+    // bound. Distinct users are the case where the map legitimately grows, which
+    // is exactly the case the prune has to hold for.
+    for (let i = 0; i < 50; i++) tracker.foreground(`user-${i}`, `conn-${i}`, null)
     expect(tracker.size()).toBe(50)
 
     // Now age every one of them out and keep WRITING, never reading. A thousand
     // short-lived sockets over a long uptime must not leave a thousand entries.
     for (let i = 0; i < 1000; i++) {
       clock.advance(WEB_PRESENCE_TTL_MS)
-      tracker.foreground(OWNER, `churn-${i}`, null)
+      tracker.foreground(`churn-user-${i}`, `churn-${i}`, null)
     }
     // Exactly one survivor: the write that just happened. Anything else means
     // the map grew.
@@ -173,7 +179,11 @@ describe('createWebPresenceTracker', () => {
     expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
-  test('two tabs are two screens — closing one does not mark the owner absent', () => {
+  test('closing the tab he LEFT does not mark him absent from the one he moved to', () => {
+    // A project switch hands the claim to the new conversation's socket and the
+    // old socket is closed some time later (the warm cache evicts it). That
+    // close must not take the live claim with it — keyed per connection is what
+    // makes the two events independent.
     const tracker = createWebPresenceTracker()
     tracker.foreground(OWNER, 'conn-1', null)
     tracker.foreground(OWNER, 'conn-2', null)
@@ -251,16 +261,46 @@ describe('presence is scoped to the conversation on screen', () => {
     }
   })
 
-  test('two tabs on two projects each answer only for their own', () => {
+  test('ONE PAIR OF EYES: a second simultaneous claim replaces the first rather than adding to it', () => {
+    // The round-2 blocker, made structurally impossible at the server. The web
+    // client keeps up to three sockets warm (`chat-core/session-cache.ts`) and
+    // fanned `foreground` to all of them, so three conversations claimed the
+    // owner at once and two of them were chats he could not see. The client half
+    // is fixed at the source; this is the property that survives a regression
+    // there — `document.hasFocus()` is true for at most one window, so a second
+    // live claim is a bug, and the newest reading of where he is looking is the
+    // only one that can be right.
     const tracker = createWebPresenceTracker()
     tracker.foreground(OWNER, 'conn-a', 'proj-a')
+    expect(tracker.isForeground(OWNER, 'proj-a')).toBe(true) // control: recorded
     tracker.foreground(OWNER, 'conn-b', 'proj-b')
-    expect(tracker.isForeground(OWNER, 'proj-a')).toBe(true)
     expect(tracker.isForeground(OWNER, 'proj-b')).toBe(true)
-    expect(tracker.isForeground(OWNER, 'proj-c')).toBe(false)
-    tracker.drop('conn-a')
+    // proj-a is no longer claimed — so a message there BUZZES, which is the
+    // direction this whole module errs in when it cannot be sure.
     expect(tracker.isForeground(OWNER, 'proj-a')).toBe(false)
-    expect(tracker.isForeground(OWNER, 'proj-b')).toBe(true)
+    expect(tracker.size()).toBe(1)
+    expect(tracker.isForeground(OWNER, 'proj-c')).toBe(false)
+  })
+
+  test('the replacement is per OWNER — a guest tab neither steals nor is stolen', () => {
+    // Narrowing on user_id matters: presence is a claim about one person's eyes,
+    // and two people can honestly be looking at two screens at once.
+    const tracker = createWebPresenceTracker()
+    tracker.foreground(OWNER, 'conn-owner', 'proj-a')
+    tracker.foreground('guest', 'conn-guest', 'proj-b')
+    expect(tracker.isForeground(OWNER, 'proj-a')).toBe(true)
+    expect(tracker.isForeground('guest', 'proj-b')).toBe(true)
+    expect(tracker.size()).toBe(2)
+  })
+
+  test('a refresh from the SAME connection is not a second claim', () => {
+    // The 20 s re-declaration must not evict itself — the surviving entry has to
+    // be the refreshed one, with a fresh timestamp.
+    const tracker = createWebPresenceTracker()
+    tracker.foreground(OWNER, 'conn-a', 'proj-a')
+    tracker.foreground(OWNER, 'conn-a', 'proj-a')
+    expect(tracker.isForeground(OWNER, 'proj-a')).toBe(true)
+    expect(tracker.size()).toBe(1)
   })
 
   test('a connection that SWITCHES scope stops answering for the old one', () => {

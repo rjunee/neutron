@@ -53,7 +53,18 @@ export interface BuildPresenceAwareChatPushSinkInput {
    * and not some other one.
    */
   owner_user_id: string
-  log?: (msg: string) => void
+  /**
+   * Where a suppression says so. REQUIRED, and that is the fix for the round-2
+   * finding rather than a style choice.
+   *
+   * It was optional and the one production caller (`open/composer.ts`) omitted
+   * it, so every live suppression left no trace anywhere — in the module whose
+   * own docblock names "no push, no error, no log anyone reads" as its worst
+   * failure. An optional diagnostic on a silent decision is a diagnostic nobody
+   * has. Making it part of the signature means a future composition cannot
+   * quietly go dark: it will not compile.
+   */
+  log: (msg: string) => void
 }
 
 /**
@@ -76,6 +87,6 @@ export function buildPresenceAwareChatPushSink(
       project_slug: input.project_slug,
     }),
     isWebForeground: (msg) => input.presence.isForeground(input.owner_user_id, msg.project_id),
-    ...(input.log !== undefined ? { log: input.log } : {}),
+    log: input.log,
   })
 }

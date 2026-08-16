@@ -152,9 +152,10 @@ describe('app-ws surface — web presence', () => {
 
   it("records the declaration against THE SOCKET'S OWN project, not globally", async () => {
     // The end-to-end proof of the conversation scope. The socket carries its
-    // project on the upgrade query string and a web client reconnects to switch
-    // projects, so the socket's scope IS the chat on screen — and a declaration
-    // from it must not answer for any other conversation.
+    // project on the upgrade query string and never changes it, so a declaration
+    // from it must not answer for any other conversation. (What makes that
+    // scope the chat ON SCREEN is a client property, not a socket one — see the
+    // warm-socket test below.)
     const h = await startGateway()
     const client = await openClient(h.base, 'web', undefined, 'proj-a')
 
@@ -166,6 +167,55 @@ describe('app-ws surface — web presence', () => {
     expect(h.presence.isForeground(OWNER, null)).toBe(false) // …and not General either
 
     await client.close()
+    await h.close()
+  })
+
+  // ── The warm-socket blocker, over real sockets (Argus round 2) ────────────
+  //
+  // One browser, several live app-ws connections: the chat client keeps up to
+  // `MAX_WARM_SESSIONS = 3` sessions alive across a project switch instead of
+  // reconnecting, so the sockets bound to the conversations he is NOT looking at
+  // stay open. While the client fanned the same attention value to all of them,
+  // every one of those declared `foreground` on its own project and the gateway
+  // suppressed the phone push for chats that were nowhere on screen.
+  it('a warm off-screen socket that reports background does not silence its project', async () => {
+    const h = await startGateway()
+    const warm = await openClient(h.base, 'web', 'dev-1', 'proj-warm')
+    const onScreen = await openClient(h.base, 'web', 'dev-1', 'proj-onscreen')
+
+    // What the fixed client sends on a project switch: the outgoing session is
+    // told it is no longer attentive, the incoming one that it is.
+    warm.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'background' }))
+    onScreen.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.isForeground(OWNER, 'proj-onscreen'))
+
+    expect(h.presence.isForeground(OWNER, 'proj-onscreen')).toBe(true) // control
+    expect(h.presence.isForeground(OWNER, 'proj-warm')).toBe(false)
+
+    await warm.close()
+    await onScreen.close()
+    await h.close()
+  })
+
+  it('even a MISBEHAVING client that claims two sockets at once silences only the newest', async () => {
+    // Defence in depth for the same blocker: this is the exact frame sequence the
+    // broken client sent, replayed against the fixed gateway. Both sockets are
+    // real, both declare foreground, and only one conversation can end up quiet —
+    // so a client regression costs one redundant-silence at most, not three.
+    const h = await startGateway()
+    const warm = await openClient(h.base, 'web', 'dev-1', 'proj-warm')
+    const onScreen = await openClient(h.base, 'web', 'dev-1', 'proj-onscreen')
+
+    warm.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.isForeground(OWNER, 'proj-warm')) // control: it landed
+    onScreen.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.isForeground(OWNER, 'proj-onscreen'))
+
+    expect(h.presence.size()).toBe(1)
+    expect(h.presence.isForeground(OWNER, 'proj-warm')).toBe(false)
+
+    await warm.close()
+    await onScreen.close()
     await h.close()
   })
 
@@ -246,16 +296,22 @@ describe('app-ws surface — web presence', () => {
     await h.close()
   })
 
-  it('two tabs are two connections — closing one leaves the other present', async () => {
+  it('closing the tab he LEFT does not take the live claim with it', async () => {
+    // Presence is keyed per CONNECTION, and this is what that buys: the socket
+    // he moved away from is closed by the warm-cache eviction some time after the
+    // claim moved on, and that close must reach only its own record. Keyed by
+    // user (or by device) it would wipe the tab he is actually looking at, and
+    // his phone would buzz at him mid-sentence.
     const h = await startGateway()
     const a = await openClient(h.base, 'web')
     const b = await openClient(h.base, 'web')
     a.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.size() === 1) // control: A's claim landed
     b.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.size() === 2)
+    await waitFor(() => h.presence.isForeground(OWNER, null))
 
     await a.close()
-    await waitFor(() => h.presence.size() === 1)
+    // Still present: the surviving claim is B's, and A's close cannot touch it.
     expect(h.presence.isForeground(OWNER, null)).toBe(true)
 
     await b.close()
@@ -263,7 +319,7 @@ describe('app-ws surface — web presence', () => {
     await h.close()
   })
 
-  it('two tabs SHARING a client-supplied device id are still two screens', async () => {
+  it('two tabs SHARING a client-supplied device id are still two CONNECTIONS', async () => {
     // The reason presence is keyed on a per-socket `conn_id` rather than on
     // `device_id`. The upgrade accepts a client-supplied `device_id` and treats it
     // as stable across reconnects, so two clients can legitimately present the
@@ -274,12 +330,12 @@ describe('app-ws surface — web presence', () => {
     const a = await openClient(h.base, 'web', 'shared-device')
     const b = await openClient(h.base, 'web', 'shared-device')
     a.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.size() === 1) // control: A's claim landed
     b.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.size() === 2)
-    expect(h.presence.size()).toBe(2)
+    await waitFor(() => h.presence.isForeground(OWNER, null))
 
+    // Closing A — same device id, different socket — must not evict B's record.
     await a.close()
-    await waitFor(() => h.presence.size() === 1)
     expect(h.presence.isForeground(OWNER, null)).toBe(true)
 
     await b.close()

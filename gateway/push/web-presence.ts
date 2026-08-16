@@ -144,10 +144,27 @@ export interface WebPresenceReporter {
    *
    * `project_id` is the conversation THIS socket is bound to — `null` for
    * General. It is not decoration: it is the whole of property 4, and the socket
-   * is the only place it can come from honestly. A web client holds one topic per
-   * connection and reconnects to switch projects
-   * (`gateway/http/app-ws-surface.ts` `channel_topic_id`), so the socket's scope
-   * IS the conversation on the owner's screen.
+   * is the only place it can come from honestly. One connection carries one
+   * topic, fixed at upgrade (`gateway/http/app-ws-surface.ts` `channel_topic_id`).
+   *
+   * WHAT THAT DOES NOT MEAN — and an earlier draft of this docblock said it did.
+   * "One topic per connection" is a fact about a socket; "the socket's scope IS
+   * the chat on his screen" is a fact about a BROWSER, and the browser has more
+   * than one socket. `chat-core/session-cache.ts` keeps up to
+   * `MAX_WARM_SESSIONS = 3` sessions alive across a project switch precisely so
+   * switching back is instant, so at any moment two of those live connections are
+   * bound to conversations that are nowhere on screen. The premise held only
+   * because this comment described a client that reconnects to switch — which
+   * `landing/chat-react/controller.ts` `setProject` deliberately does not do
+   * ("Keep the outgoing session warm").
+   *
+   * WHAT ACTUALLY MAKES THE SCOPE HONEST is that a warm socket does not CLAIM
+   * anything: `WarmSessionCache.setAttentive(attentive, active_key)` reports the
+   * owner's attention to the rendered session and `false` to every other, so a
+   * `foreground` frame arriving here is from the one connection the owner is
+   * actually in front of. {@link createWebPresenceTracker} then keeps only the
+   * newest claim per owner, so even a client that regresses can silence one
+   * conversation rather than three.
    */
   foreground(user_id: string, connection_id: string, project_id: string | null): void
   /** …and now he isn't. Same effect as {@link drop}; kept distinct so the call
@@ -267,6 +284,26 @@ export function createWebPresenceTracker(
       if (user_id.length === 0 || connection_id.length === 0) return
       const at = now()
       prune(at)
+      // ONE PAIR OF EYES: the newest claim for this owner replaces any older one.
+      //
+      // Defence in depth for the failure Argus reproduced in round 2 — a client
+      // that keeps several sockets warm (`chat-core/session-cache.ts`,
+      // `MAX_WARM_SESSIONS = 3`) fanned `foreground` to all of them, so three
+      // conversations claimed the owner's attention at once and pushes for two
+      // of them were suppressed while he could see neither. The client half is
+      // fixed at the source (only the on-screen session reports attentive), and
+      // this is the property that holds even if it regresses: `hasFocus()` is
+      // true for at most one window, so a second simultaneous claim from the
+      // same owner is evidence of a bug, not of a second screen.
+      //
+      // IT CAN ONLY EVER NOTIFY MORE. Dropping a claim shrinks the set that
+      // suppresses; the worst case is a redundant buzz for a chat he really was
+      // reading, and the 20 s refresh (`WEB_PRESENCE_REFRESH_MS`) restores the
+      // survivor's claim on its own. That asymmetry is why last-write-wins is
+      // safe here and a union would not be.
+      for (const [id, entry] of live) {
+        if (id !== connection_id && entry.user_id === user_id) live.delete(id)
+      }
       live.set(connection_id, { user_id, scope: scopeKey(project_id), at })
     },
     background(connection_id): void {
@@ -328,10 +365,21 @@ export interface SuppressPushWhileWebForegroundInput {
  * describing an intended mode, sitting above code that never entered it.
  *
  * WHAT ACTUALLY MAKES THE STAMP CORRECT IS PROPERTY 4, the conversation scope.
- * Suppression now requires a web client foregrounded ON THE MESSAGE'S OWN
+ * Suppression requires a web client foregrounded ON THE MESSAGE'S OWN
  * conversation — the same socket the live fan-out just delivered to — so
  * `delivered: true` and "he is looking at it" are two readings of one fact, and
- * stamping records that he was reached rather than guessing it. The dangerous
+ * stamping records that he was reached rather than guessing it.
+ *
+ * THAT ARGUMENT RESTS ON A CLIENT INVARIANT, WHICH ROUND 2 CAUGHT BROKEN. A
+ * warm off-screen session is also delivered to live and was also declaring
+ * `foreground` on its own project, which turned "delivered AND foreground" into
+ * "delivered to a socket in a tab he is not looking at" — the row stamped,
+ * the push suppressed, the re-emit silent. The invariant it needs is
+ * "only the RENDERED session claims attention", and that is now enforced at both
+ * ends: `chat-core/session-cache.ts` `setAttentive(attentive, active_key)` on the
+ * client, and newest-claim-wins per owner in {@link createWebPresenceTracker}
+ * here. Neither is decoration — this paragraph is false without them. The
+ * dangerous
  * shape is the OTHER one: suppressed AND not delivered live, which is what a
  * GLOBAL presence check produced for every other conversation. There
  * `notified || delivered` is `false || false`, nothing stamps, and the re-emit

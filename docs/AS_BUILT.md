@@ -2,6 +2,56 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — web presence, round three: the tab he was reading silenced the three he wasn't
+
+Same change, third review. Both blockers were the same mistake in two places — **a signal that
+looked like attention and was actually something else** — and both would have shipped as silence.
+
+**THE BROWSER HAS MORE SOCKETS THAN SCREENS.** Round two scoped suppression to the socket's own
+conversation, on the stated premise that "a web client holds one topic per connection and reconnects
+to switch projects". It does not reconnect. `landing/chat-react/controller.ts` `setProject`
+deliberately keeps the outgoing session warm — `chat-core/session-cache.ts` holds up to
+`MAX_WARM_SESSIONS = 3` — because tearing the socket down is the 1–3 s switch the owner measured and
+complained about. So `WarmSessionCache.setAttentive` was fanning one attentive `true` to three live
+sockets, two of which were bound to chats that were nowhere on screen, each declaring `foreground`
+with **its own** `project_id`. Up to three conversations suppressed at once, and because the warm
+socket still counted as a live delivery the row was stamped `delivered_at`, so the re-emit was quiet
+too. Reproduced end-to-end with controls before it was believed.
+
+📌 **The premise was not stale — it was never true.** It read as design documentation, it was cited
+in three files as the justification for the scoping fix AND for the `delivered_at` argument, and the
+code it described sat forty lines from a comment explaining why the opposite was done on purpose.
+Rule 3a's tell was right there and unused: the docblock described a MODE ("reconnects to switch"),
+and nothing in the repo entered it. The fix is to make the sentence true rather than to delete it —
+`setAttentive(attentive, active_key)` now gives the answer to the RENDERED session and `false` to
+every other, a project switch re-aims it in the same call, and the server keeps only the newest
+foreground claim per owner so a future client regression costs one conversation instead of three.
+
+**THE AGENT'S OWN REPLY WAS FAKING HIS ATTENTION.** `scroll` was in the client's interaction-event
+list, capture-phase on `window` — so the transcript's auto-scroll-to-bottom, fired on every streamed
+token, re-stamped `lastInteraction` on a tab nobody had touched. An abandoned tab therefore stayed
+"actively used" for as long as output flowed, and the idle timer could never wind down during exactly
+the turn worth notifying about. `scroll` does not distinguish a human from a `scrollTop` write;
+`wheel` / `touchstart` / `keydown` cannot be synthesised by one, and they cover every way a human
+actually scrolls.
+
+📌 **Both bugs are one shape: a signal that is true of the SYSTEM being read as true of the OWNER.**
+A warm socket is the app's optimisation, not his eye contact; an auto-scroll is the app's output, not
+his hand. Neither is detectable from the value — both are perfectly good booleans — only from asking
+who caused it.
+
+**And the diagnostic was optional, so the only caller omitted it.** Every live suppression left no
+push, no error and no log line, in the module whose own docblock names that as its worst failure.
+`log` is now a REQUIRED parameter of `buildPresenceAwareChatPushSink`, wired to the composer's
+logger: a composition that goes dark no longer compiles.
+
+Tests: the seam that had none now has ten — `WarmSessionCache` fan-out addressing, three controller
+tests over real sessions and fake sockets (the claim moves on a switch, an attention change reaches
+only the on-screen session, switching back re-claims), two over real WebSockets against the gateway
+(including the misbehaving-client case), newest-claim-wins on the tracker, the programmatic-scroll
+control, the poll guard, and the suppression log. Each was mutation-tested against the pre-fix
+behaviour and each goes red. Full matrix green: 51 tsconfigs, `scripts/run-tests.sh` clean.
+
 ## 2026-08-16 — web presence, round two: the docblock described a protection the code did not have
 
 Follow-up to #305. Review found six things worth fixing, and the two that mattered most were both

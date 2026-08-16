@@ -4288,13 +4288,27 @@ waiting for the very message this feature is about. An inattentive tab stays con
 keeps receiving live; the only thing that changes is that the phone starts buzzing again.
 
 **Suppression is SCOPED to the conversation.** The tracker keys each declaration by the
-socket's own `project_id` — a web client holds one topic per connection and reconnects to
-switch projects — and `isForeground(user, project_id)` only answers `true` for that chat.
-A tab open on project A therefore never silences project B or General. This is deliberately
-the same distinction `app/lib/push-foreground-policy.ts` draws on the phone ("is he looking
-at THIS conversation?"), which is what makes the two policies compose rather than merely
-coexist; every spelling of General (`null`, `''`, `~general`) normalises to one key on both
-sides, the ISSUES #410/#411 hazard.
+socket's own `project_id` — fixed at upgrade, never re-scoped — and
+`isForeground(user, project_id)` only answers `true` for that chat. A tab open on project A
+therefore never silences project B or General. This is deliberately the same distinction
+`app/lib/push-foreground-policy.ts` draws on the phone ("is he looking at THIS
+conversation?"), which is what makes the two policies compose rather than merely coexist;
+every spelling of General (`null`, `''`, `~general`) normalises to one key on both sides,
+the ISSUES #410/#411 hazard.
+
+**One browser holds SEVERAL of those sockets, and only one of them may claim him.** The
+chat client does not reconnect to switch projects — `landing/chat-react/controller.ts`
+deliberately keeps the outgoing session warm (`chat-core/session-cache.ts`,
+`MAX_WARM_SESSIONS = 3`) because tearing the socket down is the 1–3 s switch the owner
+measured. So at any moment up to two live connections are bound to conversations that are
+nowhere on his screen, and "the socket's project" is a fact about a SOCKET, not about a
+screen. The first cut fanned one attention value to all of them and silenced up to three
+chats at once, invisibly. Attention is therefore addressed:
+`WarmSessionCache.setAttentive(attentive, active_key)` gives the answer to the rendered
+session and `false` to every other, a project switch re-aims it in the same call, and the
+server keeps only the NEWEST foreground claim per owner — so even a client that regresses
+can cost at most one conversation's notifications rather than three, and every uncertain
+case still resolves toward buzzing.
 
 The decision itself is one wrapper, `suppressPushWhileWebForeground`
 (`gateway/push/web-presence.ts`), composed with the real sink in

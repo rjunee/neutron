@@ -2597,6 +2597,15 @@ export function buildOpenGraphComposer(
       // The owner, and only the owner: presence is per-user, so a guest sitting
       // in a shared project cannot silence his phone by having a tab open.
       owner_user_id: OWNER_USER_ID,
+      // WIRED, not optional-and-forgotten (Argus round 2). A suppression is a
+      // notification that never happened: no push, no error, and — until this
+      // line — no trace anywhere, in the one composition that actually runs. That
+      // is the same "no log anyone reads" failure this module's docblock names as
+      // its worst case, so the module offered a lever and the only caller left it
+      // unpulled. Now every skipped buzz and every failed presence check says so.
+      log: (message) => {
+        log.info('push_web_presence', { message })
+      },
     })
     /**
      * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign

@@ -38,6 +38,24 @@ class FakeSocket implements SocketLike {
       .map((s) => JSON.parse(s) as Record<string, unknown>)
       .filter((e) => e['type'] === 'user_message')
   }
+  presenceStates(): string[] {
+    return this.sent
+      .map((s) => JSON.parse(s) as Record<string, unknown>)
+      .filter((e) => e['type'] === 'presence')
+      .map((e) => String(e['state']))
+  }
+  /**
+   * Presence EDGES — consecutive repeats collapsed.
+   *
+   * The wire is deliberately repetitive (`setActive` re-states presence, and a
+   * foregrounded session re-declares on a timer so the server's TTL cannot
+   * expire it), so the count of frames is an implementation detail while the
+   * sequence of CHANGES is the claim: which conversation held the owner's
+   * attention, and when it let go.
+   */
+  presenceEdges(): string[] {
+    return this.presenceStates().filter((state, i, all) => state !== all[i - 1])
+  }
 }
 
 function setup(projectId: string | null = null) {
@@ -104,6 +122,96 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(sessions[0]).toBe(generalSession)
     expect(sockets[0]).toBe(generalSocket)
     expect(generalSocket.closed).toBe(false)
+    controller.stop()
+  })
+
+  // ── Web presence over the warm cache (Argus round 2 blocker) ──────────────
+  //
+  // The bug this pins was invisible to every other suite because every other
+  // suite drives ONE session. Keeping the outgoing socket warm (the test above)
+  // is what makes a project switch instant — and it is also what leaves two live
+  // sockets bound to conversations the owner cannot see. While the controller
+  // fanned the same attention value to all of them, those two kept declaring
+  // `foreground` on their own projects, and the server skipped the phone push
+  // for both. No error, no log, and a green repo: up to three chats silenced by
+  // the tab he was reading a fourth in.
+  function presenceSetup() {
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      topicForProject: (projectId) => (projectId === null ? TOPIC : `${TOPIC}:${projectId}`),
+      createSession: (sinks, scope) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: scope.topicId,
+          createSocket: () => {
+            const socket = new FakeSocket()
+            sockets.push(socket)
+            return socket
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+          // No refresh timer: this test asserts the EDGES, and an armed repeat
+          // would leak a real timeout past the end of the test.
+          presenceRefreshMs: 0,
+        }),
+    })
+    return { controller, sockets }
+  }
+
+  it('moves the foreground claim to the conversation on screen and withdraws it from the warm one', () => {
+    const { controller, sockets } = presenceSetup()
+    controller.start()
+    const generalSocket = sockets[0]!
+    generalSocket.open()
+    expect(generalSocket.presenceEdges()).toEqual(['foreground'])
+
+    controller.setProject('p1')
+    const p1Socket = sockets[1]!
+    p1Socket.open()
+
+    // The socket the owner just left says so IMMEDIATELY. Without the withdrawal
+    // it would sit on its stale `foreground` until the server's TTL — a minute of
+    // silence for General, renewed every 20 s for as long as the tab lived.
+    expect(generalSocket.presenceEdges()).toEqual(['foreground', 'background'])
+    expect(p1Socket.presenceEdges()).toEqual(['foreground'])
+    controller.stop()
+  })
+
+  it('an attention change reaches only the on-screen session', () => {
+    const { controller, sockets } = presenceSetup()
+    controller.start()
+    const generalSocket = sockets[0]!
+    generalSocket.open()
+    controller.setProject('p1')
+    const p1Socket = sockets[1]!
+    p1Socket.open()
+
+    // He walks away, then comes back to the SAME conversation. The warm General
+    // socket must not be handed a foreground claim on the way back in.
+    controller.setAttentive(false)
+    controller.setAttentive(true)
+
+    expect(p1Socket.presenceEdges()).toEqual(['foreground', 'background', 'foreground'])
+    expect(generalSocket.presenceEdges()).toEqual(['foreground', 'background'])
+    controller.stop()
+  })
+
+  it('switching back re-claims the returned-to conversation and drops the one left behind', () => {
+    const { controller, sockets } = presenceSetup()
+    controller.start()
+    const generalSocket = sockets[0]!
+    generalSocket.open()
+    controller.setProject('p1')
+    const p1Socket = sockets[1]!
+    p1Socket.open()
+    controller.setProject(null)
+
+    // Same session, same socket (the warm-cache test above pins that), so the
+    // claim has to be re-made on it — a fresh `onOpen` will not happen.
+    expect(sockets).toHaveLength(2)
+    expect(generalSocket.presenceEdges()).toEqual(['foreground', 'background', 'foreground'])
+    expect(p1Socket.presenceEdges()).toEqual(['foreground', 'background'])
     controller.stop()
   })
 
