@@ -277,9 +277,9 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     // a scratch dir so this test writes nothing into the real repo.
     const scratch = mkdtempSync(join(tmpdir(), 'as-built-cosmetic-'))
     created.push(scratch)
-    const runHostWithCommonDir = async (cmd: string[], cwd: string) => {
+    const runHostWithCommonDir = async (cmd: string[]) => {
       if (cmd.includes('--git-common-dir')) return { ok: true, exit_code: 0, stdout: `${scratch}\n`, stderr: '' }
-      return runHost(cmd, cwd)
+      return runHost(cmd)
     }
 
     const installed = await ensureAsBuiltMergeDriver(runHostWithCommonDir, REPO_ROOT)
