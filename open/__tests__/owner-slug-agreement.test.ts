@@ -33,11 +33,14 @@ import {
   resolveBootConfig,
   OwnerSlugUnreadableError,
 } from '@neutronai/config/index.ts'
-import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
+import { resolveNeutronHome, resolveOpenDbPath } from '@neutronai/migrations/db-path.ts'
 // The two OTHER readers of `OWNER_HOME`. `config/index.ts` documents that every
 // sibling identity read trims; these are the siblings, and a review measured
 // them not trimming. Imported here so the claim is enforced where it is made.
-import { resolveOwnerHome as listenerResolveOwnerHome } from '@neutronai/gateway/boot-listener-registry.ts'
+import {
+  resolveOwnerHome as listenerResolveOwnerHome,
+  resolveRegistryDbPath,
+} from '@neutronai/gateway/boot-listener-registry.ts'
 import { resolveOwnerHomeFromEnv } from '@neutronai/onboarding/overnight/register.ts'
 
 let home: string
@@ -351,6 +354,68 @@ describe('the boot resolver and the CLI resolver agree', () => {
       expect(resolveNeutronHome(blankEnv)).toBe(home)
       expect(listenerResolveOwnerHome({ OWNER_HOME: '   ', NEUTRON_DB_PATH: join(home, 'db', 'project.db') } as NodeJS.ProcessEnv)).toBe(home)
       expect(resolveOwnerHomeFromEnv({ OWNER_HOME: '   ', NEUTRON_DB_PATH: join(home, 'db', 'project.db') } as NodeJS.ProcessEnv)).toBe(home)
+    })
+
+    it('the readers the last sweep missed agree too — blank is unset on NEUTRON_DB_PATH and NEUTRON_HOME', () => {
+      // THE CLAIM WAS DECLARED TRUE WHILE THREE READERS STILL BROKE IT. The
+      // test above fixed the two `OWNER_HOME` siblings and `config/index.ts`
+      // then asserted "every sibling identity read in this repo trims". A later
+      // review measured three that did not, on the OTHER two variables:
+      //
+      //   `resolveOpenDbPath`    (`migrations/db-path.ts:67`)        — NEUTRON_DB_PATH, `length > 0`
+      //   `resolveRegistryDbPath`(`gateway/boot-listener-registry.ts:56,58,60`) — `!== ''`
+      //   `resolveStatePath`     (`gbrain-memory/gbrain-doctor.ts:205`) — trimmed the RETURN
+      //
+      // The first two are pinned here. The third lives in
+      // `gbrain-memory/__tests__/gbrain-doctor.test.ts` because `open` does not
+      // depend on `@neutronai/gbrain-memory` and a test is not a reason to make
+      // it, but it is the same defect and was fixed in the same change.
+      //
+      // Measured before this fix:
+      //   NEUTRON_DB_PATH='   ' -> resolveOpenDbPath '   ' while resolveOwnerHome
+      //                            fell back to ~/.local/share/neutron
+      //   NEUTRON_HOME='   '    -> resolveRegistryDbPath '   /registry.db' while
+      //                            resolveNeutronHome fell back to ~/neutron
+      // One variable, two answers, on the reads that decide which database the
+      // process opens and which registry tells it its own handle.
+
+      // 1. NEUTRON_DB_PATH — blank falls through to the <NEUTRON_HOME> default.
+      for (const blank of ['', '   ', '\t\n']) {
+        expect(resolveOpenDbPath({ NEUTRON_DB_PATH: blank, NEUTRON_HOME: home } as NodeJS.ProcessEnv)).toBe(
+          join(home, 'project.db'),
+        )
+      }
+      // 2. NEUTRON_HOME — blank falls through to the documented dev fallback.
+      for (const blank of ['', '   ', '\t\n']) {
+        expect(resolveRegistryDbPath({ NEUTRON_HOME: blank } as NodeJS.ProcessEnv)).toBe(
+          join(homedir(), '.local', 'share', 'neutron', 'registry.db'),
+        )
+      }
+      // …and the explicit override + legacy slots on that same function, which
+      // fixing only the `NEUTRON_HOME` line would have left on the old rule.
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: '   ', NEUTRON_HOME: home } as NodeJS.ProcessEnv)).toBe(
+        join(home, 'registry.db'),
+      )
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH_RW: '   ' } as NodeJS.ProcessEnv)).toBe(
+        join(homedir(), '.local', 'share', 'neutron', 'registry.db'),
+      )
+
+      // 3. THE RETURN HALF, which is the opposite direction of the same seam.
+      // A leading/trailing space is legal in a POSIX path, so a reader that
+      // trims its RETURN silently rewrites a real directory. Pinned here for
+      // the two readers this package can see; the `gbrain-doctor` half is in
+      // that package's own suite.
+      const spaced = ' /real/dir '
+      expect(resolveNeutronHome({ NEUTRON_HOME: spaced } as NodeJS.ProcessEnv)).toBe(spaced)
+      expect(resolveOpenDbPath({ NEUTRON_DB_PATH: spaced } as NodeJS.ProcessEnv)).toBe(spaced)
+
+      // CONTROLS — a real path is honoured on every one of them, so the
+      // assertions above fail for "blank was honoured" rather than for "the
+      // variable stopped being read at all", which is a different bug wearing
+      // the same green.
+      expect(resolveOpenDbPath({ NEUTRON_DB_PATH: '/srv/pin/x.db' } as NodeJS.ProcessEnv)).toBe('/srv/pin/x.db')
+      expect(resolveRegistryDbPath({ NEUTRON_HOME: home } as NodeJS.ProcessEnv)).toBe(join(home, 'registry.db'))
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: '/srv/r.db' } as NodeJS.ProcessEnv)).toBe('/srv/r.db')
     })
 
     it('the env shim publishes a usable OWNER_HOME rather than re-writing the empty one', () => {

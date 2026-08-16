@@ -456,10 +456,22 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * the `.url_slug` lookup then ran against a directory named three spaces, found
  * nothing, and a correctly renamed instance resolved to the anonymous fallback
  * again — the same defect as the empty string, one space away from it and past
- * the fix for it. Every sibling identity read in this repo trims (the
- * `instanceSlug` branch of {@link resolveOwnerSlugSourceFromConfig},
- * `open/server.ts`), so this one does too, and `resolveNeutronHome` was fixed
- * in the same change so the two still agree.
+ * the fix for it. Every sibling identity read in this repo trims its PREDICATE
+ * (the `instanceSlug` branch of {@link resolveOwnerSlugSourceFromConfig},
+ * `open/server.ts`, `resolveNeutronHome` + `resolveOpenDbPath` in
+ * `migrations/db-path.ts`, `resolveRegistryDbPath` + `resolveOwnerHome` in
+ * `gateway/boot-listener-registry.ts`, `resolveOwnerHomeFromEnv` in
+ * `onboarding/overnight/register.ts`, `resolveStatePath` in
+ * `gbrain-memory/gbrain-doctor.ts`), so this one does too.
+ *
+ * That sentence was previously an unqualified "every sibling trims" written
+ * while three of them did not — `resolveOpenDbPath`, `resolveRegistryDbPath` and
+ * the return half of `resolveStatePath`. A docblock asserting a property the
+ * repo lacks is worse than no docblock: it is confidently specific, it reads as
+ * design documentation, and the next reader trusts it instead of checking. The
+ * siblings were fixed rather than the claim narrowed, because the split-brain
+ * was the defect and the docblock was only the evidence of it. The list is
+ * exhaustive as of this change so a future divergence is a visible edit here.
  *
  * The RETURN is verbatim, not trimmed: a blank value means unset, but a value
  * that is genuinely a path is published back to `OWNER_HOME` byte-for-byte
