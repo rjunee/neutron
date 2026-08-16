@@ -420,11 +420,17 @@ export function surfaceSizeAlert(
     // A bad alert hook must never crash the watchdog tick.
   }
 }
-export function defaultIsPidAlive(pid: number): boolean {
+export function defaultIsPidAlive(
+  pid: number,
+  kill: (pid: number, signal: 0) => true = process.kill.bind(process),
+): boolean {
   try {
-    process.kill(pid, 0)
+    kill(pid, 0)
     return true
-  } catch {
+  } catch (err) {
+    // EPERM proves that the process exists but belongs to another uid. Treating
+    // that as dead is unsafe for callers which use this as destructive evidence.
+    if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return true
     return false
   }
 }

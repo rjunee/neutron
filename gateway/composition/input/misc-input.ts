@@ -171,6 +171,14 @@ export interface MiscCompositionInput {
      * nowhere on the wiring is a knob no operator has. Absent → the 2 s default.
      */
     watch_interval_ms?: number
+    /**
+     * PULL half of launcher-death detection: an EXTERNAL per-run probe of
+     * whether the recorded launcher generation (`workflow_run_id`) is still a
+     * live process. Three-valued (`alive`/`dead`/`unknown`): only positive
+     * `dead` evidence acts. Absent means no `trident-liveness` loop and preserves
+     * prior behaviour byte-for-byte. The trident module owns the durable latch.
+     */
+    probe_launcher_alive?: import('@neutronai/trident/tick.ts').TridentLivenessProbe
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed

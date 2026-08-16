@@ -502,6 +502,13 @@ with cross-references noted inline.
     `trident/store.test.ts`.
     Protects: the fix-round budget from being spent on infrastructure failures that are not the
     agent's fault.
+116. External launcher liveness acts only on positive death evidence: `alive`, `unknown`, or a
+    throwing probe does nothing; malformed pids and disagreement between registry homes are
+    ambiguous. Every running launcher is probed without the advancement sweep's 50-row cap. A
+    detected death becomes terminal immediately, releases its lane, and runs terminal delivery;
+    pushed crash events retain their durable recovery budget. The 90-minute no-advance and 2-hour
+    max-inflight backstops remain unchanged.
+    `trident/tick.ts`, `trident/liveness.ts`, `trident/liveness-death-e2e.test.ts`.
 
 ## 10. Naming & vocabulary (`critic-naming-vocab.md` §6)
 

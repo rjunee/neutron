@@ -22,12 +22,21 @@
  * `changeSignature()` query and `wake()`s the sweep only when a run actually
  * advanced, so an out-of-process checkpoint is picked up in seconds; the 90 s
  * interval stays armed unchanged as the backstop.
+ *
+ * A THIRD optional loop ('trident-liveness', 15 s) asks the question none of the
+ * above can: is the launcher generation recorded on an in-flight row still a live
+ * PROCESS? Liveness is otherwise SELF-REPORTED (a run looks alive because it keeps
+ * stamping its own `last_advanced_at`), so a hard death — OOM, SIGKILL, host restart
+ * — merely looks slow and waits out the 90-minute reaper. The probe is injected
+ * ({@link TridentLivenessProbe}) and acts only on a POSITIVE 'dead'; absent the
+ * seams, this file behaves exactly as it did before it existed.
  */
 
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
 import { changeSignatureEntries, type TridentRun, type TridentRunStore } from './store.ts'
+import { LIVENESS_PROBE_INTERVAL_MS } from './liveness.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
 import { createLogger } from '@neutronai/logger'
 
@@ -98,6 +107,41 @@ export interface TridentTerminalHook {
  */
 export interface TridentTransitionHook {
   onTransition(run: TridentRun): Promise<void>
+}
+
+/**
+ * The answer to "is this run's recorded launcher generation still a live process?".
+ *
+ *   • `'alive'`   — POSITIVELY observed running. Nothing to do.
+ *   • `'dead'`    — POSITIVELY observed gone (the pid is not alive / the pooled child
+ *                   has exited). The ONLY value that causes any action.
+ *   • `'unknown'` — no evidence either way (the generation is not in the pool or the
+ *                   registry, the registry could not be read, the probe is not
+ *                   configured for this run). Treated exactly like `'alive'`.
+ *
+ * The three-valued answer is the whole point: a two-valued probe would have to fold
+ * "I cannot tell" into one of the other two, and folding it into `'dead'` is how a
+ * healthy build gets killed by a registry hiccup.
+ */
+export type LauncherLiveness = 'alive' | 'dead' | 'unknown'
+
+/**
+ * EXTERNAL liveness of a run's launcher generation — the signal that does not
+ * depend on the dying process cooperating. Production (a later task) wires a
+ * pool + durable-registry pid probe over `run.workflow_run_id`; tests inject fakes.
+ * A throw is treated as `'unknown'`.
+ */
+export interface TridentLivenessProbe {
+  (run: TridentRun): Promise<LauncherLiveness>
+}
+
+/**
+ * Terminally fail one positively-dead launcher generation. Production wires the
+ * additive `TridentRunStore.failRunningByLauncher` path; pushed crash events keep
+ * using the separate bounded crash-recovery path.
+ */
+export interface TridentDeadLauncherLatch {
+  (session_key: string, failure_reason: string): Promise<void>
 }
 
 /**
@@ -225,6 +269,24 @@ export interface TridentTickOptions {
    */
   on_transition?: TridentTransitionHook
   /**
+   * EXTERNAL liveness of the run's recorded launcher generation
+   * (`workflow_run_id`) — see {@link TridentLivenessProbe}. Supplied together with
+   * {@link latch_launcher_dead} it arms the 'trident-liveness' loop; either one
+   * missing leaves the loop unbuilt and this class byte-identical to its pre-probe
+   * behaviour.
+   */
+  probe_launcher_alive?: TridentLivenessProbe
+  /**
+   * Where a POSITIVE death is latched — see {@link TridentDeadLauncherLatch}.
+   * Production wires `TridentRunStore.failRunningByLauncher`.
+   */
+  latch_launcher_dead?: TridentDeadLauncherLatch
+  /**
+   * Liveness probe cadence. Default {@link LIVENESS_PROBE_INTERVAL_MS} (15 s).
+   * `<= 0` — or any non-finite value — disables the probe loop.
+   */
+  liveness_interval_ms?: number
+  /**
    * Injectable clock (ms) for the transition fan's stall detection. Defaults to
    * `Date.now`. Tests pass a fixed clock to exercise the stall-crossing fan
    * deterministically.
@@ -246,6 +308,11 @@ export class TridentTickLoop {
   private readonly loop: SupervisedLoop
   /** null when disabled (`watch_interval_ms <= 0`). */
   private readonly watchLoop: SupervisedLoop | null
+  /** The external liveness seams — both required, else the probe loop is not built. */
+  private readonly probeLauncherAlive: TridentLivenessProbe | null
+  private readonly latchLauncherDead: TridentDeadLauncherLatch | null
+  /** null unless BOTH seams are supplied and the cadence is enabled. */
+  private readonly livenessLoop: SupervisedLoop | null
   /** Last observed change signature; null = nothing observed yet (first observation records, never wakes). */
   private lastChangeSig: string | null = null
   /**
@@ -302,12 +369,39 @@ export class TridentTickLoop {
               })
             },
           })
+    this.probeLauncherAlive = options.probe_launcher_alive ?? null
+    this.latchLauncherDead = options.latch_launcher_dead ?? null
+    const livenessIntervalMs = options.liveness_interval_ms ?? LIVENESS_PROBE_INTERVAL_MS
+    // BOTH seams or nothing: a probe with nowhere to latch would observe deaths and
+    // discard them, and a latch with no probe has nothing to say. Same NaN-first
+    // guard as the watcher above, for the same reason (`setInterval(fn, NaN)` clamps
+    // to ~1 ms, so a bare `<= 0` check would arm a ~500 Hz probe where the caller
+    // asked for none).
+    this.livenessLoop =
+      this.probeLauncherAlive === null ||
+      this.latchLauncherDead === null ||
+      !Number.isFinite(livenessIntervalMs) ||
+      livenessIntervalMs <= 0 ||
+      livenessIntervalMs > 2_147_483_647
+        ? null
+        : new SupervisedLoop({
+            name: 'trident-liveness',
+            intervalMs: livenessIntervalMs,
+            tick: () => this.livenessBody(),
+            onError: (name, err) => {
+              log.error('liveness_failed', {
+                loop: name,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
+            },
+          })
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
   start(): void {
     this.loop.start()
     this.watchLoop?.start()
+    this.livenessLoop?.start()
   }
 
   /**
@@ -337,7 +431,9 @@ export class TridentTickLoop {
   }
 
   /**
-   * §F2 — EVERY timer this object owns, for the LoopRegistry inventory.
+   * §F2 — EVERY timer this object owns, for the LoopRegistry inventory. Trident may
+   * own THREE: the 90 s sweep, the 2 s change watcher, and — when the external
+   * liveness seams are wired — the 15 s 'trident-liveness' probe.
    *
    * `describe()` returns only the 90 s sweep, which is what the composer used to
    * register — so the 2 s 'trident-watch' loop was a live, self-restarting timer
@@ -349,13 +445,16 @@ export class TridentTickLoop {
    * before `start()` is still correct. Single-loop callers keep `describe()`.
    */
   describeAll(): LoopDescriptor[] {
-    if (this.watchLoop === null) return [this.loop.describe()]
-    return [this.loop.describe(), this.watchLoop.describe()]
+    const all: LoopDescriptor[] = [this.loop.describe()]
+    if (this.watchLoop !== null) all.push(this.watchLoop.describe())
+    if (this.livenessLoop !== null) all.push(this.livenessLoop.describe())
+    return all
   }
 
   /** Stop + quiesce: awaits the in-flight tick so the composer can
    *  `await loop.stop()` (then `drain()`) before `db.close()`. */
   async stop(): Promise<void> {
+    if (this.livenessLoop !== null) await this.livenessLoop.stop()
     if (this.watchLoop !== null) await this.watchLoop.stop()
     await this.loop.stop()
     // DROP THE OBSERVED SIGNATURE WITH THE TIMERS. It is a comparison against a
@@ -384,6 +483,141 @@ export class TridentTickLoop {
     const { skipped } = await this.loop.runOnce()
     if (skipped) return { advanced: 0, skipped_due_to_overlap: true }
     return { advanced: this.advancedCount - before, skipped_due_to_overlap: false }
+  }
+
+  /**
+   * Drive ONE liveness probe pass now — the {@link runOnce} mirror for the
+   * 'trident-liveness' loop, so tests exercise the probe deterministically instead
+   * of waiting out a 15 s cadence. A no-op `{ skipped: true }` when the loop is not
+   * armed (seams absent / cadence disabled).
+   */
+  async runLivenessOnce(): Promise<{ skipped: boolean }> {
+    if (this.livenessLoop === null) return { skipped: true }
+    const { skipped } = await this.livenessLoop.runOnce()
+    return { skipped }
+  }
+
+  /**
+   * THE PULL SIDE OF LAUNCHER-DEATH DETECTION: ask, for every in-flight run, whether
+   * the launcher generation on its row is still a live process — and latch the ones
+   * that positively are not.
+   *
+   * Detection is otherwise PUSH-ONLY (`onChildCrash` → `crashRunningByLauncher`) and
+   * push can be missed: the gateway can be down at death time, the sink write can
+   * fail past its retry window, the latch UPDATE's `subagent_status='running'`
+   * predicate can lose a race. When it is missed, nothing ever ASKS the question, and
+   * the lane sits until the 90-minute reaper reports "suspected agent hang" — a
+   * sentence that does not say it died.
+   *
+   * A positive death is terminal immediately. After the latch commits, this pass
+   * sends the committed row through the same transition and terminal hooks as a
+   * sweep-produced terminal transition, because the next non-terminal sweep cannot
+   * see a row whose phase is already `failed`.
+   *
+   * NO CROSS-LOOP GATING WITH THE SWEEP IS NEEDED. The terminal latch predicates
+   * its update on the still-running generation, while `saveIfActive` refuses to
+   * write over a terminal row. Whichever writer commits first, a confirmed death
+   * cannot be revived by an in-flight sweep.
+   */
+  private async livenessBody(): Promise<void> {
+    const probe = this.probeLauncherAlive
+    const latch = this.latchLauncherDead
+    if (probe === null || latch === null) return
+    // Unlike the expensive advancement sweep, this cheap pid probe is unbounded:
+    // every occupied lane must remain externally observable even above 50 runs.
+    const runs = this.store.listRunningLaunchers()
+    // ONE probe per launcher GENERATION per pass: several runs can share a launcher,
+    // and a pid check is cheap but not free — and the latch is per-generation anyway,
+    // so a second call would be pure duplication.
+    const seen = new Map<string, LauncherLiveness>()
+    for (const run of runs) {
+      // Only a run that is actually IN FLIGHT under a recorded generation is probed.
+      // Terminal rows never reach here (`listNonTerminal`); a run not yet fired, or
+      // already crashed/completed, has no live launcher to ask about.
+      if (run.subagent_status !== 'running') continue
+      const key = run.workflow_run_id
+      if (typeof key !== 'string' || key.length === 0) continue
+      // Already answered for this generation this pass — the probe AND the latch are
+      // both per-generation, so there is nothing left to do for a second run on it.
+      if (seen.has(key)) continue
+      let verdict: LauncherLiveness
+      try {
+        verdict = await probe(run)
+      } catch (err) {
+        // A PROBE OUTAGE IS NOT A DEATH. Treated exactly as 'unknown'.
+        verdict = 'unknown'
+        log.error('liveness_probe_failed', {
+          run: run.id,
+          slug: run.slug,
+          generation: key,
+          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        })
+      }
+      seen.set(key, verdict)
+      // DEATH IS ACTED ON ONLY FROM A POSITIVE OBSERVATION. 'alive' and 'unknown'
+      // (an unrecognised generation, an unreadable registry, a probe outage) do
+      // NOTHING AT ALL: absence of evidence must never read as death, or a registry
+      // hiccup reaps healthy builds — strictly worse than the latency this loop
+      // removes. What the probe cannot see is still covered by the 90-min
+      // `NO_ADVANCE_HANG_MS` reaper and the 2-h `DEFAULT_MAX_INFLIGHT_MS` ceiling,
+      // both retained.
+      if (verdict !== 'dead') continue
+      // The reason is load-bearing, on three counts:
+      //   • it starts with `inner workflow child crashed:` so the measured cause
+      //     survives into the terminal crash-recovery reason;
+      //   • it says DEAD/DIED and names the generation, so the row states WHAT died
+      //     instead of the reaper's "suspected agent hang" (which would be a lie:
+      //     nothing hung, the process is gone);
+      //   • it must never contain the token `exhausted` — `delivery.ts` routes that
+      //     into the review-unresolved class ("the reviewer still had blocking
+      //     findings"), a confident lie about a build whose reviewer may never have
+      //     run (same trap as the crash-recovery-budget reason in orchestrator.ts).
+      const reason = `inner workflow child crashed: generation ${key} is dead (external liveness probe at ${new Date(this.now()).toISOString()}); build died without reporting`
+      try {
+        await latch(key, reason)
+        // The latch is per-generation, so fan every row it terminally changed. Use
+        // the committed row: this also avoids announcing a terminal transition if
+        // another writer won the predicate race and left the run non-terminal.
+        for (const candidate of runs) {
+          if (candidate.workflow_run_id !== key) continue
+          const terminal = this.store.get(candidate.id)
+          if (terminal === null || !isTerminalPhase(terminal.phase)) continue
+          if (this.on_transition !== null) {
+            try {
+              await this.on_transition.onTransition(terminal)
+              this.transitionCount++
+            } catch (err) {
+              log.error('transition_fan_failed', {
+                run: terminal.id,
+                slug: terminal.slug,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
+            }
+          }
+          if (this.on_terminal !== null) {
+            try {
+              await this.on_terminal.onTerminal(terminal)
+              this.deliveredCount++
+            } catch (err) {
+              log.error('terminal_delivery_failed', {
+                run: terminal.id,
+                slug: terminal.slug,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
+            }
+          }
+        }
+      } catch (err) {
+        // A failed latch is not fatal and needs no bookkeeping: the generation is
+        // still dead on the next cadence, so the probe retries naturally.
+        log.error('liveness_latch_failed', {
+          run: run.id,
+          slug: run.slug,
+          generation: key,
+          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        })
+      }
+    }
   }
 
   /**

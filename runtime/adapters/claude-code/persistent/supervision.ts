@@ -934,3 +934,72 @@ export async function peekSizeWatchdogForTest(
     return undefined
   }
 }
+
+// ---------------------------------------------------------------------------
+// External launcher liveness — the PULL half of crash detection.
+// ---------------------------------------------------------------------------
+
+/**
+ * Is the launcher child identified by `generationKey` still a LIVE process?
+ *
+ * The watchdog above is the PUSH half: it observes a death and fires
+ * `onChildCrash`. This is the PULL half — the production probe behind trident's
+ * `trident-liveness` loop (`trident/tick.ts`), which ASKS the question for a run
+ * whose recorded generation may have died while the crash EVENT was lost (gateway
+ * down at death time, a sink write past its retry window, a latch predicate race).
+ * Without it liveness is SELF-REPORTED: a hard-dead lane merely looks slow until
+ * the 90-minute reaper.
+ *
+ * Decision order — the pool WINS over the registry, because a recorded pid can
+ * outlive its process and the OS may recycle it onto something unrelated:
+ *   1. An in-process pool session on this generation → alive iff its child has not
+ *      exited. Authoritative: we own the handle.
+ *   2. Else the durable registry record carrying this `child_generation` → its pid
+ *      is the cross-restart liveness anchor (the same `kill -0` the watchdog's own
+ *      15 s pid-probe uses).
+ *   3. Found in NEITHER → 'unknown'. A SUPERSEDED generation is absent precisely
+ *      because it was already event-latched at respawn; absence must never read as
+ *      death, or a registry that has simply moved on would reap healthy builds.
+ *   4. Anything ambiguous — unreadable/corrupt/missing registry, a matching record
+ *      with no recorded pid, any throw — → 'unknown'. This never throws.
+ *
+ * 'dead' therefore requires POSITIVE evidence, and the answer is BINARY process
+ * liveness: no amount of thinking can make a live agent probe 'dead'.
+ */
+export function probeLauncherGenerationAlive(
+  generationKey: string,
+  replRegistryPath: string,
+): 'alive' | 'dead' | 'unknown' {
+  try {
+    // The pool stores `Promise<ReplSession>`, so read the SETTLED value rather than
+    // awaiting a spawn that may still be in flight — the same synchronous-mirror
+    // motive as `childByKey`. A pending promise peeks to itself and a rejected one
+    // to its error; both fail the duck-type below and are skipped (a session that
+    // never spawned owns no generation). No instance scoping is needed here:
+    // `childGeneration` is a per-spawn UUID, so a match IS the child we were asked
+    // about, and this read never actuates anything.
+    for (const pending of pool.values()) {
+      const settled: unknown = Bun.peek(pending)
+      if (settled === pending || typeof settled !== 'object' || settled === null) continue
+      const session = settled as Partial<ReplSession>
+      if (session.childGeneration !== generationKey) continue
+      if (typeof session.hasChildExited !== 'function') continue
+      return session.hasChildExited() ? 'dead' : 'alive'
+    }
+    // Post-crash / cross-restart: the pool no longer holds the session but the
+    // registry still records the generation's pid. `loadRegistry` maps an absent OR
+    // corrupt file to `{}`, so both degrade to the no-match 'unknown' below.
+    for (const record of Object.values(loadRegistry(replRegistryPath))) {
+      if (record.child_generation !== generationKey) continue
+      // Registry rows survive upgrades and are not a trusted type boundary. A
+      // malformed pid must not turn process.kill's EINVAL/TypeError into positive
+      // death evidence for a potentially healthy launcher.
+      if (typeof record.pid !== 'number' || !Number.isInteger(record.pid) || record.pid <= 0) return 'unknown'
+      return defaultIsPidAlive(record.pid) ? 'alive' : 'dead'
+    }
+    return 'unknown'
+  } catch (err) {
+    log.error('launcher_liveness_probe_error', { generationKey, error: String(err) })
+    return 'unknown'
+  }
+}

@@ -475,6 +475,24 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /** Every actively running row with an external launcher generation.
+   * Unbounded deliberately: liveness must not inherit the expensive sweep's
+   * per-tick cap or leave newer lanes invisible behind older rows. */
+  listRunningLaunchers(): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, []>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND subagent_status = 'running'
+            AND workflow_run_id IS NOT NULL
+            AND workflow_run_id <> ''
+          ORDER BY last_advanced_at ASC`,
+      )
+      .all()
+      .map(rowToRun)
+  }
+
   /**
    * A signature of "did anything a tick would care about change?" — the
    * wake-on-change watcher's ONE query, and the thing the sweep's own settle
@@ -545,6 +563,19 @@ export class TridentRunStore {
         [failure_reason, now, session_key],
       )
     })
+  }
+
+  /** A positive external death is terminal: fail the run and release its lane now. */
+  async failRunningByLauncher(session_key: string, failure_reason: string): Promise<void> {
+    await this.db.run(
+      `UPDATE code_trident_runs
+          SET phase = 'failed', subagent_status = NULL, subagent_run_id = NULL,
+              workflow_run_id = NULL, failure_reason = ?, last_advanced_at = ?
+        WHERE workflow_run_id = ?
+          AND subagent_status = 'running'
+          AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+      [failure_reason, this.now(), session_key],
+    )
   }
 
   /**
