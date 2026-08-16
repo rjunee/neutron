@@ -215,11 +215,15 @@ test('a token the host rejects is reported as rejected, never as missing', async
         return { ok: false, stdout: '', stderr: 'HTTP 401: Bad credentials', exit_code: 1 }
       },
     )
-    expect(await probe.publisherAvailable()).toEqual({
-      authenticated: false,
-      cause: 'credential_rejected',
-      detail: 'HTTP 401: Bad credentials',
-    })
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated).toBe(false)
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+    // The detail keeps `gh`'s own words AND names which credential was tried, so
+    // the owner knows it was the STORED one and not the host's ambient login.
+    expect(res.authenticated === false && res.detail).toContain('HTTP 401: Bad credentials')
+    expect(res.authenticated === false && res.detail).toContain(
+      'the credential resolved from the configured source',
+    )
     let msg = ''
     try {
       await detectMergeMode('/repo', probe)

@@ -4,8 +4,14 @@ import {
   defaultGitModeProbe,
   detectMergeMode,
   isGithubRemoteUrl,
+  looksLikeAmbiguousLoginFailure,
+  looksLikeCredentialRejected,
+  looksLikeGithubRateLimited,
   looksLikeGithubUnreachable,
+  looksLikeNoGithubAuth,
+  renderAuthFailureDetail,
   spawnCapture,
+  MAX_AUTH_FAILURE_DETAIL_CHARS,
   PUBLISHER_AUTH_COMMAND,
   unwiredPublisherCredential,
   type GitModeProbe,
@@ -338,11 +344,12 @@ describe('a stored credential beats an un-logged-in ambient CLI', () => {
         return { ok: false, stdout: '', stderr: 'HTTP 401: Bad credentials', exit_code: 1 }
       },
     )
-    expect(await probe.publisherAvailable()).toEqual({
-      authenticated: false,
-      cause: 'credential_rejected',
-      detail: 'HTTP 401: Bad credentials',
-    })
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+    expect(res.authenticated === false && res.detail).toContain('HTTP 401: Bad credentials')
+    expect(res.authenticated === false && res.detail).toContain(
+      'the credential resolved from the configured source',
+    )
   })
 
   test('an unspawnable publisher CLI (exit -1) is unavailable, not a bad token', async () => {
@@ -592,14 +599,22 @@ describe('unreachable GitHub is reported as unreachable, not as a bad token', ()
   })
 
   // CONTROL that the inversion NARROWED rather than swallowed: every wording
-  // `gh` actually uses to refuse a credential still reaches the owner as one.
-  test('CONTROL — real `gh` rejection wordings are still `credential_rejected`', async () => {
+  // that PROVES GitHub answered and refused still reaches the owner as one.
+  //
+  // Each string below requires a live GitHub response body to exist at all — a
+  // transport failure cannot fabricate `Bad credentials` or a scope list — which
+  // is exactly what separates them from the ambiguous wordings covered by the
+  // `credential_verdict_unavailable` suite below. Two entries that used to live
+  // in this list (`The token in GH_TOKEN is invalid.` and `X Failed to log in
+  // …`) moved there, because measurement showed `gh` prints them for a dead
+  // network too.
+  test('CONTROL — wordings that PROVE GitHub answered are still `credential_rejected`', async () => {
     for (const stderr of [
       'HTTP 401: Bad credentials',
-      'The token in GH_TOKEN is invalid.',
-      'X Failed to log in to github.com using token (GH_TOKEN)',
       'HTTP 403: Resource not accessible by personal access token',
       'error: missing required scopes: repo',
+      'HTTP 403: Your token has not been granted the required scopes',
+      'This endpoint requires authentication',
     ]) {
       const probe = defaultGitModeProbe(withToken, ghFails({ stdout: '', stderr, exit_code: 1 }))
       const res = await probe.publisherAvailable()
@@ -855,6 +870,257 @@ describe('spawnCapture flags a timeout only when it caused one', () => {
     const res = await probe.publisherAvailable()
     expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
     expect(res.authenticated === false && res.cause).not.toBe('credential_rejected')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The classifier suite, driven by REAL multi-line `gh` output.
+//
+// WHY THESE FIXTURES ARE MULTI-LINE AND THE OLD ONES WERE NOT. Every stub in
+// this file used to be a single crafted line, which is not what `gh` prints and
+// is precisely why a first-line-only truncation bug survived a green suite: with
+// a one-line stub, `split('\n')[0]` IS the whole string, so the defect was
+// invisible by construction. The blocks below are copied from `gh version 2.97.0
+// (2026-07-31)` run as `gh auth status --hostname github.com --active`.
+// ---------------------------------------------------------------------------
+
+/**
+ * MEASURED, and the single most important fixture in this file: gh 2.97.0 prints
+ * EXACTLY THIS for BOTH
+ *
+ *   • a genuinely invalid token on a working network, and
+ *   • a perfectly good token behind a dead proxy (GitHub never reached).
+ *
+ * The two stderr captures were byte-for-byte identical. So this text is not
+ * evidence of a bad token — it is evidence that `gh` could not log in, and the
+ * cause is undetermined. Note the first line is the bare hostname, which is what
+ * the old `split('\n')[0]` rendering kept while discarding all three lines that
+ * carry meaning.
+ */
+const GH_LOGIN_FAILURE_AMBIGUOUS = [
+  'github.com',
+  '  X Failed to log in to github.com using token (GH_TOKEN)',
+  '  - Active account: true',
+  '  - The token in GH_TOKEN is invalid.',
+].join('\n')
+
+/**
+ * A verdict only a live GitHub response can produce: the scope list came back in
+ * a response body, so the transport demonstrably worked and the credential was
+ * genuinely refused. This is the shape that MUST still read as a rejection.
+ */
+const GH_REJECTED_MISSING_SCOPE = [
+  'github.com',
+  '  X Failed to log in to github.com account owner-a (keyring)',
+  '  - Active account: true',
+  "  - Token scopes: 'gist', 'read:org'",
+  "  ! Missing required token scopes: 'repo'",
+].join('\n')
+
+/** GitHub's primary rate limit, which it returns as 403 WITH a valid token. */
+const GH_RATE_LIMIT_PRIMARY = [
+  'github.com',
+  '  X Failed to log in to github.com using token (GH_TOKEN)',
+  '  - Active account: true',
+  '  - HTTP 403: API rate limit exceeded for user ID 12345.',
+  '    (https://api.github.com/user)',
+].join('\n')
+
+/** GitHub's secondary rate limit — also a 403, also with a valid token. */
+const GH_RATE_LIMIT_SECONDARY = [
+  'github.com',
+  '  X Failed to log in to github.com using token (GH_TOKEN)',
+  '  - HTTP 403: You have exceeded a secondary rate limit.',
+  '    Please wait a few minutes before you try again.',
+].join('\n')
+
+/** MEASURED: what gh 2.97.0 prints with an empty config dir. */
+const GH_NO_ACCOUNTS = 'You are not logged into any GitHub hosts. To log in, run: gh auth login'
+
+const storeWithToken: PublisherCredentialSource = {
+  owner_handle: 'owner-a',
+  source: 'a fake token store',
+  load: async () => ({ GH_TOKEN: 't0k' }),
+}
+const emptyStore: PublisherCredentialSource = {
+  owner_handle: 'owner-a',
+  source: 'a fake token store',
+  load: async () => ({}),
+}
+
+/** A host whose `gh` always fails with the given stderr; `git` reports a GitHub origin. */
+const ghFailsWith =
+  (stderr: string, exit_code = 1) =>
+  async (cmd: string[]): Promise<HostCommandResult> => {
+    if (cmd[0] === 'git') {
+      return {
+        ok: true,
+        stdout: 'https://github.com/example-org/example-repo.git',
+        stderr: '',
+        exit_code: 0,
+      }
+    }
+    return { ok: false, stdout: '', stderr, exit_code }
+  }
+
+const refusalMessage = async (probe: GitModeProbe): Promise<string> =>
+  detectMergeMode('/repo', probe).then(
+    () => '',
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  )
+
+describe('a transport failure is never sold to the owner as a bad token', () => {
+  test('the MEASURED dead-network output is NOT classified as a rejection', async () => {
+    const probe = defaultGitModeProbe(storeWithToken, ghFailsWith(GH_LOGIN_FAILURE_AMBIGUOUS))
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).not.toBe('credential_rejected')
+    expect(res.authenticated === false && res.cause).toBe('credential_verdict_unavailable')
+  })
+
+  test('the refusal NAMES the ambiguity and sends the owner to the network first', async () => {
+    const msg = await refusalMessage(
+      defaultGitModeProbe(storeWithToken, ghFailsWith(GH_LOGIN_FAILURE_AMBIGUOUS)),
+    )
+    expect(msg).toContain('does not say')
+    expect(msg).toContain('Check network/DNS/proxy FIRST')
+    // The costly instruction is the one that must NOT appear, because it is the
+    // one that has him rotating a credential nothing was learned about.
+    expect(msg).not.toContain('REJECTED')
+    expect(msg).not.toContain('expired, revoked, or missing a scope')
+  })
+
+  test('the classifiers agree: the measured output is ambiguous, not a verdict', () => {
+    expect(looksLikeAmbiguousLoginFailure(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(true)
+    expect(looksLikeCredentialRejected(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(false)
+    // …and the transport classifier CANNOT rescue it, which is the trap: the
+    // `dial tcp` / `no such host` strings it looks for are emitted only under
+    // `GH_DEBUG`, never in the normal output above.
+    expect(looksLikeGithubUnreachable(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(false)
+  })
+
+  test('CONTROL — a verdict only a live response can produce IS still a rejection', async () => {
+    const probe = defaultGitModeProbe(storeWithToken, ghFailsWith(GH_REJECTED_MISSING_SCOPE))
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+    const msg = await refusalMessage(probe)
+    expect(msg).toContain('REJECTED')
+  })
+})
+
+describe('a rate limit is not a rejection — GitHub returns 403 with a WORKING token', () => {
+  for (const [label, stderr] of [
+    ['primary', GH_RATE_LIMIT_PRIMARY],
+    ['secondary', GH_RATE_LIMIT_SECONDARY],
+  ] as const) {
+    test(`the ${label} rate limit is \`github_rate_limited\`, not a bad token`, async () => {
+      const probe = defaultGitModeProbe(storeWithToken, ghFailsWith(stderr))
+      const res = await probe.publisherAvailable()
+      expect(res.authenticated === false && res.cause).toBe('github_rate_limited')
+    })
+
+    test(`the ${label} refusal says WAIT, and never says rotate`, async () => {
+      const msg = await refusalMessage(defaultGitModeProbe(storeWithToken, ghFailsWith(stderr)))
+      expect(msg).toContain('rate-limited')
+      expect(msg).toContain('Wait for the limit to reset')
+      expect(msg).toContain('Do NOT rotate the token')
+      expect(msg).not.toContain('REJECTED')
+      expect(msg).not.toContain('expired, revoked, or missing a scope')
+    })
+  }
+
+  test('the 403 in a rate limit is subtracted from the rejection classifier itself', () => {
+    // The defect was a blanket `/\bhttp 40[13]\b/`. Asserted at the classifier so
+    // it cannot be reintroduced by a caller that skips the probe's ordering.
+    expect(looksLikeCredentialRejected('HTTP 403: API rate limit exceeded')).toBe(false)
+    expect(looksLikeGithubRateLimited('HTTP 403: API rate limit exceeded')).toBe(true)
+  })
+
+  test('CONTROL — a 403 that is NOT a rate limit is still a rejection', () => {
+    expect(
+      looksLikeCredentialRejected('HTTP 403: Resource not accessible by personal access token'),
+    ).toBe(true)
+  })
+})
+
+describe('the reported cause is what HAPPENED, not what was configured', () => {
+  test('an empty store whose AMBIENT credential is refused reads as a rejection', async () => {
+    // The real gh 2.97.0 case: a stale ambient account whose token in `hosts.yml`
+    // is invalid. Control reaches the rejection branch on positive evidence a
+    // credential was presented and refused, so "no credential available" would
+    // deny the very observation that selected the branch.
+    const probe = defaultGitModeProbe(emptyStore, ghFailsWith(GH_REJECTED_MISSING_SCOPE))
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+    expect(res.authenticated === false && res.cause).not.toBe('no_credential_available')
+  })
+
+  test('…and the refusal names WHICH credential, so he fixes the ambient one', async () => {
+    const msg = await refusalMessage(
+      defaultGitModeProbe(emptyStore, ghFailsWith(GH_REJECTED_MISSING_SCOPE)),
+    )
+    expect(msg).toContain("used this host's ambient login")
+    // The self-contradicting sentence must be gone: `gh` just told us a
+    // credential WAS presented.
+    expect(msg).not.toContain('no GitHub credential is stored')
+    expect(msg).toContain('REJECTED')
+  })
+
+  test('CONTROL — an empty store with NO credential anywhere is still `no_credential_available`', async () => {
+    const probe = defaultGitModeProbe(emptyStore, ghFailsWith(GH_NO_ACCOUNTS))
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('no_credential_available')
+    const msg = await refusalMessage(probe)
+    expect(msg).toContain('no GitHub credential is stored')
+    expect(msg).not.toContain('REJECTED')
+  })
+
+  test('CONTROL — narrowing the rejection classifier did not break the no-auth guard', () => {
+    // `looksLikeNoGithubAuth` trusts the `gh auth login` hint only when nothing
+    // else in the output is a verdict. Narrowing `looksLikeCredentialRejected`
+    // would have silently reopened that hole for the ambiguous wordings.
+    expect(looksLikeNoGithubAuth(GH_NO_ACCOUNTS)).toBe(true)
+    expect(
+      looksLikeNoGithubAuth('The token in GH_TOKEN is invalid. To log in, run: gh auth login'),
+    ).toBe(false)
+    expect(looksLikeNoGithubAuth('HTTP 401: Bad credentials. To log in, run: gh auth login')).toBe(
+      false,
+    )
+  })
+})
+
+describe('multi-line `gh` output survives into the refusal', () => {
+  test('EVERY diagnostic line reaches the owner, not just the bare hostname', async () => {
+    const msg = await refusalMessage(
+      defaultGitModeProbe(storeWithToken, ghFailsWith(GH_LOGIN_FAILURE_AMBIGUOUS)),
+    )
+    // The three lines the old `split('\n')[0]` threw away…
+    expect(msg).toContain('Failed to log in to github.com using token (GH_TOKEN)')
+    expect(msg).toContain('Active account: true')
+    expect(msg).toContain('The token in GH_TOKEN is invalid.')
+    // …and the one it kept, which on its own diagnoses nothing.
+    expect(msg).toContain('github.com')
+    // The refusal must not TERMINATE at the hostname, which is what the bug
+    // produced: `…missing a scope: github.com`.
+    expect(msg.trimEnd().endsWith('github.com')).toBe(false)
+  })
+
+  test('lines are flattened and trimmed, never dropped', () => {
+    expect(renderAuthFailureDetail(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(
+      ': github.com; X Failed to log in to github.com using token (GH_TOKEN); ' +
+        '- Active account: true; - The token in GH_TOKEN is invalid.',
+    )
+  })
+
+  test('empty, absent and blank-only details render as nothing', () => {
+    expect(renderAuthFailureDetail(undefined)).toBe('')
+    expect(renderAuthFailureDetail('')).toBe('')
+    expect(renderAuthFailureDetail('\n  \n')).toBe('')
+  })
+
+  test('a runaway detail is bounded rather than allowed to flood the refusal', () => {
+    const rendered = renderAuthFailureDetail('x'.repeat(MAX_AUTH_FAILURE_DETAIL_CHARS + 500))
+    expect(rendered).toContain('(truncated)')
+    expect(rendered.length).toBeLessThan(MAX_AUTH_FAILURE_DETAIL_CHARS + 40)
   })
 })
 

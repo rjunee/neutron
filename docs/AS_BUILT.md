@@ -258,7 +258,9 @@ host where the owner had run `gh auth login` and never connected GitHub in-app �
 that publish fine, because the publisher inherits that session. That traded the original
 false negative for a new one.
 
-The refusal names WHICH of five causes and under WHICH owner handle the lookup was made:
+The refusal names WHICH cause and under WHICH owner handle the lookup was made (five at
+first, seven after the correction round below adds `credential_verdict_unavailable` and
+`github_rate_limited`):
 `no_credential_available` (nothing stored AND no ambient session — "not an expired
 token"), `credential_rejected` (expired/revoked/scope), `could_not_reach_github`,
 `publisher_cli_unavailable` (spawn failure, exit -1), `probe_failed`. `gh auth status`
@@ -276,14 +278,74 @@ everything ELSE fall through to `credential_rejected` — described in the code 
 a token rotation. An x509/TLS error matches no transport pattern, so "certificate signed
 by unknown authority" arrived as "expired, revoked, or missing a scope": confident,
 specific, and about a token nothing had been learned about. `credential_rejected` now
-requires POSITIVE evidence that `gh` refused the credential (`looksLikeCredentialRejected`
-— `bad credentials`, `is invalid`, `failed to log in`, `HTTP 401/403`, missing scopes),
-and an unclassifiable failure reports `probe_failed` naming the command and exit code.
+requires POSITIVE evidence that `gh` refused the credential, and an unclassifiable failure
+reports `probe_failed` naming the command and exit code. (The evidence list that first
+shipped here — `bad credentials`, `is invalid`, `failed to log in`, `HTTP 401/403`,
+missing scopes — was itself wrong in three places and is corrected in the round below.)
 Two related honesty fixes ride along: `gh` reporting NO authentication while the probe HAD
 resolved a token means the host runner dropped the environment (`EnvCapableHostRunner`'s
 third parameter is optional, so a two-parameter runner type-checks and silently discards
 it) — that is now reported as a wiring fault, not a rejection; and `probe_failed`'s text
 tells the owner not to rotate on that signal.
+
+THE CLASSIFIER WAS STILL WRONG ABOUT THREE OF THE FIVE CAUSES, AND A WRONG CAUSE IS WORSE
+THAN THE VAGUE MESSAGE IT REPLACED — it converts a correct refusal into confident
+misdirection. All four defects were in the new classify/message logic, all measured
+against real `gh version 2.97.0 (2026-07-31)` rather than reasoned about:
+
+1. **A TRANSPORT FAILURE WAS SOLD AS A BAD TOKEN.** Measured: `gh auth status --hostname
+   github.com --active` behind a dead proxy — GitHub never reached, token irrelevant —
+   prints stderr BYTE-IDENTICAL to a genuinely invalid token:
+
+       github.com
+         X Failed to log in to github.com using token (GH_TOKEN)
+         - Active account: true
+         - The token in GH_TOKEN is invalid.
+
+   `is invalid` matched the REJECTION list, and the `dial tcp`/`no such host` strings
+   `looksLikeGithubUnreachable` looks for are emitted only under `GH_DEBUG` — so ordering
+   the unreachable check first could not rescue it. There is NO signal here that separates
+   the two, so the honest answer is that there is no verdict: the ambiguous wordings now
+   route to a new `credential_verdict_unavailable` (`trident/git-mode.ts`
+   `looksLikeAmbiguousLoginFailure`) whose refusal says the output does not say WHICH, and
+   sends the owner to check network/DNS/proxy FIRST. What remains `credential_rejected` is
+   only wording a LIVE RESPONSE BODY must exist to produce (`bad credentials`, a scope
+   list, `requires authentication`, `resource not accessible by`) — a dead network cannot
+   fabricate those.
+2. **A RATE-LIMITED 403 WAS A REJECTION.** GitHub returns **403**, not 429, for both the
+   primary and secondary rate limit, and returns it to a request whose credential it
+   ACCEPTED and counted; `gh auth status` makes a live round-trip, so it hits this. The
+   blanket `/\bhttp 40[13]\b/` therefore told a rate-limited owner to rotate a working
+   token. New `looksLikeGithubRateLimited` is subtracted inside
+   `looksLikeCredentialRejected` AND branches first in the probe — two independent guards,
+   mutation-tested separately — and the new `github_rate_limited` refusal says the limit is
+   evidence the token is FINE and the action is to wait.
+3. **THE CAUSE WAS KEYED ON THE CONFIGURED SOURCE, NOT ON WHAT HAPPENED.** The rejection
+   branch computed `token.length === 0 ? 'no_credential_available' : 'credential_rejected'`,
+   which is self-contradicting: control only reaches it on positive evidence a credential
+   WAS presented and refused, so "no credential available" denies the observation that
+   selected the branch. Real case, not hypothetical — a stale ambient account whose
+   `hosts.yml` token is invalid lands exactly there with an empty store. An empty store
+   does not mean nothing was tried; it means `gh` fell back to the host's AMBIENT login, so
+   that fact moved into the detail (`describeWhichCredential`) where it tells the owner
+   which credential to go fix, and the message no longer claims the stored one.
+4. **MULTI-LINE `gh` STDERR WAS TRUNCATED TO ITS FIRST LINE.** `result.detail.split('\n')[0]`
+   — and gh's first line is the BARE HOSTNAME, so the refusal kept the one line that
+   diagnoses nothing, discarded all three that do, and ended `…missing a scope:
+   github.com`. `renderAuthFailureDetail` now flattens every non-empty line (`; `-joined),
+   bounded at `MAX_AUTH_FAILURE_DETAIL_CHARS`. **Why the suite could not see it: every
+   stubbed detail was single-line, so `[0]` WAS the whole string and the defect was
+   invisible by construction.** The fixtures are now real captured multi-line `gh` output,
+   which is the part that keeps the next regression visible.
+
+Each of the four has a test asserting BOTH the classification and the owner-facing
+message, and each was mutation-tested by re-introducing the exact defect: 3 red for (1),
+1 red for the classifier guard and 4 more for the probe-ordering guard in (2), 4 red for
+(3), 2 red for (4). Narrowing the rejection list also silently widened
+`looksLikeNoGithubAuth`, whose `gh auth login` hint was only trusted when nothing else in
+the output was a verdict — its exclusion now covers the ambiguous wordings too, with a
+control asserting an "invalid token … run: gh auth login" output does not read as "nothing
+stored". `git-mode.test.ts` + `git-mode-credential-seam.test.ts` go 53 → 71 tests.
 
 Guards. `trident/git-mode-credential-seam.test.ts` drives a REAL `SecretsStore` on a temp
 db through the composer's exact construction: a stored token makes the probe available on

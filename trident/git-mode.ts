@@ -50,8 +50,18 @@ export interface HostCommandResult {
  *     nothing, and the host's ambient `gh` could not authenticate either.
  *     GitHub was never connected (or the token is filed under a different
  *     owner handle). NOT an expired token.
- *   • `credential_rejected`     — a credential WAS supplied and `gh` refused
- *     it: expired, revoked, or missing a scope.
+ *   • `credential_rejected`     — GitHub ANSWERED and refused the credential:
+ *     expired, revoked, or missing a scope. Requires a verdict only a live
+ *     response can produce (see {@link looksLikeCredentialRejected}).
+ *   • `credential_verdict_unavailable` — `gh` said it could not log in, in
+ *     wording that does NOT distinguish "the token was refused" from "GitHub
+ *     was never reached". This is not hedging: MEASURED on gh 2.97.0, a dead
+ *     proxy and a genuinely invalid token print byte-identical stderr (see
+ *     {@link looksLikeAmbiguousLoginFailure}). Naming it honestly is the whole
+ *     point of this taxonomy — the alternative is a confident wrong cause.
+ *   • `github_rate_limited`     — GitHub answered with a rate limit. That answer
+ *     is returned WITH a working credential, so it is evidence the token is
+ *     FINE, and the only action is to wait.
  *   • `could_not_reach_github`  — `gh` ran but never got an answer: DNS,
  *     offline, a proxy, a GitHub outage, or our own 60s watchdog killing the
  *     call. NOTHING was learned about the credential, and telling the owner to
@@ -70,13 +80,16 @@ export interface HostCommandResult {
  * opinion about the publisher's own credential.
  *
  * Note which of these are the owner's to act on: only `no_credential_available`
- * ("connect GitHub") and `credential_rejected` ("reconnect it"). The other three
- * are host conditions, and a taxonomy that folded them into `credential_rejected`
- * — as this one did in round 1 — spends the owner's time on the wrong repair.
+ * ("connect GitHub") and `credential_rejected` ("reconnect it"). The rest are
+ * host conditions or honest non-verdicts, and a taxonomy that folded them into
+ * `credential_rejected` — as this one did in round 1 — spends the owner's time
+ * on the wrong repair.
  */
 export type PublisherAuthFailureCause =
   | 'no_credential_available'
   | 'credential_rejected'
+  | 'credential_verdict_unavailable'
+  | 'github_rate_limited'
   | 'could_not_reach_github'
   | 'publisher_cli_unavailable'
   | 'probe_failed'
@@ -189,16 +202,52 @@ export interface GitModeProbe {
   publisherAvailable(): Promise<PublisherAuthResult>
 }
 
+/**
+ * Upper bound on the rendered detail, so an unbounded `err.message` on the
+ * `probe_failed` path cannot turn a refusal into a wall of text.
+ */
+export const MAX_AUTH_FAILURE_DETAIL_CHARS = 600
+
+/**
+ * Render the captured `gh` output into the one-line refusal WITHOUT discarding
+ * any of it.
+ *
+ * WHY THIS IS NOT `split('\n')[0]`, which is what it replaced. `gh auth
+ * status`'s failure output is MULTI-LINE and its first line is the bare
+ * hostname — measured on gh 2.97.0, a refused token prints four lines:
+ *
+ *     github.com
+ *       X Failed to log in to github.com using token (GH_TOKEN)
+ *       - Active account: true
+ *       - The token in GH_TOKEN is invalid.
+ *
+ * Taking `[0]` therefore kept the ONE line carrying no diagnosis and dropped
+ * all three that did, so the refusal ended `…missing a scope: github.com`. Every
+ * line `gh` bothered to print is a line the owner needs; they are flattened
+ * rather than truncated, and only the total length is bounded.
+ */
+export function renderAuthFailureDetail(detail: string | undefined): string {
+  if (detail === undefined) return ''
+  const lines = detail
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  if (lines.length === 0) return ''
+  const joined = lines.join('; ')
+  return `: ${
+    joined.length > MAX_AUTH_FAILURE_DETAIL_CHARS
+      ? `${joined.slice(0, MAX_AUTH_FAILURE_DETAIL_CHARS)}… (truncated)`
+      : joined
+  }`
+}
+
 /** The refusal text, with the cause and the owner handle spelled out. */
 export function describePublisherAuthFailure(
   publisher: PublisherIdentity,
   result: { cause: PublisherAuthFailureCause; detail?: string },
 ): string {
   const who = `owner handle "${publisher.owner_handle}" (${publisher.source})`
-  const detail =
-    result.detail !== undefined && result.detail.length > 0
-      ? `: ${result.detail.split('\n')[0]}`
-      : ''
+  const detail = renderAuthFailureDetail(result.detail)
   switch (result.cause) {
     case 'no_credential_available':
       return (
@@ -207,9 +256,27 @@ export function describePublisherAuthFailure(
         `The credential source was read and was empty; this is not an expired token${detail}`
       )
     case 'credential_rejected':
+      // NOT "the stored credential": this cause is also reached when the store
+      // was empty and `gh` fell back to the host's ambient login, and it is that
+      // ambient credential GitHub refused. The probe says which in the detail.
       return (
-        `the stored GitHub credential for ${who} was REJECTED by \`gh auth status\` ` +
+        `the GitHub credential used for ${who} was REJECTED by GitHub ` +
         `— expired, revoked, or missing a scope${detail}`
+      )
+    case 'credential_verdict_unavailable':
+      return (
+        `\`gh auth status\` could not log in for ${who}, but its wording does not say ` +
+        `WHETHER the credential was refused or GitHub was never reached — measured on ` +
+        `gh 2.97.0, a dead proxy and a genuinely invalid token print identical output. ` +
+        `Check network/DNS/proxy FIRST; rotate the token only once the network is known ` +
+        `good${detail}`
+      )
+    case 'github_rate_limited':
+      return (
+        `GitHub rate-limited \`gh auth status\`, so the credential for ${who} was neither ` +
+        `accepted nor rejected — GitHub returns a rate limit WITH a working credential, so ` +
+        `this is evidence the token is fine. Wait for the limit to reset. ` +
+        `Do NOT rotate the token on this signal${detail}`
       )
     case 'could_not_reach_github':
       return (
@@ -335,7 +402,7 @@ export const PUBLISHER_AUTH_COMMAND: readonly string[] = [
 ]
 
 /**
- * Whether `gh`'s output is a VERDICT that the credential was refused.
+ * Whether GitHub ANSWERED and refused the credential.
  *
  * Positive evidence is REQUIRED before `credential_rejected` is emitted, because
  * that cause is the one that sends the owner to rotate a token. Round 2 had this
@@ -344,21 +411,95 @@ export const PUBLISHER_AUTH_COMMAND: readonly string[] = [
  * had not enumerated all arrived as "expired, revoked, or missing a scope" —
  * confident, specific, and about a token nothing had been learned about.
  *
- * The strings are `gh`'s own, captured from a real CLI (see
- * `PUBLISHER_AUTH_COMMAND`) plus the GitHub API's 401/403 bodies it relays.
+ * WHAT ROUND 3 STILL HAD WRONG, and the principle that fixes it. The list used
+ * to include `is invalid` and `failed to log in`, which are exactly the words
+ * `gh` prints when it never reached GitHub at all (see
+ * {@link looksLikeAmbiguousLoginFailure}) — so a DNS outage was reported as a
+ * bad token. Every string kept below requires a LIVE RESPONSE BODY from GitHub
+ * to be produced, which is what makes it a verdict: a transport failure cannot
+ * fabricate `Bad credentials` or a scope list, because there was no response to
+ * carry them.
+ *
+ * A rate limit is explicitly NOT a refusal even though GitHub returns it as
+ * `403` — it is returned WITH a valid credential, so it is excluded before
+ * anything else is considered.
  */
 export function looksLikeCredentialRejected(text: string): boolean {
   const t = text.toLowerCase()
   if (t.length === 0) return false
+  // A rate-limited 403 arrives with a WORKING token. It must never be read as a
+  // refusal, so it is subtracted before the 40x test below can see it.
+  if (looksLikeGithubRateLimited(t)) return false
   return (
     t.includes('bad credentials') ||
-    t.includes('is invalid') ||
-    t.includes('invalid token') ||
-    t.includes('failed to log in') ||
     t.includes('requires authentication') ||
-    t.includes('missing required scopes') ||
+    // `gh auth status` prints "Missing required token scopes", the API prints
+    // "missing required scopes" — the optional word is why this is a regex and
+    // not an `includes`, which silently missed gh's own wording.
+    /missing required (token )?scopes/.test(t) ||
     t.includes('insufficient oauth scopes') ||
+    t.includes('resource not accessible by') ||
     /\bhttp 40[13]\b/.test(t)
+  )
+}
+
+/**
+ * Whether GitHub answered with a RATE LIMIT rather than a verdict.
+ *
+ * GitHub returns **403** — not 429 — for both the primary and the secondary rate
+ * limit, and it returns it to a request whose credential was accepted and
+ * counted. `gh auth status` makes a live API round-trip, so it hits this. The
+ * blanket `/\bhttp 40[13]\b/` in {@link looksLikeCredentialRejected} therefore
+ * told a rate-limited owner that his WORKING token was expired or revoked; the
+ * one correct action (wait) was the one action the refusal did not offer.
+ */
+export function looksLikeGithubRateLimited(text: string): boolean {
+  const t = text.toLowerCase()
+  if (t.length === 0) return false
+  return (
+    t.includes('rate limit exceeded') ||
+    t.includes('secondary rate limit') ||
+    t.includes('api rate limit') ||
+    t.includes('exceeded a secondary') ||
+    /\bhttp 429\b/.test(t)
+  )
+}
+
+/**
+ * Whether `gh` reported a login failure in wording that CANNOT distinguish a
+ * refused credential from a network that never carried the question.
+ *
+ * THIS IS A MEASUREMENT, NOT A HEDGE. On gh 2.97.0, run against `github.com`
+ * with `--active`, these two situations produce BYTE-IDENTICAL stderr:
+ *
+ *   • a genuinely invalid token, network fine;
+ *   • a perfectly good token behind a dead proxy, so GitHub was never reached.
+ *
+ * Both print:
+ *
+ *     github.com
+ *       X Failed to log in to github.com using token (GH_TOKEN)
+ *       - Active account: true
+ *       - The token in GH_TOKEN is invalid.
+ *
+ * The `dial tcp` / `no such host` strings {@link looksLikeGithubUnreachable}
+ * looks for appear only under `GH_DEBUG`, so that classifier cannot rescue the
+ * transport case from normal output, and `is invalid` matched the REJECTION
+ * classifier — which is how a network outage came to tell the owner his token
+ * was bad.
+ *
+ * There is no signal here that separates them, so the honest answer is that
+ * there is no verdict. `credential_verdict_unavailable` says exactly that and
+ * points at the network first; guessing "rotate your token" is wrong about half
+ * the time and expensive in the half it is wrong.
+ */
+export function looksLikeAmbiguousLoginFailure(text: string): boolean {
+  const t = text.toLowerCase()
+  if (t.length === 0) return false
+  return (
+    t.includes('failed to log in') ||
+    t.includes('is invalid') ||
+    t.includes('invalid token')
   )
 }
 
@@ -369,6 +510,13 @@ export function looksLikeCredentialRejected(text: string): boolean {
  * `gh` nonetheless says it was handed nothing, the credential did not survive
  * the trip — which is a fault in the host runner, not in the token, and must
  * never be reported as a rejection.
+ *
+ * The `gh auth login` hint is the weakest of the three signals — `gh` also
+ * prints it alongside a FAILED login — so it is only believed when the same
+ * output carries no verdict and no ambiguous login failure. Both exclusions are
+ * load-bearing: the ambiguous one had to be added when
+ * {@link looksLikeCredentialRejected} was narrowed, or an "invalid token …
+ * run: gh auth login" output would have started reading as "nothing stored".
  */
 export function looksLikeNoGithubAuth(text: string): boolean {
   const t = text.toLowerCase()
@@ -376,7 +524,9 @@ export function looksLikeNoGithubAuth(text: string): boolean {
   return (
     t.includes('not logged into any github hosts') ||
     t.includes('no accounts') ||
-    (t.includes('gh auth login') && !looksLikeCredentialRejected(t))
+    (t.includes('gh auth login') &&
+      !looksLikeCredentialRejected(t) &&
+      !looksLikeAmbiguousLoginFailure(t))
   )
 }
 
@@ -396,6 +546,25 @@ export function looksLikeGithubUnreachable(text: string): boolean {
     t.includes('temporary failure in name resolution') ||
     /\bhttp 5\d\d\b/.test(t)
   )
+}
+
+/**
+ * Name WHICH credential `gh` was talking about, so the refusal sends the owner
+ * to the right one.
+ *
+ * An empty store does not mean nothing was tried — `spawnCapture` omits an empty
+ * environment, so `gh` falls back to the host's ambient login and it is THAT
+ * credential GitHub answered about. Reporting an ambient refusal against the
+ * (empty) store would send the owner to reconnect an app credential that was
+ * never in play.
+ */
+export function describeWhichCredential(token: string, stderr: string): string {
+  const which =
+    token.length > 0
+      ? 'the credential resolved from the configured source was used'
+      : "no credential was stored for this handle, so `gh` used this host's ambient " +
+        'login — that is the credential this is about'
+  return stderr.length > 0 ? `${which}: ${stderr}` : which
 }
 
 /**
@@ -502,6 +671,12 @@ export function defaultGitModeProbe(
       if (looksLikeGithubUnreachable(output)) {
         return { authenticated: false, cause: 'could_not_reach_github', detail: res.stderr }
       }
+      // BEFORE any credential verdict: GitHub returns 403 for a rate limit, to a
+      // request whose credential it ACCEPTED. Classified here so the blanket 40x
+      // test below can never see it.
+      if (looksLikeGithubRateLimited(output)) {
+        return { authenticated: false, cause: 'github_rate_limited', detail: res.stderr }
+      }
       // `gh` says it was handed no credential at all.
       if (looksLikeNoGithubAuth(output)) {
         // CANARY. We resolved a token, and `gh` still saw none — so it did not
@@ -525,13 +700,34 @@ export function defaultGitModeProbe(
         // reject.
         return { authenticated: false, cause: 'no_credential_available', detail: res.stderr }
       }
-      // POSITIVE EVIDENCE ONLY. Reached only when `gh` actually said the
-      // credential was refused.
+      // POSITIVE EVIDENCE ONLY. Reached only when GitHub answered and refused.
+      //
+      // THE CAUSE IS WHAT HAPPENED, NOT WHAT WAS CONFIGURED. This used to read
+      // `token.length === 0 ? 'no_credential_available' : 'credential_rejected'`,
+      // which is self-contradicting: control only arrives here on positive
+      // evidence that a credential WAS presented and refused, so "no credential
+      // available" denies the very observation that selected the branch. It was
+      // not hypothetical — a stale ambient account whose `hosts.yml` token is
+      // invalid lands exactly here with an empty store, and the owner was told
+      // nothing was connected while `gh` was telling us something was, and was
+      // bad. An empty store does not mean no credential was tried; it means the
+      // one that was tried came from the host's ambient login instead, which is
+      // a fact about WHICH credential to go fix, so it belongs in the detail.
       if (looksLikeCredentialRejected(output)) {
         return {
           authenticated: false,
-          cause: token.length === 0 ? 'no_credential_available' : 'credential_rejected',
-          detail: res.stderr,
+          cause: 'credential_rejected',
+          detail: describeWhichCredential(token, res.stderr),
+        }
+      }
+      // GitHub may never have answered at all: `gh` prints the same "failed to
+      // log in / token is invalid" text for a refused token and for a network it
+      // could not cross. Say so rather than picking the expensive guess.
+      if (looksLikeAmbiguousLoginFailure(output)) {
+        return {
+          authenticated: false,
+          cause: 'credential_verdict_unavailable',
+          detail: describeWhichCredential(token, res.stderr),
         }
       }
       // `gh` failed for a reason we cannot classify. Nothing was learned about
