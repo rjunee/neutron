@@ -38,12 +38,13 @@
  */
 
 import {
-  AS_BUILT_CANDIDATES,
   BUILT_IN_MERGE_DRIVERS,
   collectTrackedAttributesFiles,
+  INSTALLER_MERGE_DRIVER,
   localEffectiveMergeDrivers,
   MERGE_ATTRIBUTE_STATES,
   mergeRulesAcross,
+  presentAsBuiltLogs,
   resolveTrackedMergeDrivers,
   unionAttributeLine,
   untrackedOverlayAttributes,
@@ -51,16 +52,19 @@ import {
 
 const root = process.argv[2] ?? process.cwd()
 
+// `SPEC.md` is read from DISK on purpose, and it is the one thing here that is.
+// It decides only WHETHER to run; a governed tree that has not committed its
+// spec yet is still one, and the cost of being wrong is running a check that
+// then finds nothing to enforce. What is GATED — the log and the rule reaching
+// it — is read from the index, because only that answers "what does a fresh
+// clone get".
 const isGoverned = await Bun.file(`${root}/SPEC.md`).exists()
 if (!isGoverned) {
   console.log(`governed-repo attributes: ${root} has no root SPEC.md — not a governed repo, nothing to enforce`)
   process.exit(0)
 }
 
-const present: string[] = []
-for (const candidate of AS_BUILT_CANDIDATES) {
-  if (await Bun.file(`${root}/${candidate}`).exists()) present.push(candidate)
-}
+const present = presentAsBuiltLogs(root)
 
 if (present.length === 0) {
   console.log('governed-repo attributes: no append-only build log found — nothing to enforce')
@@ -100,7 +104,18 @@ function localNote(): string[] {
   if (explained.length > 0 && overlay !== null) {
     out.push(`   (this clone additionally resolves, via ${overlay.path} — informational, not gated:`)
     for (const p of explained) out.push(`      ${p} → ${local.get(p) ?? 'unspecified'}`)
-    out.push('    that is what scripts/install-merge-drivers.sh installs, and it does not change the floor)')
+    // Only the installer's OWN driver may be credited to the installer. Any
+    // rule at all in `info/attributes` used to be described as "what
+    // scripts/install-merge-drivers.sh installs" — so a hand-written local
+    // `merge=binary` overlay was reported as the sanctioned upgrade, which
+    // sends the reader to an installer that never wrote it.
+    const fromInstaller = explained.every((p) => local.get(p) === INSTALLER_MERGE_DRIVER)
+    out.push(
+      fromInstaller
+        ? `    that is what scripts/install-merge-drivers.sh installs, and it does not change the floor)`
+        : `    that file is untracked, so it changes your merges and nobody else's, and it does`,
+    )
+    if (!fromInstaller) out.push('    not change the floor)')
   }
   for (const p of unexplained) {
     out.push(`   (this clone resolves ${p} → ${local.get(p) ?? 'unspecified'}, which differs from the`)

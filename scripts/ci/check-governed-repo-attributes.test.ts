@@ -80,9 +80,22 @@ function initRepoWithOverlay(dir: string, overlay: string): void {
   writeFileSync(join(dir, '.git', 'info', 'attributes'), overlay)
 }
 
-function runGate(root: string): { status: number; out: string } {
-  const res = spawnSync('bun', [GATE, root], { cwd: REPO_ROOT, encoding: 'utf8' })
+function runGate(root: string, env?: NodeJS.ProcessEnv): { status: number; out: string } {
+  const res = spawnSync('bun', [GATE, root], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    ...(env ? { env } : {}),
+  })
   return { status: res.status ?? -1, out: `${res.stdout}${res.stderr}` }
+}
+
+/** A repo with everything committed — the tracked state a clone would get. */
+function initRepo(dir: string): void {
+  execFileSync('git', ['init', '-q', dir], { stdio: 'pipe' })
+  execFileSync('git', ['-C', dir, 'add', '-A'], { stdio: 'pipe' })
+  execFileSync('git', ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'seed'], {
+    stdio: 'pipe',
+  })
 }
 
 describe('check-governed-repo-attributes (subprocess)', () => {
@@ -333,6 +346,142 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     expect(status).toBe(0)
     expect(out).toContain('informational, not gated')
     expect(out).not.toContain('NOT explained')
+  })
+
+  test('an overlay that is NOT the installer\'s driver is not credited to the installer', () => {
+    // Any rule at all in `info/attributes` used to be described as "what
+    // scripts/install-merge-drivers.sh installs". A hand-written local
+    // `merge=binary` is not, and saying so sends the reader to a script that
+    // never wrote the line — while calling a driver that DROPS the other side's
+    // entries a sanctioned upgrade.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+    initRepoWithOverlay(dir, 'docs/AS_BUILT.md merge=binary\n')
+    const { status, out } = runGate(dir)
+    expect(status).toBe(0)
+    expect(out).toContain('informational, not gated')
+    expect(out).toContain('binary')
+    expect(out).not.toContain('install-merge-drivers.sh installs')
+    expect(out).toContain("changes your merges and nobody else's")
+  })
+
+  test('an UNTRACKED log does not fail a repo whose tracked floor is perfect', () => {
+    // Presence was read from DISK while the rule was read from the INDEX. A
+    // stray `AS-BUILT.md` in someone's working tree then made the gate demand a
+    // rule for a file that reaches no clone — a repo with a perfect tracked
+    // floor failing on a file that is not in it.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+    initRepo(dir)
+    writeFileSync(join(dir, 'AS-BUILT.md'), '# stray, never committed\n')
+
+    const { status, out } = runGate(dir)
+    expect(status).toBe(0)
+    expect(out).toContain('✅')
+    expect(out).not.toContain('AS-BUILT.md')
+  })
+
+  describe('a poisoned environment cannot flip the verdict', () => {
+    /** A committed repo whose tracked union line is GONE. */
+    function brokenRepo(): string {
+      const dir = fixture({ attributes: '# the union line was deleted\n' })
+      initRepo(dir)
+      return dir
+    }
+
+    /** A committed repo whose tracked union line is intact. */
+    function healthyRepo(): string {
+      const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+      initRepo(dir)
+      return dir
+    }
+
+    // Every one of these was measured as an exit-0 "✅ governed-repo attributes
+    // OK" over a DELETED floor before the isolation reached the reads that feed
+    // the probe. This repo runs `scripts/ci` gates from git hooks, and git
+    // exports GIT_DIR / GIT_INDEX_FILE into a hook's environment itself.
+    const poisons: Array<[string, (healthy: string) => NodeJS.ProcessEnv]> = [
+      ['GIT_DIR points at a healthy repo', (h) => ({ GIT_DIR: join(h, '.git') })],
+      [
+        'GIT_INDEX_FILE + GIT_OBJECT_DIRECTORY come from a healthy repo',
+        (h) => ({ GIT_INDEX_FILE: join(h, '.git', 'index'), GIT_OBJECT_DIRECTORY: join(h, '.git', 'objects') }),
+      ],
+    ]
+
+    for (const [name, build] of poisons) {
+      test(`still FAILS a broken floor when ${name}`, () => {
+        const healthy = healthyRepo()
+        const broken = brokenRepo()
+        const env = { ...process.env, ...build(healthy) }
+
+        // Control: the poison is real — unisolated git reads the other repo.
+        expect(
+          execFileSync('git', ['-C', broken, 'show', ':.gitattributes'], { encoding: 'utf8', env }),
+        ).toContain('merge=union')
+
+        const { status } = runGate(broken, env)
+        expect(status).toBe(1)
+      })
+
+      test(`still PASSES an intact floor when ${name}`, () => {
+        // The other half: isolation that fails everything is not isolation.
+        const healthy = healthyRepo()
+        const broken = brokenRepo()
+        const env = { ...process.env, ...build(broken) }
+        const { status, out } = runGate(healthy, env)
+        expect(status).toBe(0)
+        expect(out).toContain('✅')
+      })
+    }
+
+    test('still FAILS a broken floor when the DEFAULT global attributes file grants union', () => {
+      // `$XDG_CONFIG_HOME/git/attributes` needs no config entry to be read, so
+      // pinning GIT_CONFIG_GLOBAL does not reach it.
+      const broken = brokenRepo()
+      const xdg = mkdtempSync(join(tmpdir(), 'governed-attrs-xdg-'))
+      created.push(xdg)
+      mkdirSync(join(xdg, 'git'), { recursive: true })
+      writeFileSync(join(xdg, 'git', 'attributes'), 'docs/AS_BUILT.md merge=union\n')
+      const env = { ...process.env, XDG_CONFIG_HOME: xdg }
+
+      // Control: with that file in place, an unisolated git answers `union` for
+      // a repo that tracks no such rule.
+      expect(
+        execFileSync('git', ['-C', broken, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'], {
+          encoding: 'utf8',
+          env,
+        }).trim(),
+      ).toBe('docs/AS_BUILT.md: merge: union')
+
+      expect(runGate(broken, env).status).toBe(1)
+    })
+
+    test('still FAILS a broken floor when an init TEMPLATE injects core.attributesFile', () => {
+      const broken = brokenRepo()
+      const template = mkdtempSync(join(tmpdir(), 'governed-attrs-tmpl-'))
+      created.push(template)
+      const attrs = join(template, 'attrs')
+      writeFileSync(attrs, 'docs/AS_BUILT.md merge=union\n')
+      writeFileSync(join(template, 'config'), `[core]\n\tattributesFile = ${attrs}\n`)
+      const env = { ...process.env, GIT_TEMPLATE_DIR: template }
+
+      // Control: a repo born from that template carries the setting in its OWN
+      // config, which outranks the global/system pins — so the probe's scratch
+      // repo answered `union` for attributes it had never been shown.
+      const control = mkdtempSync(join(tmpdir(), 'governed-attrs-tmplrepo-'))
+      created.push(control)
+      execFileSync('git', ['init', '-q', control], { stdio: 'pipe', env })
+      expect(
+        execFileSync(
+          'git',
+          ['-C', control, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'],
+          {
+            encoding: 'utf8',
+            env: { ...env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_ATTR_NOSYSTEM: '1' },
+          },
+        ).trim(),
+      ).toBe('docs/AS_BUILT.md: merge: union')
+
+      expect(runGate(broken, env).status).toBe(1)
+    })
   })
 
   test('this repo — the governed tree the gate ships in — passes its own gate', () => {

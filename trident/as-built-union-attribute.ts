@@ -100,6 +100,16 @@ export const BUILT_IN_MERGE_DRIVERS = ['text', 'binary', 'union'] as const
  */
 export const MERGE_ATTRIBUTE_STATES = ['set', 'unset'] as const
 
+/**
+ * The driver name `scripts/install-merge-drivers.sh` binds (its `DRIVER_NAME`).
+ *
+ * Named here so a diagnostic can tell the sanctioned opt-in upgrade apart from
+ * any other rule someone put in their untracked `info/attributes`. Crediting
+ * every overlay to the installer sends a reader to a script that never wrote
+ * the line they are looking at. A test pins this against the shell script.
+ */
+export const INSTALLER_MERGE_DRIVER = 'as-built-log'
+
 /** One `merge=` assignment found in an attributes file, with where it was found. */
 export interface MergeRule {
   /** The attributes file it came from, repo-relative (e.g. `docs/.gitattributes`). */
@@ -228,10 +238,24 @@ export function relevantAttributesPaths(paths: readonly string[]): string[] {
  * nested inside a larger repo `git show :docs/.gitattributes` would return some
  * OTHER directory's file — a confident answer to a different question, which is
  * the failure this whole module exists to stop. Nested trees read from disk.
+ *
+ * ⚠️ THESE READS CARRY THE SAME ISOLATION AS THE PROBE, and they must. The
+ * probe downstream was isolated while the reads that FEED it were not, so
+ * `GIT_DIR` (or `GIT_INDEX_FILE` + `GIT_OBJECT_DIRECTORY`) pointing at another
+ * repository handed a healthy repo's `.gitattributes` to a probe that then
+ * correctly answered `union` — about the wrong repository. Measured end to end
+ * on git 2.50.1: exit 0, "✅ governed-repo attributes OK", over a repo whose
+ * union line had been deleted. Isolating only the last step in a chain isolates
+ * nothing.
  */
-export function collectTrackedAttributesFiles(repoRoot: string, paths: readonly string[]): AttributesFile[] {
+export function collectTrackedAttributesFiles(
+  repoRoot: string,
+  paths: readonly string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): AttributesFile[] {
   const candidates = relevantAttributesPaths(paths)
-  const fromIndex = isRepositoryTopLevel(repoRoot)
+  const env = checkAttrEnv(baseEnv)
+  const fromIndex = isRepositoryTopLevel(repoRoot, env)
   const found: AttributesFile[] = []
 
   for (const path of candidates) {
@@ -240,6 +264,7 @@ export function collectTrackedAttributesFiles(repoRoot: string, paths: readonly 
       try {
         content = execFileSync('git', ['-C', repoRoot, 'show', `:${path}`], {
           encoding: 'utf8',
+          env,
           stdio: ['ignore', 'pipe', 'ignore'],
         })
       } catch {
@@ -254,11 +279,47 @@ export function collectTrackedAttributesFiles(repoRoot: string, paths: readonly 
   return found
 }
 
+/**
+ * Which of {@link AS_BUILT_CANDIDATES} this repo actually keeps — read the same
+ * way the attributes are.
+ *
+ * Presence used to be a plain disk check while the rule was read from the
+ * index, and the two disagreeing is a real failure: an UNTRACKED `AS-BUILT.md`
+ * left in a working tree made the gate demand a rule for a file that reaches no
+ * clone, failing a repo whose tracked floor was perfect. Loud rather than
+ * silent, but still wrong, and the fix is to ask one question of one source.
+ *
+ * Outside a repository (a governed tree checked before it is one, and the
+ * gate's own fixtures) there is no index, so disk is the only reading of "what
+ * would travel".
+ */
+export function presentAsBuiltLogs(
+  repoRoot: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const env = checkAttrEnv(baseEnv)
+  if (isRepositoryTopLevel(repoRoot, env)) {
+    try {
+      const stdout = execFileSync('git', ['-C', repoRoot, 'ls-files', '-z', '--', ...AS_BUILT_CANDIDATES], {
+        encoding: 'utf8',
+        env,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      const tracked = new Set(stdout.split('\0').filter((p) => p.length > 0))
+      return AS_BUILT_CANDIDATES.filter((c) => tracked.has(c))
+    } catch {
+      return []
+    }
+  }
+  return AS_BUILT_CANDIDATES.filter((c) => existsSync(join(repoRoot, c)))
+}
+
 /** Is `dir` the TOP LEVEL of a git repository (not merely inside one)? */
-function isRepositoryTopLevel(dir: string): boolean {
+function isRepositoryTopLevel(dir: string, env: NodeJS.ProcessEnv): boolean {
   try {
     const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
       encoding: 'utf8',
+      env,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
     if (top.length === 0) return false
@@ -286,6 +347,30 @@ export const CHECK_ATTR_ISOLATION_ENV = {
   GIT_CONFIG_SYSTEM: '/dev/null',
   GIT_ATTR_NOSYSTEM: '1',
 } as const
+
+/**
+ * Command-line pin applied to every `git check-attr` this module runs.
+ *
+ * Pinning `GIT_CONFIG_GLOBAL=/dev/null` is NOT enough, because git's global
+ * attributes file has a DEFAULT that needs no config to exist:
+ * `$XDG_CONFIG_HOME/git/attributes`, falling back to `~/.config/git/attributes`.
+ * Measured on git 2.50.1 (Apple Git-155), against a governed repo whose tracked
+ * `.gitattributes` carries no rule for the log: with that XDG file saying
+ * `docs/AS_BUILT.md merge=union`, the gate exited 0 and printed
+ * "✅ governed-repo attributes OK" over a deleted floor.
+ *
+ * `-c` outranks every config FILE, including a repo-local one, and that second
+ * half does more work than it looks like. `GIT_TEMPLATE_DIR` (or
+ * `init.templateDir`) naming a template whose `config` sets
+ * `core.attributesFile` gives the probe's scratch repo that setting in its own
+ * config at `init` time, where no environment pin can reach it — measured, also
+ * end to end, as the same false PASS. An earlier draft of this fix answered
+ * that with an empty `--template=` plus stripping `GIT_TEMPLATE_DIR`; both were
+ * then removed, because mutating them away leaves every test green. This one
+ * line already covers it, and a second mechanism that no test can distinguish
+ * from its absence is not a defence, it is something to maintain.
+ */
+export const CHECK_ATTR_ARGV_PIN = ['-c', 'core.attributesFile=/dev/null'] as const
 
 /**
  * Variables REMOVED from every probe git process. Pinning the three above is
@@ -439,7 +524,7 @@ export function resolveTrackedMergeDrivers(input: {
     // scratch tree stays empty apart from the attributes files themselves.
     const stdout = execFileSync(
       'git',
-      ['-C', scratch, 'check-attr', '-z', 'merge', '--', ...input.paths],
+      [...CHECK_ATTR_ARGV_PIN, '-C', scratch, 'check-attr', '-z', 'merge', '--', ...input.paths],
       { env, encoding: 'utf8' },
     )
     return parseCheckAttrZ(stdout)
@@ -460,17 +545,26 @@ export function resolveTrackedMergeDrivers(input: {
  * Returns `null` when `repoRoot` is not a git repository — a governed tree can
  * be checked before it is a repo (the CI script accepts any directory), and
  * "not a repo" is not a finding.
+ *
+ * "This clone" means THIS REPOSITORY — its tracked files plus its untracked
+ * `$GIT_COMMON_DIR/info/attributes` — and deliberately not the machine around
+ * it. The same isolation the verdict uses is applied here, for two reasons: an
+ * ambient `GIT_DIR` would make this sentence describe a different repository
+ * entirely, and the note this feeds exists to attribute a divergence to the
+ * repo's own overlay, which a machine-global attributes file would only ever
+ * confuse it about.
  */
 export function localEffectiveMergeDrivers(
   repoRoot: string,
   paths: readonly string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
 ): Map<string, string | null> | null {
   if (paths.length === 0) return new Map()
   try {
     const stdout = execFileSync(
       'git',
-      ['-C', repoRoot, 'check-attr', '-z', 'merge', '--', ...paths],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      [...CHECK_ATTR_ARGV_PIN, '-C', repoRoot, 'check-attr', '-z', 'merge', '--', ...paths],
+      { encoding: 'utf8', env: checkAttrEnv(baseEnv), stdio: ['ignore', 'pipe', 'ignore'] },
     )
     return parseCheckAttrZ(stdout)
   } catch {
@@ -488,11 +582,15 @@ export function localEffectiveMergeDrivers(
  * which named a file that might not exist and described a broken floor as a
  * harmless local upgrade.
  */
-export function untrackedOverlayAttributes(repoRoot: string): { path: string; content: string } | null {
+export function untrackedOverlayAttributes(
+  repoRoot: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): { path: string; content: string } | null {
   let common: string
   try {
     common = execFileSync('git', ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
       encoding: 'utf8',
+      env: checkAttrEnv(baseEnv),
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
   } catch {

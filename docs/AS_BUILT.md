@@ -187,26 +187,94 @@ referenced, under a docblock describing them as live behaviour — the shape of
 thing that reads as a feature for months. The module is now only the question the
 gate asks.
 
-Tests went 17 → 79 across the two files (34 module + 19 gate + 26 workflow), and
-all 17 originals passed over every false success above, because they only ever
+The isolation reached the last step in the chain and not the ones feeding it,
+which isolates nothing. `resolveTrackedMergeDrivers` ran under a scrubbed
+environment; `collectTrackedAttributesFiles` — which decides WHICH
+`.gitattributes` that probe is then shown — ran `git show :<path>` under the
+caller's. Measured end to end on git 2.50.1 against a governed repo whose union
+line had been deleted: with `GIT_DIR` pointed at a healthy repo, the gate exited
+0 and printed `✅ governed-repo attributes OK`; the same with `GIT_INDEX_FILE`
+plus `GIT_OBJECT_DIRECTORY`. The probe was answering correctly about a different
+repository. Every git read in the module now carries the same isolation, and the
+regression tests for it run the gate as a SUBPROCESS under each poisoned
+environment, because an in-process test hands the poison in explicitly and
+therefore cannot see an inherited one — dropping the `env` argument leaves the
+in-process tests green and turns the four subprocess ones red, which is exactly
+how this shipped.
+
+`GIT_CONFIG_GLOBAL=/dev/null` does not disable git's global attributes file,
+because that file has a DEFAULT needing no config at all:
+`$XDG_CONFIG_HOME/git/attributes`, falling back to `~/.config/git/attributes`.
+Measured: with `docs/AS_BUILT.md merge=union` in that file, the gate passed a
+repo tracking no such rule. Every `check-attr` now runs with
+`-c core.attributesFile=/dev/null`, which outranks every config FILE including a
+repo-local one — and that also closes an init TEMPLATE whose `config` sets
+`core.attributesFile`, measured as the same false PASS. A draft carried a second
+mechanism for the template case (an empty `--template=` plus stripping
+`GIT_TEMPLATE_DIR`); mutating both away left the whole suite green, so they were
+removed rather than kept as a defence no test can distinguish from its absence.
+
+Log PRESENCE was read from disk while the RULE reaching it was read from the
+index. An untracked `AS-BUILT.md` in a working tree therefore failed a repo whose
+tracked floor was perfect — loud rather than silent, but still the gate answering
+about a file that reaches no clone. Presence now comes from `git ls-files` at the
+top level, disk only outside a repository. `SPEC.md` stays a disk read on
+purpose: it decides only WHETHER to run.
+
+The workflow guard proved the step's TEXT was present, nothing more. Adding
+`if: false` or `continue-on-error: true` to that same step left it green while
+the gate decided nothing — one-word edits that read as configuration rather than
+as deletion, and the exact edits a red gate tempts someone into. The check is now
+a pure function over the YAML, and the four bypasses (delete the step, disable
+the step, swallow its exit code, disable the whole job) are run against it as
+tests, each asserting its mutation landed before asserting it was caught.
+
+Nothing performed a real merge. Every "measured on git 2.50.1" sentence in this
+subsystem — including the one that had already been WRONG in shipped remediation
+text — was prose checked once by hand. Six real two-branch merges now pin them:
+`union` keeps both entries at exit 0 with no markers; a custom driver with no
+config is an ordinary `CONFLICT (content)` at exit 1 WITH markers and explicitly
+not 128; `merge.<name>.name` without `.driver` is the exit-128
+`lacks command line`; a bare `merge` rule is the ordinary text merge; `-merge`
+and `merge=binary` both make git treat the file as binary, keeping ours whole and
+dropping the other side's entries with no marker to notice them by.
+
+The local-clone note credited ANY overlay rule to `install-merge-drivers.sh`, so
+a hand-written `merge=binary` in someone's `info/attributes` was reported as the
+sanctioned upgrade — a driver that DROPS the other side's entries, described as
+harmless, pointing at a script that never wrote it. The installer's driver name
+is now a single exported constant pinned by a test against the shell script's
+`DRIVER_NAME`, and only that driver earns the installer's name in the note.
+
+Tests went 41 → 108 across the three files. The two that carry the gate went
+17 → 78 (51 module + 27 gate); the workflow-wiring file went 24 → 30. All 17
+originals passed over every false success above, because they only ever
 exercised pure helpers and an in-memory probe — the bug was never in a helper, it
 was in deciding a verdict from one. There are now subprocess tests running the
 real gate against throwaway trees (union present, rule missing, no attributes
 file, another built-in, a custom driver, `merge`/`-merge` states, duplicate
 rules, overriding wildcard, SUBDIRECTORY override, an untracked subdirectory
-override that must NOT fail, two logs, governed, ungoverned, an overlay over a
-broken floor, an overlay over an intact one, a glob overlay, an unexplained
-divergence) plus real-`git check-attr` boundary tests with clone-verified
-controls.
+override that must NOT fail, an untracked LOG that must NOT fail, two logs,
+governed, ungoverned, an overlay over a broken floor, an overlay over an intact
+one, a glob overlay, a non-installer overlay, an unexplained divergence, and a
+broken floor under each of four poisoned environments with an intact floor as
+the positive control) plus real-`git check-attr` boundary tests and real merges,
+with clone-verified controls.
 
 The "checks EVERY log" test was itself vacuous: the candidate ordering made the
 first present log the broken one, so a gate checking only `present[0]` stayed
 green through it. The fixture now makes the FIRST log conformant and a LATER one
-broken, and that mutation now fails. Eight mutations in total, each run with the
-unmutated suite green as the control: root-only attributes collection,
+broken, and that mutation now fails. Thirteen mutations in total, each run with
+the unmutated suite green as the control: root-only attributes collection,
 isolation-strips-nothing, `present[0]`-only, set/unset-as-custom-driver,
-overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo, and
-deleting the workflow step two ways — every one now turns a test red.
+overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo,
+deleting the workflow step two ways, the collector inheriting the ambient
+environment, the collector reading an unscrubbed one, dropping the
+`core.attributesFile` argv pin, presence read from disk, and crediting every
+overlay to the installer — every one turns a test red. One mutation did NOT, and
+that is why the code it removed is absent from this change: deleting the
+empty-`--template=` dance left the entire suite green, the argv pin having
+already covered it.
 
 ## 2026-08-16 — two builds can append to this file at once
 

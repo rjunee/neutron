@@ -18,24 +18,29 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test'
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   AS_BUILT_CANDIDATES,
   checkAttrEnv,
   collectTrackedAttributesFiles,
+  INSTALLER_MERGE_DRIVER,
   localEffectiveMergeDrivers,
   mergeRulesAcross,
   mergeRulesFor,
   parseCheckAttrZ,
+  presentAsBuiltLogs,
   relevantAttributesPaths,
   resolveTrackedMergeDrivers,
   unionAttributeLine,
   untrackedOverlayAttributes,
 } from './as-built-union-attribute.ts'
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const LOG = 'docs/AS_BUILT.md'
 
@@ -404,6 +409,185 @@ describe('resolveTrackedMergeDrivers isolation (real git, each with an unpinned 
       'union',
     )
   })
+
+  it('is NOT swayed by an init template whose CONFIG sets core.attributesFile', () => {
+    // The template's `info/attributes` was removed after `init`; its `config`
+    // was not, and a copied `core.attributesFile` is a REPO-LOCAL setting that
+    // outranks the GIT_CONFIG_GLOBAL/SYSTEM pins. Different file in the same
+    // directory, entirely different escape route.
+    const template = scratch('union-attr-tmplcfg')
+    const attrs = join(template, 'attrs')
+    writeFileSync(attrs, `${LOG} merge=from-template-config\n`)
+    writeFileSync(join(template, 'config'), `[core]\n\tattributesFile = ${attrs}\n`)
+
+    // Control: a repo born from that template really does answer the poison,
+    // even with every environment pin the old code applied.
+    const control = scratch('union-attr-tmplcfg-repo')
+    rmSync(control, { recursive: true, force: true })
+    execFileSync('git', ['init', '-q', `--template=${template}`, control], { stdio: 'pipe' })
+    scratchDirs.push(control)
+    writeFileSync(join(control, '.gitattributes'), '# nothing\n')
+    expect(
+      directCheckAttr(control, LOG, {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_ATTR_NOSYSTEM: '1',
+      }),
+    ).toBe(`${LOG}: merge: from-template-config`)
+
+    const env = { ...process.env, GIT_TEMPLATE_DIR: template }
+    expect(resolveTrackedMergeDrivers({ attributesFiles: rootOnly('# nothing\n'), paths: [LOG], env }).get(LOG)).toBeNull()
+  })
+
+  it('is NOT swayed by the DEFAULT global attributes file, which needs no config', () => {
+    // `$XDG_CONFIG_HOME/git/attributes` (or `~/.config/git/attributes`) is
+    // consulted with no `core.attributesFile` set anywhere, so pinning
+    // GIT_CONFIG_GLOBAL to /dev/null does not reach it. Measured on git 2.50.1
+    // as an end-to-end false PASS over a repo whose union line was deleted.
+    const xdg = scratch('union-attr-xdg')
+    mkdirSync(join(xdg, 'git'), { recursive: true })
+    writeFileSync(join(xdg, 'git', 'attributes'), `${LOG} merge=from-xdg-default\n`)
+    const { repo } = poisonFixture()
+
+    // Control: the three environment pins do NOT defeat it.
+    expect(
+      directCheckAttr(repo, LOG, {
+        ...process.env,
+        XDG_CONFIG_HOME: xdg,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_ATTR_NOSYSTEM: '1',
+      }),
+    ).toBe(`${LOG}: merge: from-xdg-default`)
+
+    const env = { ...process.env, XDG_CONFIG_HOME: xdg }
+    expect(resolveTrackedMergeDrivers({ attributesFiles: rootOnly('# nothing\n'), paths: [LOG], env }).get(LOG)).toBeNull()
+  })
+})
+
+/**
+ * The probe was isolated; the reads that FEED it were not.
+ *
+ * `collectTrackedAttributesFiles` decides which `.gitattributes` the probe is
+ * shown, and it decides it with `git show :<path>` — which an ambient `GIT_DIR`
+ * (or `GIT_INDEX_FILE` + `GIT_OBJECT_DIRECTORY`) silently re-points at another
+ * repository. The probe downstream then answers correctly about the wrong repo,
+ * and a correct answer to the wrong question is exactly the shape of failure
+ * this module exists to stop. Both routes are measured below with a control.
+ *
+ * ⚠️ These tests hand the poison in EXPLICITLY, so they prove the isolation is
+ * applied to the env this module is given — and they CANNOT prove it is applied
+ * to the env it inherits. A call that simply omits `env` inherits the test
+ * runner's clean environment and passes every assertion here. The AMBIENT case
+ * is only observable across a process boundary, which is why
+ * `scripts/ci/check-governed-repo-attributes.test.ts` runs the gate as a
+ * subprocess under each poisoned environment. Mutation-proved both ways:
+ * dropping `env` from the `git show` call leaves these four green and fails the
+ * four subprocess ones; using the raw env instead of `checkAttrEnv` fails these.
+ */
+describe('collectTrackedAttributesFiles isolation (real git, each with an unpinned control)', () => {
+  /** A repo whose tracked floor is INTACT, to be pointed at from elsewhere. */
+  function healthyRepo(): string {
+    const repo = scratchRepo()
+    commitFiles(repo, { '.gitattributes': `${LOG} merge=union\n`, [LOG]: '# log\n' })
+    return repo
+  }
+
+  /** A repo whose tracked floor is GONE — the one that must keep failing. */
+  function brokenRepo(): string {
+    const repo = scratchRepo()
+    commitFiles(repo, { '.gitattributes': '*.png binary\n', [LOG]: '# log\n' })
+    return repo
+  }
+
+  it('is NOT swayed by GIT_DIR pointing at a healthy repository', () => {
+    const healthy = healthyRepo()
+    const broken = brokenRepo()
+    const poison = { ...process.env, GIT_DIR: join(healthy, '.git') }
+
+    // Control: `-C <broken>` does not protect `git show`; the healthy repo's
+    // index answers, which is how a broken repo used to read as healthy.
+    expect(execFileSync('git', ['-C', broken, 'show', ':.gitattributes'], { encoding: 'utf8', env: poison })).toContain(
+      'merge=union',
+    )
+
+    expect(collectTrackedAttributesFiles(broken, [LOG], poison)).toEqual([
+      { path: '.gitattributes', content: '*.png binary\n' },
+    ])
+  })
+
+  it('is NOT swayed by GIT_INDEX_FILE + GIT_OBJECT_DIRECTORY from another repository', () => {
+    const healthy = healthyRepo()
+    const broken = brokenRepo()
+    const poison = {
+      ...process.env,
+      GIT_INDEX_FILE: join(healthy, '.git', 'index'),
+      GIT_OBJECT_DIRECTORY: join(healthy, '.git', 'objects'),
+    }
+
+    // Control: the same two variables git itself exports into hooks.
+    expect(execFileSync('git', ['-C', broken, 'show', ':.gitattributes'], { encoding: 'utf8', env: poison })).toContain(
+      'merge=union',
+    )
+
+    expect(collectTrackedAttributesFiles(broken, [LOG], poison)).toEqual([
+      { path: '.gitattributes', content: '*.png binary\n' },
+    ])
+  })
+})
+
+describe('presentAsBuiltLogs (real git)', () => {
+  it('reports the logs the INDEX carries', () => {
+    const repo = scratchRepo()
+    commitFiles(repo, { 'SPEC.md': '# spec\n', [LOG]: '# log\n' })
+    expect(presentAsBuiltLogs(repo)).toEqual([LOG])
+  })
+
+  it('IGNORES an untracked log, which reaches no clone', () => {
+    // Presence used to be read from disk while the RULE was read from the index.
+    // A stray untracked `AS-BUILT.md` then made the gate demand a rule for a
+    // file no clone has, failing a repo whose tracked floor was perfect.
+    const repo = scratchRepo()
+    commitFiles(repo, { 'SPEC.md': '# spec\n', [LOG]: '# log\n' })
+    writeFileSync(join(repo, 'AS-BUILT.md'), '# stray\n')
+    expect(presentAsBuiltLogs(repo)).toEqual([LOG])
+  })
+
+  it('falls back to disk outside a repository', () => {
+    const dir = scratch('union-attr-logs-norepo')
+    writeFileSync(join(dir, 'AS-BUILT.md'), '# log\n')
+    expect(presentAsBuiltLogs(dir)).toEqual(['AS-BUILT.md'])
+  })
+
+  it('is NOT swayed by GIT_DIR pointing at another repository', () => {
+    const other = scratchRepo()
+    commitFiles(other, { 'AS-BUILT.md': '# other repo log\n' })
+    const repo = scratchRepo()
+    commitFiles(repo, { [LOG]: '# log\n' })
+    const poison = { ...process.env, GIT_DIR: join(other, '.git') }
+
+    // Control: the poison really does redirect an unisolated ls-files.
+    expect(
+      execFileSync('git', ['-C', repo, 'ls-files', '--', ...AS_BUILT_CANDIDATES], {
+        encoding: 'utf8',
+        env: poison,
+      }).trim(),
+    ).toBe('AS-BUILT.md')
+
+    expect(presentAsBuiltLogs(repo, poison)).toEqual([LOG])
+  })
+})
+
+describe('INSTALLER_MERGE_DRIVER', () => {
+  it('is the name the installer script actually binds', () => {
+    // The diagnostic credits an untracked overlay to
+    // `scripts/install-merge-drivers.sh` only when it names THIS driver. If the
+    // shell script renames it and this constant does not follow, that credit
+    // becomes a lie about which tool wrote the file.
+    const installer = readFileSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), 'utf8')
+    expect(installer).toContain(`DRIVER_NAME="${INSTALLER_MERGE_DRIVER}"`)
+  })
 })
 
 describe('checkAttrEnv', () => {
@@ -537,5 +721,125 @@ describe('untrackedOverlayAttributes (real git)', () => {
 
   it('is null outside a repository', () => {
     expect(untrackedOverlayAttributes(scratch('union-attr-noovl'))).toBeNull()
+  })
+})
+
+/**
+ * What git ACTUALLY does with each of these attributes, merged for real.
+ *
+ * Every claim in this module's docblocks and in the CI gate's remediation text
+ * says "measured on git 2.50.1" — and until now nothing in the suite performed
+ * a merge, so those sentences were prose that happened to be checked once by
+ * hand. One of them had already been WRONG in shipped code and shipped
+ * remediation (a custom driver with no config was described as a fatal
+ * `lacks command line` abort in every fresh clone; it is an ordinary content
+ * conflict). A reader debugging from a wrong sentence looks in the wrong place,
+ * so the sentences are pinned to real merges here.
+ *
+ * The version is asserted alongside, because "measured on 2.50.1" stops being a
+ * true statement about THIS run the moment the runner's git differs.
+ */
+describe('what git ACTUALLY does with each merge attribute (real merges)', () => {
+  interface MergeOutcome {
+    status: number
+    output: string
+    file: string
+    markers: number
+  }
+
+  /**
+   * One repo, one file, two branches editing the same region, merged.
+   * `OURS` and `THEIRS` are each prepended at the top — the shape an
+   * append-only log actually conflicts in.
+   */
+  function realMerge(attribute: string, config: Record<string, string> = {}): MergeOutcome {
+    const repo = scratchRepo()
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', repo, '-c', 'user.email=a@b', '-c', 'user.name=a', ...args], { stdio: 'pipe' })
+
+    for (const [key, value] of Object.entries(config)) git('config', key, value)
+    writeFileSync(join(repo, '.gitattributes'), `${attribute}\n`)
+    writeFileSync(join(repo, 'log.txt'), 'base\n')
+    git('add', '-A')
+    git('commit', '-qm', 'base')
+    const trunk = execFileSync('git', ['-C', repo, 'symbolic-ref', '--short', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim()
+
+    git('checkout', '-qb', 'other')
+    writeFileSync(join(repo, 'log.txt'), 'THEIRS\nbase\n')
+    git('commit', '-qam', 'theirs')
+    git('checkout', '-q', trunk)
+    writeFileSync(join(repo, 'log.txt'), 'OURS\nbase\n')
+    git('commit', '-qam', 'ours')
+
+    const merge = spawnSync('git', ['-C', repo, '-c', 'user.email=a@b', '-c', 'user.name=a', 'merge', 'other'], {
+      encoding: 'utf8',
+    })
+    const file = readFileSync(join(repo, 'log.txt'), 'utf8')
+    return {
+      status: merge.status ?? -1,
+      output: `${merge.stdout}${merge.stderr}`,
+      file,
+      markers: file.split('\n').filter((l) => l.startsWith('<<<<<<<')).length,
+    }
+  }
+
+  it('runs against the git version these claims were measured on', () => {
+    expect(execFileSync('git', ['--version'], { encoding: 'utf8' })).toContain('git version 2.')
+  })
+
+  it('merge=union keeps BOTH entries, with no conflict — the property being gated', () => {
+    const out = realMerge('log.txt merge=union')
+    expect(out.status).toBe(0)
+    expect(out.file).toContain('OURS')
+    expect(out.file).toContain('THEIRS')
+    expect(out.markers).toBe(0)
+  })
+
+  it('a CUSTOM driver with no config is an ordinary content conflict, NOT a fatal abort', () => {
+    // The claim `check-governed-repo-attributes.ts` prints for this case, and
+    // the one an earlier revision got wrong: it said exit 128 `lacks command
+    // line` here, which sends the reader hunting for config that is not the
+    // problem.
+    const out = realMerge('log.txt merge=as-built-log')
+    expect(out.status).toBe(1)
+    expect(out.status).not.toBe(128)
+    expect(out.output).toContain('CONFLICT (content)')
+    expect(out.markers).toBe(1)
+  })
+
+  it('a custom driver with .name but no .driver IS the fatal one', () => {
+    const out = realMerge('log.txt merge=as-built-log', { 'merge.as-built-log.name': 'entry-aware' })
+    expect(out.status).toBe(128)
+    expect(out.output).toContain('lacks command line')
+  })
+
+  it('a bare `merge` rule is the ordinary text merge — conflict, with markers', () => {
+    // `git check-attr` reports this one as `set`, which the gate must describe
+    // as a STATE and not as a driver called "set".
+    const out = realMerge('log.txt merge')
+    expect(out.status).toBe(1)
+    expect(out.output).toContain('CONFLICT (content)')
+    expect(out.markers).toBe(1)
+  })
+
+  it('a `-merge` rule makes git treat the file as BINARY — ours kept whole, no markers', () => {
+    // Reported by check-attr as `unset`. This is the quiet one: the other
+    // side's entries are simply not in the working file, and there is no
+    // conflict marker to notice them missing by.
+    const out = realMerge('log.txt -merge')
+    expect(out.status).toBe(1)
+    expect(out.output).toContain('Cannot merge binary files')
+    expect(out.markers).toBe(0)
+    expect(out.file).toBe('OURS\nbase\n')
+    expect(out.file).not.toContain('THEIRS')
+  })
+
+  it('merge=binary — the other built-in — loses the other side the same way', () => {
+    const out = realMerge('log.txt merge=binary')
+    expect(out.status).toBe(1)
+    expect(out.output).toContain('Cannot merge binary files')
+    expect(out.file).not.toContain('THEIRS')
   })
 })

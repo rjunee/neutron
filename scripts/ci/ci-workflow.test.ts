@@ -339,26 +339,101 @@ describe('scheduled full leak-gate scan', () => {
  * shape of hole the leak-gate wiring tests above exist to close. Its own
  * subprocess tests prove the script is CORRECT; nothing there can prove it is
  * REACHED. Deleting the `- run:` line must fail CI, not pass it.
+ *
+ * PRESENCE OF THE LINE IS NOT ENOUGH, and that gap was real: a first version of
+ * this suite asserted only that the `- run:` key existed, so `if: false` or
+ * `continue-on-error: true` on the very same step left it green while the gate
+ * decided nothing. Both are single-word edits, both read as configuration
+ * rather than as deletion, and both are exactly what a red gate tempts somebody
+ * into. The check below is a pure function over YAML text so the MUTATIONS can
+ * be run against it here — a guard whose own bypass is untested is the shape of
+ * hole it exists to close.
  */
 describe('governed-repo attributes gate is wired into ci.yml', () => {
+  const GATE_RUN = 'bun scripts/ci/check-governed-repo-attributes.ts'
+
   /** The lines of one top-level job, bounded by the next job key. */
-  function jobBlock(name: string): string {
-    const start = yml.indexOf(`\n  ${name}:\n`)
-    expect(start).toBeGreaterThan(-1)
-    const rest = yml.slice(start + 1)
+  function jobBlock(source: string, name: string): string {
+    const start = source.indexOf(`\n  ${name}:\n`)
+    if (start === -1) return ''
+    const rest = source.slice(start + 1)
     const next = rest.search(/\n {2}[a-z][a-z0-9-]*:\n/)
     return next === -1 ? rest : rest.slice(0, next)
   }
 
-  test('a job actually runs the gate', () => {
-    // Job-scoped and anchored to a real `- run:` key rather than a file-wide
-    // `toContain`, so a passing mention of the script in a comment or in another
-    // job cannot satisfy it — the same anchoring the `fail-fast: false` test
-    // above needed after a whole-file match let the setting be flipped while the
-    // explanatory comment kept the test green.
-    // Mutation-proved before landing: deleting the `- run:` line fails this test.
-    expect(jobBlock('layering')).toMatch(/^\s+- run: bun scripts\/ci\/check-governed-repo-attributes\.ts /m)
+  /**
+   * Why the gate would not decide anything, or `null` if it would.
+   *
+   * A step runs unconditionally when it carries neither an `if:` (which can
+   * evaluate false) nor `continue-on-error: true` (which discards its exit
+   * code), and when the job around it carries neither either.
+   */
+  function whyNotGating(source: string): string | null {
+    const job = jobBlock(source, 'layering')
+    if (job === '') return 'no layering job'
+
+    const lines = job.split('\n')
+    const stepAt = lines.findIndex((l) => new RegExp(`^\\s+- run: ${GATE_RUN.replace(/[/.]/g, '\\$&')} `).test(l))
+    if (stepAt === -1) return 'no step runs the gate'
+
+    // The step is every line from its `- ` marker until the next one at the
+    // same indent (a step's own keys are indented deeper than its dash).
+    const indent = (lines[stepAt] ?? '').search(/\S/)
+    const step: string[] = [lines[stepAt] ?? '']
+    for (let i = stepAt + 1; i < lines.length; i++) {
+      const line = lines[i] ?? ''
+      if (line.trim().length === 0) continue
+      const at = line.search(/\S/)
+      if (at <= indent) break
+      step.push(line)
+    }
+
+    // Job-level keys sit at 4 spaces, before the `steps:` list. Slicing at a
+    // missing `steps:` would hand the WHOLE job to the job-scope check, which
+    // then trips on any step's legitimate `if:` — a false alarm dressed as a
+    // finding, so an absent `steps:` is treated as no job-level block.
+    const stepsAt = job.indexOf('\n    steps:')
+    for (const [scope, block] of [
+      ['step', step.join('\n')],
+      ['job', stepsAt === -1 ? '' : job.slice(0, stepsAt)],
+    ] as const) {
+      if (/^\s+if:/m.test(block)) return `${scope} is conditional on an if:`
+      if (/^\s+continue-on-error:\s*true/m.test(block)) return `${scope} sets continue-on-error: true`
+    }
+    return null
+  }
+
+  test('a job runs the gate, unconditionally, with its exit code honoured', () => {
+    expect(whyNotGating(yml)).toBeNull()
   })
+
+  // The controls. Each mutation is what someone reaches for to quiet a red
+  // gate, and each must be caught — otherwise the test above proves only that a
+  // string is present in a file.
+  const mutations: Array<[string, (s: string) => string]> = [
+    ['the step is deleted', (s) => s.replace(new RegExp(`^.*${GATE_RUN.replace(/[/.]/g, '\\$&')}.*$`, 'm'), '')],
+    [
+      'the step is disabled with if: false',
+      (s) => s.replace(`      - run: ${GATE_RUN}`, `      - if: false\n        run: ${GATE_RUN}`),
+    ],
+    [
+      'the step keeps running but its failure is swallowed',
+      (s) =>
+        s.replace(`      - run: ${GATE_RUN}`, `      - continue-on-error: true\n        run: ${GATE_RUN}`),
+    ],
+    [
+      'the whole job is disabled',
+      (s) => s.replace('\n  layering:\n', '\n  layering:\n    if: false\n'),
+    ],
+  ]
+
+  for (const [name, mutate] of mutations) {
+    test(`catches the bypass: ${name}`, () => {
+      const mutated = mutate(yml)
+      expect(mutated).not.toBe(yml) // the mutation landed
+      expect(whyNotGating(mutated)).not.toBeNull()
+    })
+  }
 
   test('the gate script it names exists on disk', () => {
     // A wired step pointing at a moved file fails only at CI time, on main.
