@@ -281,11 +281,14 @@ test('integrations_migrate_orphaned refuses on a fallback boot', async () => {
   })
 
   const out = (await byName(b.built, 'integrations_migrate_orphaned').handler({}, CTX)) as {
+    refused_direction?: true
     total_moved: number
     message: string
   }
   expect(out.total_moved).toBe(0)
-  expect(out.message).toContain('Refused')
+  // STRUCTURAL, so an edit to the sentence cannot quietly disarm the guard the
+  // agent surface most needs. (Was `out.message).toContain('Refused')`.)
+  expect(out.refused_direction).toBe(true)
   // Read the row back rather than trusting the count.
   expect(await b.secrets.get({ owner_handle: STALE, kind: 'byo_api_key', label: 'tavily' })).toBe(
     'tvly-stale',
@@ -304,7 +307,9 @@ test('integrations_migrate_orphaned refuses on a fallback boot', async () => {
     plaintext: 'tvly-stale',
   })
   const moved = (await byName(ok.built, 'integrations_migrate_orphaned').handler({}, CTX)) as {
+    refused_direction?: true
     total_moved: number
   }
   expect(moved.total_moved).toBeGreaterThan(0)
+  expect(moved.refused_direction).toBeUndefined()
 })

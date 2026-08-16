@@ -24,6 +24,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph, type MemoryHealthProvider } from './composition.ts'
 import { LoopRegistry } from '@neutronai/loop'
 import {
+  effectiveOwnerHome,
   resolveBootConfig,
   resolveIdentityConfig,
   type BootConfig,
@@ -182,9 +183,11 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
  * independent `process.env` read. This keeps the composer + boot from
  * desyncing on the resolved slug (the hazard the C1 brief flags).
  *
- * The `.url_slug` lookup uses the EFFECTIVE owner home — `config.ownerHome ??
- * config.neutronHome` — i.e. the exact value {@link envShimFromBootConfig}
- * publishes to `OWNER_HOME`. This preserves the old Open flow bit-for-bit: the
+ * The `.url_slug` lookup uses the EFFECTIVE owner home — `effectiveOwnerHome`
+ * (`config/index.ts`), i.e. the exact value {@link envShimFromBootConfig}
+ * publishes to `OWNER_HOME`; they call the SAME function, because the sentence
+ * "the exact value" was written while each computed its own `??` expression and
+ * they disagreed on `OWNER_HOME=''`. This preserves the old Open flow: the
  * legacy `open/server.ts` mutated `process.env.OWNER_HOME ||= neutronHome`
  * BEFORE `boot()` read it, so an `OWNER_HOME`-unset box with `<NEUTRON_HOME>/
  * .url_slug` resolved the slug from that file. Reading raw `config.ownerHome`
@@ -235,12 +238,35 @@ export interface OwnerSlugResolution {
  * still share one body.
  */
 export function resolveOwnerSlugSourceFromConfig(config: IdentityConfig): OwnerSlugResolution {
-  const ownerHome = config.ownerHome ?? config.neutronHome
-  if (ownerHome !== undefined && ownerHome !== '') {
+  // AN EMPTY `OWNER_HOME` IS NOT A HOME, AND IT USED TO COLLAPSE ALL THREE
+  // RESOLVERS AT ONCE. This read `config.ownerHome ?? config.neutronHome`, and
+  // `??` does not fall through on `''` — so `OWNER_HOME=''` resolved the
+  // effective home to `''`, the guard below rejected it, and the `.url_slug`
+  // lookup was skipped instead of falling back to `neutronHome`. A correctly
+  // renamed instance then booted on the bare `'dev'` fallback and refused every
+  // credential migration, telling the owner to set a handle already set.
+  // `effectiveOwnerHome` is the ONE place that decides, and it agrees with
+  // `resolveNeutronHome` (`migrations/db-path.ts:35-41`) about what empty means.
+  const ownerHome = effectiveOwnerHome(config)
+  if (ownerHome.length > 0) {
     const slugFile = join(ownerHome, '.url_slug')
     if (existsSync(slugFile)) {
-      const fromFile = readFileSync(slugFile, 'utf8').trim()
-      if (fromFile.length > 0) return { slug: fromFile, source: 'file' }
+      // AN UNREADABLE RENAME FILE DEGRADES TO THE ENV ANSWER, IT DOES NOT THROW.
+      // `existsSync` is true for a chmod-000 file and for a DIRECTORY named
+      // `.url_slug`, and the read then throws EACCES / EISDIR. This function is
+      // reached from `neutron doctor` via `open/diagnostics-cli-impl.ts:32`,
+      // which calls it OUTSIDE the try that produces `{ok:false}` — so the throw
+      // escaped the documented contract and the operator got a stack trace
+      // instead of the state of their box. EACCES on `.url_slug` is a recorded
+      // real failure mode, not a hypothetical. An unreadable file is treated
+      // exactly like an absent one, which is already a supported state.
+      let fromFile: string | undefined
+      try {
+        fromFile = readFileSync(slugFile, 'utf8').trim()
+      } catch {
+        fromFile = undefined
+      }
+      if (fromFile !== undefined && fromFile.length > 0) return { slug: fromFile, source: 'file' }
     }
   }
   // TRIMMED AND NON-EMPTY, exactly like the `.url_slug` branch above — the

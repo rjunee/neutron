@@ -53,6 +53,63 @@ asserting the audit row's `reason` by exact equality, plus the composition chain
 field-coverage gate cannot see because the safe default and the wrong answer are the same
 literal). `typecheck-all.sh` 51/51.
 
+**A LATER ROUND FOUND THE GUARD FAILING THE OTHER WAY, AND IT WAS LIVE.** The refusal is
+silent in both directions — a broken guard silently steals rows, and a guard that
+misreads its own configuration silently refuses every migration on a correct machine.
+`resolveOwnerSlugSourceFromConfig` read the effective owner home as `config.ownerHome ??
+config.neutronHome`, and `??` falls through on `undefined` but NOT on `''`. So
+`OWNER_HOME=''` resolved the home to the empty string, the guard on the next line
+rejected that as unusable, and the `.url_slug` lookup was SKIPPED rather than falling
+back to `NEUTRON_HOME` — collapsing all three slug resolvers onto the bare `'dev'`
+fallback at once. A correctly renamed instance then journalled its own handle as
+orphaned and answered `Refused` to every explicit migration, telling the owner to set a
+handle that was already set. `resolveNeutronHome` (`migrations/db-path.ts`) has always
+treated an empty value as unset, so the two halves of one identity resolution disagreed
+about what empty means, ten lines apart. There is now ONE `effectiveOwnerHome` in
+`config/index.ts` that both the slug resolver and the env shim call — the shim was the
+second live site, and because `open/server.ts` fills a slot that is `undefined` OR `''`
+it re-wrote the empty string over itself, leaving every below-seam reader of
+`process.env.OWNER_HOME` holding `''`. Fixing only the resolver would have left the
+running server's owner home empty. The agreement suite could not see this axis by
+construction: it varies `NEUTRON_INSTANCE_SLUG` and never passes an empty `OWNER_HOME`,
+and all three resolvers were wrong the SAME way, so they agreed perfectly on the wrong
+answer.
+
+**`neutron doctor` escaped its `{ok:false}` contract again, on the same line.** The
+previous round closed the ZodError path and opened a filesystem one: the `.url_slug` read
+behind `existsSync` was unguarded, and `existsSync` is true for a chmod-000 file and for
+a DIRECTORY of that name — the read then throws EACCES / EISDIR out of a function
+`open/diagnostics-cli-impl.ts` calls OUTSIDE the try that produces `{ok:false}`. Both
+variants were reproduced against the branch. An unreadable rename file now degrades to
+the env/fallback answer exactly as an absent one already does. The EACCES fixtures assert
+that the mode really denies the read before asserting the deny-path behaviour, because
+`chmod 000` is advisory against root; the EISDIR case denies root too and carries the
+axis unconditionally.
+
+**The refusal is data now, not prose.** `MigrateOrphanedCredentialsResult` carried no
+field for it — `refused_direction` was consumed only to build a sentence and the call
+still returned `ok:true`, so `POST /api/cores/integrations/migrate-orphaned` answered a
+refusal with `200 {ok:true,total_moved:0}`, structurally identical to a collision skip
+and to a clean no-op. Five assertions guarding a security-relevant refusal were
+`message).toContain('Refused')`, so editing one English sentence disarmed all five while
+leaving the guard untested. The flag now propagates to the result and out over the wire,
+and those assertions are structural; the operator-facing sentence stays pinned once,
+deliberately, rather than being the sole evidence in five places. **And the refusal
+leaves an audit row.** The journal emit was gated on `total_moved > 0` and a refusal
+moves nothing, so the one security-relevant outcome reachable from HTTP and from an agent
+tool wrote nothing at all while the automatic path journalled a reasoned row. It now
+emits `credential_scope_orphaned` with boot's own
+`reason: 'fallback_boot_handle_refused_direction'` plus a `surface` key, asserted by
+exact payload equality with the no-secret-material sweep.
+
+Five mutations, each with a control proving it landed: reinstating the `??`, deleting the
+read's try/catch, dropping the structural flag, suppressing the audit emit, and disarming
+the direction guard itself — the last one proving the suite still catches rows actually
+MOVING, not merely a missing marker. 67 tests green across the six touched files;
+`lint.sh` clean; `typecheck-all.sh` 50/51 with the one failure (`app/tsconfig.json`,
+`TS2688 Cannot find type definition file for 'node'`) reproduced identically on the
+untouched tree — a local install artifact, unchanged by this work.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset

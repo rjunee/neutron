@@ -280,8 +280,20 @@ test('the migrate route REFUSES on a fallback boot, and says what to do instead'
   // exactly what it should. Failing the request would invite a retry, and the
   // retry would be just as refused.
   expect(res.status).toBe(200)
-  const body = (await res.json()) as { ok: boolean; total_moved: number; message: string }
+  const body = (await res.json()) as {
+    ok: boolean
+    refused_direction?: true
+    total_moved: number
+    message: string
+  }
   expect(body.total_moved).toBe(0)
+  // THE WIRE CARRIES THE REFUSAL AS DATA. A 200 with `{ok:true, total_moved:0}`
+  // is structurally identical to a collision skip and to a clean no-op, so this
+  // assertion used to be `body.message).toContain('Refused')` — one English
+  // sentence away from a green test over a disarmed security guard.
+  expect(body.refused_direction).toBe(true)
+  // The operator-facing sentence is a contract of its own and stays asserted —
+  // once, here, deliberately, rather than as the sole evidence in five places.
   expect(body.message).toContain('Refused')
   expect(body.message).not.toContain('tvly-stale')
 

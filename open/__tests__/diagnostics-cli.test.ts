@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -280,6 +280,96 @@ describe('collectCliDiagnostics', () => {
     // resolving the wrong slug would report an empty instance, which is the
     // failure mode the slug work on this branch exists to close.
     expect(result.report.project_slug).toBe('demo')
+  })
+
+  /**
+   * THE SAME CONTRACT, THE OTHER WAY OUT OF THE SAME LINE.
+   *
+   * The round above closed the ZodError escape and left a filesystem one open
+   * on the very next statement: `gateway/index.ts` did an UNGUARDED
+   * `readFileSync(join(ownerHome, '.url_slug'))` behind an `existsSync` check.
+   * `existsSync` is true for a chmod-000 file and for a DIRECTORY of that name,
+   * and the read then throws EACCES / EISDIR — past the same `{ok:false}`
+   * contract, from the same call site (`diagnostics-cli-impl.ts:32`, outside the
+   * try). EACCES on `.url_slug` is a recorded real failure mode, not a
+   * hypothetical.
+   *
+   * The guard above cannot see this: it varies only `NEUTRON_PORT`, so it stays
+   * green while the filesystem axis throws. Both variants were reproduced
+   * against the unfixed resolver — `EACCES: permission denied, open
+   * '<home>/.url_slug'` and `EISDIR: illegal operation on a directory, read`.
+   */
+  it('does NOT throw when `.url_slug` exists but cannot be read (EACCES)', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+
+    const slugFile = join(tmp, '.url_slug')
+    writeFileSync(slugFile, 'renamed\n', 'utf8')
+    // CONTROL — readable, the file WINS over the env slug. Without this a pass
+    // below could mean the resolver never looks at `.url_slug` at all.
+    const readable = collectCliDiagnostics(envFor(dbPath))
+    expect(readable.ok).toBe(true)
+    if (!readable.ok) return
+    expect(readable.report.project_slug).toBe('renamed')
+
+    chmodSync(slugFile, 0o000)
+    // `chmod 000` is advisory against root, so prove the mode really denies the
+    // read before asserting the deny-path behaviour (a root CI container would
+    // otherwise pin the opposite branch). The EISDIR case below denies root too.
+    let denied = false
+    try {
+      readFileSync(slugFile, 'utf8')
+    } catch {
+      denied = true
+    }
+    if (!denied) return
+
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // Degrades to the env answer, exactly as an ABSENT rename file already does.
+    expect(result.report.project_slug).toBe('demo')
+  })
+
+  it('does NOT throw when `.url_slug` is a directory (EISDIR)', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+
+    // CONTROL — the same env with no `.url_slug` at all already returns ok.
+    const before = collectCliDiagnostics(envFor(dbPath))
+    expect(before.ok).toBe(true)
+
+    mkdirSync(join(tmp, '.url_slug'))
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('demo')
+  })
+
+  /**
+   * AN EMPTY `OWNER_HOME` MUST NOT BLIND THE DIAGNOSTIC EITHER.
+   *
+   * `neutron doctor` filters events and jobs by the slug it resolves, so a
+   * resolver that collapses to `'dev'` reports an empty instance for a system
+   * running perfectly well — the exact failure this file's other cases exist to
+   * prevent, reached through a different input.
+   */
+  it('reads `.url_slug` under NEUTRON_HOME when OWNER_HOME is the empty string', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+    writeFileSync(join(tmp, '.url_slug'), 'renamed\n', 'utf8')
+
+    const env = { ...envFor(dbPath), OWNER_HOME: '' } as NodeJS.ProcessEnv
+    const result = collectCliDiagnostics(env)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('renamed')
   })
 })
 

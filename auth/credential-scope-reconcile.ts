@@ -225,9 +225,15 @@ export type CredentialScopeReconcileOptions = CredentialScopeProvenance
 export interface CredentialScopeMigrateResult {
   /**
    * Present only when the DIRECTION guard refused: the boot handle was the
-   * fallback, so nothing moved and every orphan is reported as skipped. Callers
-   * render a different sentence for this than for a collision — "set the
-   * handle" rather than "the slot is taken".
+   * fallback, so nothing moved and every orphan is reported as skipped.
+   *
+   * Callers render a different sentence for this than for a collision — "set the
+   * handle" rather than "the slot is taken" — AND propagate the flag itself
+   * (`MigrateOrphanedCredentialsResult.refused_direction`,
+   * `gateway/cores/integrations.ts`), so the distinction survives as data all
+   * the way out of `POST /api/cores/integrations/migrate-orphaned`. This
+   * sentence used to promise only the sentence, which made the prose the sole
+   * evidence a security guard had fired.
    */
   refused_direction?: true
   boot_handle: string

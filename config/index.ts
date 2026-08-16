@@ -430,6 +430,32 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
 }
 
 /**
+ * THE EFFECTIVE OWNER HOME — the directory the `.url_slug` rename file is read
+ * from (`gateway/index.ts` `resolveOwnerSlugSourceFromConfig`) AND the value
+ * {@link envShimFromBootConfig} publishes back to `OWNER_HOME`. Those two are
+ * documented as the same value, so they compute it in ONE place.
+ *
+ * AN EMPTY `OWNER_HOME` IS NOT A HOME. This was `config.ownerHome ??
+ * config.neutronHome` at both sites, and `??` falls through on `null`/`undefined`
+ * but NOT on `''` — so `OWNER_HOME=''` resolved the effective home to `''`, the
+ * slug resolver rejected that as unusable and SKIPPED the `.url_slug` lookup
+ * entirely instead of falling back to `neutronHome`. On a correctly renamed
+ * instance that exports an empty `OWNER_HOME`, all three slug resolvers
+ * collapsed onto the bare `'dev'` fallback at once, boot journalled the handle
+ * as orphaned, and every explicit credential migration answered `Refused` —
+ * telling the owner to set a handle that was already set.
+ *
+ * `resolveNeutronHome` (`migrations/db-path.ts:35-41`) has always treated an
+ * empty `NEUTRON_HOME`/`OWNER_HOME` as UNSET. The two halves of one identity
+ * resolution now agree about what empty means; they did not before.
+ */
+export function effectiveOwnerHome(config: IdentityConfig): string {
+  const ownerHome = config.ownerHome
+  if (typeof ownerHome === 'string' && ownerHome.length > 0) return ownerHome
+  return config.neutronHome
+}
+
+/**
  * Resolve + validate the process environment ONCE into a frozen BootConfig.
  * Throws (aggregated Zod error) if any numeric knob is malformed — the loud
  * failure that replaces the old silent-`NaN` behavior.
@@ -540,7 +566,11 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
  */
 export function envShimFromBootConfig(config: BootConfig): Record<string, string> {
   const out: Record<string, string> = {}
-  out['OWNER_HOME'] = config.ownerHome ?? config.neutronHome
+  // Via {@link effectiveOwnerHome}, so an empty `OWNER_HOME` is repaired here
+  // too. `open/server.ts:130` fills a slot that is `undefined` OR `''`, so the
+  // old `??` re-wrote the empty string over itself and left every below-seam
+  // reader of `process.env.OWNER_HOME` holding `''`.
+  out['OWNER_HOME'] = effectiveOwnerHome(config)
   out['NEUTRON_DB_PATH'] = config.dbPath
   if (config.onboardingChatCookieSecret !== undefined) {
     out['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = config.onboardingChatCookieSecret

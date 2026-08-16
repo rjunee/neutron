@@ -210,6 +210,13 @@ function authed(base: string, path: string, init: RequestInit = {}): Promise<Res
 
 interface MigrateBody {
   ok: boolean
+  /**
+   * The refusal AS DATA. Both refusal assertions in this file used to read
+   * `message).toContain('Refused')`, which made one English sentence in
+   * `gateway/cores/integrations.ts` the sole evidence that a security guard had
+   * fired on the served route and on the registered tool.
+   */
+  refused_direction?: true
   total_moved: number
   message: string
 }
@@ -238,7 +245,7 @@ test('SERVED route: a fallback boot refuses to move the rows', async () => {
   expect(res.status).toBe(200)
   const body = (await res.json()) as MigrateBody
   expect(body.total_moved).toBe(0)
-  expect(body.message).toContain('Refused')
+  expect(body.refused_direction).toBe(true)
   expect(body.message).not.toContain('tvly-stale')
 
   const rows = await whereIsTheRow(h)
@@ -256,7 +263,7 @@ test('SERVED route: a configured boot DOES move the rows', async () => {
   expect(res.status).toBe(200)
   const body = (await res.json()) as MigrateBody
   expect(body.total_moved).toBeGreaterThan(0)
-  expect(body.message).not.toContain('Refused')
+  expect(body.refused_direction).toBeUndefined()
 
   const rows = await whereIsTheRow(h)
   expect(rows.stale).toBeNull()
@@ -273,7 +280,7 @@ test('REGISTERED tool: a fallback boot refuses to move the rows', async () => {
   expect(tool).toBeDefined()
   const out = (await tool!.handler({}, CTX)) as MigrateBody
   expect(out.total_moved).toBe(0)
-  expect(out.message).toContain('Refused')
+  expect(out.refused_direction).toBe(true)
 
   const rows = await whereIsTheRow(h)
   expect(rows.stale).toBe('tvly-stale')
@@ -288,7 +295,7 @@ test('REGISTERED tool: a configured boot DOES move the rows', async () => {
   expect(tool).toBeDefined()
   const out = (await tool!.handler({}, CTX)) as MigrateBody
   expect(out.total_moved).toBeGreaterThan(0)
-  expect(out.message).not.toContain('Refused')
+  expect(out.refused_direction).toBeUndefined()
 
   const rows = await whereIsTheRow(h)
   expect(rows.stale).toBeNull()

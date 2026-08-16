@@ -479,6 +479,24 @@ export async function buildIntegrationsStatus(
 /** Outcome of one explicit migrate action. Counts and handles only. */
 export interface MigrateOrphanedCredentialsResult {
   ok: true
+  /**
+   * Present ONLY when the direction guard refused: this process booted on the
+   * bare fallback handle, so nothing moved and every orphan is reported as
+   * skipped. Mirrors `CredentialScopeMigrateResult.refused_direction`
+   * (`auth/credential-scope-reconcile.ts`) and the boot path's structured
+   * `reason: 'fallback_boot_handle_refused_direction'` (`gateway/index.ts`).
+   *
+   * IT EXISTS BECAUSE THE REFUSAL WAS NOT DATA. A refusal used to return
+   * `{ok:true, total_moved:0}` — byte-identical to a collision-skip and to a
+   * clean no-op — so the ONLY thing any caller or test could key on was the
+   * English in {@link MigrateOrphanedCredentialsResult.message}. Editing that
+   * sentence disarmed every assertion guarding a security-relevant refusal
+   * while leaving the guard itself untested. `ok` stays `true`: the request
+   * succeeded and its outcome is fully reported — this field is what says WHICH
+   * outcome, and `POST /api/cores/integrations/migrate-orphaned` returns it
+   * verbatim.
+   */
+  refused_direction?: true
   boot_handle: string
   stale_handles: string[]
   moved: CredentialScopeMove[]
@@ -547,6 +565,34 @@ export async function migrateOrphanedCredentials(
 
   let message: string
   if (r.refused_direction === true) {
+    // THE REFUSAL LEAVES AN AUDIT ROW, exactly as the automatic path does.
+    // Boot journals a refused direction as `credential_scope_orphaned` with
+    // `reason: 'fallback_boot_handle_refused_direction'` (gateway/index.ts).
+    // The explicit path — reachable from HTTP and from an agent tool — left no
+    // record at all, because the emit above is gated on `total_moved > 0` and a
+    // refusal moves nothing. A security-relevant refusal was the one event with
+    // no trace.
+    //
+    // SAME event + SAME reason as boot, so one journal query finds both; the
+    // extra `surface` key says which one refused. That asymmetry follows the
+    // precedent already set by `credential_scope_migrated`, where this path
+    // carries a `skipped` key boot's payload does not have. Handles, table
+    // names and counts only (acceptance (d)).
+    await emitSystemEventSafe(
+      input.sink !== undefined ? input.sink : resolveSystemEventSink(),
+      {
+        event: 'credential_scope_orphaned',
+        module: 'gateway',
+        level: 'warn',
+        project_slug: input.project_slug,
+        payload: {
+          from: r.stale_handles,
+          orphan_counts: r.skipped,
+          reason: 'fallback_boot_handle_refused_direction',
+          surface: 'explicit_migrate',
+        },
+      },
+    )
     // Deliberately NOT phrased as a failure: nothing is broken, the process
     // simply has no name, and the repair is to give it one. Pointing the owner
     // at the migration again would be pointing at the thing that just refused.
@@ -571,6 +617,11 @@ export async function migrateOrphanedCredentials(
 
   return {
     ok: true,
+    // Structural, so a caller (and a test) can tell a refusal from a collision
+    // skip without parsing `message`. Spread rather than `refused_direction:
+    // undefined` so a clean result has no such key at all — the shape the
+    // reconciler's own result uses.
+    ...(r.refused_direction === true ? { refused_direction: true as const } : {}),
     boot_handle: r.boot_handle,
     stale_handles: r.stale_handles,
     moved: r.moved,
