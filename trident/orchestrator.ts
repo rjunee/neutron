@@ -490,18 +490,63 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
 
 /**
  * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
- * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
- * so matching those would fail closed on ordinary prose. Seven of either, then a space or EOL.
+ * these are the labelled markers, which carry a branch name after the run and so end in a space
+ * or a tab. A bare `=======` separator is caught separately by `CONFLICT_SEPARATOR_ADDED` below
+ * (exact-line, and exempt in markdown, where it is a setext underline). `|||||||` remains
+ * unmatched: it only appears under `merge.conflictStyle=diff3`, and catching it is a follow-up.
  *
- * SEVEN OR MORE, not exactly seven. `.gitattributes` can set `conflict-marker-size=32` for a
- * path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
- * eighth character is another `<` rather than the space the pattern demands. This regex is the
- * ONLY gate standing between a half-resolved staged file and a force-push to the shared branch,
- * so a marker length it cannot see is a marker it waves through. Found by codex cross-model
- * review. The boundary test uses real git with `conflict-marker-size` set, not a hand-written
- * long marker, so it proves git's behaviour rather than the fixture's.
+ * Four or more catches the narrowest marker width this gate deliberately supports as well as
+ * git's default and wider configured markers. Because candidates are paths known to have
+ * conflicted in this replay, an added four-wide labelled run fails closed as residue.
  */
-const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|$)/
+const CONFLICT_MARKER_ADDED = /^\+(?:<{4,}|>{4,})(?: |\t|\r?$)/
+
+/**
+ * A `git diff --cached -U1` line that ADDS git's bare conflict SEPARATOR. Unlike `<<<<<<<` and
+ * `>>>>>>>`, the separator line git writes carries NO label — it is exactly a run of `=` and
+ * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
+ * indented docstring underline) never matches. Git permits `conflict-marker-size` to narrow the
+ * marker as well as widen it; four is the fail-closed lower bound shared with the outer-marker
+ * scan. Shorter punctuation remains ordinary generated content. `\r?` covers
+ * a CRLF file. This is the residue MOST likely to
+ * survive a sloppy hand-resolution: the outer markers
+ * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
+ * gate entirely.
+ */
+const CONFLICT_SEPARATOR_ADDED = /^\+={4,}\r?$/
+
+/**
+ * Markdown permits an all-`=` Setext H1 underline. Text around it cannot safely corroborate that
+ * interpretation: conflict sides can have the identical title/blank/paragraph shape. The narrow
+ * exemption therefore requires affirmative diff evidence that the resolver added the nonblank
+ * title immediately before the underline, and that the resulting next line is blank or EOF.
+ * Surviving conflict-side content immediately after the separator is therefore refused. Scanning
+ * each candidate separately avoids decoding git-quoted path headers.
+ */
+const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
+
+function stagedDiffAddsConflictMarker(diff: string, path: string): boolean {
+  const lines = diff.split('\n')
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? ''
+    if (CONFLICT_MARKER_ADDED.test(line)) return true
+    if (!CONFLICT_SEPARATOR_ADDED.test(line)) continue
+    if (!SETEXT_UNDERLINE_PATHS.test(path)) return true
+
+    const addedTitle = /^\+(.+)\r?$/.exec(lines[i - 1] ?? '')?.[1] ?? ''
+    if (addedTitle.trim() === '') return true
+
+    // Removed lines do not exist in the staged result. The first context/added line after them is
+    // the line after the underline; a hunk/file boundary means the underline is at EOF.
+    let after = i + 1
+    while ((lines[after] ?? '').startsWith('-') && !lines[after]?.startsWith('---')) after += 1
+    const next = lines[after]
+    const atEof = next === undefined || next === '' || next.startsWith('@@') || next.startsWith('diff --git ')
+    const followedByBlank = next === '+' || next === '+\r' || next === ' ' || next === ' \r'
+    if (!atEof && !followedByBlank) return true
+  }
+  return false
+}
 
 /**
  * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
@@ -1089,7 +1134,7 @@ export async function rebaseOntoObservedBase(
       // in the costume of another.
       //
       // `-z` + `core.quotePath=false` BECAUSE THIS LIST IS MACHINE-CONSUMED. It becomes the
-      // resolver's `CONFLICTED FILES` and the pathspec of the staged-marker scan below, and git's
+      // resolver's `CONFLICTED FILES` and the literal pathspec of the staged-marker scan below; git's
       // default C-quoting renders `ünicode file.txt` as `"\303\274nicode file.txt"` — a name that
       // opens nothing and matches no pathspec. `-z` emits the raw bytes, NUL-separated.
       const unreadableConflictState = (detail: string): Error =>
@@ -1132,26 +1177,21 @@ export async function rebaseOntoObservedBase(
        */
       const stagedMarkerFiles = async (candidates: string[]): Promise<string[]> => {
         if (candidates.length === 0) return []
-        let res
-        try {
-          res = await run_host(
-            ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--', ...candidates],
-            scratchDir,
-          )
-        } catch (err) {
-          throw unreadableConflictState(err instanceof Error ? err.message : String(err))
-        }
-        if (!res.ok) throw unreadableConflictState(res.stderr || 'git diff --cached failed with no output')
         const marked: string[] = []
-        let current: string | null = null
-        for (const line of res.stdout.split('\n')) {
-          const header = /^\+\+\+ (?:b\/)?(.+)$/.exec(line)
-          if (header !== null) {
-            const named = header[1]
-            current = named === undefined || named === '/dev/null' ? null : named
-            continue
+        // Deliberate per-path subprocesses: markdown classification needs the candidate path, and
+        // literal pathspecs avoid parsing quoted diff headers. Conflict sets are normally tiny.
+        for (const candidate of candidates) {
+          let res
+          try {
+            res = await run_host(
+              ['git', '-C', scratchDir, 'diff', '--cached', '-U1', '--', `:(literal)${candidate}`],
+              scratchDir,
+            )
+          } catch (err) {
+            throw unreadableConflictState(err instanceof Error ? err.message : String(err))
           }
-          if (current !== null && CONFLICT_MARKER_ADDED.test(line) && !marked.includes(current)) marked.push(current)
+          if (!res.ok) throw unreadableConflictState(res.stderr || 'git diff --cached failed with no output')
+          if (stagedDiffAddsConflictMarker(res.stdout, candidate)) marked.push(candidate)
         }
         return marked
       }

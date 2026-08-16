@@ -117,7 +117,7 @@ interface World {
  * A real origin, a real full author clone, and a real SHALLOW build checkout holding a branch
  * that is genuinely behind a `main` which moved after the branch was cut.
  */
-async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean }): Promise<World> {
+async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean; markerSize?: number }): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), 'trident-rebase-'))
   created.push(root)
   const origin = join(root, 'origin.git')
@@ -135,6 +135,8 @@ async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean }
   await identify(author)
   await git(author, 'remote', 'add', 'origin', `file://${origin}`)
   writeFileSync(join(author, 'README.md'), 'base\n')
+  if (opts.markerSize !== undefined)
+    writeFileSync(join(author, '.gitattributes'), `lib.txt conflict-marker-size=${opts.markerSize}\n`)
   // A FILE THAT ENDS ON A BLANK LINE is the whole point of the `trailingBlank` fixture: the last
   // line of a diff over it is a context line for that blank line, i.e. the two bytes `" \n"`. Any
   // trim on the way to disk eats the space, the final hunk comes up one line short of its `@@`
@@ -481,30 +483,22 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     expect(worktrees.length).toBe(1)
   }, 60_000)
 
-  test('a LONGER marker under `conflict-marker-size` is still caught — the gate matches seven OR MORE', async () => {
-    // `.gitattributes` can widen the markers git writes for a path. The staged-byte scan is the
-    // ONLY thing standing between a half-resolved file and a force-push to the shared branch, so a
-    // marker length it cannot see is a marker it waves through. An exact-seven pattern rejects a
-    // 32-character marker because the eighth character is another `<`, not the space it demands.
-    //
-    // git is asked to produce the long marker itself, via the attribute — hand-writing one would
-    // only prove the fixture. The resolver then stages the file with that marker still inside,
-    // which is the case the index cannot catch.
+  test('a resolver that deleted the outer markers but left the bare ======= separator never gets it onto the branch', async () => {
+    // THE SLOPPY RESOLUTION, against real git. `<<<<<<< ours` and `>>>>>>> theirs` are the lines
+    // a human's eye goes to; keeping BOTH sides and deleting just those two leaves a bare
+    // `=======` between them. That is the residue most likely to survive a hand-resolution, and
+    // until this gate learned the separator it went straight onto the shared branch.
     const world = await seedWorld({ conflicting: true })
-    writeFileSync(join(world.checkout, '.gitattributes'), 'lib.txt conflict-marker-size=32\n')
-    const scratchDir = scratch(world.checkout, 't7b')
-    const run = resolverRun('realgit-long-marker', world)
+    const scratchDir = scratch(world.checkout, 't7c')
+    const run = resolverRun('realgit-bare-separator', world)
 
-    let seen = ''
+    let calls = 0
     const resolve_conflict: MergeConflictResolver = async (input) => {
-      writeFileSync(join(input.repo_path, '.gitattributes'), 'lib.txt conflict-marker-size=32\n')
-      // Re-run the merge for this path so git rewrites the markers at the attribute's width.
-      seen = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
-      const wide = '<'.repeat(32)
-      writeFileSync(
-        join(input.repo_path, 'lib.txt'),
-        `line1\n${wide} ours\nline2-from-branch\n${'>'.repeat(32)} theirs\nline3\n`,
-      )
+      calls += 1
+      // ANTI-FAKE GUARD: the markers git left really are there before we rewrite the file.
+      const raw = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+      expect(raw).toContain('<<<<<<<')
+      writeFileSync(join(input.repo_path, 'lib.txt'), 'line1\nline2-from-branch\n=======\nline2-from-main\nline3\n')
       await git(input.repo_path, 'add', 'lib.txt')
       return { resolved: true }
     }
@@ -519,13 +513,53 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
       caught = err
     }
 
-    expect(seen).toContain('<<<<<<<')
     expect(caught).toBeInstanceOf(TridentRebaseConflict)
     expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
-    // THE BRANCH NEVER MOVED and no marker of ANY width reached it.
+    expect(calls).toBe(1)
+    // THE BRANCH NEVER MOVED and the separator never reached it.
     expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
-    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<<<<<<<')
+    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('=======')
     expect(existsSync(scratchDir)).toBe(false)
+  }, 60_000)
+
+  test('narrower and wider outer markers under `conflict-marker-size` are caught independently', async () => {
+    // `.gitattributes` can narrow or widen the markers git writes for a path. The staged-byte
+    // scan is the
+    // ONLY thing standing between a half-resolved file and a force-push to the shared branch, so a
+    // marker length it cannot see is a marker it waves through. Git produces both fixtures; the
+    // resolver removes the separator so this pins CONFLICT_MARKER_ADDED rather than passing via
+    // the separator rule.
+    for (const markerSize of [4, 32]) {
+      const world = await seedWorld({ conflicting: true, markerSize })
+      const scratchDir = scratch(world.checkout, `t7b-${markerSize}`)
+      const run = resolverRun(`realgit-marker-${markerSize}`, world)
+
+      let seen = ''
+      const resolve_conflict: MergeConflictResolver = async (input) => {
+        seen = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+        expect(seen).toContain(`${'<'.repeat(markerSize)} `)
+        const withoutSeparator = seen.split('\n').filter((line) => line !== '='.repeat(markerSize)).join('\n')
+        writeFileSync(join(input.repo_path, 'lib.txt'), withoutSeparator)
+        await git(input.repo_path, 'add', 'lib.txt')
+        return { resolved: true }
+      }
+
+      let caught: unknown = null
+      try {
+        await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+          run,
+          resolve_conflict,
+        })
+      } catch (err) {
+        caught = err
+      }
+
+      expect(caught).toBeInstanceOf(TridentRebaseConflict)
+      expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
+      expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
+      expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<'.repeat(markerSize))
+      expect(existsSync(scratchDir)).toBe(false)
+    }
   }, 60_000)
 
   test('a resolver that DECLINES leaves a REAL conflict an attention state — branch unmoved, scratch worktree gone', async () => {
