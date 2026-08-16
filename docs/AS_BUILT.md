@@ -74,6 +74,56 @@ are not decorative. The positive control re-appends the first heading NOT alread
 duplicated: the scenario it models is a union merge doubling the newest entry, and
 re-appending an already-doubled heading takes it from two occurrences to three without
 changing the duplicate count at all.
+## 2026-08-16 — the union gate asks git instead of re-deriving it
+
+#315 added a CI gate asserting this log carries `merge=union`, and decided that
+by PARSING `.gitattributes` and taking the FIRST exact-path `merge=` assignment.
+git takes the LAST one, and a later WILDCARD beats an earlier exact path.
+Measured here on git 2.50.1: a file containing `docs/AS_BUILT.md merge=union`
+followed by `docs/AS_BUILT.md merge=as-built-log` resolves in git to
+`as-built-log`, and the shipped gate printed `✅ … (already-union)` and exited 0
+over it. Same with a following `docs/*.md merge=binary`. So the floor this gate
+exists to hold could be removed with the gate reporting green — the regression
+it was written to prevent, wearing its own ✅.
+
+The verdict now comes from `git check-attr`, asked in a THROWAWAY repository
+seeded with only the tracked `.gitattributes`. The isolation is the design, not
+tidiness: the entry-aware driver binds itself in the untracked
+`$GIT_COMMON_DIR/info/attributes`, which OUTRANKS the tracked file, so a machine
+that ran `scripts/install-merge-drivers.sh` answers `as-built-log` for a repo
+whose tracked line is gone. Asking the local clone would pass that repo. The
+gate now asks two separate questions — is the FLOOR every fresh clone gets
+intact (decides), and does THIS clone additionally carry the opt-in upgrade
+(printed, never decisive). A machine-local `core.attributesFile` and an
+`init.templateDir` shipping its own `info/attributes` are both pinned out, each
+with a control test proving the poison reaches an unpinned probe.
+
+The gate's stated rationale was also wrong about git and is corrected to what
+was measured. It claimed a custom driver named in a tracked file is fatal in
+every fresh clone (`lacks command line`, exit 128). It is not: with NO
+`merge.<name>.*` config, git falls back to the ordinary text merge — exit 1,
+`CONFLICT (content)`, markers in the file. The exit-128 abort needs
+`merge.<name>.name` defined WITHOUT `.driver`. A custom driver in the tracked
+file is still rejected, because it is not union, but the remediation text now
+describes the symptom a reader will actually meet.
+
+Two more things this turned up. The gate had NO workflow step — it ran nowhere,
+in any repository, since it merged; it is now a step in the `layering` job.
+And another built-in driver on the log (`binary`, `text`) used to PASS, inherited
+from the fixer's "don't overwrite somebody's choice" rule: correct for a fixer,
+wrong for a gate, since neither one union-merges. A fixer must not overwrite; a
+gate must not bless.
+
+Tests went 17 → 43. The 17 all passed over both false successes above, because
+they only ever exercised pure helpers and an in-memory probe — the bug was never
+in a helper, it was in deciding a verdict from one. There are now subprocess
+tests running the real gate against throwaway trees (union present, rule
+missing, no attributes file, another built-in, a custom driver, duplicate rules,
+overriding wildcard, two logs, governed, ungoverned, an overlay over a broken
+floor, an overlay over an intact one) and real-`git check-attr` boundary tests.
+Five mutations, each with a control proving it landed: parser-decides,
+local-clone-decides, built-in-blessed, and both isolation pins removed — all
+five now fail a test; four of them failed nothing before.
 
 ## 2026-08-16 — two builds can append to this file at once
 

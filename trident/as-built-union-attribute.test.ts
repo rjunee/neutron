@@ -11,13 +11,21 @@
  *      reports.
  */
 
-import { describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it } from 'bun:test'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   AS_BUILT_CANDIDATES,
   ensureUnionAttribute,
   existingMergeDriver,
+  localEffectiveMergeDrivers,
+  mergeRulesFor,
+  parseCheckAttrZ,
   planUnionAttribute,
+  resolveTrackedMergeDrivers,
   unionAttributeLine,
   type UnionAttributeProbe,
 } from './as-built-union-attribute.ts'
@@ -45,6 +53,39 @@ describe('existingMergeDriver', () => {
 
   it('returns null for a path with attributes but no merge driver', () => {
     expect(existingMergeDriver('AS-BUILT.md text\n', 'AS-BUILT.md')).toBeNull()
+  })
+
+  it('takes the LAST assignment, the way git does, not the first', () => {
+    // The first-match reading is what let the gate report a healthy union floor
+    // over a file that had already overridden it. This helper still does not
+    // speak for git — nothing below a wildcard is visible to it — but it must at
+    // least not contradict git on the one case it does model.
+    const attributes = 'docs/AS_BUILT.md merge=union\ndocs/AS_BUILT.md merge=as-built-log\n'
+    expect(existingMergeDriver(attributes, 'docs/AS_BUILT.md')).toBe('as-built-log')
+  })
+})
+
+describe('mergeRulesFor', () => {
+  it('reports every active assignment with its line number', () => {
+    const attributes = '# lead\ndocs/AS_BUILT.md merge=union\n*.png binary\ndocs/AS_BUILT.md merge=as-built-log\n'
+    expect(mergeRulesFor(attributes, 'docs/AS_BUILT.md')).toEqual([
+      { line: 2, text: 'docs/AS_BUILT.md merge=union', driver: 'union' },
+      { line: 4, text: 'docs/AS_BUILT.md merge=as-built-log', driver: 'as-built-log' },
+    ])
+  })
+
+  it('skips commented and unrelated lines', () => {
+    expect(mergeRulesFor('# docs/AS_BUILT.md merge=union\n*.md merge=union\n', 'docs/AS_BUILT.md')).toEqual([])
+  })
+})
+
+describe('parseCheckAttrZ', () => {
+  it('reads the NUL triples and maps unspecified to null', () => {
+    const stream = ['a.md', 'merge', 'union', 'b.md', 'merge', 'unspecified', ''].join('\0')
+    const parsed = parseCheckAttrZ(stream)
+    expect(parsed.get('a.md')).toBe('union')
+    expect(parsed.get('b.md')).toBeNull()
+    expect(parsed.size).toBe(2)
   })
 })
 
@@ -176,5 +217,138 @@ describe('ensureUnionAttribute', () => {
     // Byte-identical, not merely "no crash": an ensure that rewrites the file
     // every build shows up as a spurious diff in every PR.
     expect(probe.files.get('/repo/.gitattributes')).toBe(after)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// REAL GIT. Everything above is a reading of text; this is the boundary where
+// the verdict is actually decided, and it had no test at all.
+// ---------------------------------------------------------------------------
+
+const scratchDirs: string[] = []
+afterAll(() => {
+  for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true })
+})
+
+function scratchRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'union-attr-realgit-'))
+  scratchDirs.push(dir)
+  execFileSync('git', ['init', '-q', dir], { stdio: 'pipe' })
+  return dir
+}
+
+function scratchRepoFromTemplate(template: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'union-attr-templated-'))
+  scratchDirs.push(dir)
+  execFileSync('git', ['init', '-q', `--template=${template}`, dir], { stdio: 'pipe' })
+  return dir
+}
+
+describe('resolveTrackedMergeDrivers (real git)', () => {
+  const LOG = 'docs/AS_BUILT.md'
+
+  it('agrees with git that a LATER duplicate rule wins', () => {
+    const attributes = `${LOG} merge=union\n${LOG} merge=as-built-log\n`
+    // Control: git itself, asked directly in a throwaway repo, so this test
+    // proves the expectation rather than assuming it.
+    const repo = scratchRepo()
+    writeFileSync(join(repo, '.gitattributes'), attributes)
+    const direct = execFileSync('git', ['-C', repo, 'check-attr', 'merge', '--', LOG], { encoding: 'utf8' })
+    expect(direct.trim()).toBe(`${LOG}: merge: as-built-log`)
+
+    expect(resolveTrackedMergeDrivers({ attributes, paths: [LOG] }).get(LOG)).toBe('as-built-log')
+  })
+
+  it('agrees with git that a LATER WILDCARD beats an earlier exact path', () => {
+    const attributes = `${LOG} merge=union\ndocs/*.md merge=binary\n`
+    expect(resolveTrackedMergeDrivers({ attributes, paths: [LOG] }).get(LOG)).toBe('binary')
+  })
+
+  it('reports union for the plain case, and null when nothing matches', () => {
+    // The positive control. Without it, a probe that had silently stopped
+    // working would "confirm" every finding by reporting nothing everywhere.
+    expect(resolveTrackedMergeDrivers({ attributes: `${LOG} merge=union\n`, paths: [LOG] }).get(LOG)).toBe('union')
+    expect(resolveTrackedMergeDrivers({ attributes: '# nothing\n', paths: [LOG] }).get(LOG)).toBeNull()
+    expect(resolveTrackedMergeDrivers({ attributes: null, paths: [LOG] }).get(LOG)).toBeNull()
+  })
+
+  it('answers for several logs in one call', () => {
+    const attributes = `${LOG} merge=union\nAS-BUILT.md merge=binary\n`
+    const resolved = resolveTrackedMergeDrivers({ attributes, paths: [LOG, 'AS-BUILT.md'] })
+    expect(resolved.get(LOG)).toBe('union')
+    expect(resolved.get('AS-BUILT.md')).toBe('binary')
+  })
+
+  it('is NOT swayed by the untracked overlay the entry-aware driver installs', () => {
+    // scripts/install-merge-drivers.sh binds its driver in
+    // $GIT_COMMON_DIR/info/attributes precisely because untracked outranks
+    // tracked. A gate that asked the local clone would read that upgrade as the
+    // floor and pass a repo whose tracked line had been deleted.
+    const repo = scratchRepo()
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true })
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), `${LOG} merge=as-built-log\n`)
+    writeFileSync(join(repo, '.gitattributes'), `${LOG} merge=union\n`)
+
+    // Control: in THIS clone git really does answer with the overlay...
+    expect(localEffectiveMergeDrivers(repo, [LOG])?.get(LOG)).toBe('as-built-log')
+    // ...while the tracked floor, asked in isolation, is still union.
+    expect(resolveTrackedMergeDrivers({ attributes: `${LOG} merge=union\n`, paths: [LOG] }).get(LOG)).toBe('union')
+  })
+
+  it('is NOT swayed by a machine-local global attributes file', () => {
+    // Measured before this was written: with core.attributesFile pointing at a
+    // file that names a driver for this path, a repo tracking NO rule resolves
+    // to the global one — a pass that reproduces on nobody else's machine.
+    const home = mkdtempSync(join(tmpdir(), 'union-attr-home-'))
+    scratchDirs.push(home)
+    writeFileSync(join(home, 'attrs'), `${LOG} merge=from-global\n`)
+    writeFileSync(join(home, 'gitconfig'), `[core]\n\tattributesFile = ${join(home, 'attrs')}\n`)
+
+    const repo = scratchRepo()
+    writeFileSync(join(repo, '.gitattributes'), '# nothing\n')
+    // Control: the poison is real and does reach an uncovered path.
+    const polluted = execFileSync('git', ['-C', repo, 'check-attr', 'merge', '--', LOG], {
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: join(home, 'gitconfig') },
+    })
+    expect(polluted.trim()).toBe(`${LOG}: merge: from-global`)
+
+    const poisoned = { ...process.env, GIT_CONFIG_GLOBAL: join(home, 'gitconfig') }
+    expect(
+      resolveTrackedMergeDrivers({ attributes: '# nothing\n', paths: [LOG], env: poisoned }).get(LOG),
+    ).toBeNull()
+  })
+
+  it('is NOT swayed by an init template that ships its own info/attributes', () => {
+    // `git init` copies $GIT_TEMPLATE_DIR (or init.templateDir) into the new
+    // .git, and info/attributes is one of the files it will copy — which would
+    // put a machine's opinion INSIDE the probe that exists to exclude it.
+    const template = mkdtempSync(join(tmpdir(), 'union-attr-template-'))
+    scratchDirs.push(template)
+    mkdirSync(join(template, 'info'), { recursive: true })
+    writeFileSync(join(template, 'info', 'attributes'), `${LOG} merge=from-template\n`)
+
+    // Control: the template really does reach a freshly-initialised repo.
+    const control = scratchRepoFromTemplate(template)
+    writeFileSync(join(control, '.gitattributes'), `${LOG} merge=union\n`)
+    const polluted = execFileSync('git', ['-C', control, 'check-attr', 'merge', '--', LOG], { encoding: 'utf8' })
+    expect(polluted.trim()).toBe(`${LOG}: merge: from-template`)
+
+    const templated = { ...process.env, GIT_TEMPLATE_DIR: template }
+    expect(
+      resolveTrackedMergeDrivers({ attributes: `${LOG} merge=union\n`, paths: [LOG], env: templated }).get(LOG),
+    ).toBe('union')
+  })
+
+  it('asks nothing when there are no paths', () => {
+    expect(resolveTrackedMergeDrivers({ attributes: null, paths: [] }).size).toBe(0)
+  })
+})
+
+describe('localEffectiveMergeDrivers (real git)', () => {
+  it('returns null outside a repository rather than throwing', () => {
+    const notARepo = mkdtempSync(join(tmpdir(), 'union-attr-norepo-'))
+    scratchDirs.push(notARepo)
+    expect(localEffectiveMergeDrivers(notARepo, ['docs/AS_BUILT.md'])).toBeNull()
   })
 })
