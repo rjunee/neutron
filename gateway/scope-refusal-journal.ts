@@ -55,9 +55,9 @@
  * per-scope fan-out carrying the full multi-handle payload would put scope A's
  * handle names and volumes into scope B's instance-scoped feed — the cross-scope
  * disclosure `listRecentForScope`'s own docblock exists to prevent (Argus r1,
- * 2026-08-16). And no ROW COUNT at all, in either direction — see the next
- * section, which is where that constraint comes from and why it is not merely
- * about disclosure.
+ * 2026-08-16). And no ACTIVITY-COUPLED count in either direction — see the next
+ * section, which is where that constraint comes from, why it is not merely
+ * about disclosure, and why it bans coupling rather than numbers per se.
  *
  * ── AND HOW OFTEN ──────────────────────────────────────────────────────────
  * The owner's diagnostics window is the newest `DEFAULT_MAX_RECENT_EVENTS` = 50
@@ -75,9 +75,14 @@
  * an idle database still passes. `instance_scope_rekey_refused` carried
  * `stranded_rows`, a `COUNT(*)` over ~40 swept tables including `tasks` and
  * `reminders`, and did exactly that. So the rule these payloads are now built to
- * is: A JOURNAL PAYLOAD DESCRIBES THE CONDITION, NEVER ITS VOLUME. Volumes that
- * an operator genuinely wants go to the log lines, which are unbounded and
- * compete with nothing. See {@link planInstanceRefusalRows}.
+ * is: NO FIELD THAT MOVES WHEN THE OWNER MERELY USES HIS INSTANCE. It is a rule
+ * about COUPLING, not about numbers per se: {@link planCredentialRefusalRows}
+ * lawfully carries `orphaned_rows`/`orphaned_handles`, because those count rows
+ * in the credential tables only — tasks and reminders never touch them, so they
+ * move only when the orphaned credential set itself changes, and a changed
+ * orphan set IS new information worth a fresh row. Volumes that drift with use
+ * go to the log lines, which are unbounded and compete with nothing. See
+ * {@link planInstanceRefusalRows}.
  *
  * THE COMPARISON IS AGAINST THE VISIBLE FEED, NOT AGAINST HISTORY (Argus r2
  * blocker, 2026-08-16). Suppression is only ever "the owner is already looking

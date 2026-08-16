@@ -197,8 +197,12 @@ with cross-references noted inline.
     deliberately does not re-key the ledger, so the next explicit boot takes the ledger-agrees
     fast path and never sweeps the row back: scoped anywhere else, the guard's only observable
     signal is invisible to the instance it protects, forever. The readable handles are the
-    ledger's (authoritative — written only by an explicit boot) or, absent that,
-    `onboarding_state`'s; blank handles are dropped. READABILITY IS DECIDED BY THAT EVIDENCE, NOT
+    ledger's (authoritative — it names a handle THIS database has booted under and committed inside
+    the re-key transaction; NOT "written only by an explicit boot", which is false — a fallback boot
+    with nothing stranded falls past the guard and seeds it, proven by
+    `migrations/__tests__/scope-rekey-direction-guard.test.ts` "a FRESH dev box still seeds", and
+    `gateway/scope-refusal-journal.ts` `resolveOwnerReadableScopes` documents why the weaker
+    property is the one relied on) or, absent that, `onboarding_state`'s; blank handles are dropped. READABILITY IS DECIDED BY THAT EVIDENCE, NOT
     BY STRING INEQUALITY WITH THE BOOTING PROCESS: an owner whose instance really is called `dev`
     reads under `dev`, and dropping that scope because the attempting process resolved to the same
     string moved the row to an unreadable one — worse than the code the rule replaced (Argus r2,
@@ -230,17 +234,23 @@ with cross-references noted inline.
     env — sees the OTHER shape as the newest row every time, and every boot writes. Asked "is this
     payload already anywhere on the page", the feed settles at one row per distinct shape, and any
     future third shape is covered without anyone noticing it exists.
-    AND NO JOURNAL PAYLOAD ON THIS PATH MAY CONTAIN A ROW COUNT — the trigger hashes the payload, so
-    a field that moves when the owner creates a task re-arms it on every boot and the starvation
-    returns in full, on exactly the instances that are in USE and on none of the idle databases the
-    dedup tests boot against (Argus r2 blocker on PR #322, 2026-08-16: `instance_scope_rekey_refused`
-    carried `stranded_rows`, a `COUNT(*)` over ~40 swept tables including `tasks`; four anonymous
-    boots with one task between each wrote FOUR rows). That same field was independently FALSE once
-    the row moved to the live handle — `stranded_slug`/`stranded_rows` named the reader's own handle
-    and his own healthy data, which the guard had just protected, and the feed rendered his ordinary
-    growth as a worsening data-loss condition. The payload is `targeted_slug`,
-    `other_targeted_handles`, `attempted_by_slug`: the CONDITION, never its volume. Volumes go to the
-    log lines, which are unbounded and compete with nothing — and for the same reason those log
+    AND NO JOURNAL PAYLOAD ON THIS PATH MAY CONTAIN AN ACTIVITY-COUPLED COUNT — no field that moves
+    when the owner merely USES his instance. The trigger hashes the payload, so such a field re-arms
+    it on every boot and the starvation returns in full, on exactly the instances that are in USE
+    and on none of the idle databases the dedup tests boot against (Argus r2 blocker on PR #322,
+    2026-08-16: `instance_scope_rekey_refused` carried `stranded_rows`, a `COUNT(*)` over ~40 swept
+    tables including `tasks`; four anonymous boots with one task between each wrote FOUR rows). That
+    same field was independently FALSE once the row moved to the live handle —
+    `stranded_slug`/`stranded_rows` named the reader's own handle and his own healthy data, which
+    the guard had just protected, and the feed rendered his ordinary growth as a worsening data-loss
+    condition. So the instance-refusal payload is `targeted_slug`, `other_targeted_handles`,
+    `attempted_by_slug`: the CONDITION, never its volume. The RULE IS ACTIVITY-COUPLING, NOT "no
+    number anywhere": the credential refusal's `orphaned_handles`/`orphaned_rows`
+    (`gateway/scope-refusal-journal.ts` `planCredentialRefusalRows`) count rows in the CREDENTIAL
+    tables only, which tasks and reminders never touch — they move only when the orphaned credential
+    set itself changes, and a changed orphan set IS new information the trigger should re-fire on
+    (the drift test pins this: four boots with a task between each hold the credential feed at one
+    row). Unbounded volumes go to the log lines, which compete with nothing — and for the same reason those log
     counts EXCLUDE `system_events`, since counting the journal's own table reported the previous
     boot's warning as "rows at stake" and climbed 1 → 3 → 4 across three IDENTICAL boots.
     AND THE READER MUST RESOLVE THE SAME SCOPE BOOT FROZE: `neutron doctor`

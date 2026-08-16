@@ -137,14 +137,17 @@ export type SystemEventName =
   // again, because the owner can no longer see it. The same rule applies to
   // `credential_scope_orphaned` on BOTH its branches.
   //
-  // AND THE PAYLOADS CARRY NO ROW COUNTS, WHICH IS WHAT MAKES THE TRIGGER WORTH
-  // ANYTHING (Argus r2 blocker on PR #322, 2026-08-16). The trigger hashes the
-  // payload, so any field that moves with ordinary owner activity re-arms it
-  // every boot and the starvation is back in full — and only on instances that
-  // are in USE, which is why every test that boots against an idle database
-  // passed while it was broken. `instance_scope_rekey_refused` carried a
-  // `COUNT(*)` over ~40 swept tables and did exactly that. Volumes belong in the
-  // log lines, which are unbounded; these payloads state the CONDITION.
+  // AND THE PAYLOADS CARRY NO ACTIVITY-COUPLED COUNTS, WHICH IS WHAT MAKES THE
+  // TRIGGER WORTH ANYTHING (Argus r2 blocker on PR #322, 2026-08-16). The
+  // trigger hashes the payload, so any field that moves with ordinary owner
+  // activity re-arms it every boot and the starvation is back in full — and only
+  // on instances that are in USE, which is why every test that boots against an
+  // idle database passed while it was broken. `instance_scope_rekey_refused`
+  // carried a `COUNT(*)` over ~40 swept tables and did exactly that. The
+  // credential refusal's `orphaned_rows` is the lawful contrast: it counts
+  // credential-table rows only, which move only when the orphaned set itself
+  // changes — a change in the CONDITION, worth a fresh row. Volumes that drift
+  // with use belong in the log lines, which are unbounded.
   | 'instance_scope_rekey_refused'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
