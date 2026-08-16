@@ -83,6 +83,32 @@
 #     config writes had failed and still printed "merge drivers: installed" on exit 0 — the exact
 #     state the paragraph above calls impossible. `--check` and the lock-contention case are both
 #     covered in `scripts/git/as-built-merge-realgit.test.ts`.
+#
+# `--check` VERIFIES WHAT IS INSTALLED, NOT MERELY THAT SOMETHING IS.
+# ------------------------------------------------------------------
+# It used to ask two yes/no questions — is `merge.<name>.driver` non-empty, and is the attribute
+# line present — and answer "installed" to any command whatsoever. A clone that ran an EARLIER
+# version of this script therefore reported success while still holding that version's command,
+# so none of the hardening below (`env -u` on the credentials, `--config=/dev/null`,
+# `--env-file=/dev/null`) ever reached it. Measured on git 2.50.1 before this was fixed: install,
+# then `git config merge.as-built-log.driver "bun <driver> %O %A %B %L %P"` — the predecessor
+# command, attribute untouched — and `--check` printed "merge drivers: installed" and exited 0.
+# That is the same false-pass class this driver exists to close, one layer out: a check that
+# cannot tell the hardened driver from its predecessor is what keeps every already-installed
+# clone on the vulnerable one.
+#
+# So the configured command is now compared against the one THIS script would write, byte for
+# byte, and a difference is reported as STALE with both strings printed and the one-line remedy.
+# Exact equality rather than a hunt for the individual hardening flags, for two reasons: a
+# substring hunt has to be extended by hand every time a flag is added — which is precisely the
+# maintenance the old check failed at — and re-running the installer is idempotent and cheap, so
+# a false "stale" costs one command while a false "installed" costs the whole property. Both
+# halves are derived by `driver_command` so there is exactly one definition of the command and
+# the check cannot drift from what the install writes.
+#
+# WHY THIS DOES NOT NEED `.name` IN THE COMPARISON: `.name` is cosmetic (see the ordering note
+# above — a lone `.driver` is a working driver), it is deliberately non-fatal on install, and
+# demanding it here would report a correctly-hardened clone as stale.
 
 set -uo pipefail
 
@@ -134,6 +160,43 @@ remove_attr_line() {
   mv "$tmp" "$ATTRS"
 }
 
+# Single-quote one word for the `/bin/sh -c` git runs the driver command under.
+#
+# The wrapping used to be a bare `'$BUN'`, which is correct for every path without a single quote
+# in it and produces an unparseable command for any path with one — and `$ROOT` comes from wherever
+# the clone happens to live, so it is not this script's to promise. The `'\''` dance is the
+# standard escape and this costs three lines. For a quote-free path the output is byte-identical to
+# the old spelling, so nothing already installed is disturbed by it.
+sq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# THE ONE DEFINITION of the command git runs, derived identically for the install and for `--check`.
+# Two spellings of this would let the check pass a clone the installer would have written
+# differently, which is the bug `--check` was just fixed for; there is deliberately no second copy.
+#
+# `--config=/dev/null` IS NOT OPTIONAL. git runs a merge driver with its cwd at the top of the
+# working tree being merged, and bun reads `bunfig.toml` from its cwd — so without this flag a
+# `bunfig.toml` carrying `preload = ["./anything.ts"]` executes that file inside the driver process
+# on every merge of this path, inheriting whatever credentials the invoking shell holds. Reproduced
+# on bun 1.3.9; `--config=/dev/null` is an empty TOML file, and the driver needs no config of its
+# own (it reads three files and writes one).
+#
+# `--env-file=/dev/null` COVERS WHAT `--config` DOES NOT. bun auto-loads a `.env` from that same
+# cwd — the merged repository — independently of `bunfig.toml`. Measured on bun 1.3.9: with only
+# `--config=/dev/null`, a `.env` in the cwd still reached `process.env`; with this flag it did not.
+#
+# …AND THE TOKEN IS NOT IN THE PROCESS AT ALL. `env -u` drops the owner's `GH_TOKEN` and the
+# `GIT_CONFIG_*` credential-helper triple that reads it, so there is nothing for a future injection
+# to find. Two independent controls: one over what can get in, one over what is there to take.
+driver_command() {
+  local bun="$1"
+  local env_bin=env
+  [ -x /usr/bin/env ] && env_bin=/usr/bin/env
+  printf '%s -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 %s --config=/dev/null --env-file=/dev/null %s %%O %%A %%B %%L %%P' \
+    "$env_bin" "$(sq "$bun")" "$(sq "$DRIVER_SCRIPT")"
+}
+
 if [ "${1:-}" = "--uninstall" ]; then
   git -C "$ROOT" config --unset "merge.$DRIVER_NAME.driver" 2>/dev/null
   git -C "$ROOT" config --unset "merge.$DRIVER_NAME.name" 2>/dev/null
@@ -150,6 +213,26 @@ if [ "${1:-}" = "--check" ]; then
   fi
   if ! grep -q -x -F "$ATTR_LINE" "$ATTRS" 2>/dev/null; then
     echo "merge drivers: NOT installed — '$ATTR_LINE' missing from $ATTRS" >&2
+    exit 1
+  fi
+  # WHAT is installed, not merely THAT something is — see the header. Without this a clone still
+  # holding a previous version's command answers "installed" and never takes the hardening.
+  check_bun="$(command -v bun 2>/dev/null)"
+  if [ -z "$check_bun" ]; then
+    # Fail closed rather than skip the comparison. The command that would be installed here names
+    # a bun, so with none on PATH there is nothing to compare against and no honest verdict to
+    # give; "installed" would be the same unverified answer this check was fixed for.
+    echo "merge drivers: CANNOT VERIFY — bun is not on PATH, so the installed command cannot be" >&2
+    echo "                       compared against the one this script installs." >&2
+    exit 2
+  fi
+  expected="$(driver_command "$check_bun")"
+  if [ "$configured" != "$expected" ]; then
+    echo "merge drivers: STALE — this clone holds a DIFFERENT driver command from the one this" >&2
+    echo "                       script installs, so it is running an older driver." >&2
+    echo "     installed → $configured" >&2
+    echo "     expected  → $expected" >&2
+    echo "     Re-run 'bash scripts/install-merge-drivers.sh' to update it (idempotent)." >&2
     exit 1
   fi
   echo "merge drivers: installed"
@@ -179,23 +262,9 @@ fail_unwritable() {
   exit 3
 }
 
-# `--config=/dev/null` IS NOT OPTIONAL. git runs a merge driver with its cwd at the top of the
-# working tree being merged, and bun reads `bunfig.toml` from its cwd — so without this flag a
-# `bunfig.toml` carrying `preload = ["./anything.ts"]` executes that file inside the driver process
-# on every merge of this path, inheriting whatever credentials the invoking shell holds. Reproduced
-# on bun 1.3.9; `--config=/dev/null` is an empty TOML file, and the driver needs no config of its
-# own (it reads three files and writes one).
-#
-# `--env-file=/dev/null` COVERS WHAT `--config` DOES NOT. bun auto-loads a `.env` from that same
-# cwd — the merged repository — independently of `bunfig.toml`. Measured on bun 1.3.9: with only
-# `--config=/dev/null`, a `.env` in the cwd still reached `process.env`; with this flag it did not.
-#
-# …AND THE TOKEN IS NOT IN THE PROCESS AT ALL. `env -u` drops the owner's `GH_TOKEN` and the
-# `GIT_CONFIG_*` credential-helper triple that reads it, so there is nothing for a future injection
-# to find. Two independent controls: one over what can get in, one over what is there to take.
-ENV_BIN="env"
-[ -x /usr/bin/env ] && ENV_BIN=/usr/bin/env
-DRIVER_COMMAND="$ENV_BIN -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 '$BUN' --config=/dev/null --env-file=/dev/null '$DRIVER_SCRIPT' %O %A %B %L %P"
+# Derived by `driver_command` above, which `--check` uses too — see its docblock for what each of
+# `env -u`, `--config=/dev/null` and `--env-file=/dev/null` closes, and the reproductions.
+DRIVER_COMMAND="$(driver_command "$BUN")"
 
 # THE LOAD-BEARING HALF FIRST — see the header. A lone `.driver` works; a lone `.name` is fatal.
 if ! git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$DRIVER_COMMAND"; then

@@ -6582,6 +6582,19 @@ The fix is a git merge driver that works on **whole entries**:
   **driver without attribute is inert and IS reachable** (a failed `mkdir`/append
   exits 3 loudly and leaves the config). The guarantee is "never the bad half,
   always loudly" — not "never a half".
+- **`--check` verifies WHAT is installed, not merely THAT something is.** It used
+  to ask whether `merge.<name>.driver` was non-empty and whether the attribute
+  line was present, and answered "installed" to any command — so a clone that ran
+  an EARLIER version of the installer reported success while still holding that
+  version's command, and the credential scrub and interpreter-isolation flags
+  never reached it. Measured on git 2.50.1 before the fix: install, replace the
+  config value with the predecessor's `bun <driver> %O %A %B %L %P`, leave the
+  attribute alone, and `--check` printed `merge drivers: installed`, exit 0. It
+  now compares the configured command byte-for-byte against the one
+  `driver_command` would write — one definition shared by the install and the
+  check, so they cannot drift — and reports `STALE` (exit 1) with both strings
+  and the remedy. `NOT installed` stays distinct from `STALE`, and a host with no
+  bun fails closed as `CANNOT VERIFY` (exit 2) rather than guessing.
 
 **What "the repo merges exactly as it does today" means here, precisely.** It is
 **not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,

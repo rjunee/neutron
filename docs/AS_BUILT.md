@@ -4,6 +4,8 @@ Running log of what shipped, newest first. One entry per merged change.
 
 ## 2026-08-16 — file presence is not authorization, and this log stops losing entries quietly
 
+Landed via PR #323.
+
 Four defects in the entry-aware merge driver that shipped in the entry directly
 below, all of them in `main`, found by a retroactive review panel.
 
@@ -397,6 +399,47 @@ It also cannot police the lexical rule it copies — a heading shape the predica
 itself gets wrong increments both counts and passes, which is what both `HEADING`
 defects above did. Those are pinned by fixture tests that name each rejected
 spelling; this one covers the aggregate.
+
+`--check` NOW VERIFIES WHAT IS INSTALLED, NOT MERELY THAT SOMETHING IS — WHICH IS
+THE SAME FALSE-PASS THIS ENTRY IS ABOUT, ONE LAYER OUT. `scripts/install-merge-drivers.sh`
+`--check` asked two yes/no questions: is `merge.as-built-log.driver` non-empty,
+and is the attribute line present. It answered "installed" to ANY command, so a
+clone that had run an earlier version of the installer reported success while
+still holding that version's command — and none of the hardening above (the
+`env -u` credential scrub, `--config=/dev/null`, `--env-file=/dev/null`) ever
+reached it. Measured on git 2.50.1 before the fix: install, then set
+`merge.as-built-log.driver` to the predecessor's `bun <driver> %O %A %B %L %P`
+with the attribute untouched, and `--check` printed `merge drivers: installed`
+and exited 0. A check that cannot tell the hardened driver from its predecessor
+is precisely what keeps an already-installed clone on the vulnerable one, quietly
+and indefinitely. The configured command is now compared byte-for-byte against
+the one the installer would write, and a difference is `STALE` on exit 1 with
+both strings and the one-line remedy printed. Exact equality rather than a hunt
+for individual flags: a substring hunt needs extending by hand every time a flag
+is added, which is the maintenance the old check already failed at, and the
+remedy is idempotent — a false `STALE` costs one command while a false
+`installed` costs the whole property. Both halves derive the command from one
+`driver_command` function, so the check cannot drift from what the install
+writes. `NOT installed` is kept distinct from `STALE`, because a clone that never
+ran the installer is not running an older driver, and no-bun fails closed as
+`CANNOT VERIFY` rather than guessing.
+
+Mutation-tested in `scripts/git/as-built-merge-realgit.test.ts`: replacing the
+comparison with `if false` turns exactly the three staleness tests red and leaves
+the other 15 green; each of the five hardening elements is dropped individually
+from an otherwise byte-identical command and each is caught, with the mutation
+itself asserted to have landed so a no-op `String.replace` cannot pass for a
+detection.
+
+The command is also shell-quoted properly now. The wrapping was a bare
+`'$DRIVER_SCRIPT'`, which is correct for every path without a single quote in it
+and unparseable for any path with one — and that path is wherever the clone
+happens to live, so it was never the installer's to promise. `sq()` applies the
+standard `'\''` escape; for a quote-free path the emitted bytes are identical to
+the old spelling, so nothing already installed is disturbed. The test builds a
+clone under a directory whose name contains a quote and hands the resulting
+command to `/bin/sh` to parse, with the naive spelling as the control that fails.
+
 ## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
 
 The launcher now composes reflection guidance ONCE. `trident/inner-loop.ts`

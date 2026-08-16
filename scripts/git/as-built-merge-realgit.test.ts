@@ -605,6 +605,164 @@ describe('the installer under a locked config — the FATAL half-state must be i
     expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).not.toBe('')
     expect(attributes(repo)).toContain('merge=as-built-log')
   }, 30_000)
+
+  /**
+   * `--check` HAS TO VERIFY WHAT IS INSTALLED, NOT MERELY THAT SOMETHING IS.
+   *
+   * The check used to ask two yes/no questions — driver config non-empty, attribute line present —
+   * and answer "installed" to ANY command. So a clone that ran an earlier version of the installer
+   * reported success while still holding that version's command, and none of the hardening ever
+   * reached it. MEASURED on git 2.50.1 before the fix: install, replace the config value with the
+   * predecessor's `bun <driver> %O %A %B %L %P` and leave the attribute alone, and `--check`
+   * printed "merge drivers: installed" and exited 0.
+   *
+   * That is the same false-pass class the driver itself exists to close, one layer out: a check
+   * that cannot tell the hardened driver from its predecessor is exactly what keeps an
+   * already-installed clone on the vulnerable one, silently and indefinitely.
+   */
+  describe('--check against the command actually installed', () => {
+    /** The command the installer wrote into this repo, which is the reference for every mutation. */
+    function installed(repo: string): string {
+      return run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()
+    }
+
+    test('the PREDECESSOR command is reported STALE, and the hardened one still passes', () => {
+      const repo = freshRepo()
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+
+      const hardened = installed(repo)
+      // The command as it stood before this change: no credential scrub, no `--config`, no
+      // `--env-file`. Everything else about the clone — attribute, driver name, script path — is
+      // left exactly as the installer left it, so the command is the ONLY thing under test.
+      const predecessor = `bun ${join(repo, 'scripts', 'git', 'as-built-merge-driver.ts')} %O %A %B %L %P`
+      expect(predecessor).not.toBe(hardened)
+      git(repo, 'config', 'merge.as-built-log.driver', predecessor)
+      expect(attributes(repo)).toContain('merge=as-built-log')
+
+      const stale = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(stale.ok).toBe(false)
+      expect(stale.stderr).toContain('STALE')
+      // It names both commands, because "stale" with nothing to compare is not actionable.
+      expect(stale.stderr).toContain(predecessor)
+      expect(stale.stderr).toContain(hardened)
+
+      // CONTROL — the replaced command is what made it stale, not something incidental about this
+      // repo or about running `--check` twice. Put the hardened command back, change nothing else.
+      git(repo, 'config', 'merge.as-built-log.driver', hardened)
+      const restored = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(restored.ok).toBe(true)
+      expect(restored.stdout).toContain('merge drivers: installed')
+    }, 30_000)
+
+    test('MUTATION — dropping ANY ONE hardening element is caught, not just a wholesale swap', () => {
+      // A check that only recognises the predecessor verbatim would pass every command that is
+      // hardened in three ways out of four. Each mutation below removes exactly one property and
+      // leaves the rest of the command byte-identical, so a pass here means the check is sensitive
+      // to that property specifically.
+      const repo = freshRepo()
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      const hardened = installed(repo)
+
+      const mutations: Array<[string, string]> = [
+        ['the bunfig preload guard', hardened.replace(' --config=/dev/null', '')],
+        ['the .env autoload guard', hardened.replace(' --env-file=/dev/null', '')],
+        ['the GH_TOKEN scrub', hardened.replace('-u GH_TOKEN ', '')],
+        ['the GIT_CONFIG credential-helper scrub', hardened.replace('-u GIT_CONFIG_COUNT ', '')],
+        ['the env wrapper entirely', hardened.replace(/^\S*env(\s+-u\s+\S+)+\s+/, '')],
+      ]
+
+      for (const [what, mutated] of mutations) {
+        // The mutation LANDED — `String.replace` is a no-op on a miss, and a no-op mutation would
+        // make the assertion below pass for the wrong reason.
+        expect(mutated, `mutation did not change the command: ${what}`).not.toBe(hardened)
+        git(repo, 'config', 'merge.as-built-log.driver', mutated)
+        const checked = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+        expect(checked.ok, `--check accepted a command missing ${what}`).toBe(false)
+        expect(checked.stderr).toContain('STALE')
+      }
+
+      // CONTROL — every one of those failed on its mutation and not on the loop itself.
+      git(repo, 'config', 'merge.as-built-log.driver', hardened)
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+    }, 60_000)
+
+    test('a stale clone is self-healed by the ordinary re-run — the remedy the message names', () => {
+      // The check is only worth its exit code if the fix it prints actually fixes it. The installer
+      // is idempotent, so the remedy for a stale clone is the same command a fresh one runs.
+      const repo = freshRepo()
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      const hardened = installed(repo)
+
+      git(repo, 'config', 'merge.as-built-log.driver', 'bun as-built-merge-driver.ts %O %A %B %L %P')
+      const stale = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(stale.ok).toBe(false)
+      expect(stale.stderr).toContain("Re-run 'bash scripts/install-merge-drivers.sh'")
+
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      expect(installed(repo)).toBe(hardened)
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+    }, 30_000)
+
+    test('a clone whose two halves are BOTH missing still reports NOT installed, not STALE', () => {
+      // The stale verdict must not swallow the two states that were already reported. A clone that
+      // never ran the installer is not "running an older driver" and telling it so would send the
+      // reader looking for a driver that was never there.
+      const repo = freshRepo()
+      const virgin = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(virgin.ok).toBe(false)
+      expect(virgin.stderr).toContain('NOT installed')
+      expect(virgin.stderr).not.toContain('STALE')
+
+      // …and so does a clone with the right driver and no attribute, which is the inert half.
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      const attrs = join(commonDir(repo), 'info', 'attributes')
+      writeFileSync(attrs, '')
+      const inert = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(inert.ok).toBe(false)
+      expect(inert.stderr).toContain('NOT installed')
+      expect(inert.stderr).not.toContain('STALE')
+    }, 30_000)
+
+    test('a checkout path containing a single quote yields a command the shell can still parse', () => {
+      // The command is a string git hands to `/bin/sh -c`, and the wrapping used to be a bare
+      // `'$ROOT/...'` — correct for every path without a quote in it and unparseable for any path
+      // with one. `$ROOT` is wherever the clone happens to live, so it is not the installer's to
+      // promise. This is the one case where the emitted bytes differ from the old spelling.
+      const parent = mkdtempSync(join(tmpdir(), 'as-built-quote-'))
+      created.push(parent)
+      const repo = join(parent, "it's a clone")
+      mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+      git(repo, 'init', '-q', '-b', 'main')
+      for (const rel of [
+        ['scripts', 'install-merge-drivers.sh'],
+        ['scripts', 'git', 'as-built-merge-driver.ts'],
+        ['scripts', 'git', 'as-built-log-merge.ts'],
+      ]) {
+        cpSync(join(REPO_ROOT, ...rel), join(repo, ...rel))
+      }
+
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      const command = installed(repo)
+      // The quote is ESCAPED rather than passed through — `it's` becomes `it'\''s` inside the
+      // single-quoted word — which is the whole point, so the raw directory name is NOT a substring.
+      expect(command).toContain("it'\\''s a clone")
+      expect(command).not.toContain("'it's a clone'")
+
+      // The proof is `/bin/sh` itself, not a regex over the quoting: run the command with the
+      // driver's five placeholders replaced by a harmless `--version`-style probe and confirm the
+      // shell parses it into words instead of dying on an unterminated quote.
+      const parsed = run(repo, ['sh', '-c', `set -- ${command.replace(/%[OABLP]/g, 'X')}; printf '%s\\n' "$#"`])
+      expect(parsed.stderr).not.toContain('unexpected EOF')
+      expect(parsed.ok).toBe(true)
+
+      // CONTROL — the old spelling on this same path does NOT parse, so the assertion above is
+      // measuring the escape and not something `sh` would have accepted either way.
+      const naive = `'${join(repo, 'scripts', 'git', 'as-built-merge-driver.ts')}' X X X X X`
+      const broken = run(repo, ['sh', '-c', `set -- ${naive}; printf '%s\\n' "$#"`])
+      expect(broken.ok).toBe(false)
+    }, 30_000)
+  })
 })
 
 /**
