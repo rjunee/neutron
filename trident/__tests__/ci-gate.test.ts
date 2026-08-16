@@ -1295,17 +1295,19 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
 
   test('a count that is not a whole number is UNREADABLE, not a missing count', () => {
     // `typeof n === 'number'` admits values that cannot be compared usefully: `NaN` is
-    // unreachable through JSON, but a FLOAT is not, and `3.5 > 3` is false — so the
-    // truncation guard passed a possibly-short list through as complete. Substituting
-    // `names.length` for the unusable count does the same thing one step further in: it
-    // ASSUMES the arrival is complete, which is the assumption this guard exists to
-    // refuse. A present-but-nonsense count nulls the list out.
+    // unreachable through JSON, but a FLOAT is not, and a fraction landing UNDER the
+    // arrival — `2.5 > 3` is false — passed a possibly-short list through as complete.
+    // (`3.5 > 3` is true and was caught; the fixture has to sit on the side the old code
+    // got wrong, or it discriminates nothing. Codex caught exactly that here.)
+    // Substituting `names.length` for the unusable count does the same thing one step
+    // further in: it ASSUMES the arrival is complete, which is the assumption this guard
+    // exists to refuse. A present-but-nonsense count nulls the list out.
     const { classifyRequiredChecksProbe } = loadReadiness()
     const cfg = (runs: string) =>
       classifyRequiredChecksProbe(
         requiredProbe({ prot: '{"contexts":["late-check"]}', protExit: 0, rules: '[]', rulesExit: 0, runs, statuses: named([]) }),
       )
-    expect(cfg(JSON.stringify({ n: 3.5, names: ['check', 'frontend', 'api'] })).produced).toBeNull()
+    expect(cfg(JSON.stringify({ n: 2.5, names: ['check', 'frontend', 'api'] })).produced).toBeNull()
     expect(cfg(JSON.stringify({ n: null, names: ['check', 'frontend'] })).produced).toBeNull()
     // The controls: an integer count that matches is still trusted, and a transcript
     // carrying NO count at all is still read as complete (that shape is the older probe).
@@ -1313,28 +1315,32 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
     expect(cfg(JSON.stringify({ names: ['check', 'frontend'] })).produced).toEqual(['check', 'frontend'])
   })
 
-  test('MUTANT: falling back to names.length on an unusable count goes RED', () => {
-    // The fix that is NOT enough, made explicit: `Number.isInteger(n) ? n : names.length`
-    // still assumes completeness for a float, which is exactly the fail-open above.
-    const mutant = SRC.replace(
-      'const total = parsed.n === undefined ? names.length : parsed.n\n    if (!Number.isInteger(total)) return null',
+  test('MUTANT: both weaker guards fall back to names.length and go RED', () => {
+    // TWO mutants, because there are two ways to get this wrong and they answer the same.
+    // The FIRST is what shipped before this round — the `typeof` test the fix replaced.
+    // The SECOND is the fix that is not enough: `Number.isInteger(n) ? n : names.length`
+    // still assumes completeness when the count is unusable, which is the same fail-open
+    // relocated. Both are handed a count that lands UNDER the arrival.
+    const CURRENT = 'const total = parsed.n === undefined ? names.length : parsed.n\n    if (!Number.isInteger(total)) return null'
+    const probe = requiredProbe({
+      prot: '{"contexts":["late-check"]}',
+      protExit: 0,
+      rules: '[]',
+      rulesExit: 0,
+      runs: JSON.stringify({ n: 2.5, names: ['check', 'frontend', 'api'] }),
+      statuses: named([]),
+    })
+    for (const weaker of [
+      "const total = typeof parsed.n === 'number' ? parsed.n : names.length",
       'const total = Number.isInteger(parsed.n) ? parsed.n : names.length',
-    )
-    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
-    const loaded = loadReadiness(mutant) // …and the mutant parses and loads
-    const out = loaded.classifyRequiredChecksProbe(
-      requiredProbe({
-        prot: '{"contexts":["late-check"]}',
-        protExit: 0,
-        rules: '[]',
-        rulesExit: 0,
-        runs: JSON.stringify({ n: 3.5, names: ['check', 'frontend', 'api'] }),
-        statuses: named([]),
-      }),
-    )
-    // The guard's own assertion, replayed against the mutant:
-    goesRed(() => expect(out.produced).toBeNull())
-    expect(out.produced).toEqual(['check', 'frontend', 'api']) // …trusted as complete
+    ]) {
+      const mutant = SRC.replace(CURRENT, weaker)
+      expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+      const out = loadReadiness(mutant).classifyRequiredChecksProbe(probe) // …and it loads
+      // The guard's own assertion, replayed against the mutant:
+      goesRed(() => expect(out.produced).toBeNull())
+      expect(out.produced).toEqual(['check', 'frontend', 'api']) // …trusted as complete
+    }
   })
 
   test('MUTANT: trusting a truncated list turns a real check into a config error', () => {

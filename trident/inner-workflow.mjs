@@ -3257,10 +3257,13 @@ function classifyRequiredChecksProbe(probe) {
     const names = parsed.names.filter((n) => typeof n === 'string')
     // A COUNT THAT IS NOT A WHOLE NUMBER IS NOT A COUNT, AND FALLING BACK TO
     // `names.length` FOR ONE IS THE SAME FAIL-OPEN ONE STEP FURTHER IN. `typeof` alone
-    // admits any number: `NaN > names.length` is false, and so is `3.5 > 3`, so a
-    // nonsense count slid a possibly-truncated list through as complete. Substituting
-    // `names.length` when the count is unusable does exactly the same thing — it ASSUMES
-    // the arrival is complete, which is the one assumption this guard exists to refuse.
+    // admits any number, and the comparison then answers for a value that cannot be
+    // compared: `NaN > names.length` is false, and so is any fraction that lands under
+    // the arrival — `2.5 > 3` — so a nonsense count slid a possibly-truncated list
+    // through as complete. (A fraction ABOVE it, `3.5 > 3`, happened to be caught; that
+    // is luck, not a guard.) Substituting `names.length` when the count is unusable does
+    // the same thing one step further in — it ASSUMES the arrival is complete, which is
+    // the one assumption this guard exists to refuse.
     //
     // So: an ABSENT count is the only "no count was reported" (older probe transcripts
     // carry bare name arrays), and anything else present-but-not-an-integer — `null` from

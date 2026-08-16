@@ -230,6 +230,26 @@ before the branch or the rulesets are touched, and an unreadable branch body is
 discarded — so guarding those would reject fixtures the classifier never looks at.
 The cross-model reviewer caught that over-scoping; both cases are now controls.
 
+**A later round tightened one more fail-open and settled one contradiction in the
+prose.** The truncation guard read the arrival count with `typeof n === 'number'`,
+which admits values a comparison cannot answer for: a fraction landing UNDER the
+arrival (`2.5 > 3` is false) passed a possibly-truncated list through as complete,
+and so would `NaN`. An absent count is now the only "no count was reported";
+anything present that is not a whole number nulls the list out, which can only
+ever disable the fast-fail and never create a stop. Separately, the normaliser's
+own comment claimed every row for a repeated name is kept and judged, while the
+classifier discards commit statuses — including RED ones — for a name the base
+branch binds to an App. The behaviour is deliberate and was already pinned by a
+test (a producer the requirement excludes cannot satisfy it, and by the same
+token cannot refute it, or anything able to POST a status could fail a check it
+was never bound to); the comment now says so instead of denying it. The
+`workflows` ruleset rule type is still skipped, which is stated in place rather
+than left to be rediscovered. The cross-model reviewer ran again on this round
+and found two defects in it: the comment's arithmetic was wrong in one clause,
+and the new fixture used a fraction the OLD code already rejected, so it
+discriminated nothing. Both fixed; the mutation test now replays both weaker
+guards, including the one that shipped.
+
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
 Landed via PR #325.
