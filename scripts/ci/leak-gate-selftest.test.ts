@@ -656,6 +656,108 @@ describe('--messages-only (the pre-push mode)', () => {
     }
   }, 60_000)
 
+  /**
+   * LEAK_GATE_EXCLUDE_REF — already-published history is not this push's to answer for.
+   *
+   * `base..head` has ONE floor, so a branch that MERGES the mainline pulls the mainline's
+   * commits into its own range. Those commits are already on GitHub and already mirrored,
+   * and they carry the `Co-authored-by: <owner>` trailer GitHub stamps on a squash merge —
+   * so the gate failed the push over messages the person pushing cannot rewrite. The hook
+   * already excluded them on the REBASE path; a merge needs an exclusion a floor cannot
+   * express. Observed 2026-08-16: merging main to clear a conflict blocked the push, with
+   * only `--no-verify` or a force-push rebase available as "fixes" — which is precisely the
+   * unsatisfiable-gate failure this hook's own header warns about.
+   */
+  test('a MERGED-IN published commit is excluded, and a NEW one is still caught', () => {
+    const { dir, base } = gitFixture()
+    const file = localDenylistFile([LOCAL_TERM])
+    const g = (...a: string[]): string =>
+      execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    try {
+      // The mainline gains a commit whose MESSAGE carries the term — the already-public
+      // history the author cannot rewrite. `origin/main` is a real ref here, as it is in a
+      // clone, so the gate resolves the exclusion the same way it does on a developer's box.
+      g('checkout', '-q', '-b', 'mainline')
+      writeFileSync(join(dir, 'src', 'main1.ts'), 'export const m = 1\n')
+      g('add', 'src/main1.ts')
+      g('commit', '-q', '-m', `fix: something on main (#330)\n\nCo-authored-by: ${LOCAL_TERM}`)
+      g('update-ref', 'refs/remotes/origin/main', 'HEAD')
+      const mainTip = g('rev-parse', 'HEAD')
+
+      // A feature branch forked BEFORE that, which then merges the mainline in.
+      g('checkout', '-q', '-b', 'feature', base)
+      writeFileSync(join(dir, 'src', 'f1.ts'), 'export const f = 1\n')
+      g('add', 'src/f1.ts')
+      g('commit', '-q', '-m', 'feat: a clean subject of my own')
+      const branchTipBeforeMerge = g('rev-parse', 'HEAD')
+      g('merge', '-q', '--no-edit', mainTip)
+      const head = g('rev-parse', 'HEAD')
+
+      // CONTROL — WITHOUT the exclusion the merged-in public commit is in window and the
+      // push is blocked. This is the bug, reproduced, and it is what makes the pass below
+      // mean something rather than being a scenario that was never failing.
+      const without = runGate(dir, {
+        LEAK_GATE_BASE_SHA: branchTipBeforeMerge,
+        LEAK_GATE_HEAD_SHA: head,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(without.out).toContain('[pii-denylist-msg]')
+      expect(without.code).toBe(1)
+
+      // WITH it, the window is exactly what this push publishes: clean.
+      const withExcl = runGate(dir, {
+        LEAK_GATE_BASE_SHA: branchTipBeforeMerge,
+        LEAK_GATE_HEAD_SHA: head,
+        LEAK_GATE_EXCLUDE_REF: 'origin/main',
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(withExcl.out).not.toContain('[pii-denylist-msg]')
+      expect(withExcl.code).toBe(0)
+
+      // AND IT IS NOT A BLANKET MUTE — the exclusion drops PUBLISHED commits, not the rule.
+      // A new commit of this branch's own carrying the same term is still caught with the
+      // exclusion set, which is the property that keeps this from being a hole.
+      writeFileSync(join(dir, 'src', 'f2.ts'), 'export const f2 = 2\n')
+      g('add', 'src/f2.ts')
+      g('commit', '-q', '-m', `feat: my own commit naming ${LOCAL_TERM}`)
+      const stillCaught = runGate(dir, {
+        LEAK_GATE_BASE_SHA: branchTipBeforeMerge,
+        LEAK_GATE_HEAD_SHA: g('rev-parse', 'HEAD'),
+        LEAK_GATE_EXCLUDE_REF: 'origin/main',
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(stillCaught.out).toContain('[pii-denylist-msg]')
+      expect(stillCaught.code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  }, 60_000)
+
+  test('an unresolvable LEAK_GATE_EXCLUDE_REF is ignored, not obeyed silently', () => {
+    // Fail-closed: a typo'd or missing ref must leave the window as it was rather than
+    // dropping commits, because "exclude something that does not exist" and "exclude
+    // nothing" must not be able to become "exclude everything".
+    const { dir, base } = gitFixture([`feat: the ${LOCAL_TERM} archive`])
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_EXCLUDE_REF: 'origin/no-such-ref',
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(out).toContain('[pii-denylist-msg]')
+      expect(code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  }, 60_000)
+
   test('no resolvable commit range ⇒ exit 2 — it scanned NOTHING', () => {
     const dir = freshTree() // deliberately not a git repo
     const file = localDenylistFile([LOCAL_TERM])
