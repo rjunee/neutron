@@ -5,31 +5,17 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 export interface MiscCompositionInput {
   db: ProjectDb
   project_slug: string
-  /**
-   * P5.6 — optional reminder-fired push hook. When supplied, the
-   * reminders module wires this hook into `ReminderTickLoop.on_fired`
-   * so an Expo Push notification fans out at the same instant the
-   * substrate dispatcher fires the Telegram message.
-   *
-   * `push_dispatcher.onFired(reminder)` is called AFTER the tick
-   * loop has advanced the row (markFired for one-shot, advanceRecurrence
-   * for recurring). Failure-safe: thrown errors are caught and logged
-   * but never block the tick from advancing to the next reminder.
-   *
-   * `open/composer.ts` wires `createPushDispatcher(...)`
-   * (`gateway/push/dispatcher.ts`) over the SAME `DevicePushTokenStore` the
-   * `/api/app/devices/register` surface writes to, so a registered device is a
-   * delivered device. Test/dev paths leave this unset so the reminder tick
-   * behaves exactly as it did before push existed.
-   *
-   * (This comment claimed "Production wires createPushDispatcher" for months
-   * while NO composer set the field and the function had no non-test call site.
-   * It is true as of the wiring above; do not let it drift back — the assertion
-   * that holds it is `tests/integration/reminders-tab-and-push.open.test.ts`.)
-   */
-  push_dispatcher?: {
-    onFired(reminder: import('@neutronai/reminders/store.ts').Reminder): Promise<void>
-  }
+  // LOOKING FOR `push_dispatcher`? It was DELETED on 2026-08-09, along with the
+  // `ReminderTickLoop.on_fired` hook it fed. It composed a native notification
+  // from the reminder ROW, and the row is the wrong source — a ritual's stored
+  // `message` is the dispatch token `ritual:<id>`, which is literally what the
+  // owner's phone displayed. The notification for a chat message is now composed
+  // by the ONE out-of-turn delivery seam (`gateway/http/deliver.ts` → its `notify`
+  // sink → `gateway/push/chat-message-push.ts`), which is the only place that
+  // knows the posted text AND its durable row id AND is shared by every producer
+  // — a fired reminder, a ritual, the morning brief, the idle nudge, a system
+  // notice. The Expo transport itself (`gateway/push/dispatcher.ts`) is unchanged
+  // and still built by the composer.
   /**
    * P1.5 / Sprint 21 — wiring cleanup callbacks. The realmode
    * composer opens auxiliary DB handles (e.g. RW registry/identity for
@@ -174,6 +160,17 @@ export interface MiscCompositionInput {
      * fans live to any open socket). Absent → the module falls back to the router.
      */
     delivery_sink?: import('@neutronai/trident/delivery.ts').OutboundSink
+    /**
+     * Wake-on-change watcher cadence, in ms (`TridentTickOptions.watch_interval_ms`;
+     * default 2_000, `<= 0` disables it). The watcher runs ONE cheap
+     * `changeSignature()` query per cadence and wakes the 90 s sweep only when a run
+     * actually advanced, so an out-of-process checkpoint is picked up in seconds.
+     *
+     * Plumbed here because "2 s default, CONFIGURABLE" is only true if a production
+     * composition can set it (Argus r3): a knob that exists on the options type and
+     * nowhere on the wiring is a knob no operator has. Absent → the 2 s default.
+     */
+    watch_interval_ms?: number
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed

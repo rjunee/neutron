@@ -108,6 +108,16 @@ const {
   maxRounds = 10,
   laneRetryAttempts = 1,
   ralph = false,
+  // THE DURABLE RE-FIRE COUNTER (`code_trident_runs.ralph_round`), threaded by the
+  // launcher (`buildWorkflowArgs`). It is 0 on the FIRST iteration of a Ralph card
+  // and bumped by one per re-fire (`refireNextRalphTask`), so it is the only input
+  // that can tell a continuation apart from the run that started the card.
+  //
+  // NULL (a legacy caller, or a dry source check that supplies no args) → the FULL
+  // planner always runs. Fail-safe by construction: the cheap continuation planner
+  // is an optimisation, and an optimisation that cannot prove it applies must not
+  // apply.
+  ralphRound = null,
   // Git-mode threaded from the run (`local` | `pr`). Defaults to `pr` for any
   // legacy caller that doesn't thread it; the launcher always sets it.
   mergeMode = 'pr',
@@ -125,6 +135,18 @@ const {
   // thread it) → the prior work is treated as being about DIFFERENT code and the
   // run rebuilds + re-reviews, exactly as it did before this existed.
   resumeCheckpointHead = null,
+  // MID-LOOP RESUME — the LIVE head of `branch`, READ IN CODE by the launcher at fire
+  // time (`resolveResumeLiveHead` in orchestrator.ts) at the credentialed host
+  // boundary, rather than reported by a probe AGENT. Tri-state, and the three values
+  // are NOT interchangeable:
+  //   - a full 40-hex OID → the authority's answer for the branch head.
+  //   - 'absent'          → the authority answered SUCCESSFULLY that the branch does
+  //                         not exist; the recorded work is gone from it → rebuild.
+  //   - ''                → the launcher tried and COULD NOT READ it. Exclusively
+  //                         "could not tell", never "not there".
+  // Null/absent (an OLD LAUNCHER, or not a resume with a recorded head) → fall back to
+  // the `head-probe-round-resume` agent seat, exactly as this ran before.
+  resumeLiveHead = null,
   // MID-LOOP RESUME — the synthesised findings the resumed `argus-request-changes`
   // checkpoint was recorded with (`code_trident_runs.inner_checkpoint_findings`,
   // already decoded to an array by the launcher). They are what a resumed fix
@@ -398,6 +420,31 @@ const kimiReviewRoute = (route, modelId) => ({
   envVar: 'KIMI_MODEL',
 })
 
+// ── A CLI SEAT MOVED ONTO CLAUDE ─────────────────────────────────────────────
+// The owner assigned a Claude tier to a cross-model review seat (the case the whole
+// point of a "put any model in any slot" pane): with the BUILD on GPT, Opus on a
+// review seat is the cross-family panel, not a violation of it. The route stops being
+// a subprocess launcher and becomes an ordinary `agent({model})` dispatch, so it
+// carries an EFFORT again and NO env knob — a leftover `envVar` here would put a
+// Claude id on a wrapper's command line.
+//
+// THIS IS NOT THE BANNED FALLBACK. `trident/kimi-review.ts` forbids a seat quietly
+// becoming a Claude reviewer when its CLI is unavailable; nothing here is reached by a
+// failure — only by the owner's stored choice, which is logged, panel-labelled and
+// recorded in the verdict.
+//
+// The effort is the owner's when a config carries one and the phase's stated default
+// otherwise: these two rows have no live effort cell (their DEFAULT executor is a CLI,
+// which is what `phaseSupportsEffort` answers), so the common path is the default.
+const claudeReviewRoute = (route, modelId, effort) => ({
+  ...route,
+  model: modelId,
+  effort,
+  transport: 'agent',
+  group: 'claude',
+  envVar: null,
+})
+
 // forge:* routes BY the planner's complexity tag: '[mechanical]' (boilerplate,
 // tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
 // ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
@@ -429,6 +476,13 @@ const modelForTag = (tag) =>
 // literals in THIS file — see the head-probe note below for why that matters.
 const ROLE_MODEL = {
   'plan:fable': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition', dispatchGroups: ['claude'] },
+  // THE CONTINUATION PLANNER IS THE SAME SEAT ON THE SAME TIER, deliberately. What
+  // `plan:next` removes is the whole-repo SURVEY, not the thinking: it still picks
+  // the next task and writes the execution spec a cheaper executor follows without
+  // re-reasoning the design. Routing it below `plan:fable` would make the two
+  // iterations of one card plan at different qualities, which is a harder failure
+  // to see than a slow build.
+  'plan:next': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition', dispatchGroups: ['claude'] },
   'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric', dispatchGroups: ['none', 'claude'] },
   'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial', group: 'claude', dispatchGroups: ['none', 'claude', 'codex'], codexWrapper: 'review' },
   'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis', dispatchGroups: ['claude'] },
@@ -438,10 +492,19 @@ const ROLE_MODEL = {
   // the owner picks a tier and the resolved id reaches the subprocess — the model is
   // NOT handed to agent() (that resolves against Claude Code's endpoint and cannot
   // reach a GPT/Kimi model; see the `modelTiers` arg). The thin Claude agent wrapping
-  // each still runs on the launcher default: its whole job is to run one command and
-  // map an exit code.
-  'argus:codex': { ...cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'codex', 'kimi'] },
-  'argus:kimi': { ...cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }), dispatchGroups: ['none', 'codex', 'kimi'] },
+  // each still runs on the launcher default WHILE THE SEAT IS ON A CLI TIER: its whole
+  // job there is to run one command and map an exit code.
+  //
+  // …AND A CLAUDE TIER IS ONE OF THE CHOICES. `claude` is in `dispatchGroups` because
+  // the dispatch exists: the seat then reviews with a real reviewer prompt on the
+  // CHOSEN tier through `agent({model})` (see `claudePeerPrompt` / the panel below),
+  // rather than shelling out. That is the owner ASSIGNING a family to a seat, which is
+  // a different thing from the banned SILENT fallback to Claude when a CLI fails — the
+  // seats never substitute for one another (`routeAvailable`), they only run what was
+  // chosen. The list must match `trident/phase-models.ts`; both are walked by
+  // `__tests__/cross-model-dispatch.test.ts`.
+  'argus:codex': { ...cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi'] },
+  'argus:kimi': { ...cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi'] },
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
@@ -460,7 +523,16 @@ const ROLE_MODEL = {
   // so a fallback to the most expensive tier would be a per-round tax on the step
   // that exists to REMOVE a per-lane tax.
   'merge-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
+  // The plan probe is the fourth of the same shape: two fixed git commands, a file
+  // body and a `grep -c` count back, interpreting nothing (the plan:fable-vs-plan:next
+  // selection is made in CODE from those fields). Routed explicitly for the reason
+  // head-probe's comment above gives — the silent fallback is the most expensive tier.
+  'plan:probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
 }
+
+// Generic seats use the canonical rubric review effort when moved onto Claude;
+// deriving it keeps their default aligned with the existing Claude reviewer.
+const claudeSeatEffort = () => ROLE_MODEL['argus:claude'].effort
 
 // OWNER PHASE OVERRIDES, threaded in as `args.phaseModels` (phase key →
 // {model?, effort?}). `model` is either a TIER name — resolved through the same
@@ -519,13 +591,32 @@ function applyPhaseOverride(route, phaseKey) {
     } else if (tier.group === 'none' && dispatchGroups.includes('none')) {
       return { ...route, disabled: true, model: null, effort: null }
     } else if (tier.group !== group && dispatchGroups.includes(tier.group)) {
-      // THE BUILD MOVES TO THE CODEX EXECUTOR. The whole route changes, not just the
+      // THE STEP MOVES TO ANOTHER EXECUTOR. The whole route changes, not just the
       // id: the dispatch stops being an `agent()` call and becomes the codex build
       // wrapper, which is the difference between "the build runs on GPT" and "we
       // asked Claude Code's endpoint for a GPT id".
+      //
+      // The line NAMES THE EXECUTOR IT MOVED TO. It used to say `executor=codex`
+      // unconditionally, which was already wrong for a seat moved to Kimi and would
+      // read as an outright lie for one moved to Claude.
       log(
-        `trident.phase-override phase=${phaseKey} executor=codex tier=${requested} model=${tier.model_id}`,
+        `trident.phase-override phase=${phaseKey} executor=${tier.group} tier=${requested} model=${tier.model_id}`,
       )
+      if (tier.group === 'claude') {
+        // …AND THE OTHER DIRECTION: a CLI seat moved onto a Claude tier. The effort is
+        // live again on this route, so it is honoured rather than logged away — the
+        // reverse of the codex case below (see `claudeReviewRoute`).
+        if (override.effort !== undefined && !(typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort))) {
+          log(`trident.phase-override IGNORED phase=${phaseKey} reason=effort-not-in(${VALID_EFFORTS.join('|')})`)
+        }
+        return claudeReviewRoute(
+          route,
+          tier.model_id,
+          typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort)
+            ? override.effort
+            : claudeSeatEffort(),
+        )
+      }
       if (override.effort !== undefined) {
         // The step HAD an effort control while it ran on Claude; on the codex
         // executor it does not. Said out loud rather than dropped, because a stored
@@ -661,7 +752,7 @@ function logCrossModelSpawn(label, fallback) {
   const route = routeModel(label)
   const overridden = route.phaseKey !== null && phaseOverrideFor(route.phaseKey) !== undefined
   log(
-    `trident.agent label=${label} model=${route.model || fallback} effort=n/a transport=cli phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}`,
+    `trident.agent label=${label} model=${route.model || fallback} effort=${route.transport === 'cli' ? 'n/a' : route.effort} transport=${route.transport} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}`,
   )
 }
 
@@ -671,9 +762,7 @@ function logCrossModelSpawn(label, fallback) {
 // of this file and executed on its own — which is exactly how the codex bridge's
 // truncation-readback test proves the SHIPPED command, rather than a retyped copy of
 // it (`inner-workflow.test.ts`). A closure value it can pass in keeps that possible.
-const CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:codex')
 const ADVERSARIAL_CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:adversarial')
-const KIMI_ENV_PREFIX = crossModelEnvPrefix('argus:kimi')
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -745,6 +834,13 @@ const FORGE_SCHEMA = {
     prNumber: { type: ['number', 'null'] },
     diffFile: { type: 'string' },
     testsPassed: { type: 'boolean' },
+    // OPTIONAL — deliberately NOT in `required`. Forge reports true only when it
+    // MATERIALLY deviated from the Ralph exec spec, which makes the plan the
+    // previous iteration committed a document that no longer describes reality:
+    // the next iteration must then pay for the full survey instead of taking the
+    // cheap `plan:next` continuation. Absent/null decodes as false everywhere, so
+    // an executor that never mentions it keeps today's behaviour exactly.
+    deviatedFromSpec: { type: ['boolean', 'null'] },
   },
 }
 
@@ -759,6 +855,18 @@ const CODEX_FORGE_SCHEMA = {
   additionalProperties: false,
   required: [...FORGE_SCHEMA.required, 'codexStatus', 'trailerComplete', 'wrapperExitCode', 'preservedWork'],
   properties: {
+    // `deviatedFromSpec` RIDES ALONG IN THE SPREAD BUT IS INERT ON THIS ROUTE, and
+    // that is deliberate rather than an oversight. The agent filling THIS schema is
+    // the codex BRIDGE — it launches a subprocess and copies the wrapper's measured
+    // trailer; it never sees the build's own reasoning, so it has no honest way to
+    // say whether the build deviated from its exec spec, and `codexBuildPrompt`
+    // correctly never asks it to. The field therefore stays absent here, which
+    // decodes as false: a deviated codex build writes the clean 'ralph-task-built'
+    // checkpoint and the NEXT iteration takes the cheap `plan:next`. That is the
+    // fail-toward-not-deviated direction on purpose — the periodic full re-plan
+    // (`PLAN_REFRESH_EVERY`) is what bounds the drift on this route. Carrying the
+    // signal out of a codex build needs a seventh trailer line from the wrapper,
+    // which is a change to `trident/codex-build.sh` and its own card.
     ...FORGE_SCHEMA.properties,
     codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
     trailerComplete: { type: 'boolean' },
@@ -789,6 +897,192 @@ const PLAN_SCHEMA = {
     complexity: { type: 'string', enum: ['mechanical', 'reasoning'] },
     remainingTasks: { type: 'number', description: 'count of tasks still unchecked AFTER the top task' },
   },
+}
+
+// HOW OFTEN A CONTINUATION ITERATION STILL PAYS FOR THE FULL RE-DERIVATION.
+//
+// RE-PLANNING IS NOT PURE WASTE — building task N can legitimately change what
+// task N+1 should be. That is why the full `plan:fable` re-derivation still runs
+// at iteration 1, on ANY genuine crash-resume, and every PLAN_REFRESH_EVERY'th
+// round, so the committed plan cannot drift arbitrarily far from the code it is
+// supposed to describe. The claim this constant encodes is NOT "planning is
+// unnecessary"; it is "re-deriving the whole checklist from the whole codebase,
+// every single task, is the wrong default".
+//
+// DO NOT REMOVE THE PERIODIC FULL RE-PLAN TO MAKE THE NUMBERS LOOK BETTER.
+const PLAN_REFRESH_EVERY = 5
+
+// The one thing the cheap plan probe reports: whether the branch carries a
+// committed IMPLEMENTATION_PLAN.md, how many '- [ ]' tasks are still unchecked in
+// it, and its VERBATIM body (which `plan:next` returns unchanged as
+// `implementationPlan`, so `ralphExecuteNote` keeps working untouched).
+//
+// `planCksum` IS THE INTEGRITY GUARD, and it is why the seat can stay on the
+// cheapest tier. This probe is asked to relay an arbitrarily long file byte for
+// byte, and its body is what the workflow then treats as the authority for what the
+// branch actually committed — so "the model quietly stopped copying", and "the model
+// helpfully tidied the wording on the way through", must both be DETECTABLE, not
+// assumed away. `cksum` CHECKSUMS the file itself in the same pipeline that produced
+// the body; the workflow recomputes that checksum over the relayed body
+// (`probeBodyIntact`) and refuses the cheap path on any disagreement. A measurement
+// beats a tier.
+const PLAN_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['planFound', 'uncheckedCount', 'planBody'],
+  properties: {
+    planFound: { type: 'boolean' },
+    uncheckedCount: { type: 'number' },
+    planBody: { type: 'string' },
+    planCksum: { type: ['number', 'null'] },
+    planBytes: { type: ['number', 'null'] },
+  },
+}
+
+// Is the relayed plan body BYTE-FOR-BYTE the file the probe measured?
+//
+// COUNTING IS NOT AN INTEGRITY CHECK (Argus r3, confirmed by two reviewers; r2 made
+// the same finding of `wc -l` alone). The relay runs through a model, its body is
+// then FORCED authoritative (`plan.implementationPlan = planProbe.planBody`) and
+// Forge is told to write and COMMIT it verbatim — so any tamper the counters do not
+// see rewrites the card's own plan. `wc -lc` did not see three of them: a silent
+// '- [ ]' → '- [x]' flip is both line- AND byte-neutral, a re-order is too, and a
+// one-byte truncation slipped through the ±1 window the trailing newline needed.
+// Counts cannot close that class, because the class is "same size, different
+// bytes".
+//
+// A CHECKSUM CAN, and `cksum` is in the same POSIX toolbox as `wc`: one extra number
+// from the same pipeline, and any edit — reword, re-order, re-check, truncate,
+// extend — changes it. It is recomputed HERE, over the relayed body, by
+// `cksumOf()`, which is bit-for-bit GNU/BSD `cksum` (CRC-32/CKSUM over the UTF-8
+// bytes, length-terminated) and is cross-checked against the real tool in
+// `inner-workflow-plan-next.test.ts`. Hand-rolled because a Workflow script has NO
+// imports and no filesystem — `agent()` Bash steps are its only other measuring
+// instrument — and because a CRC is ~20 lines where a cryptographic digest is not.
+// This is a TAMPER-EVIDENCE check against a careless relay, not a defence against an
+// adversary choosing collisions.
+//
+// The two candidates are the trailing-newline window, kept for the same reason the
+// count windows had one: an agent relaying a file's content routinely drops the
+// final newline, and that relay is faithful. Everything else must match exactly.
+//
+// A probe that reports NO checksum fails this guard — which only means the lane
+// takes the full `plan:fable`, i.e. today's behaviour minus the saving. The earlier
+// "an absent count is not evidence of tampering, so it passes" rule is exactly how a
+// relay escapes the guard by omitting the number it was asked for, and there is no
+// older probe shape to be compatible with (the seat ships in this same change).
+function probeBodyIntact(probe) {
+  if (probe === null || typeof probe.planBody !== 'string') return false
+  const claimed = probe.planCksum
+  if (claimed === null || claimed === undefined || !Number.isFinite(claimed)) return false
+  const bytes = probe.planBytes
+  for (const candidate of [probe.planBody, `${probe.planBody}\n`]) {
+    const measured = cksumOf(candidate)
+    if (measured.crc !== Math.trunc(claimed)) continue
+    // `cksum` prints the byte count next to the CRC, so it is free to check — and a
+    // relay that reported a matching CRC with a contradictory length has contradicted
+    // itself, which is exactly what this guard exists to catch.
+    if (bytes !== null && bytes !== undefined) {
+      if (!Number.isFinite(bytes) || Math.trunc(bytes) !== measured.bytes) continue
+    }
+    return true
+  }
+  return false
+}
+
+// How many '- [ ]' tasks are still unchecked in a plan body, counted the same way
+// the probe's `grep -c '^[[:space:]]*- \[ \]'` counts them on the file.
+//
+// THIS IS THE CROSS-CHECK BETWEEN THE PROBE'S TWO ANSWERS (Argus r3, confirmed by
+// two reviewers). `uncheckedCount` and `planBody` come back from the same seat and
+// were never compared: the count OVERRIDES `remainingTasks` (the re-fire gate, so a
+// low count ends a half-built card) while the body OVERWRITES the committed
+// IMPLEMENTATION_PLAN.md (so a body missing tasks deletes them). Two numbers
+// measured on the same file must agree; when they do not, the probe's answer is
+// incoherent and the lane must take the full planner rather than pick whichever half
+// it likes.
+function countUnchecked(body) {
+  if (typeof body !== 'string') return -1
+  return (body.match(/^[ \t]*- \[ \]/gm) ?? []).length
+}
+
+// The FIRST still-unchecked task line of a committed plan body, as literal text —
+// the same lines the probe's `grep -c '^[[:space:]]*- \[ \]'` counted, read in the
+// same top-to-bottom order the Ralph one-task discipline requires. Returns the text
+// AFTER the marker (which is what `ralphExecuteNote` quotes to Forge), or null when
+// the body has no unchecked line at all.
+function firstUncheckedTask(body) {
+  if (typeof body !== 'string') return null
+  for (const line of body.split('\n')) {
+    const match = line.match(/^\s*- \[ \]\s*(.+?)\s*$/)
+    if (match) return match[1]
+  }
+  return null
+}
+
+// GNU/BSD `cksum` of a string: the POSIX CRC-32 and the UTF-8 byte count, computed
+// from code units alone.
+//
+// THE ONE PLACE THIS MUST BE EXACT is the comparison in `probeBodyIntact` against
+// what `cksum` printed for the file on the branch, so this is not "a CRC" — it is
+// CRC-32/CKSUM specifically: polynomial 0x04C11DB7, unreflected, initial value 0,
+// the message LENGTH appended low-byte-first, final one's complement. That is the
+// algorithm POSIX specifies for `cksum`, so GNU coreutils and BSD agree on it, and
+// `inner-workflow-plan-next.test.ts` cross-checks this implementation against the
+// real tool over ASCII, multi-byte and astral-plane fixtures rather than against a
+// second hand-written expectation.
+//
+// Hand-rolled, and byte-by-byte rather than via an encoder, because a Workflow
+// script has NO imports and only the globals the runtime injects —
+// `TextEncoder`/`Buffer`/`crypto` are not part of that contract, and a
+// ReferenceError here would take down the very gate that is supposed to fail safe.
+// `String.length` counts UTF-16 code units, which is not what `cksum` reads: the
+// '—' this codebase writes everywhere is 3 bytes and 1 unit. A lone surrogate is
+// encoded as U+FFFD (3 bytes), which is what a UTF-8 encoder would have written to
+// the file being measured.
+function cksumOf(s) {
+  let crc = 0
+  let n = 0
+  // One byte through the unreflected CRC-32 register, MSB first.
+  const feed = (byte) => {
+    crc = (crc ^ (byte << 24)) >>> 0
+    for (let k = 0; k < 8; k++) {
+      crc = crc & 0x80000000 ? (((crc << 1) >>> 0) ^ 0x04c11db7) >>> 0 : (crc << 1) >>> 0
+    }
+  }
+  for (let i = 0; i < s.length; i++) {
+    let c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      const lo = s.charCodeAt(i + 1)
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00)
+        i++
+      } else c = 0xfffd
+    } else if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd
+    if (c < 0x80) {
+      feed(c)
+      n += 1
+    } else if (c < 0x800) {
+      feed(0xc0 | (c >> 6))
+      feed(0x80 | (c & 0x3f))
+      n += 2
+    } else if (c < 0x10000) {
+      feed(0xe0 | (c >> 12))
+      feed(0x80 | ((c >> 6) & 0x3f))
+      feed(0x80 | (c & 0x3f))
+      n += 3
+    } else {
+      feed(0xf0 | (c >> 18))
+      feed(0x80 | ((c >> 12) & 0x3f))
+      feed(0x80 | ((c >> 6) & 0x3f))
+      feed(0x80 | (c & 0x3f))
+      n += 4
+    }
+  }
+  // The length terminator, low byte first (this is what makes `cksum` distinguish a
+  // message from the same message padded with NULs), then the final complement.
+  for (let len = n; len > 0; len = Math.floor(len / 256)) feed(len & 0xff)
+  return { crc: ~crc >>> 0, bytes: n }
 }
 
 // ── Inlined contracts (workflow agents are BARE workers — no CLAUDE.md / persona
@@ -1389,18 +1683,83 @@ SPEC / TASK CONTEXT:
 ${task}`
 }
 
+// THE CHEAP PROBE THAT DECIDES WHETHER THE CONTINUATION PLANNER CAN RUN AT ALL.
+//
+// The workflow script has NO direct shell — every git fact it uses arrives through
+// an `agent()` Bash step (see `readBranchHead`). So "does the branch carry a
+// committed plan, and does it still have unchecked tasks?" needs a seat. This is
+// the same shape as the head probe: ONE fixed command pair, a verbatim body and a
+// count back, no judgement about what any of it means — the selection is made in
+// code below, from these three fields.
+// THE PROBE READS THE SAME REF THE RESUME GATE JUDGED.
+//
+// `classifyResume`'s head comparison — the thing that makes 'unknown-checkpoint'
+// mean "the branch did not move under this handoff" — is fed by the launcher's
+// `resolveResumeLiveHead`, which in `pr` mode asks the REMOTE (`git ls-remote
+// origin`) and in `local` mode the local ref. A probe reading the plain local
+// branch name in pr mode would therefore read a DIFFERENT commit than the one the
+// gate cleared: `git show <branch>:…` resolves `refs/heads/<branch>` ahead of
+// `refs/remotes/origin/<branch>`, so a repo of record holding an unpublished local
+// commit (Forge commits locally in pr mode and is told not to push) would hand
+// `plan:next` a plan whose tasks nobody has published or reviewed. Same authority
+// split as `readBranchHead`, for the same reason.
+const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
+
+function planProbePrompt() {
+  const planPath = `${planProbeRef}:.trident/plans/${forgeBranch}.md`
+  return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
+1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
+2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
+If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0}\` — that is a normal answer, not an error to retry around.
+Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:
+\`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | grep -c '^[[:space:]]*- \\[ \\]'\`
+(\`grep -c\` exits 1 and prints 0 when nothing matches; that is \`uncheckedCount\` = 0, not a failure.)
+3. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | cksum\` — \`cksum\` prints TWO numbers, the CRC then the byte count: report them as \`planCksum\` and \`planBytes\`. The workflow RECOMPUTES that checksum over the \`planBody\` you report, so a body that lost a line, gained a word, re-ordered the checklist, or had a '- [ ] ' silently turned into '- [x] ' on the way into the schema is DETECTED and the whole cheap path is abandoned. Do not compute either number from what you copied, and do not omit them — report exactly what \`cksum\` printed.
+NEVER EXIT SILENTLY.`
+}
+
+// THE CONTINUATION PLANNER (`plan:next`) — the same PLAN_SCHEMA, without the
+// whole-repo survey.
+//
+// The previous iteration's Forge PERSISTED AND COMMITTED the regenerated
+// IMPLEMENTATION_PLAN.md with its task checked off (`ralphExecuteNote`), so the
+// branch already carries a CURRENT plan. Iteration N+1 re-deriving that document
+// from SPEC.md + the whole codebase is the measured 287 s this step removes: the
+// saving is the ABSENT SURVEY, not a cheaper model — the routing matches
+// `plan:fable` deliberately, because choosing the next task and writing its
+// execution spec is still the high-value thinking.
+function planNextPrompt(body, forgeBranch) {
+  const planPath = `.trident/plans/${forgeBranch}.md`
+  return `You are the CONTINUATION PLANNER for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+A PRIOR ITERATION of this same build regenerated ${planPath} below and committed it to branch ${forgeBranch} with the task it built already marked '- [x]'. That plan is CURRENT. Your job is to pick up where it left off — NOT to re-derive it.
+- Do NOT read SPEC.md. Do NOT survey, read, or diff the codebase. Do NOT run any command. Everything you need is in this prompt.
+- Do NOT regenerate, re-order, re-word, or re-prioritise the checklist.
+1. Return \`implementationPlan\` = EXACTLY the committed plan body below, VERBATIM, byte for byte (the executor persists it again with the task you pick marked '- [x]', so any edit here silently rewrites the card's plan).
+2. Return \`topTask\` = the FIRST still-unchecked '- [ ]' item in that body, reading top to bottom (the Ralph one-task discipline: exactly one task per iteration).
+3. Return \`executionSpec\` for that ONE task: the exact TARGET FILES, the ACCEPTANCE CRITERION (what "done" means), and the TEST PLAN (which tests to write/run) — derived from that item's own text plus the TASK CONTEXT below. Make it precise enough that a cheaper model executes it WITHOUT re-reasoning the design.
+4. Tag \`complexity\`: 'mechanical' (boilerplate, tests, formatting, a single-file edit) vs 'reasoning' (multi-file, architecture-touching, tricky invariants). When genuinely uncertain choose 'reasoning' (Opus is the safer executor).
+5. Return \`remainingTasks\` = the count of unchecked items left AFTER the one you picked. A probe counted the unchecked '- [ ]' items in this body already, so this should be that count minus one.
+Return via the schema. NEVER exit silently.
+COMMITTED PLAN (verbatim):
+${body}
+TASK CONTEXT:
+${task}`
+}
+
 // Appended to the forge:build/forge:fix prompt in Ralph mode. Forge is now a PURE
 // EXECUTOR: it implements the ONE task from Fable's exec spec (no re-planning)
-// and PERSISTS the regenerated IMPLEMENTATION_PLAN.md into its worktree (with the
-// task checked off) so the plan lands on the branch/PR.
-function ralphExecuteNote(plan) {
+// and PERSISTS the regenerated plan into its worktree (with the task checked off).
+function ralphExecuteNote(plan, forgeBranch) {
+  const planPath = `.trident/plans/${forgeBranch}.md`
   return `\n\nRALPH MODE — you are the EXECUTOR. The plan was authored by the Fable orchestrator; do NOT re-plan or redesign — implement it.
 - Implement ONLY this one task: ${plan.topTask}
 - EXECUTION SPEC (follow it exactly):
 ${plan.executionSpec}
-- Persist the plan: write IMPLEMENTATION_PLAN.md at the repo root with EXACTLY this body, but with the task above marked '- [x]':
+- Persist the plan: write ${planPath} with EXACTLY this body, but with the task above marked '- [x]':
 ${plan.implementationPlan}
-- Commit IMPLEMENTATION_PLAN.md together with your code + tests.`
+- Commit ${planPath} together with your code + tests.
+- Report \`deviatedFromSpec: true\` in your structured result ONLY if you materially deviated from the EXECUTION SPEC above (different target files, a different design, or the task as built is not the task as specced) — a true here forces the next iteration to re-derive the whole plan, so do not set it for cosmetic drift. Otherwise report false or omit it.`
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1967,8 +2326,13 @@ async function reviewRoundOrInfraBlock(runRound) {
  * guaranteed to reproduce the previous findings. So the caller stops.
  */
 function roundLanded(headBefore, headAfter) {
-  const before = typeof headBefore === 'string' ? headBefore.trim() : ''
-  const after = typeof headAfter === 'string' ? headAfter.trim() : ''
+  // LOWERCASED ON BOTH SIDES. git prints lowercase, so this is theoretical today — but
+  // one of the two heads compared here now comes back through `readBuiltHead`, which
+  // lowercases, and the other through `readBranchHead`, which does not. An uppercase
+  // relay of the SAME commit would compare unequal and read as a landed round: the one
+  // direction of this comparison that certifies work nobody did.
+  const before = typeof headBefore === 'string' ? headBefore.trim().toLowerCase() : ''
+  const after = typeof headAfter === 'string' ? headAfter.trim().toLowerCase() : ''
   // An unreadable/absent AFTER is NOT treated as landed — a fetch that failed
   // must not read as progress. An unreadable BEFORE is the only permissive case:
   // with no baseline there is nothing to compare, so don't invent a failure.
@@ -1985,6 +2349,18 @@ const FULL_OID = /^[0-9a-f]{40}$/
 function normalizeOid(value) {
   const s = typeof value === 'string' ? value.trim().toLowerCase() : ''
   return FULL_OID.test(s) ? s : ''
+}
+
+/** A plausible OID CLAIM from the build agent (7–40 hex, either case), trimmed —
+ *  else null. The outer publisher resolves the REAL head with `rev-parse --verify`
+ *  on the branch this workflow NAMES; this value is only a cross-check there, so an
+ *  abbreviated sha is carried verbatim and a missing one is NOT an error — a thrown
+ *  handoff here is how run 3d2696c3 discarded a finished, committed build
+ *  (defect 2026-08-14). Mirrors the `publish_head` decode in inner-loop.ts. */
+const OID_CLAIM = /^[0-9a-fA-F]{7,40}$/
+function oidClaim(value) {
+  const s = typeof value === 'string' ? value.trim() : ''
+  return OID_CLAIM.test(s) ? s : null
 }
 
 /**
@@ -2011,12 +2387,34 @@ function normalizeOid(value) {
  *     skip forward to the next step and (only here) carry the RECORDED reviewed
  *     OID as `reviewedHead`.
  *   • recorded OID != live head → the verdict is about different code. RE-REVIEW.
- *   • no recorded OID (a checkpoint written before it was recorded), a
- *     not-full-OID value, or an unreadable live head → treated as MOVED. Old data
- *     must not unlock the new fast path, and "could not tell" is never "unchanged".
+ *   • no recorded OID (a checkpoint written before it was recorded) or a
+ *     not-full-OID recorded value → treated as MOVED, i.e. REBUILD. Old data must
+ *     not unlock the new fast path.
+ *   • an UNREADABLE live head ('') → a bounded STOP, *but only for a checkpoint
+ *     whose meaning the head actually decides* (see below). "Could not tell" is
+ *     still never "unchanged" — no fast path opens — but REBUILDING is the wrong
+ *     consequence too: it redoes work that is already committed, at the most
+ *     expensive effort available, and can fork a divergent commit the publisher
+ *     then refuses. Measured: the neutron-enterprise run resumed at
+ *     `outer-published:2aa070d7…` was rebuilt at 133,169 output tokens because one
+ *     probe read failed, and the rebuild's commit existed nowhere. The recorded
+ *     work is intact; only the READ failed, so the run stops naming the branch and
+ *     the recorded OID and is re-runnable the moment the read succeeds.
  *   • an UNKNOWN checkpoint name → rebuild. `ralph-task-built` lands here on
  *     purpose: that iteration deliberately built one task and handed back for a
  *     re-fire, so the next iteration must PLAN and BUILD the next task, not review.
+ *
+ * THE STOP DOES NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN (Argus r5).
+ * Two dispositions are the same on EVERY head — matching, moved, absent or
+ * unreadable: `forge-done` in ralph mode ('ralph-progress-unknown') and any name
+ * this function does not recognise, `ralph-task-built` included
+ * ('unknown-checkpoint'). Both rebuild. When the read fails for one of those, the
+ * failed read changed nothing, and converting a rebuild that was going to happen
+ * anyway into a TERMINAL stop is a strict regression — a transient blip would kill
+ * every ralph re-fire. So the '' branch asks `resumeOnUnchangedHead` what this
+ * checkpoint would do if the head DID match, and defers to it when the answer is
+ * already `rebuild`. Asking the same function the match path uses is what keeps the
+ * two in step: there is no second list of names to drift.
  *
  * THE COMPARISON HAPPENS HERE, IN CODE, exactly like `roundLanded`: the agent is
  * asked for one fact (the head sha) and this function decides what it means. And
@@ -2034,13 +2432,45 @@ function classifyResume(input) {
   if (name === 'pr-merged') return { mode: 'merged', reason: 'already-merged' }
   const recorded = normalizeOid(input.recordedHead)
   if (recorded.length === 0) return { mode: 'rebuild', reason: 'no-recorded-head' }
+  // The launcher's tri-state: a branch the AUTHORITY says does not exist is a real
+  // READ, not a failed one — the recorded work is gone from the authority, so a
+  // rebuild is correct here and can be named truthfully. Checked BEFORE normalizeOid,
+  // which would flatten this to '' — and '' is reserved exclusively for "could not
+  // read the head", the case that gets a bounded-STOP consequence just below.
+  if (input.currentHead === 'absent') return { mode: 'rebuild', reason: 'head-branch-absent' }
   const current = normalizeOid(input.currentHead)
-  if (current.length === 0) return { mode: 'rebuild', reason: 'head-unreadable' }
+  if (current.length === 0) {
+    // A FAILED READ MUST NOT CHANGE A HEAD-INDEPENDENT ANSWER (Argus r5). If this
+    // checkpoint rebuilds even when the head matches, the head was never an input to
+    // it — so return that rebuild rather than a terminal stop the read failure would
+    // otherwise invent. The bounded stop is for the checkpoints whose fast path the
+    // unreadable head would have unlocked; there is no committed round to protect
+    // when the checkpoint itself says the progress is unknown.
+    const regardless = resumeOnUnchangedHead(name, input)
+    if (regardless.mode === 'rebuild') return regardless
+    return { mode: 'stop', reason: 'head-unreadable' }
+  }
   if (current !== recorded) return { mode: 'rebuild', reason: 'head-moved' }
   // From here the recorded OID and the live head are the SAME commit, so the
   // prior phase's outcome is about exactly the code this run is looking at.
+  return resumeOnUnchangedHead(name, input)
+}
+
+/**
+ * What a checkpoint NAME means once the live head is known to be the recorded
+ * commit. Split out of `classifyResume` so the unreadable-head branch can consult
+ * the SAME decision (Argus r5) instead of carrying a second list of names that
+ * could drift out of step with this one.
+ *
+ * Every `rebuild` returned here is head-INDEPENDENT by construction: it is the
+ * answer on the BEST possible head, so a worse head cannot improve it.
+ */
+function resumeOnUnchangedHead(name, input) {
   if (name === 'argus-approved') return { mode: 'approved', reason: 'head-unchanged' }
-  if (/^outer-published:[0-9a-f]{40}:\d+:\d+$/.test(name)) {
+  // The optional `:deviated` suffix is about the NEXT iteration's PLANNER, not
+  // about whether THIS invocation may skip its own re-build — so a deviated
+  // publish checkpoint classifies exactly as a clean one does.
+  if (/^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)) {
     return { mode: 'review', reason: 'outer-published-head-unchanged' }
   }
   if (name === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(name)) {
@@ -2344,8 +2774,61 @@ const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING'
 // with only CodeQL look healthy when the conflicting branch had prevented the
 // workflow containing these jobs from starting at all.
 const REVIEW_REQUIRED_CHECKS = Object.freeze(['test', 'lint', 'typecheck'])
-const REVIEW_READINESS_ATTEMPTS = 3
-const REVIEW_READINESS_RETRY_MS = 15000
+
+// HOW LONG THE GATE WAITS FOR A REQUIRED CHECK — A MEASURED BUDGET, NOT A GUESS.
+//
+// MEASURED 2026-08-15 on rjunee/neutron PR #275, commit 6ba7500:
+//     pushed                00:55:56Z
+//     check `test` STARTED  01:01:24Z   (+328 s — GitHub Actions QUEUE time)
+//     check `test` finished 01:01:28Z   (+332 s — the job itself runs in 4 s)
+//
+// Essentially the whole delay is queueing. Until the workflow is created the check
+// is not merely unfinished, it is ABSENT from `statusCheckRollup` — so the gate is
+// asking about a row that does not exist yet, which is why waiting (not failing) is
+// the only correct response.
+//
+// THE OLD BUDGET WAS 3 x 15 s = 30 SECONDS, against a check that takes five and a
+// half minutes to appear. It could not win, and it did not: FOUR consecutive builds
+// of one card (051bcf1f, b122ce3d, 45400961, 0d54d2a3) died with
+// `REVIEW DEFERRED — required check test has not run`. Each threw away a COMPLETE
+// build — Forge, plan, publish — to avoid a wait of a few minutes, and each was
+// reported to the owner as REQUEST_CHANGES on work no reviewer had read.
+//
+// It is deterministic rather than unlucky, and the reason is worth stating: a build's
+// LAST act before this gate is pushing its closing commit, so it invalidates the CI
+// it was green on and then asks about the new head seconds later. Any budget shorter
+// than the queue time fails EVERY time, on EVERY build.
+//
+// 15 minutes is ~3x the measured 328 s. Deliberately generous rather than finely
+// tuned — a tuned number is what failed, and the same lesson is written into
+// `trident/liveness.ts` after a 25-minute reaper killed a healthy build. The cost of
+// being generous is a probe on the Bookkeeping tier every 30 s; the cost of being
+// tight is an entire build.
+//
+// A check still absent after the budget IS a real stop with a real reason: the
+// workflow genuinely never started, and that needs a human, not another wait.
+const REVIEW_READINESS_BUDGET_MS = 900000
+const REVIEW_READINESS_RETRY_MS = 30000
+// Derived, never hand-written — a count and a duration that can disagree is how the
+// doc comment above comes to describe a budget the loop does not actually have. The
+// +1 is the FIRST probe, which happens before any wait.
+const REVIEW_READINESS_ATTEMPTS = Math.ceil(REVIEW_READINESS_BUDGET_MS / REVIEW_READINESS_RETRY_MS) + 1
+
+// The budget as a human duration, derived from the same constant the loop spends —
+// so the sentence the owner reads cannot claim a wait the gate did not perform.
+//
+// A LINE COMMENT ON PURPOSE. `__tests__/ci-gate.test.ts` extracts the classifyCi
+// closure by slicing from `const CI_FAILED_STATES` to the next JSDoc opener, so
+// starting a doc block here silently truncates that slice and `probeCause` vanishes
+// from the evaluated environment — four unrelated tests go red with a bare
+// ReferenceError, and nothing points at the comment that caused it. (Writing the
+// opener sequence inside a line comment does it too; that is not hypothetical
+// either.) Both loaders now assert what they captured, and keeping this a `//` keeps
+// the boundary where every reader expects it.
+function readinessBudgetLabel() {
+  const minutes = REVIEW_READINESS_BUDGET_MS / 60000
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minutes`
+}
 
 // MEASURE THE CAUSE, AND HAVING MEASURED IT, DO NOT THROW IT AWAY (#240). Run
 // 8417b277 held `To get started with GitHub CLI, please run: gh auth login` in the
@@ -2359,6 +2842,30 @@ function redactProbeText(text) {
   return String(text)
     .replace(/(\w+:\/\/)[^/\s@]+@/g, '$1***@')
     .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '$1***')
+}
+// THE SHAPE EVERY `blockKind: 'infra-only'` TERMINAL CAUSE IS WRITTEN IN — redacted and
+// capped, once, here. Two instances of ONE failure class (the resume bounded stop and the
+// build-completion bounded stop) used to disagree about this: one redacted + capped, the
+// other passed its sentence through raw. Both causes are composed from a branch name, an
+// OID and a phase label, so neither is likely to carry a credential — but "unlikely" is
+// not the rule this file applies to text it persists, and a divergence maintained by hand
+// is a divergence waiting to be widened by whoever adds the third instance.
+//
+// THE CAP IS 500 BECAUSE 300 CUT THE ADVICE OFF THE END OF A REAL SENTENCE. Measured
+// (Argus r3): with the 43-char branch `trident/git-truth-comes-from-git-the-publis` (the
+// maximum `slugify-task` can produce — 35 chars of slug behind `trident/`), a 40-hex claim
+// and a `/tmp/trident-<slug>.diff` path, the round-1 unreadable-head cause composes to 331
+// characters and lost its trailing "re-run when the read succeeds". A cap that silently
+// deletes the one actionable clause is worse than no cause at all, and the guard test at
+// the time passed only because its fixture branch was short. Two defences, because a
+// model-supplied diff path has no length bound at all: the cap is 500 (the widest realistic
+// cause plus room), AND every composed cause now puts its re-run advice near the FRONT so
+// truncation can only ever cost detail, never the instruction. `inner-loop.ts` clamps
+// `terminal_cause` on the way into the DB and MUST hold the same number — see the constant
+// there.
+const TERMINAL_CAUSE_MAX = 500
+function infraCause(text) {
+  return redactProbeText(text).slice(0, TERMINAL_CAUSE_MAX)
 }
 // The first non-empty line(s) of what the probe actually said, redacted + capped.
 // '' when there is nothing usable (caller then keeps its bare generic reason).
@@ -2565,7 +3072,11 @@ const BRANCH_HEAD_SCHEMA = {
   additionalProperties: false,
   required: ['head'],
   properties: {
-    /** The 40-char sha, or '' when the command could not produce one. */
+    /** ONE token, and the seat prompts ask for exactly one of three: a 40-char sha, the
+     *  literal `absent` (git ANSWERED that the branch does not exist), or '' when the
+     *  command printed nothing or errored. The two probes that use this schema
+     *  (`readBranchHead`, `readBuiltHead`) both consume all three — `absent` and '' earn
+     *  OPPOSITE consequences and must not be collapsed. */
     head: { type: 'string' },
   },
 }
@@ -2631,11 +3142,25 @@ function infraTerminalCause(synthesis) {
  *
  * The agent is given one command and asked for one string. It makes no judgement
  * about whether that string is good news.
+ *
+ * TRI-STATE, THE SAME ONE `readBuiltHead` AND THE LAUNCHER'S `resolveResumeLiveHead`
+ * SPEAK (40-hex / `'absent'` / `''`), because the two probes answer the SAME question
+ * for the SAME decider and used to disagree about how to say "not there":
+ *   - local mode ran a bare `git rev-parse <branch>`, which on a missing branch prints
+ *     the BRANCH NAME on stdout and exits 128 — a name that is not 40 hex, so it reached
+ *     `classifyResume` as `''`, i.e. "could not read";
+ *   - pr mode's `ls-remote` printed nothing for a deleted remote branch — also `''`.
+ * `''` now earns a bounded STOP (Part 2b), so on a launcher that predates
+ * `resume_live_head` — the only path that still uses this probe for the resume decision —
+ * a genuinely DELETED branch became a permanent stop no re-run could clear, instead of
+ * the rebuild `head-branch-absent` is for. `--verify --quiet` plus the `--git-dir` health
+ * check (local) and `ls-remote --exit-code`'s documented exit 2 (pr) split "git answered
+ * 'no such branch'" from "the read failed", exactly as `readBuiltHead` does.
  */
 async function readBranchHead(round) {
   const cmd = isPr
-    ? `cd ${shSingleQuote(repoPath)} && git ls-remote origin ${shSingleQuote(`refs/heads/${forgeBranch}`)} | awk '{print $1}'`
-    : `cd ${shSingleQuote(repoPath)} && git rev-parse ${shSingleQuote(forgeBranch)}`
+    ? `cd ${shSingleQuote(repoPath)} && { out=$(git ls-remote --exit-code origin ${shSingleQuote(`refs/heads/${forgeBranch}`)}); ec=$?; if [ $ec -eq 0 ]; then printf '%s\\n' "$out" | awk '{print $1}'; elif [ $ec -eq 2 ]; then echo absent; fi; }`
+    : `cd ${shSingleQuote(repoPath)} && { git rev-parse --verify --quiet ${shSingleQuote(`refs/heads/${forgeBranch}^{commit}`)} || { git rev-parse --git-dir >/dev/null 2>&1 && echo absent; }; }`
   // Through `seatAttempt` for the same reason the review seats are: a probe agent that
   // DIES must not end the lane. This probe's own contract already says what an error
   // means — "report head='' if it prints nothing or errors" — and a `null` reads as
@@ -2644,12 +3169,86 @@ async function readBranchHead(round) {
   // verdict at all.
   const res = await seatAttempt(`head-probe-round-${round}`, () =>
     agent(
-      `Run EXACTLY this single Bash command and report the sha it prints via the schema. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.
+      `Run EXACTLY this single Bash command and report the ONE token it prints via the schema — a 40-character sha, or the literal word absent. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.
 ${cmd}`,
       withModel({ label: `head-probe-round-${round}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
     ),
   )
-  return (res && typeof res.head === 'string' ? res.head : '').trim()
+  const head = (res && typeof res.head === 'string' ? res.head : '').trim()
+  return head.toLowerCase() === 'absent' ? 'absent' : head
+}
+
+/** How many times a build-completion head read is attempted before it is called
+ *  unreadable. THREE, deliberately the same number of attempts `resolveResumeLiveHead`
+ *  (trident/orchestrator.ts) spends on the identical question at the launcher
+ *  boundary: one question about one fact should not have two answers about how
+ *  hard it is worth trying. (The launcher additionally SPACES its attempts; this
+ *  runtime has no sleep — see `readBuiltHead`.) */
+const BUILT_HEAD_READ_ATTEMPTS = 3
+
+/**
+ * The head of refs/heads/<forgeBranch> read from the LOCAL ref store the moment a
+ * build/fix agent exits — the source `branchHead`/`reviewedHead`/checkpoint heads are
+ * pinned to. LOCAL deliberately (not ls-remote): at build completion the commit exists
+ * only locally; "pushed" is the outer publisher's concern.
+ *
+ * TRI-STATE, exactly like the launcher's `resolveResumeLiveHead` (trident/orchestrator.ts)
+ * and for the same reason — "not there" and "could not tell" earn OPPOSITE consequences:
+ *   - a 40-hex OID → git answered; this IS the built head.
+ *   - `'absent'`   → git answered SUCCESSFULLY that the branch does not exist. A real
+ *                    fact and a REAL OUTCOME: nothing was built. It must keep the honest
+ *                    "nothing was built" throw and must never be dressed up as an infra
+ *                    read failure with "re-run when the read succeeds" advice that can
+ *                    never succeed.
+ *   - `''`         → the read FAILED (retried once). Reserved exclusively for
+ *                    "could not read", which is the only case a bounded infra-only stop
+ *                    belongs to.
+ * The `|| git rev-parse --git-dir` health check is what splits the last two: a bare
+ * `rev-parse --verify` fails identically for a missing branch and a broken checkout.
+ *
+ * NOTE — THIS READ IS STILL RELAYED BY A MODEL SEAT, and knowingly so. `inner-workflow.mjs`
+ * runs inside the Workflow runtime, whose only injected capability is `agent()`; there is
+ * no in-process exec here, so `git` cannot be spawned from code at THIS point in the run
+ * the way the launcher does it at the resume/publish boundaries. What changed is the
+ * SOURCE: the value is produced by `git rev-parse` rather than composed by the builder,
+ * and the seat is given one command and asked to copy one token.
+ *
+ * THE SEAT ITSELF CAN DIE (a 529 on the shared account), and `seatAttempt` returns null for
+ * that exactly as it does for a garbled answer — so a transient seat death is INDISTINGUISHABLE
+ * here from a genuinely unreadable head. Three consequences follow, and all three are
+ * deliberate:
+ *   - the ATTEMPT COUNT is THREE, the same count `resolveResumeLiveHead` spends on the same
+ *     question at the launcher boundary. The BUDGETS ARE NOT THE SAME, and this docblock
+ *     used to imply they were: the launcher waits `RESUME_HEAD_RETRY_DELAYS_MS` between its
+ *     attempts, and this runtime provides no `sleep` at all, so these three fire back to
+ *     back. What separates them is whatever a fresh agent dispatch costs (seconds, not
+ *     microseconds) — real time, but an unmeasured amount of it, so no claim is made about
+ *     which transient outages it covers;
+ *   - every failed attempt is LOGGED with its tag, so the transcript shows whether the run
+ *     spent one attempt or three before giving up;
+ *   - the consequence of giving up is fail-closed and bounded: in `pr` mode the outer
+ *     publisher re-reads the head in real code at the credentialed boundary, so the run is
+ *     not blocked at all; in `local` mode the run STOPS without rebuilding, publishing or
+ *     approving anything. A dead seat can refuse finished work; it can never certify or
+ *     publish the wrong commit.
+ */
+async function readBuiltHead(tag) {
+  const ref = shSingleQuote(`refs/heads/${forgeBranch}^{commit}`)
+  const cmd = `cd ${shSingleQuote(repoPath)} && { git rev-parse --verify --quiet ${ref} || { git rev-parse --git-dir >/dev/null 2>&1 && echo absent; }; }`
+  for (let attempt = 1; attempt <= BUILT_HEAD_READ_ATTEMPTS; attempt++) {
+    const res = await seatAttempt(`head-probe-round-built-${tag}`, () =>
+      agent(
+        `Run EXACTLY this single Bash command and report the ONE token it prints via the schema — a 40-character sha, or the literal word absent. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.\n${cmd}`,
+        withModel({ label: `head-probe-round-built-${tag}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
+      ),
+    )
+    const raw = (res && typeof res.head === 'string' ? res.head : '').trim().toLowerCase()
+    if (raw === 'absent') return 'absent'
+    const head = normalizeOid(raw)
+    if (head !== '') return head
+    log(`trident-v2 head-probe-round-built-${tag}: attempt ${attempt}/${BUILT_HEAD_READ_ATTEMPTS} did not return a head (${res === null ? 'seat died' : 'empty/garbled answer'})`)
+  }
+  return ''
 }
 
 /** The one fact the resume-diff step returns: how big the diff it wrote is. */
@@ -2785,10 +3384,14 @@ function reviewPreconditionDeferred(readiness) {
           `${readiness.reason}. No review seat was dispatched and no review round was consumed. ` +
           (readiness.status === 'conflicting'
             ? 'Update the branch against its base and resolve the conflict, then re-run.'
-            : readiness.status === 'absent'
-              ? 'Wait for or restore that workflow job, then re-run once it appears.'
+            : // SAY HOW LONG IT WAITED. Without the duration these two read exactly
+              // like the 30-second version that gave up before GitHub had queued the
+              // job, so the owner cannot tell "we did not wait" from "we waited and it
+              // never came" — and only the second one is his problem to act on.
+              readiness.status === 'absent'
+              ? `The readiness gate waited ${readinessBudgetLabel()} and the check never appeared, so the workflow did not start. Restore or re-trigger that workflow job, then re-run.`
               : readiness.status === 'pending'
-                ? 'The readiness probe retried without incrementing the round; re-run after the check completes.'
+                ? `The readiness gate waited ${readinessBudgetLabel()} without incrementing the round and the check was still running; re-run once it completes.`
                 : 'Restore access to the PR readiness data, then re-run.'),
       },
     ],
@@ -2873,6 +3476,7 @@ function crossModelPeerStatus(slot, verdicts, statusKey) {
   if (slot === null || slot === undefined) return 'not_connected'
   const verdict = verdicts[slot]
   const status = verdict && typeof verdict[statusKey] === 'string' ? verdict[statusKey] : ''
+  if (statusKey === CORE_SEAT_STATUS_KEY) return status.length > 0 ? 'connected' : 'deferred'
   return status.length > 0 ? status : 'deferred'
 }
 
@@ -2973,22 +3577,31 @@ function corePanelLine(letter, label, verdict) {
 
 // Which cross-model peers were configured but failed. Kept separate from the gate
 // so the mapping status → blocker text is readable and testable on its own.
-function deferredCrossModelPeers(statuses) {
+function deferredCrossModelPeers(statuses, routes) {
+  routes = routes || {}
   const out = []
   if (statuses.codex === 'deferred') {
-    out.push({
-      name: 'Codex',
-      title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
-      evidence:
-        'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
+    const family = routes.codex?.group || 'codex'
+    out.push(family === 'codex' ? {
+      name: 'Codex', title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
+      evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
+    } : {
+      name: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`,
+      title: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'}) DEFERRED — refusing to silently APPROVE`,
+      evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
   if (statuses.kimi === 'deferred') {
-    out.push({
+    const family = routes.kimi?.group || 'kimi'
+    out.push(family === 'kimi' ? {
       name: 'Kimi K3',
       title: 'Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE',
       evidence:
         'a Kimi API key was configured but the review call failed, timed out, or returned no answer text (the thinking-budget case). A deferred cross-model review cannot be treated as an approval, and there is deliberately NO fallback to a Claude-family reviewer — that would restore the single-family panel this peer exists to break.',
+    } : {
+      name: `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'})`,
+      title: `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'}) DEFERRED — refusing to silently APPROVE`,
+      evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
   return out
@@ -3048,17 +3661,17 @@ function codexReviewerPrompt(diffFile) {
   // runId (uuid) — matching writeTerminalResult's /tmp/trident-terminal-${runId}
   // — falling back to slug only for a dry source check with no runId (Codex [P2]).
   const uniq = runId || slug
-  const lane = opts.adversarial === true ? 'adversarial' : 'cross-model'
-  const outFile = opts.adversarial === true
+  const lane = opts.adversarial === true ? 'adversarial' : opts.lane || 'cross-model'
+  const outFile = opts.adversarial === true || opts.lane
     ? `/tmp/trident-codex-${lane}-${uniq}.out`
     : `/tmp/trident-codex-${uniq}.out`
-  const errFile = opts.adversarial === true
+  const errFile = opts.adversarial === true || opts.lane
     ? `/tmp/trident-codex-${lane}-${uniq}.err`
     : `/tmp/trident-codex-${uniq}.err`
   const script = `${repoPath}/trident/codex-review.sh`
   const envPrefix = opts.adversarial === true
     ? `${ADVERSARIAL_CODEX_ENV_PREFIX}NEUTRON_CODEX_REVIEW_RUBRIC=${shSingleQuote(`You are ARGUS-ADVERSARIAL (independent, read-only). Independently try to REFUTE the change: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do not substitute the generic second-opinion rubric.`)} `
-    : CODEX_ENV_PREFIX
+    : opts.envPrefix || ''
   // Codex reviews the SAME diff FILE Forge wrote (as the other reviewers do), NOT
   // `git diff` in repoPath — repoPath is still on the base branch (Forge builds in
   // an isolated worktree), so a git-diff there would be empty/stale and codex
@@ -3086,16 +3699,18 @@ Return via the schema. NEVER exit silently — if the command itself could not r
 // SYNCHRONOUSLY to a CLI, map its EXIT CODE to a schema result. The CLI reads
 // KIMI_API_KEY from its OWN environment, so the credential never appears here.
 function kimiReviewerPrompt(diffFile) {
+  const opts = arguments[1] || {}
   const uniq = runId || slug
-  const outFile = `/tmp/trident-kimi-${uniq}.out`
-  const errFile = `/tmp/trident-kimi-${uniq}.err`
+  const lane = opts.lane || 'cross-model'
+  const outFile = `/tmp/trident-kimi-${lane}-${uniq}.out`
+  const errFile = `/tmp/trident-kimi-${lane}-${uniq}.err`
   const cli = `${repoPath}/trident/kimi-review-cli.ts`
   // Reviews the SAME diff FILE Forge wrote, for the same reason codex does:
   // repoPath is still on the base branch, so a `git diff` there would be empty
   // and the reviewer could approve without having reviewed the change.
   return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${KIMI_ENV_PREFIX}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
+  ${opts.envPrefix || ''}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
@@ -3182,55 +3797,65 @@ TASK: ${task}`,
   let kimiSlot = null
   const slotOneRoute = routeModel('argus:codex')
   const slotTwoRoute = routeModel('argus:kimi')
-  const routeAvailable = (route) => route.group === 'codex' ? codexConfigured : route.group === 'kimi' ? kimiConfigured : false
-  const peerPrompt = (label, route) => route.group === 'kimi' ? kimiReviewerPrompt(diffFile) : codexReviewerPrompt(diffFile)
-  const peerSchema = (route) => route.group === 'kimi' ? KIMI_VERDICT_SCHEMA : CODEX_VERDICT_SCHEMA
+  const routeAvailable = (route) => !route.group || route.group === 'claude' || (route.group === 'codex' ? codexConfigured : route.group === 'kimi' ? kimiConfigured : false)
+  const claudePeerPrompt = (slot) => `${ARGUS_RUBRIC}
+You are Cross-model review ${slot}, an independent, read-only reviewer. Review the diff at ${diffFile} for the TASK below. Apply the rubric adversarially, evidence-gate every claim with file:line or a concrete reproduction, and return your verdict + findings. Do NOT modify files.
+TASK: ${task}`
+  const peerPrompt = (label, route, slot) => {
+    if (route.group === 'claude') return claudePeerPrompt(slot)
+    const cliOpts = { lane: `seat-${slot}`, envPrefix: crossModelEnvPrefix(label) }
+    return route.group === 'kimi' ? kimiReviewerPrompt(diffFile, cliOpts) : codexReviewerPrompt(diffFile, cliOpts)
+  }
+  const peerSchema = (route) => route.group === 'claude' ? VERDICT_SCHEMA : route.group === 'kimi' ? KIMI_VERDICT_SCHEMA : CODEX_VERDICT_SCHEMA
+  const peerAgentOpts = (opts, route) => {
+    return route.group === 'claude' ? withModel(opts) : opts
+  }
   if (slotOneRoute.disabled) offSeats.push('Cross-model review 1')
   if (slotTwoRoute.disabled) offSeats.push('Cross-model review 2')
   if (!slotOneRoute.disabled && routeAvailable(slotOneRoute)) {
-    // argus:codex runs on the CODEX runtime (an independent GPT-5 peer), not a
-    // Claude model — the thin claude agent just shells out to codex-review.sh, so
-    // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
-    // per-run tally still counts the cross-model reviewer ("C on Codex").
+    // On a CLI route the thin Claude agent only shells out, so it keeps the launcher
+    // default. On an explicitly selected Claude route, the seat itself reviews and
+    // `withModel` applies the chosen tier below.
     // RB2 (b) — DELIBERATELY no `reflectionGuidance` here (two reasons): this thin
     // launcher only invokes the external codex CLI, whose GPT-5 review sees ONLY the
     // raw git diff (never this claude prompt text), so injecting owner corrections
     // would be inert; AND argus:codex is part of the independent MERGE GATE, which
     // must never carry the untrusted reflection block (see the trust-boundary note
     // above the reviewers array).
-    logCrossModelSpawn('argus:codex', 'codex-runtime')
+    if (slotOneRoute.group !== 'claude') logCrossModelSpawn('argus:codex', 'codex-runtime')
     codexSlot = reviewers.length
     reviewers.push(() =>
       seatAttempt('argus:codex', () =>
-        agent(peerPrompt('argus:codex', slotOneRoute), {
-          label: 'argus:codex',
-          phase: 'Review',
-          schema: peerSchema(slotOneRoute),
-        }),
+        agent(peerPrompt('argus:codex', slotOneRoute, 1), peerAgentOpts({ label: 'argus:codex', phase: 'Review', schema: peerSchema(slotOneRoute) }, slotOneRoute)),
       ),
     )
   }
-  // argus:kimi runs on the KIMI K3 runtime — a DIFFERENT MODEL FAMILY, which is
-  // the entire point: two Claude reviewers plus codex still leaves two of three
-  // sharing a family, so K3's DISAGREEMENTS are what this panelist is for. The
-  // thin claude agent only shells out to the CLI, so it keeps the launcher-default
-  // model; log it as `model=kimi-runtime` for the per-run tally.
+  // The same route-dependent dispatch applies to seat 2: Kimi/Codex choices use the
+  // corresponding CLI bridge, while an explicit Claude choice reviews in the agent.
   // RB2 (b) — DELIBERATELY no `reflectionGuidance`, for both reasons that exclude
   // argus:codex: K3 sees only the diff file (never this prompt text), so injecting
   // owner corrections would be inert; and this is part of the independent MERGE
   // GATE, which must never carry the untrusted reflection block.
   if (!slotTwoRoute.disabled && routeAvailable(slotTwoRoute)) {
-    logCrossModelSpawn('argus:kimi', 'kimi-runtime')
+    if (slotTwoRoute.group !== 'claude') logCrossModelSpawn('argus:kimi', 'kimi-runtime')
     kimiSlot = reviewers.length
     reviewers.push(() =>
       seatAttempt('argus:kimi', () =>
-        agent(peerPrompt('argus:kimi', slotTwoRoute), {
-          label: 'argus:kimi',
-          phase: 'Review',
-          schema: peerSchema(slotTwoRoute),
-        }),
+        agent(peerPrompt('argus:kimi', slotTwoRoute, 2), peerAgentOpts({ label: 'argus:kimi', phase: 'Review', schema: peerSchema(slotTwoRoute) }, slotTwoRoute)),
       ),
     )
+  }
+  // THE BUILD COUNTS AS A FAMILY. It is not a review seat, but the property this
+  // warning protects is "the reviewer is not the same family as what produced the
+  // code" — build on GPT with Opus reviewing IS the cross-family panel the design
+  // wants (SPEC Decisions Log 2026-08-14, "any tier in any slot"). Excluding the
+  // build would warn about a panel that is genuinely cross-family, and stay silent
+  // when a Claude build is reviewed only by Claude.
+  const enabledPanelFamilies = [routeModel('forge:build', 'reasoning'), rubricRoute, adversarialRoute, slotOneRoute, slotTwoRoute]
+    .filter((route) => !route.disabled && routeAvailable(route))
+    .map((route) => route.group || 'claude')
+  if (enabledPanelFamilies.length > 1 && new Set(enabledPanelFamilies).size === 1) {
+    log(`trident.panel-single-family WARNING family=${enabledPanelFamilies[0]} seats=${enabledPanelFamilies.length} configuration-accepted=true`)
   }
   let verdicts = await parallel(reviewers)
   // Retry ONLY a cross-model lane that came back `deferred`, before any of this is
@@ -3250,17 +3875,18 @@ TASK: ${task}`,
     verdicts,
     slots: [
       ...coreSeats,
-      { name: 'codex', slot: codexSlot, statusKey: slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
-      { name: 'kimi', slot: kimiSlot, statusKey: slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
+      { name: 'argus:codex', slot: codexSlot, statusKey: slotOneRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
+      { name: 'argus:kimi', slot: kimiSlot, statusKey: slotTwoRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
     ],
     attempts: LANE_RETRY_ATTEMPTS,
     log,
     invoke: async (name) => {
       const core = coreSeats.find((s) => s.name === name)
       if (core) return await reviewers[core.slot]()
-      const label = name === 'codex' ? 'argus:codex-retry' : 'argus:kimi-retry'
-      const route = name === 'codex' ? slotOneRoute : slotTwoRoute
-      return await agent(peerPrompt(label, route), { label, phase: 'Review', schema: peerSchema(route) })
+      const first = name === 'argus:codex'
+      const label = first ? 'argus:codex-retry' : 'argus:kimi-retry'
+      const route = first ? slotOneRoute : slotTwoRoute
+      return await agent(peerPrompt(label, route, first ? 1 : 2), peerAgentOpts({ label, phase: 'Review', schema: peerSchema(route) }, route))
     },
   })
   // POSITIONAL INDEXING WAS A LATENT BUG. This read `verdicts[2]` for codex,
@@ -3281,8 +3907,8 @@ TASK: ${task}`,
   // default applied to a missing verdict, which is how a crashed reviewer used to read
   // as one that was never set up. See `crossModelPeerStatus` / `missingCoreReviewers`.
   const missingCore = missingCoreReviewers(verdicts, coreSeats)
-  const codexStatus = crossModelPeerStatus(codexSlot, verdicts, slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
-  const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
+  const codexStatus = crossModelPeerStatus(codexSlot, verdicts, slotOneRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
+  const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, slotTwoRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
   // Only read for the 'connected' panel line, where the verdict is present by
   // definition — a status of 'connected' can only come off a real verdict object.
   const codexReview = codexSlot === null ? null : verdicts[codexSlot]
@@ -3294,14 +3920,15 @@ TASK: ${task}`,
   // cross-model verdict is a full panelist when connected; a 'not_connected' codex
   // is noted + ignored; a 'deferred' codex is hard-gated below.
   phase('Synthesis')
+  const peerRouteLabel = (route) => route.group === 'claude' ? `${route.group}/${route.model}` : route.group
   const peerPanelLine = (letter, slot, status, review, route, off) =>
     off
       ? `Verdict ${letter} (Cross-model review ${slot}): OFF — deliberately set to NONE; no reviewer was dispatched.`
       : status === 'connected'
-        ? `Verdict ${letter} (Cross-model review ${slot}, ${route.group}): ${JSON.stringify(review)} — treat as a full panelist; an evidence-backed blocker VETOES APPROVE.`
+        ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): ${JSON.stringify(review)} — treat as a full panelist; an evidence-backed blocker VETOES APPROVE.`
         : status === 'deferred'
-          ? `Verdict ${letter} (Cross-model review ${slot}, ${route.group}): DEFERRED — configured but the review failed or returned no usable verdict. Do NOT return APPROVE.`
-          : `Verdict ${letter} (Cross-model review ${slot}, ${route.group}): NOT CONNECTED — its required credential is unavailable; note it and proceed.`
+          ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): DEFERRED — configured but the review failed or returned no usable verdict. Do NOT return APPROVE.`
+          : `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): NOT CONNECTED — its required credential is unavailable; note it and proceed.`
   const codexPanel = peerPanelLine('C', 1, codexStatus, codexReview, slotOneRoute, slotOneRoute.disabled)
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
@@ -3351,7 +3978,10 @@ ${kimiPanelLine}`,
   // anything it lets through. See enforceSeverityGate for why the ordering is the
   // load-bearing part rather than an implementation detail.
   const severityGated = enforceSeverityGate(synthesisRaw)
-  const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus })
+  const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus }, {
+    codex: slotOneRoute,
+    kimi: slotTwoRoute,
+  })
   // THE CI GATE, folded into the SAME gate rather than added beside it.
   //
   // A red build is a CODE blocker: it joins the findings so the fix loop re-Forges
@@ -3410,7 +4040,7 @@ try {
   // facts it compares.
   const checkpointText = resumeCheckpoint
   const publishedResume = typeof checkpointText === 'string'
-    ? checkpointText.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
+    ? checkpointText.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)(:deviated)?$/)
     : null
   // The outer publisher's encoded OID is the newer, independently witnessed
   // record and takes precedence over the companion checkpoint column. It still
@@ -3420,8 +4050,21 @@ try {
   // The head probe is skipped entirely when there is no recorded OID to compare
   // it against — with nothing to compare, the answer is 'rebuild' whatever the
   // branch head says, and the probe would only cost an agent.
+  //
+  // AND it is skipped when the LAUNCHER already read the head from git. Whenever
+  // `resumeLiveHead` is a string — INCLUDING '' and 'absent' — the
+  // `head-probe-round-resume` agent seat is NOT dispatched: a git fact is read at the
+  // credentialed boundary, not relayed by a model. The probe survives only as the
+  // fallback for launchers that predate this arg. No normalisation happens here
+  // ('absent' is passed through verbatim); `classifyResume` owns interpretation — and the
+  // fallback probe now speaks the SAME tri-state (see `readBranchHead`), so a deleted
+  // branch reaches the decider as `'absent'` → rebuild on both paths rather than as the
+  // `''` that a launcher-less run would have turned into a stop nothing could clear.
+  const launcherLiveHead = typeof resumeLiveHead === 'string' ? resumeLiveHead.trim() : null
   const currentHeadAtResume =
-    resumeCheckpoint !== null && recordedResumeHead.length > 0 ? await readBranchHead('resume') : ''
+    resumeCheckpoint !== null && recordedResumeHead.length > 0
+      ? (launcherLiveHead !== null ? launcherLiveHead : await readBranchHead('resume'))
+      : ''
   const resumePlan = classifyResume({
     checkpoint: resumeCheckpoint,
     recordedHead: recordedResumeHead,
@@ -3432,8 +4075,39 @@ try {
   let resumeMode = resumePlan.mode
   if (resumeCheckpoint !== null) {
     log(
-      `trident-v2 resume: checkpoint=${resumeCheckpoint} recorded=${recordedResumeHead || '(none)'} head=${currentHeadAtResume || '(unread)'} → ${resumeMode} (${resumePlan.reason})`,
+      `trident-v2 resume: checkpoint=${resumeCheckpoint} recorded=${recordedResumeHead || '(none)'} head=${currentHeadAtResume || '(unread)'} src=${launcherLiveHead !== null ? 'launcher' : 'probe'} → ${resumeMode} (${resumePlan.reason})`,
     )
+  }
+
+  // PART 2b — AN UNREADABLE HEAD IS A BOUNDED STOP, NEVER A REBUILD. The recorded
+  // work exists; only the READ failed (already retried 3x in code by the launcher's
+  // resolveResumeLiveHead). Rebuilding here redoes committed work and can fork a
+  // divergent commit — the exact double-failure of the neutron-enterprise #439 run.
+  // The recorded checkpoint is passed through UNTOUCHED so the failed row still says
+  // WHAT was built and WHERE — evidence for whoever picks this up. It is not an input
+  // to a re-run: a re-run is a fresh dispatch with null checkpoints and it rebuilds
+  // (see `resolveResumeLiveHead` in orchestrator.ts for the whole trade). What this
+  // stop buys is that the rebuild is ASKED FOR rather than spent automatically on a
+  // read that failed. blockKind 'infra-only' + terminalCause make the outer failure
+  // reason name the measurement, never "without Argus APPROVE".
+  if (resumeMode === 'stop') {
+    const stopCause = `could not read the head of ${forgeBranch}; the recorded work is at ${recordedResumeHead}; re-run when the read succeeds`
+    log(`trident-v2 resume STOP (bounded): ${stopCause} — not rebuilding already-recorded work`)
+    const stopResult = {
+      ok: false,
+      prNumber: pr,
+      branch: forgeBranch,
+      verdict: 'REQUEST_CHANGES',
+      round,
+      checkpoint: resumeCheckpoint,
+      remainingTasks: 0,
+      blockKind: 'infra-only',
+      // Redacted + capped through the SAME helper as the build-completion stop below —
+      // one failure class, one shape, including how its text is persisted.
+      terminalCause: infraCause(stopCause),
+    }
+    await writeTerminalResult(stopResult)
+    return stopResult
   }
 
   if (resumeMode === 'merged') {
@@ -3512,6 +4186,12 @@ try {
   // Opus). Only in Ralph mode; a plain (non-ralph) task has no plan doc and
   // forge:build executes it directly (routed to Opus by the missing-tag default).
   let complexityTag = null
+  // Did THIS iteration's Forge materially deviate from the exec spec it was given?
+  // If so the IMPLEMENTATION_PLAN.md it committed may no longer describe reality,
+  // so the NEXT iteration must re-derive the whole plan from the code instead of
+  // reading the committed one. Declared here (ahead of the outer-published resume
+  // parse below) because both the resume path and the build path set it.
+  let taskDeviated = false
   // RALPH RE-FIRE (#362) — the count of tasks still UNCHECKED after the one this
   // iteration builds. >0 means the outer loop must re-fire a FRESH inner iteration
   // for the next task instead of merging after task 1 (the bug this fixes). Stays 0
@@ -3520,6 +4200,9 @@ try {
   if (publishedResume !== null) {
     round = Number(publishedResume[3])
     ralphRemaining = Number(publishedResume[2])
+    // The publish handoff carried the previous invocation's deviation fact across
+    // the process boundary (see the checkpoint format below).
+    if (publishedResume[4] !== undefined) taskDeviated = true
   }
   // The diff the reviewers read, the branch head the did-this-round-land check
   // baselines against, and the commit the merge is pinned to. Filled in by the
@@ -3527,8 +4210,48 @@ try {
   let diffFile = ''
   let branchHead = ''
   let reviewedHead = ''
+  // Did the build-completion head read FAIL (as opposed to git answering `'absent'`)?
+  // `branchHead` flattens both to '', and the "nothing was built" throw below must not
+  // claim a commit is missing when the run never managed to look. Wording only — the
+  // OUTCOME is deliberately the same, because a build that wrote no diff built nothing
+  // whether or not its head could be read.
+  let builtHeadUnreadable = false
   let roundLostItsWork = null
   let roundLostItsDiff = null
+  // The bounded stop for a build-completion head that could not be read or that
+  // disagrees with the builder's claim. `ok: false` DELIBERATELY, and the same value
+  // the resume stop above uses: these are two instances of ONE failure class
+  // (blockKind 'infra-only', a measured terminalCause, verdict REQUEST_CHANGES), and
+  // two terminal results of the same class that disagree on `ok` is a bug waiting for
+  // its first consumer.
+  //
+  // IT REPORTS NO CHECKPOINT, BECAUSE IT WRITES NONE — `checkpoint: null`, and that is
+  // load-bearing. `writeTerminalResult` does not touch `inner_checkpoint`; the OUTER
+  // loop copies `result.checkpoint` into the row on the REQUEST_CHANGES path
+  // (orchestrator.ts, `applyResult`) and does NOT touch `inner_checkpoint_head`. So
+  // naming a phase here that `checkpoint()` never recorded would land the NEW name
+  // beside the PREVIOUS phase's OID — exactly the drift the checkpoint invariant (see
+  // `checkpoint`, "A CHECKPOINT RECORDS WHICH COMMIT IT APPLIED TO") exists to make
+  // impossible, and a resume would then judge this phase against a commit belonging to
+  // an earlier one. Both callers reach this with no head worth recording: either the
+  // read failed, or git and the builder named different commits and this run refuses to
+  // believe either. `null` leaves the row's last genuinely-recorded (name, OID) pair
+  // intact — the durable record of what this branch last had — and the PHASE is not lost:
+  // `terminalCause` names it verbatim ("after forge:fix-round-2").
+  //
+  // `remainingTasks: 0` IS ALSO DELIBERATE IN A RALPH RUN, even when `plan:fable` already
+  // measured a non-zero count this round. It is not a claim that no tasks remain — it is
+  // the field the outer loop reads to decide whether to RE-FIRE (orchestrator.ts), and
+  // re-firing a run that just failed to read its own head spends another whole iteration
+  // on the condition that stopped this one. A stop is a stop. The remaining count is not
+  // lost: Ralph's queue lives in the committed `IMPLEMENTATION_PLAN.md`, which the next
+  // run re-reads, and the checkpoint columns this stop leaves untouched record where the
+  // branch actually got to.
+  const builtHeadStop = async (cause) => {
+    const stop = { ok: false, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: null, blockKind: 'infra-only', terminalCause: infraCause(cause), remainingTasks: 0 }
+    await writeTerminalResult(stop)
+    return stop
+  }
 
   if (resumeMode === 'review' || resumeMode === 'fix') {
     // ── SKIP THE BUILD ────────────────────────────────────────────────────────
@@ -3565,21 +4288,194 @@ try {
         : ''
     let ralphNote = ''
     if (ralph === true) {
-      const plan = await agent(
-        planFablePrompt(resuming),
-        withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
-      )
+      // ── WHICH PLANNER RUNS THIS ITERATION ─────────────────────────────────
+      // A PLANNED RALPH HANDOFF WHOSE BRANCH DID NOT MOVE IN THE CRASH WINDOW is
+      // the ONLY shape that may skip the survey, and this predicate is exactly
+      // that — read it against `classifyResume`, which is where it gets its
+      // force. For the checkpoint name 'ralph-task-built', reason
+      // 'unknown-checkpoint' is reachable ONLY after the recorded head was
+      // compared against the live head and MATCHED: every other outcome
+      // (head-moved / head-unreadable / head-branch-absent / no-recorded-head /
+      // no-checkpoint) returns earlier with its own reason. So this is not a
+      // name check with a comparison bolted on; the comparison already happened.
+      //
+      // Every other resume shape — 'forge-done', 'fix-round-N', 'argus-*', an
+      // outer-published resume, no checkpoint at all — is a GENUINE crash-resume
+      // (or the first iteration) and keeps the full planner and its verbatim
+      // `resumeNote` path, unchanged.
+      //
+      // `ralphRound` IS ZERO-BASED — read it as "how many re-fires have happened",
+      // not "which iteration is this". `createRun` writes `ralph_round: 0`
+      // (trident/store.ts) and `refireNextRalphTask` bumps it by one per handoff
+      // (trident/orchestrator.ts), so ITERATION N ARRIVES HERE AS ralphRound N-1:
+      // iteration 1 → 0, iteration 2 → 1, iteration 6 → 5. Hence `>= 1` (not
+      // `>= 2`): iteration 2 is the FIRST continuation and the whole point of this
+      // card — gating on `>= 2` silently made iteration 2 pay the full 287 s
+      // survey. `% PLAN_REFRESH_EVERY !== 0` then lands the periodic full re-plan
+      // on iteration K+1 = 6 (ralphRound 5), 11 (10), … and also excludes
+      // ralphRound 0 a second time, which is iteration 1 and must always
+      // full-plan.
+      const cleanContinuation =
+        resumePlan.reason === 'unknown-checkpoint' &&
+        typeof resumeCheckpoint === 'string' &&
+        resumeCheckpoint.trim() === 'ralph-task-built' &&
+        Number.isSafeInteger(ralphRound) &&
+        ralphRound >= 1 &&
+        ralphRound % PLAN_REFRESH_EVERY !== 0
+      // The committed plan, read by the cheap probe seat — but ONLY when the cheap
+      // planner could actually be used. On every other path this costs nothing,
+      // because it is not dispatched.
+      //
+      // Through `seatAttempt`, for the same reason `head-probe`/`ci-probe` are: A
+      // PROBE AGENT THAT DIES MUST NOT END THE LANE. This seat is a pure
+      // OPTIMISATION — all it decides is whether the CHEAPER planner may run — so
+      // a transient dispatch failure (a 529, a killed session) crashing the whole
+      // workflow would make having the fast path strictly WORSE than not having
+      // it. Death collapses to `null`, which is already the "no usable probe"
+      // value the `usePlanNext` predicate below rejects, so the lane falls through
+      // to the full `plan:fable` exactly as it does for a branch that carries no
+      // committed plan at all.
+      const planProbe = cleanContinuation
+        ? await seatAttempt(`plan-probe-round-${ralphRound}`, () =>
+            agent(
+              planProbePrompt(),
+              withModel({ label: 'plan:probe', phase: 'Build', schema: PLAN_PROBE_SCHEMA }),
+            ),
+          )
+        : null
+      // THE DECISION IS MADE HERE, IN CODE, from the probe's four facts — the probe
+      // itself judges nothing. A dead probe, a branch with no committed plan, an
+      // empty body, a plan with ZERO unchecked tasks, a body that fails its own
+      // checksum, or a body whose unchecked tasks CONTRADICT the probe's own grep
+      // count all FALL THROUGH to the full planner: a branch whose plan is exhausted
+      // must ESCALATE to the planner that can decide the card is done, never
+      // silently build nothing — and an incoherent probe answer must never get to
+      // pick which of its halves the workflow believes.
+      const bodyUnchecked = planProbe === null ? -1 : countUnchecked(planProbe.planBody)
+      const usePlanNext =
+        cleanContinuation &&
+        planProbe !== null &&
+        planProbe.planFound === true &&
+        Number.isSafeInteger(planProbe.uncheckedCount) &&
+        planProbe.uncheckedCount >= 1 &&
+        typeof planProbe.planBody === 'string' &&
+        planProbe.planBody.trim().length > 0 &&
+        probeBodyIntact(planProbe) &&
+        bodyUnchecked === planProbe.uncheckedCount
+      if (cleanContinuation && !usePlanNext) {
+        log(
+          `trident-v2 plan:next SKIPPED (round ${ralphRound}) — ${
+            planProbe === null
+              ? 'the plan probe returned nothing'
+              : planProbe.planFound !== true
+                ? `no committed IMPLEMENTATION_PLAN.md on ${planProbeRef}`
+                : typeof planProbe.planBody !== 'string' || planProbe.planBody.trim().length === 0
+                  ? 'the committed plan is empty'
+                  : planProbe.uncheckedCount < 1 || !Number.isSafeInteger(planProbe.uncheckedCount)
+                    ? `the committed plan has ${JSON.stringify(planProbe.uncheckedCount)} unchecked task(s)`
+                    : !probeBodyIntact(planProbe)
+                      ? `the relayed plan body does not match the checksum the probe measured on the file ` +
+                        `(cksum ${JSON.stringify(planProbe.planCksum)}, ${JSON.stringify(planProbe.planBytes)} byte(s)) — treating it as truncated or altered`
+                      : `the relayed plan body carries ${bodyUnchecked} unchecked task(s) but the probe's grep -c ` +
+                        `counted ${planProbe.uncheckedCount} on the file — the two halves of the probe's answer disagree`
+          } → falling through to the full plan:fable`,
+        )
+      }
+      const plannerLabel = usePlanNext ? 'plan:next' : 'plan:fable'
+      const plan = usePlanNext
+        ? await agent(
+            planNextPrompt(planProbe.planBody, forgeBranch),
+            withModel({ label: 'plan:next', phase: 'Build', schema: PLAN_SCHEMA }),
+          )
+        : await agent(
+            planFablePrompt(resuming),
+            withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
+          )
       // NEVER continue Ralph without a plan (Codex [P2]). The old in-Forge
       // RALPH_NOTE is gone, so a null plan (planner terminal error) would run
       // forge:build with NO plan + NO one-task discipline — an unplanned build.
       // Fail loudly; the catch{} persists a terminal failure result promptly.
+      // IDENTICAL FOR BOTH PLANNERS — the cheap path is allowed to be cheaper, not
+      // to be less safe.
       if (!plan) {
-        throw new Error('plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode')
+        throw new Error(
+          usePlanNext
+            ? 'plan:next returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode'
+            : 'plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode',
+        )
+      }
+      // ── THE RELAYED PLAN IS VERIFIED, NOT TRUSTED ───────────────────────────
+      // `plan:next` is asked to do exactly two mechanical things — echo the
+      // committed body byte for byte, and report the probe's count minus one — and
+      // the probe ALREADY MEASURED BOTH (a verbatim `git show`, a `grep -c`). So
+      // neither is taken on the model's word, because both failure modes are
+      // silent and expensive: `ralphExecuteNote` tells Forge to write "EXACTLY
+      // this body" and COMMIT it, so a shortened echo rewrites the card's own plan
+      // and deletes tasks nobody decided to drop; and `remainingTasks` is the
+      // re-fire gate, so a hallucinated 0 declares a half-built card finished.
+      // The measurement wins over the relay, every time, and says so on the
+      // transcript. (Same discipline as `briefIntegrity()`: compare against what
+      // was measured, prefer the measurement, log the divergence.)
+      if (usePlanNext) {
+        if (plan.implementationPlan !== planProbe.planBody) {
+          const relayed = typeof plan.implementationPlan === 'string' ? plan.implementationPlan.length : -1
+          log(
+            `trident-v2 plan:next INTEGRITY — the relayed implementationPlan (${relayed} chars) is not the committed body ` +
+              `(${planProbe.planBody.length} chars); persisting the COMMITTED body instead`,
+          )
+          plan.implementationPlan = planProbe.planBody
+        }
+        // THE TASK ITSELF IS A MEASUREMENT TOO, not just the body and the count.
+        //
+        // `ralphExecuteNote` tells Forge to implement "the task above" and to commit
+        // the plan with THAT task marked '- [x]'. If `topTask` is a paraphrase — or
+        // an invention — of a line that is not literally in the checklist, Forge has
+        // nothing to check off: the committed plan comes back with the same unchecked
+        // items, the next iteration picks the same first task, and the card cannot
+        // converge until PLAN_REFRESH_EVERY (5) or `max_ralph_rounds` (20) stops it.
+        // The first unchecked '- [ ]' line IS the answer `plan:next` was asked for
+        // and the body is right here, so read it rather than trusting the relay.
+        const measuredTop = firstUncheckedTask(planProbe.planBody)
+        const relayedTop =
+          typeof plan.topTask === 'string' ? plan.topTask.trim().replace(/^-\s*\[[ xX]\]\s*/, '') : ''
+        if (measuredTop === null) {
+          // The selection gate already proved the body carries EXACTLY the unchecked
+          // count `grep -c` measured, so the only way here is a '- [ ]' marker with no
+          // task text after it — a plan line nobody can build. Loud on the transcript;
+          // the exec spec still carries the work.
+          log(
+            `trident-v2 plan:next INTEGRITY — the relayed body has NO '- [ ]' line although the probe's grep -c ` +
+              `counted ${planProbe.uncheckedCount}; keeping topTask=${JSON.stringify(plan.topTask)} as-is`,
+          )
+        } else {
+          // A relay that echoed the whole '- [ ] …' line answered CORRECTLY, so the
+          // marker is stripped rather than reported as a divergence: an integrity log
+          // that fires on every clean run is noise, and noise is how a real one gets
+          // missed. Either way Forge is handed the committed line's own text.
+          if (relayedTop !== measuredTop) {
+            log(
+              `trident-v2 plan:next INTEGRITY — topTask=${JSON.stringify(plan.topTask)} is not the first unchecked ` +
+                `'- [ ]' line of the committed plan (${JSON.stringify(measuredTop)}); using the committed line`,
+            )
+          }
+          plan.topTask = measuredTop
+        }
+        // The probe counted the unchecked tasks INCLUDING the one being built now,
+        // so the truth after this iteration is exactly one fewer.
+        const measuredRemaining = planProbe.uncheckedCount - 1
+        const claimed = Number.isFinite(plan.remainingTasks) ? Math.trunc(plan.remainingTasks) : null
+        if (claimed !== measuredRemaining) {
+          log(
+            `trident-v2 plan:next INTEGRITY — remainingTasks=${JSON.stringify(plan.remainingTasks)} contradicts the probe's ` +
+              `grep -c count (${planProbe.uncheckedCount} unchecked − 1 = ${measuredRemaining}); using the measured count`,
+          )
+          plan.remainingTasks = measuredRemaining
+        }
       }
       complexityTag = plan.complexity
-      ralphNote = ralphExecuteNote(plan)
+      ralphNote = ralphExecuteNote(plan, forgeBranch)
       ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
-      log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
+      log(`trident-v2 ${plannerLabel} → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
     }
 
     // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
@@ -3601,36 +4497,115 @@ ${task}${reflectionGuidance}`,
     const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
     const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
     diffFile = forgeDiff
+    const builtHead = await readBuiltHead('r1')
+    // THE CLAIM IS READ ONCE, THROUGH `oidClaim`, AND EVERY USE BELOW READS THAT ONE
+    // VALUE — never the raw `forge.commitSha` beside it. The fix round does the same.
+    // They are equivalent today (oidClaim only trims + shape-tests), which is exactly
+    // why the asymmetry was invisible: the day oidClaim normalises anything, one site
+    // would compare the normalised value and the other would print the raw one.
+    const claim = oidClaim(forgeSha)
+    // TWO OIDs THAT DISAGREE IS ALL THIS MEASURED, so it is all the cause says. The
+    // sentence used to name "wrong branch or wrong worktree" — a deduction, and not even
+    // the likeliest one: a commit hook that amends, or a second commit landing between
+    // the builder's `rev-parse` and this probe, produce exactly the same signal. The
+    // shipped Part-1 twin (`publishBuiltCommit`, trident/orchestrator.ts) names both OIDs
+    // and stops there; so does this. (orchestrator.ts: "A MESSAGE MUST NOT ASSERT A CAUSE
+    // IT DID NOT MEASURE.")
+    //
+    // AND IN `pr` MODE THIS CHECK DOES NOT RUN AT ALL — the same `!isPr` carve-out the
+    // unreadable-head stop below already has, for the same reason. The identical
+    // comparison is made in REAL CODE by `publishBuiltCommit` at the credentialed
+    // boundary, against a `rev-parse` this process ran itself; here both sides of it
+    // arrive through a model seat. A garbled relay of either value would veto a build the
+    // publisher would have validated — a strictly less trustworthy copy of a check that
+    // is about to happen anyway. In `local` mode there IS no publisher, so it stands.
+    if (!isPr && builtHead !== '' && builtHead !== 'absent' && claim !== null && !builtHead.startsWith(claim.toLowerCase()))
+      return await builtHeadStop(`forge:build reported commit '${claim}' but refs/heads/${forgeBranch} resolves to '${builtHead}'; refusing to publish or review either until they agree`)
+    // AN INFRA-ONLY STOP IS FOR A FAILED READ, NEVER FOR AN EMPTY BUILD. `'absent'` is
+    // git ANSWERING that the branch was never created, and a build that left no diff
+    // built nothing whether or not its head could be read — both are "nothing was
+    // built", a real outcome with its own honest throw further down (deliberately
+    // AFTER the merge and Ralph questions, which can each legitimately finish a build
+    // invocation with no diff). Telling the operator to "re-run when the read
+    // succeeds" for either would be re-run advice that can never succeed.
+    //
+    // AND IT PROMISES NOTHING ABOUT THE CHECKOUT. A read that failed did not observe the
+    // branch, the repository, or anything else — in a directory that is not a git repo at
+    // all the probe prints nothing and lands here identically. So the message says what
+    // this run DID (nothing: no rebuild, no publish, no review) rather than asserting that
+    // a branch it could not see is still there. Re-run advice is honest either way: it
+    // tells the operator when to try again, not that trying again will work.
+    //
+    // THE ADVICE COMES BEFORE THE DETAIL, and that ordering is load-bearing: this text is
+    // capped on its way into the DB (`infraCause`, and again in `inner-loop.ts`), the diff
+    // path at the end is model-supplied and therefore unbounded, and a cause that loses
+    // its tail must lose DETAIL, never the one instruction the operator can act on. At 300
+    // chars this sentence's own "re-run when the read succeeds" was the part that got cut.
+    if (builtHead === '' && !isPr && forgeDiff !== '')
+      return await builtHeadStop(`could not read the head of refs/heads/${forgeBranch} after forge:build (${BUILT_HEAD_READ_ATTEMPTS} attempts) — re-run when the read succeeds; this run rebuilt, published and reviewed nothing; the build reported ${claim === null ? 'no sha' : `'${claim}'`} and wrote a diff to ${forgeDiff}`)
     // The baseline for the did-this-round-land check below. Round 1's own commit is
-    // the starting point; every fix round must move the branch past it.
-    branchHead = forgeSha
+    // the starting point; every fix round must move the branch past it. `'absent'` is
+    // not a commit, so it carries forward as the empty head the gate below refuses.
+    branchHead = builtHead === 'absent' ? '' : builtHead
+    builtHeadUnreadable = builtHead === ''
+    // THE EXACT BOOLEAN ONLY (fail-closed, as `pr_merged` is decoded): a string
+    // 'true', a 1, or any other truthy stand-in is a field that did not arrive in
+    // the shape the schema asks for, and reading one as a deviation would spend the
+    // full 287 s survey on the next iteration for nothing.
+    if (ralph === true && forge.deviatedFromSpec === true) taskDeviated = true
 
-    // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
-    // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
-    // (both are required FORGE_SCHEMA fields, so this is always populated on a
-    // healthy build). Carried out in the terminal result and passed to
+    // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM.
+    // It is read from git ONCE, at build completion, and cross-checked against the
+    // builder's independent claim. It is carried out in the terminal result and
+    // passed to
     // `--match-head-commit` at merge, so a head that moved fails LOUDLY instead of
     // silently shipping code no reviewer saw (observed on PR #171: the head went
     // clean → dirty mid-review).
     //
-    // DELIBERATELY NOT A FRESH PROBE OF THE REMOTE HEAD. A commit pushed between
-    // Forge's push and the probe would be read back and recorded as `reviewedHead`,
+    // DELIBERATELY NEVER RE-PROBED AT PUBLISH OR MERGE TIME. A commit pushed after
+    // the build and before such a probe would be read back and recorded as `reviewedHead`,
     // and the merge would then pin to it and SUCCEED — certifying as reviewed a
     // commit whose code is not in the diff anyone read. That is the same lie the
     // crash-resume shortcut was fixed to stop telling, and a pinned merge of an
     // unreviewed commit is worse than an unpinned one because the pin manufactures
-    // confidence nobody earned. A sha that is merely STALE cannot mis-merge:
-    // `--match-head-commit` just REFUSES. Empty (Forge reported no sha) records
-    // nothing and the outer merge refuses too — fail-closed either way.
+    // confidence nobody earned. Reading once at build completion preserves #545's
+    // reviewed-commit identity; a later branch movement makes the pinned merge refuse.
     reviewedHead = branchHead
 
     // C1 checkpoint — Forge done (PR + branch persisted), recorded against the
-    // commit Forge reported so a resume can tell whether this build is still the
+    // commit read from git so a resume can tell whether this build is still the
     // code on the branch.
-    await checkpoint('forge-done', { pr, head: branchHead })
+    //
+    // …AND, WHEN THE READ FAILED IN `pr` MODE, AGAINST THE BUILDER'S CLAIM RATHER THAN
+    // AGAINST NOTHING. The `!isPr` carve-out above deliberately does NOT stop a pr-mode
+    // run whose head read failed: the outer publisher re-reads the head in real code and
+    // is the authority. But recording `head: ''` here is how that carve-out re-opened the
+    // very defect this card exists to close — `classifyResume` reads an empty recorded
+    // OID as `no-recorded-head` → REBUILD.
+    //
+    // WHO ACTUALLY BENEFITS, NAMED CORRECTLY (Argus r5). This comment used to say "a
+    // publish that fails leaves a finished, committed build to be rebuilt". That path
+    // does not exist: a failed publish is TERMINAL (`orchestrator.ts`, publish-failed),
+    // and a terminal row is never resumed. The real beneficiary is CRASH-RECOVERY
+    // RELAUNCH (#267) — the launcher process dies between this checkpoint and the
+    // publish, the row is reclaimed non-terminal, and the relaunch resumes from exactly
+    // this checkpoint. With `head: ''` that relaunch rebuilds a build that is already
+    // committed. The claim is the only other evidence there is, and recording it is safe
+    // BECAUSE IT REMAINS A CLAIM: no fast path opens unless the recorded OID EQUALS the
+    // live head the LAUNCHER reads from git, so a wrong claim degrades to `head-moved` →
+    // rebuild — exactly what an empty one would have done — while a right one preserves
+    // the work. Only a FULL 40-hex claim qualifies (`normalizeOid`); an abbreviated one
+    // cannot be compared for equality. `'absent'` records '' as before: git ANSWERED that
+    // there is no branch, and a claim about a branch git says does not exist is not
+    // evidence of anything.
+    await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead })
     if (isPr) {
-      if (!FULL_OID.test(branchHead)) throw new Error('forge:build completed without a full local commit OID for the outer publisher')
-      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: branchHead, remainingTasks: ralphRemaining }
+      // NO THROW ON SHA SHAPE. What this handoff actually carries is the BRANCH
+      // NAME (`branch: forgeBranch`) — a value no model can plausibly mangle —
+      // which the outer publisher `rev-parse --verify`s to get the real head.
+      // `publishHead` is a best-effort CROSS-CHECK only, so a missing or
+      // abbreviated claim must never discard a build that is already committed.
+      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: claim, remainingTasks: ralphRemaining, deviatedFromSpec: taskDeviated }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -3674,8 +4649,15 @@ ${task}${reflectionGuidance}`,
   // (`classifyResume` sends this checkpoint name to rebuild however the head
   // compares, because the next task is still unbuilt).
   if (ralph === true && ralphRemaining > 0) {
+    // A DEVIATED HANDOFF IS A DIFFERENT CHECKPOINT NAME, and that is the whole
+    // mechanism: the cheap `plan:next` selection requires the EXACT name
+    // 'ralph-task-built', so 'ralph-task-built-deviated' fails that check and falls
+    // into `classifyResume`'s unknown-checkpoint → rebuild. The next iteration
+    // therefore runs the full `plan:fable` and re-derives the plan from the code,
+    // which is the correct price when the committed plan may no longer be true.
+    const builtCheckpoint = taskDeviated ? 'ralph-task-built-deviated' : 'ralph-task-built'
     log(`trident-v2 ralph: task built, ${ralphRemaining} task(s) remain → hand back to outer loop for re-fire`)
-    await checkpoint('ralph-task-built', { pr, head: branchHead })
+    await checkpoint(builtCheckpoint, { pr, head: branchHead })
     const refireResult = {
       ok: true,
       prNumber: pr,
@@ -3684,7 +4666,7 @@ ${task}${reflectionGuidance}`,
       // merges, on remainingTasks>0). Kept non-APPROVE as belt-and-suspenders.
       verdict: 'REQUEST_CHANGES',
       round,
-      checkpoint: 'ralph-task-built',
+      checkpoint: builtCheckpoint,
       remainingTasks: ralphRemaining,
     }
     await writeTerminalResult(refireResult)
@@ -3694,13 +4676,26 @@ ${task}${reflectionGuidance}`,
   // A completed final build must have both a commit to pin and a diff to review.
   // Merge and Ralph re-fire are settled first: either can legitimately finish a
   // build invocation without producing a reviewable diff.
+  // `branchHead` is now the head READ FROM GIT (or '' when the branch does not
+  // exist), so this half of the gate no longer measures whether a model relayed a
+  // sha — it measures whether a commit exists at all. That is the "nothing was
+  // built" outcome acceptance criterion 5 requires be kept, and it must stay
+  // distinct from the infra-only stop above, which fires only on a FAILED read.
   if (resumeMode === 'rebuild') {
     if (branchHead === '' || diffFile === '') {
-      const missing = [branchHead === '' ? 'commitSha' : null, diffFile === '' ? 'diffFile' : null]
+      const missing = [branchHead === '' ? `commit on ${forgeBranch}` : null, diffFile === '' ? 'diffFile' : null]
         .filter((m) => m !== null)
         .join(' and ')
+      // SAY WHICH FACTS WERE MEASURED. When the head read FAILED, "no commit" is the
+      // shape of the sentence but not something this run observed — the diff is. The
+      // outcome is unchanged (no diff is no change, so there is nothing to review either
+      // way) and the re-run advice is deliberately still absent: re-running a build that
+      // produced nothing produces nothing again.
+      const unmeasured = builtHeadUnreadable
+        ? ' (the head read failed, so whether a commit exists was not measured — but the build wrote no diff, so there is nothing to review regardless)'
+        : ''
       throw new Error(
-        `forge:build completed but produced no ${missing} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
+        `forge:build completed but produced no ${missing}${unmeasured} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
       )
     }
     await checkpoint('forge-done', { pr, head: branchHead })
@@ -3765,14 +4760,45 @@ TASK:
 ${task}${reflectionGuidance}`,
       `r${round}`,
     )
+    // ONE READ OF THE CLAIM, THROUGH `oidClaim`, EXACTLY AS ROUND 1 DOES — the raw
+    // `fix.commitSha` is not consulted again below.
+    const fixClaim = oidClaim(fix?.commitSha)
+    // …AND ONE READ OF THE DIFF THE ROUND CLAIMS TO HAVE WRITTEN, for the gate below.
+    const fixDiff = typeof fix?.diffFile === 'string' ? fix.diffFile.trim() : ''
+    const fixHead = await readBuiltHead(`r${round}`)
+    // Round 1's mismatch rules, unchanged: two OIDs that disagree is the whole
+    // measurement, and in `pr` mode `publishBuiltCommit` makes the same comparison in real
+    // code straight after this round hands back.
+    if (!isPr && fixHead !== '' && fixHead !== 'absent' && fixClaim !== null && !fixHead.startsWith(fixClaim.toLowerCase()))
+      return await builtHeadStop(`forge:fix-round-${round} reported commit '${fixClaim}' but refs/heads/${forgeBranch} resolves to '${fixHead}'; refusing to publish or review either until they agree`)
+    // THE SAME STOP AS ROUND 1, FOR THE SAME REASON. Without it a fix round whose head
+    // read failed carried on to APPROVE with `reviewedHead: ''` and wrote a checkpoint
+    // with `head: ''` — which `classifyResume` maps to REBUILD (no recorded head), i.e.
+    // it reintroduced the rebuild-of-committed-work path this card exists to remove.
+    // `'absent'` is NOT stopped here: for a fix round a vanished branch is the merge /
+    // round-lost question, which `roundOutcome` below already asks and answers.
+    // The wording claims nothing about a checkout this read never saw — see round 1.
+    //
+    // GATED ON THE ROUND HAVING WRITTEN A DIFF, EXACTLY AS ROUND 1 IS (Argus r4). A round
+    // that produced NOTHING did not lose its work to the failed read — it lost it (or never
+    // had it) in a throwaway worktree, and "re-run when the read succeeds" is advice that
+    // cannot recover anything. Round 1 refuses to give it for the same reason; this twin
+    // was ungated. With no diff the round falls through to `roundOutcome`, whose round-lost
+    // path already reports the honest thing: the round left no trace on the branch, and
+    // here is where to look for it.
+    if (fixHead === '' && !isPr && fixDiff !== '')
+      return await builtHeadStop(`could not read the head of refs/heads/${forgeBranch} after forge:fix-round-${round} (${BUILT_HEAD_READ_ATTEMPTS} attempts) — re-run when the read succeeds; this run published, re-reviewed and approved nothing; the round reported ${fixClaim === null ? 'no sha' : `'${fixClaim}'`}`)
+    // The recorded head, with the SAME claim fallback round 1 uses and for the same
+    // reason: in `pr` mode an unreadable head does not stop the round, and writing '' here
+    // is what turns a finished, committed fix round into a rebuild on the next resume.
     await checkpoint(`fix-round-${round}`, {
       pr,
-      head: typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : '',
+      head: fixHead === '' ? normalizeOid(fixClaim) : fixHead === 'absent' ? '' : fixHead,
     })
     if (isPr) {
-      const publishHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-      if (!FULL_OID.test(publishHead)) throw new Error(`forge:fix-round-${round} completed without a full local commit OID for the outer publisher`)
-      const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead, remainingTasks: ralphRemaining }
+      // Best-effort claim, same as the build handoff: the branch name is the
+      // handoff, `publishHead` is only a cross-check for the publisher.
+      const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead: fixClaim, remainingTasks: ralphRemaining }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -3783,7 +4809,15 @@ ${task}${reflectionGuidance}`,
     // exactly that failure — so both facts are gathered and `roundOutcome` orders
     // them: GitHub is asked whether the PR merged BEFORE any `round-lost` verdict
     // is written (ISSUES #563), and the round-lost path is otherwise untouched.
-    const headAfter = await readBranchHead(round)
+    // `'absent'` COLLAPSES TO `''` HERE, AND ONLY HERE. The probe's tri-state exists for
+    // the RESUME decision, where "the branch is gone" and "the read failed" earn opposite
+    // consequences. This site asks a different question — did THIS round move the branch?
+    // — and `roundLanded` compares strings: a literal `'absent'` would differ from the
+    // round-1 head and read as PROGRESS, turning a deleted branch into a landed round.
+    // A branch that is gone did not land a fix round, which is what `''` already says
+    // (and a merge, the benign reason for a vanished branch, is asked FIRST below).
+    const headAfterRead = await readBranchHead(round)
+    const headAfter = headAfterRead === 'absent' ? '' : headAfterRead
     const outcome = roundOutcome(await probePrMerged(pr, `r${round}`), branchHead, headAfter)
     if (outcome === 'merged') {
       log(`trident-v2 MERGED: PR #${String(pr)} is merged — the run is DONE at round ${round} (no re-review, no further round)`)
@@ -3813,8 +4847,8 @@ ${task}${reflectionGuidance}`,
     // the round-1 variable: it is the only value that is a measurement of THIS
     // round (for a codex build the wrapper measured it after the build exited and
     // reports it empty when the file is missing or empty), and reusing round 1's
-    // path is precisely how an absent file goes unnoticed.
-    const fixDiff = typeof fix?.diffFile === 'string' ? fix.diffFile.trim() : ''
+    // path is precisely how an absent file goes unnoticed. Read ONCE, at the top of
+    // this round, because the unreadable-head stop above is gated on the same fact.
     if (fixDiff === '') {
       log(`trident-v2 fix loop: round=${round} LEFT NO DIFF — stopping`)
       roundLostItsDiff = round
@@ -3822,13 +4856,28 @@ ${task}${reflectionGuidance}`,
       break
     }
     diffFile = fixDiff
-    // …and the commit THIS round's review judges is, exactly as in round 1, the
-    // one the fix agent reported committing — NOT `headAfter` (#545). The remote
+    // …and the commit THIS round's review judges is pinned to the head read from
+    // git at THIS round's completion, cross-checked against the fix agent's claim
+    // above — NOT `headAfter` (#545). The remote
     // probe above answers a different question ("did the branch move?"), and a
     // third party's push satisfies it just as well as the fix agent's own commit;
     // recording that push as `reviewedHead` would pin the merge to code the
-    // upcoming review never sees. Empty → fail-closed, same as round 1.
-    reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
+    // upcoming review never sees. It cannot be empty here: this line is past the
+    // empty-diff break, so `fixDiff !== ''`, which is exactly the condition under which
+    // an unreadable head stopped the round above.
+    //
+    // `'absent'` COLLAPSES TO `''`, EXACTLY AS THE CHECKPOINT WRITE AND `headAfter`
+    // ABOVE ALREADY DO (Argus r5). This comment used to claim `'absent'` could not
+    // reach the line at all — "the branch has to have MOVED for `roundOutcome` to
+    // return 'landed'" — which is false: `fixHead` and `headAfter` are two SEPARATE
+    // probes, so a built-head read that says the branch is gone can sit next to a
+    // branch read that says it moved, and the literal string `'absent'` was then
+    // recorded as the reviewed commit. Bounded downstream (`reviewedHeadOid` in
+    // merge.ts refuses anything that is not 40 hex, so a `pr`-mode merge could never
+    // pin it) but this is a LOCAL-mode value that is not a commit, and naming it one
+    // is the lie #545 is about. `''` is what every other site in this file says for
+    // "no commit to pin", and it is what this one says now.
+    reviewedHead = fixHead === 'absent' ? '' : fixHead
     synthesis = await runReviewRound(diffFile, round, pr)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)
@@ -3922,7 +4971,8 @@ ${task}${reflectionGuidance}`,
   // the backstop. The `finally` cleanup still runs. We RETURN the failure object
   // (the detached workflow's result API) rather than re-throwing, so the result is
   // a clean terminal value, not an error.
-  log(`trident-v2 inner THREW: ${err && err.message ? err.message : String(err)}`)
+  const thrownMessage = err && err.message ? String(err.message) : String(err)
+  log(`trident-v2 inner THREW: ${thrownMessage}`)
   const failureResult = {
     ok: false,
     prNumber: pr,
@@ -3933,6 +4983,16 @@ ${task}${reflectionGuidance}`,
     // A THROWN iteration NEVER re-fires (a failure is a failure — recoverable via a
     // fresh /code run, same as before #362). 0 keeps the outer off the re-fire path.
     remainingTasks: 0,
+    // THE THROWN MESSAGE IS A MEASUREMENT, AND IT USED TO BE THROWN AWAY. Without it the
+    // outer loop's only sentence for every one of these exits was "inner workflow ended at
+    // round N of M at checkpoint 'inner-error' without Argus APPROVE" — which names the one
+    // thing that is NOT the cause on a path Argus never reached. Run 3d2696c3 threw over a
+    // missing commit OID and the operator was told the review panel had refused a build it
+    // never saw. So the sentence this workflow composed at the point the
+    // fact was known travels out with the result, redacted + capped by the SAME helper the
+    // bounded stops use. No `blockKind` is asserted alongside it: a throw is not a review
+    // verdict, and `null` keeps the outer loop from claiming the code was judged.
+    terminalCause: infraCause(thrownMessage),
   }
   try {
     await writeTerminalResult(failureResult)

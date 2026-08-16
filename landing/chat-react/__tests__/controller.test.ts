@@ -72,6 +72,41 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
 
 describe('NeutronChatController — view model over chat-core', () => {
+  it('reuses the same session and socket when switching back to a warm project', () => {
+    const sockets: FakeSocket[] = []
+    const sessions: WebChatSession[] = []
+    const controller = new NeutronChatController({
+      topicForProject: (projectId) => projectId === null ? TOPIC : `${TOPIC}:${projectId}`,
+      createSession: (sinks, scope) => {
+        const session = new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: scope.topicId,
+          createSocket: () => {
+            const socket = new FakeSocket()
+            sockets.push(socket)
+            return socket
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        })
+        sessions.push(session)
+        return session
+      },
+    })
+    controller.start()
+    const generalSession = sessions[0]!
+    const generalSocket = sockets[0]!
+    controller.setProject('p1')
+    controller.setProject(null)
+    expect(sessions).toHaveLength(2)
+    expect(sockets).toHaveLength(2)
+    expect(sessions[0]).toBe(generalSession)
+    expect(sockets[0]).toBe(generalSocket)
+    expect(generalSocket.closed).toBe(false)
+    controller.stop()
+  })
+
   // ── liveActivity: say WHAT it is doing, not just that it is ────────────────
   //
   // Owner-asked 2026-08-11 after a 277-second turn showed him only three dots.

@@ -17,6 +17,16 @@
  * re-appears on the next hydration / reconnect even with no socket open at fire
  * time — a reminder fires from a timer, not a request) THEN best-effort
  * live-pushes to the socket the topic grammar resolves to.
+ *
+ * ── 2026-08-09 — THE NOTIFICATION IS NOT HERE, deliberately. The owner's phone
+ * said `ritual:kaizen`, and the first fix for that composed the native
+ * notification in this file, from the delivered body. It cured the reported
+ * message and left the morning brief, the idle nudge and the overnight report
+ * silent, because they post through `deliver` on a DIFFERENT sink. So the
+ * notification moved down into `deliver` itself, which is the one thing all four
+ * producers share (`gateway/http/deliver.ts` — "the native notification is a
+ * fourth thing deliver owns"). Nothing about a fired reminder's notification is
+ * special, so nothing about it is written here.
  */
 
 import type { Deliver } from '../http/deliver.ts'

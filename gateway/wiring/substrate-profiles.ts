@@ -85,6 +85,29 @@ export interface SubstrateProfile {
    */
   readonly skip_permissions: boolean
   /**
+   * Whether a spawn on this profile carries the instance's GitHub credential —
+   * `GH_TOKEN` plus the matching git credential helper (`github/credential.ts`
+   * `githubProcessEnv`). It is what makes `gh` and a raw `git push` work inside
+   * the spawned REPL's Bash.
+   *
+   * REQUIRED, WITH NO DEFAULT, AND THAT IS THE POINT. Handing this to a call
+   * site instead put the decision in nine places nobody rereads: an agent asked
+   * "what PRs are open" and answered out of documentation because ITS site was
+   * never updated (`ISSUES.md` #576), and trident builds against a private repo
+   * died at `fatal: could not read Username` because THEIRS wasn't either. A
+   * required field means a new profile cannot be authored without stating the
+   * grant, and a new substrate inherits whatever its profile already decided.
+   *
+   * ⚠️ IT IS A TRUST DECISION, NOT A CONVENIENCE. `true` gives that spawn push
+   * access to every repo the owner's token reaches, so a profile whose input is
+   * attacker-influenced (imported history, project docs, onboarding text) must
+   * be `false` — the same boundary `enableToolBridge` already draws.
+   *
+   * Resolution is PER SPAWN, from {@link githubSpawnEnvRef}, so a credential
+   * connected after boot works and a rotated one is never stale.
+   */
+  readonly github_credential: boolean
+  /**
    * RESERVED (Phase B) — CC permission mode. `undefined` today; NOT applied by
    * the factory yet (see file header). Reserving it here means Phase B flips a
    * constant, not the factory + 8 sites.
@@ -105,7 +128,7 @@ export interface SubstrateProfile {
    * `BuildLlmCallSubstrateInput.extra_env`; when a profile sets this the factory
    * uses it in place of the legacy per-call `extra_env` input.
    */
-  readonly extra_env?: Record<string, string | undefined>
+  readonly extra_env?: () => Promise<Record<string, string | undefined>>
   /**
    * RESERVED (Phase D) — native OS sandbox config. `undefined` today; NOT
    * applied by the factory yet (see file header). Shape only.
@@ -136,6 +159,8 @@ export interface SubstrateProfile {
  */
 export const PROFILE_TOOLLESS_UTILITY: SubstrateProfile = {
   skip_permissions: true,
+  // scribe / reflection do no git work at all — a credential here would be reach without a use.
+  github_credential: false,
 }
 
 /**
@@ -148,6 +173,8 @@ export const PROFILE_TOOLLESS_UTILITY: SubstrateProfile = {
  */
 export const PROFILE_WARM_CHAT: SubstrateProfile = {
   skip_permissions: true,
+  // the owner's own chat. `gh pr list` and `git` in its Bash are the point.
+  github_credential: true,
 }
 
 /**
@@ -158,6 +185,8 @@ export const PROFILE_WARM_CHAT: SubstrateProfile = {
  */
 export const PROFILE_PHASE_SPEC: SubstrateProfile = {
   skip_permissions: true,
+  // its input is user-controlled onboarding text — a prompt-injection surface.
+  github_credential: false,
 }
 
 /**
@@ -174,6 +203,8 @@ export const PROFILE_PHASE_SPEC: SubstrateProfile = {
  */
 export const PROFILE_ISOLATED_COMPOSE: SubstrateProfile = {
   skip_permissions: true,
+  // composes from imported project docs, which are attacker-influenced content.
+  github_credential: false,
 }
 
 /**
@@ -186,6 +217,8 @@ export const PROFILE_ISOLATED_COMPOSE: SubstrateProfile = {
  */
 export const PROFILE_UNTRUSTED_IMPORT: SubstrateProfile = {
   skip_permissions: true,
+  // imported chat history is the prompt-injection surface this profile is named for.
+  github_credential: false,
 }
 
 /**
@@ -198,6 +231,8 @@ export const PROFILE_UNTRUSTED_IMPORT: SubstrateProfile = {
  */
 export const PROFILE_EPHEMERAL: SubstrateProfile = {
   skip_permissions: true,
+  // disposable Trident / agent-dispatch builds: they commit and push.
+  github_credential: true,
 }
 
 /**
@@ -244,9 +279,36 @@ export const PROFILE_EPHEMERAL: SubstrateProfile = {
  */
 export const PROFILE_WARM_FIRE: SubstrateProfile = {
   skip_permissions: true,
+  // Trident v2's build loop. Without it a run against a PRIVATE repo dies at
+  // `fatal: could not read Username for 'https://github.com'` — measured on the
+  // owner's instance 2026-08-15, where every enterprise dispatch built, committed
+  // and then failed, burning a full Forge round each time.
+  github_credential: true,
   // 30min of silence. Deliberately BELOW the 45min absolute ceiling so the
   // ceiling stays the terminal authority and this window can never make a turn
   // immortal, and far above any plausible silent-thinking stretch.
   turn_inactivity_ms: 30 * 60_000,
 }
 
+/**
+ * The instance's GitHub spawn-env resolver, registered ONCE at composition.
+ *
+ * A module-level holder rather than a factory input for the same reason
+ * `replToolBridgeRef` is one: the value is a property of the single running
+ * instance, and threading it through nine construction sites is exactly the
+ * per-site decision this file exists to remove. Open is single-owner — one
+ * instance, one GitHub credential.
+ *
+ * Unset ⇒ every spawn behaves exactly as it does today, so a build that never
+ * registers one (tests, an instance with no GitHub connected) is unaffected.
+ */
+export const githubSpawnEnvRef: {
+  resolve: (() => Promise<Record<string, string | undefined>>) | undefined
+} = { resolve: undefined }
+
+/** Register the instance's resolver. Called once, by the composer. */
+export function setGithubSpawnEnvResolver(
+  resolve: () => Promise<Record<string, string | undefined>>,
+): void {
+  githubSpawnEnvRef.resolve = resolve
+}

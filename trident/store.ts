@@ -153,6 +153,24 @@ export interface TridentRun {
    * Null until (and unless) the outer loop harvests.
    */
   harvested_at: number | null
+  /**
+   * CRASH-RECOVERY BUDGET SPENT (migration 0123) — how many times a launcher
+   * crash on this run has been recovered by relaunching the build as a
+   * continuation instead of reaping it. Legacy rows (NULL) read as 0.
+   *
+   * RECOVERY-OWNED, SINGLE WRITER: only {@link TridentRunStore.beginCrashRecovery}
+   * ever writes it. It is DELIBERATELY absent from `TridentRunUpdate`, `update()`,
+   * `save()` and `saveIfActive()` — same ownership discipline as `inner_result`
+   * (workflow-owned) and `harvested_at` (harvest-owned), so no full-snapshot save
+   * carrying a stale in-memory copy can ever refund budget that was already spent.
+   *
+   * DURABLE on purpose: the cause it bounds is a gateway deploy loop (three
+   * restarts in 53 min on 2026-08-14), and every gateway boot resets in-memory
+   * state — an in-process counter cannot cap the very loop that restarts the
+   * process. SEPARATE from `round`/`ralph_round`: a launcher crash is not the
+   * agent's failure and must not consume its fix rounds.
+   */
+  crash_recoveries: number
 }
 
 export interface CreateTridentRunInput {
@@ -241,18 +259,48 @@ interface TridentRunDbRow {
   started_at: string
   last_advanced_at: string
   harvested_at: number | null
+  crash_recoveries: number | null
 }
 
-const COLS =
+/** Exported solely so tests can pin the column-count invariant. */
+export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
-  'started_at, last_advanced_at, harvested_at'
+  'started_at, last_advanced_at, harvested_at, crash_recoveries'
+
+// Derived from COLS so placeholder-count = column-count BY CONSTRUCTION. A
+// hand-miscounted `?` list silently corrupts every insert and no type error
+// catches it — so the list is never typed by hand.
+const INSERT_PLACEHOLDERS = COLS.split(', ')
+  .map(() => '?')
+  .join(', ')
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
 const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
+
+/**
+ * Split a {@link TridentRunStore.changeSignature} into `run id → last_advanced_at`.
+ *
+ * The watcher only ever needs string equality on the whole signature; this is for
+ * the ONE caller that needs to know WHICH run moved — `tick.ts`'s settle, which
+ * must tell its own sweep writes apart from an out-of-process checkpoint that
+ * landed during the same sweep. The separator is a TAB, which neither an ISO
+ * timestamp nor a run id can contain, so the split is unambiguous; a line without
+ * one is skipped rather than guessed at.
+ */
+export function changeSignatureEntries(signature: string): Map<string, string> {
+  const entries = new Map<string, string>()
+  if (signature === '') return entries
+  for (const line of signature.split('\n')) {
+    const cut = line.indexOf('\t')
+    if (cut < 0) continue
+    entries.set(line.slice(cut + 1), line.slice(0, cut))
+  }
+  return entries
+}
 
 export class TridentRunStore {
   constructor(
@@ -302,10 +350,11 @@ export class TridentRunStore {
       started_at: ts,
       last_advanced_at: ts,
       harvested_at: null,
+      crash_recoveries: 0,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (${INSERT_PLACEHOLDERS})`,
       [
         run.id,
         run.slug,
@@ -337,6 +386,7 @@ export class TridentRunStore {
         run.started_at,
         run.last_advanced_at,
         run.harvested_at,
+        run.crash_recoveries,
       ],
     )
     return run
@@ -425,6 +475,50 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /**
+   * A signature of "did anything a tick would care about change?" — the
+   * wake-on-change watcher's ONE query, and the thing the sweep's own settle
+   * compares against. One `<last_advanced_at>\t<id>` line per NON-TERMINAL run,
+   * ordered by id; the empty active set is the empty string. No git, no gh, no
+   * joins — a single indexed scan of the live set, safe to run every ~2 s.
+   *
+   * PER-RUN, NOT AGGREGATE, AND THAT IS THE WHOLE POINT (Argus r2, confirmed by two
+   * independent repros). The first shape of this was `COUNT(*)|MAX(last_advanced_at)`,
+   * which cannot distinguish "the sweep re-stamped the run it advanced" from "an
+   * out-of-process checkpoint landed while the sweep was reading" — MAX moves the
+   * same way for both, so the tick could only choose between absorbing its own
+   * writes (and swallowing the external checkpoint, which then waited out the 90 s
+   * backstop — the exact latency this card removes) and not absorbing them (and
+   * re-firing a full 50-run git/gh sweep on every 2 s cadence). Per-run stamps make
+   * that a decidable question: {@link changeSignatureEntries} + the sweep's record
+   * of what IT wrote (`tick.ts`) tells the two apart exactly, with no window in
+   * which a wake is lost.
+   *
+   * MIXED-PRECISION STAMPS NEED NO NORMALISATION HERE. `store.now()` writes
+   * milliseconds (`…T03:15:45.900Z`) and `trident/checkpoint.sh` whole seconds
+   * (`…T03:15:45Z`); the old MAX compared them as TEXT, where 'Z' (0x5A) sorts above
+   * '.' (0x2E) and a whole-second stamp could mask a LATER millisecond one on
+   * another run. Comparison here is per-run EQUALITY, so any re-stamp in any shape
+   * — earlier, later, same second — is a difference. Ordering never enters into it.
+   *
+   * Unbounded on purpose: the row set is the LIVE runs (terminal rows are excluded
+   * by the same predicate `listNonTerminal` uses), and a cap would create a blind
+   * window in which a checkpoint is invisible to the detector — the failure mode
+   * this method exists to prevent. Tens of rows in practice; the sweep it gates
+   * does per-run git/gh work on up to 50 of them.
+   */
+  changeSignature(): string {
+    const rows = this.db
+      .prepare<{ id: string; at: string }, []>(
+        `SELECT id AS id, COALESCE(last_advanced_at, '') AS at
+           FROM code_trident_runs
+          WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
+          ORDER BY id`,
+      )
+      .all()
+    return rows.map((r) => `${r.at}\t${r.id}`).join('\n')
+  }
+
   /** Durably latch one dead launcher generation and crash only its workflows. */
   async crashRunningByLauncher(session_key: string, failure_reason: string): Promise<void> {
     await this.db.transaction((tx) => {
@@ -451,6 +545,38 @@ export class TridentRunStore {
         [failure_reason, now, session_key],
       )
     })
+  }
+
+  /**
+   * Atomically CLAIM a crashed run for recovery: clear the crash latch, release the
+   * sub-agent slot, null the (tombstoned) launcher generation so `launch()`'s
+   * `?? workflow_run_id` fallback can never re-adopt a dead generation, and spend one
+   * unit of the durable crash-recovery budget — ONE conditional UPDATE, so a racing
+   * terminate / second tick loses cleanly. Returns the reloaded run, or null if the
+   * claim lost (row terminal, already recovered, or gone).
+   *
+   * WHY RAW SQL RATHER THAN `update()`: `update()`'s statusGuard and `saveIfActive`'s
+   * crash veto both REFUSE a non-crashed write onto a latched row, and that veto is
+   * load-bearing for every other path (it is what stopped the unbounded re-fire) — so
+   * it stays. Recovery goes around it DELIBERATELY, in one atomic claim, and is the
+   * only writer of `crash_recoveries`.
+   */
+  async beginCrashRecovery(id: string): Promise<TridentRun | null> {
+    const won = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET subagent_status = NULL,
+                subagent_run_id = NULL,
+                workflow_run_id = NULL,
+                crash_recoveries = COALESCE(crash_recoveries, 0) + 1,
+                last_advanced_at = ?
+          WHERE id = ? AND subagent_status = 'crashed'
+            AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        [this.now(), id],
+      )
+      return res.changes > 0
+    })
+    return won ? this.get(id) : null
   }
 
   /**
@@ -762,5 +888,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     started_at: row.started_at,
     last_advanced_at: row.last_advanced_at,
     harvested_at: row.harvested_at,
+    // Legacy rows predate migration 0123 and read NULL — no budget spent yet.
+    crash_recoveries: row.crash_recoveries ?? 0,
   }
 }

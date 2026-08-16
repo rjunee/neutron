@@ -8,7 +8,6 @@ import { ReminderStore, type Reminder } from './store.ts'
 import {
   ReminderTickLoop,
   type ReminderDispatcher,
-  type ReminderFiredHook,
 } from './tick.ts'
 
 let tmp: string
@@ -358,7 +357,23 @@ describe('ReminderTickLoop.runOnce', () => {
     expect(advanced?.fire_at).toBe(now_sec + 60)
   })
 
-  test('P5.6 — on_fired hook fires once per dispatched reminder, after store advance', async () => {
+  test('the tick advances the row and dispatches — it does NOT notify', async () => {
+    // WHAT WAS DELETED HERE (2026-08-09) and why the replacement is one test
+    // instead of five. The tick used to carry an `on_fired` hook, and the
+    // composition attached the Expo push dispatcher to it; five tests pinned its
+    // ordering, its failure-safety and its recurring-row behaviour. All five were
+    // testing a place the notification should never have been built: the hook sees
+    // only the reminder ROW, and a ritual's row `message` is the dispatch token
+    // `ritual:<id>` — the string the owner's phone displayed. Composition moved to
+    // the shared out-of-turn delivery seam `gateway/http/deliver.ts` (composing via
+    // `gateway/push/chat-message-push.ts`), which holds the delivered text and the
+    // durable row id, and is tested there. Not to
+    // `gateway/proactive/reminder-outbound.ts` — a notification wired to the
+    // reminder path leaves the brief, the nudge and the overnight report silent.
+    //
+    // What remains worth pinning at THIS level is the absence: the tick's
+    // responsibility ends at "dispatch it, advance the row", and nothing about a
+    // notification can influence either.
     const store = new ReminderStore(db)
     const now = 10_000_000
     const a = await store.create({
@@ -374,142 +389,13 @@ describe('ReminderTickLoop.runOnce', () => {
       message: 'b',
     })
     const dispatcher = recordingDispatcher()
-    // Capture the post-advance status visible to the hook to confirm
-    // ordering: the row must already be marked fired by the time the
-    // hook sees it.
-    const pushed: Array<{ id: string; status: Reminder['status'] }> = []
-    const hook: ReminderFiredHook = {
-      async onFired(r) {
-        const post = store.get(r.id)
-        pushed.push({ id: r.id, status: post?.status ?? 'pending' })
-      },
-    }
-    const loop = new ReminderTickLoop({
-      store,
-      dispatcher,
-      now: () => now,
-      on_fired: hook,
-    })
-    const result = await loop.runOnce()
-    expect(result.fired).toBe(2)
-    expect(pushed.length).toBe(2)
-    expect(pushed.map((p) => p.id).sort()).toEqual([a.id, b.id].sort())
-    expect(pushed.every((p) => p.status === 'fired')).toBe(true)
-  })
-
-  test('P5.6 — on_fired hook errors do not abort the tick', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    await store.create({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: now / 1000 - 100,
-      message: 'first',
-    })
-    await store.create({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: now / 1000 - 50,
-      message: 'second',
-    })
-    const dispatcher = recordingDispatcher()
-    const seen: string[] = []
-    const hook: ReminderFiredHook = {
-      async onFired(r) {
-        seen.push(r.message)
-        if (r.message === 'first') throw new Error('push offline')
-      },
-    }
-    const loop = new ReminderTickLoop({
-      store,
-      dispatcher,
-      now: () => now,
-      on_fired: hook,
-    })
-    const result = await loop.runOnce()
-    // Both dispatched + marked fired despite the hook throwing.
-    expect(result.fired).toBe(2)
-    expect(seen).toEqual(['first', 'second'])
-    expect(store.listPending('t1').length).toBe(0)
-  })
-
-  test('P5.6 — on_fired hook fires for recurring rows after advanceRecurrence', async () => {
-    const store = new ReminderStore(db)
-    const now_sec = 10_000_000
-    const initial = now_sec - 10
-    const recurring = await store.createRecurring({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: initial,
-      message: 'weekly',
-      recurrence: 'weekly',
-    })
-    const dispatcher = recordingDispatcher()
-    const seen: Array<{ id: string; fire_at_at_hook_time: number }> = []
-    const hook: ReminderFiredHook = {
-      async onFired(r) {
-        // The reminder ARGUMENT carries the pre-advance fire_at (the
-        // hook gets the snapshot the dispatcher saw); the DB row has
-        // already advanced.
-        seen.push({ id: r.id, fire_at_at_hook_time: r.fire_at })
-      },
-    }
-    const loop = new ReminderTickLoop({
-      store,
-      dispatcher,
-      now: () => now_sec * 1000,
-      on_fired: hook,
-    })
-    await loop.runOnce()
-    expect(seen).toEqual([{ id: recurring.id, fire_at_at_hook_time: initial }])
-    expect(store.get(recurring.id)?.status).toBe('pending')
-    expect(store.get(recurring.id)?.fire_at).toBe(initial + 7 * 24 * 60 * 60)
-  })
-
-  test('P5.6 — without on_fired (default), tick behaviour is unchanged', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    await store.create({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: now / 1000 - 1,
-      message: 'a',
-    })
-    const dispatcher = recordingDispatcher()
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
-    expect((await loop.runOnce()).fired).toBe(1)
-  })
-
-  test('P5.6 — on_fired does NOT fire when the dispatcher throws (row stays pending)', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    await store.create({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: now / 1000 - 1,
-      message: 'broken',
-    })
-    const dispatcher: ReminderDispatcher = {
-      dispatch: async () => {
-        throw new Error('substrate offline')
-      },
-    }
-    const calls: string[] = []
-    const hook: ReminderFiredHook = {
-      async onFired(r) {
-        calls.push(r.id)
-      },
-    }
-    const loop = new ReminderTickLoop({
-      store,
-      dispatcher,
-      now: () => now,
-      on_fired: hook,
-    })
     const result = await loop.runOnce()
-    expect(result.fired).toBe(0)
-    expect(calls.length).toBe(0)
-    expect(store.listPending('t1').length).toBe(1)
+    expect(result.fired).toBe(2)
+    expect(dispatcher.fired.map((r: Reminder) => r.id).sort()).toEqual([a.id, b.id].sort())
+    expect(store.get(a.id)?.status).toBe('fired')
+    expect(store.get(b.id)?.status).toBe('fired')
+    expect(store.listPending('t1').length).toBe(0)
   })
 
   test('runOnce while a previous tick is in-flight returns skipped', async () => {
@@ -596,7 +482,14 @@ describe('ReminderTickLoop — one dispatch path for every row', () => {
     expect(dispatcher.fired.map((r: Reminder) => r.id).sort()).toEqual([plain.id, ritual.id].sort())
   })
 
-  test('a ritual row fires the on_fired push hook — it is not a privileged kind', async () => {
+  test('a ritual row advances exactly like a nudge — it is not a privileged kind', async () => {
+    // This used to assert that a ritual row fired the tick's `on_fired` PUSH hook.
+    // The hook is gone (see the note on the deleted P5.6 block above): the ritual's
+    // notification is now composed at delivery, and the claim that a ritual is not
+    // privileged is asserted there — a nudge and a ritual reach
+    // `buildButtonStoreReminderOutbound.post` identically, so they cannot produce
+    // different notifications. What the TICK owes is that the row itself takes the
+    // ordinary path.
     const store = new ReminderStore(db)
     const now = 10_000_000
     const row = await store.create({
@@ -607,21 +500,13 @@ describe('ReminderTickLoop — one dispatch path for every row', () => {
     })
     tagRitual(row.id, 'morning-brief')
 
-    const onFiredCalls: Reminder[] = []
-    const on_fired: ReminderFiredHook = {
-      onFired: async (r) => {
-        onFiredCalls.push(r)
-      },
-    }
-    const loop = new ReminderTickLoop({
-      store,
-      dispatcher: recordingDispatcher(),
-      on_fired,
-      now: () => now,
-    })
-    await loop.runOnce()
+    const dispatcher = recordingDispatcher()
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
+    const res = await loop.runOnce()
 
-    expect(onFiredCalls.map((r) => r.id)).toEqual([row.id])
+    expect(res.fired).toBe(1)
+    expect(dispatcher.fired.map((r: Reminder) => r.id)).toEqual([row.id])
+    expect(store.get(row.id)?.status).toBe('fired')
   })
 
   test('a dispatch THROW reverts the claim for a ritual row, exactly as for a nudge', async () => {

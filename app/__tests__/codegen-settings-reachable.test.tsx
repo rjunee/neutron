@@ -74,8 +74,8 @@ function payload(
         label: 'Cross-model review (Codex)',
         description: 'A second opinion from a GPT model, run through the Codex CLI.',
         group: 'codex',
-        groups: ['codex'],
-        effort_supported: false,
+        groups: ['none', 'claude', 'codex', 'kimi'],
+        effort_supported: true,
         default: { model: 'sol', effort: 'high' },
       },
     ],
@@ -237,15 +237,11 @@ describe('the screen renders what the SERVER says the phases are', () => {
     // …and pressing it changes nothing, which is the half a render check misses.
     await press('phase-review_codex-model-luna');
     expect(byTestId('phase-review_codex-changed')).toBeNull();
-    // THE OTHER KIND OF GREYING, on the executor this lane did not wire. "Go and get a
-    // Kimi key" would send the owner of a Codex row to fix something that would not
-    // help, so the reason has to be the wiring — and it must still say so after the
-    // build moved.
-    const k3 = byTestId('phase-review_codex-model-k3');
-    expect(k3).not.toBeNull();
-    expect(k3!.textContent ?? '').toContain('Kimi is not wired for this step yet');
-    await press('phase-review_codex-model-k3');
-    expect(byTestId('phase-review_codex-changed')).toBeNull();
+    // Claude is wired for the generic review seat and an available tier takes effect.
+    const opus = byTestId('phase-review_codex-model-opus');
+    expect(opus).not.toBeNull();
+    await press('phase-review_codex-model-opus');
+    expect(byTestId('phase-review_codex-changed')).not.toBeNull();
   });
 
   it('lets the BUILD row be moved to a codex tier, and the choice actually takes', async () => {

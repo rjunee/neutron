@@ -15,7 +15,7 @@
  *     factories throwing.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +26,10 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import {
+  githubSpawnEnvRef,
+  setGithubSpawnEnvResolver,
+} from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -107,6 +111,15 @@ async function drain(sub: Substrate): Promise<void> {
   }
 }
 
+// `githubSpawnEnvRef` is module-level state a composer registers at boot, so a
+// composer test running earlier IN THE SAME SHARD leaves a live resolver behind
+// and every profile that opts into the credential then calls it. CI found this;
+// a local single-file run never could. Clear it so this file measures its own
+// wiring rather than whatever ran before it.
+beforeEach(() => {
+  githubSpawnEnvRef.resolve = undefined
+})
+
 describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
   test('cc-llm-* phase-spec substrate omits the tool bridge', async () => {
     const { ctx, captured } = makeCtx()
@@ -130,6 +143,73 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.enableToolBridge).toBe(true)
     expect(opts!.ephemeral).not.toBe(true)
     expect(opts!.skip_permissions).toBe(true)
+  })
+
+  test('THE PROFILE DECIDES which substrates carry the GitHub credential', async () => {
+    // The decision is not made here and not at the construction sites — it is on
+    // the profile, so a substrate added later inherits whatever its profile
+    // already decided instead of silently getting nothing. That silence is what
+    // produced ISSUES #576 and a private-repo build dying at `could not read
+    // Username`.
+    let calls = 0
+    setGithubSpawnEnvResolver(async () => {
+      calls += 1
+      return { GH_TOKEN: 'probe-value' }
+    })
+    try {
+      const { ctx, captured } = makeCtx()
+      const w = wireSubstrates(ctx)
+
+      // WIRING ALONE MUST NOT RESOLVE IT. The composer closes over a secrets
+      // store it builds later in its own scope, so an eager call would be a
+      // temporal-dead-zone crash at boot rather than a wrong token.
+      expect(calls).toBe(0)
+
+      // cc-agent-* runs on PROFILE_WARM_CHAT (github_credential: true).
+      await drain(w.liveAgentSubstrate!)
+      const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+      expect(agent!.env!['GH_TOKEN']).toBe('probe-value')
+      // …and the helper that makes raw `git` work, not just `gh`.
+      expect(agent!.env!['GIT_CONFIG_KEY_0']).toBeUndefined() // supplied by the real resolver, not this probe
+      expect(calls).toBeGreaterThan(0)
+
+      // cc-llm-* runs on PROFILE_PHASE_SPEC (github_credential: false) — its
+      // input is user-controlled onboarding text.
+      await drain(w.llmCallSubstrate!)
+      const llm = captured.find((o) => o.substrate_instance_id === 'cc-llm-owner')
+      expect(llm!.env!['GH_TOKEN']).toBeUndefined()
+    } finally {
+      githubSpawnEnvRef.resolve = undefined
+    }
+  })
+
+  test('A FAILING credential read degrades the spawn, it does not kill it', async () => {
+    // Surfaced by CI: the resolver threw and took the whole substrate down with
+    // it. In production that is a locked store turning a chat turn into a dead
+    // session — strictly worse than having no credential, which merely makes
+    // `gh` fail with git's own message.
+    setGithubSpawnEnvResolver(async () => {
+      throw new Error('secrets store unavailable')
+    })
+    try {
+      const { ctx, captured } = makeCtx()
+      const w = wireSubstrates(ctx)
+      await drain(w.liveAgentSubstrate!)
+      const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+      expect(agent).toBeDefined()
+      expect(agent!.env!['GH_TOKEN']).toBeUndefined()
+    } finally {
+      githubSpawnEnvRef.resolve = undefined
+    }
+  })
+
+  test('no registered resolver ⇒ every spawn env is byte-for-byte unchanged', async () => {
+    githubSpawnEnvRef.resolve = undefined
+    const { ctx, captured } = makeCtx()
+    const w = wireSubstrates(ctx)
+    await drain(w.liveAgentSubstrate!)
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+    expect(agent!.env!['GH_TOKEN']).toBeUndefined()
   })
 
   test('makeComposeSubstrate: per-project ISOLATED compose session — keyed by project_id, distinct pool key from cc-agent, TOOLLESS (#377/#378 white-box)', async () => {
@@ -371,6 +451,17 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       expect(watchdog.find((entry) => entry.sessionKey === sessionKey)?.action).toBe('cap-hit-alert')
       expect(runs.get(dead!.id)?.subagent_status).toBe('crashed')
       expect(runs.get(live.id)?.subagent_status).toBe('running')
+
+      // #240 / T2 — the latched crash reason must carry the MEASURED cause
+      // (observation time + gateway process boot time), not a bare detail
+      // string. Mutation killed: stripping the timestamp composition in
+      // onChildCrash makes this regex fail.
+      const latched = runs.get(dead!.id)?.failure_reason ?? ''
+      expect(latched).toContain('inner workflow child crashed')
+      expect(latched).toMatch(
+        /observed \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z; gateway process booted \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/,
+      )
+      expect(latched.toLowerCase()).not.toContain('exhausted')
 
       await loop.runOnce()
       const stored = runs.get(dead!.id)!

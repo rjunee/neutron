@@ -50,6 +50,7 @@ function runWith(overrides: Partial<TridentRun> = {}): TridentRun {
     started_at: '2026-01-01T00:00:00.000Z',
     last_advanced_at: '2026-01-01T01:00:00.000Z',
     harvested_at: null,
+    crash_recoveries: 0,
     ...overrides,
   }
 }
@@ -212,6 +213,29 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     )
     expect(interp.klass).toBe('review-unresolved')
     expect(interp.summary.toLowerCase()).toContain('blocking findings')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('crash-recovery budget → the SUPERVISOR died, never "the reviewer had findings"', () => {
+    // The orchestrator's budget reason EMBEDS the latched launcher-crash text, which
+    // is not ours to keyword-proof — here it carries 'stalled' and 'exhausted', the
+    // exact tokens the hang + review branches match on. Mutation killed: remove this
+    // branch (or order it after them) and a gateway-restart casualty is reported as a
+    // review that found blocking problems, which is the #240 failure shape.
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        failure_reason:
+          'launcher crashed 4 time(s); crash-recovery budget (3) used up — not relaunching. ' +
+          'Last crash: inner workflow child crashed: pooled child exited (the pool had stalled and exhausted its slots)',
+      }),
+    )
+    expect(interp.klass).toBe('infra')
+    expect(interp.summary.toLowerCase()).not.toContain('reviewer')
+    expect(interp.summary.toLowerCase()).not.toContain('blocking findings')
+    expect(interp.summary.toLowerCase()).toContain('supervisor')
+    // The work is not lost — it is on the branch, and the user is told so.
+    expect(interp.summary.toLowerCase()).toContain('branch')
     assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
   })
 

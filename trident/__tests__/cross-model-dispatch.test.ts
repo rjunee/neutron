@@ -31,8 +31,15 @@ import { fileURLToPath } from 'node:url'
 import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 
 import { buildWorkflowArgs } from '../inner-loop.ts'
+import { TRIDENT_PHASES } from '../phase-models.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
+
+const sourceFunction = (name: string): ((...args: unknown[]) => unknown) => {
+  const match = new RegExp(`function ${name}\\([^]*?\\n\\}`).exec(SRC)
+  if (match === null) throw new Error(`missing production helper ${name}`)
+  return Function('CORE_SEAT_STATUS_KEY', `return (${match[0]})`)('verdict') as (...args: unknown[]) => unknown
+}
 
 interface Captured {
   label: string | undefined
@@ -97,6 +104,14 @@ async function runWorkflow(
     fixLands?: boolean
     /** Make the codex-backed adversarial core seat fail closed. */
     deferredAdversarial?: boolean
+    /** Make the first generic Claude seat attempt fail so its retry route is exercised. */
+    deferredClaudeSeatOnce?: boolean
+    /** Make every generic Claude-seat attempt fail, including its bounded retry. */
+    deferredClaudeSeat?: boolean
+    /** Simulate a configured Codex wrapper reporting that its CLI is unavailable. */
+    unavailableCodexCli?: boolean
+    /** Optional model marker used by dispatch-focused cases. */
+    model?: string
     /** Simulate a wrapper death before either trailer-writing branch. */
     missingBuildTrailer?: boolean
     /** The preserved build worktree contains changes after that death. */
@@ -106,6 +121,7 @@ async function runWorkflow(
   const captured: Captured[] = []
   const logs: string[] = []
   let synthCount = 0
+  let deferredClaudeSeat = false
 
   const agent = async (prompt: string, o?: Record<string, unknown>): Promise<unknown> => {
     const label = o?.['label'] as string | undefined
@@ -148,9 +164,12 @@ async function runWorkflow(
           }
         : built
     }
+    if (String(label).startsWith('head-probe-round-built-')) {
+      return { head: label === 'head-probe-round-built-r1' ? 'a'.repeat(40) : 'b'.repeat(40) }
+    }
     if (String(label).startsWith('head-probe-round-')) {
       // A head DIFFERENT from round 1's `abc`, so `roundLanded` sees the branch move.
-      return { head: opts.fixLands === true ? 'fed' : '' }
+      return { head: opts.fixLands === true ? 'b'.repeat(40) : '' }
     }
     if (label === 'plan:fable') {
       // Ralph's planner. `complexity` is the field that splits the build dispatch
@@ -173,9 +192,20 @@ async function runWorkflow(
       return { verdict: 'APPROVE', findings: [] }
     }
     if (label === 'argus:codex' || label === 'argus:codex-retry') {
+      if (o?.['model'] !== undefined) {
+        if (opts.deferredClaudeSeat === true || (opts.deferredClaudeSeatOnce === true && !deferredClaudeSeat)) {
+          deferredClaudeSeat = true
+          return null
+        }
+        return { verdict: 'APPROVE', findings: [] }
+      }
+      if (opts.unavailableCodexCli === true) {
+        return { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected', codexTruncated: false }
+      }
       return { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
     }
     if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
+      if (o?.['model'] !== undefined) return { verdict: 'APPROVE', findings: [] }
       return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
     }
     if (label === 'argus:synthesis') {
@@ -289,9 +319,11 @@ describe('THE DEFAULT PATH — an install that never opened the pane', () => {
     // now stated by the dispatch instead of left to the CLI's default.
     expect(promptFor(captured, 'argus:codex')).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
     expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
+    expect(promptFor(captured, 'argus:codex')).toContain('/tmp/trident-codex-seat-1-')
+    expect(promptFor(captured, 'argus:kimi')).toContain('/tmp/trident-kimi-seat-2-')
   })
 
-  test('the KIMI lane is left exactly as it was — the build move did not touch it', async () => {
+  test('the Kimi CLI route still dispatches through its bridge', async () => {
     // Kimi is OUT OF SCOPE for this change, and "out of scope" has to be visible in the
     // dispatch and not just in a commit message: the seat runs, on its own tier, through
     // its own wrapper, with the model threaded exactly the way it was before the build
@@ -330,6 +362,49 @@ describe('THE DEFAULT PATH — an install that never opened the pane', () => {
 })
 
 describe('AN OVERRIDE REACHES THE DISPATCH', () => {
+  test('a Claude-seat verdict is connected even though it has no CLI status field', () => {
+    const status = sourceFunction('crossModelPeerStatus')
+    expect(status(0, [{ verdict: 'APPROVE', findings: [] }], 'verdict')).toBe('connected')
+    expect(status(0, [null], 'verdict')).toBe('deferred')
+  })
+
+  test('both generic seats dispatch every executor family they declare', async () => {
+    const tierForGroup = { none: 'none', claude: 'opus', codex: 'terra', kimi: 'k3' } as const
+
+    for (const [phase, label] of [
+      ['review_codex', 'argus:codex'],
+      ['review_kimi', 'argus:kimi'],
+    ] as const) {
+      const declaredGroups = TRIDENT_PHASES.find((candidate) => candidate.key === phase)!.dispatchGroups
+      for (const group of declaredGroups) {
+        const tier = tierForGroup[group]
+        const { captured } = await runWorkflow(productionArgs({ [phase]: { model: tier } }))
+        const seat = captured.find((call) => call.label === label)
+        if (group === 'none') {
+          expect({ phase, group, dispatched: seat !== undefined }).toEqual({
+            phase,
+            group,
+            dispatched: false,
+          })
+        } else if (group === 'claude') {
+          expect({ phase, group, model: seat?.opts['model'], effort: seat?.opts['effort'], cli: seat?.prompt.includes('REVIEW bridge') }).toEqual({
+            phase,
+            group,
+            model: getBestModel(),
+            effort: 'high',
+            cli: false,
+          })
+        } else {
+          expect({ phase, group, cli: seat?.prompt.includes(group === 'kimi' ? 'KIMI K3 CROSS-MODEL REVIEW bridge' : 'CODEX CROSS-MODEL REVIEW bridge') }).toEqual({
+            phase,
+            group,
+            cli: true,
+          })
+        }
+      }
+    }
+  })
+
   test('choosing the `terra` tier puts gpt-5.6-terra on the codex command line', async () => {
     const stored = { review_codex: { model: 'terra' } }
     // Through the production launcher: if `buildWorkflowArgs` dropped it, or the
@@ -365,6 +440,90 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
       effort: 'max',
     })
   })
+
+  test('a GPT build with Opus in cross-model seat 1 dispatches that seat on Opus', async () => {
+    const args = productionArgs({ build: { model: 'terra' }, review_codex: { model: 'opus', effort: 'max' } })
+    const { captured, logs } = await runWorkflow(args)
+    const build = captured.find((c) => c.label === 'forge:build')!
+    const seat = captured.find((c) => c.label === 'argus:codex')!
+
+    expect(build.prompt).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
+    expect({ model: seat.opts['model'], effort: seat.opts['effort'] }).toEqual({
+      model: getBestModel(),
+      effort: 'max',
+    })
+    expect(seat.prompt).toContain('an independent, read-only reviewer')
+    expect(seat.prompt).toContain('file:line or a concrete reproduction')
+    expect(seat.prompt).not.toContain('CODEX CROSS-MODEL REVIEW bridge')
+    expect(seat.opts['schema']).toMatchObject({ required: ['verdict', 'findings'] })
+    expect(logs.filter((line) => line.includes('trident.agent label=argus:codex') && line.includes(`model=${getBestModel()}`))).toHaveLength(1)
+    expect(logs.some((line) => line.includes('panel-single-family'))).toBe(false)
+    const synthesis = captured.find((c) => c.label === 'argus:synthesis')!
+    expect(synthesis.prompt).toContain(`Cross-model review 1, claude/${getBestModel()}`)
+    expect(synthesis.prompt).toContain('treat as a full panelist')
+  })
+
+  test('a configured Codex seat whose CLI is unavailable never falls back to Claude', async () => {
+    const args = productionArgs({ review_codex: { model: 'sol' } })
+    const { captured } = await runWorkflow(args, { unavailableCodexCli: true })
+    const seat = captured.find((c) => c.label === 'argus:codex')!
+    expect(seat.prompt).toContain('CODEX CROSS-MODEL REVIEW bridge')
+    expect(seat.opts['model']).toBeUndefined()
+    expect(captured.some((c) => c.label === 'argus:codex-retry')).toBe(false)
+  })
+
+  test('a deferred Claude seat retries with its chosen model and Claude verdict schema', async () => {
+    const { captured } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'sonnet', effort: 'medium' } }),
+      { deferredClaudeSeatOnce: true },
+    )
+    const retry = captured.find((c) => c.label === 'argus:codex-retry')!
+    expect(retry.opts).toMatchObject({ model: SONNET_MODEL, effort: 'medium' })
+    expect(retry.opts['schema']).toMatchObject({ required: ['verdict', 'findings'] })
+    expect(retry.prompt).toContain('an independent, read-only reviewer')
+    expect(retry.prompt.toLowerCase()).toContain('evidence-gate every claim')
+    expect(retry.prompt).toContain('TEST-QUALITY discipline')
+    expect(retry.prompt).not.toContain('CODEX CROSS-MODEL REVIEW bridge')
+    const synthesis = captured.find((c) => c.label === 'argus:synthesis')!
+    expect(synthesis.prompt).toContain(`Cross-model review 1, claude/${SONNET_MODEL}`)
+    expect(synthesis.prompt).toContain('treat as a full panelist')
+  })
+
+  test('a Claude seat that exhausts its retry is blocked as Claude, not misreported as Codex', async () => {
+    const { result, logs } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'opus' } }),
+      { deferredClaudeSeat: true },
+    )
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(result['blockKind']).toBe('infra-only')
+    expect(logs.some((line) => line.includes('trident.lane-retry argus:codex'))).toBe(true)
+    expect(logs.some((line) => line.includes('trident.lane-retry codex '))).toBe(false)
+  })
+
+  test('a deliberately same-family review panel is warned about, never refused', async () => {
+    const { captured, logs } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'opus' }, review_kimi: { model: 'sonnet' } }),
+    )
+    expect(captured.some((c) => c.label === 'argus:codex')).toBe(true)
+    expect(captured.some((c) => c.label === 'argus:kimi')).toBe(true)
+    // FIVE, not four: the BUILD counts as a panel family (owner-decided
+    // 2026-08-15). The property this warning protects is that the reviewer does
+    // not share the blind spots of whatever WROTE the code, so the producer is
+    // part of the set — build + rubric + adversarial + both cross-model seats.
+    // Counting reviewers alone got both real cases backwards: it stayed silent
+    // when a Claude build was reviewed only by Claude, and it warned about
+    // build-on-GPT + Opus-reviewing, which is the cross-family panel the design
+    // wants.
+    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=5 configuration-accepted=true'))).toBe(true)
+  })
+
+  test('the same-family warning describes the panel that actually dispatched', async () => {
+    const args = productionArgs(null)
+    args['codexHome'] = null
+    args['kimiConfigured'] = false
+    const { logs } = await runWorkflow(args)
+    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=3 configuration-accepted=true'))).toBe(true)
+  })
 })
 
 describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () => {
@@ -394,6 +553,7 @@ describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () =>
       .filter((label): label is string => label !== undefined)
     expect(anthropicLabels).toEqual([
       'plan:fable',
+      'head-probe-round-built-r1',
       'argus:claude',
       'argus:synthesis',
       'cleanup:worktree',
@@ -831,13 +991,11 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(panels[1]!.prompt).not.toContain('/tmp/x.diff')
   })
 
-  test('the downstream contract survives: the measured sha becomes `reviewedHead`', async () => {
-    // The merge pins to `reviewedHead` (#545) and refuses when it is empty, so a
-    // codex build that could not report a pushed sha the way a Claude build does
-    // would fail every merge. The bridge copies it out of the wrapper's measured
-    // trailer, and it has to arrive here unchanged.
+  test('the downstream contract survives: the git-read sha becomes `reviewedHead`', async () => {
+    // The merge pins to the full OID read from git at build completion (#545),
+    // not to the executor's independent structured claim.
     const { result } = await runWorkflow(productionArgs(CODEX_BUILD))
-    expect(result['reviewedHead']).toBe('abc')
+    expect(result['reviewedHead']).toBe('a'.repeat(40))
     expect(result['branch']).toBe('trident/a-run')
     expect(result['verdict']).toBe('APPROVE')
   })
@@ -970,14 +1128,15 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // Never an APPROVE — an empty diff must not be able to produce one.
     expect(result['verdict'] ?? null).not.toBe('APPROVE')
 
-    // EACH FACT ALONE IS FATAL, for a different reason: a diff with no sha can never
-    // be merged (`--match-head-commit` has nothing to pin), and a sha with no diff
-    // gives the panel nothing to read.
-    for (const produced of [{ commitSha: 'abc', diffFile: '' }, { commitSha: '', diffFile: '/tmp/x.diff' }]) {
-      const half = await runWorkflow(productionArgs(CODEX_BUILD), { buildProduces: produced })
-      expect(half.result['ok']).toBe(false)
-      expect(half.captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
-    }
+    // A missing diff is still fatal, whether or not the agent reports a sha.
+    const noDiff = await runWorkflow(productionArgs(CODEX_BUILD), { buildProduces: { commitSha: 'abc', diffFile: '' } })
+    expect(noDiff.result['ok']).toBe(false)
+    expect(noDiff.captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+
+    // A missing agent claim with a real diff is healthy: git supplies the head.
+    const noClaim = await runWorkflow(productionArgs(CODEX_BUILD), { buildProduces: { commitSha: '', diffFile: '/tmp/x.diff' } })
+    expect(noClaim.result['ok']).toBe(true)
+    expect(noClaim.result['reviewedHead']).toBe('a'.repeat(40))
 
     // THE CONTROL: the same harness with a real sha and diff DOES reach the panel, so
     // the emptiness above is the guard firing and not a workflow that never reviews.

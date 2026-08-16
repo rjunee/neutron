@@ -1,4 +1,4 @@
-import { createElement, type ReactNode } from 'react';
+import { createElement, forwardRef, useImperativeHandle, type ReactNode, type Ref } from 'react';
 // SIBLING STUB, NOT THE `react-native` SPECIFIER — deliberately.
 //
 // `mock.module('react-native', …)` is PROCESS-GLOBAL and permanent in Bun, and
@@ -41,13 +41,51 @@ export function lastFlashListProps(): Record<string, unknown> | null {
   return recordedProps;
 }
 
-/** Forget the recorded render. Call in `beforeEach`. */
-export function resetFlashListRecorder(): void {
-  recordedProps = null;
+/**
+ * The IMPERATIVE calls the surface made on the list's ref, in order.
+ *
+ * The props recorder above can only show which opening position was ASKED FOR at
+ * mount. It is blind to the case the push-tap re-anchor exists for: a transcript
+ * that is already mounted, where FlashList has latched its initial scroll and the
+ * only way to move is a method call on the ref. Before this the stub forwarded no
+ * ref at all, so `listRef.current` was null and every imperative scroll in this
+ * surface was silently unobservable — a handler could be deleted outright and no
+ * test here would notice.
+ *
+ * These are still ASKS, not pixels: that `scrollToIndex` lands on the row is
+ * FlashList's own behaviour and remains a device claim, the same boundary
+ * `chat-initial-anchor.ts` draws.
+ */
+export interface FlashListImperativeCall {
+  method: 'scrollToIndex' | 'scrollToEnd' | 'scrollToOffset';
+  arg?: unknown;
+}
+let imperativeCalls: FlashListImperativeCall[] = [];
+
+/** The imperative calls the surface made on the list ref, oldest first. */
+export function flashListImperativeCalls(): readonly FlashListImperativeCall[] {
+  return imperativeCalls;
 }
 
-export function FlashList<T>(props: FlashListProps<T>) {
+/** Forget the recorded render + imperative calls. Call in `beforeEach`. */
+export function resetFlashListRecorder(): void {
+  recordedProps = null;
+  imperativeCalls = [];
+}
+
+function FlashListInner<T>(props: FlashListProps<T>, ref: Ref<unknown>) {
   recordedProps = props as Record<string, unknown>;
+  useImperativeHandle(ref, () => ({
+    scrollToIndex: (arg: unknown): void => {
+      imperativeCalls.push({ method: 'scrollToIndex', arg });
+    },
+    scrollToEnd: (arg?: unknown): void => {
+      imperativeCalls.push({ method: 'scrollToEnd', arg });
+    },
+    scrollToOffset: (arg: unknown): void => {
+      imperativeCalls.push({ method: 'scrollToOffset', arg });
+    },
+  }));
   const { data, renderItem, keyExtractor, ListEmptyComponent, ListFooterComponent } = props;
   const rows = data ?? [];
   if (rows.length === 0) {
@@ -66,3 +104,7 @@ export function FlashList<T>(props: FlashListProps<T>) {
     ListFooterComponent as ReactNode,
   );
 }
+
+export const FlashList = forwardRef(FlashListInner) as <T>(
+  props: FlashListProps<T> & { ref?: Ref<unknown> },
+) => ReactNode;

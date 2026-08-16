@@ -108,6 +108,7 @@ import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
 import type { ChannelKind } from '@neutronai/channels/types.ts'
+import { parseAppWsSendMarker } from './app-ws-marker.ts'
 
 /**
  * X5 — the single `ChannelKind` every Open outbound run carries. Open is
@@ -823,8 +824,10 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         return {
           message_id: prompt.prompt_id,
           // Neither a `dropped` (persisted-but-offline) nor a `lost` (captured
-          // nowhere) marker is a live delivery.
-          was_new: !id.startsWith('app-ws:dropped:') && !id.startsWith('app-ws:lost:'),
+          // nowhere) marker is a live delivery. Parsed in ONE place now
+          // (`app-ws-marker.ts`) — this predicate had three independent copies,
+          // and every one of them discarded the `<id>` the marker carries.
+          was_new: parseAppWsSendMarker(id).delivered_live,
         }
       }
       // Ordering + de-dupe fix (import_running status bubble, M1 2026-06-30):
@@ -858,8 +861,10 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         return {
           message_id: prompt.prompt_id,
           // Neither a `dropped` (persisted-but-offline) nor a `lost` (captured
-          // nowhere) marker is a live delivery.
-          was_new: !id.startsWith('app-ws:dropped:') && !id.startsWith('app-ws:lost:'),
+          // nowhere) marker is a live delivery. Parsed in ONE place now
+          // (`app-ws-marker.ts`) — this predicate had three independent copies,
+          // and every one of them discarded the `<id>` the marker carries.
+          was_new: parseAppWsSendMarker(id).delivered_live,
         }
       }
       const ok = emitOnboardingPrompt(topic_id, toEmit)

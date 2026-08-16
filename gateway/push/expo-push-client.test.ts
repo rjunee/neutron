@@ -191,4 +191,42 @@ describe('ExpoPushClient.send', () => {
     expect(() => createExpoPushClient({ batch_size: 0 })).toThrow(/batch_size/)
     expect(() => createExpoPushClient({ batch_size: -5 })).toThrow(/batch_size/)
   })
+
+  test('invalid timeout_ms rejects at construction, like batch_size beside it', () => {
+    // `AbortSignal.timeout` REJECTS a non-finite argument rather than coercing it
+    // (measured: `Value NaN is outside the range [0, 9007199254740991]`), and it is
+    // reached per BATCH inside `send`. Unvalidated, a misconfigured deadline would
+    // surface as a throw from inside a best-effort notification on every single
+    // fire, and the dispatcher's network-failure catch would log a permanent config
+    // mistake as a transient Expo outage forever. Failing at construction makes it
+    // one loud error at boot instead.
+    expect(() => createExpoPushClient({ timeout_ms: Number.NaN })).toThrow(/timeout_ms/)
+    expect(() => createExpoPushClient({ timeout_ms: 0 })).toThrow(/timeout_ms/)
+    expect(() => createExpoPushClient({ timeout_ms: -1 })).toThrow(/timeout_ms/)
+    expect(() => createExpoPushClient({ timeout_ms: Number.POSITIVE_INFINITY })).toThrow(
+      /timeout_ms/,
+    )
+  })
+
+  test('a valid timeout_ms is accepted and reaches the fetch as a signal', () => {
+    // The positive control: the guard must not have been bought by rejecting
+    // everything, and the option must still do its job.
+    let sawSignal = false
+    const client = createExpoPushClient({
+      timeout_ms: 250,
+      fetch: async (_input, init) => {
+        sawSignal = init?.signal instanceof AbortSignal
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '',
+          json: async () => ({ data: [{ status: 'ok', id: 't-1' }] }),
+        }
+      },
+    })
+    return client.send([{ to: 'ExponentPushToken[a]', body: 'x' }]).then((res) => {
+      expect(sawSignal).toBe(true)
+      expect(res.ok).toBe(true)
+    })
+  })
 })

@@ -10,8 +10,9 @@
  *   - `formatDueRelative(iso, now_ms)` — `in 2h` / `tomorrow` / `5h overdue`
  *     style relative-time string. Null `iso` → `''` (chip not rendered).
  *   - `kindChipLabel(item)`     — `Task` / `Reminder`.
- *   - `projectChipLabel(item)`  — `item.project_id` or the owner-level
- *     label for owner-level rows. Truncated to `PROJECT_CHIP_MAX_CHARS`.
+ *   - `projectChipLabel(item)`  — `item.project_id`, or the owner-level
+ *     label for owner-level rows, or `General` for the no-project scope's
+ *     `~general` sentinel. Truncated to `PROJECT_CHIP_MAX_CHARS`.
  *   - `bucketDotColor(bucket)`  — `THEME.danger` / `THEME.warning` /
  *     `THEME.text_muted`. No green for `soon` (brief § 4.6).
  *   - `priorityChipKind(prio)`  — `'p0'`..`'p3'` discriminator the row
@@ -21,6 +22,7 @@
  */
 
 import type { FocusBucket, FocusItem } from './focus-client';
+import { RAIL_GENERAL_ID } from './general-scope';
 import { THEME } from './theme';
 
 /**
@@ -33,6 +35,26 @@ export const PROJECT_CHIP_MAX_CHARS = 16;
 
 /** Owner-level project chip label rendered when `project_id === ''`. */
 export const INSTANCE_CHIP_LABEL = 'Instance';
+
+/**
+ * Chip label for the no-project General scope.
+ *
+ * The Focus row's `project_id` comes from `extractProjectIdFromTopic`
+ * (`gateway/http/app-focus-surface.ts`), which decodes `app-project:<id>` back
+ * to the id it carries. Once the reminders surface reserved `~general` as
+ * General's own topic segment, that decode started yielding the RAW SENTINEL —
+ * so a General reminder rendered a chip reading literally `~general`. It is an
+ * internal routing token, not a name the owner ever chose, and it had no way to
+ * reach this screen before (the surface 400'd on `~`), so this maps it back to
+ * the word the rail shows.
+ *
+ * Deliberately NOT folded into `INSTANCE_CHIP_LABEL`: General is a real,
+ * routable scope with its own tabs, and `isInstanceLevel` is what decides both
+ * the tap destination and the visually-distinct chip register. Treating it as
+ * owner-level would send the tap to the projects list instead of General's own
+ * Reminders tab.
+ */
+export const GENERAL_CHIP_LABEL = 'General';
 
 /** Discriminator returned by `priorityChipKind`; null when the chip isn't rendered. */
 export type PriorityChipKind = 'p0' | 'p1' | 'p2' | 'p3' | null;
@@ -81,11 +103,14 @@ export function kindChipLabel(item: Pick<FocusItem, 'kind'>): string {
  * Display label for the Project chip on the row. Owner-level rows
  * (`project_id === ''`) render the `INSTANCE_CHIP_LABEL` sentinel; the
  * caller uses `isInstanceLevel` to pick the visually-distinct chip
- * register (hairline border vs solid bg).
+ * register (hairline border vs solid bg). The General scope renders
+ * `GENERAL_CHIP_LABEL` rather than its raw `~general` routing token —
+ * see that constant for why it is not owner-level.
  */
 export function projectChipLabel(item: Pick<FocusItem, 'project_id'>): string {
   const raw = item.project_id;
   if (raw.length === 0) return INSTANCE_CHIP_LABEL;
+  if (raw === RAIL_GENERAL_ID) return GENERAL_CHIP_LABEL;
   if (raw.length <= PROJECT_CHIP_MAX_CHARS) return raw;
   return `${raw.slice(0, PROJECT_CHIP_MAX_CHARS - 1)}…`;
 }

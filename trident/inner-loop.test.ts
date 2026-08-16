@@ -17,6 +17,8 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   buildWorkflowFirer,
   buildWorkflowArgs,
@@ -24,6 +26,7 @@ import {
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
+  TERMINAL_CAUSE_MAX,
   WORKFLOW_FIRE_TOOL_NAMES,
   type FireInnerWorkflow,
   type FireInnerWorkflowInput,
@@ -69,6 +72,7 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',
     harvested_at: null,
+    crash_recoveries: 0,
     ...over,
   }
 }
@@ -135,6 +139,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: 'argus-approved',
       remaining_tasks: 0,
       pr_merged: false,
+      deviated_from_spec: false,
       publish_requested: false,
       publish_head: null,
       block_kind: null,
@@ -159,6 +164,28 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', prMerged: false }))?.pr_merged).toBe(
       false,
     )
+  })
+  // The deviation flag decides whether the NEXT Ralph iteration pays for the full
+  // whole-repo survey (~287 s) or takes the cheap `plan:next` continuation. It is
+  // fail-closed in the direction that costs money, not correctness: a truthy
+  // stand-in read as `true` would re-plan from scratch every iteration forever,
+  // silently undoing the saving this card exists for.
+  test('decodes deviatedFromSpec; absent or any non-boolean → false', () => {
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', deviatedFromSpec: true }))
+        ?.deviated_from_spec,
+    ).toBe(true)
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.deviated_from_spec).toBe(false)
+    for (const bogus of ['true', 1, 'yes', {}, [], null]) {
+      expect(
+        parseInnerResult(JSON.stringify({ verdict: 'APPROVE', deviatedFromSpec: bogus }))
+          ?.deviated_from_spec,
+      ).toBe(false)
+    }
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'APPROVE', deviatedFromSpec: false }))
+        ?.deviated_from_spec,
+    ).toBe(false)
   })
   test('decodes remainingTasks (the #362 Ralph re-fire signal); absent → null', () => {
     const withRemaining = parseInnerResult(
@@ -204,9 +231,58 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     }
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.terminal_cause).toBeNull()
   })
+  /**
+   * THE TWO CAPS MUST AGREE, AND NOTHING WAS CHECKING THAT (Argus r4). `TERMINAL_CAUSE_MAX`
+   * is declared HERE and hand-mirrored in `inner-workflow.mjs` (a Workflow script cannot
+   * import TS), and the SMALLER of the two is what actually decides — so a drift is silent
+   * and one-directional. It has already cost the round-1 unreadable-head cause its only
+   * actionable clause at the previous 300/300 pair. The mirror is scraped from the .mjs
+   * rather than restated, the same way `inner-workflow-built-head.test.ts` reads
+   * `BUILT_HEAD_READ_ATTEMPTS`.
+   */
+  test('the .mjs mirror of TERMINAL_CAUSE_MAX is the same number', () => {
+    const src = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+    const mirrored = /const TERMINAL_CAUSE_MAX = (\d+)/.exec(src)?.[1]
+    expect(mirrored).toBeDefined()
+    expect(Number(mirrored)).toBe(TERMINAL_CAUSE_MAX)
+  })
   test('a cause is clamped — it is persisted and then read in a chat row', () => {
-    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(400)}  ` }))
-    expect(out?.terminal_cause?.length).toBe(300)
+    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(900)}  ` }))
+    expect(out?.terminal_cause?.length).toBe(TERMINAL_CAUSE_MAX)
+  })
+  /**
+   * THE CLAMP MUST NOT CUT A REAL CAUSE OFF AT THE KNEES. At 300 the workflow's round-1
+   * unreadable-head sentence — 331 chars with the longest branch name `slugify-task` can
+   * produce — lost its trailing "re-run when the read succeeds", i.e. the clamp deleted
+   * the only actionable clause in it. This is the composed sentence, at full length.
+   */
+  test('the longest realistic composed cause survives the clamp whole', () => {
+    const branch = `trident/${'x'.repeat(35)}` // slugify-task caps the slug at 35
+    const cause =
+      `could not read the head of refs/heads/${branch} after forge:build (3 attempts) — re-run when the read succeeds; ` +
+      `this run rebuilt, published and reviewed nothing; the build reported '${'a'.repeat(40)}' and wrote a diff to /tmp/${branch.replace('/', '-')}.diff`
+    const out = parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', terminalCause: cause }))
+    expect(out?.terminal_cause).toBe(cause)
+    expect(out?.terminal_cause).toContain('re-run when the read succeeds')
+  })
+  // A COMMIT OID IS READ, NOT REPORTED (defect 2026-08-14). `publishHead` is the build's
+  // CLAIM, kept only so the outer publisher can CHECK it against `rev-parse`. Requiring a
+  // full 40-hex string here silently dropped an abbreviated sha, which then read downstream
+  // as "the build produced no commit" — and discarded a finished build.
+  test('decodes publishHead as a CLAIM: any 7-40 hex string survives verbatim; anything else → null', () => {
+    const full = 'abcdef0123456789abcdef0123456789abcdef01'
+    expect(parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: full }))?.publish_head).toBe(full)
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'abc1234' }))?.publish_head,
+    ).toBe('abc1234')
+    // Below the 7-char floor is not a plausible OID — no claim at all (still publishable).
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'abc123' }))?.publish_head,
+    ).toBeNull()
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', publishHead: 'not-a-sha' }))?.publish_head,
+    ).toBeNull()
+    expect(parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES' }))?.publish_head).toBeNull()
   })
   test('null/empty/garbage → null (still in flight)', () => {
     expect(parseInnerResult(null)).toBeNull()
@@ -226,6 +302,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: null,
       remaining_tasks: null,
       pr_merged: false,
+      deviated_from_spec: false,
       publish_requested: false,
       publish_head: null,
       block_kind: null,
@@ -245,6 +322,33 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       reflectionIntegrity: '5:87654321',
     }
     expect(buildWorkflowArgs(input(), parts).briefParts).toBe(parts)
+  })
+
+  /**
+   * The durable re-fire counter. The workflow gates its cheap `plan:next`
+   * continuation planner (and the every-Kth full re-plan) on it, so a launcher that
+   * dropped it would silently pay the full whole-repo survey on every Ralph task —
+   * exactly the waste that planner exists to remove, and invisible from either side.
+   */
+  test('the Ralph round counter is threaded from the run row', () => {
+    expect(buildWorkflowArgs(input()).ralphRound).toBe(0)
+    expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
+  })
+
+  /**
+   * The live head the launcher READ from git (never a model's report of it). The key's
+   * PRESENCE is the signal that a code-read answer exists, so it must be absent — not
+   * null — when the launcher did not read one, or the workflow could not tell an old
+   * launcher apart from an unreadable head.
+   */
+  test('the launcher-read resume head is threaded verbatim, and omitted when there is none', () => {
+    const HEAD = 'a'.repeat(40)
+    expect(buildWorkflowArgs(input({ resume_live_head: HEAD })).resumeLiveHead).toBe(HEAD)
+    expect('resumeLiveHead' in buildWorkflowArgs(input())).toBe(false)
+    // '' ("could not read") and 'absent' ("the authority says it is gone") are DIFFERENT
+    // facts with different consequences — neither may be normalised into the other.
+    expect(buildWorkflowArgs(input({ resume_live_head: '' })).resumeLiveHead).toBe('')
+    expect(buildWorkflowArgs(input({ resume_live_head: 'absent' })).resumeLiveHead).toBe('absent')
   })
 
   test('writes launcher-held strings and threads the returned manifest into the prompt', async () => {

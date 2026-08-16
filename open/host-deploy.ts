@@ -110,11 +110,56 @@ export const HOST_DEPLOY_SUBJECT_CAP = 120
 export const HOST_DEPLOY_URL_SERVICE = 'host_deploy_url' as const
 export const HOST_DEPLOY_TOKEN_SERVICE = 'host_deploy_token' as const
 
-/** Hard ceiling on the ONE authenticated control-plane call. */
-export const HOST_DEPLOY_CALL_TIMEOUT_MS = 30_000
+/**
+ * Hard ceiling on the ONE authenticated control-plane call.
+ *
+ * MEASURED, not guessed. A real deploy is not a request/response — the control
+ * plane checks out the new Open ref, runs its ENTIRE test suite as the contract
+ * gate, installs both dependency trees, and only then restarts with health
+ * waits. Measured on a real deployment (2026-08-15): the checkout landed at
+ * 00:33:44 and the instance came back at 00:34:39 — about 60-90 seconds
+ * end-to-end, on a warm cache.
+ *
+ * At 30s this timer therefore expired on EVERY REAL DEPLOY, without exception,
+ * while the deploy itself went on to succeed. The owner saw "the operation timed
+ * out" and a message telling him nothing had happened, at 00:34, for a deploy
+ * that was at that moment finishing. Three minutes clears the measured envelope
+ * with room for a colder cache or a larger fleet.
+ *
+ * ⚠️ AND IT STILL DOES NOT MAKE A TIMEOUT MEAN "IT FAILED" — see the timeout
+ * branch in `answer()`. A longer wait reduces how often we stop listening; it
+ * cannot turn not-listening into knowledge. Raising this without fixing that
+ * message would have made the lie rarer and therefore harder to catch.
+ */
+export const HOST_DEPLOY_CALL_TIMEOUT_MS = 180_000
 
 /** Hard ceiling on resolving a remote deploy target. */
 export const HOST_DEPLOY_REMOTE_TIMEOUT_MS = 30_000
+
+/**
+ * Did this dispatch failure mean "I stopped waiting", rather than "it failed"?
+ *
+ * `createHostDeployDispatch` aborts with `AbortSignal.timeout(...)`, which
+ * rejects with a `TimeoutError` — the DOMException whose message is literally
+ * "The operation timed out." That is the string the owner was shown.
+ *
+ * MATCHED ON `name`, NOT ON THE MESSAGE. The message is human-facing text that
+ * varies by runtime and locale; `name` is the contract. A `.includes('timed
+ * out')` check would look equivalent, pass every test written against one
+ * runtime, and quietly stop recognising a timeout on another — turning this
+ * branch back into the confident falsehood it exists to remove.
+ *
+ * `AbortError` is deliberately NOT treated as a timeout: that is a deliberate
+ * cancellation by a caller, which is a different fact about the world.
+ */
+export function isDispatchTimeout(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'name' in err &&
+    (err as { name?: unknown }).name === 'TimeoutError'
+  )
+}
 
 /** Longest slice of a control-plane response body echoed into chat. */
 export const HOST_DEPLOY_DETAIL_CAP = 400
@@ -232,6 +277,13 @@ export type HostDeployDispatch = (
 
 /** The button prompt emission seam — the composer's durable `deliver`. */
 export interface HostDeployEmit {
+  /**
+   * The chat topic the prompt MUST be delivered to — the topic that asked for
+   * the deploy, or the install's fallback topic when there is no calling topic.
+   * The emitter delivers HERE; a destination hard-coded in the emitter is the
+   * defect this field exists to prevent (2026-08-15).
+   */
+  topic_id: string
   body: string
   options: ButtonOption[]
   idempotency_key: string
@@ -259,6 +311,17 @@ export type HostDeployRequestResult =
       target_sha: string
       current_sha: string
       commit_count: number
+      /**
+       * The topic the Approve/Deny prompt ACTUALLY landed on. Always present so
+       * the agent can never say "a button is waiting" without saying where.
+       */
+      approval_topic_id: string
+      /**
+       * Set ONLY when the prompt could not be raised on the requesting topic
+       * (no calling topic — cron/system callers) and fell back to the install's
+       * owner topic. Absent when the prompt landed where it was asked for.
+       */
+      note?: string
     }
   | { status: 'unavailable'; reason: string }
   | { status: 'up_to_date'; ref: string; target_sha: string }
@@ -389,6 +452,10 @@ export function renderHostDeployApprovalBody(input: {
   /** `target..current` — what a rollback/sideways move would REMOVE. */
   removed?: readonly HostDeployCommit[]
   removed_total?: number
+  /** The EXACT option value that approves — printed in the body as the typed fallback. */
+  approve_value: string
+  /** The EXACT option value that denies. */
+  deny_value: string
 }): string {
   const { ref, current_sha, target_sha, commits, total } = input
   const removed = input.removed ?? []
@@ -438,7 +505,18 @@ export function renderHostDeployApprovalBody(input: {
     'Nothing is deployed unless you tap Approve. This approval is bound to ' +
       `${shortSha(target_sha)} — if ${ref} moves before you answer, it is refused and you are asked again.`,
   )
-  parts.push('Tap Approve or Deny. Typing anything else will NOT approve this deploy.')
+  // The token alphabet is `[A-Za-z0-9_-]` (HOST_DEPLOY_VALUE_RE), so a single
+  // backtick inline code span can never be escaped by it — no safeFence needed.
+  // Inline code stops Markdown from mangling the `_`/`-` characters and makes
+  // the string copy-typable. These MUST be the same strings the buttons carry
+  // (computed once in `request()`) — that identity is the whole point: both
+  // resolve through the same `handleOwnerButtonAnswer` exact-match path.
+  parts.push(
+    'Tap Approve or Deny. If the buttons are not visible where you are reading this, type one of these exact lines instead:',
+  )
+  parts.push(`- \`${input.approve_value}\` — approves this deploy`)
+  parts.push(`- \`${input.deny_value}\` — denies it`)
+  parts.push('Any other text will NOT approve this deploy.')
   return parts.join('\n')
 }
 
@@ -453,6 +531,12 @@ export interface HostDeployServiceOptions {
   dispatch: HostDeployDispatch
   project_slug: string
   owner_user_id: string
+  /**
+   * FALLBACK approval destination, used ONLY when a request carries no calling
+   * topic (cron/system callers). A request that names its topic raises the
+   * prompt THERE — the owner asked from a project topic and was sent to General
+   * to find a button, which is the defect fixed on 2026-08-15.
+   */
   approval_topic_id: string
   emit: (p: HostDeployEmit) => Promise<void>
   log?: (msg: string) => void
@@ -476,8 +560,13 @@ export interface HostDeployOwnerAnswerInput {
 export interface HostDeployService {
   /** Present ALWAYS; `enabled:false` carries the reason. */
   status(): HostDeployStatus
-  /** Resolve + raise an approval. Deploys NOTHING. */
-  request(input: { ref?: string }): Promise<HostDeployRequestResult>
+  /**
+   * Resolve + raise an approval. Deploys NOTHING. `topic_id` is the topic the
+   * request came from (`ToolCallContext.topic_id`); the prompt is raised there.
+   * Null/omitted — a cron or system caller — falls back to the install's
+   * `approval_topic_id`.
+   */
+  request(input: { ref?: string; topic_id?: string | null }): Promise<HostDeployRequestResult>
   /** The owner's affirmative act. Returns null when the reply is not one. */
   handleOwnerButtonAnswer(
     input: HostDeployOwnerAnswerInput,
@@ -491,6 +580,15 @@ interface HostDeployApprovalArgs {
   current_sha?: unknown
   /** Rendered by the notifier as the "an approval is waiting" one-liner. */
   description?: unknown
+}
+
+/** Read a grant's stored arguments. A row that will not parse reads as empty. */
+function parseApprovalArgs(args_json: string): HostDeployApprovalArgs {
+  try {
+    return (JSON.parse(args_json) as HostDeployApprovalArgs | null) ?? {}
+  } catch {
+    return {}
+  }
 }
 
 export function createHostDeployService(
@@ -519,7 +617,17 @@ export function createHostDeployService(
     }
   }
 
-  async function request(input: { ref?: string }): Promise<HostDeployRequestResult> {
+  async function request(
+    input: { ref?: string; topic_id?: string | null },
+  ): Promise<HostDeployRequestResult> {
+    // ── WHERE THE BUTTON GOES. The topic that asked for the deploy, every time
+    // it named one. `approval_topic_id` is the FALLBACK for callers with no
+    // conversation (cron/system) — it used to be the only destination, which is
+    // how the owner was told to tap a button in a topic he was not in.
+    const requested_topic =
+      typeof input.topic_id === 'string' && input.topic_id.length > 0 ? input.topic_id : null
+    const approval_topic = requested_topic ?? approval_topic_id
+
     // ── (a) NO CONTROL PLANE → visible, disabled, WITH THE REASON. Checked
     // FIRST so an unconfigured box never mints an approval the owner could tap
     // into a guaranteed failure. Not a throw: "disabled with a reason" is a
@@ -595,7 +703,7 @@ export function createHostDeployService(
     const decision = approvals.requestApproval({
       id: approval_id,
       project_slug,
-      topic_id: approval_topic_id,
+      topic_id: approval_topic,
       tool_name: HOST_DEPLOY_APPROVAL_TOOL_NAME,
       policy: 'prompt-user',
       args: {
@@ -617,19 +725,24 @@ export function createHostDeployService(
 
     // ── (d) emit the CODE-rendered approval prompt carrying the commit list.
     try {
+      // Computed ONCE so the buttons and the typed fallback printed in the body
+      // can never drift apart — both resolve through the same exact-match path.
+      const approve_value = `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:a`
+      const deny_value = `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:d`
       const options: ButtonOption[] = [
         {
           label: 'Approve',
           body: 'Approve this host deploy',
-          value: `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:a`,
+          value: approve_value,
         },
         {
           label: 'Deny',
           body: 'Deny this host deploy',
-          value: `${HOST_DEPLOY_VALUE_PREFIX}${uuidToToken(approval_id)}:d`,
+          value: deny_value,
         },
       ]
       await emit({
+        topic_id: approval_topic,
         body: renderHostDeployApprovalBody({
           ref,
           current_sha,
@@ -638,6 +751,8 @@ export function createHostDeployService(
           total: range.total,
           removed: rolled_back.commits,
           removed_total: rolled_back.total,
+          approve_value,
+          deny_value,
         }),
         options,
         idempotency_key: `host-deploy-approval:${approval_id}`,
@@ -657,7 +772,9 @@ export function createHostDeployService(
       }
     }
 
-    log(`host-deploy pending_approval ref=${ref} target=${shortSha(target_sha)} commits=${range.total}`)
+    log(
+      `host-deploy pending_approval ref=${ref} target=${shortSha(target_sha)} commits=${range.total} topic=${approval_topic}`,
+    )
     return {
       status: 'pending_approval',
       request_id: uuidToToken(approval_id),
@@ -665,7 +782,63 @@ export function createHostDeployService(
       target_sha,
       current_sha,
       commit_count: range.total,
+      approval_topic_id: approval_topic,
+      // Only the fallback needs saying out loud: the prompt is somewhere other
+      // than the conversation this was asked in, and the owner has to be told
+      // where or he is hunting for a button that is not on his screen.
+      ...(requested_topic === null
+        ? {
+            note:
+              `The Approve/Deny prompt was posted to the owner's General chat topic (${approval_topic}). ` +
+              'Tell the owner where to find it.',
+          }
+        : {}),
     }
+  }
+
+  /**
+   * A DEAD GRANT IS NOT A DEAD END. Raise a REPLACEMENT approval on the topic the
+   * owner just tapped in — demonstrably where he is — and return the one sentence
+   * that names it. Deploys NOTHING and approves NOTHING: the fresh grant is a new
+   * pending row with new `hdp:` tokens that needs its own owner tap. Called from
+   * the TTL/stale/swept-expired refusals, which used to end at "Ask again" and
+   * leave a five-minute window the owner could not win (2026-08-15).
+   */
+  async function reraise(ref: string | null, topic_id: string): Promise<string> {
+    if (ref === null) return 'Ask again to see the current commit list.'
+    let fresh: HostDeployRequestResult
+    try {
+      fresh = await request({ ref, topic_id })
+    } catch (err) {
+      return `A fresh approval could not be raised (${errText(err)}) — ask again.`
+    }
+    if (fresh.status === 'pending_approval') {
+      return (
+        `A fresh approval for ${ref} at ${shortSha(fresh.target_sha)} ` +
+        `(${fresh.commit_count} commit${fresh.commit_count === 1 ? '' : 's'}) was just posted in ` +
+        'this chat — tap Approve on that one to deploy.'
+      )
+    }
+    if (fresh.status === 'up_to_date') {
+      return `And nothing is left to deploy — the host is already at ${shortSha(fresh.target_sha)}.`
+    }
+    return `A fresh approval could not be raised: ${fresh.reason}`
+  }
+
+  /**
+   * Is a host-deploy grant for `ref` ALREADY waiting? The dedupe guard on the
+   * re-raise: repeat taps on the same dead button must point at the prompt that
+   * is already there rather than mint a new one per tap.
+   */
+  function pendingGrantForRef(ref: string | null): boolean {
+    if (ref === null) return false
+    return approvals
+      .findByToolName(project_slug, HOST_DEPLOY_APPROVAL_TOOL_NAME)
+      .some((r) => {
+        if (r.status !== 'pending') return false
+        const r_ref = parseApprovalArgs(r.args_json).ref
+        return typeof r_ref === 'string' && r_ref === ref
+      })
   }
 
   async function handleOwnerButtonAnswer(
@@ -678,18 +851,21 @@ export function createHostDeployService(
     // any unrelated reply is not an approval and never reaches a row — the same
     // discipline as `onboarding/interview/button-backed-answer.ts:207-209`.
     //
-    // KNOWN SEAM, stated rather than implied: `prior_option_values` is the
-    // caller's recent-prompt window (four prompts on the topic, per
-    // `gateway/wiring/build-live-agent-turn.ts`), so after four further prompts
-    // the button stops being eligible and this returns null — the raw `hdp:`
-    // token then falls through to the LLM as ordinary text with no explanation to
-    // the owner. Inherited from the ritual-approval surface, and FAIL-SAFE in the
-    // direction that matters (an evicted button deploys nothing), but it is a
-    // silence the owner has to interpret. The grant-age gate below makes the same
-    // window explicit in time: a late tap on a STILL-eligible button is refused
-    // with a sentence rather than dropped.
+    // ELIGIBILITY IS TWO CONDITIONS: the regex AND membership in
+    // `prior_option_values` (the caller's recent-prompt window — four prompts on
+    // the topic, per `gateway/wiring/build-live-agent-turn.ts`). They no longer
+    // have the same consequence. A value that FAILS THE REGEX is not ours:
+    // ordinary text and cross-service ritual tokens (`rap:`) still return null so
+    // the ritual service and the LLM keep their routing. A value that MATCHES the
+    // regex but FAILS MEMBERSHIP is an `hdp:` token whose prompt aged out of the
+    // window — it used to return null too, and the raw token then fell through to
+    // the LLM as unexplained text, a silence the owner had to interpret. It is
+    // now carried through the gates below as `evicted`: the tap is ANSWERED with
+    // an explanation and, for a still-pending grant, a claim-gated replacement
+    // prompt raised on the topic the owner just typed in. Still FAIL-SAFE in the
+    // direction that matters — an evicted button deploys nothing, on any path.
     if (!HOST_DEPLOY_VALUE_RE.test(value)) return null
-    if (!input.prior_option_values.includes(value)) return null
+    const evicted = !input.prior_option_values.includes(value)
 
     // ── (b) OWNER ONLY. This is the no-self-approval guard: the requester is
     // the agent, whose turns never carry the owner's user_id, so an agent can
@@ -715,19 +891,65 @@ export function createHostDeployService(
     ) {
       return { body: 'That deploy request is unknown or no longer valid — nothing was deployed.' }
     }
+    // ── (b1) WHAT WAS APPROVED, read PURELY. Parsed before the status and age
+    // gates because every dead-end branch below now needs the `ref` to raise a
+    // replacement grant; this read has no side effect of its own, so a branch that
+    // does not re-raise is unaffected by it.
+    const args = parseApprovalArgs(row.args_json)
+    const ref = typeof args.ref === 'string' ? args.ref : null
+    const approved_sha = typeof args.target_sha === 'string' ? args.target_sha : null
+
     if (row.status !== 'pending') {
-      // Includes 'expired' — an approval that timed out is NOT an approval, and
-      // re-tapping a decided row never re-runs a deploy.
-      //
-      // The two answers differ because ONE of them would otherwise be false. On
-      // an already-APPROVED row a deploy DID go out on the earlier tap, so
+      // On an already-APPROVED row a deploy DID go out on the earlier tap, so
       // "nothing was deployed" would be a lie in the only record the owner keeps
       // — and it is the sentence a late Deny tap would read.
+      if (row.status === 'approved') {
+        return {
+          body: `That deploy request was already approved and the deploy already went out — this tap changed nothing. Ask again to deploy anything newer.`,
+        }
+      }
+      // An approval that timed out (or was swept) is NOT an approval — but it is
+      // also not a dead end. Re-raise, UNLESS a grant for the same ref is already
+      // waiting: repeat taps on one dead button must not spam prompts.
+      if (row.status === 'expired') {
+        return {
+          body:
+            'That deploy request had already expired — nothing was deployed. ' +
+            (pendingGrantForRef(ref)
+              ? 'A fresh approval is already waiting — tap Approve on the newest prompt.'
+              : await reraise(ref, input.topic_id)),
+        }
+      }
+      return {
+        body: `That deploy request was already ${row.status} — nothing was deployed. Ask again to see the current commit list.`,
+      }
+    }
+
+    if (evicted) {
+      // The prompt aged out of the four-prompt answer window on this topic
+      // (or the token was typed in a different topic than carried the prompt).
+      // The grant is real and pending but its button can never be eligible
+      // again, so retire it and raise a replacement where the owner just
+      // typed. CLAIM-GATED like the age gate below: of two taps racing one
+      // evicted grant, exactly one re-raises; the loser reads the settled
+      // status. An evicted tap NEVER dispatches.
+      let claimed: boolean
+      try {
+        claimed = await approvals.cancelPending(id)
+      } catch {
+        claimed = false
+      }
+      if (!claimed) {
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return { body: `That deploy request was already ${settled} — nothing was deployed.` }
+      }
       return {
         body:
-          row.status === 'approved'
-            ? `That deploy request was already approved and the deploy already went out — this tap changed nothing. Ask again to deploy anything newer.`
-            : `That deploy request was already ${row.status} — nothing was deployed. Ask again to see the current commit list.`,
+          'That approval prompt has aged out of the answer window (newer prompts replaced it), ' +
+          'so it can no longer be answered — nothing was deployed. ' +
+          (pendingGrantForRef(ref)
+            ? 'A fresh approval is already waiting — tap Approve on the newest prompt.'
+            : await reraise(ref, input.topic_id)),
       }
     }
 
@@ -737,24 +959,31 @@ export function createHostDeployService(
     // so a grant tapped the next morning on an unmoved ref still deployed (Argus
     // r1 minor). The row is expired as it is refused, so the same tap cannot be
     // repeated into a race with a sweep that may never come.
+    //
+    // CLAIM-GATED, because the refusal now has a side effect (a fresh grant).
+    // `cancelPending` reports whether THIS call retired the pending row, so of two
+    // taps racing one dead grant exactly one re-raises; the loser reads the status
+    // the row actually settled at and raises nothing.
     const age_ms = now() - row.requested_at * 1000
     if (age_ms > HOST_DEPLOY_APPROVAL_TTL_MS) {
-      await cancel(id)
+      let claimed: boolean
+      try {
+        claimed = await approvals.cancelPending(id)
+      } catch {
+        claimed = false
+      }
+      if (!claimed) {
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return { body: `That deploy request was already ${settled} — nothing was deployed.` }
+      }
       return {
         body:
           `That deploy request is older than ${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} minutes, ` +
-          `so it has expired — nothing was deployed. Ask again to see the current commit list.`,
+          `so it has expired — nothing was deployed. ` +
+          (await reraise(ref, input.topic_id)),
       }
     }
 
-    let args: HostDeployApprovalArgs
-    try {
-      args = JSON.parse(row.args_json) as HostDeployApprovalArgs
-    } catch {
-      args = {}
-    }
-    const ref = typeof args.ref === 'string' ? args.ref : null
-    const approved_sha = typeof args.target_sha === 'string' ? args.target_sha : null
     if (ref === null || approved_sha === null) {
       await cancel(id)
       return { body: 'That deploy request could not be read back — nothing was deployed. Ask again.' }
@@ -803,13 +1032,26 @@ export function createHostDeployService(
     }
     if (live_sha !== approved_sha) {
       // The approval dies with the sha it was bound to — it must never be
-      // replayable against the new target.
-      await cancel(id)
+      // replayable against the new target. Claim-gated for the same reason the age
+      // gate is: the replacement grant must be raised exactly once, and only by
+      // the tap that actually retired this row.
+      let claimed: boolean
+      try {
+        claimed = await approvals.cancelPending(id)
+      } catch {
+        claimed = false
+      }
+      if (!claimed) {
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return { body: `That deploy request was already ${settled} — nothing was deployed.` }
+      }
       return {
         body:
           `Stale approval — nothing was deployed. ${ref} moved from ${shortSha(approved_sha)} ` +
           `(what you approved) to ${shortSha(live_sha)} while this was waiting. ` +
-          `Ask again to see the new commit list and approve that.`,
+          // The fresh grant binds to the NEW sha, so the owner is one tap from the
+          // deploy he asked for instead of one round trip from re-asking.
+          (await reraise(ref, input.topic_id)),
       }
     }
 
@@ -860,6 +1102,34 @@ export function createHostDeployService(
       })
     } catch (err) {
       const detail = scrubHostDeploySecrets(errText(err), secrets)
+      // A TIMEOUT IS NOT A FAILURE REPORT — it is the absence of one, and the two
+      // must never share a sentence. The request had already been accepted and
+      // authenticated; what expired is OUR patience. The deploy may be running
+      // right now, may have finished, or may yet be refused by the gate, and this
+      // process cannot tell which.
+      //
+      // It said "Nothing was deployed; ask again to retry" — an absence claim
+      // with no evidence behind it, on top of an invitation to re-run an
+      // operation that RESTARTS THE OWNER'S INSTANCE. On 2026-08-15 he got
+      // exactly that message for a deploy that succeeded 55 seconds later, and
+      // the only reason a second one did not follow is that he asked first.
+      //
+      // ⇒ report what is true (we stopped waiting), name the state as unknown,
+      // and point at the check that CAN answer it. Never invite a blind retry of
+      // a non-idempotent action whose outcome is unobserved.
+      if (isDispatchTimeout(err)) {
+        log(`host-deploy call TIMED OUT ref=${ref} sha=${shortSha(approved_sha)}: ${detail}`)
+        return {
+          body:
+            `Approved, and the deploy was requested — but I stopped waiting for the answer after ` +
+            `${Math.round(HOST_DEPLOY_CALL_TIMEOUT_MS / 1000)}s. ${detail}\n\n` +
+            `**It may still be running, and it may already have succeeded.** A deploy takes minutes ` +
+            `(the contract gate runs the full test suite before anything is bumped), so a timeout here ` +
+            `says only that I gave up listening — not that nothing happened.\n\n` +
+            `Ask for the deploy status rather than re-approving: a second deploy would restart the ` +
+            `instance again.`,
+        }
+      }
       log(`host-deploy call failed ref=${ref} sha=${shortSha(approved_sha)}: ${detail}`)
       return {
         body: `Approved, but the deploy request did not go through: ${detail}. Nothing was deployed; ask again to retry.`,

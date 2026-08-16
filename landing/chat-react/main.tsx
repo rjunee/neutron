@@ -25,6 +25,8 @@ import {
   type WindowLike,
 } from './config.ts'
 import { NeutronChatController } from './controller.ts'
+import { WebDiagnosticsClient } from './diagnostics-client.ts'
+import { createSwitchTimingEmitter } from './switch-timing.ts'
 import { useNeutronChatVm } from './useNeutronChat.ts'
 import { useAttachmentDraft } from './useAttachmentDraft.ts'
 
@@ -273,11 +275,13 @@ async function boot(): Promise<void> {
   // (initial + project switch + reconnect) carries the boot-detected IANA `tz`,
   // not just the initial `config.wsUrl`.
   const wsUrlFor = (projectId: string | null): string => wsUrlForScope(config, projectId)
+  const diagnostics = new WebDiagnosticsClient({ base_url: config.origin, token: config.token })
   const controller = new NeutronChatController({
     projectId: config.projectId,
     // FIX 1 — seed the rail from the bootstrap, then keep it reactive so
     // projects created mid-onboarding appear live (a `projects_changed` frame).
     projects: config.projects,
+    switchTimingEmit: createSwitchTimingEmitter((report) => diagnostics.sendReport(report)),
     // Managed post-onboarding claim redirect — undefined on Open self-host, so
     // the controller's redirect no-ops (see BootstrapConfig.postOnboardingClaimUrl).
     ...(config.postOnboardingClaimUrl !== undefined

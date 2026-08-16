@@ -52,6 +52,14 @@ function loadReal(): {
     SRC.indexOf('const CI_FAILED_STATES'),
     SRC.indexOf('/**', SRC.indexOf('const CI_PENDING_STATES')),
   )
+  // …and say so HERE if a refactor moves them out of the slice, rather than letting
+  // `new Function` throw a bare ReferenceError from inside an unrelated test. This
+  // slice ends at the next `/**`, so merely opening a JSDoc block above `probeCause`
+  // is enough to lose it — which is exactly what happened while writing the readiness
+  // budget below.
+  if (!consts.includes('function probeCause(') || !consts.includes('function redactProbeText(')) {
+    throw new Error('probeCause/redactProbeText are no longer inside the classifyCi const slice')
+  }
   const factory = new Function(
     `${consts}\n${grab('classifyCi')}\n${grab('ciBlockerFindings')}\n${grab('ciDeferredPeer')}\nreturn { classifyCi, ciBlockerFindings, ciDeferredPeer }`,
   ) as () => ReturnType<typeof loadReal>
@@ -304,6 +312,10 @@ function loadReadiness(source = SRC): {
   }) => Promise<{ deferred: boolean; readiness: Readiness; value: unknown }>
   probeCause: (raw: unknown) => string
   redactProbeText: (text: unknown) => string
+  REVIEW_READINESS_BUDGET_MS: number
+  REVIEW_READINESS_RETRY_MS: number
+  REVIEW_READINESS_ATTEMPTS: number
+  readinessBudgetLabel: () => string
 } {
   // The preamble carries the consts AND the two redaction/excerpt helpers
   // `classifyReviewReadiness` closes over — they sit between the consts and the
@@ -322,7 +334,7 @@ function loadReadiness(source = SRC): {
   const reviewAt = source.indexOf('async function reviewWithPreconditions(')
   const reviewSource = source.slice(reviewAt, source.indexOf('/**\n * CI findings', reviewAt))
   const factory = new Function(
-    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, reviewWithPreconditions, probeCause, redactProbeText }`,
+    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, reviewWithPreconditions, probeCause, redactProbeText, REVIEW_READINESS_BUDGET_MS, REVIEW_READINESS_RETRY_MS, REVIEW_READINESS_ATTEMPTS, readinessBudgetLabel }`,
   ) as () => ReturnType<typeof loadReadiness>
   return factory()
 }
@@ -385,6 +397,83 @@ describe('review-round preconditions — refuse before spending', () => {
       expect(out.deferred).toBe(false)
       expect(spent).toBe(1)
     }
+  })
+
+  // ── THE BUDGET IS A MEASUREMENT, AND THESE TESTS ARE WHERE IT IS KEPT ──────
+  //
+  // MEASURED 2026-08-15, rjunee/neutron PR #275 commit 6ba7500: pushed 00:55:56Z,
+  // required check `test` STARTED 01:01:24Z (+328 s of GitHub Actions queue time)
+  // and finished 4 s later. Until the workflow is created the check is ABSENT from
+  // the rollup, so the gate is asking about a row that does not exist yet.
+  //
+  // The old budget was 3 attempts x 15 s = 30 s and lost every single time: four
+  // consecutive builds of one card were destroyed by it. Anyone tempted to shrink
+  // it again has to make these go red first, which is the point of putting the
+  // numbers here rather than in a comment nobody runs.
+  const MEASURED_QUEUE_MS = 328_000
+  const OLD_BUDGET_ATTEMPTS = 3
+  const OLD_BUDGET_RETRY_MS = 15_000
+
+  /** Absent until the (virtual) clock passes `readyAtMs`, then all three checks green. */
+  const queuedUntil = (readyAtMs: number) => {
+    let clock = 0
+    return {
+      advance: (ms: number) => { clock += ms },
+      rows: () => (clock < readyAtMs ? completedChecks('SUCCESS').filter((r) => r.name !== 'test') : completedChecks('SUCCESS')),
+    }
+  }
+
+  test('HEADLINE: the gate outlasts the MEASURED 328 s Actions queue and reviews once', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions, REVIEW_READINESS_RETRY_MS } = loadReadiness()
+    const ci = queuedUntil(MEASURED_QUEUE_MS)
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', ci.rows())),
+      spend: async () => { spent += 1; return 'real-review' },
+      wait: async () => ci.advance(REVIEW_READINESS_RETRY_MS),
+    })
+    // Deferred=false is the whole fix: the build reaches a reviewer instead of dying.
+    expect({ deferred: out.deferred, spent, value: out.value }).toEqual({ deferred: false, spent: 1, value: 'real-review' })
+  })
+
+  test('REGRESSION: the OLD 30-second budget loses that exact race — 0 reviews', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions } = loadReadiness()
+    const ci = queuedUntil(MEASURED_QUEUE_MS)
+    let spent = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => classifyReviewReadiness(readinessProbe('MERGEABLE', ci.rows())),
+      spend: async () => { spent += 1 },
+      wait: async () => ci.advance(OLD_BUDGET_RETRY_MS),
+      attempts: OLD_BUDGET_ATTEMPTS,
+    })
+    expect({ deferred: out.deferred, spent }).toEqual({ deferred: true, spent: 0 })
+    expect(out.readiness.reason).toContain('required check test has not run')
+  })
+
+  test('the attempt COUNT is derived from the budget, and the budget clears the measurement', () => {
+    const { REVIEW_READINESS_BUDGET_MS, REVIEW_READINESS_RETRY_MS, REVIEW_READINESS_ATTEMPTS } = loadReadiness()
+    // The waiting the loop can actually do — attempts-1 waits, the first probe is free.
+    const spendable = (REVIEW_READINESS_ATTEMPTS - 1) * REVIEW_READINESS_RETRY_MS
+    expect(spendable).toBeGreaterThanOrEqual(REVIEW_READINESS_BUDGET_MS)
+    // Generous, not tuned: at least double the measured queue. `liveness.ts` records
+    // what finely-tuned thresholds cost when the thing they measure moves.
+    expect(REVIEW_READINESS_BUDGET_MS).toBeGreaterThanOrEqual(MEASURED_QUEUE_MS * 2)
+  })
+
+  test('a permanently absent check still stops — and the reason says how long it waited', async () => {
+    const { classifyReviewReadiness, reviewWithPreconditions, readinessBudgetLabel } = loadReadiness()
+    let probes = 0
+    const out = await reviewWithPreconditions({
+      probe: async () => { probes += 1; return classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').filter((r) => r.name !== 'test'))) },
+      spend: async () => { throw new Error('must not review on an absent check') },
+      wait: async () => {},
+    })
+    expect(out.deferred).toBe(true)
+    expect(probes).toBe(loadReadiness().REVIEW_READINESS_ATTEMPTS)
+    // The owner-facing sentence must distinguish "we never waited" from "we waited
+    // and it never came"; only the second is his to act on.
+    expect(readinessBudgetLabel()).toBe('15 minutes')
+    expect(SRC).toContain('The readiness gate waited ${readinessBudgetLabel()} and the check never appeared')
   })
 
   test('MUTANTS: delete conflict guard, absent→passed, and absent→failed all go RED', () => {
@@ -586,10 +675,27 @@ describe('the terminal result emits terminalCause for infra-only stops only', ()
     expect(SRC).toContain('...(isInfraOnlyStop ? { terminalCause } : {}),')
   })
 
-  test('the THROWN-workflow failure result does NOT invent one', () => {
-    // A crash is not a measured infra-only stop; giving it a cause would re-create the
-    // exact defect (a specific message without the measurement behind it).
+  /**
+   * A THROW CARRIES THE MESSAGE IT THREW — AND NOTHING ELSE.
+   *
+   * This used to assert the opposite (`failureResult` must carry NO `terminalCause`), on
+   * the reasoning that a crash is not a measured infra-only stop. Half of that is right and
+   * is still pinned below: a crash has no BLOCK KIND, so it must never claim the code was
+   * judged or that "review never ran". But the thrown MESSAGE is a measurement — the
+   * workflow composed it at the point the fact was known — and dropping it is what left run
+   * 3d2696c3 ("forge:build completed without a full local commit OID") reported to the
+   * operator as "…without Argus APPROVE" on a path Argus never reached.
+   */
+  test('the THROWN-workflow failure result carries the message, and no block kind', () => {
     const failure = SRC.slice(SRC.indexOf('const failureResult = {'), SRC.indexOf('\n  }', SRC.indexOf('const failureResult = {')))
-    expect(failure).not.toContain('terminalCause')
+    // The thrown text, through the same redact + cap helper every other cause uses…
+    expect(failure).toContain('terminalCause: infraCause(thrownMessage)')
+    // …and NOT a fabricated block kind: that field is what licenses the outer loop's
+    // "review never ran (infra-only)" sentence, and a crash measured no such thing.
+    // (The PROPERTY, not the word — the comment beside it names the field on purpose.)
+    expect(failure).not.toContain('blockKind:')
+    // The message reported to the log and the message persisted are ONE value, so the
+    // transcript and the row cannot disagree about why the run died.
+    expect(SRC).toContain('log(`trident-v2 inner THREW: ${thrownMessage}`)')
   })
 })

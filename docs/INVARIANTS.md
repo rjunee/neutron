@@ -139,6 +139,14 @@ with cross-references noted inline.
     first page, strict composite later) and `latestPromptByTopic` (rowid-DESC).
     `button-store.ts:697-815`. (Duplicate of #10/#12, cross-referenced from the data-layer critic.)
     Protects: **G2**, **W3**.
+112. `code_trident_runs` INSERT is corruption-proof by construction: `INSERT_PLACEHOLDERS` is
+    DERIVED from `COLS` (`trident/store.ts:277`), so the placeholder count equals the column
+    count always — a hand-miscounted `?` list would otherwise silently corrupt every insert with
+    no type error to catch it. `trident/store.test.ts` pins `COLS.length` against the live
+    `PRAGMA table_info` column count and round-trips distinct values through every column, going
+    red on any swap or short bound array.
+    Protects: crash-recovery migration 0123 (`crash_recoveries` column) and every prior column
+    addition to the same table.
 
 ## 4. Duplication / consolidation seams (`critic-duplication.md`)
 
@@ -211,8 +219,21 @@ with cross-references noted inline.
     `gateway/cores/mount-open-cores.ts:177-277`, `gateway/boot-helpers.ts:1163-1180`.
     Protects: **D5**, **X2**.
 41. Reminder dispatcher degrades to `literalFallback` on ANY LLM failure so a reminder always
-    delivers; outbound is persist-before-send with swallowed live-push throws.
-    `reminders/dispatcher.ts:203,232,237`, `reminders/outbound.ts:7-18`. (Cross-ref #22.)
+    delivers — but the degrade is BOUNDED: stored intent over `MAX_DEGRADED_INTENT_CHARS`
+    (300) is replaced by a generic line naming the reminder id, and a COMPOSED body over
+    `MAX_NUDGE_BODY_CHARS` (2000) is refused as a composition failure rather than posted.
+    A failed compose must NEVER post `row.message` (#293 defect B). Outbound is
+    persist-before-send with swallowed live-push throws.
+    `reminders/message-shape.ts` (`literalFallbackResult` / `overBoundNudgeBody`),
+    `reminders/dispatcher.ts` (`fallbackBody` / `compose`). (Cross-ref #22.)
+    Protects: **F1**.
+41b. A FIRED reminder is delivered to the topic that owns the work: `app:<owner>:<project>`
+    when its stored destination names an EXISTING project, General otherwise — and EVERY
+    downgrade to General is logged with a reason, never silent. The project lister must not
+    swallow read errors into "no projects exist" (that reroutes every project reminder), and
+    the resolver must never throw (a throw before the post makes the tick loop re-fire
+    forever). `open/wiring/reminder-topic.ts`, `open/composer.ts` (`listProjectIds` /
+    `resolveAppWsReminderTopic`).
     Protects: **F1**.
 42. Engagement gate fails soft to `all_messages` — a DB read error must never drop a chat turn.
     `gateway/http/chat-bridge.ts:2749-2791`.
@@ -459,6 +480,28 @@ with cross-references noted inline.
     (`engine-import-routing.ts:998-1001`) — a boot orphan-sweep must not race it into
     double-failure UX.
     Protects: **P6**.
+113. Harvest before reap: Trident's tick §1 tries `parseInnerResult` on a run row EVEN when
+    `subagent_status === 'crashed'` (`trident/orchestrator.ts:1118`) — a workflow that wrote a
+    terminal result and only then lost its launcher must still harvest, with zero relaunches
+    spent. `trident/crash-before-launch-save.test.ts`.
+    Protects: crash-recovery relaunch path (§1a-crash) from regressing the pre-existing
+    harvest-before-reap ordering guarantee.
+114. Launcher-crash recovery is budget-bounded and the budget is DURABLE: `code_trident_runs
+    .crash_recoveries` (migration 0123) is spent only by the atomic
+    `TridentRunStore.beginCrashRecovery` claim (`trident/store.ts:499`); the cap is
+    `DEFAULT_MAX_CRASH_RECOVERIES = 3` (`trident/orchestrator.ts:290`) and holds across gateway
+    restarts because the counter is a column, not process memory. The terminal reason names the
+    crash-recovery budget and must NEVER contain the token `exhausted` — `trident/delivery.ts:174`
+    classes `crash-recovery budget` as an infra failure AHEAD of the exhausted-budget matcher, so
+    it is not misclassified as agent-side spend. `trident/crash-recovery.test.ts`.
+    Protects: bounded, restart-proof recovery from spinning forever under a deploy loop.
+115. A crash-recovery relaunch is a continuation, not a retry: it never consumes `round` or
+    `ralph_round`, and only `beginCrashRecovery` may clear the `crashed` latch / null the
+    tombstoned workflow generation — never `update`/`save`/`saveIfActive` (`saveIfActive` vetoes
+    non-crashed writes onto a crashed-latched row). `trident/crash-recovery.test.ts` +
+    `trident/store.test.ts`.
+    Protects: the fix-round budget from being spent on infrastructure failures that are not the
+    agent's fault.
 
 ## 10. Naming & vocabulary (`critic-naming-vocab.md` §6)
 
@@ -564,7 +607,10 @@ with cross-references noted inline.
 
 - **111 invariants** extracted from the 11 critic reports' load-bearing-subtleties /
   fail-soft-invariant / must-not-break sections (`critic-security-config.md` has no dedicated
-  section; its "what exists and is fine" items are folded into §11 above).
+  section; its "what exists and is fine" items are folded into §11 above). Four further items
+  (#112–#115) were added post-synthesis for the gateway-restart crash-recovery build; they are
+  appended at the end of their sections rather than renumbered in, so numbering is not strictly
+  sequential within §3 and §9.
 - The vast majority cross-reference a specific refactor-plan unit (G/K/L/C/D/P/F/O/X/W/N/S/M
   series) that either builds a characterization test protecting the behavior or must
   demonstrably preserve it per the unit's own **Accept** criteria.

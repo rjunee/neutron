@@ -651,6 +651,17 @@ Each carries an acceptance criterion; all in `neutron-open`.
       an explicit terminal cause on every terminal path; the orchestrator reports THAT; and
       `delivery.ts` regains a specific summary per cause. Until then the generic message is
       correct and MUST NOT be re-specialised.
+      PROGRESS 2026-08-14/15, two of the terminal paths now emit one, and BOTH ship with the
+      measurement rather than before it. (1) An `infra-only` review stop carries the probe's
+      own words (PR #240). (2) A THROWN workflow carries the sentence it threw — the catch
+      used to persist `{checkpoint: 'inner-error'}` with no cause, so run `3d2696c3`
+      (a finished, committed build whose OID was not relayed) was reported to the owner as
+      "…without Argus APPROVE" on a path Argus never reached. It carries NO block kind,
+      because a throw is not a review verdict, and `innerTerminalFailureReason` reports it as
+      *"inner workflow failed at round N of M: `<cause>`"* — saying nothing about the review
+      panel, which only `infra-only` is licensed to do. STILL OPEN: the review-verdict paths
+      ('code' / 'round-lost' / 'none') emit no cause — a finding title describes the DIFF, not
+      why the loop stopped — and `delivery.ts` still has one summary for all of them.
       OWNER'S RULE (2026-08-13, verbatim): *"If it's a generic catchall make the error message generic."*
       This is the governing principle and it is broader than this line: **a message must not assert a cause
       it did not measure.** A branch that catches N causes says something true of all N, and the specific

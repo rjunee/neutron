@@ -164,6 +164,23 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // THE SUPERVISOR DIED REPEATEDLY (gateway restarts) AND THE RECOVERY BUDGET RAN OUT.
+  // Checked EARLY and by its own token, because this reason deliberately EMBEDS the
+  // latched launcher-crash text — whatever the substrate said — and that text is not
+  // ours to keyword-proof. Left further down it would be captured by the branches
+  // below on a stray 'stalled'/'exhausted'/'git ' token and reported as a review or a
+  // hang outcome, which is the #240 failure shape: a confident sentence about a cause
+  // nobody measured. `infra` is the honest class — nothing about the BUILD failed.
+  if (r.includes('crash-recovery budget')) {
+    return {
+      klass: 'infra',
+      summary:
+        'The build supervisor was killed repeatedly (gateway restarts), and I stopped relaunching after ' +
+        'the recovery budget ran out. The work so far is saved on its branch.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
   // Suspected agent hang / stalled inner workflow — already a plain reason.
   if (r.includes('suspected agent hang') || r.includes('no progress for') || r.includes('stalled')) {
     return {

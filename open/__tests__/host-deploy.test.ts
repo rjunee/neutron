@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { uuidToToken } from '@neutronai/reminders/index.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApprovalManager, type ApprovalRow } from '@neutronai/tools/approval.ts'
 
@@ -39,6 +40,7 @@ import {
   HOST_DEPLOY_MIN_SECRET_CHARS,
   HOST_DEPLOY_TOKEN_SERVICE,
   HOST_DEPLOY_URL_SERVICE,
+  HOST_DEPLOY_VALUE_RE,
   type HostDeployCommit,
   type HostDeployDispatchInput,
   type HostDeployDispatchResult,
@@ -46,6 +48,7 @@ import {
   type HostDeployGit,
   type HostDeployRequestResult,
   type HostDeployService,
+  isDispatchTimeout,
 } from '../host-deploy.ts'
 import { createHostDeployRemoteGit } from '../host-deploy-runtime.ts'
 
@@ -60,6 +63,10 @@ const MOVED_SHA = '99887766554433221100ffeeddccbbaa99887766'
 
 const URL = 'https://control.example.test/v1/deploy'
 const TOKEN = 'hdp-secret-token-9f3a2b1c8d7e6f5a4b3c2d1e'
+
+/** Fixed option values for tests that call `renderHostDeployApprovalBody` directly. */
+const APPROVE_VALUE = 'hdp:AAAAAAAAAAAAAAAAAAAAAA:a'
+const DENY_VALUE = 'hdp:AAAAAAAAAAAAAAAAAAAAAA:d'
 
 let tmp: string
 let db: ProjectDb
@@ -307,6 +314,89 @@ describe('a request without an approval deploys NOTHING', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+describe('the button is raised WHERE the deploy was asked for', () => {
+  // 2026-08-15: the owner asked for a host deploy from `app:owner:neutron-open`,
+  // was told an Approve button was waiting, and there was none — the prompt had
+  // been posted to General, the ONE topic the service captured at composition
+  // time. `TOPIC` here is that install fallback; the requesting topic is the
+  // destination now.
+  const PROJECT_TOPIC = 'app:owner:neutron-open'
+
+  test('a request from a project topic raises its prompt on THAT topic', async () => {
+    const h = harness()
+    const result = await h.service.request({ ref: 'origin/main', topic_id: PROJECT_TOPIC })
+    await settle()
+
+    // TWO INDEPENDENT SEAMS, asserted separately on purpose: the grant row and
+    // the tappable prompt are written by different calls, and re-hard-coding
+    // EITHER one back to the owner topic has to turn this test red on its own.
+    const pending = approvals.listPending(PROJECT)
+    expect(pending).toHaveLength(1)
+    expect(pending[0]!.topic_id).toBe(PROJECT_TOPIC)
+
+    expect(h.emits).toHaveLength(1)
+    expect(h.emits[0]!.topic_id).toBe(PROJECT_TOPIC)
+
+    // …and neither is the fallback.
+    expect(pending[0]!.topic_id).not.toBe(TOPIC)
+    expect(h.emits[0]!.topic_id).not.toBe(TOPIC)
+
+    // The result NAMES the destination, so the agent can never say "a button is
+    // waiting" without saying where. No note: it landed where it was asked for.
+    expect(result).toMatchObject({
+      status: 'pending_approval',
+      approval_topic_id: PROJECT_TOPIC,
+    })
+    expect((result as { note?: string }).note).toBeUndefined()
+  })
+
+  test('no calling topic → the install fallback, and the result SAYS so', async () => {
+    for (const input of [{ ref: 'origin/main' }, { ref: 'origin/main', topic_id: null }]) {
+      const h = harness()
+      const result = await h.service.request(input)
+      await settle()
+
+      const pending = approvals.listPending(PROJECT)
+      expect(pending[pending.length - 1]!.topic_id).toBe(TOPIC)
+      expect(h.emits[0]!.topic_id).toBe(TOPIC)
+
+      // A cron/system caller has no conversation to post into, so the prompt
+      // goes to the owner's General topic — which is only acceptable because
+      // the result says which topic that is.
+      const note = (result as { note?: string }).note ?? ''
+      expect(result).toMatchObject({ status: 'pending_approval', approval_topic_id: TOPIC })
+      expect(note).toContain(TOPIC)
+      expect(note.length).toBeGreaterThan(0)
+    }
+  })
+
+  test('an empty-string topic is not a topic — it falls back', async () => {
+    const h = harness()
+    const result = await h.service.request({ topic_id: '' })
+    await settle()
+    expect(h.emits[0]!.topic_id).toBe(TOPIC)
+    expect(approvals.listPending(PROJECT)[0]!.topic_id).toBe(TOPIC)
+    expect(result).toMatchObject({ approval_topic_id: TOPIC })
+  })
+
+  test('the tap resolves on the topic that carries the prompt — no second mechanism', async () => {
+    // The capture seam windows on the tap's OWN topic, so raising the prompt on
+    // the requesting topic is enough for Approve to work there.
+    const h = harness()
+    await h.service.request({ topic_id: PROJECT_TOPIC })
+    await settle()
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: h.approveValue(),
+      topic_id: PROJECT_TOPIC,
+      prior_option_values: h.options(),
+    })
+    expect(out).not.toBeNull()
+    expect(h.dispatchCalls).toHaveLength(1)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe('the approval body carries the ACTUAL commit list', () => {
   test('every commit, the current pin and the target sha are in the body', async () => {
     const h = harness()
@@ -326,6 +416,50 @@ describe('the approval body carries the ACTUAL commit list', () => {
     }
   })
 
+  test('the typed fallback in the body is the SAME string the buttons carry — no drift', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+
+    const emit = h.emits[0]!
+    expect(emit.body).toContain(emit.options[0]!.value)
+    expect(emit.body).toContain(emit.options[1]!.value)
+    expect(emit.body).not.toContain('Typing anything else will NOT approve this deploy')
+  })
+
+  test('the approve string printed in the body actually approves, end to end', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+
+    const emit = h.emits[0]!
+    const m = emit.body.match(/hdp:[A-Za-z0-9_-]{22}:a/)
+    expect(m).not.toBeNull()
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: m![0],
+      topic_id: emit.topic_id,
+      prior_option_values: emit.options.map((o) => o.value),
+    })
+    expect(h.dispatchCalls).toHaveLength(1)
+    expect(out!.body).toContain('Deploy requested')
+  })
+
+  test('the typed fallback appears after the binding sentence, and the fence still holds', async () => {
+    const h = harness()
+    await h.service.request({})
+    const body = h.emits[0]!.body
+
+    const boundIdx = body.indexOf('This approval is bound to')
+    const fallbackIdx = body.indexOf('type one of these exact lines instead')
+    expect(boundIdx).toBeGreaterThan(-1)
+    expect(fallbackIdx).toBeGreaterThan(boundIdx)
+
+    // The commit list still renders inside a fence.
+    expect(body).toContain('```')
+  })
+
   test('an over-cap range counts the remainder instead of silently truncating', () => {
     const body = renderHostDeployApprovalBody({
       ref: 'origin/main',
@@ -333,6 +467,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: COMMITS.slice(0, 2),
       total: 57,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('57 commits would land:')
     expect(body).toContain('… and 55 more commits')
@@ -345,6 +481,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [],
       total: 0,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('SIDEWAYS or BACKWARD')
     expect(body).toContain('(no new commits)')
@@ -386,6 +524,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       total: 3,
       removed: COMMITS,
       removed_total: 3,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('3 commits would land:')
     expect(body).not.toContain('ROLLED BACK')
@@ -400,6 +540,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       total: 0,
       removed: [],
       removed_total: 0,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).toContain('Nothing would be rolled back either')
   })
@@ -429,6 +571,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [{ sha: COMMITS[0]!.sha, subject: hostile }],
       total: 1,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).not.toContain('\r')
   })
@@ -444,6 +588,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [{ sha: COMMITS[0]!.sha, subject: hostile }],
       total: 1,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     expect(body).not.toContain('\u202E')
     expect(body).not.toContain('\u200B')
@@ -456,6 +602,8 @@ describe('the approval body carries the ACTUAL commit list', () => {
       target_sha: TARGET_SHA,
       commits: [{ sha: COMMITS[0]!.sha, subject: 'fix: ``` then **bold** injected' }],
       total: 1,
+      approve_value: APPROVE_VALUE,
+      deny_value: DENY_VALUE,
     })
     // The fence must be LONGER than the longest backtick run inside it.
     expect(body).toContain('````')
@@ -491,11 +639,12 @@ describe('the approval binds to a SPECIFIC sha', () => {
     const h = harness({ git: fakeGit(state) })
     await h.service.request({})
     await settle()
+    const oldApprove = h.approveValue()
 
     // Three more commits land upstream while the prompt sits in the chat.
     state.refs['origin/main'] = MOVED_SHA
 
-    const out = await answer(h, h.approveValue())
+    const out = await answer(h, oldApprove)
     expect(out).not.toBeNull()
     // NOTHING deployed.
     expect(h.dispatchCalls).toEqual([])
@@ -505,10 +654,24 @@ describe('the approval binds to a SPECIFIC sha', () => {
     expect(out!.body).toContain(MOVED_SHA.slice(0, 8))
     expect(out!.body).toContain(TARGET_SHA.slice(0, 8))
 
-    // And the stale grant is dead — a second tap cannot replay it.
-    const again = await answer(h, h.approveValue())
+    // …and it is not a dead end: a REPLACEMENT approval, bound to the NEW sha,
+    // is raised on the topic the owner just tapped in.
+    await settle()
+    expect(h.emits).toHaveLength(2)
+    expect(h.emits[1]!.topic_id).toBe(TOPIC)
+    expect(h.emits[1]!.body).toContain(MOVED_SHA.slice(0, 8))
+
+    // And the stale grant is dead — a second tap on the OLD button cannot replay
+    // it, and points at the waiting prompt rather than raising a third one.
+    const again = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: oldApprove,
+      topic_id: TOPIC,
+      prior_option_values: [oldApprove, ...h.options()],
+    })
     expect(h.dispatchCalls).toEqual([])
-    expect(again!.body).toContain('already expired')
+    expect(again!.body).toContain('already waiting')
+    expect(h.emits).toHaveLength(2)
   })
 
   test('an unmoved target deploys EXACTLY the sha that was approved, once', async () => {
@@ -572,19 +735,138 @@ describe('approval is an EXPLICIT AFFIRMATIVE ACT by the owner', () => {
     })
   }
 
-  test('a well-formed token that was never an offered button is not eligible', async () => {
+  test('an EVICTED token gets a sentence and a fresh prompt, not silence', async () => {
     const h = harness()
     await h.service.request({})
     await settle()
-    const forged = h.approveValue()
+    const evicted = h.approveValue()
+    const row_id = approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)[0]!.id
+
+    // Four further prompts on the topic have pushed this one out of the answer
+    // window: the value is real, the grant is pending, but membership fails.
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: evicted,
+      topic_id: TOPIC,
+      prior_option_values: ['rap:AAAAAAAAAAAAAAAAAAAAAA:a'],
+    })
+    await settle()
+    // Not null, and nothing deployed.
+    expect(out).not.toBeNull()
+    expect(out!.body).toContain('answer window')
+    expect(h.dispatchCalls).toEqual([])
+    // The unanswerable grant is retired and a replacement raised where he typed.
+    expect(approvals.get(row_id)!.status).not.toBe('pending')
+    expect(h.emits).toHaveLength(2)
+    expect(h.emits[1]!.topic_id).toBe(TOPIC)
+  })
+
+  test('a forged hdp token that maps to no row gets a sentence, not a re-raise', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const forged = `hdp:${uuidToToken(crypto.randomUUID())}:a`
 
     const out = await h.service.handleOwnerButtonAnswer({
       user_id: OWNER,
       user_text: forged,
       topic_id: TOPIC,
-      prior_option_values: ['rap:AAAAAAAAAAAAAAAAAAAAAA:a'],
+      prior_option_values: [],
     })
-    expect(out).toBeNull()
+    await settle()
+    expect(out!.body).toContain('no longer valid')
+    expect(h.dispatchCalls).toEqual([])
+    // A token that was never a grant raises nothing.
+    expect(h.emits).toHaveLength(1)
+  })
+
+  test('an evicted tap when a fresh grant already waits points at it instead of raising a third', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const first = h.approveValue()
+    await h.service.request({})
+    await settle()
+    expect(h.emits).toHaveLength(2)
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: first,
+      topic_id: TOPIC,
+      prior_option_values: [],
+    })
+    await settle()
+    expect(out!.body).toContain('already waiting')
+    expect(h.emits).toHaveLength(2)
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('an evicted tap on an already-approved row says the deploy went out', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const approve = h.approveValue()
+
+    await answer(h, approve)
+    expect(h.dispatchCalls).toHaveLength(1)
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: approve,
+      topic_id: TOPIC,
+      prior_option_values: [],
+    })
+    await settle()
+    expect(out!.body).toContain('already approved')
+    expect(out!.body).toContain('already went out')
+    expect(h.dispatchCalls).toHaveLength(1)
+  })
+
+  test('a second evicted tap on the same token re-raises exactly once', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const evicted = h.approveValue()
+
+    const tap = () =>
+      h.service.handleOwnerButtonAnswer({
+        user_id: OWNER,
+        user_text: evicted,
+        topic_id: TOPIC,
+        prior_option_values: [],
+      })
+
+    const first = await tap()
+    await settle()
+    expect(first!.body).toContain('answer window')
+    expect(h.emits).toHaveLength(2)
+
+    // `cancelPending` is the claim: the second tap finds the row already
+    // retired, so it raises nothing and reads the settled status instead.
+    const second = await tap()
+    await settle()
+    expect(second!.body).toContain('nothing was deployed')
+    expect(second!.body).toContain('already waiting')
+    expect(h.emits).toHaveLength(2)
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('an evicted Deny token also gets the sentence and deploys/declines nothing', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: h.denyValue(),
+      topic_id: TOPIC,
+      prior_option_values: [],
+    })
+    await settle()
+    expect(out).not.toBeNull()
+    expect(out!.body).toContain('nothing was deployed')
+    // Decision-neutral: an evicted tap decided nothing, in either direction.
+    expect(out!.body).not.toContain('declined')
     expect(h.dispatchCalls).toEqual([])
   })
 
@@ -600,7 +882,13 @@ describe('approval is an EXPLICIT AFFIRMATIVE ACT by the owner', () => {
 
     const out = await answer(h, h.approveValue())
     expect(h.dispatchCalls).toEqual([])
-    expect(out!.body).toContain('already expired')
+    expect(out!.body).toContain('expired')
+    // Not silence, and not a dead end either: the swept grant answers with a
+    // sentence AND a fresh prompt the owner can actually tap.
+    expect(out!.body).toContain('fresh approval')
+    await settle()
+    expect(h.emits).toHaveLength(2)
+    expect(h.dispatchCalls).toEqual([])
   })
 
   test('Deny records the decision and deploys nothing', async () => {
@@ -956,14 +1244,115 @@ describe('a grant has a lifetime of its own', () => {
     // still literally `pending` in the table when the tap arrives.
     nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
     expect(approvals.listPending(PROJECT)).toHaveLength(1)
+    const oldApprove = h.approveValue()
 
-    const out = await answer(h, h.approveValue())
+    const out = await answer(h, oldApprove)
     expect(h.dispatchCalls).toEqual([])
     expect(out!.body).toContain('has expired')
-    expect(out!.body).toContain('Ask again')
-    // And the refusal kills the grant, so the same tap cannot be repeated into a
-    // race with a sweep that may never come.
-    expect(approvals.listPending(PROJECT)).toEqual([])
+    // A SENTENCE AND A FRESH GRANT, not silence and not "ask again" — the owner
+    // was told to tap something that had already died; making him re-ask is how a
+    // 5-minute window becomes unwinnable.
+    expect(out!.body).toContain('fresh approval')
+    await settle()
+    expect(h.emits).toHaveLength(2)
+    expect(h.emits[1]!.topic_id).toBe(TOPIC)
+    const fresh = h.emits[1]!.options.map((o) => o.value)
+    for (const v of fresh) expect(HOST_DEPLOY_VALUE_RE.test(v)).toBe(true)
+    expect(fresh).not.toContain(oldApprove)
+    // The old grant is dead and EXACTLY ONE grant is waiting — the new one. A
+    // re-raise never approves: nothing was dispatched.
+    expect(approvals.listPending(PROJECT)).toHaveLength(1)
+    const rows = approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.status).sort()).toEqual(['expired', 'pending'])
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('the fresh grant from an expired tap deploys on its own tap, and only then', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    // Tapping the DEAD button re-raises. It does not deploy — that is the whole
+    // difference between a re-raise and an auto-approve.
+    await answer(h, h.approveValue())
+    await settle()
+    expect(h.dispatchCalls).toEqual([])
+
+    // The owner taps the button he was just handed. NOW it deploys.
+    const out = await answer(h, h.approveValue())
+    expect(h.dispatchCalls).toHaveLength(1)
+    expect(h.dispatchCalls[0]!.sha).toBe(TARGET_SHA)
+    expect(out!.body).toContain('Deploy requested')
+  })
+
+  test('a repeat tap on the dead button points at the waiting prompt instead of raising a second one', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const oldApprove = h.approveValue()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    await answer(h, oldApprove)
+    await settle()
+    expect(h.emits).toHaveLength(2)
+
+    // The dead button is still on screen; tapping it again must not mint a
+    // prompt per tap.
+    const again = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: oldApprove,
+      topic_id: TOPIC,
+      prior_option_values: [oldApprove, ...h.options()],
+    })
+    await settle()
+    expect(again!.body).toContain('already waiting')
+    expect(h.emits).toHaveLength(2)
+    expect(approvals.listPending(PROJECT)).toHaveLength(1)
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('a racing second tap on a TTL-dead grant re-raises exactly once', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const oldApprove = h.approveValue()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    await answer(h, oldApprove)
+    await settle()
+    // The second tap on the SAME dead token finds the row already retired by the
+    // first — `cancelPending` is the claim — so it raises nothing.
+    const second = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: oldApprove,
+      topic_id: TOPIC,
+      prior_option_values: [oldApprove, ...h.options()],
+    })
+    await settle()
+    expect(h.emits).toHaveLength(2)
+    expect(second!.body).toContain('nothing was deployed')
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('an expired tap when the host has caught up says nothing is left to deploy', async () => {
+    const state: GitState = { head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }
+    const h = harness({ git: fakeGit(state) })
+    await h.service.request({})
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    // Someone else deployed it in the meantime. There is nothing to re-raise, and
+    // a prompt that asks the owner to approve a no-op is worse than a sentence.
+    state.head = TARGET_SHA
+    state.refs['origin/main'] = TARGET_SHA
+
+    const out = await answer(h, h.approveValue())
+    await settle()
+    expect(out!.body).toContain('nothing is left to deploy')
+    expect(h.emits).toHaveLength(1)
+    expect(h.dispatchCalls).toEqual([])
   })
 
   test('an approval INSIDE the window still deploys — the gate is a boundary, not a wall', async () => {
@@ -1079,5 +1468,117 @@ describe('input + failure handling', () => {
     await settle()
     // No orphan pending grant lingering until the TTL sweep.
     expect(approvals.listPending(PROJECT)).toEqual([])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * A TIMEOUT IS THE ABSENCE OF A REPORT, NOT A REPORT OF FAILURE.
+ *
+ * The client waited 30s for an operation that takes minutes, so the timer
+ * expired on every real deploy — and the message it produced told the owner
+ * "Nothing was deployed; ask again to retry". On 2026-08-15 he was shown exactly
+ * that at 00:34 for a deploy that completed 55 seconds later. Re-approving would
+ * have restarted his instance a second time.
+ */
+describe('a dispatch TIMEOUT never claims nothing happened', () => {
+  const timeoutErr = (): Error => {
+    // What `AbortSignal.timeout()` actually rejects with.
+    const e = new Error('The operation timed out.')
+    e.name = 'TimeoutError'
+    return e
+  }
+
+  test('it does NOT say nothing was deployed', async () => {
+    const h = harness({
+      dispatch: async () => {
+        throw timeoutErr()
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out).not.toBeNull()
+    expect(out!.body).not.toContain('Nothing was deployed')
+  })
+
+  test('it does NOT invite a blind retry of an instance-restarting action', async () => {
+    const h = harness({
+      dispatch: async () => {
+        throw timeoutErr()
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).not.toContain('ask again to retry')
+  })
+
+  test('it says the deploy may still be running, and points at the status check', async () => {
+    const h = harness({
+      dispatch: async () => {
+        throw timeoutErr()
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).toContain('may still be running')
+    expect(out!.body.toLowerCase()).toContain('status')
+  })
+
+  test('a NON-timeout dispatch failure still reports failure — the distinction is the point', async () => {
+    // Connection refused really does mean nothing happened. Collapsing the two
+    // cases in either direction loses information the owner needs.
+    const h = harness({
+      dispatch: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:7780')
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).toContain('Nothing was deployed')
+    expect(out!.body).toContain('ask again to retry')
+  })
+
+  test('a refused gate is still a refusal, not a timeout', async () => {
+    // The HTTP-refusal path must be untouched by this change.
+    const h = harness({
+      dispatch: async () => ({ ok: false, detail: 'HTTP 500 — contract gate FAILED' }),
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).toContain('The host refused the deploy')
+    expect(out!.body).not.toContain('may still be running')
+  })
+})
+
+describe('isDispatchTimeout', () => {
+  test('recognises the TimeoutError AbortSignal.timeout rejects with', () => {
+    const e = new Error('The operation timed out.')
+    e.name = 'TimeoutError'
+    expect(isDispatchTimeout(e)).toBe(true)
+  })
+
+  test('matches on NAME, not on the human-facing message', () => {
+    // A `.includes("timed out")` check would pass every test written against one
+    // runtime and silently stop recognising a timeout on another.
+    const impostor = new Error('The operation timed out.')
+    impostor.name = 'Error'
+    expect(isDispatchTimeout(impostor)).toBe(false)
+  })
+
+  test('an explicit AbortError is NOT a timeout — it is a cancellation', () => {
+    const e = new Error('aborted')
+    e.name = 'AbortError'
+    expect(isDispatchTimeout(e)).toBe(false)
+  })
+
+  test('ordinary transport errors and junk are not timeouts', () => {
+    expect(isDispatchTimeout(new Error('ECONNREFUSED'))).toBe(false)
+    expect(isDispatchTimeout(null)).toBe(false)
+    expect(isDispatchTimeout('TimeoutError')).toBe(false)
   })
 })

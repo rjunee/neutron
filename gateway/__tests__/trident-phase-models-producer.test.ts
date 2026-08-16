@@ -331,7 +331,7 @@ describe('the HTTP surface', () => {
     // shape, which made it assert that a review seat could not be switched off.
     // Every row still includes its own default — a row that omitted it could not
     // offer the model it already runs (pinned by the loop below).
-    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['none', 'codex', 'kimi'])
+    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['none', 'claude', 'codex', 'kimi'])
     expect(phases.find((p) => p.key === 'synthesis')!.groups).toEqual(['claude'])
     expect(phases.find((p) => p.key === 'synthesis')!.groups).not.toContain('none')
     for (const p of phases) expect(p.groups).toContain(p.group)
@@ -380,7 +380,7 @@ describe('the HTTP surface', () => {
     // combine: true here, false on `sol`, and the cell is live only when both are.
     const phases = json['phases'] as Array<Record<string, unknown>>
     expect(phases.find((p) => p['key'] === 'build')!['effort_supported']).toBe(true)
-    expect(phases.find((p) => p['key'] === 'review_codex')!['effort_supported']).toBe(false)
+    expect(phases.find((p) => p['key'] === 'review_codex')!['effort_supported']).toBe(true)
   })
 
   it('shows an unrunnable tier DISABLED WITH THE REASON, never omitted', async () => {

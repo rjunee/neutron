@@ -1584,9 +1584,14 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    down the socket and stands up a fresh one bound to the new topic, hydrating
 >    that topic's transcript from the shared OPFS store (`main.tsx topicForProject`
 >    / `wsUrlFor`). **Gated on `platform === 'web'`** — mobile keeps its single
->    `app:<user>` socket + `project_id`-field model, unchanged. Reminders/briefs
->    still fan to the bare `app:<user>` (General inbox) topic, so they surface in
->    General (durable rows under `app:<user>`), not the per-project chats.
+>    `app:<user>` socket + `project_id`-field model, unchanged. **Since #293
+>    (2026-08-15)** a fired reminder is delivered to the topic that OWNS the work:
+>    `app:<user>:<project>` when its stored destination names an EXISTING project,
+>    General otherwise (`open/wiring/reminder-topic.ts`). Briefs and ritual posts
+>    carry no destination and still land in General. The durable row and the live
+>    push share that topic, and the deliver seam stamps the project's
+>    `last_activity_at` so the rail pops — an out-of-turn post behaves exactly like
+>    a steady-state agent reply on the same topic.
 >    **Mounted-per-conversation surface cache (#343).** `ChatApp` no longer
 >    remounts the whole chat surface on a project switch (the old `key={convId}`
 >    on the sole runtime host tore down thread + composer, flashed the empty
@@ -2884,6 +2889,10 @@ deferral. All four seats may be NONE; synthesis and the terminal result then sta
 no review ran and that merge relied on build and CI gates alone.
 
 Each phase declares its complete `dispatchGroups` once in `trident/phase-models.ts`.
+The generic cross-model review seats accept every executor family. Claude choices
+dispatch directly with the selected tier; Codex and Kimi choices use their CLI bridges
+and never fall back to Claude when unavailable. A panel whose available review seats
+all resolve to one family is accepted with a run warning.
 The settings payload uses that set verbatim, validation accepts exactly its tiers, and
 the workflow route carries the same set. A deliberately Claude-only phase carries an
 actionable `dispatchConstraint` describing the wrapper or executor required to widen it.
@@ -2898,7 +2907,25 @@ actionable `dispatchConstraint` describing the wrapper or executor required to w
     pushes an explicit refspec through its credentialed host runner, and independently
     runs `git ls-remote --heads origin` before it accepts `REMOTE_HEAD`. It similarly
     reads an existing PR or creates one and reads it back. Only after both facts exist
-    does it re-fire the workflow from `outer-published:<sha>` for review. The credential
+    does it re-fire the workflow from `outer-published:<sha>` for review.
+    Before the lease observation the outer loop also REBASES the branch onto the
+    observed base tip (`rebaseOntoObservedBase`): the shared checkout is shallow
+    (#574), so it replays the branch's own diff (`gh pr diff` when a PR exists, the
+    diff from the branch's FORK POINT on first publish — a two-dot `base..branch`
+    diff would replay work `base` already has) onto the base tip in a throwaway
+    worktree with `git apply --3way` and moves the branch ref by compare-and-swap —
+    a stale branch reaches review as `MERGEABLE`. A replay CONFLICT is handed to
+    the bounded Forge `resolve_conflict` resolver first, in that throwaway worktree:
+    this is the autonomous path, so unlike the local-merge path there is no human
+    present to reconcile the branch by hand. The resolver's claim is checked against
+    git, not taken — the unmerged set AND the staged bytes must come back free of
+    conflict markers, and every round must shrink the set. With no resolver
+    configured, on a decline, on a round that makes no progress, or on an exhausted
+    bound, the outcome is the unchanged ATTENTION failure (`TridentRebaseConflict`,
+    naming the conflicting paths), never a `REQUEST_CHANGES`. A resolved conflict
+    shortcuts nothing: resolution is a mergeability operation, not a verdict, and
+    the branch goes through the full review gate exactly as a clean replay does.
+    The credential
     is injected at the host-command boundary in `open/composer.ts`; it never enters the
     wrapper command, the Forge transcript, or any process below the inner workflow.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
@@ -3360,7 +3387,13 @@ separate change).
   **hang watchdog** (`trident/orchestrator.ts`, `NO_ADVANCE_HANG_MS` = 25 min)
   reaps a non-terminal run whose `last_advanced_at` has not moved — a suspected
   zero-token agent hang — to `failed` with a named reason, so it surfaces on the
-  Plan item + fires the terminal notification instead of stalling silently.
+  Plan item + fires the terminal notification instead of stalling silently. A
+  **launcher crash is not a dead build**, though: a gateway restart/deploy that
+  kills the warm REPL's child is caught by §1a-crash in `trident/orchestrator.ts`,
+  which atomically claims the crashed row (`TridentRunStore.beginCrashRecovery`)
+  and relaunches it as a continuation from its persisted branch/PR/checkpoint,
+  bounded by the durable `crash_recoveries` budget (default 3) and carrying the
+  measured gateway boot timestamp in the latched failure reason.
 - **▶ play button + on-disk spec persistence (M1).** A Plan card created from a
   NON-TRIVIAL ask now persists the FULL context to a real, user-visible markdown
   doc so it survives session resets and drives the build. `work-board/spec-doc.ts`
@@ -4127,20 +4160,124 @@ with no declared `path`, so the tab survived only in the mobile pre-fetch
 placeholder and vanished the moment `/tabs` answered.
 
 **Push delivery** (`gateway/push/`). A fired reminder also reaches the owner's
-registered devices. `open/composer.ts` builds ONE `DevicePushTokenStore` and
-hands it to both halves — `/api/app/devices/{register,unregister}` (what the app
-calls on every sign-in/sign-out) and `createPushDispatcher`, supplied as
-`composition.push_dispatcher` and attached by `build-core-modules.ts` to
-`ReminderTickLoop.on_fired`. Three properties make it safe to run unconditionally:
-it fires only AFTER a successful nudge dispatch, so push never announces a
-reminder the owner was not already being told about; with zero registered tokens
-`dispatch` returns before issuing any HTTP request, which is the state of every
-fresh install; and a ticket Expo marks `DeviceNotRegistered` DELETES that token
-row, so a dead device is retried once rather than on every reminder forever
-(other ticket errors — rate limits, credential problems — never prune). Failures
-are caught inside the tick, so an unreachable Expo cannot stop a reminder from
-being marked fired. `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are
-merely rate-limited.
+registered devices, **as a chat-message notification** — there is no
+reminder-shaped and no ritual-shaped notification. `open/composer.ts` builds ONE
+`DevicePushTokenStore` and hands it to both halves:
+`/api/app/devices/{register,unregister}` (what the app calls on every
+sign-in/sign-out) and `createPushDispatcher`, which is now purely the Expo
+TRANSPORT.
+
+The notification is COMPOSED BY THE DELIVERY SEAM. `createDeliver`
+(`gateway/http/deliver.ts`) takes a `notify` sink and calls it for every post that
+got a DURABLE row — `'reply'` (a fired reminder or ritual) and `'inert'` (the
+morning brief, the idle nudge, the overnight report, a system notice) — and never
+for `'none'`, a transient live-only pill with no row for a tap to land on. So every
+out-of-turn producer notifies identically, because a notification is a property of
+the seam rather than of any one producer. (Composing it in
+`gateway/proactive/reminder-outbound.ts` instead was the first attempt: it cured the
+reported message and left every other producer silent, which is the same
+per-producer mistake `deliver` exists to have ended.)
+
+The payload comes from the pure builders in `gateway/push/chat-message-push.ts`:
+title = the project (or `General`), body = the first part of the posted message
+truncated on a word boundary, data = `{ kind: 'agent_message', message_id,
+project_id }`. `project_id` is ALWAYS present; the no-project General scope names
+itself with `GENERAL_RAIL_ID`, defined once in `wire-types/topic-id.ts` and pinned
+to the client's constants by `app/__tests__/general-scope.test.ts`. Omitting it for
+General — the first attempt again — is malformed to every app bundle already
+installed, and a store artifact cannot be upgraded in lockstep with a self-hosted
+gateway.
+
+General has THREE spellings and they are not interchangeable — the rail id
+`'~general'`, the client chat scope `''`, and the HTTP path segment `'general'` —
+so every mobile client that talks to a project-scoped surface maps through
+`app/lib/general-scope.ts`. `reminders-client.ts` was the one that did not: it
+interpolated the rail id raw, and `sanitizeProjectId` rejects `~`, so General's
+Reminders tab and every legacy reminder push tap rendered `invalid_project_id`.
+Note that `encodeURIComponent` does NOT help here — `~` is unreserved and passes
+through unchanged, which is why an "it encodes the segment" test cannot catch this.
+
+Every out-of-turn producer in the Open composer delivers to the owner's BARE
+`app:<user>` topic (suffixing it is the PR #105 deliver-to-nobody bug), so in
+practice every notification is General-scoped and its tap opens the General chat —
+which is where the message actually landed. `chatMessagePushScope` also parses the
+project form `app:<user>:<project>`, the topic the mobile client binds when a
+project chat is open, for the first producer that posts into one.
+
+It used to be composed on the reminder TICK, from the reminder ROW
+(`push_dispatcher` → `ReminderTickLoop.on_fired` → `pushReminder`). All four are
+DELETED (2026-08-09). The tick can only see the row, and a ritual row's `message`
+IS the dispatch token `ritual:<id>` — so the owner's notification literally read
+`ritual:kaizen`, and it carried the instance slug where the tap needed a project
+id. Both symptoms were that one mistake.
+
+Four properties make push safe to run unconditionally: it fires only AFTER a
+durable chat row exists, so a notification never points at a transcript that has
+no such message; with zero registered tokens the transport returns before issuing
+any HTTP request, which is the state of every fresh install; a ticket Expo marks
+`DeviceNotRegistered` DELETES that token row, so a dead device is retried once
+rather than on every send forever (other ticket errors — rate limits, credential
+problems — never prune); an idempotent re-emit (`was_new: false` with
+`was_delivered: true`) is NOT re-notified, so a reconnect re-render or a retried
+approval prompt cannot buzz the owner about a message already in his chat — with the
+ButtonStore contract's exception honoured, since a row he never saw
+(`was_delivered: false`) still needs the notification; and a notification failure is
+swallowed inside `deliver`,
+because an escaping throw would be read by the reminder tick as "the post did not
+happen" and would re-post the same message next tick. The Expo POST also carries an
+`AbortSignal.timeout`, since it is now awaited inside a durable delivery and a
+stalled connection would otherwise park the fire.
+
+That re-emit suppression only works because `deliver` also WRITES the value it reads.
+`was_delivered` comes from `button_prompts.delivered_at`, whose only writers had been
+the onboarding engines — so for one round of review the suppression was INERT: no row
+`deliver` created was ever stamped, the condition could never be true, and the
+double-buzz continued. `deliver` now calls `ButtonStore.markDelivered` after the owner
+has ACTUALLY been reached, which is why `ChatMessagePushSink` resolves a boolean rather
+than `void`: it reports whether a DEVICE was reached, and it FAILS CLOSED. Reading
+`PushResult.ok` is not enough — `ok` means only "no HTTP/network exception" and is
+`true` with `delivered: 0` in two ordinary cases, zero registered devices (the
+dispatcher short-circuits before Expo is called, the state of every fresh install) and
+a batch where every ticket errored. The sink therefore requires a numeric
+`PushResult.delivered >= 1` and treats a result that reports no count as not
+delivered. `delivered` is in turn COUNTED from `status: 'ok'` tickets rather than
+derived as `attempted - errored`, because a 200 carrying fewer tickets than messages
+(or none) made subtraction report a full delivery on a response that accepted nothing —
+which put the zero-delivery stamp back by a second route.
+Stamping is deliberately skipped when nothing was reached, so a message
+that persisted while every transport failed still buzzes on the retry instead of being
+silenced forever. Only `durability: 'reply'` is stamped — `persistInertAgentTurn` writes
+`delivered_at` in its own INSERT. The notification is additionally bounded at 3 s
+(`DEFAULT_NOTIFY_TIMEOUT_MS`) so it can never hold a delivery open: `POST
+/api/app/system-notice` awaits `deliver` to answer its caller, and the only limit
+underneath was Expo's 10 s PER BATCH. A timed-out notification counts as not sent — the
+bound abandons it rather than cancelling it, so a merely-slow send can still land after
+being reported not-sent and the next re-emit will buzz again. That trade is deliberate:
+a duplicate buzz is visible, and the alternative (stamping on no evidence) silences the
+message forever.
+
+The notification is NOT gated on `delivered_live`, deliberately. Android keeps the
+app-ws socket open while the app sits in the background, so a live socket is a render,
+not a read receipt; gating on it would silence exactly the case a notification exists
+for.
+`EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are merely rate-limited.
+
+**The tap** (`app/lib/push-deep-link-dispatch.ts`). `agent_message` resolves to
+`/projects/<id>/chat?message_id=<id>`, and the chat route CONSUMES that param:
+`app/app/projects/[id]/chat.tsx` threads it as `targetMessageId`, and
+`ChatSyncSurface` feeds it to `chatDeepLinkAnchor`
+(`app/lib/chat-core/chat-initial-anchor.ts`) twice — once at render, joining
+`projectId` in the frozen-anchor key so a COLD open from a tap anchors the
+latch-friendly way, and once in an effect that calls `scrollToIndex` ONCE per
+target, which is the only way to re-anchor a project whose transcript is ALREADY
+mounted (FlashList applies its initial scroll once and latches
+`isInitialScrollComplete`). Both paths ask the same function, so they cannot land
+in different places. The rule prefers the unread run's START when the referenced
+message is inside it (§ ISSUES #505) and the referenced row itself when it is
+behind the read watermark. With no pushed id, nothing scrolls imperatively. A
+`reminder` kind is still DECODED to `/projects/<id>/reminders?reminder_id=<id>` even
+though nothing sends it any more: a store-published app and a self-hosted gateway do
+not upgrade together, and notifications already in the shade still carry it.
 
 ## Ritual executor — approval-gated code rituals (`reminders/`)
 
