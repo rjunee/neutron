@@ -2,6 +2,46 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — four headings collided in this log; only one was a duplicate
+
+"One entry per merged change" (line 3) had never been checked, and folding the 46
+per-entry files back into this file (bb90794b, #304) produced four colliding `##`
+headings. #304 verified that every original heading was still PRESENT; nothing asked
+whether any had become a twin. Measured at f99d6d49: 307 headings, 303 distinct.
+
+Only ONE was a real duplicate. `## 2026-08-14 — the by-path build brief is proven in
+lockstep, prompt to receipt` was written by a84d6cbb (#261) and then re-appended
+VERBATIM by 6da6ddb9 (#275) — a different change, which also added its own entry, so
+the copy was a merge artefact rather than a second record. The two bodies were
+byte-identical apart from the blank separator the copy dropped, which is why the copy
+sat flush against the next heading. Asserted equal before removing it, and the removal
+is 26 lines of prose that still exist 26 lines above.
+
+The other three were NOT duplicates and deleting either side would have destroyed
+history. `Codex and Kimi are connectable from a phone` (1281 vs 4275 chars), `The chat
+agent can search the web` (942 vs 2582) and `Model usage on the phone` (784 vs 2464)
+are each a SUMMARY entry written straight into this log by its original change
+(0e56be5b #161, 4df45217 #168, 68a9a930 #169) plus the long-form companion that the
+same commits wrote to a separate file. Those files were titled `# Title` with the date
+in the FILENAME; #304 normalised that shape to `## YYYY-MM-DD — title` and thereby
+minted a heading identical to the summary's. Both sides are kept and the FOLDED one is
+suffixed ` (detail)`, because it is the synthesised heading — no author typed it — and
+the summary's own `Detail: §` pointer, which until now resolved ambiguously to two
+sections including itself, is repointed to match. No prose changed on either side.
+Containment was checked rather than assumed before ruling deletion out: 0 of 23
+sentences in the three short bodies appear verbatim in their long counterpart.
+
+The contract is now mechanical. `trident/as-built-heading-uniqueness.ts` reports every
+repeated `## ` heading and `trident/as-built-heading-uniqueness.test.ts` runs it
+against this file on every PR. Keyed on the WHOLE heading line, never the date — this
+log carries more than twenty entries dated 2026-08-09 alone, and a gate that cries wolf
+gets waved through. It matters because the file is `merge=union` (cb39016f), so a
+conflicting hunk keeps BOTH sides instead of raising: duplication here compounds
+silently rather than failing loudly, and nothing else looks. Mutation-tested both ways
+— re-appending a collision to the real log reds exactly the conformance case, and
+blinding the checker's `## ` match reds the positive control while the conformance case
+still passes, which is the false negative a lone conformance assertion cannot see.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset
@@ -1570,32 +1610,6 @@ one-character head-slice shift and under a one-character tail edit, both new tes
 RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
 gap this task existed to close.
 
-## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
-
-`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
-build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
->30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
-the host-held part files into a temp dir, the real workflow composes the forge:build
-prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
-by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
-then concatenated in the listed order and measured against the prompt's
-`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
-recomputes before it spends a token. Chained with the by-path suite in
-`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
-reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
-agent retyping anywhere in the path. Test-only; no production file changed.
-
-Two findings from building it. First, the chunk blocks may NOT have their paths
-rewritten wholesale: the coda forming the `.a2` segment names
-`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
-bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
-the assembled brief is asserted to mention neither segment path. Second, dropping the
-trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
-`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
-newline; the sensitivity check therefore uses mutations that move a real byte. Under a
-one-character head-slice shift and under a one-character tail edit, both new tests go
-RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
-gap this task existed to close.
 ## 2026-08-14 — credentials scoped to a previous owner handle migrate at boot, and a scope miss is no longer "not connected"
 
 Rows in `secrets` and `project_credentials` are keyed by the frozen owner handle; rows written before provisioning froze a different handle were invisible to the instance and reported as "not connected". Boot now runs `auth/credential-scope-reconcile.ts` (wired in `gateway/index.ts` inside a never-fail-boot guard): when every credential row sits under exactly one non-boot handle and ZERO rows exist under the boot handle, the scope columns are rewritten in one transaction — a pure metadata move, ciphertext bytes untouched — and a `credential_scope_migrated` audit row records handles, tables, and counts only. Any ambiguity (rows under more than one handle, or any row already under the boot handle) migrates NOTHING: a stale row must never overwrite a freshly connected credential. The sweep covers both `SHARED_KEY_ENCRYPTED_TABLES` members plus the `api_keys` metadata twin, and boot never refuses either way.
@@ -5987,7 +6001,7 @@ silent, so the test asserts it.
 12 tests that PRESS the real controls; four mutants each caught, including "the Connect
 button is rendered but inert" — the failure a source check cannot see.
 
-Detail: § 2026-08-09 — Codex and Kimi are connectable from a phone.
+Detail: § 2026-08-09 — Codex and Kimi are connectable from a phone (detail).
 
 ## 2026-08-09 — the Kimi key comes from the store, and only the store
 
@@ -6159,7 +6173,7 @@ Guarded by a new test asserting every bundled ritual's declared built-ins are a 
 of the live surface — the join between two green suites whose union was broken, the same
 shape as the push-kind drift.
 
-Detail: § 2026-08-09 — The chat agent can search the web.
+Detail: § 2026-08-09 — The chat agent can search the web (detail).
 
 ## 2026-08-09 — Model usage on the phone
 
@@ -6176,7 +6190,7 @@ production code in `app/lib` never imports `landing`.
 Every refusal mutation-tested separately, including one attempt that was NOT faithful and
 proved nothing until rewritten.
 
-Detail: § 2026-08-09 — Model usage on the phone.
+Detail: § 2026-08-09 — Model usage on the phone (detail).
 
 ## 2026-08-09 — Naming the account behind a usage reading
 
@@ -6941,7 +6955,7 @@ a pre-set env value not being overwritten, i.e. the old behaviour restored (3 te
 
 Typecheck 51/51 · lint clean.
 
-## 2026-08-09 — The chat agent can search the web
+## 2026-08-09 — The chat agent can search the web (detail)
 
 Reported as *"Kaizen ritual said it can't do web search."* It couldn't — and
 neither could ordinary chat. `LIVE_AGENT_TOOL_NAMES` in
@@ -6994,7 +7008,7 @@ Adding to `LIVE_AGENT_TOOL_NAMES` is safe because it stays a CONSTANT surface, j
 a larger one; the reuse guard refuses a VARYING surface. The first turn after deploy
 respawns the warm child once, as any deploy does.
 
-## 2026-08-09 — Codex and Kimi are connectable from a phone
+## 2026-08-09 — Codex and Kimi are connectable from a phone (detail)
 
 ### The gap, stated accurately
 
@@ -7075,7 +7089,7 @@ test's, which is what two failures actually were.
 
 Typecheck 51/51 · lint clean · byte-scanned.
 
-## 2026-08-09 — Model usage on the phone
+## 2026-08-09 — Model usage on the phone (detail)
 
 The web card shipped a day earlier and the phone had nothing. ☰ → Settings →
 **Model usage**: the same two windows, the same pace, the same refusals.
