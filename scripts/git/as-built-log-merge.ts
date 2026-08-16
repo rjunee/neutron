@@ -93,29 +93,44 @@
  * says "One entry per merged change"; an entry with no title is not one, and a line that heads
  * nothing is safer as body text than as an entry whose identity is a stray keystroke. This is
  * deliberately NARROWER than CommonMark, which reads every one of the rejected forms as a valid
- * EMPTY heading and additionally allows up to three leading spaces.
+ * EMPTY heading and additionally allows up to three leading spaces and an end-of-line straight
+ * after the hashes.
  *
- * IT TOOK TWO PASSES TO STATE THAT RULE CORRECTLY, AND BOTH MISSES WERE THE SAME DEFECT WEARING A
- * SHORTER NAME — a cross-model reviewer found each. `/^##[ \t]/` rejects a bare `##` but ACCEPTS
- * `## ` and `##\t`, the same empty heading with trailing whitespace. Then `/^##[ \t]+\S/` closed
- * those and still accepted `## #`, `## ##`, `## ###   `: in CommonMark a run of `#` at the END of
- * an ATX heading is an optional CLOSING sequence, so those render empty too (the spec's own example
- * is `### ###`). Both reproduce identically — a base carrying one such body line parses to THREE
- * entries, and an ours-side edit of that line alone (`## ` → `##`, or `## #` → `## ##`) returns
- * `ok: false, wouldLoseEntries: true`, the refusal reserved for history loss, fabricated by editing
- * whitespace. The negative lookahead is the rule stated once: after the delimiter there must be
- * something that is not just a closing sequence. A title may still BEGIN with a hash — `## #303
- * landed` is a heading with content, because a closing sequence only counts at the end — and that
- * case is checked rather than assumed. CRLF falls out by construction: `\r` is whitespace, and the
- * lookahead admits an optional one before the end.
+ * IT TOOK THREE PASSES TO STATE THAT RULE CORRECTLY, AND EVERY MISS WAS THE SAME DEFECT WEARING A
+ * SHORTER NAME — a cross-model reviewer found each one, and each was reproduced before it was
+ * fixed. `/^##[ \t]/` rejects a bare `##` but ACCEPTS `## ` and `##\t`, the same empty heading with
+ * trailing whitespace. `/^##[ \t]+\S/` closed those and still accepted `## #`, `## ##`,
+ * `## ###   `: in CommonMark a run of `#` at the END of an ATX heading is an optional CLOSING
+ * sequence, so those render empty too (the spec's own example is `### ###`). Spelling the closing
+ * sequence out as `(?![ \t]*#*[ \t]*\r?$)` closed THOSE and still accepted `## #\r\r`, and — worse,
+ * because it was a REGRESSION rather than a leftover — `## ` followed by a non-breaking space,
+ * a vertical tab or a form feed, all of which the `\S` cut had rejected. Every one reproduces
+ * identically: a base carrying one such body line parses to THREE entries, and an ours-side edit of
+ * that line alone (`## ` → `##`, `## #` → `## ##`) returns `ok: false, wouldLoseEntries: true` —
+ * the refusal reserved for history loss, fabricated by editing whitespace or punctuation.
  *
- * WHAT IT STILL ADMITS, SO IT IS NOT DISCOVERED AS A SURPRISE: "title" here means "a code point
- * ECMAScript does not call whitespace", so an invisible-only title (U+200B and friends) is accepted
- * and can be edited into a fabricated conflict the same way. It is residual rather than introduced —
- * every earlier cut of this regex accepted it too — and closing it means shipping a unicode
- * category table into a merge driver. The rule is stated as the lexical one it is.
+ * SO THE RULE IS STATED ONCE, AS A CLASS RATHER THAN AS A SHAPE: after the delimiter there must be
+ * a character that is neither whitespace nor a hash. That is one lookahead, it needs no cases, and
+ * it cannot be defeated by a spelling nobody enumerated — which is what the previous two attempts
+ * were, and why each of them needed another round. Two consequences are deliberate:
+ *
+ *   - A title may BEGIN with a hash. `## #303 landed` is a heading with content, because a closing
+ *     sequence only counts at the END, and it has its own guard test — over-narrowing here would
+ *     DROP an entry, which is worse than fabricating a conflict.
+ *   - A title made ENTIRELY of hashes and whitespace (`## # #`, whose CommonMark content is `#`) is
+ *     body text. This is the one place the rule is narrower than the spec by choice: line 3 of the
+ *     log says "One entry per merged change", `#` is not a change, and admitting it would put an
+ *     entry key on a line whose whole content is punctuation.
+ *
+ * ONE LIMIT REMAINS AND IS NAMED RATHER THAN PAPERED OVER. CommonMark counts a lone `\r` as a line
+ * ending; this file splits on `\n` only, so `## \r2026-01-01 — x` is one line here and two there,
+ * and this reads it as a dated heading where a renderer reads an empty heading followed by a
+ * paragraph. Closing it means changing the line model the whole file rests on, including the
+ * byte-exact round-trip `serializeLog(parseLog(t)) === t` that every other guarantee is checked
+ * against. Nothing is LOST by it — the line is intact and both sides parse it the same way — and no
+ * generator writes a bare `\r` mid-line, so it is recorded here rather than fixed.
  */
-const HEADING = /^##[ \t]+(?![ \t]*#*[ \t]*\r?$)/
+const HEADING = /^##[ \t]+(?![\s#]*$)/
 /** `## 2026-08-15 — title`. Ten historical sections carry no date; see `effectiveDates`. */
 const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/
 /**

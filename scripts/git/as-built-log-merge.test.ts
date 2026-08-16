@@ -69,7 +69,7 @@ describe('parse/serialize', () => {
     // subtraction the day a fenced sample lands is cheaper than a duplicate parser maintained
     // forever. The log has no such line today: verified, every one of its heading lines heads an
     // entry, and its quoted markdown is indented.
-    const isHeadingLine = (line: string): boolean => /^##[ \t]+(?![ \t]*#*[ \t]*\r?$)/.test(line)
+    const isHeadingLine = (line: string): boolean => /^##[ \t]+(?![\s#]*$)/.test(line)
     const atColumnZero = text.split('\n').filter(isHeadingLine).length
     expect(parsed.entries.length).toBe(atColumnZero)
     // The same shape the parser uses, NOT `startsWith('## ')`. A literal space here would forbid
@@ -257,25 +257,53 @@ describe('parse/serialize', () => {
     expect(parsed.entries[0]!.lines.join('\n')).toContain('##not-a-heading')
   })
 
-  test('…and so is an EMPTY heading, in every spelling CommonMark has for one', () => {
-    // Two passes of the same defect. `/^##[ \t]/` rejected a bare `##` and accepted `## ` and
-    // `##\t` — the same empty heading with trailing whitespace. `/^##[ \t]+\S/` closed those and
-    // still accepted the CLOSING-SEQUENCE forms: a run of `#` at the end of an ATX heading is
-    // optional punctuation, so `## #` and `## ###   ` render empty too. An entry with no title is
-    // not "one entry per merged change", and its identity would be a keystroke.
-    for (const marker of ['##', '## ', '##\t', '##  ', '## #', '## ##', '## ###   ', '## #\r']) {
+  test('…and so is a heading whose content is only whitespace and hashes', () => {
+    // THREE rounds of the same defect, each spelling found by a cross-model reviewer after the
+    // previous fix shipped, which is the argument for the rule being a CLASS and not a shape:
+    //   `/^##[ \t]/`                       accepted `## ` and `##\t`   (empty + trailing space)
+    //   `/^##[ \t]+\S/`                    accepted `## #`, `## ###  ` (CommonMark closing run)
+    //   `/^##[ \t]+(?![ \t]*#*[ \t]*\r?$)/` accepted `## #\r\r`, and REGRESSED on `## ` + NBSP,
+    //                                       vertical tab and form feed, which `\S` had rejected
+    // An entry with no title is not "one entry per merged change", and its identity would be a
+    // keystroke. `## # #` is here on purpose: its CommonMark content is `#`, and a lone hash is not
+    // a change — this is the one place the rule is narrower than the spec by choice.
+    const markers = [
+      '##',
+      '## ',
+      '##\t',
+      '##  ',
+      '## #',
+      '## ##',
+      '## ###   ',
+      '## #\r',
+      '## #\r\r',
+      '## # #',
+      '##  ',
+      '## ',
+      '## \f',
+    ]
+    for (const marker of markers) {
       const parsed = parseLog(log(`## 2026-08-16 — has a stray marker\n\n${marker}\n\ntail\n\n`))
       expect(parsed.entries.length).toBe(1)
     }
   })
 
-  test('…but a title may BEGIN with a hash, because a closing sequence only counts at the end', () => {
-    // The narrowing that rejects `## #` must not reject `## #303 landed`, which is a heading whose
-    // CONTENT starts with a hash. Without this the fix would trade a fabricated conflict for a
-    // dropped entry, which is the direction that loses history.
-    const parsed = parseLog(log('## #303 landed\n\nbody\n\n'))
-    expect(parsed.entries.length).toBe(1)
-    expect(parsed.entries[0]!.lines[0]).toBe('## #303 landed')
+  test('…but every one of these IS a title, so narrowing may not swallow them', () => {
+    // The other direction, and the one that would lose history rather than fabricate a conflict.
+    // `## #303 landed` is the load-bearing case — a closing sequence counts only at the END, so a
+    // heading whose CONTENT begins with a hash is an ordinary heading. The rest are here because
+    // the reviewer's note was that the property was pinned in only one direction.
+    // The last one is a title whose first character is a NON-BREAKING space. CommonMark strips only
+    // spaces and tabs from ATX content, so its content is non-empty and this is a heading. It is
+    // here because it is the case that separates this rule from the near-miss `(?=\S)…`, which the
+    // reviewer named: that variant rejects this line, and without a fixture the whole suite stays
+    // green while a real titled entry silently becomes body text.
+    const titles = ['## #303 landed', '## \\#', '## !!!', '## 2026-08-16 — ordinary', '##\tafter a tab', '##  x']
+    for (const title of titles) {
+      const parsed = parseLog(log(`${title}\n\nbody\n\n`))
+      expect(parsed.entries.length).toBe(1)
+      expect(parsed.entries[0]!.lines[0]).toBe(title)
+    }
   })
 
   test('…while a TAB after the hashes still is one, which `/^## /` would have silently missed', () => {
@@ -368,6 +396,8 @@ describe('merge', () => {
     for (const [before, after] of [
       ['## ', '##'],
       ['## #', '## ##'],
+      ['## #\r\r', '## ##\r\r'],
+      ['##  ', '##  '],
     ] as const) {
       const withMarker = `## 2026-08-16 — has a stray marker\n\n${before}\n\ntail\n\n`
       const edited = `## 2026-08-16 — has a stray marker\n\n${after}\n\ntail\n\n`

@@ -260,30 +260,40 @@ collision goes unreported. Zero live occurrences of `^##[^# ]` exist in the
 tracked markdown (control: 308 for `^## ` in this log), so this was a latent
 trap, not an outage.
 
-REQUIRING THE DELIMITER WAS NOT ENOUGH — TWICE, AND A CROSS-MODEL REVIEWER FOUND
-BOTH REMAINDERS. `/^##[ \t]/` rejects a bare `##` but ACCEPTS `## ` and `##\t`,
-the same empty heading with trailing whitespace. `/^##[ \t]+\S/` closed those and
-still accepted `## #`, `## ##`, `## ###   `: a run of `#` at the END of an ATX
-heading is an optional CLOSING sequence, so those render empty too — the spec's
-own example is `### ###`. Both reproduce identically: a base carrying one such
-body line parses to THREE entries, and an ours-side edit of that line alone
-(`## ` → `##`, or `## #` → `## ##`) returns `ok: false, wouldLoseEntries: true`,
-on key `## 1` and `## # 1` respectively — the refusal reserved for history loss,
-fabricated by editing whitespace.
+REQUIRING THE DELIMITER WAS NOT ENOUGH — THREE TIMES, EACH REMAINDER FOUND BY A
+CROSS-MODEL REVIEWER RE-RUN ON THE PREVIOUS FIX. `/^##[ \t]/` rejects a bare `##`
+but ACCEPTS `## ` and `##\t`, the same empty heading with trailing whitespace.
+`/^##[ \t]+\S/` closed those and still accepted `## #`, `## ##`, `## ###   `: a
+run of `#` at the END of an ATX heading is an optional CLOSING sequence, so those
+render empty too — the spec's own example is `### ###`. Spelling that sequence
+out as `(?![ \t]*#*[ \t]*\r?$)` closed THOSE and still accepted `## #\r\r`, and
+regressed on `## ` followed by a non-breaking space, a vertical tab or a form
+feed — all of which the `\S` cut had rejected, so that one was not a leftover but
+a new hole opened by the fix. Every spelling reproduces identically: a base
+carrying one such body line parses to THREE entries, and an ours-side edit of
+that line alone (`## ` → `##`, or `## #` → `## ##`) returns `ok: false,
+wouldLoseEntries: true` on key `## 1` and `## # 1` respectively — the refusal
+reserved for history loss, fabricated by editing whitespace or punctuation.
 
-The rule is now stated once, as a negative lookahead: after the delimiter there
-must be something that is not merely a closing sequence. That an entry needs a
-TITLE is this log's contract rather than CommonMark's, which reads every rejected
-form as a valid empty heading and additionally allows up to three leading spaces.
-A title may still BEGIN with a hash — `## #303 landed` is a heading with content,
-since a closing sequence only counts at the end — and that case is pinned by its
-own test rather than assumed, because the alternative to a fabricated conflict is
-a dropped entry, which is the worse direction. CRLF falls out by construction.
-What it still admits is stated rather than left to be discovered: "title" means a
-code point ECMAScript does not call whitespace, so an invisible-only title
-(U+200B and friends) is accepted and can be edited into the same fabricated
-conflict. That is residual — every earlier cut accepted it too — and closing it
-means shipping a unicode category table into a merge driver.
+Three rounds of enumerating spellings is the argument against enumerating them.
+The rule is now a CLASS: after the delimiter there must be a character that is
+neither whitespace nor a hash — one lookahead, no cases, and nothing left for a
+fourth reviewer to spell differently. That an entry needs a TITLE is this log's
+contract rather than CommonMark's, which reads every rejected form as a valid
+empty heading and additionally allows up to three leading spaces and an
+end-of-line straight after the hashes. Two consequences are deliberate and both
+are pinned by their own tests: a title may BEGIN with a hash (`## #303 landed` is
+a heading with content, since a closing sequence counts only at the end — and
+over-narrowing there would DROP an entry, which is worse than fabricating a
+conflict), while a title made entirely of hashes and whitespace (`## # #`) is
+body text, because a lone `#` is not a merged change.
+
+One limit is recorded rather than closed: CommonMark counts a lone `\r` as a line
+ending and this parser splits on `\n` only, so `## \r2026-01-01 — x` is one line
+here and two there. Closing it means changing the line model every other
+guarantee is checked against, including the byte-exact round-trip; nothing is
+lost by it, both sides parse it identically, and no generator writes a bare `\r`
+mid-line.
 
 Also from that review: the per-entry assertion in the real-log test was changed
 off `startsWith('## ')`, which had been quietly outlawing the tab spelling the
