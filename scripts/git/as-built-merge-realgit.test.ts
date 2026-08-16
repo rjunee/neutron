@@ -222,6 +222,93 @@ describe('two concurrent builds publishing against a moved base', () => {
 })
 
 /**
+ * THE CHECKOUT SUPPLIES THE FILES BEING MERGED. IT MUST NOT ALSO SUPPLY THE INTERPRETER'S CONFIG.
+ *
+ * git runs a merge driver with its cwd at the top of the working tree being merged, and bun reads
+ * `bunfig.toml` from its cwd. So a repository that commits a `bunfig.toml` carrying
+ * `preload = ["./anything.ts"]` gets that file executed INSIDE the driver process, before any of our
+ * code, on every merge of this path. The driver is a child of the publisher's `run_host`, whose
+ * environment carries `GH_TOKEN` (`open/composer.ts` `makeLazyCredentialedHostRunner` →
+ * `github/credential.ts` `githubProcessEnv`), so the payload reads the owner's credential out of
+ * `process.env`.
+ *
+ * Round 1 fixed WHICH SCRIPT runs and left this open, which is the same mistake one layer down: the
+ * interpreter's configuration is part of what an untrusted checkout supplies. The fix is
+ * `--config=/dev/null` in the configured command; the test below proves it by running the attack
+ * both ways against real git.
+ */
+describe('a checkout cannot inject code into the driver through bunfig.toml', () => {
+  /** The scenario, plus a hostile `bunfig.toml` + payload committed at the base like any other file. */
+  function hostileScenario(): { repo: string; forkPoint: string; canary: string } {
+    const { repo, forkPoint } = scenario()
+    const canary = join(repo, 'exfiltrated.txt')
+    git(repo, 'checkout', '-q', 'main')
+    writeFileSync(join(repo, 'bunfig.toml'), 'preload = ["./exfil.ts"]\n')
+    writeFileSync(
+      join(repo, 'exfil.ts'),
+      `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(canary)}, String(process.env.GH_TOKEN))\n`,
+    )
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-qm', 'a repo that ships its own bun configuration')
+    return { repo, forkPoint, canary }
+  }
+
+  /** `replay`, but with a credential in the environment for the payload to reach for. */
+  function replayWithToken(repo: string, forkPoint: string, label: string): Ran {
+    const diff = join(repo, `${label}.diff`)
+    const out = Bun.spawnSync(['git', 'diff', `${forkPoint}..build-two`], { cwd: repo, stdout: 'pipe', stderr: 'pipe' })
+    writeFileSync(diff, new TextDecoder().decode(out.stdout))
+    const worktree = join(repo, `.replay-${label}`)
+    git(repo, 'worktree', 'add', '-q', '--detach', worktree, 'main')
+    const res = Bun.spawnSync(['git', 'apply', '--3way', '--index', diff], {
+      cwd: worktree,
+      env: { ...process.env, GH_TOKEN: 'sentinel-credential-value' },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    return {
+      ok: res.exitCode === 0,
+      code: res.exitCode,
+      stdout: new TextDecoder().decode(res.stdout),
+      stderr: new TextDecoder().decode(res.stderr),
+    }
+  }
+
+  test('the payload fires WITHOUT the flag and is inert WITH it — same repo, same merge, one flag apart', () => {
+    const { repo, forkPoint, canary } = hostileScenario()
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    const installed = run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()
+    expect(installed).toContain('--config=/dev/null')
+
+    // CONTROL FIRST — prove the attack is real and this scenario reaches it. The ONLY change is
+    // removing the flag from the configured command; a test asserting "no canary" is worthless
+    // without the half that shows a canary is producible at all.
+    git(repo, 'config', 'merge.as-built-log.driver', installed.replace(' --config=/dev/null', ''))
+    const unprotected = replayWithToken(repo, forkPoint, 'exfil-control')
+    expect(unprotected.ok).toBe(true) // the merge still worked — the payload is silent, which is the point
+    expect(existsSync(canary)).toBe(true)
+    expect(readFileSync(canary, 'utf8')).toBe('sentinel-credential-value')
+    rmSync(canary)
+
+    // …and now the command the installer actually writes.
+    git(repo, 'config', 'merge.as-built-log.driver', installed)
+    const protectedRun = replayWithToken(repo, forkPoint, 'exfil-treatment')
+
+    // THE PROPERTY: nothing from the checkout ran.
+    expect(existsSync(canary)).toBe(false)
+
+    // …and it did not buy that by breaking the merge, which would be a different bug wearing the
+    // same green tick.
+    expect(protectedRun.ok).toBe(true)
+    const merged = readFileSync(join(repo, '.replay-exfil-treatment', 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(merged).not.toContain('<<<<<<<')
+    expect(merged).toContain('## 2026-08-16 — build one shipped')
+    expect(merged).toContain('## 2026-08-16 — build two shipped')
+  }, 60_000)
+})
+
+/**
  * The installer's own header promises the two halves arrive "together or not at all". It has no
  * `errexit` and cannot safely take one — a `--unset` of an absent key exits 5 and a `grep -v` with
  * no output exits 1, both normal here — so that promise is kept by hand, and therefore has to be
@@ -307,11 +394,72 @@ describe('the installer under a locked config — the half-installed state must 
     expect(hasAttribute).toBe(hasDriver)
   }, 30_000)
 
-  test('the SECOND config write failing leaves no declared-but-commandless driver behind', () => {
-    // This is the exit-128 state specifically, and a whole-config lock cannot produce it: it needs
-    // `merge.<name>.name` to LAND and `merge.<name>.driver` to fail, i.e. a failure arriving between
-    // two writes the unfixed script made back to back and checked neither of. A `git` shim that
-    // rejects exactly the second key reproduces that window deterministically.
+  test('a lone .driver with NO .name is a WORKING driver — which is why ordering can replace a rollback', () => {
+    // The measurement the ordering rests on, pinned rather than asserted in a comment. If git ever
+    // started requiring `.name`, writing `.driver` first would stop being safe and this goes red.
+    const repo = freshRepo()
+    const realGit = Bun.which('git')
+    expect(realGit).not.toBeNull()
+
+    const bin = join(repo, 'shim-bin')
+    mkdirSync(bin, { recursive: true })
+    const shim = join(bin, 'git')
+    writeFileSync(
+      shim,
+      [
+        '#!/usr/bin/env bash',
+        'for arg in "$@"; do',
+        '  if [ "$arg" = "merge.as-built-log.name" ]; then',
+        '    echo "error: could not lock config file .git/config: File exists" >&2',
+        '    exit 255',
+        '  fi',
+        'done',
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        '',
+      ].join('\n'),
+    )
+    chmodSync(shim, 0o755)
+
+    const res = Bun.spawnSync(['bash', 'scripts/install-merge-drivers.sh'], {
+      cwd: repo,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    // The cosmetic half failed; the install still succeeded and both load-bearing halves are there.
+    expect(res.exitCode).toBe(0)
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).toBe('')
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()).not.toBe('')
+    expect(attributes(repo)).toContain('merge=as-built-log')
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+
+    // …and git AGREES it is a usable driver: a real three-way merge through it, with no `.name` set.
+    git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+    git(repo, 'config', 'user.name', 'Trident Test')
+    git(repo, 'config', 'commit.gpgsign', 'false')
+    mkdirSync(join(repo, 'docs'), { recursive: true })
+    writeLog(repo, HISTORY)
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-qm', 'base')
+    git(repo, 'checkout', '-q', '-b', 'other')
+    writeLog(repo, [...entry('2026-08-16', 'theirs', 'Written by theirs.'), ...HISTORY])
+    git(repo, 'commit', '-qam', 'theirs')
+    git(repo, 'checkout', '-q', 'main')
+    writeLog(repo, [...entry('2026-08-16', 'ours', 'Written by ours.'), ...HISTORY])
+    git(repo, 'commit', '-qam', 'ours')
+    const merge = run(repo, ['git', 'merge', '--no-edit', 'other'])
+    expect(merge.stderr).not.toContain('lacks command line')
+    expect(merge.ok).toBe(true)
+    const merged = readFileSync(join(repo, 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(merged).toContain('Written by ours.')
+    expect(merged).toContain('Written by theirs.')
+  }, 30_000)
+
+  test('the DRIVER config write failing leaves no declared-but-commandless driver behind', () => {
+    // The exit-128 state is `merge.<name>.name` set with `merge.<name>.driver` unset. The script
+    // now writes `.driver` FIRST and stops there on failure, so a shim rejecting that key must
+    // leave the config completely empty — not merely rolled back. A whole-config lock cannot
+    // distinguish those two outcomes, which is why this uses a key-specific shim.
     const repo = freshRepo()
     const realGit = Bun.which('git')
     expect(realGit).not.toBeNull()
@@ -343,11 +491,14 @@ describe('the installer under a locked config — the half-installed state must 
     })
     expect(res.exitCode).not.toBe(0)
 
-    // The lone `.name` — the thing that makes git refuse the merge with exit 128 — is gone, and the
-    // attribute that would point at it was never written.
+    // The lone `.name` — the thing that makes git refuse the merge with exit 128 — was never
+    // written in the first place, and neither was the attribute that would point at it.
     const name = run(repo, ['git', 'config', '--get', 'merge.as-built-log.name'])
     expect(name.stdout.trim()).toBe('')
     expect(attributes(repo)).not.toContain('merge=as-built-log')
+    // No `--unset` was needed to get there — the earlier version's rollback was a THIRD write that
+    // the same held lock would have blocked, so its absence here is the fix, not an omission.
+    expect(new TextDecoder().decode(res.stderr)).not.toContain('--unset')
 
     // CONTROL — the shim is what stopped it: the identical command without it installs both halves.
     const clean = run(repo, ['bash', 'scripts/install-merge-drivers.sh'])

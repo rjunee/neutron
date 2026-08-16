@@ -24,14 +24,26 @@
  * newest-first among the retained ones, which for the ordinary case (a build writing today's
  * date) means exactly where a build would have prepended it by hand.
  *
- * WHAT IT REFUSES. If both sides modify the SAME existing entry differently, or one deletes what
- * the other edits, or the preamble diverges, or EITHER SIDE KEEPS NONE OF THE ENTRIES THE BASE
- * HAD, that is a genuine semantic conflict and this returns `{ ok: false }`. The caller then falls
- * back to `git merge-file`, so the floor of this whole mechanism is exactly today's behaviour —
- * conflict markers a human reads — never a silent mis-merge. A driver that guessed here would be
- * worse than the conflict it replaced. Every ambiguous case is biased toward refusing: this file
- * rewrites the project's permanent history, so a conflict costs a human five minutes and a
- * plausible-looking result costs entries nobody notices are gone.
+ * WHAT IT REFUSES. If both sides modify the SAME existing entry differently, or the preamble
+ * diverges, or A BASE ENTRY IS ABSENT FROM ONE SIDE WHILE THE OTHER STILL HAS IT, that is a
+ * genuine semantic conflict and this returns `{ ok: false }`. The caller then falls back to
+ * `git merge-file`, so the floor of this whole mechanism is exactly today's behaviour — conflict
+ * markers a human reads — never a silent mis-merge. A driver that guessed here would be worse than
+ * the conflict it replaced. Every ambiguous case is biased toward refusing: this file rewrites the
+ * project's permanent history, so a conflict costs a human five minutes and a plausible-looking
+ * result costs entries nobody notices are gone.
+ *
+ * DELETION REQUIRES AGREEMENT — THE ONLY REMOVAL THIS ACCEPTS IS ONE BOTH SIDES MADE. That rule
+ * replaces a weaker one that only refused when a side kept NONE of the base's entries, and the
+ * weaker rule lost history in the ordinary case: a side truncated newest-first keeps its top few
+ * entries, clears the survivor guard with one to spare, and every older entry then reads as
+ * "deleted by us, untouched by them" and is dropped under `ok: true`. Run against the real
+ * `docs/AS_BUILT.md` (308 entries) with `ours` truncated to ONE base entry and `theirs` an ordinary
+ * concurrent build, the weaker rule returned `ok: true` and DELETED 307 entries from an APPEND-ONLY
+ * history, in a merge nobody diffs. There is no counterpart risk on the
+ * other side of the trade: refusing costs one conflict a human resolves by hand, which is exactly
+ * what happened before this driver existed. The survivor guard below is kept anyway, ahead of this
+ * one, purely because it names the wholesale-truncation case in a sentence an operator can act on.
  *
  * KNOWN LIMIT, STATED RATHER THAN DISCOVERED LATER. Identity is the heading plus an occurrence
  * index, so adding an entry whose heading is byte-identical to an existing one (same date AND same
@@ -59,8 +71,17 @@ const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/
  * block. Per CommonMark a closing fence uses the SAME character, is at least as long as the
  * opening run, and carries nothing after it but whitespace; an info string (```` ```md ````) marks
  * an opening fence and can never close one. All three of those are enforced in `parseLog`.
+ *
+ * INDENTATION IS BOUNDED AT THREE SPACES, WHICH IS CommonMark AND NOT A DETAIL. `^\s*` accepted
+ * ANY indentation, so four-or-more spaces then ``` opened a block that CommonMark reads as ordinary
+ * indented-code TEXT — and every following `## ` was then swallowed into the preceding entry until
+ * something happened to close it. Measured on the old regex: a two-entry input whose first entry
+ * quotes a four-space-indented ``` parsed as ONE entry, so the second entry could not be merged
+ * against, only inside. Three spaces is also CommonMark's limit for a CLOSING fence, which the same
+ * bound gives for free. Nothing is lost in the other direction: `HEADING` only matches at column 0,
+ * so a `## ` that is itself indented into a code block was never read as a heading anyway.
  */
-const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/
 
 export interface LogEntry {
   /**
@@ -186,16 +207,12 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
     return { ok: false, reason: 'neither side parses as an entry log' }
   }
 
-  // …AND THE SAME JUDGEMENT APPLIES TO ONE SIDE ALONE, WHICH IS WHERE THIS SILENTLY LOST HISTORY.
-  // The guard above used to be the only one, so a malformed side was merged as though every entry
-  // it lacks had been DELIBERATELY DELETED. Concretely: base holds one entry, `ours` is the single
-  // line `TRUNCATED`, `theirs` adds a new entry above the old one — both sides changed, so this is
-  // a live driver path — and the old entry came back out as "deleted by us, untouched by them" and
-  // vanished, under an `ok: true` that no human ever reads a diff of. A side that keeps NONE of
-  // the entries the base had is a truncation, a rename or a bad apply, never a considered edit to
-  // an append-only log, and the honest answer is the conflict this file's floor already promises.
-  // Note this refuses on what SURVIVED rather than on the entry count, so a side that replaced the
-  // whole log with different entries is caught by the same rule.
+  // A WHOLESALE TRUNCATION GETS ITS OWN SENTENCE. The per-entry rule further down already refuses
+  // this case, and would refuse it correctly; this guard runs first only so the operator reading
+  // the driver's stderr is told "one side kept none of the 308 entries" instead of being told the
+  // name of whichever entry happened to be examined first. Refusing on what SURVIVED rather than on
+  // the entry count also names a wholesale REWRITE — a side with plenty of entries, none of them
+  // the base's — in the same words.
   if (O.entries.length > 0) {
     const keptByUs = O.entries.filter((entry) => inA.has(entry.key)).length
     const keptByThem = O.entries.filter((entry) => inB.has(entry.key)).length
@@ -222,17 +239,24 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
     const ours_ = inA.get(original.key)
     const theirs_ = inB.get(original.key)
     if (ours_ === undefined && theirs_ === undefined) continue // both deleted it — agreed
-    if (ours_ === undefined) {
-      if (body(theirs_ as LogEntry) !== body(original)) {
-        return { ok: false, reason: `one side deleted an entry the other edited: ${original.key}` }
+
+    // ONE SIDE MISSING AN ENTRY THE OTHER STILL HAS IS A REFUSAL, WHATEVER THE OTHER SIDE DID TO
+    // IT. This used to drop the entry whenever the surviving side had not also edited it, on the
+    // reading that "absent here, unchanged there" is a clean deletion. For an append-only log that
+    // reading is wrong far more often than it is right: a truncated apply, a bad 3-way, a partial
+    // checkout and a genuine deletion all present identically, and only one of them wants the
+    // entry gone. MEASURED, against the real 308-entry log rather than a fixture: `ours` truncated
+    // newest-first to ONE base entry, `theirs` an ordinary concurrent build, and the previous code
+    // returned `ok: true` having DELETED 307 entries. The cost of refusing instead is one conflict a
+    // human resolves, which is what this path did before the driver existed. So a removal is
+    // honoured only when BOTH sides made it — agreement, above, is the only evidence of intent
+    // this file will accept.
+    if (ours_ === undefined || theirs_ === undefined) {
+      const side = ours_ === undefined ? 'ours' : 'theirs'
+      return {
+        ok: false,
+        reason: `the ${side} side is missing an entry the other still has, and an append-only log does not lose entries by accident: ${original.key}`,
       }
-      continue // deleted by us, untouched by them
-    }
-    if (theirs_ === undefined) {
-      if (body(ours_) !== body(original)) {
-        return { ok: false, reason: `one side deleted an entry the other edited: ${original.key}` }
-      }
-      continue
     }
     if (body(ours_) === body(theirs_)) retained.push(ours_)
     else if (body(ours_) === body(original)) retained.push(theirs_)

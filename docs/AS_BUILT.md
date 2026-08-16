@@ -30,37 +30,88 @@ Mutation-tested: restoring the `bash <checkout>/scripts/install-merge-drivers.sh
 call makes the hostile-installer test fail on the canary that script writes from
 `$GH_TOKEN`.
 
+…AND NAMING A TRUSTED SCRIPT WAS NOT ENOUGH, BECAUSE THE CHECKOUT STILL SUPPLIED
+THE INTERPRETER'S CONFIGURATION. git runs a merge driver with its cwd at the top
+of the working tree being merged, and bun reads `bunfig.toml` from its cwd. So a
+repository committing `preload = ["./anything.ts"]` had that file executed inside
+the driver process, before any of our code, on every merge of this path — with
+the same `GH_TOKEN` in the same environment. The first round closed WHICH SCRIPT
+runs and left this open, which is the identical mistake one layer down. The
+configured command is now `bun --config=/dev/null <driver> %O %A %B %L %P`, an
+empty TOML file, so the checkout's `bunfig.toml` supplies no `preload`, no
+`loader` and no registry override; the driver needs none of that, as it reads
+three files and writes one. What was measured is the cwd `bunfig.toml`, which is
+the one an untrusted checkout controls — the flag's effect on a `$HOME` config
+was not measured and nothing here rests on it. Where the interpreter is not bun,
+nothing is installed at all, rather than a `--config` flag being assumed to mean
+the same thing elsewhere.
+Measured on bun 1.3.9 with a control on both sides: without the flag the child
+printed `EXFIL GH_TOKEN=<the value>`, with it the payload never ran and the merge
+still succeeded. Both real-git suites run the attack the same way — the control
+produces the credential first, then the treatment suppresses it.
+
 A MALFORMED SINGLE SIDE SILENTLY DELETED HISTORY. The refusal in
 `scripts/git/as-built-log-merge.ts` required BOTH sides to parse to zero entries,
 so one bad side was merged as though every entry it lacks had been deliberately
 deleted. Reproduced against the shipped code: base holds one entry, ours is the
 literal text `TRUNCATED`, theirs adds a new entry above the old one — `ok: true`,
-and the old entry is gone. Both sides changed, so this is a live driver path. A
-side that keeps NONE of the entries the base had is now refused, which catches a
-wholesale rewrite as well as a truncation because the rule is what SURVIVED
-rather than what the entry count is.
+and the old entry is gone. Both sides changed, so this is a live driver path.
+
+The first fix for that refused only a side that kept NONE of the base's entries,
+and REFUSING ON ZERO SURVIVORS IS NOT REFUSING ON LOST HISTORY — which is the
+same defect wearing a narrower guard. A side truncated newest-first to its top
+two entries keeps one, clears the guard with an entry to spare, and every older
+entry then reads as "deleted by us, untouched by them" and is dropped under
+`ok: true`. Against this file that is one entry kept and 307 deleted. So the rule
+is now the general one: A REMOVAL IS HONOURED ONLY WHEN BOTH SIDES MADE IT. A
+base entry present on one side and absent from the other is a conflict, whatever
+the surviving side did to it — truncation, a bad three-way, a partial checkout
+and a deliberate deletion all present identically, and only one of them wants the
+entry gone. Refusing costs one conflict a human resolves by hand, which is what
+this path did before the driver existed; guessing costs entries nobody notices
+are missing. The zero-survivor guard stays ahead of it purely for its message.
 
 VALID MARKDOWN COULD BE MERGED INTO SOMEBODY'S CODE BLOCK. The fence tracker
 flipped one boolean on EITHER delimiter, so a `~~~` quoted inside a backtick
 fence ended the block early, the sample `## ` heading below it parsed as a real
 entry, and a concurrent addition dated between the two sorted INTO the code
 block. A fence is now closed only by its own delimiter, at least as long as the
-run that opened it, with nothing after it. Parsing of the real 307-entry log is
-byte-identical before and after.
+run that opened it, with nothing after it. Its indentation is also bounded at
+CommonMark's three spaces: the regex was `^\s*`, so four-or-more spaces then
+` ``` ` — which CommonMark reads as ordinary indented-code TEXT, opening nothing
+— began a block that swallowed every heading after it until something happened to
+close it. Measured on the old regex, a two-entry input whose first entry quotes a
+four-space-indented fence parsed as ONE entry. Nothing is given up in the other
+direction, since `HEADING` only matches at column 0. Parsing of the real 308-entry
+log is byte-identical before and after, verified by running both regexes over it.
 
 THE INSTALLER COULD PRODUCE THE STATE ITS OWN HEADER CALLS IMPOSSIBLE. It has no
 `errexit` (and cannot safely take one), so a failed `git config` write did not
 stop the attribute write. Measured with a `config.lock` present: exit 0, the
 message `merge drivers: installed`, the attribute written, the driver unset.
-Every write is now checked, a failed driver write rolls back the lone
-`merge.<name>.name` — which is the config git actually refuses on, `fatal: custom
-merge driver as-built-log lacks command line`, exit 128, measured on git 2.50.1 —
-and both halves are verified before it reports success.
+Every write is now checked and both halves are verified before it reports
+success. The first fix wrote `merge.<name>.name` first and UNSET it by hand when
+the `.driver` write failed — a repair performed by a THIRD config write, which
+the held `config.lock` that caused the failure would have blocked too, so the
+cleanup was best-effort exactly when it was needed. The order is now what makes
+the fatal state unreachable rather than repaired: `.driver` is written FIRST and
+nothing else happens if it fails, and `.name` follows and is not fatal. Measured
+on git 2.50.1 in both directions: a lone `.driver` with NO `.name` merges
+perfectly (the driver ran, exit 0 — `.name` is only the description
+`git config --get-regexp merge.` prints), while a lone `.name` with no `.driver`
+is `fatal: custom merge driver as-built-log lacks command line`, exit 128. Both
+of those are now pinned by tests, the lock-contention path included.
 
-Tests: 44 across `scripts/git/as-built-log-merge.test.ts`,
+Tests: 54 across `scripts/git/as-built-log-merge.test.ts`,
 `scripts/git/as-built-merge-realgit.test.ts` and
-`trident/as-built-publish-wiring-realgit.test.ts`, up from 30. Each safety
-property was mutation-tested with a control proving the mutation landed.
+`trident/as-built-publish-wiring-realgit.test.ts`, up from 29 on the base
+commit — measured by running the three files on each side, not counted by hand
+(the first draft of this line said 44 up from 30 and both numbers were wrong).
+Each safety property was mutation-tested with a control proving the mutation
+landed: reverting the fence bound fails the two indentation tests and nothing
+else, restoring the old one-sided-deletion rule fails the two truncation tests
+and nothing else, and each security test produces the credential under the
+control before asserting its absence under the treatment.
 
 ## 2026-08-16 — two builds can append to this file at once
 

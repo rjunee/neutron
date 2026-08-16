@@ -28,6 +28,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
+
 import { spawnCapture } from './git-mode.ts'
 import { ensureAsBuiltMergeDriver, rebaseOntoObservedBase, TridentRebaseConflict } from './orchestrator.ts'
 
@@ -237,11 +238,14 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     expect(show.stdout).toContain('## 2026-08-16 — the build that published second')
   }, 60_000)
 
-  test('a failed driver-config write leaves no declared-but-commandless driver behind', () => {
+  test('a failed driver-config write never reaches the fatal half — there is nothing to roll back', async () => {
     // `merge.<name>.name` set with no `.driver` is the one state git refuses outright —
     // `fatal: custom merge driver as-built-log lacks command line`, exit 128, measured on git
-    // 2.50.1 — so the write that lands first must not survive the write that fails. A `run_host`
-    // that fails only on the `.driver` key reproduces that window without needing a real lock.
+    // 2.50.1. Round 1 wrote `.name` first and unset it by hand when `.driver` failed, i.e. it
+    // repaired the fatal state with a THIRD config write that the very condition causing the
+    // failure — a held `config.lock` — would also have blocked. Ordering removes the state instead:
+    // `.driver` goes first, and a `run_host` that fails only on that key must therefore leave the
+    // config untouched, with no `--unset` anywhere.
     const calls: string[][] = []
     const runHost = async (cmd: string[]) => {
       calls.push(cmd)
@@ -250,12 +254,92 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     }
 
     // Any checkout that satisfies the applicability gate will do; this repo is one.
-    return ensureAsBuiltMergeDriver(runHost, REPO_ROOT).then((installed) => {
-      expect(installed).toBe(false)
-      const rollback = calls.find((cmd) => cmd.includes('--unset') && cmd.includes('merge.as-built-log.name'))
-      expect(rollback).toBeDefined()
-      // …and it never went on to bind a path to the driver it could not configure.
-      expect(calls.some((cmd) => cmd.includes('--git-common-dir'))).toBe(false)
-    })
+    const installed = await ensureAsBuiltMergeDriver(runHost, REPO_ROOT)
+    expect(installed).toBe(false)
+    // The cosmetic key was never written, so no cleanup is owed for it…
+    expect(calls.some((cmd) => cmd.includes('merge.as-built-log.name'))).toBe(false)
+    // …and none was attempted.
+    expect(calls.some((cmd) => cmd.includes('--unset'))).toBe(false)
+    // …and it never went on to bind a path to the driver it could not configure.
+    expect(calls.some((cmd) => cmd.includes('--git-common-dir'))).toBe(false)
   })
+
+  test('CONTROL — the COSMETIC write failing is not fatal: the driver still installs', async () => {
+    // The other half of the ordering claim. If `.name` were load-bearing this would have to fail,
+    // and writing `.driver` first would be no safer than writing it second.
+    const calls: string[][] = []
+    const runHost = async (cmd: string[]) => {
+      calls.push(cmd)
+      const ok = !cmd.includes('merge.as-built-log.name')
+      return { ok, exit_code: ok ? 0 : 255, stdout: '', stderr: ok ? '' : 'could not lock config file' }
+    }
+    // `--git-common-dir` has to answer for the attribute write to be attempted at all; point it at
+    // a scratch dir so this test writes nothing into the real repo.
+    const scratch = mkdtempSync(join(tmpdir(), 'as-built-cosmetic-'))
+    created.push(scratch)
+    const runHostWithCommonDir = async (cmd: string[], cwd: string) => {
+      if (cmd.includes('--git-common-dir')) return { ok: true, exit_code: 0, stdout: `${scratch}\n`, stderr: '' }
+      return runHost(cmd, cwd)
+    }
+
+    const installed = await ensureAsBuiltMergeDriver(runHostWithCommonDir, REPO_ROOT)
+    expect(installed).toBe(true)
+    expect(readFileSync(join(scratch, 'info', 'attributes'), 'utf8')).toContain('docs/AS_BUILT.md merge=as-built-log')
+    // …and the command it wrote is locked down against the checkout's own bun configuration.
+    const driverWrite = calls.find((cmd) => cmd.includes('merge.as-built-log.driver'))
+    expect(driverWrite).toBeDefined()
+    expect(driverWrite?.at(-1)).toContain('--config=/dev/null')
+  })
+
+  test('SECURITY — a bunfig.toml in the checkout cannot preload code into the driver process', async () => {
+    // The vector round 1 left open. git runs a merge driver with cwd at the top of the working tree
+    // being merged, and bun reads `bunfig.toml` from cwd — so naming a trusted script is not enough
+    // while the checkout still supplies the config that script starts under. The publisher's
+    // `run_host` carries `GH_TOKEN`, so the preload reads the owner's credential from its own
+    // environment. Reproduced on bun 1.3.9 before the flag; inert after it.
+    const world = await seedWorld({ shipsInstaller: true, label: 'bunfig' })
+    const canary = join(world.root, 'exfiltrated.txt')
+
+    // The payload, committed on `main` so the scratch rebase worktree checks it out.
+    writeFileSync(join(world.checkout, 'bunfig.toml'), 'preload = ["./exfil.ts"]\n')
+    writeFileSync(
+      join(world.checkout, 'exfil.ts'),
+      `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(canary)}, String(process.env.GH_TOKEN))\n`,
+    )
+    await git(world.checkout, 'add', '-A')
+    await git(world.checkout, ...GIT_ID, 'commit', '-q', '-m', 'a repo that ships its own bun configuration')
+    await git(world.checkout, 'push', '-q', 'origin', 'main')
+
+    // CONTROL — prove the payload is live and this scenario reaches it, by running the driver the
+    // way the checkout would have it run: same interpreter, same script, cwd in the checkout, no
+    // `--config`. "No canary" means nothing without a demonstrated canary.
+    const control = await spawnCapture(
+      [process.execPath, join(REPO_ROOT, 'scripts', 'git', 'as-built-merge-driver.ts')],
+      world.checkout,
+      { GH_TOKEN: 'sentinel-credential-value' },
+    )
+    expect(control.ok).toBe(false) // no arguments — it refuses, which is fine; the preload ran first
+    expect(readFileSync(canary, 'utf8')).toBe('sentinel-credential-value')
+    rmSync(canary)
+
+    const scratchDir = join(world.checkout, '.trident-worktrees', 'rebase-bunfig')
+    const res = await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir)
+
+    // THE PROPERTY: publishing merged the log without executing anything the checkout supplied.
+    expect(existsSync(canary)).toBe(false)
+    expect(res.rebased).toBe(true)
+
+    const configured = await spawnCapture(
+      ['git', '-C', world.checkout, 'config', '--get', 'merge.as-built-log.driver'],
+      world.checkout,
+    )
+    expect(configured.stdout).toContain('--config=/dev/null')
+
+    // …and it did not buy that by skipping the merge, which would be a different bug wearing the
+    // same green tick.
+    const show = await spawnCapture(['git', '-C', world.checkout, 'show', `${res.head}:docs/AS_BUILT.md`], world.checkout)
+    expect(show.stdout).not.toContain('<<<<<<<')
+    expect(show.stdout).toContain('## 2026-08-16 — the build that published first')
+    expect(show.stdout).toContain('## 2026-08-16 — the build that published second')
+  }, 60_000)
 })

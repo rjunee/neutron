@@ -32,20 +32,25 @@
 # exits 1 on an empty result, both of which are normal here). So every step below that can leave
 # the fatal half behind is checked BY HAND, and the ordering is load-bearing:
 #
-#   config first → attribute second → verify both → remove the attribute again if either is missing
+#   .driver → .name → attribute → verify both → remove the attribute again if either is missing
 #
 # because driver-without-attribute is inert while a clone that BELIEVES it is installed is not.
-# Measured on git 2.50.1, the two bad halves differ and both were reachable:
+# Measured on git 2.50.1, the two bad halves differ and only one of them is now reachable:
 #
 #   • `merge.<name>.name` written with no `.driver` — git refuses outright, exit 128:
 #         fatal: custom merge driver as-built-log lacks command line.
-#     Reachable whenever the first config write lands and the second does not, which is why the
-#     second's failure path unsets the first.
+#     UNREACHABLE BY ORDERING. `.driver` is written first and nothing else happens if it fails, and
+#     a lone `.driver` with no `.name` merges perfectly (measured: driver ran, exit 0 — `.name` is
+#     only the description `git config --get-regexp merge.` prints). The earlier version wrote
+#     `.name` first and unset it by hand when `.driver` failed — a cleanup performed by a THIRD
+#     write, which the held `config.lock` that caused the failure would have blocked too. Ordering
+#     removes the state; a rollback only apologises for it.
 #   • the attribute written with no config at all — git falls back to its built-in merge SILENTLY,
 #     so the clone reports "installed" and goes on conflicting exactly as before. Reachable with a
 #     stale `$GIT_COMMON_DIR/config.lock`: the unchecked version appended the attribute after both
 #     config writes had failed and still printed "merge drivers: installed" on exit 0 — the exact
-#     state the paragraph above calls impossible.
+#     state the paragraph above calls impossible. `--check` and the lock-contention case are both
+#     covered in `scripts/git/as-built-merge-realgit.test.ts`.
 
 set -uo pipefail
 
@@ -128,14 +133,20 @@ fail_unwritable() {
   exit 3
 }
 
-if ! git -C "$ROOT" config "merge.$DRIVER_NAME.name" "entry-aware merge for the AS_BUILT log"; then
-  fail_unwritable "merge.$DRIVER_NAME.name"
-fi
-if ! git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$BUN $DRIVER_SCRIPT %O %A %B %L %P"; then
-  # Leave no lone `.name` behind; if the config is locked this cannot land either, hence the `|| :`.
-  git -C "$ROOT" config --unset "merge.$DRIVER_NAME.name" 2>/dev/null || :
+# `--config=/dev/null` IS NOT OPTIONAL. git runs a merge driver with its cwd at the top of the
+# working tree being merged, and bun reads `bunfig.toml` from its cwd — so without this flag a
+# `bunfig.toml` carrying `preload = ["./anything.ts"]` executes that file inside the driver process
+# on every merge of this path, inheriting whatever credentials the invoking shell holds. Reproduced
+# on bun 1.3.9; `--config=/dev/null` is an empty TOML file, and the driver needs no config of its
+# own (it reads three files and writes one).
+DRIVER_COMMAND="$BUN --config=/dev/null $DRIVER_SCRIPT %O %A %B %L %P"
+
+# THE LOAD-BEARING HALF FIRST — see the header. A lone `.driver` works; a lone `.name` is fatal.
+if ! git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$DRIVER_COMMAND"; then
   fail_unwritable "merge.$DRIVER_NAME.driver"
 fi
+# Cosmetic, and deliberately not fatal: its absence changes nothing about how the merge runs.
+git -C "$ROOT" config "merge.$DRIVER_NAME.name" "entry-aware merge for the AS_BUILT log" || :
 
 if ! mkdir -p "$(dirname "$ATTRS")"; then
   echo "install-merge-drivers: NOT INSTALLED — could not create $(dirname "$ATTRS")" >&2
@@ -160,6 +171,6 @@ if [ -z "$(git -C "$ROOT" config --get "merge.$DRIVER_NAME.driver" 2>/dev/null)"
 fi
 
 echo "merge drivers: installed"
-echo "       driver → $BUN $DRIVER_SCRIPT %O %A %B %L %P"
+echo "       driver → $DRIVER_COMMAND"
 echo "       path   → $ATTR_LINE"
 echo "                ($ATTRS)"

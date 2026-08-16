@@ -61,7 +61,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
@@ -541,6 +541,39 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * The command git will run for a merge, built so the TARGET CHECKOUT CANNOT INJECT CODE INTO IT.
+ *
+ * ⚠️ GIT RUNS A MERGE DRIVER WITH ITS CWD AT THE TOP OF THE WORKING TREE BEING MERGED, AND BUN
+ * READS `bunfig.toml` FROM ITS CWD. So naming a trusted script is NOT on its own enough: a
+ * `bunfig.toml` committed in the target repository with `preload = ["./anything.ts"]` runs that
+ * file inside our driver process, before a line of our code, every time git merges this path.
+ * That process is a child of the publisher's `run_host`, whose environment carries `GH_TOKEN`
+ * (`open/composer.ts` `makeLazyCredentialedHostRunner` → `github/credential.ts` `githubProcessEnv`),
+ * so the payload reads the owner's credential straight out of `process.env`. Reproduced on bun
+ * 1.3.9: with the preload present the child printed `EXFIL GH_TOKEN=<the value>`; with
+ * `--config=/dev/null` in front of the script it printed nothing and the script still ran. Round 1
+ * closed the "which script runs" hole and left this one open, which is the same class of mistake
+ * one layer down — the interpreter's own configuration is part of what an untrusted checkout
+ * supplies.
+ *
+ * `--config=/dev/null` names an empty TOML file, so the checkout's `bunfig.toml` supplies no
+ * `preload`, no `loader` and no registry override. The driver needs none of that: it reads three
+ * files and writes one. (Scope, stated rather than overclaimed: what was MEASURED is the cwd
+ * `bunfig.toml`, which is the one an untrusted checkout controls. Whether the flag also displaces a
+ * `$HOME/.bunfig.toml` was not measured and nothing here depends on it — `$HOME` on the publisher
+ * host is as trusted as the interpreter itself.)
+ *
+ * `null` when the interpreter is not bun. The driver is a `.ts` module, so nothing else can run it
+ * anyway, and rather than infer that some other interpreter would honour a `--config` flag with the
+ * same meaning, this refuses to install — which leaves the checkout merging the log exactly as it
+ * does today.
+ */
+function asBuiltDriverCommand(driver: string): string | null {
+  if (basename(process.execPath).replace(/\.exe$/i, '') !== 'bun') return null
+  return `${shellQuote(process.execPath)} --config=/dev/null ${shellQuote(driver)} %O %A %B %L %P`
+}
+
+/**
  * Bind the entry-aware `docs/AS_BUILT.md` merge driver in a build checkout, where it applies.
  *
  * ⚠️ FILE PRESENCE IN THE TARGET CHECKOUT IS NOT AUTHORIZATION, AND NOTHING FROM THE TARGET
@@ -563,6 +596,13 @@ function shellQuote(value: string): string {
  * TARGET's driver script, which git would then have run under the same credential on every merge
  * touching this path.
  *
+ * …AND NEITHER IS THE INTERPRETER'S CONFIGURATION, WHICH IS THE THIRD WAY IN. Naming a trusted
+ * script is not sufficient while the checkout still supplies the `bunfig.toml` that script starts
+ * under — see `asBuiltDriverCommand`, where the `--config=/dev/null` that closes it lives, with the
+ * reproduction. The property to hold onto is the one this whole docblock is about: NOTHING the
+ * target checkout contains — not a script, not a config, not a `PATH` — decides what runs on the
+ * publisher host.
+ *
  * ONLY WHERE IT APPLIES. Two conditions, both read as DATA and neither executed: the checkout has
  * the log, and it carries this log's merge contract (`scripts/git/as-built-log-merge.ts`), which is
  * what distinguishes a repo using this layout from one that merely has a file by that name. A repo
@@ -571,10 +611,18 @@ function shellQuote(value: string): string {
  * authorises only "merge this one path with our own reviewed code, or conflict", which is a
  * decision an untrusted repo is welcome to make.
  *
- * ORDER IS LOAD-BEARING: config first, attribute second, and the attribute is skipped entirely if
- * the config did not land. Driver-without-attribute is inert; attribute-without-driver is fatal to
- * every merge touching the path (`lacks command line`, exit 128). Same rule as the standalone
- * installer, for the same reason.
+ * ORDER IS LOAD-BEARING, AND IT IS CHOSEN SO THE FATAL HALF-STATE CANNOT BE REACHED AT ALL.
+ * `merge.<name>.driver` is written FIRST, `merge.<name>.name` — which is only a human-readable
+ * description — second, and the attribute last, skipped entirely unless the driver landed. Measured
+ * on git 2.50.1: a lone `.driver` with NO `.name` merges perfectly (the driver ran, exit 0), while a
+ * lone `.name` with no `.driver` is `fatal: custom merge driver as-built-log lacks command line`,
+ * exit 128. Round 1 wrote `.name` first and rolled it back by hand when `.driver` failed, which
+ * meant the fatal state existed for a moment and its cleanup was a second write that the very
+ * condition causing the failure (a held `config.lock`) would also have blocked. Writing the
+ * load-bearing half first deletes the state instead of cleaning up after it, so there is no
+ * rollback to fail. Attribute-without-driver stays fatal, and driver-without-attribute stays inert,
+ * which is why the attribute is still last. Same rule as the standalone installer, for the same
+ * reason.
  *
  * BEST EFFORT, NEVER FATAL. A failure to install leaves the checkout merging exactly as it does
  * today — a conflict on the log — which is the same outcome as not calling this at all. Publishing
@@ -592,28 +640,25 @@ export async function ensureAsBuiltMergeDriver(
   const driver = ownAsBuiltMergeDriver()
   if (driver === null) return false
 
+  // `process.execPath` is the interpreter already running trident, so the driver is reached without
+  // consulting the target checkout's PATH for a `bun` it might supply itself — and `--config` stops
+  // it reading the checkout's `bunfig.toml`. `null` means "not bun": do not install.
+  const command = asBuiltDriverCommand(driver)
+  if (command === null) return false
+
   try {
-    // `process.execPath` is the interpreter already running trident, so the driver is reached
-    // without consulting the target checkout's PATH for a `bun` it might supply itself.
-    const command = `${shellQuote(process.execPath)} ${shellQuote(driver)} %O %A %B %L %P`
-    const named = await run_host(
-      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.name`, 'entry-aware merge for the AS_BUILT log'],
-      repoPath,
-    )
-    if (!named.ok) return false
+    // THE LOAD-BEARING HALF FIRST. A lone `.driver` is a working driver; a lone `.name` is fatal.
     const configured = await run_host(
       ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.driver`, command],
       repoPath,
     )
-    if (!configured.ok) {
-      // A LONE `.name` IS THE ONE STATE GIT REFUSES OUTRIGHT — `fatal: custom merge driver
-      // as-built-log lacks command line`, exit 128, on every merge touching a path bound to it
-      // (measured on git 2.50.1). The attribute below is never written when we get here, so nothing
-      // is bound to it yet; rolling the `.name` back anyway keeps that true for a LATER install
-      // that does write the attribute, and for anyone reading the config by hand.
-      await run_host(['git', '-C', repoPath, 'config', '--unset', `merge.${AS_BUILT_DRIVER_NAME}.name`], repoPath)
-      return false
-    }
+    if (!configured.ok) return false
+    // Cosmetic, and deliberately unchecked: it is what `git config --get-regexp merge.` prints to a
+    // human, and its absence changes nothing about how the merge runs.
+    await run_host(
+      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.name`, 'entry-aware merge for the AS_BUILT log'],
+      repoPath,
+    )
 
     // The COMMON git dir, not the per-worktree one: a linked worktree reads attributes from the
     // common one, which is what the publisher's throwaway rebase worktree depends on.

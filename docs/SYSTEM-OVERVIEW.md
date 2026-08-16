@@ -6470,15 +6470,24 @@ The fix is a git merge driver that works on **whole entries**:
   historically, and re-sorting 300 entries would bury a one-entry change);
   additions are placed newest-first among them. It is entry-aware and never
   line-aware on purpose — a `union` driver would interleave two entries, and
-  **every ambiguous case is biased toward refusing.** A side that keeps NONE of
-  the entries the base had is a truncation, a rename or a bad apply — never a
-  considered edit to an append-only history — and is refused rather than merged
-  as though each missing entry had been deliberately deleted. Entry boundaries
-  ignore `## ` inside a fenced block, and a fence is closed only by its OWN
-  delimiter, at least as long as the one that opened it, with nothing after it:
-  a `~~~` quoted inside a backtick fence used to end the block early, which made
-  the sample heading below it parse as a real entry and let concurrent additions
-  land INSIDE somebody's code block.
+  **every ambiguous case is biased toward refusing.** Concretely, **a removal is
+  honoured only when BOTH sides made it**: a base entry present on one side and
+  absent from the other is a conflict, whatever the surviving side did to it. An
+  earlier rule refused only when a side kept NONE of the base's entries, which
+  let the ordinary failure through — a side truncated to its newest two entries
+  clears a zero-survivor guard with one entry to spare, and every older entry
+  then reads as "deleted by us, untouched by them" and is dropped under a
+  success nobody diffs. Against the real 308-entry log that is 307 entries gone.
+  The zero-survivor guard is still there, ahead of the general rule, only because
+  it names the wholesale-truncation case in a sentence an operator can act on.
+  Entry boundaries ignore `## ` inside a fenced block, and a fence is closed only
+  by its OWN delimiter, at least as long as the one that opened it, with nothing
+  after it: a `~~~` quoted inside a backtick fence used to end the block early,
+  which made the sample heading below it parse as a real entry and let concurrent
+  additions land INSIDE somebody's code block. Fence indentation is bounded at
+  CommonMark's three spaces — `^\s*` accepted any, so a four-space-indented
+  ` ``` ` (which CommonMark reads as ordinary indented-code text) opened a block
+  that swallowed every heading after it.
   interleaving inside one entry is what produced broken TypeScript in an earlier
   incident.
 - `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls.
@@ -6498,11 +6507,28 @@ The fix is a git merge driver that works on **whole entries**:
 
 `rebaseOntoObservedBase` (`trident/orchestrator.ts`) binds the driver before it
 replays a branch, so build lanes get this without anyone remembering.
-`ensureAsBuiltMergeDriver` writes the same two halves the script does — the
-config, then the attribute, and the attribute only if the config landed —
-**directly, and it executes nothing out of the checkout**. The command it
-configures is *this installation's* `scripts/git/as-built-merge-driver.ts` under
-the interpreter already running trident.
+`ensureAsBuiltMergeDriver` writes the same halves the script does — the driver
+config, then the (cosmetic) `merge.<name>.name`, then the attribute, and the
+attribute only if the driver config landed — **directly, and it executes nothing
+out of the checkout**. The command it configures is *this installation's*
+`scripts/git/as-built-merge-driver.ts` under the interpreter already running
+trident, invoked as `bun --config=/dev/null …`.
+
+**That flag is load-bearing, not tidiness.** git runs a merge driver with its cwd
+at the top of the working tree being merged, and bun reads `bunfig.toml` from its
+cwd — so naming a trusted script is not sufficient while the checkout still
+supplies the configuration that script starts under. A repository committing
+`preload = ["./anything.ts"]` had that file executed inside the driver process,
+before any of our code, on every merge of this path. Measured on bun 1.3.9: with
+the preload present the child printed the `GH_TOKEN` it found in its environment;
+with `--config=/dev/null` it printed nothing and the driver still ran. What was
+measured is the **cwd** `bunfig.toml`, which is the one an untrusted checkout
+controls; nothing here depends on the flag's effect on `$HOME`. The
+property to hold is that **nothing the target checkout contains — not a script,
+not a config, not a `PATH` — decides what runs on the publisher host.** Both
+halves of that are pinned with a control that produces the credential before the
+treatment suppresses it (`scripts/git/as-built-merge-realgit.test.ts`,
+`trident/as-built-publish-wiring-realgit.test.ts`).
 
 That matters because the publisher's `run_host` carries the owner's `GH_TOKEN`
 (`open/composer.ts` composes it via `makeLazyCredentialedHostRunner` over
@@ -6522,9 +6548,16 @@ completely untouched.
 The standalone `scripts/install-merge-drivers.sh` remains the path for humans
 (`CONTRIBUTING.md`), and enforces the same ordering by hand: it has no `errexit`
 (a `--unset` of an absent key exits 5, a `grep -v` with no output exits 1 — both
-normal there), so each write is checked, a failed driver write rolls back the
-lone `merge.<name>.name` that would otherwise make git refuse the merge with
-`lacks command line`, and both halves are verified before it reports success.
+normal there), so each write is checked and both halves are verified before it
+reports success. **The order is what makes the fatal half unreachable rather than
+merely repaired:** `merge.<name>.driver` is written FIRST and nothing else
+happens if it fails, and `merge.<name>.name` — which is only the description
+`git config --get-regexp merge.` prints — is written after and is not fatal.
+Measured on git 2.50.1, a lone `.driver` with no `.name` merges perfectly while a
+lone `.name` with no `.driver` is `lacks command line`, exit 128. The earlier
+version wrote `.name` first and unset it by hand on failure, i.e. it repaired the
+fatal state with a THIRD write that the held `config.lock` causing the failure
+would also have blocked.
 
 Proven against real git, not stubs: `scripts/git/as-built-merge-realgit.test.ts`
 replays two branches onto a moved base and asserts the conflict WITHOUT the

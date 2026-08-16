@@ -92,8 +92,32 @@ describe('parse/serialize', () => {
     expect(serializeLog(parsed)).toBe(text)
   })
 
-  test('an INDENTED fence opens and closes at its own indentation', () => {
+  test('an INDENTED fence opens and closes at its own indentation, up to CommonMark\'s three spaces', () => {
     const text = log('## 2026-08-16 — fenced inside a list\n\n- item:\n\n  ```md\n## 2000-01-01 — sample only\n  ```\n\ntail\n\n')
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(1)
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
+  test('FOUR spaces is indented code, not a fence — so it cannot swallow the entries that follow', () => {
+    // The regex was `^\s*`, which accepted any indentation. CommonMark stops at three: at four the
+    // line is ordinary indented-code TEXT and opens nothing. Measured on the old regex, this exact
+    // input parsed to ONE entry — the four-space ``` opened a block that never closed, and the
+    // second entry was swallowed into the first, where a merge could then place things inside it.
+    const text = log(
+      '## 2026-08-16 — quotes an over-indented sample\n\n    ```\n    not a fence, just indented code\n\n',
+      '## 2026-08-15 — a real entry that must stay reachable\n\nbody\n\n',
+    )
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(2)
+    expect(parsed.entries[1]!.lines[0]).toBe('## 2026-08-15 — a real entry that must stay reachable')
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
+  test('…and a four-space CLOSING run does not close a fence opened at column zero', () => {
+    // The same bound on the other end: an over-indented run is body text, so the block stays open
+    // and the sample heading inside it is still sample text.
+    const text = log('## 2026-08-16 — fence closed properly\n\n```\n    ```\n## 2000-01-01 — sample only\n```\n\ntail\n\n')
     const parsed = parseLog(text)
     expect(parsed.entries.length).toBe(1)
     expect(serializeLog(parsed)).toBe(text)
@@ -275,14 +299,66 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     expect(mergeAsBuiltLog(base, log(NEW_ONE), log(NEW_TWO, OLD_A, OLD_B)).ok).toBe(false)
   })
 
-  test('CONTROL — a side keeping even ONE base entry still merges, so the guard is not "refuse everything"', () => {
+  test('a NEWEST-FIRST truncation that keeps one entry is refused too — surviving the guard is not surviving', () => {
+    // THE DEFECT THIS PINS, and it is the ordinary shape of the bug rather than the extreme one:
+    // the survivor guard only fired at ZERO survivors, so a side truncated to its newest entries
+    // cleared it with one entry to spare and every older entry was then read as "deleted by us,
+    // untouched by them" and dropped under `ok: true`. `ours` here keeps NEW_ONE and OLD_B and has
+    // lost OLD_A; `theirs` still has OLD_A. Against the real 308-entry log the same input keeps one
+    // entry and deletes 307.
     const base = log(OLD_A, OLD_B)
     const res = mergeAsBuiltLog(base, log(NEW_ONE, OLD_B), log(NEW_TWO, OLD_A, OLD_B))
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.reason).toContain('## 2026-08-10 — older thing')
+  })
+
+  test('CONTROL — the same merge with nothing missing still succeeds, so the rule is not "refuse everything"', () => {
+    // Identical to the case above except that `ours` keeps OLD_A. If this went red the rule would
+    // have stopped being a safety property and started being a denial of the feature.
+    const base = log(OLD_A, OLD_B)
+    const res = mergeAsBuiltLog(base, log(NEW_ONE, OLD_A, OLD_B), log(NEW_TWO, OLD_A, OLD_B))
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.text).toContain('body one')
     expect(res.text).toContain('body two')
+    expect(res.text).toContain('body of older thing')
     expect(res.text).toContain('body of oldest thing')
+  })
+
+  test('THE REAL LOG — a truncation keeping ONE of its 308 entries is refused, not merged minus 307', () => {
+    // The fixtures above are three-entry toys. This is the file the driver is actually pointed at,
+    // in the shape the bug takes there: `ours` truncated newest-first to a single base entry,
+    // `theirs` an ordinary concurrent build. Measured against the previous rule, this exact input
+    // returned `ok: true` with 307 of the 308 entries gone.
+    const parsed = parseLog(readFileSync(REAL_LOG, 'utf8'))
+    expect(parsed.entries.length).toBeGreaterThan(250)
+
+    const base = serializeLog(parsed)
+    const ours = serializeLog({ preamble: parsed.preamble, entries: parsed.entries.slice(0, 1) })
+    const fresh = parseLog(log(NEW_ONE)).entries[0]!
+    const theirs = serializeLog({ preamble: parsed.preamble, entries: [fresh, ...parsed.entries] })
+
+    const res = mergeAsBuiltLog(base, ours, theirs)
+    expect(res.ok).toBe(false)
+
+    // CONTROL — the same `theirs` against an INTACT `ours` still merges, so what is being refused
+    // is the truncation and not the size of the file.
+    const intact = mergeAsBuiltLog(base, base, theirs)
+    expect(intact.ok).toBe(true)
+    if (!intact.ok) return
+    expect(parseLog(intact.text).entries.length).toBe(parsed.entries.length + 1)
+  })
+
+  test('a one-sided deletion is refused even when the other side never touched the entry', () => {
+    // The narrowest possible statement of the rule, with no truncation and no concurrent edit
+    // anywhere: base has two entries, `ours` drops one, `theirs` is byte-identical to the base.
+    // Under the old code this was the textbook "clean deletion" and the entry left silently.
+    const base = log(OLD_A, OLD_B)
+    const res = mergeAsBuiltLog(base, log(OLD_B), base)
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.reason).toContain('append-only')
   })
 
   test('an empty base is still merged — the guard is about LOSING history, not about having none', () => {
