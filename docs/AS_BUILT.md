@@ -200,6 +200,32 @@ there — the same fixture-pins-impossible-behaviour defect class as the test th
 entry above describes. The fixture now carries the measured shapes by name
 (`RULESET_GOVERNED_BRANCH`, `CLASSIC_PROTECTED_BRANCH`) and the missing pairing is
 a headline test.
+
+**An EMPTY rollup satisfied "everything has finished" vacuously.** `rollupSettled`
+was initialised to `true` and falsified only from inside a loop over the rollup's
+own rows, so ZERO rows left it true. The config-error fast-fail then declared a
+configuration fault whose sentence read `every other check on this PR has
+finished` over a PR where nothing had started — and because config-error is
+terminal, it also spent the remaining waits on a state that only needed waiting.
+The trigger is ordinary rather than exotic: a fork or first-time-contributor PR
+whose workflows sit `awaiting approval` reports `statusCheckRollup: []` until a
+maintainer approves them, which is exactly the case that must WAIT. The
+unprotected-base path already refused the empty rollup for this reason
+(`ran.length === 0` ⇒ `absent`), so the asymmetry was unintended; the flag now
+seeds from the rollup's own size and both paths agree. A SKIPPED-only rollup is
+still settled, which the existing test pins.
+
+**And the fixture default could still describe two worlds at once.** Naming the
+measured shapes was not enough on its own: the flagship `a 404 on protection is
+an ANSWER — the ruleset still speaks` test kept taking the `protected:false`
+default while asserting that a NON-EMPTY ruleset speaks, a pairing GitHub cannot
+emit. It now states the ruleset-governed payload, and the fixture builder REFUSES
+the contradiction outright — a branch reporting `protected:false` alongside a
+ruleset that requires a status check throws, so no future case can smuggle the
+combination back in. The guard is scoped to where the branch section is
+LOAD-BEARING (the classifier reads it only when the protection subresource 404s),
+because pinning an inert field would be noise rather than a guard.
+
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
 Landed via PR #325.
