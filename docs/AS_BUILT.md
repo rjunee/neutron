@@ -18,14 +18,28 @@ GitHub answers 404 rather than 403 for a resource the credential may not ask
 about, precisely so the endpoint does not disclose that it exists. The same body
 therefore meant two opposite things, and a credential with PR + check scope but
 no Administration-read silently downgraded a PROTECTED base to unprotected and
-reported success. The permissive reading now requires a POSITIVE CONTROL: either
-`branches/{b}` answering `protected:false` (readable with plain pull access, so
-it answers for exactly the credential that cannot read protection) or
-`repos/{o}/{r}` answering `permissions.admin:true` (the credential could have
-read protection, so its 404 is an answer rather than a refusal). Either proof is
-enough; NEITHER is `mode:'unknown'` and the gate defers naming the ambiguity.
-The rulesets read is not ambiguous the same way — `rules/branches/{b}` is
-readable with pull access and answers `[]` — so its 404 keeps its old meaning.
+reported success. The permissive reading now requires a POSITIVE CONTROL, and it
+has to come from a read PLAIN PULL ACCESS can do, because the credential that
+cannot read protection is the entire case. `branches/{b}` is that read and it
+answers on two fields: `protected:false` (nothing guards the branch at all) or
+`protection.enabled:false` (no CLASSIC protection specifically). The second field
+is the load-bearing one — `protected` is TRUE whenever a RULESET applies, so it
+alone can never clear a ruleset-governed branch. Measured on the base branch this
+gate runs against, with a credential holding no admin role: protection → 404,
+branch → `{"protected":true,"protection":{"enabled":false,…}}`, rules → `["test"]`.
+Both fields come back to a non-admin caller, so the required set resolves to
+`["test"]`. NEITHER field proving it is `mode:'unknown'` and the gate defers
+naming the ambiguity. The rulesets read is not ambiguous the same way —
+`rules/branches/{b}` is readable with pull access and answers `[]` — so its 404
+keeps its old meaning.
+
+`permissions.admin` is NOT a proof and is no longer read. A repository ROLE and a
+token's permission set are different things: a fine-grained token can carry the
+admin role through its user and still lack Administration-read, so its 404 means
+"may not ask" while `admin:true` calls it "there is none" — the same fail-open in
+the other direction. `GET /repos` needs only Metadata-read, so that field can
+never testify about a scope it did not have to hold. The read is gone from the
+probe entirely, which also removes one mandatory per-round API call.
 
 **Successful commit-status checks were rejected as "not produced".**
 `statusCheckRollup` returns TWO row shapes: CheckRun (`name`/`status`/
@@ -49,22 +63,48 @@ what GitHub has reported on the BASE BRANCH HEAD; a `pull_request`-only job, or
 one gated on a path/branch/event filter, is legitimately absent from it, and on
 a PR's first poll nothing has appeared yet. Read as proof on the first probe, a
 correctly configured repository got a permanent configuration fault seconds
-after the push. The absence must now OUTLAST a settle window
-(`REVIEW_READINESS_CONFIG_GRACE_MS = 480000`) before it is allowed to mean
-never. The floor is the same measurement the budget rests on — the check on
-PR #275 was ABSENT from the rollup for 328 s and then appeared — and 8 minutes
-is ~1.5x that and a little over half the 15-minute budget, so the fast-fail the
-original change added is preserved: a name genuinely no workflow emits still
-stops at 8 minutes, not 15. It must stay STRICTLY below the budget or the
-config-error branch becomes unreachable and the gate silently reverts to burning
-the whole budget on a fault it can already name; the test suite asserts the
-inequality, because that failure is invisible — it looks like patience.
+after the push.
+
+Waiting cannot turn that snapshot into proof, so the stop no longer claims it is
+one. What waiting buys is the OTHER half of the evidence: the name is also absent
+from this PR's OWN rollup, which is exactly where a `pull_request`-only job would
+appear. The config error therefore needs all three — absent from the PR's rollup,
+absent from a base head that reported OTHER checks, and absent for longer than
+the settle window — and the sentence it returns states that evidence instead of
+asserting "is not produced by any workflow in this repository", a claim this data
+cannot support and one that sends the owner hunting for a workflow that may exist
+and simply be conditional. The deferral text now names the conditional-filter case
+explicitly.
+
+An EMPTY produced list is the input that proves nothing at all — a base commit
+whose CI never ran, or whose checks expired — and it can no longer fire the
+fast-fail however long it persists.
+
+`REVIEW_READINESS_CONFIG_GRACE_MS` is DERIVED from the budget (two thirds of it,
+10 minutes at the current 15) rather than hand-written. Two tuned durations beside
+each other is how the budget comment came to argue for a 3x margin over the
+measured 328 s appearance time while the number next to it was 1.5x; as a ratio it
+moves WITH the budget and the fast-fail stays reachable by construction. It must
+stay STRICTLY below the budget or the config-error branch becomes unreachable and
+the gate silently reverts to burning the whole budget on a fault it can already
+name; the test suite asserts the inequality anyway, because that failure is
+invisible — it looks like patience.
+
+Both produced-list reads also ask for GitHub's `total_count` beside the names.
+`per_page=100` without pagination exits 0 and returns a complete-LOOKING array, so
+a base head reporting more than 100 checks would silently drop names — and a
+dropped name is indistinguishable from one no workflow emits, which is the single
+reading that STOPS a build. A count larger than what arrived now nulls the list
+out, which can only ever disable the fast-fail.
 
 The probe grew from three reads to five, all in the SAME Bookkeeping seat and
 all through `ghReadCommand`, and the transcript is now split by section NAME
 rather than by `indexOf` offsets so an added section cannot mis-slice its
 neighbours. An absent section reads as unreadable rather than being silently
-mis-attributed.
+mis-attributed. `elapsedMs` counts the sleeps and not the probe round-trips
+between them, so it is a FLOOR — the safe direction for its one consumer, since
+the fast-fail can only fire later than the window and never earlier — and every
+owner-facing sentence built from it says "at least".
 
 **One existing test asserted the buggy behaviour and had to change.** `404
 protection + no rulesets is a definitively UNPROTECTED base` fed a bare 404 with
@@ -73,10 +113,21 @@ required the classifier to answer `required: []`. That test is why the defect
 shipped: the behaviour was pinned, so nothing downstream could notice it. It is
 replaced by tests that assert the DECISION under each reading of the ambiguity —
 404-with-proof resolves, authorization-shaped 404 defers and spends zero review
-seats. Each of the three fixes carries a mutant test that reintroduces the
-defect and asserts the specific WRONG value the mutant returns, rather than only
-that an assertion threw: a mutant that failed to LOAD would satisfy `toThrow()`
-while proving nothing.
+seats. Each fix carries a mutant test that reintroduces the defect and asserts
+the specific WRONG value the mutant returns, rather than only that an assertion
+threw: a mutant that failed to LOAD would satisfy `toThrow()` while proving
+nothing.
+
+**A shared fixture defaulted to a branch state GitHub never emits.** Every
+`requiredProbe` case defaulted `branch` to `{"protected":false}`, and a
+ruleset-governed branch reports `protected:true`. No test paired a protection 404
+with a non-empty ruleset and a realistic `protected:true`, which is precisely why
+nothing caught that the first version of this fix answered `unknown` on the
+repository trident actually builds and would have deferred EVERY review round
+there — the same fixture-pins-impossible-behaviour defect class as the test the
+entry above describes. The fixture now carries the measured shapes by name
+(`RULESET_GOVERNED_BRANCH`, `CLASSIC_PROTECTED_BRANCH`) and the missing pairing is
+a headline test.
 
 ## 2026-08-16 — two builds can append to this file at once
 

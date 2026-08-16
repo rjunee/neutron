@@ -518,7 +518,7 @@ describe('review-round preconditions — refuse before spending', () => {
     // The owner-facing sentence must distinguish "we never waited" from "we waited
     // and it never came"; only the second is his to act on.
     expect(readinessBudgetLabel()).toBe('15 minutes')
-    expect(SRC).toContain('The readiness gate waited ${readinessBudgetLabel()} and the check never appeared')
+    expect(SRC).toContain('The readiness gate waited at least ${readinessBudgetLabel()} and the check never appeared')
   })
 
   test('MUTANTS: delete conflict guard, absent→passed, and absent→failed all go RED', () => {
@@ -557,10 +557,16 @@ const ENTERPRISE_ROLLUP = [
 /**
  * The five-section transcription `probeRequiredChecks` hands to the classifier.
  *
- * `branch`/`perm` default to the shape that PROVES the base branch is unprotected
+ * `branch` defaults to the shape that PROVES the base branch is unprotected
  * (`protected:false`), so every fixture that is not ABOUT the 404 ambiguity keeps
- * reading as it did. The tests that are about it pass those fields explicitly.
+ * reading as it did. The tests that are about it pass the field explicitly.
+ *
+ * THE PRODUCED LISTS ARE OBJECTS, NOT BARE ARRAYS — `{n, names}`, because the probe
+ * asks for GitHub's `total_count` beside the names so a truncated page is detectable.
+ * `named()` builds the untruncated shape; a test that wants truncation writes `n`
+ * larger than the array by hand.
  */
+const named = (names: string[], n?: number) => JSON.stringify({ n: n ?? names.length, names })
 const requiredProbe = (s: {
   prot: string
   protExit: number
@@ -572,19 +578,27 @@ const requiredProbe = (s: {
   statusesExit?: number
   branch?: string
   branchExit?: number
-  perm?: string
-  permExit?: number
 }) => ({
   raw:
     `${s.prot}\n___PROT_EXIT=${s.protExit}\n` +
     `___SECTION=BRANCH\n${s.branch ?? '{"protected":false}'}\n___BRANCH_EXIT=${s.branchExit ?? 0}\n` +
-    `___SECTION=PERM\n${s.perm ?? '{"admin":false}'}\n___PERM_EXIT=${s.permExit ?? 0}\n` +
     `___SECTION=RULES\n${s.rules}\n___RULES_EXIT=${s.rulesExit}\n` +
-    `___SECTION=RUNS\n${s.runs ?? '[]'}\n___RUNS_EXIT=${s.runsExit ?? 0}\n` +
-    `___SECTION=STATUSES\n${s.statuses ?? '[]'}\n___STATUSES_EXIT=${s.statusesExit ?? 0}\n___EXIT=0`,
+    `___SECTION=RUNS\n${s.runs ?? named([])}\n___RUNS_EXIT=${s.runsExit ?? 0}\n` +
+    `___SECTION=STATUSES\n${s.statuses ?? named([])}\n___STATUSES_EXIT=${s.statusesExit ?? 0}\n___EXIT=0`,
   exit_code: 0,
 })
 const NOT_FOUND = 'gh: Not Found (HTTP 404)'
+/**
+ * THE BRANCH PAYLOAD A RULESET-GOVERNED BRANCH ACTUALLY RETURNS, measured with a
+ * credential holding no admin role on the base branch this gate runs against:
+ * `protected` is TRUE (a ruleset applies) while `protection.enabled` is FALSE (no
+ * classic protection). The old fixture defaulted `protected:false` everywhere, a state
+ * such a branch never reports, which is why no test could see that the shipped
+ * classifier answered `unknown` on the primary repository and deferred every round.
+ */
+const RULESET_GOVERNED_BRANCH = '{"protected":true,"protectionEnabled":false}'
+/** Classic protection really is on, and this credential may not read it. */
+const CLASSIC_PROTECTED_BRANCH = '{"protected":true,"protectionEnabled":true}'
 
 describe('the required-check set comes from the base branch, not from this repo’s job names', () => {
   test('HEADLINE: the neutron-enterprise rollup PASSES readiness on an unprotected base', () => {
@@ -606,7 +620,14 @@ describe('the required-check set comes from the base branch, not from this repo�
       REVIEW_READINESS_CONFIG_GRACE_MS,
     )
     expect(out.status).toBe('config-error')
-    expect(out.reason).toBe('required check test is not produced by any workflow in this repository')
+    // THE REASON STATES THE EVIDENCE, NOT A CONCLUSION THE DATA CANNOT SUPPORT. It used
+    // to read "is not produced by any workflow in this repository" — an absolute that
+    // one snapshot of the base head can never establish, and one that sends the owner
+    // hunting for a workflow that may exist and simply be conditional.
+    expect(out.reason).toBe(
+      'required check test has not appeared after at least 10 minutes, and the base branch head reports 2 other checks without it',
+    )
+    expect(out.reason).not.toContain('any workflow')
   })
 
   test('…and there is NO third outcome for that rollup: it never defers silently', async () => {
@@ -643,14 +664,49 @@ describe('the required-check set comes from the base branch, not from this repo�
     expect(probes).toBe(REVIEW_READINESS_CONFIG_GRACE_MS / REVIEW_READINESS_RETRY_MS + 1)
     expect(probes).toBeLessThan(REVIEW_READINESS_ATTEMPTS)
     expect(waits).toBe(probes - 1)
-    // The deferral tells the owner to REPAIR the configuration, not to wait again.
-    expect(SRC).toContain('This is a repository configuration error, not a queue delay')
+    // The deferral tells the owner to REPAIR the configuration, not to wait again — and
+    // names the conditional-filter case rather than asserting no such workflow exists.
+    expect(SRC).toContain('This reads as a repository configuration error rather than a queue delay')
+    expect(SRC).toContain('if the job is real but conditional')
+  })
+
+  test('AN EMPTY produced LIST IS NEVER A CONFIG ERROR, however long it persists', () => {
+    // A base commit whose CI never ran (or whose checks have expired) reports NOTHING.
+    // Absence from an empty list is not evidence about any name, and treating it as
+    // evidence turns every such base branch into a permanent configuration fault well
+    // before the budget — the fail-fast firing on the one input that proves nothing.
+    const { classifyReviewReadiness, REVIEW_READINESS_CONFIG_GRACE_MS, REVIEW_READINESS_BUDGET_MS } = loadReadiness()
+    const at = (elapsed: number) =>
+      classifyReviewReadiness(readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP), requiredCfg(['test'], []), elapsed)
+    expect(at(REVIEW_READINESS_CONFIG_GRACE_MS).status).toBe('absent')
+    expect(at(REVIEW_READINESS_BUDGET_MS).status).toBe('absent')
+    // The control: the SAME elapsed time with a non-empty base-head list DOES stop.
+    expect(
+      classifyReviewReadiness(
+        readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
+        requiredCfg(['test'], ['check']),
+        REVIEW_READINESS_CONFIG_GRACE_MS,
+      ).status,
+    ).toBe('config-error')
+  })
+
+  test('MUTANT: letting an EMPTY produced list fail fast goes RED', () => {
+    const mutant = SRC.replace('        produced.length > 0 &&\n', '')
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    const { REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
+    expect(
+      loadReadiness(mutant).classifyReviewReadiness(
+        readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
+        requiredCfg(['test'], []),
+        REVIEW_READINESS_CONFIG_GRACE_MS,
+      ).status,
+    ).toBe('config-error')
   })
 
   test('MUTANT: turning the config error back into an absent WAIT goes RED', () => {
     const mutant = SRC.replace(
-      "return { status: 'config-error', reason: `required check ${name} is not produced by any workflow in this repository` }",
-      'return { status: \'absent\', reason: `required check ${name} has not run` }',
+      "          status: 'config-error',",
+      "          status: 'absent',",
     )
     expect(mutant).not.toBe(SRC) // positive control: the replacement matched
     const { REVIEW_READINESS_CONFIG_GRACE_MS } = loadReadiness()
@@ -746,7 +802,7 @@ describe('the required-check set comes from the base branch, not from this repo�
   })
 })
 
-describe('classifyRequiredChecksProbe — three reads, one answer, judged in code', () => {
+describe('classifyRequiredChecksProbe — five reads, one answer, judged in code', () => {
   test('branch protection contexts become the required set', () => {
     const { classifyRequiredChecksProbe } = loadReadiness()
     const out = classifyRequiredChecksProbe(
@@ -755,7 +811,7 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
         protExit: 0,
         rules: '[]',
         rulesExit: 0,
-        runs: '["check","frontend","sbom"]',
+        runs: named(['check', 'frontend', 'sbom']),
       }),
     )
     expect(out).toEqual({ mode: 'resolved', required: ['check', 'frontend'], produced: ['check', 'frontend', 'sbom'] })
@@ -771,7 +827,7 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
         protExit: 1,
         rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
         rulesExit: 0,
-        runs: '["review-gate"]',
+        runs: named(['review-gate']),
       }),
     )
     expect(out.mode).toBe('resolved')
@@ -796,32 +852,93 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
         prot: NOT_FOUND,
         protExit: 1,
         branch: '{"protected":false}',
-        perm: '{"admin":false}',
         rules: '[]',
         rulesExit: 0,
-        runs: '["check"]',
+        runs: named(['check']),
       }),
     )
     expect(out).toEqual({ mode: 'resolved', required: [], produced: ['check'] })
   })
 
-  test('…and an ADMIN credential’s 404 is an answer too, even on a protected-looking branch', () => {
-    // The other proof: the credential could have read protection, so its 404 is GitHub
-    // saying "there is none" rather than "you may not ask". `protected:true` here is a
-    // ruleset, which the rules read already covers.
+  test('HEADLINE: the REAL ruleset-governed branch resolves — protected:true, protection.enabled:false, rules speak', () => {
+    // THE FAIL-SHUT THE FIRST FIX SHIPPED. This is the measured state of the base branch
+    // this gate runs against, read with a credential holding no admin role: protection
+    // 404s, `protected` is TRUE because a ruleset applies, and the ruleset requires
+    // `test`. Reading `protected` alone left this `unknown`, so the gate deferred EVERY
+    // review round on the repository trident builds — a gate that never runs.
+    //
+    // `protection.enabled:false` is the field that settles it, and the same non-admin
+    // credential gets it back: no CLASSIC protection exists, so the 404 was GitHub
+    // answering rather than refusing, and the ruleset half is already covered below.
+    const { classifyRequiredChecksProbe, classifyReviewReadiness } = loadReadiness()
+    const cfg = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: RULESET_GOVERNED_BRANCH,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]',
+        rulesExit: 0,
+        runs: named(['test', 'CodeQL']),
+      }),
+    )
+    expect(cfg).toEqual({ mode: 'resolved', required: ['test'], produced: ['test', 'CodeQL'] })
+    // …and the round it unblocks: a green `test` reaches review instead of deferring.
+    expect(
+      classifyReviewReadiness(readinessProbe('MERGEABLE', [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }]), cfg)
+        .status,
+    ).toBe('passed')
+  })
+
+  test('MUTANT: reading only `protected` re-breaks the ruleset-governed branch', () => {
+    // The exact regression, re-introduced: drop the `protection.enabled` half of the
+    // proof and the primary repository goes back to deferring every round.
+    const mutant = SRC.replace(
+      'branchObj !== null && (branchObj.protected === false || branchObj.protectionEnabled === false)',
+      'branchObj !== null && branchObj.protected === false',
+    )
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    const out = loadReadiness(mutant).classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: RULESET_GOVERNED_BRANCH,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]',
+        rulesExit: 0,
+        runs: named(['test']),
+      }),
+    )
+    expect(out.mode).toBe('unknown')
+  })
+
+  test('HEADLINE: an ADMIN ROLE IS NOT PROOF — the repo-permissions read is gone entirely', () => {
+    // The fail-OPEN half of the same predicate. `permissions.admin` comes from
+    // `GET /repos`, which needs only Metadata-read, and it describes the caller's
+    // repository ROLE — not the token's scopes. A fine-grained token can hold the admin
+    // role through its user and still lack Administration-read, so its 404 means "may
+    // not ask" while `admin:true` was calling it "there is none" and resolving
+    // `required: []`: the permissive all-green rule on a genuinely protected base.
+    //
+    // Pinned at the source, because the fix is a DELETION and only the source can show
+    // that the field is no longer consulted or even requested.
+    // The jq PATH, not the bare words — the comment explaining why the field is gone
+    // has to be allowed to name it, or the pin forbids documenting its own reason.
+    expect(SRC).not.toContain('.permissions.admin')
+    expect(SRC).not.toContain('permObj')
+    expect(SRC).not.toContain('___PERM_EXIT')
+    // And the behaviour: classic protection is really on, so no admin claim can make
+    // this resolve. The probe no longer emits a PERM section at all.
     const { classifyRequiredChecksProbe } = loadReadiness()
     const out = classifyRequiredChecksProbe(
       requiredProbe({
         prot: NOT_FOUND,
         protExit: 1,
-        branch: '{"protected":true}',
-        perm: '{"admin":true}',
+        branch: CLASSIC_PROTECTED_BRANCH,
         rules: '[]',
         rulesExit: 0,
-        runs: '["check"]',
+        runs: named(['check']),
       }),
     )
-    expect(out).toEqual({ mode: 'resolved', required: [], produced: ['check'] })
+    expect(out.mode).toBe('unknown')
   })
 
   test('HEADLINE: an AUTHORIZATION-shaped 404 is UNKNOWN — the gate defers, it does not go permissive', async () => {
@@ -836,11 +953,10 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
       requiredProbe({
         prot: NOT_FOUND,
         protExit: 1,
-        branch: '{"protected":true}',
-        perm: '{"admin":false}',
+        branch: CLASSIC_PROTECTED_BRANCH,
         rules: '[]',
         rulesExit: 0,
-        runs: '["check"]',
+        runs: named(['check']),
       }),
     )
     expect(cfg.mode).toBe('unknown')
@@ -858,9 +974,9 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
     expect({ deferred: out.deferred, spent }).toEqual({ deferred: true, spent: 0 })
   })
 
-  test('an UNREADABLE branch/permission pair leaves the 404 ambiguous, so it is UNKNOWN', () => {
-    // Neither proof available — the disambiguating reads themselves failed. The honest
-    // answer is "could not tell", never the permissive one.
+  test('an UNREADABLE branch read leaves the 404 ambiguous, so it is UNKNOWN', () => {
+    // No proof available — the disambiguating read itself failed. The honest answer is
+    // "could not tell", never the permissive one.
     const { classifyRequiredChecksProbe } = loadReadiness()
     const out = classifyRequiredChecksProbe(
       requiredProbe({
@@ -868,8 +984,6 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
         protExit: 1,
         branch: 'gh: server error (HTTP 502)',
         branchExit: 1,
-        perm: 'gh: server error (HTTP 502)',
-        permExit: 1,
         rules: '[]',
         rulesExit: 0,
       }),
@@ -886,8 +1000,7 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
       requiredProbe({
         prot: NOT_FOUND,
         protExit: 1,
-        branch: '{"protected":true}',
-        perm: '{"admin":false}',
+        branch: CLASSIC_PROTECTED_BRANCH,
         rules: '[]',
         rulesExit: 0,
       }),
@@ -961,8 +1074,8 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
         protExit: 0,
         rules: '[]',
         rulesExit: 0,
-        runs: '["check"]',
-        statuses: '["legacy-ci","check"]',
+        runs: named(['check']),
+        statuses: named(['legacy-ci', 'check']),
       }),
     )
     expect(out).toEqual({ mode: 'resolved', required: ['legacy-ci'], produced: ['check', 'legacy-ci'] })
@@ -979,12 +1092,78 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
         protExit: 0,
         rules: '[]',
         rulesExit: 0,
-        runs: '["check"]',
+        runs: named(['check']),
         statuses: 'gh: server error (HTTP 502)',
         statusesExit: 1,
       }),
     )
     expect(out.produced).toBeNull()
+  })
+
+  test('A TRUNCATED produced LIST IS UNREADABLE, NOT SHORT', () => {
+    // `per_page=100` with no pagination exits 0 and returns a complete-LOOKING array,
+    // so a base head with more than 100 reported checks would silently drop names — and
+    // a dropped name is indistinguishable from one no workflow emits, which is the one
+    // reading that STOPS a build. GitHub's own `total_count` is what makes the two
+    // distinguishable, so a count larger than the array nulls the union out.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const truncated = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["late-check"]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: named(['check', 'frontend'], 137),
+        statuses: named([]),
+      }),
+    )
+    expect(truncated.produced).toBeNull()
+    // The control: the SAME payload with a count that matches is trusted.
+    expect(
+      classifyRequiredChecksProbe(
+        requiredProbe({
+          prot: '{"contexts":["late-check"]}',
+          protExit: 0,
+          rules: '[]',
+          rulesExit: 0,
+          runs: named(['check', 'frontend']),
+          statuses: named([]),
+        }),
+      ).produced,
+    ).toEqual(['check', 'frontend'])
+  })
+
+  test('MUTANT: trusting a truncated list turns a real check into a config error', () => {
+    // What the truncation blindness actually costs, end to end: `late-check` IS produced
+    // here, it just fell off page 1 — and the mutant stops the build for it.
+    const mutant = SRC.replace('return total > names.length ? null : names', 'return names')
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    const loaded = loadReadiness(mutant)
+    const cfg = loaded.classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["late-check"]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: named(['check', 'frontend'], 137),
+        statuses: named([]),
+      }),
+    )
+    expect(cfg.produced).toEqual(['check', 'frontend'])
+    expect(
+      loaded.classifyReviewReadiness(
+        readinessProbe('MERGEABLE', ENTERPRISE_ROLLUP),
+        cfg,
+        loaded.REVIEW_READINESS_CONFIG_GRACE_MS,
+      ).status,
+    ).toBe('config-error')
+  })
+
+  test('the probe ASKS for total_count on both produced-list reads', () => {
+    // The classifier can only detect truncation if the probe requested the count — a
+    // jq that returns a bare array makes the check silently inert.
+    expect(SRC).toContain('{n:.total_count,names:[.check_runs[].name]}')
+    expect(SRC).toContain('{n:.total_count,names:[.statuses[].context]}')
   })
 
   test('MUTANT: dropping commit statuses from `produced` goes RED', () => {
@@ -999,8 +1178,8 @@ describe('classifyRequiredChecksProbe — three reads, one answer, judged in cod
           protExit: 0,
           rules: '[]',
           rulesExit: 0,
-          runs: '["check"]',
-          statuses: '["legacy-ci"]',
+          runs: named(['check']),
+          statuses: named(['legacy-ci']),
         }),
       ).produced,
     ).toEqual(['check'])
@@ -1143,7 +1322,9 @@ describe('statusCheckRollup carries TWO row shapes and both are judged', () => {
         requiredCfg(['legacy-ci'], ['check']),
         REVIEW_READINESS_CONFIG_GRACE_MS,
       ).reason,
-    ).toBe('required check legacy-ci is not produced by any workflow in this repository')
+    ).toBe(
+      'required check legacy-ci has not appeared after at least 10 minutes, and the base branch head reports 1 other check without it',
+    )
   })
 })
 
@@ -1205,6 +1386,17 @@ describe('“has not appeared YET” is not “no workflow produces it”', () =
     expect(REVIEW_READINESS_CONFIG_GRACE_MS).toBeGreaterThan(328000)
   })
 
+  test('the settle window is DERIVED from the budget, not a second tuned constant', () => {
+    // Two hand-written durations beside each other is how the budget comment came to
+    // argue for a 3x margin while the number next to it was 1.5x. As a ratio it moves
+    // WITH the budget and the fast-fail stays reachable by construction.
+    const { REVIEW_READINESS_CONFIG_GRACE_MS, REVIEW_READINESS_BUDGET_MS } = loadReadiness()
+    expect(REVIEW_READINESS_CONFIG_GRACE_MS).toBe(Math.round((REVIEW_READINESS_BUDGET_MS * 2) / 3))
+    expect(SRC).not.toMatch(/const REVIEW_READINESS_CONFIG_GRACE_MS = \d+$/m)
+    // …and it is a real increase over the 8 minutes that shipped: ~1.8x the measurement.
+    expect(REVIEW_READINESS_CONFIG_GRACE_MS).toBeGreaterThan(480000)
+  })
+
   test('the settle window is STRICTLY below the budget, or the fast-fail is unreachable', () => {
     // Fails CLOSED and invisibly if this ever inverts: the config-error branch stops
     // firing, the gate burns the whole budget on a fault it can already name, and the
@@ -1212,8 +1404,8 @@ describe('“has not appeared YET” is not “no workflow produces it”', () =
     const { REVIEW_READINESS_CONFIG_GRACE_MS, REVIEW_READINESS_BUDGET_MS, readinessGraceLabel } = loadReadiness()
     expect(REVIEW_READINESS_CONFIG_GRACE_MS).toBeLessThan(REVIEW_READINESS_BUDGET_MS)
     // The sentence the owner reads is derived from the same constant the loop spends.
-    expect(readinessGraceLabel()).toBe('8 minutes')
-    expect(SRC).toContain('The gate waited ${readinessGraceLabel()} first')
+    expect(readinessGraceLabel()).toBe('10 minutes')
+    expect(SRC).toContain('The gate waited at least ${readinessGraceLabel()} first')
   })
 
   test('MUTANT: firing the config error on the first probe goes RED', () => {
