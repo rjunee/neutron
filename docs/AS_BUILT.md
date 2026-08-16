@@ -455,6 +455,99 @@ and 16 are identical on untouched `main`; the residue is flaky rather than diffe
 reproduced by running the same two files three times on unchanged code and getting three
 different failing subsets — all real-`git`/network shell tests, none touching this change.
 
+### Round 5 — the message and the classifier were reading different bytes
+
+Five review findings, and four of them are the same shape: a classifier that had been
+fixed, standing next to a MESSAGE or a TEST that had not. That shape is worse than an
+unfixed classifier, because a refusal whose wording contradicts its own verdict invites
+the owner to overrule a correct answer.
+
+1. **THE RATE-LIMIT REFUSAL CLAIMED THE CREDENTIAL WAS GOOD.** It read "GitHub returns a
+   rate limit WITH a working credential, so this is evidence the token is fine" — a
+   POSITIVE claim about a credential nothing had verified. GitHub 403-rate-limits
+   UNAUTHENTICATED requests too, against the source IP, and `gh` has documented modes
+   (cli/cli#13317) where a keychain error silently drops the credential and the request
+   goes out unauthenticated. The same 403 is therefore equally consistent with "fine" and
+   with "no credential was sent at all". The refusal now states the one-directional
+   reading — not evidence of rejection, not evidence of acceptance — and the docblock on
+   `looksLikeGithubRateLimited` and the entry in `PublisherAuthFailureCause` were corrected
+   with it. The AS-BUILT paragraph above that says "evidence the token is FINE" describes
+   round 4 and is superseded here.
+2. **THE EVIDENCE SENTENCE READ STDERR WHILE THE CLASSIFIER READ BOTH STREAMS.**
+   `classifyGithubReachability` reads `stderr + stdout`; the owner-facing sentence branched
+   on `reach.stderr` alone and fell back to "exited N without printing anything". MEASURED
+   on gh 2.97.0 in this round: `gh api /zen` on SUCCESS writes its body to STDOUT and 0
+   bytes to stderr, and on a bad token writes the 112-byte JSON error body to STDOUT with
+   only a 31-byte summary on stderr — so the fuller diagnostic was the one being discarded,
+   and a call that plainly answered was reported as mute. `describeReachabilityAnswer` now
+   derives the sentence from the same two streams, and says "printed nothing" only when
+   both are genuinely empty.
+3. **A SUCCESSFUL REACHABILITY CALL WAS CALLED INCONCLUSIVE.** A `gh api /zen` that exits 0
+   proves GitHub answered AND accepted this credential. Round 4 returned `'inconclusive'`
+   for it, so a probe whose second measurement had just succeeded told the owner to "Check
+   network/DNS/proxy FIRST". New `'reachable'` verdict → new cause
+   `github_reachable_but_login_failed`, which points at the host's local `gh` login state
+   and says not to rotate.
+4. **x509/TLS INTERCEPTION RENDERED AS "the probe itself failed".** The round-4 docblock
+   cited x509 as its motivating example and no pattern matched it. The Go TLS vocabulary
+   (`x509:`, untrusted root, self-signed, expired cert, `tls: handshake failure`) now
+   classifies as `could_not_reach_github` — a handshake that never completed carried no
+   credential to GitHub. Deliberately the TLS vocabulary and NOT the bare word
+   `certificate`, with a control asserting a 401 that happens to mention one is still a
+   rejection.
+5. **A SAML/SSO 403 HAD NO BRANCH AT ALL.** Named in a docblock, handled nowhere, so it
+   fell to the unclassified tail and reported "nothing was learned about the credential"
+   when the single most actionable thing had been learned: GitHub accepted WHO the token
+   is and refused WHAT it asked for. New cause `credential_needs_sso_authorization` tells
+   the owner to authorize the token he has, because rotating produces another unauthorized
+   one.
+
+Two more, both about guards that could not have failed:
+
+- **`ALL_CAUSES` was a `readonly Cause[]`, which any subset satisfies.** The two causes
+  added in this round would have compiled while going unasserted — the exact failure the
+  list exists to prevent. It is now derived from a `satisfies Record<PublisherAuthFailure
+  Cause, …>` map, so omitting a member is a compile error naming it. Mutation-proved with
+  `tsc`: deleting one key yields `TS1360: Property 'github_reachable_but_login_failed' is
+  missing`, control run passes.
+- **Every `gh api` fixture hardcoded `stdout: ''`.** The classifier reads both streams, so
+  no fixture could exercise half of its input and a regression dropping stdout moved no
+  test. Fixtures are now two-stream captures with the measured split, `ghHost` spreads the
+  capture instead of forcing an empty stdout, and a direct guard asserts a verdict that
+  lands ONLY on stdout is still read.
+- **The `never dropped` test name contradicted the length cap standing next to it.**
+  Renamed to what it actually guarantees — no line is ever SELECTED BETWEEN — with a
+  companion test pinning the cap as the only thing that removes characters, from the tail.
+- **The follow-up call doubled the worst case to 120s.** The docblock said "one extra `gh`
+  invocation", which is true as a COUNT and silent about the time; the blackholed-proxy
+  case hangs for the full budget and no caller imposes a deadline (`open/composer.ts`,
+  `trident/work-board-build-tool.ts`, `onboarding/overnight/register.ts` all just await
+  it). `EnvCapableHostRunner` gained an optional 4th `timeoutMs` — a three-parameter runner
+  still satisfies the type, so no existing double changed — and the reachability call now
+  asks for `PUBLISHER_REACHABILITY_TIMEOUT_MS` (15s). Worst case 60s + 15s, asserted at the
+  seam rather than in prose.
+
+**Mutation acceptance is now a checked-in test, not a claim in this file.**
+`trident/git-mode-mutation.test.ts` copies `git-mode.ts` and its suite into a gitignored
+dot-directory, re-introduces each defect as an exact substring edit, runs the real suite
+against the copy, and asserts it goes RED *and names the specific guard that caught it* —
+so a mutation that reddens something unrelated does not count. 11 mutations, all caught,
+plus a POSITIVE CONTROL that runs the unmutated copy first. The control earned its keep
+immediately: bun skips dot-directories in discovery, so the first draft's bare
+`.trident-mutants/…` filter matched no files and exited 1, which is indistinguishable from
+a red suite — every mutation would have been reported as caught while nothing ran.
+
+Verification (this round): `trident/git-mode.test.ts` 100 pass / 0 fail (355 assertions),
+up from 84; `trident/git-mode-mutation.test.ts` 12 pass / 0 fail; `trident/git-mode-
+credential-seam.test.ts` unchanged at 5 pass / 0 fail, still asserting through the
+token-store seam that a stored token with NO ambient login resolves to `'pr'`, with
+`process.env` never mutated. `bash scripts/ci/typecheck-all.sh` → 51/51 pass. A review of
+round 4 reported `app/tsconfig.json` failing `TS2688 Cannot find type definition file for
+node` and self-flagged it as possibly environmental; it is — the same script on UNTOUCHED
+`main` at `f99d6d49` passes 51/51 including `app/`, so the finding was an unpopulated
+`app/node_modules` in the review worktree and not a branch regression. Test failures were
+differenced against that same main baseline rather than counted.
+
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
 The gate carried `['test', 'lint', 'typecheck']` — THIS repository's job names — frozen

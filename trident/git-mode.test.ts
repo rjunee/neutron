@@ -3,6 +3,7 @@ import {
   classifyGithubReachability,
   cleanupAfterMerge,
   defaultGitModeProbe,
+  describeReachabilityAnswer,
   detectMergeMode,
   isGithubRemoteUrl,
   looksLikeAmbiguousLoginFailure,
@@ -10,11 +11,14 @@ import {
   looksLikeGithubRateLimited,
   looksLikeGithubUnreachable,
   looksLikeNoGithubAuth,
+  looksLikeSamlSsoUnauthorized,
   renderAuthFailureDetail,
   spawnCapture,
+  DEFAULT_HOST_COMMAND_TIMEOUT_MS,
   MAX_AUTH_FAILURE_DETAIL_CHARS,
   PUBLISHER_AUTH_COMMAND,
   PUBLISHER_REACHABILITY_COMMAND,
+  PUBLISHER_REACHABILITY_TIMEOUT_MS,
   unwiredPublisherCredential,
   type GitModeProbe,
   type PublisherAuthFailureCause,
@@ -211,15 +215,36 @@ describe('detectMergeMode names WHY the publisher could not authenticate', () =>
   // this list was one call with `no_credential_available` under the name "every
   // refusal", so six of the seven causes were unasserted — and a cause added
   // later (as two were) would have joined them silently.
-  const ALL_CAUSES: readonly PublisherAuthFailureCause[] = [
-    'no_credential_available',
-    'credential_rejected',
-    'credential_verdict_unavailable',
-    'github_rate_limited',
-    'could_not_reach_github',
-    'publisher_cli_unavailable',
-    'probe_failed',
-  ]
+  //
+  // WHY THIS IS A KEYED RECORD AND NOT AN ARRAY — the round-5 fix, and the reason
+  // "every member" was still a claim rather than a guarantee. A
+  // `readonly PublisherAuthFailureCause[]` is satisfied by ANY subset: the two
+  // causes added in this very PR (`credential_needs_sso_authorization`,
+  // `github_reachable_but_login_failed`) would have compiled fine while going
+  // completely unasserted, which is the exact failure the comment above says the
+  // list exists to prevent. `Record<PublisherAuthFailureCause, ...>` is
+  // exhaustive BY TYPE: omit a member and `tsc` fails on this line, in this file,
+  // naming the missing cause.
+  //
+  // The value is not a placeholder. It is what the owner is being asked to do
+  // about his credential, which is the property the assertions below actually
+  // care about:
+  //   'act_now'      — go touch the credential, now: this cause says so outright.
+  //   'conditional'  — touch it only after something else is ruled out first.
+  //   'do_not_touch' — a host condition or a non-verdict; touching it is waste.
+  const CREDENTIAL_ACTION = {
+    no_credential_available: 'act_now',
+    credential_rejected: 'act_now',
+    credential_needs_sso_authorization: 'act_now',
+    credential_verdict_unavailable: 'conditional',
+    github_rate_limited: 'do_not_touch',
+    github_reachable_but_login_failed: 'do_not_touch',
+    could_not_reach_github: 'do_not_touch',
+    publisher_cli_unavailable: 'do_not_touch',
+    probe_failed: 'do_not_touch',
+  } as const satisfies Record<PublisherAuthFailureCause, 'act_now' | 'conditional' | 'do_not_touch'>
+
+  const ALL_CAUSES = Object.keys(CREDENTIAL_ACTION) as PublisherAuthFailureCause[]
 
   test('every refusal keeps the original guard sentence — the gate itself is unchanged', async () => {
     for (const cause of ALL_CAUSES) {
@@ -243,17 +268,55 @@ describe('detectMergeMode names WHY the publisher could not authenticate', () =>
     expect(rendered.size).toBe(ALL_CAUSES.length)
   })
 
-  test('ONLY the two causes the owner can act on ask him to touch the credential', async () => {
-    // The costly instruction, enumerated the other way round: every cause that is
-    // a host condition or an honest non-verdict must be free of it.
+  // THE COSTLY INSTRUCTION, ENUMERATED THE OTHER WAY ROUND, and rewritten in
+  // round 5 because the previous version was a two-way test over a three-way
+  // reality. It asked whether a message "asks him to touch the credential" and
+  // expected `true` for exactly `credential_rejected` and
+  // `no_credential_available` — which quietly asserted `false` for
+  // `credential_verdict_unavailable`, whose message says "rotate the token only
+  // once the network is known good" (`trident/git-mode.ts`
+  // `describePublisherAuthFailure`, the `credential_verdict_unavailable` arm).
+  // That IS asking him to touch the credential; the honest distinction is that it
+  // asks CONDITIONALLY. Collapsing conditional into "no" meant the guard could
+  // not have noticed a future edit that dropped the condition and left the bare
+  // instruction standing — which is the whole misdirection this PR exists to
+  // remove.
+  const DO_NOT_ROTATE = 'Do NOT rotate the token on this signal'
+  const CONDITIONAL_ROTATE = 'rotate the token only once the network is known good'
+  const REPAIR_NOW = ['connect GitHub', 'was REJECTED by GitHub', 'AUTHORIZE the existing token']
+
+  test('each refusal asks for a credential repair NOW, LATER, or NEVER — and says which', async () => {
     for (const cause of ALL_CAUSES) {
       const msg = await refusal({ authenticated: false, cause })
-      const asksForRepair =
-        msg.includes('REJECTED') || msg.includes('connect GitHub')
-      expect([cause, asksForRepair]).toEqual([
+      const asksNow = REPAIR_NOW.some((phrase) => msg.includes(phrase))
+      const asksLater = msg.includes(CONDITIONAL_ROTATE)
+      const asksNever = msg.includes(DO_NOT_ROTATE)
+      // Exactly one of the three, for every cause. `[cause, …]` so a failure
+      // names which cause broke rather than just printing three booleans.
+      expect([cause, asksNow, asksLater, asksNever]).toEqual([
         cause,
-        cause === 'credential_rejected' || cause === 'no_credential_available',
+        CREDENTIAL_ACTION[cause] === 'act_now',
+        CREDENTIAL_ACTION[cause] === 'conditional',
+        CREDENTIAL_ACTION[cause] === 'do_not_touch',
       ])
+    }
+  })
+
+  test('a `do_not_touch` cause never smuggles in a repair instruction', async () => {
+    for (const cause of ALL_CAUSES) {
+      if (CREDENTIAL_ACTION[cause] !== 'do_not_touch') continue
+      const msg = await refusal({ authenticated: false, cause })
+      for (const phrase of [...REPAIR_NOW, CONDITIONAL_ROTATE]) {
+        expect([cause, phrase, msg.includes(phrase)]).toEqual([cause, phrase, false])
+      }
+    }
+  })
+
+  test('an `act_now` cause never also tells him to stand down', async () => {
+    for (const cause of ALL_CAUSES) {
+      if (CREDENTIAL_ACTION[cause] !== 'act_now') continue
+      const msg = await refusal({ authenticated: false, cause })
+      expect([cause, msg.includes(DO_NOT_ROTATE)]).toEqual([cause, false])
     }
   })
 })
@@ -614,26 +677,56 @@ describe('unreachable GitHub is reported as unreachable, not as a bad token', ()
   // `looksLikeGithubUnreachable` — a TLS/x509 error being the concrete one Argus
   // found — arrived as a confident, specific claim about a token that had been
   // learned nothing about. `credential_rejected` now requires POSITIVE evidence.
-  test('an x509/TLS failure is NOT reported as a rejected credential', async () => {
+  // ROUND 5 SHARPENS THIS. The docblock above cites x509 as its motivating
+  // example, and the assertion below settled for `probe_failed` — "nothing was
+  // learned" — which was still wrong about a case where something specific WAS
+  // learned: the TLS handshake never completed, so no credential reached GitHub.
+  // That is a transport fact, and the owner-facing difference is real: one
+  // message points at the connection, the other shrugs.
+  for (const [label, stderr] of [
+    ['an untrusted root (corporate MITM proxy)', 'x509: certificate signed by unknown authority'],
+    ['a self-signed certificate', 'x509: self-signed certificate in certificate chain'],
+    ['an expired server certificate', 'x509: certificate has expired or is not yet valid'],
+    ['a failed TLS handshake', 'remote error: tls: handshake failure'],
+  ] as const) {
+    test(`${label} is a TRANSPORT failure, not a rejected credential`, async () => {
+      const probe = defaultGitModeProbe(
+        withToken,
+        ghFails({
+          stdout: '',
+          stderr: `Get "https://api.github.com/": ${stderr}`,
+          exit_code: 1,
+        }),
+      )
+      const res = await probe.publisherAvailable()
+      expect(res.authenticated === false && res.cause).not.toBe('credential_rejected')
+      expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
+      // …and the owner is told, in as many words, not to act on it — and told
+      // WHICH thing to look at, which `probe_failed` could not say.
+      const msg = await detectMergeMode('/repo', probe).then(
+        () => '',
+        (err: unknown) => (err instanceof Error ? err.message : String(err)),
+      )
+      expect(msg).toContain('Do NOT rotate the token')
+      expect(msg).toContain('check network/DNS/proxy')
+      expect(msg).not.toContain('REJECTED')
+      expect(msg).not.toContain('the publisher capability probe itself failed')
+    })
+  }
+
+  test('CONTROL — the bare word "certificate" does not hijack a real rejection', async () => {
+    // The transport patterns are the Go TLS vocabulary, not `certificate`, so a
+    // verdict that happens to mention one is still a verdict.
     const probe = defaultGitModeProbe(
       withToken,
       ghFails({
         stdout: '',
-        stderr:
-          'Get "https://api.github.com/": x509: certificate signed by unknown authority',
+        stderr: 'HTTP 401: Bad credentials (certificate-based auth is not enabled)',
         exit_code: 1,
       }),
     )
     const res = await probe.publisherAvailable()
-    expect(res.authenticated === false && res.cause).not.toBe('credential_rejected')
-    expect(res.authenticated === false && res.cause).toBe('probe_failed')
-    // …and the owner is told, in as many words, not to act on it.
-    const msg = await detectMergeMode('/repo', probe).then(
-      () => '',
-      (err: unknown) => (err instanceof Error ? err.message : String(err)),
-    )
-    expect(msg).toContain('Do NOT rotate the token')
-    expect(msg).not.toContain('REJECTED')
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
   })
 
   test('an unrecognised failure says so instead of guessing the costly cause', async () => {
@@ -1014,41 +1107,149 @@ const GH_TIMEOUT_ENTRY = [
   '  - Active account: true',
 ].join('\n')
 
-/** MEASURED (`gh api`, invalid token, network fine): GitHub ANSWERED, and refused. */
-const GH_API_BAD_CREDENTIALS = 'gh: Bad credentials (HTTP 401)'
+/**
+ * THE `gh api` FIXTURES CARRY BOTH STREAMS — the round-5 fix, and the reason the
+ * suite could stay green through a real regression.
+ *
+ * Every one of these used to be a bare stderr string, and every double that
+ * served them hardcoded `stdout: ''`. That is not what `gh` does, and the
+ * difference is not cosmetic: {@link classifyGithubReachability} reads
+ * `stderr + stdout`, so a fixture with an empty stdout can never exercise the
+ * half of the input the classifier depends on, and a change that dropped stdout
+ * from the classifier would not have moved a single test. It also hid the
+ * owner-facing bug this PR fixes — the evidence sentence read `stderr` alone,
+ * which is invisible when every fixture puts everything in stderr.
+ *
+ * MEASURED on gh 2.97.0 (byte counts from the capture), and the split is not
+ * uniform, which is exactly why it has to be modelled:
+ *
+ *   success           → stdout only  (body), stderr EMPTY, exit 0
+ *   bad credentials   → stdout JSON body (112 B) AND stderr summary (31 B), exit 1
+ *   transport failure → stderr only (102/106 B), stdout EMPTY, exit 1
+ */
+interface GhApiCapture {
+  stdout: string
+  stderr: string
+  exit_code: number
+  ok: boolean
+  timed_out?: boolean
+}
 
-/** MEASURED (`gh api` through a proxy port that refuses the connection). */
-const GH_API_DEAD_PROXY =
-  'Get "https://api.github.com/zen": proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused'
+const ghApi = (over: Partial<GhApiCapture>): GhApiCapture => ({
+  stdout: '',
+  stderr: '',
+  exit_code: 1,
+  ok: false,
+  ...over,
+})
+
+/**
+ * The text a STRING-level classifier sees, flattened the same way
+ * `defaultGitModeProbe` and `classifyGithubReachability` flatten it. Asserting
+ * `looksLike*` against a capture's stderr alone would re-create, inside the
+ * tests, exactly the stderr-only reading this PR removes from the code.
+ */
+const bothStreams = (c: GhApiCapture): string => `${c.stderr}\n${c.stdout}`
+
+/**
+ * MEASURED (`gh api /zen`, valid ambient credential): the body goes to STDOUT
+ * and stderr is EMPTY. The shape that proved the owner-facing bug — a call that
+ * plainly answered was reported as "exited 0 without printing anything".
+ */
+const GH_API_ZEN_SUCCESS = ghApi({ stdout: 'Encourage flow.', exit_code: 0, ok: true })
+
+/**
+ * MEASURED (`gh api`, invalid token, network fine): GitHub ANSWERED, and refused.
+ * Note WHERE the two halves land — the fuller diagnostic is the one on STDOUT,
+ * i.e. the one a stderr-only reading throws away.
+ */
+const GH_API_BAD_CREDENTIALS = ghApi({
+  stdout: [
+    '{',
+    '  "message": "Bad credentials",',
+    '  "documentation_url": "https://docs.github.com/rest",',
+    '  "status": "401"',
+    '}',
+  ].join('\n'),
+  stderr: 'gh: Bad credentials (HTTP 401)',
+})
+
+/** MEASURED (`gh api` through a proxy port that refuses the connection): stderr only. */
+const GH_API_DEAD_PROXY = ghApi({
+  stderr:
+    'Get "https://api.github.com/zen": proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused',
+})
 
 /**
  * MEASURED (`gh api` through a proxy host that does not resolve). Two lines, and
  * neither is in Go's `net` vocabulary — this is `gh`'s own wording, which is why
  * the Go-shaped transport patterns missed a plain DNS failure entirely.
  */
-const GH_API_DNS_FAILURE = [
-  'error connecting to no-such-host-xyzzy.invalid',
-  'check your internet connection or https://githubstatus.com',
-].join('\n')
+const GH_API_DNS_FAILURE = ghApi({
+  stderr: [
+    'error connecting to no-such-host-xyzzy.invalid',
+    'check your internet connection or https://githubstatus.com',
+  ].join('\n'),
+})
 
 /** MEASURED (`gh api` through a blackholed proxy address — the call hung, then timed out). */
-const GH_API_BLACKHOLE_TIMEOUT =
-  'Get "https://api.github.com/zen": proxyconnect tcp: dial tcp 192.0.2.1:8080: i/o timeout'
+const GH_API_BLACKHOLE_TIMEOUT = ghApi({
+  stderr:
+    'Get "https://api.github.com/zen": proxyconnect tcp: dial tcp 192.0.2.1:8080: i/o timeout',
+})
 
 /**
- * CONSTRUCTED: GitHub's documented primary rate-limit body placed into the `gh
- * api` error line whose exact shape WAS measured above ({@link
- * GH_API_BAD_CREDENTIALS}). Exhausting a real rate limit to capture it was not
- * a reasonable thing to do to the account. Note WHERE it lives: `gh auth status`
- * cannot print an HTTP status at all, so a rate limit reaches us as the
- * ambiguous block plus THIS, on the reachability call.
+ * CONSTRUCTED (`x509` through a TLS-intercepting proxy with an untrusted root):
+ * Go's own wording, wrapped in `gh api`'s `Get "…":` prefix exactly as the two
+ * MEASURED transport captures above are. The handshake never completed, so no
+ * credential reached GitHub.
  */
-const GH_API_RATE_LIMIT_PRIMARY =
-  'gh: API rate limit exceeded for user ID 12345. (HTTP 403)'
+const GH_API_TLS_INTERCEPTED = ghApi({
+  stderr: 'Get "https://api.github.com/zen": x509: certificate signed by unknown authority',
+})
 
-/** CONSTRUCTED the same way: GitHub's secondary rate limit — also a 403, also with a valid token. */
-const GH_API_RATE_LIMIT_SECONDARY =
-  'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)'
+/**
+ * CONSTRUCTED: GitHub's documented primary rate-limit body, split across the two
+ * streams the same way the MEASURED 401 above splits — body to stdout, `gh`'s
+ * one-line summary to stderr. Exhausting a real rate limit to capture it was not
+ * a reasonable thing to do to the account. Note WHERE it lives: `gh auth status`
+ * cannot print an HTTP status at all, so a rate limit reaches us as the ambiguous
+ * block plus THIS, on the reachability call.
+ */
+const GH_API_RATE_LIMIT_PRIMARY = ghApi({
+  stdout: [
+    '{',
+    '  "message": "API rate limit exceeded for user ID 12345.",',
+    '  "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",',
+    '  "status": "403"',
+    '}',
+  ].join('\n'),
+  stderr: 'gh: API rate limit exceeded for user ID 12345. (HTTP 403)',
+})
+
+/** CONSTRUCTED the same way: GitHub's secondary rate limit — also a 403. */
+const GH_API_RATE_LIMIT_SECONDARY = ghApi({
+  stderr:
+    'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)',
+})
+
+/**
+ * CONSTRUCTED: GitHub's SAML/SSO authorization refusal. A 403 in which GitHub
+ * knows exactly whose credential this is — which is how it can name the org — and
+ * refuses the RESOURCE. The wording lives in the RESPONSE BODY, i.e. on STDOUT,
+ * so this case is invisible to any reading that only looks at stderr.
+ */
+const GH_API_SAML_SSO = ghApi({
+  stdout: [
+    '{',
+    '  "message": "Resource protected by organization SAML enforcement. ' +
+      'You must grant your OAuth token access to this organization.",',
+    '  "documentation_url": "https://docs.github.com/articles/authenticating-with-saml-single-sign-on",',
+    '  "status": "403"',
+    '}',
+  ].join('\n'),
+  stderr: 'gh: Resource protected by organization SAML enforcement. (HTTP 403)',
+})
 
 /** MEASURED: what gh 2.97.0 prints with an empty config dir and no token. */
 const GH_NO_ACCOUNTS = 'You are not logged into any GitHub hosts. To log in, run: gh auth login'
@@ -1087,7 +1288,7 @@ const ghFailsWith =
  * right double wherever the reachability answer is not what is under test.
  */
 const ghHost =
-  (surfaces: { status: string; api: string; apiExit?: number; apiTimedOut?: boolean }) =>
+  (surfaces: { status: string; api: GhApiCapture }) =>
   async (cmd: string[]): Promise<HostCommandResult> => {
     if (cmd[0] === 'git') {
       return {
@@ -1097,15 +1298,10 @@ const ghHost =
         exit_code: 0,
       }
     }
-    if (cmd[1] === 'api') {
-      return {
-        ok: false,
-        stdout: '',
-        stderr: surfaces.api,
-        exit_code: surfaces.apiExit ?? 1,
-        ...(surfaces.apiTimedOut === true ? { timed_out: true } : {}),
-      }
-    }
+    // The `gh api` surface answers with BOTH streams, because that is what `gh`
+    // does and because the classifier reads both. Spreading the capture is the
+    // point: a fixture can no longer silently assert `stdout: ''`.
+    if (cmd[1] === 'api') return { ...surfaces.api }
     return { ok: false, stdout: '', stderr: surfaces.status, exit_code: 1 }
   }
 
@@ -1166,7 +1362,7 @@ describe('a transport failure is never sold to the owner as a bad token', () => 
   })
 })
 
-describe('a rate limit is not a rejection — GitHub returns 403 with a WORKING token', () => {
+describe('a rate limit is a 403 that is not a verdict on the credential either way', () => {
   for (const [label, api] of [
     ['primary', GH_API_RATE_LIMIT_PRIMARY],
     ['secondary', GH_API_RATE_LIMIT_SECONDARY],
@@ -1190,6 +1386,25 @@ describe('a rate limit is not a rejection — GitHub returns 403 with a WORKING 
       expect(msg).not.toContain('REJECTED')
       expect(msg).not.toContain('expired, revoked, or missing a scope')
     })
+
+    test(`the ${label} refusal does NOT claim the credential is good`, async () => {
+      // THE ROUND-5 CORRECTION, and it cuts the other way from every other fix
+      // in this PR. Round 4's text read "GitHub returns a rate limit WITH a
+      // working credential, so this is evidence the token is fine" — a POSITIVE
+      // claim about a credential nothing had verified. GitHub 403-rate-limits
+      // UNAUTHENTICATED requests too, against the source IP, and `gh` has
+      // documented modes (cli/cli#13317) in which a keychain error silently
+      // drops the credential and the request goes out unauthenticated. So the
+      // same 403 is equally consistent with "the token is fine" and "no token
+      // was sent at all". The honest reading is one-directional: not evidence of
+      // rejection, and not evidence of acceptance.
+      const msg = await refusalMessage(defaultGitModeProbe(storeWithToken, host))
+      expect(msg).toContain('neither accepted nor rejected')
+      expect(msg).toContain('NOT evidence of rejection')
+      expect(msg).toContain('unauthenticated requests too')
+      expect(msg).not.toContain('evidence the token is fine')
+      expect(msg).not.toContain('WITH a working credential')
+    })
   }
 
   test('the 403 in a rate limit is subtracted from the rejection classifier itself', () => {
@@ -1198,8 +1413,8 @@ describe('a rate limit is not a rejection — GitHub returns 403 with a WORKING 
     // ordering.
     expect(looksLikeCredentialRejected('HTTP 403: API rate limit exceeded')).toBe(false)
     expect(looksLikeGithubRateLimited('HTTP 403: API rate limit exceeded')).toBe(true)
-    expect(looksLikeCredentialRejected(GH_API_RATE_LIMIT_PRIMARY)).toBe(false)
-    expect(looksLikeCredentialRejected(GH_API_RATE_LIMIT_SECONDARY)).toBe(false)
+    expect(looksLikeCredentialRejected(bothStreams(GH_API_RATE_LIMIT_PRIMARY))).toBe(false)
+    expect(looksLikeCredentialRejected(bothStreams(GH_API_RATE_LIMIT_SECONDARY))).toBe(false)
   })
 
   test('a 403 with NO rejection wording is not a verdict about the credential either', () => {
@@ -1211,7 +1426,19 @@ describe('a rate limit is not a rejection — GitHub returns 403 with a WORKING 
     expect(looksLikeCredentialRejected('HTTP 403: Forbidden')).toBe(false)
     expect(looksLikeCredentialRejected('gh: Forbidden (HTTP 403)')).toBe(false)
     expect(looksLikeCredentialRejected('HTTP 401: Bad credentials')).toBe(true)
-    expect(looksLikeCredentialRejected(GH_API_BAD_CREDENTIALS)).toBe(true)
+    expect(looksLikeCredentialRejected(bothStreams(GH_API_BAD_CREDENTIALS))).toBe(true)
+  })
+
+  test('a SAML/SSO 403 is an AUTHORIZATION refusal, not a rejected credential', () => {
+    // GitHub answered, and its answer names the org — so it knows whose token
+    // this is. "Expired, revoked, or missing a scope" is the wrong repair and
+    // `probe_failed`'s "nothing was learned" is the wrong report; round 4 gave
+    // the second of those. The wording lives in the response BODY, which is why
+    // this is asserted over both streams.
+    expect(looksLikeSamlSsoUnauthorized(bothStreams(GH_API_SAML_SSO))).toBe(true)
+    expect(looksLikeCredentialRejected(bothStreams(GH_API_SAML_SSO))).toBe(false)
+    // …and it is not mistaken for a transport failure either.
+    expect(looksLikeGithubUnreachable(bothStreams(GH_API_SAML_SSO))).toBe(false)
   })
 
   test('CONTROL — a 403 whose WORDING is a refusal is still a rejection', () => {
@@ -1230,11 +1457,8 @@ describe('the tie `gh auth status` cannot break is broken by asking GitHub direc
   // can only ever produce a non-verdict — which meant a genuinely expired token
   // was reported as "check your network first", and `credential_rejected` was
   // unreachable from real `gh` output. `gh api` prints what actually happened.
-  const withReachability = (api: string, opts: { apiExit?: number; apiTimedOut?: boolean } = {}) =>
-    defaultGitModeProbe(
-      storeWithToken,
-      ghHost({ status: GH_LOGIN_FAILURE_AMBIGUOUS, api, ...opts }),
-    )
+  const withReachability = (api: GhApiCapture) =>
+    defaultGitModeProbe(storeWithToken, ghHost({ status: GH_LOGIN_FAILURE_AMBIGUOUS, api }))
 
   test('GitHub ANSWERED with a refusal → `credential_rejected`, and the owner is told to rotate', async () => {
     const probe = withReachability(GH_API_BAD_CREDENTIALS)
@@ -1267,8 +1491,47 @@ describe('the tie `gh auth status` cannot break is broken by asking GitHub direc
     })
   }
 
+  test('a SAML/SSO refusal names the ORG problem, and never says "rotate"', async () => {
+    // Round 4 sent this to `probe_failed` — "nothing was learned about the
+    // credential" — when in fact the single most actionable thing had been
+    // learned. Note the evidence for it is on STDOUT, so this test also fails if
+    // the classifier goes back to reading stderr alone.
+    const probe = withReachability(GH_API_SAML_SSO)
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_needs_sso_authorization')
+    const msg = await refusalMessage(probe)
+    expect(msg).toContain('AUTHORIZE the existing token')
+    expect(msg).toContain('not expired or revoked')
+    expect(msg).not.toContain('REJECTED')
+    expect(msg).not.toContain('the publisher capability probe itself failed')
+  })
+
+  test('a reachability call that SUCCEEDS rules out both the token and the network', async () => {
+    // THE ROUND-5 REPRO. `gh api /zen` exiting 0 proves GitHub answered and
+    // accepted this credential — and round 4 called that `inconclusive` and told
+    // the owner to "Check network/DNS/proxy FIRST", i.e. to go debug the one
+    // thing the probe had just measured as working.
+    const probe = withReachability(GH_API_ZEN_SUCCESS)
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('github_reachable_but_login_failed')
+    const msg = await refusalMessage(probe)
+    expect(msg).toContain("this host's local `gh` login state")
+    expect(msg).toContain('Do NOT rotate the token')
+    expect(msg).not.toContain('Check network/DNS/proxy FIRST')
+    expect(msg).not.toContain('REJECTED')
+  })
+
+  test('a successful reachability call is QUOTED, not reported as having printed nothing', async () => {
+    // The measured shape that exposed the classifier/message split: success
+    // writes to STDOUT and leaves stderr EMPTY, so the stderr-only rendering
+    // reported an answer it had in hand as "exited 0 without printing anything".
+    const msg = await refusalMessage(withReachability(GH_API_ZEN_SUCCESS))
+    expect(msg).toContain('SUCCEEDED, answering: Encourage flow.')
+    expect(msg).not.toContain('without printing anything')
+  })
+
   test('our own watchdog killing the reachability call is unreachable, not a verdict', async () => {
-    const probe = withReachability('', { apiTimedOut: true })
+    const probe = withReachability(ghApi({ timed_out: true }))
     const res = await probe.publisherAvailable()
     expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
     // A silent `gh` must not render as `answered: ` with nothing after it, which
@@ -1276,17 +1539,19 @@ describe('the tie `gh auth status` cannot break is broken by asking GitHub direc
     const msg = await refusalMessage(probe)
     expect(msg).toContain('killed by our own')
     expect(msg).not.toContain('and answered:')
+    // …and it names the SHORTER budget this call actually gets, not the 60s one.
+    expect(msg).toContain(`${PUBLISHER_REACHABILITY_TIMEOUT_MS / 1000}s watchdog`)
   })
 
   test('an unspawnable `gh api` leaves the honest non-verdict standing', async () => {
-    const probe = withReachability('', { apiExit: -1 })
+    const probe = withReachability(ghApi({ exit_code: -1 }))
     const res = await probe.publisherAvailable()
     expect(res.authenticated === false && res.cause).toBe('credential_verdict_unavailable')
     expect(await refusalMessage(probe)).toContain('without printing anything')
   })
 
   test('BOTH measurements mute → the honest non-verdict, still pointing at the network first', async () => {
-    const probe = withReachability('gh: something nobody has classified')
+    const probe = withReachability(ghApi({ stderr: 'gh: something nobody has classified' }))
     const res = await probe.publisherAvailable()
     expect(res.authenticated === false && res.cause).toBe('credential_verdict_unavailable')
     const msg = await refusalMessage(probe)
@@ -1294,11 +1559,45 @@ describe('the tie `gh auth status` cannot break is broken by asking GitHub direc
     expect(msg).not.toContain('REJECTED')
   })
 
-  test('the refusal shows BOTH measurements, so the owner can audit the verdict', async () => {
+  test('the refusal shows BOTH measurements AND BOTH STREAMS of the second one', async () => {
     const msg = await refusalMessage(withReachability(GH_API_BAD_CREDENTIALS))
     expect(msg).toContain('The token in GH_TOKEN is invalid.')
     expect(msg).toContain('gh api --hostname github.com /zen')
+    // stderr's one-line summary…
     expect(msg).toContain('Bad credentials (HTTP 401)')
+    // …AND the fuller response body, which `gh` writes to STDOUT and which the
+    // stderr-only rendering discarded even though the classifier had read it.
+    expect(msg).toContain('"documentation_url": "https://docs.github.com/rest"')
+  })
+
+  test('the reachability call gets the REDUCED watchdog budget, not the 60s one', async () => {
+    // The worst case is 60s + this, inside a call no caller imposes a deadline on
+    // (`open/composer.ts`, `trident/work-board-build-tool.ts`,
+    // `onboarding/overnight/register.ts` all just await it). Asserted at the seam
+    // rather than in prose, because the previous docblock's "one extra `gh`
+    // invocation" was true as a COUNT and silent about the 120s it cost.
+    const budgets: (number | undefined)[] = []
+    const probe = defaultGitModeProbe(
+      storeWithToken,
+      async (cmd, _cwd, _env, timeoutMs): Promise<HostCommandResult> => {
+        if (cmd[0] === 'git') {
+          return {
+            ok: true,
+            stdout: 'https://github.com/example-org/example-repo.git',
+            stderr: '',
+            exit_code: 0,
+          }
+        }
+        budgets.push(timeoutMs)
+        if (cmd[1] === 'api') return { ...GH_API_DEAD_PROXY }
+        return { ok: false, stdout: '', stderr: GH_LOGIN_FAILURE_AMBIGUOUS, exit_code: 1 }
+      },
+    )
+    await probe.publisherAvailable()
+    // The first (`gh auth status`) call passes no budget, so it keeps the
+    // production 60s default; the follow-up asks for less.
+    expect(budgets).toEqual([undefined, PUBLISHER_REACHABILITY_TIMEOUT_MS])
+    expect(PUBLISHER_REACHABILITY_TIMEOUT_MS).toBeLessThan(DEFAULT_HOST_COMMAND_TIMEOUT_MS)
   })
 
   test('the reachability call carries the PUBLISHER credential, not a bare `gh`', async () => {
@@ -1315,12 +1614,8 @@ describe('the tie `gh auth status` cannot break is broken by asking GitHub direc
           exit_code: 0,
         }
       }
-      return {
-        ok: false,
-        stdout: '',
-        stderr: cmd[1] === 'api' ? GH_API_BAD_CREDENTIALS : GH_LOGIN_FAILURE_AMBIGUOUS,
-        exit_code: 1,
-      }
+      if (cmd[1] === 'api') return { ...GH_API_BAD_CREDENTIALS }
+      return { ok: false, stdout: '', stderr: GH_LOGIN_FAILURE_AMBIGUOUS, exit_code: 1 }
     })
     await probe.publisherAvailable()
     const reachability = seen.filter((c) => c.cmd[1] === 'api')
@@ -1350,23 +1645,62 @@ describe('the tie `gh auth status` cannot break is broken by asking GitHub direc
   })
 
   test('classifyGithubReachability reads the MEASURED shapes, and defaults to inconclusive', () => {
-    const asResult = (stderr: string, over: Partial<HostCommandResult> = {}): HostCommandResult => ({
-      ok: false,
-      stdout: '',
-      stderr,
-      exit_code: 1,
-      ...over,
-    })
-    expect(classifyGithubReachability(asResult(GH_API_BAD_CREDENTIALS))).toBe('refused')
-    expect(classifyGithubReachability(asResult(GH_API_DEAD_PROXY))).toBe('unreachable')
-    expect(classifyGithubReachability(asResult(GH_API_DNS_FAILURE))).toBe('unreachable')
-    expect(classifyGithubReachability(asResult(GH_API_BLACKHOLE_TIMEOUT))).toBe('unreachable')
-    expect(classifyGithubReachability(asResult(GH_API_RATE_LIMIT_PRIMARY))).toBe('rate_limited')
-    expect(classifyGithubReachability(asResult('', { timed_out: true }))).toBe('unreachable')
-    expect(classifyGithubReachability(asResult('ENOENT', { exit_code: -1 }))).toBe('inconclusive')
-    expect(classifyGithubReachability(asResult('who knows'))).toBe('inconclusive')
+    expect(classifyGithubReachability(GH_API_BAD_CREDENTIALS)).toBe('refused')
+    expect(classifyGithubReachability(GH_API_DEAD_PROXY)).toBe('unreachable')
+    expect(classifyGithubReachability(GH_API_DNS_FAILURE)).toBe('unreachable')
+    expect(classifyGithubReachability(GH_API_BLACKHOLE_TIMEOUT)).toBe('unreachable')
+    expect(classifyGithubReachability(GH_API_TLS_INTERCEPTED)).toBe('unreachable')
+    expect(classifyGithubReachability(GH_API_RATE_LIMIT_PRIMARY)).toBe('rate_limited')
+    expect(classifyGithubReachability(GH_API_SAML_SSO)).toBe('sso_unauthorized')
+    expect(classifyGithubReachability(GH_API_ZEN_SUCCESS)).toBe('reachable')
+    expect(classifyGithubReachability(ghApi({ timed_out: true }))).toBe('unreachable')
+    expect(classifyGithubReachability(ghApi({ stderr: 'ENOENT', exit_code: -1 }))).toBe(
+      'inconclusive',
+    )
+    expect(classifyGithubReachability(ghApi({ stderr: 'who knows' }))).toBe('inconclusive')
     // A 403 with no rejection wording must not sneak a verdict in through here.
-    expect(classifyGithubReachability(asResult('gh: Forbidden (HTTP 403)'))).toBe('inconclusive')
+    expect(classifyGithubReachability(ghApi({ stderr: 'gh: Forbidden (HTTP 403)' }))).toBe(
+      'inconclusive',
+    )
+  })
+
+  test('the classifier reads STDOUT too — a verdict that lands only there is still read', () => {
+    // The direct guard on the defect the fixtures were hiding. `gh` puts the
+    // fuller diagnostic in the response body, i.e. on stdout; every fixture used
+    // to hardcode `stdout: ''`, so a classifier that stopped reading stdout would
+    // not have moved one test. Here the verdict exists ONLY on stdout.
+    expect(classifyGithubReachability(ghApi({ stdout: '{"message": "Bad credentials"}' }))).toBe(
+      'refused',
+    )
+    expect(
+      classifyGithubReachability(
+        ghApi({ stdout: '{"message": "Resource protected by organization SAML enforcement."}' }),
+      ),
+    ).toBe('sso_unauthorized')
+    expect(
+      classifyGithubReachability(ghApi({ stdout: '{"message": "API rate limit exceeded"}' })),
+    ).toBe('rate_limited')
+  })
+
+  test('describeReachabilityAnswer quotes both streams, and says "nothing" only when both are empty', () => {
+    expect(describeReachabilityAnswer(GH_API_ZEN_SUCCESS, 'reachable')).toContain(
+      'SUCCEEDED, answering: Encourage flow.',
+    )
+    const refused = describeReachabilityAnswer(GH_API_BAD_CREDENTIALS, 'refused')
+    expect(refused).toContain('gh: Bad credentials (HTTP 401)')
+    expect(refused).toContain('"status": "401"')
+    // Only-stdout is still an answer…
+    expect(describeReachabilityAnswer(ghApi({ stdout: 'body only' }), 'inconclusive')).toBe(
+      'answered: body only',
+    )
+    // …and only-stderr is too.
+    expect(describeReachabilityAnswer(ghApi({ stderr: 'err only' }), 'inconclusive')).toBe(
+      'answered: err only',
+    )
+    // Genuinely mute is the ONLY case that says nothing was printed.
+    expect(describeReachabilityAnswer(ghApi({ exit_code: 7 }), 'inconclusive')).toBe(
+      'exited 7 without printing anything',
+    )
   })
 })
 
@@ -1436,11 +1770,33 @@ describe('multi-line `gh` output survives into the refusal', () => {
     expect(msg.trimEnd().endsWith('The token in GH_TOKEN is invalid.')).toBe(true)
   })
 
-  test('lines are flattened and trimmed, never dropped', () => {
+  // NAMED FOR WHAT IT ACTUALLY GUARANTEES. This was called "never dropped",
+  // which the very next test contradicts: the length cap DOES drop characters.
+  // The two are not in tension once the guarantee is stated precisely — no LINE
+  // is ever SELECTED BETWEEN (which is what `split('\n')[0]` did), and the only
+  // thing that can remove characters is the total-length cap, which removes them
+  // from the END of an already-complete rendering. A test name that overstates
+  // its own guarantee is how a later reader concludes the cap is a bug and
+  // removes it.
+  test('no line is selected between — every line is flattened and trimmed in order', () => {
     expect(renderAuthFailureDetail(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(
       ': github.com; X Failed to log in to github.com using token (GH_TOKEN); ' +
         '- Active account: true; - The token in GH_TOKEN is invalid.',
     )
+  })
+
+  test('the length cap is the ONLY thing that drops characters, and it cuts the tail', () => {
+    // The boundary the pair of names has to be honest about. Four lines, the
+    // last of which is pushed past the cap: the earlier lines survive intact, the
+    // last is cut mid-way, and the reader is told it was cut.
+    const long = ['first line', 'second line', 'x'.repeat(MAX_AUTH_FAILURE_DETAIL_CHARS)].join('\n')
+    const rendered = renderAuthFailureDetail(long)
+    expect(rendered.startsWith(': first line; second line; ')).toBe(true)
+    expect(rendered).toContain('(truncated)')
+    // Nothing was re-ordered or selected away — the loss is a suffix, and only a
+    // suffix.
+    const body = rendered.slice(2).replace('… (truncated)', '')
+    expect('first line; second line; ' + 'x'.repeat(MAX_AUTH_FAILURE_DETAIL_CHARS)).toContain(body)
   })
 
   test('empty, absent and blank-only details render as nothing', () => {

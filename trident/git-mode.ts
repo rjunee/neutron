@@ -43,8 +43,8 @@ export interface HostCommandResult {
 /**
  * WHY a publisher-authentication failure carries a CAUSE.
  *
- * "the outer publisher cannot authenticate" is equally true of all seven
- * situations below, and only two of them are the owner's to fix:
+ * "the outer publisher cannot authenticate" is equally true of all nine
+ * situations below, and only three of them are the owner's to fix:
  *
  *   • `no_credential_available` — the credential source was asked and had
  *     nothing, and the host's ambient `gh` could not authenticate either.
@@ -61,9 +61,21 @@ export interface HostCommandResult {
  *     print byte-identical stderr (see {@link looksLikeAmbiguousLoginFailure}).
  *     It is now the LAST resort rather than the answer, because
  *     {@link PUBLISHER_REACHABILITY_COMMAND} resolves the common cases.
- *   • `github_rate_limited`     — GitHub answered with a rate limit. That answer
- *     is returned WITH a working credential, so it is evidence the token is
- *     FINE, and the only action is to wait.
+ *   • `github_rate_limited`     — GitHub answered with a rate limit. A rate
+ *     limit is NOT a verdict on the credential in either direction: GitHub
+ *     returns 403 rate limits to authenticated requests (counted against the
+ *     user's hourly quota) AND to unauthenticated ones (counted, far more
+ *     tightly, against the source IP). So it is evidence NOT to rotate, and it
+ *     is NOT evidence the token is good. The only action is to wait.
+ *   • `credential_needs_sso_authorization` — GitHub answered, accepted the
+ *     credential's identity, and refused the RESOURCE because the org enforces
+ *     SAML/SSO and this token has not been authorized for it. Rotating would
+ *     produce another unauthorized token; the fix is to authorize the existing
+ *     one for the org.
+ *   • `github_reachable_but_login_failed` — `gh auth status` could not log in,
+ *     but a direct `gh api` call with the SAME credential SUCCEEDED. GitHub is
+ *     reachable and the credential works, so the fault is in the local `gh`
+ *     login state, not in the token and not in the network.
  *   • `could_not_reach_github`  — `gh` ran but never got an answer: DNS,
  *     offline, a proxy, a GitHub outage, or our own 60s watchdog killing the
  *     call. NOTHING was learned about the credential, and telling the owner to
@@ -81,17 +93,22 @@ export interface HostCommandResult {
  * {@link PublisherCredentialSource}, so no probe can be built that has no
  * opinion about the publisher's own credential.
  *
- * Note which of these are the owner's to act on: only `no_credential_available`
- * ("connect GitHub") and `credential_rejected` ("reconnect it"). The rest are
- * host conditions or honest non-verdicts, and a taxonomy that folded them into
- * `credential_rejected` — as this one did in round 1 — spends the owner's time
- * on the wrong repair.
+ * Note which of these are the owner's to act on NOW, and how differently:
+ * `no_credential_available` ("connect GitHub"), `credential_rejected`
+ * ("reconnect it") and `credential_needs_sso_authorization` ("authorize the
+ * token you already have"). `credential_verdict_unavailable` asks for a
+ * credential action only CONDITIONALLY, after the network is ruled out, and the
+ * rest are host conditions or honest non-verdicts. A taxonomy that folded them
+ * into `credential_rejected` — as this one did in round 1 — spends the owner's
+ * time on the wrong repair.
  */
 export type PublisherAuthFailureCause =
   | 'no_credential_available'
   | 'credential_rejected'
+  | 'credential_needs_sso_authorization'
   | 'credential_verdict_unavailable'
   | 'github_rate_limited'
+  | 'github_reachable_but_login_failed'
   | 'could_not_reach_github'
   | 'publisher_cli_unavailable'
   | 'probe_failed'
@@ -278,11 +295,28 @@ export function describePublisherAuthFailure(
         `Check network/DNS/proxy FIRST; rotate the token only once the network is known ` +
         `good${detail}`
       )
+    case 'credential_needs_sso_authorization':
+      return (
+        `GitHub accepted the credential for ${who} but refused the resource: the ` +
+        `organization enforces SAML/SSO and this token has not been authorized for it. ` +
+        `The token is not expired or revoked — AUTHORIZE the existing token for the org ` +
+        `(GitHub settings → the token → "Configure SSO"). Rotating it just produces ` +
+        `another unauthorized token${detail}`
+      )
     case 'github_rate_limited':
       return (
         `GitHub rate-limited \`gh auth status\`, so the credential for ${who} was neither ` +
-        `accepted nor rejected — GitHub returns a rate limit WITH a working credential, so ` +
-        `this is evidence the token is fine. Wait for the limit to reset. ` +
+        `accepted nor rejected. A rate limit is NOT evidence of rejection and NOT evidence ` +
+        `the credential is good either — GitHub 403-rate-limits unauthenticated requests too, ` +
+        `against the source IP. Wait for the limit to reset, then re-run. ` +
+        `Do NOT rotate the token on this signal${detail}`
+      )
+    case 'github_reachable_but_login_failed':
+      return (
+        `\`gh auth status\` could not log in for ${who}, but a direct \`gh api\` call with ` +
+        `the SAME credential SUCCEEDED — so GitHub is reachable and the credential works. ` +
+        `The fault is in this host's local \`gh\` login state (typically a stale account ` +
+        `entry), not in the token and not in the network. ` +
         `Do NOT rotate the token on this signal${detail}`
       )
     case 'could_not_reach_github':
@@ -294,7 +328,8 @@ export function describePublisherAuthFailure(
     case 'publisher_cli_unavailable':
       return (
         `the \`gh\` CLI could not be executed on this host, so the stored credential ` +
-        `for ${who} could not be verified either way${detail}`
+        `for ${who} could not be verified either way — install or upgrade \`gh\`. ` +
+        `Do NOT rotate the token on this signal${detail}`
       )
     case 'probe_failed':
       return (
@@ -359,6 +394,13 @@ export type EnvCapableHostRunner = (
   cmd: string[],
   cwd?: string,
   extraEnv?: Record<string, string>,
+  /**
+   * Watchdog budget for THIS call, so the probe can spend less on its follow-up
+   * question than on its first one. Optional, and a runner is free to ignore it
+   * — a three-parameter function still satisfies this type, which keeps every
+   * existing test double valid. `spawnCapture` honours it.
+   */
+  timeoutMs?: number,
 ) => Promise<HostCommandResult>
 
 /**
@@ -419,9 +461,11 @@ export const PUBLISHER_AUTH_COMMAND: readonly string[] = [
  *
  * WHY 401 COUNTS AND A BARE 403 DOES NOT — the round-4 fix. This used to test
  * `/\bhttp 40[13]\b/`, and 403 is simply not a statement about the credential:
- * GitHub returns it, TO A REQUEST WHOSE TOKEN IT ACCEPTED AND COUNTED, for the
- * primary rate limit, the secondary rate limit, SAML/SSO authorization, and
- * repository resource restrictions. So a bare `HTTP 403: Forbidden` carrying no
+ * GitHub returns it for the primary rate limit, the secondary rate limit,
+ * SAML/SSO authorization, and repository resource restrictions — none of which
+ * is "this credential is expired, revoked, or missing a scope", and two of
+ * which (the rate limits) it also returns to requests carrying NO credential at
+ * all, counted against the source IP. So a bare `HTTP 403: Forbidden` carrying no
  * rejection wording told the owner his working token was "expired, revoked, or
  * missing a scope" — and the rate-limit subtraction below only rescued the 403s
  * that happened to say "rate limit". 401 is the code that means the credential
@@ -430,15 +474,19 @@ export const PUBLISHER_AUTH_COMMAND: readonly string[] = [
  * list), because then the verdict comes from the wording, not from the number.
  *
  * A rate limit is explicitly NOT a refusal even though GitHub returns it as
- * `403` — it is returned WITH a valid credential, so it is excluded before
- * anything else is considered.
+ * `403` — it says nothing about the credential in either direction, so it is
+ * excluded before anything else is considered. A SAML/SSO refusal is subtracted
+ * for the opposite reason: GitHub accepted the credential's identity and
+ * refused the RESOURCE, so "expired, revoked, or missing a scope" is the wrong
+ * repair (see {@link looksLikeSamlSsoUnauthorized}).
  */
 export function looksLikeCredentialRejected(text: string): boolean {
   const t = text.toLowerCase()
   if (t.length === 0) return false
-  // A rate-limited 403 arrives with a WORKING token. It must never be read as a
-  // refusal, so it is subtracted before anything below can see it.
+  // Neither of these is "rotate your token", and both can otherwise reach the
+  // wording tests below, so both are subtracted before anything can see them.
   if (looksLikeGithubRateLimited(t)) return false
+  if (looksLikeSamlSsoUnauthorized(t)) return false
   return (
     t.includes('bad credentials') ||
     t.includes('requires authentication') ||
@@ -461,11 +509,21 @@ export function looksLikeCredentialRejected(text: string): boolean {
  * Whether GitHub answered with a RATE LIMIT rather than a verdict.
  *
  * GitHub returns **403** — not 429 — for both the primary and the secondary rate
- * limit, and it returns it to a request whose credential was accepted and
- * counted. `gh auth status` makes a live API round-trip, so it hits this. The
+ * limit. `gh auth status` makes a live API round-trip, so it hits this. The
  * blanket `/\bhttp 40[13]\b/` in {@link looksLikeCredentialRejected} therefore
- * told a rate-limited owner that his WORKING token was expired or revoked; the
- * one correct action (wait) was the one action the refusal did not offer.
+ * told a rate-limited owner that his token was expired or revoked; the one
+ * correct action (wait) was the one action the refusal did not offer.
+ *
+ * WHAT THIS DOES AND DOES NOT ESTABLISH — the round-5 correction, and the reason
+ * the refusal text was rewritten alongside it. An earlier draft of this cause
+ * told the owner a rate limit was "evidence the token is fine". It is not:
+ * GitHub rate-limits UNAUTHENTICATED requests too, far more tightly, against the
+ * source IP — and `gh` has documented failure modes in which a keychain error
+ * silently drops the credential and the request goes out unauthenticated
+ * (cli/cli#13317). So the same 403 is consistent with a working token AND with
+ * no token having been sent at all. The correct reading is one-directional: this
+ * is NOT evidence of rejection, so do not rotate — and it is not evidence of
+ * acceptance either, so do not report the credential as verified.
  */
 export function looksLikeGithubRateLimited(text: string): boolean {
   const t = text.toLowerCase()
@@ -476,6 +534,37 @@ export function looksLikeGithubRateLimited(text: string): boolean {
     t.includes('api rate limit') ||
     t.includes('exceeded a secondary') ||
     /\bhttp 429\b/.test(t)
+  )
+}
+
+/**
+ * Whether GitHub answered with a SAML/SSO AUTHORIZATION refusal.
+ *
+ * This is a 403, and the docblock on {@link looksLikeCredentialRejected} already
+ * named SAML/SSO as one of the reasons a bare 403 is not a verdict — but naming
+ * it was as far as round 4 got. With no branch of its own it fell through to the
+ * unclassified tail and rendered as `probe_failed`: "nothing was learned about
+ * the credential". Something very specific WAS learned, and it has its own
+ * repair. GitHub accepted the credential's identity — it knows who the token
+ * belongs to, which is why it can tell you the org needs authorization — and
+ * refused the RESOURCE. Rotating produces another unauthorized token; the fix is
+ * to authorize the token that already exists.
+ *
+ * The wording is GitHub's own, returned in the response body alongside the
+ * `X-GitHub-SSO` header. `gh api` surfaces the body (measured: a 401 body is
+ * printed to STDOUT while the one-line summary goes to stderr), which is why the
+ * classifier reads both streams.
+ */
+export function looksLikeSamlSsoUnauthorized(text: string): boolean {
+  const t = text.toLowerCase()
+  if (t.length === 0) return false
+  return (
+    t.includes('saml enforcement') ||
+    t.includes('saml sso') ||
+    t.includes('single sign-on') ||
+    t.includes('protected by organization saml') ||
+    t.includes('must grant your oauth token access to this organization') ||
+    t.includes('x-github-sso')
   )
 }
 
@@ -553,8 +642,18 @@ export function looksLikeAmbiguousLoginFailure(text: string): boolean {
  * cheapest authenticated endpoint GitHub publishes and its body is discarded;
  * only the failure shape is read.
  *
- * COST: one extra `gh` invocation, only on the ambiguous branch of an
- * already-failing probe. The success path is untouched.
+ * COST, STATED AS THE WORST CASE RATHER THAN AS A COUNT. The honest unit is not
+ * "one extra invocation" — it is TIME, and the previous docblock's phrasing hid
+ * that. The ambiguous branch is reached only when `gh auth status` has already
+ * failed, and the case that produces it most often (a blackholed proxy) is
+ * precisely the one that hangs for the full watchdog budget. At the shared 60s
+ * budget the worst case was 60s + 60s = 120s of wall clock inside a call no
+ * caller imposes a deadline on (`open/composer.ts`, `trident/
+ * work-board-build-tool.ts`, `onboarding/overnight/register.ts` all just await
+ * it). Hence {@link PUBLISHER_REACHABILITY_TIMEOUT_MS}: the follow-up gets a
+ * SMALLER budget, because a `/zen` that has not answered in 15s is not going to,
+ * and a timeout is already a first-class answer here (`'unreachable'`). Worst
+ * case is now 60s + 15s. The success path is untouched.
  */
 export const PUBLISHER_REACHABILITY_COMMAND: readonly string[] = [
   'gh',
@@ -564,30 +663,60 @@ export const PUBLISHER_REACHABILITY_COMMAND: readonly string[] = [
   '/zen',
 ]
 
+/**
+ * Watchdog budget for the follow-up reachability call — deliberately a fraction
+ * of {@link DEFAULT_HOST_COMMAND_TIMEOUT_MS}.
+ *
+ * `/zen` is a single unauthenticated-cost GET that normally answers in well
+ * under a second. Anything slower than this is the transport failure the call
+ * exists to detect, and `timed_out` is already classified as `'unreachable'` —
+ * so waiting the full 60s buys no additional information, it only doubles how
+ * long the owner's build sits before it is told anything.
+ */
+export const PUBLISHER_REACHABILITY_TIMEOUT_MS = 15_000
+
 /** What the reachability measurement established about the ambiguous failure. */
-export type GithubReachability = 'refused' | 'unreachable' | 'rate_limited' | 'inconclusive'
+export type GithubReachability =
+  | 'refused'
+  | 'sso_unauthorized'
+  | 'unreachable'
+  | 'rate_limited'
+  | 'reachable'
+  | 'inconclusive'
 
 /**
  * Read the reachability measurement. `'inconclusive'` is a real answer and the
  * default: an unrecognised result must leave the honest non-verdict standing
  * rather than manufacture the expensive one.
+ *
+ * WHY `'reachable'` IS ITS OWN ANSWER and not folded back into `'inconclusive'`.
+ * A `gh api /zen` that EXITS 0 is not a shrug — it proves GitHub answered and
+ * that it accepted this very credential. Round 4 returned `'inconclusive'` for
+ * it, so a probe whose second measurement had just SUCCEEDED told the owner
+ * "Check network/DNS/proxy FIRST"; the one thing measurably not wrong was the
+ * network. Note the exit code is read here rather than the output: on success
+ * `gh api` writes its body to STDOUT and nothing at all to stderr (measured, gh
+ * 2.97.0), so a stderr-only reading of a success sees an empty string.
  */
 export function classifyGithubReachability(res: HostCommandResult): GithubReachability {
   // Our own watchdog killed it, or `gh` could not be run — nothing was learned
   // about reachability, so nothing may be concluded about the credential.
   if (res.timed_out === true) return 'unreachable'
   if (res.exit_code === -1) return 'inconclusive'
+  // GitHub answered, and answered this credential. Positive evidence, and the
+  // only branch here that rules the network OUT rather than in.
+  if (res.ok) return 'reachable'
   const output = `${res.stderr}\n${res.stdout}`
   // Transport first: a host that cannot be reached cannot have refused anything.
   if (looksLikeGithubUnreachable(output)) return 'unreachable'
-  // Then the rate limit, which is a 403 carried by an ACCEPTED credential and so
-  // must be subtracted before any 4xx reading.
+  // Then the rate limit — a 403 that is not a verdict on the credential in
+  // either direction — so it is subtracted before any 4xx reading.
   if (looksLikeGithubRateLimited(output)) return 'rate_limited'
+  // Then SSO, also a 403, and also not "rotate this token".
+  if (looksLikeSamlSsoUnauthorized(output)) return 'sso_unauthorized'
   if (looksLikeCredentialRejected(output)) return 'refused'
-  // `gh api` succeeded, or failed in a way we do not recognise. A success here is
-  // genuinely strange — the credential worked for the API but not for `gh auth
-  // status` — and inventing a verdict from strangeness is what this module is
-  // being fixed for.
+  // `gh api` failed in a way we do not recognise. Inventing a verdict from
+  // strangeness is what this module is being fixed for.
   return 'inconclusive'
 }
 
@@ -639,11 +768,29 @@ export function looksLikeNoGithubAuth(text: string): boolean {
  *     verbatim in the 2.97.0 binary). It says GitHub never answered, so it is a
  *     transport fact; it used to reach the unclassified branch and be reported
  *     as `probe_failed`.
+ *   • the x509/TLS family — a corporate MITM proxy, an untrusted root, an
+ *     expired server certificate. The round-4 docblock two entries down already
+ *     cited x509 as the MOTIVATING EXAMPLE for not falling through to
+ *     `credential_rejected`, and yet no pattern here matched it: measured
+ *     `x509: certificate signed by unknown authority` fell to the unclassified
+ *     tail and rendered as "the probe itself failed", which is both wrong and
+ *     unactionable. A TLS handshake that never completed carried no credential
+ *     to GitHub, so it is a transport fact like the rest of this list. Note the
+ *     patterns are the Go TLS vocabulary specifically, not the bare word
+ *     `certificate`, which appears in unrelated `gh` output.
  */
 export function looksLikeGithubUnreachable(text: string): boolean {
   const t = text.toLowerCase()
   if (t.length === 0) return false
   return (
+    t.includes('x509:') ||
+    t.includes('certificate signed by unknown authority') ||
+    t.includes('certificate is not trusted') ||
+    t.includes('certificate has expired or is not yet valid') ||
+    t.includes('self-signed certificate') ||
+    t.includes('tls: failed to verify') ||
+    t.includes('tls: handshake failure') ||
+    t.includes('unable to verify the first certificate') ||
     t.includes('dial tcp') ||
     t.includes('no such host') ||
     t.includes('connection refused') ||
@@ -659,6 +806,46 @@ export function looksLikeGithubUnreachable(text: string): boolean {
     t.includes('timeout trying to log in') ||
     /\bhttp 5\d\d\b/.test(t)
   )
+}
+
+/**
+ * Render what the reachability call ACTUALLY SAID, reading the same two streams
+ * the classifier read.
+ *
+ * THE DEFECT THIS REPLACES, which is the classifier/message split that keeps
+ * producing this class of bug. {@link classifyGithubReachability} reads
+ * `stderr + stdout`; the sentence shown to the owner read `reach.stderr` ALONE
+ * and fell back to "exited N without printing anything" when it was empty. Both
+ * halves of that were wrong on MEASURED gh 2.97.0 output:
+ *
+ *   • SUCCESS writes the body to STDOUT and nothing to stderr — so a `/zen` that
+ *     answered was reported to the owner as having printed nothing, i.e. as lost
+ *     evidence, in the very message that then told him to go check his network.
+ *   • A REJECTED token writes the JSON error body to STDOUT (112 bytes here) and
+ *     only the one-line summary to stderr — so the fuller of the two diagnostics
+ *     was the one being discarded.
+ *
+ * A message that contradicts the classification standing next to it is worse
+ * than a vague one: it invites the owner to overrule a correct verdict. So the
+ * evidence sentence is derived from the same bytes, and "printed nothing" is now
+ * said only when BOTH streams are genuinely empty.
+ */
+export function describeReachabilityAnswer(
+  reach: HostCommandResult,
+  verdict: GithubReachability,
+): string {
+  const said = [reach.stderr, reach.stdout]
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .join(' / ')
+  if (said.length > 0) {
+    return verdict === 'reachable' ? `SUCCEEDED, answering: ${said}` : `answered: ${said}`
+  }
+  if (reach.timed_out === true) {
+    return `was killed by our own ${PUBLISHER_REACHABILITY_TIMEOUT_MS / 1000}s watchdog before it answered`
+  }
+  if (reach.ok) return 'exited 0, so GitHub answered, but printed nothing'
+  return `exited ${reach.exit_code} without printing anything`
 }
 
 /**
@@ -790,6 +977,17 @@ export function defaultGitModeProbe(
       if (looksLikeGithubRateLimited(output)) {
         return { authenticated: false, cause: 'github_rate_limited', detail: res.stderr }
       }
+      // Also before any credential verdict: a SAML/SSO refusal is a 403 in which
+      // GitHub accepted WHO the credential is and refused WHAT it asked for.
+      // "Expired, revoked, or missing a scope" is the wrong repair, and so is
+      // `probe_failed`'s "nothing was learned" — this one is very learnable.
+      if (looksLikeSamlSsoUnauthorized(output)) {
+        return {
+          authenticated: false,
+          cause: 'credential_needs_sso_authorization',
+          detail: describeWhichCredential(token, res.stderr),
+        }
+      }
       // `gh` says it was handed no credential at all.
       if (looksLikeNoGithubAuth(output)) {
         // CANARY. We resolved a token, and `gh` still saw none — so it did not
@@ -838,45 +1036,48 @@ export function defaultGitModeProbe(
       // SECOND QUESTION rather than guess — or, as round 3 did, rather than
       // report every genuinely expired token as "we could not tell".
       if (looksLikeAmbiguousLoginFailure(output)) {
-        const reach = await run([...PUBLISHER_REACHABILITY_COMMAND], undefined, env)
-        // A killed or silent `gh` leaves no stderr, and `answered: ` with nothing
-        // after it reads as though the evidence were lost rather than absent.
-        const answer =
-          reach.stderr.trim().length > 0
-            ? `answered: ${reach.stderr}`
-            : reach.timed_out === true
-              ? `was killed by our own ${DEFAULT_HOST_COMMAND_TIMEOUT_MS / 1000}s watchdog before it answered`
-              : `exited ${reach.exit_code} without printing anything`
+        const reach = await run(
+          [...PUBLISHER_REACHABILITY_COMMAND],
+          undefined,
+          env,
+          PUBLISHER_REACHABILITY_TIMEOUT_MS,
+        )
+        const verdict = classifyGithubReachability(reach)
         const evidence =
           `\`${PUBLISHER_REACHABILITY_COMMAND.join(' ')}\` was then run to tell a refusal ` +
-          `apart from an unreachable GitHub, and ${answer}`
-        switch (classifyGithubReachability(reach)) {
+          `apart from an unreachable GitHub, and ${describeReachabilityAnswer(reach, verdict)}`
+        const detail = `${describeWhichCredential(token, res.stderr)} — ${evidence}`
+        switch (verdict) {
           case 'refused':
             // GitHub ANSWERED, and its answer was a refusal. That is the positive
             // evidence `gh auth status` structurally cannot supply.
+            return { authenticated: false, cause: 'credential_rejected', detail }
+          case 'sso_unauthorized':
             return {
               authenticated: false,
-              cause: 'credential_rejected',
-              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
+              cause: 'credential_needs_sso_authorization',
+              detail,
             }
           case 'unreachable':
-            return {
-              authenticated: false,
-              cause: 'could_not_reach_github',
-              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
-            }
+            return { authenticated: false, cause: 'could_not_reach_github', detail }
           case 'rate_limited':
+            return { authenticated: false, cause: 'github_rate_limited', detail }
+          case 'reachable':
+            // The second measurement SUCCEEDED with the same credential, so both
+            // "your token was refused" and "check your network" are ruled out by
+            // evidence. Round 4 reported this as `credential_verdict_unavailable`
+            // and sent the owner to check a network that had just answered.
             return {
               authenticated: false,
-              cause: 'github_rate_limited',
-              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
+              cause: 'github_reachable_but_login_failed',
+              detail,
             }
           case 'inconclusive':
             // Both measurements came back mute. The honest non-verdict stands.
             return {
               authenticated: false,
               cause: 'credential_verdict_unavailable',
-              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
+              detail,
             }
         }
       }
