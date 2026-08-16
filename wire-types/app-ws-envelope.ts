@@ -110,6 +110,35 @@ export interface AppWsInboundButtonChoice {
   freeform_text?: string
 }
 
+/**
+ * Web presence (2026-08-15) — the client declares whether the owner is LOOKING
+ * at it right now, so the server can decline to buzz his phone about a message
+ * he is already reading on the web app.
+ *
+ * THIS FRAME EXISTS BECAUSE NOTHING ELSE ON THIS SOCKET ANSWERS THE QUESTION.
+ * The client's `setActive` (`chat-core/ws-client.ts:175-195`) only starts and
+ * stops the LOCAL heartbeat — it has never sent a byte to the server — so the
+ * only presence signal the gateway had was "a socket is open", and that is an
+ * explicitly rejected proxy: a backgrounded tab (like a backgrounded Android
+ * app) holds its socket wide open, so gating on it would silence exactly the
+ * notification that exists for that case (see the comment above the notify in
+ * `gateway/http/deliver.ts`). Hence an EXPLICIT declaration.
+ *
+ * IT IS A LEVEL, NOT AN EDGE, AND IT IS DELIBERATELY RE-SENT ON A TIMER.
+ * `foreground` is only believed for a bounded window after it arrives
+ * (`WEB_PRESENCE_TTL_MS` in `gateway/push/web-presence.ts`), because the one
+ * failure this feature can produce that nobody would ever notice is SILENCE: a
+ * browser that dies without a close frame would otherwise leave the owner marked
+ * present, and therefore un-notified, forever. So the client repeats it while it
+ * stays foregrounded and the server forgets it if the repeats stop.
+ */
+export interface AppWsInboundPresence {
+  v: 1
+  type: 'presence'
+  /** `foreground` = the owner is looking at this client right now. */
+  state: 'foreground' | 'background'
+}
+
 export type AppWsInbound = AppWsInboundUserMessage
 
 export interface AppWsOutboundSessionReady {

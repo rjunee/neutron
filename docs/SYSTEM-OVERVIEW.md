@@ -4262,6 +4262,36 @@ not a read receipt; gating on it would silence exactly the case a notification e
 for.
 `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are merely rate-limited.
 
+**But it IS gated on WEB PRESENCE** (2026-08-15), which is the same question asked with a
+real answer instead of an inference. The owner: *"can you also check if I'm actively using
+the web app, and if so dont send push notifications to my phone."* A socket cannot answer
+that — a browser tab holds one open while minimised exactly as Android does — so the web
+client now SAYS so: `chat-core/web-session.ts` sends `{ v:1, type:'presence', state }` on
+every socket open, on every `visibilitychange` (wired at
+`landing/chat-react/useNeutronChat.ts`, which also states the level once on mount because
+`visibilitychange` is an edge), and then repeats `foreground` every
+`WEB_PRESENCE_REFRESH_MS`. The app-ws surface records it per CONNECTION — not per device,
+so two tabs are two screens and closing one does not mark the owner absent — and ONLY for
+`platform=web` sockets, because a native client's foreground is the device's own question
+(`app/lib/push-foreground-policy.ts`, which is untouched and still suppresses the banner
+for the conversation on screen; a push never sent and a push sent-but-not-shown are
+different things).
+
+The decision itself is one wrapper, `suppressPushWhileWebForeground`
+(`gateway/push/web-presence.ts`), applied at the SINGLE `buildChatMessagePushSink`
+construction in `open/composer.ts`, so both pushing paths — `createDeliver`'s `notify` and
+the `ownsNotify` branch of the app-ws send — inherit it and cannot disagree. A suppressed
+push answers `false`, so the row is NOT stamped `delivered_at` and a later re-emit is still
+free to buzz him.
+
+Every uncertain case biases toward NOTIFYING, because the failure this feature can cause is
+SILENCE and nobody notices silence: a `foreground` claim is believed for
+`WEB_PRESENCE_TTL_MS` and no longer (derived as 3× the refresh in
+`wire-types/web-presence.ts`, so the two numbers cannot drift apart), so a browser killed
+without a close frame is forgotten within a minute; an absent tracker, an unknown owner and
+a THROWING presence check all read as not-present; and the decoder refuses any `state` it
+does not recognise rather than treating "not background" as present.
+
 **The tap** (`app/lib/push-deep-link-dispatch.ts`). `agent_message` resolves to
 `/projects/<id>/chat?message_id=<id>`, and the chat route CONSUMES that param:
 `app/app/projects/[id]/chat.tsx` threads it as `targetMessageId`, and

@@ -13,6 +13,9 @@
  *                              them + keeps the runtime decode/sanitize helpers).
  *   - `./topic-id.ts`        — `app:<user>[:<project>]` topic-id derivation
  *                              (killed the `landing/chat-react/config.ts` mirror).
+ *   - `./web-presence.ts`    — the presence refresh cadence + the TTL DERIVED
+ *                              from it, so a client that repeats and a server
+ *                              that expires can never drift into silence.
  *   - `./doc-links.ts`       — the `docs:/…` marker ⇄ channel-URL algorithm
  *                              (killed the `app/lib/doc-links.ts` byte-twin).
  *   - `./tab-descriptor.ts`  — the engine `TabDescriptor` wire shape (killed the
@@ -30,6 +33,7 @@
 export * from './option.ts'
 export * from './app-ws-envelope.ts'
 export * from './topic-id.ts'
+export * from './web-presence.ts'
 export * from './doc-links.ts'
 export * from './tab-descriptor.ts'
 export * from './agent-engagement.ts'

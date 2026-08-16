@@ -400,6 +400,10 @@ import { parseAppWsSendMarker, shouldNotifyForSend } from './wiring/app-ws-marke
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
 import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
 import {
+  createWebPresenceTracker,
+  suppressPushWhileWebForeground,
+} from '@neutronai/gateway/push/web-presence.ts'
+import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
 } from '@neutronai/gateway/http/app-upload-surface.ts'
@@ -2572,9 +2576,24 @@ export function buildOpenGraphComposer(
     // (`gateway/http/app-devices-surface.ts:206` — the resolved owner bearer's
     // slug). Reading and writing under one key is what makes "a registered device
     // is a notified device" true rather than aspirational.
-    const chatMessagePush = buildChatMessagePushSink({
-      fanOut: pushTransport,
-      project_slug,
+    //
+    // 2026-08-15, owner-reported: *"can you also check if I'm actively using the
+    // web app, and if so dont send push notifications to my phone."* That is the
+    // `suppressPushWhileWebForeground` wrapper below, and the reason it goes HERE
+    // — on the single construction, rather than at either call site — is that
+    // this ONE sink feeds BOTH pushing paths: `createDeliver({ notify: … })` a
+    // few lines down (out-of-turn posts) and the `ownsNotify` branch of
+    // `buildAppWsSendReply` (ordinary in-turn replies, #300). Two copies of the
+    // presence question would be two chances for them to answer it differently.
+    const webPresence = createWebPresenceTracker()
+    const chatMessagePush = suppressPushWhileWebForeground({
+      sink: buildChatMessagePushSink({
+        fanOut: pushTransport,
+        project_slug,
+      }),
+      // The owner, and only the owner: presence is per-user, so a guest sitting
+      // in a shared project cannot silence his phone by having a tab open.
+      isWebForeground: () => webPresence.isForeground(OWNER_USER_ID),
     })
     /**
      * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign
@@ -5424,6 +5443,7 @@ export function buildOpenGraphComposer(
       appWsImportProgressRouter,
       buildClarifyPoster,
       appWsRegistry,
+      webPresence,
       appWsChatTurn,
       scribeOnUserTurn,
       // M2 task 5 — resolve a voice note's transcript for the SCRIBE text (voice
