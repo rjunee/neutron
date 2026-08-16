@@ -357,6 +357,100 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(h.inputs).toHaveLength(1)
   })
 
+  describe('FIX-ROUND ANCESTRY GATE', () => {
+    const reviewed = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const produced = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+    const ancestryRun = async (answer: HostCommandResult, pin: string | null = reviewed) => {
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: produced } }),
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(produced)
+          if (joined.includes(`merge-base --is-ancestor ${reviewed} ${produced}`)) return answer
+          return ok()
+        },
+      })
+      const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: pin, bound_pr: null, fenced_paths: null })
+      return { h, final: await runToTerminal(h, run.id) }
+    }
+
+    test('refuses a produced head that abandoned the reviewed head before push or PR creation', async () => {
+      const { h, final } = await ancestryRun({ ok: false, stdout: '', stderr: '', exit_code: 1 })
+      expect(final.phase).toBe('failed')
+      expect(final.failure_reason).toContain('does not descend from the reviewed head')
+      expect(final.failure_reason).toContain(reviewed)
+      expect(final.failure_reason).toContain(produced)
+      const calls = h.hostCalls.map((c) => c.join(' '))
+      expect(calls.some((c) => c.includes(' push '))).toBe(false)
+      expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+    })
+
+    test('fails closed when git cannot verify ancestry', async () => {
+      const { h, final } = await ancestryRun({ ok: false, stdout: '', stderr: 'fatal: Not a valid commit name aaaa', exit_code: 128 })
+      expect(final.failure_reason).toContain('could not verify')
+      expect(final.failure_reason).toContain(reviewed)
+      expect(final.failure_reason).toContain(produced)
+      expect(h.hostCalls.some((c) => c.includes('push'))).toBe(false)
+    })
+
+    test('rejects a malformed pin without asking git to measure it', async () => {
+      const { h, final } = await ancestryRun(ok(), 'deadbeef')
+      expect(final.failure_reason).toContain('is not a 40-hex commit')
+      expect(final.failure_reason).toContain(produced)
+      expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge-base --is-ancestor deadbeef'))).toBe(false)
+    })
+
+    test('a verified descendant proceeds through the normal publish path', async () => {
+      let fires = 0
+      let remotes = 0
+      const h = buildHarness({
+        plan: () => ++fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: produced } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(produced)
+          if (joined.includes(`merge-base --is-ancestor ${reviewed} ${produced}`)) return ok()
+          if (joined.includes('merge-base --is-ancestor')) return ok()
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${++remotes === 1 ? '9'.repeat(40) : produced}\trefs/heads/feat-x`)
+          if (joined.includes('gh pr list')) return ok('42')
+          if (joined.includes('diff --name-only')) return ok('changed.ts')
+          return ok()
+        },
+      })
+      const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: reviewed, bound_pr: null, fenced_paths: null })
+      expect((await runToTerminal(h, run.id)).phase).toBe('done')
+      expect(h.hostCalls.map((c) => c.join(' '))).toContain(`git -C /repo merge-base --is-ancestor ${reviewed} ${produced}`)
+    })
+
+    test('a null pin adds no pre-rebase ancestry command', async () => {
+      const { h } = await ancestryRun(ok(), null)
+      expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(`merge-base --is-ancestor ${reviewed} ${produced}`))).toBe(false)
+    })
+
+    test('real git treats equality as ancestry and an unrelated commit as non-ancestry', () => {
+      const repo = join(tmp, 'ancestry-real-git')
+      mkdirSync(repo)
+      const git = (...args: string[]) => Bun.spawnSync(['git', '-C', repo, ...args], { stdout: 'pipe', stderr: 'pipe' })
+      expect(git('init').exitCode).toBe(0)
+      expect(git('config', 'user.email', 'test@example.com').exitCode).toBe(0)
+      expect(git('config', 'user.name', 'Test').exitCode).toBe(0)
+      writeFileSync(join(repo, 'one'), 'one')
+      expect(git('add', 'one').exitCode).toBe(0)
+      expect(git('commit', '-m', 'one').exitCode).toBe(0)
+      const x = git('rev-parse', 'HEAD').stdout.toString().trim()
+      expect(git('merge-base', '--is-ancestor', x, x).exitCode).toBe(0)
+      expect(git('checkout', '--orphan', 'unrelated').exitCode).toBe(0)
+      expect(git('rm', '-rf', '.').exitCode).toBe(0)
+      writeFileSync(join(repo, 'two'), 'two')
+      expect(git('add', 'two').exitCode).toBe(0)
+      expect(git('commit', '-m', 'two').exitCode).toBe(0)
+      const y = git('rev-parse', 'HEAD').stdout.toString().trim()
+      expect(git('merge-base', '--is-ancestor', x, y).exitCode).not.toBe(0)
+    })
+  })
+
   /**
    * THE PUBLISHER MUST BE ABLE TO PUBLISH A REBASED BRANCH — WITH A LEASE, NEVER A FORCE.
    *
