@@ -1178,7 +1178,12 @@ function forgePushStep(reenter) {
 const FORGE_PR_LINE = isPr ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
 // `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
-function forgeBuildContract(reenter) {
+function forgeBuildContract(reenter, artifactCheckpointName) {
+  const artifactCommand = artifactCheckpointCommand(artifactCheckpointName)
+  const artifactStep = artifactCommand === null
+    ? ''
+    : `\n6. DURABILITY CHECKPOINT — the INSTANT your commit is in and the diff file is written, run EXACTLY this single Bash command, verbatim (idempotent; it must NOT fail your build — if it errors, ignore the error and continue): ${artifactCommand}`
+  const reportStep = artifactCommand === null ? 6 : 7
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
@@ -1188,8 +1193,8 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
-6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
+5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -1488,7 +1493,7 @@ function codexBriefByPath(brief) {
   }
 }
 
-function codexBuildPrompt(slot, brief, route) {
+function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   const uniq = runId || slug
   const briefFile = `/tmp/trident-codex-build-${uniq}-${slot}.brief`
   const byPath = codexBriefByPath(brief)
@@ -1574,6 +1579,9 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
     partMissingInstructions += `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_CORRUPT in ${errFile} → read the named file in the error: if it is one of YOUR two segment files (${a1File} or ${a2File}), re-run ALL segment calls from CALL 1 exactly once; if it is a HOST-written part path, no retry by you can fix it and you must NOT rewrite the file — report codexStatus='deferred'.`
   }
   const diffFile = codexBuildDiffFile()
+  const checkpointEnv = !dbPath || !runId
+    ? ''
+    : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)}`
   // The model assignment, exactly as the review lane does it: the id belongs to the
   // subprocess, never to the wrapping agent. Empty when no registry was threaded,
   // which invokes the wrapper on its own pinned default.
@@ -1600,7 +1608,7 @@ ${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -1634,7 +1642,12 @@ async function forgeAgent(opts, tag, brief, slot) {
     return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
   }
   const res = await agent(
-    codexBuildPrompt(slot, `${brief}${codexBuildCoda()}`, route),
+    codexBuildPrompt(
+      slot,
+      `${brief}${codexBuildCoda()}`,
+      route,
+      opts.label === 'forge:build' ? 'forge-done' : opts.label.slice('forge:'.length),
+    ),
     withModel({ ...opts, schema: CODEX_FORGE_SCHEMA }, tag),
   )
   if (!res) return null
@@ -1824,6 +1837,12 @@ ${plan.implementationPlan}
 // written the same way and for the same reason — always, so it is never stale —
 // through the temp-file + `readfile()` indirection `writeTerminalResult` uses, so
 // the JSON's own quotes cannot break the sqlite argument.
+function artifactCheckpointCommand(name) {
+  if (!dbPath || !runId) return null
+  const findingsTmp = `/tmp/trident-checkpoint-findings-${runId}.json`
+  return `printf '%s' '[]' > ${shSingleQuote(findingsTmp)} && bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} branch ${shSingleQuote(forgeBranch)} inner_checkpoint ${shSingleQuote(name)} inner_checkpoint_head "$(git rev-parse --verify HEAD)" inner_findings_file ${shSingleQuote(findingsTmp)} subagent_status running`
+}
+
 async function checkpoint(name, opts) {
   if (!dbPath || !runId) return
   const o = opts || {}
@@ -5449,7 +5468,7 @@ try {
     const forge = await forgeAgent(
       { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
       complexityTag,
-      `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
+      `${forgeBuildContract(resuming, 'forge-done')}${ralphNote}${reuseNote}
 
 TASK:
 ${task}${reflectionGuidance}`,
@@ -5737,7 +5756,7 @@ ${task}${reflectionGuidance}`,
     const fix = await forgeAgent(
       { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree' },
       complexityTag,
-      `${forgeBuildContract(true)}
+      `${forgeBuildContract(true, `fix-round-${round}`)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). Commit on the SAME local branch; ${isPr ? 'the durable outer loop publishes after you exit, so do not push or run `gh`.' : 'there is no remote and no PR.'} Address every BLOCKER + important finding, run tests until green, commit locally, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):
