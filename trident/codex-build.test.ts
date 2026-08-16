@@ -72,6 +72,8 @@ const briefIntegrity = loadBriefIntegrity()
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
 
 interface RunOpts {
+  /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
+  checkpointExit?: number
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Don't set CODEX_HOME at all. */
@@ -188,6 +190,7 @@ interface RunOpts {
 const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n'
 
 interface RunResult {
+  checkpointArgs: string
   status: number | null
   /** The signal the harness killed the wrapper with, or null if it exited by itself. */
   signal: NodeJS.Signals | null
@@ -391,6 +394,16 @@ exit 1
     NEUTRON_CODEX_AUTH_RETRY_DELAY: '0',
     ...(opts.env ?? {}),
   }
+  if (opts.checkpointExit !== undefined) {
+    const checkpoint = join(dir, 'checkpoint-stub.sh')
+    writeFileSync(checkpoint, `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\nexit ${opts.checkpointExit}\n`)
+    chmodSync(checkpoint, 0o755)
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT'] = checkpoint
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = '/tmp/run.db'
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = 'run-123'
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_NAME'] = 'forge-done'
+  }
+  Object.assign(env, opts.env ?? {})
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
   const brief = opts.briefParts === undefined
     ? (opts.brief === undefined ? DEFAULT_BRIEF : opts.brief)
@@ -459,6 +472,7 @@ exit 1
   }
   const trailerRaw = readOr('build.trailer')
   return {
+    checkpointArgs: readOr('checkpoint-args.txt'),
     status: res.status,
     /** Non-null when the harness had to KILL the wrapper — i.e. it did not finish. */
     signal: res.signal ?? null,
@@ -503,6 +517,31 @@ const FAKE_BUILD_NO_DIFF = `cat >/dev/null; ${NARRATE}; echo built >> built.txt;
 /** A build that RUNS and edits but never commits — the case that must report nothing. */
 const FAKE_NO_COMMIT = `cat >/dev/null; ${NARRATE}; echo edited > built.txt`
 const FAKE_FAIL = `cat >/dev/null; ${NARRATE}; echo "boom" >&2; exit 7`
+
+describe('artifact-time checkpoint', () => {
+  test('records the measured HEAD after commit and diff', () => {
+    const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    expect(r.status).toBe(0)
+    expect(r.checkpointArgs.trim().split('\n')).toEqual([
+      '/tmp/run.db', 'run-123', 'inner_checkpoint', 'forge-done', 'inner_checkpoint_head', r.head,
+    ])
+  })
+
+  test('does not run unless all four values are present', () => {
+    const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 0, env: {
+      NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD,
+      NEUTRON_CODEX_BUILD_CHECKPOINT_NAME: '',
+    } })
+    expect(r.status).toBe(0)
+    expect(r.checkpointArgs).toBe('')
+  })
+
+  test('checkpoint failure cannot fail the build', () => {
+    const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 1, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('CODEX_BUILD_CHECKPOINT_FAILED')
+  })
+})
 /**
  * A build that behaves like a REAL codex build now does: it commits and writes its
  * diff, and it does NOT push and does NOT open a PR — because it cannot.
