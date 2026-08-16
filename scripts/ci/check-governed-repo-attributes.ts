@@ -19,7 +19,7 @@
  * both are legitimately nothing to enforce), exit 1 otherwise.
  */
 
-import { planUnionAttribute, AS_BUILT_CANDIDATES } from '../../trident/as-built-union-attribute.ts'
+import { planUnionAttribute, AS_BUILT_CANDIDATES } from '@neutronai/trident/as-built-union-attribute.ts'
 
 const root = process.argv[2] ?? process.cwd()
 
