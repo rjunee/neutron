@@ -278,9 +278,6 @@ test('a real FALLBACK boot refuses, says why in the audit row, and leaves the ro
   // an operator actually reads at 3am.
   const warned: string[] = []
   const realWarn = console.warn
-  console.warn = (...args: unknown[]): void => {
-    warned.push(args.map(String).join(' '))
-  }
   // The distinguishing act: no `.url_slug`, so nothing has told this process
   // who it is. (`beforeEach` wrote one; an anonymous boot is its absence.)
   rmSync(join(home, '.url_slug'), { force: true })
@@ -299,18 +296,34 @@ test('a real FALLBACK boot refuses, says why in the audit row, and leaves the ro
     seedDb.close()
   }
 
-  const handle = await boot({ port: 0 })
+  // The mock goes on INSIDE the try that restores it. Installed before an
+  // `await boot()` that sits outside one, a boot rejection leaks the global into
+  // every later test in the file — which happened during review when listener
+  // creation failed.
   try {
-    // The rows are exactly where they were. Asserted on the VALUE, because a
-    // migration that moved and re-encrypted would also leave one row here.
-    const store = new SecretsStore({ data_dir: home, db: handle.db })
-    expect(
-      await store.get({
-        owner_handle: asOwnerHandle(LIVE),
-        kind: 'byo_api_key',
-        label: 'anthropic:prod',
-      }),
-    ).toBe('live-token')
+    console.warn = (...args: unknown[]): void => {
+      warned.push(args.map(String).join(' '))
+    }
+    const handle = await boot({ port: 0 })
+    try {
+      // The rows are exactly where they were. Asserted on the VALUE, because a
+      // migration that moved and re-encrypted would also leave one row here.
+      const store = new SecretsStore({ data_dir: home, db: handle.db })
+      expect(
+        await store.get({
+          owner_handle: asOwnerHandle(LIVE),
+          kind: 'byo_api_key',
+          label: 'anthropic:prod',
+        }),
+      ).toBe('live-token')
+    } finally {
+      // THE JOURNAL IS READ AFTER THIS, NOT BEFORE. The write is
+      // fire-and-forget and microtask-scheduled (`persistence/system-events.ts`),
+      // so only shutdown's drain makes it durable — reading earlier is a race
+      // that passes on a fast machine and fails on a loaded one, which is the
+      // worst kind of test.
+      await handle.shutdown({ force: true })
+    }
 
     const names = systemEventNames()
     expect(names).toContain('credential_scope_orphaned')
@@ -333,7 +346,6 @@ test('a real FALLBACK boot refuses, says why in the audit row, and leaves the ro
     expect(orphanLines.join('\n')).toContain('fallback_boot_handle_refused_direction')
   } finally {
     console.warn = realWarn
-    await handle.shutdown({ force: true })
   }
 })
 

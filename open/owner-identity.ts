@@ -30,14 +30,25 @@ export const OWNER_USER_ID = 'owner'
 
 /**
  * Resolve the owner's instance slug. Mirrors `gateway/index.ts`
- * `resolveOwnerSlug`'s env precedence (`NEUTRON_INSTANCE_SLUG`) so the
- * banner / self-instance row agree with the slug `boot()` freezes at
- * startup. Falls back to `'dev'` for a bare `bun run` — the same fallback
- * the boot shell uses.
+ * `resolveOwnerSlugSourceFromConfig`'s env precedence (`NEUTRON_INSTANCE_SLUG`)
+ * so the banner / self-instance row agree with the slug `boot()` freezes at
+ * startup. Falls back to `'dev'` for a bare `bun run` — the same fallback the
+ * boot shell uses.
+ *
+ * ⚠️ THIS DOCBLOCK PROMISES AGREEMENT, AND FOR A WHILE IT LIED. When boot
+ * started trimming (an empty or whitespace `NEUTRON_INSTANCE_SLUG` is not an
+ * identity), this copy kept `length > 0`, so `'   '` resolved to `'dev'` at
+ * boot and to `'   '` here. `neutron doctor` then filtered events and jobs by a
+ * slug nothing had written under and reported an empty instance — a diagnostic
+ * that quietly lies about the system it is diagnosing.
+ *
+ * The two are pinned equal by `open/__tests__/owner-slug-agreement.test.ts`.
+ * A second answer to "who am I" is not a second opinion, it is a bug waiting
+ * for someone to trust the wrong one.
  */
 export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
-  const slug = env['NEUTRON_INSTANCE_SLUG']
-  if (typeof slug === 'string' && slug.length > 0) return slug
+  const slug = env['NEUTRON_INSTANCE_SLUG']?.trim() ?? ''
+  if (slug.length > 0) return slug
   return 'dev'
 }
 
