@@ -34,8 +34,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { spawnCapture, type RunHostCommand } from './git-mode.ts'
-import { type MergeConflictResolver } from './merge.ts'
+import { spawnCapture } from './git-mode.ts'
+import { type MergeConflictResolver, type RunHostCommand } from './merge.ts'
 import { healShallowCheckout, rebaseOntoObservedBase, TridentRebaseConflict } from './orchestrator.ts'
 import type { TridentRun } from './store.ts'
 
