@@ -2,6 +2,37 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the merge-driver docblocks cite line numbers that moved
+
+Landed via PR #339.
+
+A retroactive panel returned five findings against the entry below after it had
+merged. Four did not reproduce against the merged code: `--check` from a linked
+worktree exits 0 (measured, git 2.50.1, with a main-checkout control), `--check`
+is unaffected by PATH (measured with bun removed from PATH and with a decoy bun
+first, both exit 0), its remedy is safe because the driver path is resolved from
+the main worktree, and the boundary is covered by
+`scripts/git/as-built-merge-realgit.test.ts` `--check from somewhere other than
+the shell that installed`. Those fixes had landed inside the PR before it
+merged; the panel had reviewed an earlier revision.
+
+The fifth had a live residual and this is it. Three of the four cross-file
+citations in the merge-driver cluster pointed at the wrong line. Two in
+`scripts/install-merge-drivers.sh` sent the reader to line 633 of
+`trident/orchestrator.ts` for `asBuiltDriverCommand`, which is at 677; the test
+file's header sent them to line 715 for the publisher's `git apply --3way`,
+which is in `rebaseOntoObservedBase` and runs at 1122. Each was correct when
+typed and was renumbered by an unrelated edit to the file it pointed into.
+Nothing referenced them, so nothing failed. A fourth cited a line relative to
+`origin/main`, a target that moves on its own.
+
+Renumbering them would buy one commit, so the citations now name a symbol and a
+new test resolves each one — the durable form this cluster already applies one
+level up, where the two derivations of the driver command are pinned by a test
+rather than by a comment. A line number is still allowed against an immutable
+commit, and the historical citation is kept that way, repinned to `63a342b2`.
+Mutation-tested three ways, each with a control proving the mutation landed.
+
 ## 2026-08-16 — file presence is not authorization, and this log stops losing entries quietly
 
 Landed via PR #323.
