@@ -320,6 +320,12 @@ export interface ScopeReconcileResult {
   snapshot_path: string | null
   moved_total: number
   dropped_total: number
+  /**
+   * Present only when the direction guard refused: the boot slug was the
+   * fallback and the DB already carries rows under an explicit handle. Nothing
+   * was written.
+   */
+  refused_direction?: { stranded_keys: string[]; stranded_rows: number }
 }
 
 export interface ReconcileInstanceScopeOptions {
@@ -333,6 +339,12 @@ export interface ReconcileInstanceScopeOptions {
   now?: () => number
   /** How many pre-re-key snapshots to retain, newest first. */
   keepSnapshots?: number
+  /**
+   * True when the boot slug is the bare `'dev'` FALLBACK — env/config absent,
+   * not explicitly set. A fallback identity may never pull rows off an explicit
+   * handle.
+   */
+  currentSlugIsFallback?: boolean
 }
 
 /** Snapshot filename infix, also the prune predicate. */
@@ -599,6 +611,30 @@ function reconcileOnRawDatabase(
   }
   const staleKeys = [...stale].sort()
 
+  // DIRECTION GUARD (defect 2026-08-14): migrating forward onto an explicitly
+  // configured handle is the feature; migrating onto the FALLBACK handle is
+  // always wrong — the fallback means "nobody told me who I am", and an
+  // anonymous process (a test suite, a bare `bun run` inheriting NEUTRON_HOME)
+  // must never pull the live instance's rows onto itself. No move, no
+  // snapshot, no ledger write; the boot proceeds.
+  if (options.currentSlugIsFallback === true && staleKeys.length > 0) {
+    const stranded_rows = countRowsUnderKeys(db, staleKeys)
+    log.warn('scope_rekey_refused_fallback_direction', {
+      fallback_slug: current_slug,
+      stranded_keys: staleKeys.join(','),
+      stranded_rows,
+    })
+    return {
+      current_slug,
+      action: 'noop',
+      rekeys: [],
+      snapshot_path: null,
+      moved_total: 0,
+      dropped_total: 0,
+      refused_direction: { stranded_keys: staleKeys, stranded_rows },
+    }
+  }
+
   const snapshot_path =
     staleKeys.length > 0 ? snapshotBeforeRekey(db, options.dbPath, now(), keep) : null
 
@@ -668,4 +704,26 @@ function reconcileOnRawDatabase(
     moved_total,
     dropped_total,
   }
+}
+
+/**
+ * How many rows sit under `keys`, across every swept `(table, column)`. Used
+ * ONLY by the direction guard, to put a number on the refusal line — a count is
+ * what turns "something was stranded" into evidence an owner can act on. Runs
+ * on the refusal path alone, so the per-column scan costs nothing on a normal
+ * boot.
+ */
+function countRowsUnderKeys(db: Database, keys: string[]): number {
+  let total = 0
+  for (const key of keys) {
+    for (const { table, column } of SCOPE_SWEEP_COLUMNS) {
+      const t = assertIdent(table, 'table')
+      const c = assertIdent(column, 'column')
+      const row = db
+        .query<{ n: number }, [string]>(`SELECT COUNT(*) AS n FROM ${t} WHERE ${c} = ?`)
+        .get(key)
+      total += row?.n ?? 0
+    }
+  }
+  return total
 }
