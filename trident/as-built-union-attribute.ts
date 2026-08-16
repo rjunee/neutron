@@ -60,15 +60,26 @@ const HEADER = [
 
 /**
  * The merge drivers git implements itself. Anything else must be defined by a
- * `merge.<name>.driver` config entry, and git treats a TRACKED attribute naming
- * an undefined one as FATAL rather than falling back:
+ * `merge.<name>.driver` config entry.
+ *
+ * WHAT AN UNCONFIGURED CUSTOM DRIVER ACTUALLY DOES — measured, because the
+ * previous version of this comment had it backwards and the error it quoted is
+ * real but comes from somewhere else. On git 2.50.1, fresh repo, a TRACKED
+ * attribute naming a driver with no `merge.<name>.*` config at all:
+ *
+ *     git merge --no-edit other   → CONFLICT (content) ...          exit 1
+ *     git apply --3way --index    →                                 exit 0
+ *
+ * git FALLS BACK to its ordinary merge; it does not abort. The fatal form —
  *
  *     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
  *
- * So a custom driver named in a COMMITTED `.gitattributes` breaks every fresh
- * clone, every outside contributor and CI, on any merge touching that path —
- * which is why `scripts/install-merge-drivers.sh` binds its driver in the
- * untracked `$GIT_COMMON_DIR/info/attributes` instead.
+ * — requires `merge.<name>.name` to be set while `merge.<name>.driver` is not,
+ * which is a half-written config an installer can leave behind, not a property
+ * of tracking the attribute. So naming a custom driver in a committed
+ * `.gitattributes` is safe for a fresh clone, an outside contributor and CI; it
+ * is only pointless if the repo does not ship the driver, which is the
+ * distinction `scripts/ci/check-governed-repo-attributes.ts` now draws.
  */
 export const BUILT_IN_MERGE_DRIVERS = ['text', 'binary', 'union'] as const
 

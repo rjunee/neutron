@@ -85,13 +85,15 @@ describe('planUnionAttribute', () => {
     expect(plan.skipped).toEqual([{ path: 'AS-BUILT.md', reason: 'builtin-driver' }])
   })
 
-  it('distinguishes a CUSTOM driver, because tracked it is fatal rather than a preference', () => {
-    // Found by mutating the CI gate against its own repo: naming the custom
-    // as-built-log driver in the TRACKED file PASSED, and it is the one case
-    // that breaks every fresh clone — git errors `lacks command line` (exit 128)
-    // instead of falling back. A fixer must not overwrite it; a gate must not
-    // bless it. Same fact, two correct responses, which is why the reason is
-    // carried rather than collapsed to "not ours".
+  it('distinguishes a CUSTOM driver, so the caller can decide whether the repo can run it', () => {
+    // The planner carries the reason rather than collapsing it to "not ours" because a fixer and
+    // a gate answer differently: a fixer must not overwrite somebody's choice, a gate has to ask
+    // whether the repo actually ships that driver.
+    //
+    // The original comment here said a tracked custom driver "breaks every fresh clone" because
+    // git errors `lacks command line`. Measured on git 2.50.1: it does not — an unconfigured
+    // driver falls back to an ordinary CONFLICT (exit 1), and the fatal form needs a half-written
+    // config (`.name` set, `.driver` unset). See `BUILT_IN_MERGE_DRIVERS` for the measurement.
     const plan = planUnionAttribute({
       attributes: 'docs/AS_BUILT.md merge=as-built-log\n',
       asBuiltPaths: ['docs/AS_BUILT.md'],

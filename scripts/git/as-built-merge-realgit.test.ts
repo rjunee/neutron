@@ -7,7 +7,7 @@
  * lines, and git's three-way merge sees two different insertions against identical context. A
  * stubbed merge would prove nothing about that — the whole question is what REAL git does. So this
  * file uses a real repository, real commits, a real moved base, and the publisher's own replay
- * mechanism (`git apply --3way`, `trident/orchestrator.ts:715`), the way
+ * mechanism (`git apply --3way --index`, `trident/orchestrator.ts:758`), the way
  * `trident/publish-rebase-realgit.test.ts` does.
  *
  * THE FAILURE IS PROVEN BEFORE THE FIX IS. `replay()` is run twice over the identical scenario:
@@ -15,6 +15,12 @@
  * MUST merge. The first half is the control. Without it "the driver works" is unfalsifiable — a
  * test that only ever runs the fixed configuration passes just as happily when the scenario it
  * describes was never conflicting in the first place.
+ *
+ * THE SCENARIO CARRIES THE TRACKED `.gitattributes`, BECAUSE THAT IS NOW THE MECHANISM. An earlier
+ * cut of this file copied only the three scripts, which meant it measured a repository layout the
+ * real one does not have. `docs/AS_BUILT.md merge=<driver>` is a committed line, so the fixture
+ * commits it too — and the `union` half of `describe('union is not safe here')` below points that
+ * same tracked line at git's built-in driver to show what #308 actually does to two entries.
  *
  * BOTH FILES THE TASK NAMES ARE IN PLAY. Each branch writes its own plan at
  * `.trident/plans/<branch>.md` AND prepends its own log entry, because the acceptance criterion is
@@ -78,7 +84,7 @@ function writeLog(repo: string, entries: string[]): void {
  *
  * Returns the paths the replay needs: the fork point both branches share, and the second branch.
  */
-function scenario(): { repo: string; forkPoint: string } {
+function scenario(mergeAttribute = 'as-built-log'): { repo: string; forkPoint: string } {
   const repo = mkdtempSync(join(tmpdir(), 'as-built-realgit-'))
   created.push(repo)
 
@@ -93,6 +99,10 @@ function scenario(): { repo: string; forkPoint: string } {
   cpSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), join(repo, 'scripts', 'install-merge-drivers.sh'))
   cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-merge-driver.ts'), join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
   cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-log-merge.ts'), join(repo, 'scripts', 'git', 'as-built-log-merge.ts'))
+
+  // THE BINDING IS TRACKED, so the fixture commits it exactly as the real repo does. Parameterised
+  // only so the `union` comparison below can point the same line at git's built-in driver.
+  writeFileSync(join(repo, '.gitattributes'), `docs/AS_BUILT.md merge=${mergeAttribute}\n`)
 
   writeLog(repo, HISTORY)
   git(repo, 'add', '-A')
@@ -218,5 +228,245 @@ describe('two concurrent builds publishing against a moved base', () => {
     const { applied, unmerged } = replay(repo, forkPoint, 'mutation')
     expect(applied.ok).toBe(false)
     expect(unmerged).toEqual(['docs/AS_BUILT.md'])
+  }, 30_000)
+})
+
+// ----------------------------------------------------------------------------------------------
+// WHY NOT `merge=union` — the question this PR has to answer, because #308 already put that line in
+// the tracked `.gitattributes` on main. Union is right about the goal and wrong about the UNIT.
+// ----------------------------------------------------------------------------------------------
+
+/** A line BOTH entries write. This is the line union loses. */
+const SIGN_OFF = 'Verified with a control.'
+
+/**
+ * The same two concurrent builds, but their entries share a line — a sign-off both of them write.
+ * Real entries in this log share plenty: a lead-in, a sign-off, a blank line. That is not a
+ * contrived fixture, it is what a generated entry looks like.
+ */
+function sharedBoilerplateScenario(mergeAttribute: string): { repo: string; forkPoint: string } {
+  const repo = mkdtempSync(join(tmpdir(), 'as-built-union-'))
+  created.push(repo)
+
+  git(repo, 'init', '-q', '-b', 'main')
+  git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+  git(repo, 'config', 'user.name', 'Trident Test')
+  git(repo, 'config', 'commit.gpgsign', 'false')
+
+  mkdirSync(join(repo, 'docs'), { recursive: true })
+  mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+  cpSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), join(repo, 'scripts', 'install-merge-drivers.sh'))
+  cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-merge-driver.ts'), join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
+  cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-log-merge.ts'), join(repo, 'scripts', 'git', 'as-built-log-merge.ts'))
+  writeFileSync(join(repo, '.gitattributes'), `docs/AS_BUILT.md merge=${mergeAttribute}\n`)
+
+  const shared = (date: string, who: string): string[] => [
+    `## ${date} — ${who} shipped`,
+    '',
+    'What changed:',
+    '',
+    `- ${who} detail`,
+    '',
+    SIGN_OFF,
+    '',
+  ]
+
+  writeLog(repo, HISTORY)
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'base')
+  const forkPoint = git(repo, 'rev-parse', 'HEAD').stdout.trim()
+
+  git(repo, 'checkout', '-q', '-b', 'build-one')
+  writeLog(repo, [...shared('2026-08-15', 'build one'), ...HISTORY])
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'build one')
+
+  git(repo, 'checkout', '-q', '-b', 'build-two', forkPoint)
+  writeLog(repo, [...shared('2026-08-17', 'build two'), ...HISTORY])
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'build two')
+
+  git(repo, 'checkout', '-q', 'main')
+  git(repo, 'merge', '-q', '--no-edit', 'build-one')
+
+  return { repo, forkPoint }
+}
+
+describe('union is not safe here, and the difference is measured rather than argued', () => {
+  test('UNION silently drops a line the two entries share, and inverts the date order', () => {
+    // No driver is installed and none is needed — `union` is built into git, so this is exactly
+    // what main does today under #308, and what GitHub's server-side merge would do.
+    const { repo, forkPoint } = sharedBoilerplateScenario('union')
+    const { applied, unmerged, worktree } = replay(repo, forkPoint, 'union')
+
+    // Union NEVER conflicts. That is the whole danger: there is nothing to review.
+    expect(applied.ok).toBe(true)
+    expect(unmerged).toEqual([])
+
+    const merged = readFileSync(join(worktree, 'docs', 'AS_BUILT.md'), 'utf8')
+    const lines = merged.split('\n')
+    expect(merged).toContain('## 2026-08-15 — build one shipped')
+    expect(merged).toContain('## 2026-08-17 — build two shipped')
+
+    // THE CORRUPTION. Both entries were written with the sign-off; the merged file has ONE copy,
+    // because union emits the lines the two sides SHARE only once. Build one's entry lost its last
+    // line to build two's, at exit 0, with no marker and nothing to review.
+    expect(lines.filter((l) => l === SIGN_OFF).length).toBe(1)
+
+    // and it is specifically the FIRST entry that was truncated — the sign-off now sits below the
+    // second heading, inside an entry that is not the one that wrote it.
+    const firstHeading = lines.indexOf('## 2026-08-15 — build one shipped')
+    const secondHeading = lines.indexOf('## 2026-08-17 — build two shipped')
+    expect(lines.indexOf(SIGN_OFF)).toBeGreaterThan(secondHeading)
+
+    // ACCEPTANCE 3, violated: the file promises newest-first and union emits ours-then-theirs
+    // regardless of date, so the OLDER entry is on top.
+    expect(firstHeading).toBeLessThan(secondHeading)
+  }, 30_000)
+
+  test('the ENTRY-AWARE driver keeps both copies and orders them newest-first', () => {
+    // The identical scenario, the identical shared line — only the driver differs. This is the
+    // A/B that makes the previous test a finding about `union` rather than about the fixture.
+    const { repo, forkPoint } = sharedBoilerplateScenario('as-built-log')
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    const { applied, unmerged, worktree } = replay(repo, forkPoint, 'entry-aware')
+    expect(applied.ok).toBe(true)
+    expect(unmerged).toEqual([])
+
+    const merged = readFileSync(join(worktree, 'docs', 'AS_BUILT.md'), 'utf8')
+    const lines = merged.split('\n')
+
+    // BOTH entries keep their own sign-off — nothing was absorbed into anything else.
+    expect(lines.filter((l) => l === SIGN_OFF).length).toBe(2)
+
+    // Newest first, as the file's own first line promises.
+    expect(lines.filter((l) => l.startsWith('## '))).toEqual([
+      '## 2026-08-17 — build two shipped',
+      '## 2026-08-15 — build one shipped',
+      '## 2026-08-14 — the by-path build brief is proven in lockstep',
+      '## 2026-08-13 — an earlier thing shipped',
+    ])
+  }, 30_000)
+})
+
+// ----------------------------------------------------------------------------------------------
+// The installer's own safety properties. Each of these was a review finding, and each is a state
+// the installer could previously reach.
+// ----------------------------------------------------------------------------------------------
+
+describe('the installer cannot leave a clone in a state that is worse than no install', () => {
+  test('THE FATAL STATE IS UNREACHABLE — `.name` is never written, so it can never outlive `.driver`', () => {
+    // `merge.<d>.name` set with `merge.<d>.driver` unset is the ONE config git treats as fatal:
+    //     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+    // The old installer wrote `.name` FIRST, unchecked, with no `set -e` — so a failed or
+    // interrupted install left exactly that, and every merge of the log died at 128 while the
+    // script printed "installed" and exited 0. Not writing `.name` at all removes the state by
+    // construction rather than guarding against it.
+    const { repo } = scenario()
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()).not.toBe('')
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).toBe('')
+
+    // CONTROL — git is genuinely fatal in that state, so the assertion above is protecting against
+    // something real. Set `.name`, drop `.driver`, and the merge dies at 128.
+    git(repo, 'config', 'merge.as-built-log.name', 'entry-aware')
+    git(repo, 'config', '--unset', 'merge.as-built-log.driver')
+    git(repo, 'checkout', '-q', 'build-two')
+    const fatal = run(repo, ['git', 'merge', '--no-edit', 'main'])
+    expect(fatal.code).toBe(128)
+    expect(fatal.stderr).toContain('lacks command line')
+  }, 30_000)
+
+  test('a clone the OLD installer touched is converged, not merely left alone', () => {
+    // Not writing `.name` protects a fresh clone and does nothing for one that already has the key
+    // — and that clone is one `--unset ...driver` away from exit 128. Install has to actively
+    // clear it. Both legacy artefacts of the previous layout are removed: the `.name` config key
+    // and the `info/attributes` line that would otherwise OUTRANK the tracked `.gitattributes`.
+    const { repo } = scenario()
+    const common = run(repo, ['git', 'rev-parse', '--path-format=absolute', '--git-common-dir']).stdout.trim()
+    mkdirSync(join(common, 'info'), { recursive: true })
+    writeFileSync(join(common, 'info', 'attributes'), 'docs/AS_BUILT.md merge=as-built-log\n')
+    git(repo, 'config', 'merge.as-built-log.name', 'left over from the old installer')
+
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).toBe('')
+    expect(readFileSync(join(common, 'info', 'attributes'), 'utf8')).not.toContain('as-built-log')
+  }, 30_000)
+
+  test('installing from a linked worktree leaves NO absolute worktree path in the shared config', () => {
+    // The config is COMMON to every worktree while the checkout is not, so an absolute path into
+    // whichever worktree ran the install is a time bomb: trident installs from a throwaway linked
+    // worktree, that worktree is removed, and every other worktree is left pointing at a script
+    // that no longer exists. Observed in the real repo — a rebase failed with "Module not found"
+    // from a config naming a deleted `.worktrees/...` path.
+    //
+    // The script path is therefore RELATIVE, which git resolves against the working tree the merge
+    // is running in (measured: a driver printing `pwd` reports the linked worktree when the merge
+    // happens there). Anchoring to the MAIN worktree was tried first and only moves the problem —
+    // its path is stable but its CONTENT is not, and a main worktree parked on a commit older than
+    // the driver makes every install fail.
+    const { repo } = scenario()
+    const linked = join(repo, '.installer-worktree')
+    git(repo, 'worktree', 'add', '-q', '--detach', linked, 'main')
+
+    expect(run(linked, ['bash', join(linked, 'scripts', 'install-merge-drivers.sh')]).ok).toBe(true)
+    const configured = run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()
+    expect(configured).not.toContain(linked)
+    expect(configured).not.toContain(repo)
+    expect(configured).toContain('scripts/git/as-built-merge-driver.ts')
+
+    // and it still works after that worktree is gone, which is the property that actually matters
+    git(repo, 'worktree', 'remove', '--force', linked)
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+  }, 30_000)
+
+  test('a merge in a linked worktree runs THAT worktree\'s driver, not another tree\'s', () => {
+    // The property the relative path buys, asserted end-to-end rather than inferred from the
+    // config string: the replay worktree the publisher creates is a linked one, and it has to
+    // merge correctly with no other worktree involved.
+    const { repo, forkPoint } = scenario()
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    const { applied, unmerged, worktree } = replay(repo, forkPoint, 'linked-run')
+    expect(applied.ok).toBe(true)
+    expect(unmerged).toEqual([])
+    const merged = readFileSync(join(worktree, 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(merged).toContain('## 2026-08-16 — build one shipped')
+    expect(merged).toContain('## 2026-08-16 — build two shipped')
+  }, 30_000)
+
+  test('--check reports NOT usable when the configured script has been deleted', () => {
+    // A nonempty config value is not a working one. `--check` used to test only that the string
+    // was set, which is exactly the state that produced "Module not found" mid-rebase.
+    const { repo } = scenario()
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+
+    rmSync(join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
+    const check = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+    expect(check.ok).toBe(false)
+    expect(check.stderr).toContain('no driver script at')
+  }, 30_000)
+
+  test('a path containing a space is quoted, so the driver still runs', () => {
+    // git expands `merge.<d>.driver` through a shell. An unquoted path with a space word-splits and
+    // the driver dies on every merge — a real hazard on macOS ("Application Support") and for any
+    // checkout under a directory a user named with a space.
+    const spaced = mkdtempSync(join(tmpdir(), 'as built spaced-'))
+    created.push(spaced)
+    const { repo, forkPoint } = scenario()
+    const moved = join(spaced, 'repo')
+    cpSync(repo, moved, { recursive: true })
+
+    expect(run(moved, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+    const { applied, unmerged, worktree } = replay(moved, forkPoint, 'spaced')
+    expect(applied.ok).toBe(true)
+    expect(unmerged).toEqual([])
+    const merged = readFileSync(join(worktree, 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(merged).toContain('## 2026-08-16 — build one shipped')
+    expect(merged).toContain('## 2026-08-16 — build two shipped')
   }, 30_000)
 })

@@ -6440,23 +6440,44 @@ The fix is a git merge driver that works on **whole entries**:
   entries keep their existing order (the log is only loosely ordered
   historically, and re-sorting 300 entries would bury a one-entry change);
   additions are placed newest-first among them. It is entry-aware and never
-  line-aware on purpose — a `union` driver would interleave two entries, and
-  interleaving inside one entry is what produced broken TypeScript in an earlier
-  incident.
+  line-aware on purpose, and that is measured rather than argued: #308 bound this
+  path to git's built-in `union`, and on git 2.50.1 two concurrently-appended
+  entries that share a line — a lead-in, a sign-off, a blank line, which generated
+  entries do — merged at **exit 0 with the first entry's closing line absorbed
+  into the second**, plus the older entry sorted above the newer one. No conflict,
+  no marker, nothing to review. That is the interleave that produced broken
+  TypeScript in an earlier incident, on a documentation log where it is quieter
+  and therefore worse.
+  It also refuses rather than guesses when a side is TRUNCATED to zero entries
+  (which otherwise reads as 300 legitimate deletions and wipes the log), and it
+  honours a side that REORDERED existing entries instead of silently reverting it.
 - `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls.
   Anything it will not merge (both sides editing one entry, a diverged header, a
   file that does not parse as a log, an unexpected throw) is handed to
   `git merge-file`, so the floor of the mechanism is exactly today's behaviour:
   conflict markers a human reads, never a plausible file nobody diffed.
-- `scripts/install-merge-drivers.sh` — installs the driver config AND the
-  binding. **The binding lives in `.git/info/attributes`, not in a tracked
-  `.gitattributes`**, because git treats an attribute naming an unconfigured
-  driver as `fatal: … lacks command line` (exit 128) rather than falling back —
-  for `git merge` and for the `git apply --3way` the publisher uses. A committed
-  attribute would break every fresh clone, outside contributor and CI until each
-  ran an install step they had no reason to know about. Untracked, the attribute
-  and its driver arrive together or neither does — the same rule
-  `install-git-hooks.sh` applies to the leak gate and its denylist.
+- **The binding is TRACKED**, in `.gitattributes`: `docs/AS_BUILT.md
+  merge=as-built-log`. An earlier cut kept it untracked on the grounds that git
+  treats an attribute naming an unconfigured driver as `fatal: … lacks command
+  line` (exit 128). That is measurably wrong, and it was the load-bearing
+  justification for the whole layout. On git 2.50.1, attribute tracked and no
+  `merge.as-built-log.*` config at all: `git merge` gives an ordinary CONFLICT
+  (exit 1) and `git apply --3way` returns 0. Exit 128 needs `merge.<name>.name`
+  set while `.driver` is unset — a half-written config, not a property of
+  tracking. So a fresh clone, an outside contributor, CI and GitHub's own
+  server-side merge all get today's behaviour, and tracking is the only way any
+  of them see the rule at all.
+- `scripts/install-merge-drivers.sh` — installs ONLY the `merge.as-built-log.driver`
+  command. It never writes `merge.as-built-log.name`, which makes the exit-128
+  state **unreachable by construction** rather than guarded against; it resolves
+  the driver path from the MAIN worktree (the config is common to every worktree,
+  so a path into a throwaway linked worktree dies when that worktree is removed);
+  it shell-quotes the path, because git expands the driver value through `/bin/sh`;
+  and `--check` verifies the script still exists rather than that the key is
+  merely non-empty.
+- `scripts/ci/check-governed-repo-attributes.ts` — asserts the tracked binding is
+  still there, since deleting it is otherwise silent. It accepts `merge=union` as
+  the floor, and the entry-aware driver **only when the repo actually ships it**.
 
 `rebaseOntoObservedBase` (`trident/orchestrator.ts`) runs the installer before
 it replays a branch, so build lanes get this without anyone remembering. That

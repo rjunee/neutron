@@ -2,6 +2,48 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the log's merge rule is tracked, and union was losing lines
+
+#309 landed the entry-aware driver with its binding in the untracked
+`.git/info/attributes`, on the stated grounds that a tracked attribute naming an
+unconfigured driver is FATAL for every fresh clone. That premise was the
+load-bearing justification for the layout, it was repeated in five files, and it
+is wrong. Measured on git 2.50.1, fresh repo, attribute tracked, no
+`merge.as-built-log.*` config at all: `git merge` returns an ordinary CONFLICT
+(exit 1) and `git apply --3way --index` returns 0. Exit 128 exists, but it needs
+`merge.<name>.name` set while `.driver` is unset — a half-written config the old
+installer could produce (no `set -e`, `.name` written first, neither write
+checked), not a property of tracking the attribute.
+
+Meanwhile #308 had bound the same path to git's built-in `union`, and #315 added
+a gate requiring that line. Union is right about the goal and wrong about the
+unit. It emits each side's UNIQUE lines around the lines they SHARE, and two
+generated entries share plenty. Two concurrently-appended entries carrying the
+same sign-off merged at exit 0 with the FIRST entry's closing line absorbed into
+the second, and the older entry sorted above the newer one in a file whose first
+line promises newest-first. No conflict, no marker, nothing to review — the same
+interleave that produced broken TypeScript once, somewhere quieter.
+
+So the binding is now TRACKED as `docs/AS_BUILT.md merge=as-built-log`, which is
+what a fresh clone, an outside contributor, CI and GitHub's server-side merge
+actually see, and the installer writes only the driver command. Four ways the
+merge could report success while losing history are closed, each with a mutation
+proving the test fails without the fix: a side truncated to zero entries used to
+read as ~300 legitimate deletions and replace the log with one entry; a
+four-backtick fence quoting a three-backtick block split one entry into two; a
+side that REORDERED existing entries had the reorder silently reverted; and a
+newly added undated continuation sorted to the bottom of the file away from its
+parent. The installer no longer writes `merge.as-built-log.name` at all, which
+makes exit 128 unreachable by construction; it resolves the driver path from the
+main worktree rather than whichever throwaway worktree ran the install; it
+shell-quotes that path, because git expands the value through `/bin/sh`; and
+`--check` verifies the script exists instead of trusting a non-empty string.
+
+#315's gate shipped without a CI line to run it, so it had never run on a single
+PR. It is wired now, it has its first tests, and it accepts the entry-aware
+driver only when the repo actually ships it — a name the repo cannot run is
+still the stray rule the gate exists to catch.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset

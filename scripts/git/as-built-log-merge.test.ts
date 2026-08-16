@@ -29,8 +29,9 @@ const NEW_TWO = '## 2026-08-16 — build two\n\nbody two\n\n'
 describe('parse/serialize', () => {
   test('round-trips the REAL AS_BUILT.md byte-for-byte', () => {
     // A merge driver that cannot reproduce its own input is a corruption engine. This is the file
-    // it will actually be pointed at — 300+ entries, four duplicated headings, ten undated
-    // sections and a great deal of fenced sample markdown.
+    // it will actually be pointed at — 300+ entries, four duplicated headings, and a great deal of
+    // fenced sample markdown. (An earlier comment here also claimed ten undated sections; measured,
+    // there are zero — every entry in the current file carries a date. See `effectiveDates`.)
     const text = readFileSync(REAL_LOG, 'utf8')
     expect(serializeLog(parseLog(text))).toBe(text)
   })
@@ -268,5 +269,122 @@ describe('the driver CLI — what git actually gets back', () => {
 
   test('too few arguments is refused rather than guessed at', () => {
     expect(runDriver([])).toBe(2)
+  })
+})
+
+// ----------------------------------------------------------------------------------------------
+// Round-3 review findings. Every one of these FAILED against the previous cut of this module, and
+// every one of them is a way the merge could return `ok: true` while losing or mangling history —
+// which is the single outcome this file exists to prevent. A clean merge that quietly drops a
+// change is worse than a conflict, because nobody looks at it.
+// ----------------------------------------------------------------------------------------------
+
+const HEAD_OLD_A = '## 2026-08-10 — older thing'
+const HEAD_OLD_B = '## 2026-08-09 — oldest thing'
+const HEAD_NEW_ONE = '## 2026-08-16 — build one'
+
+describe('a side that is not a log never merges silently', () => {
+  test('ONE side truncated to zero entries is refused — it used to wipe the whole history', () => {
+    // THE BUG: the guard read `A.entries.length === 0 && B.entries.length === 0`, so a ONE-sided
+    // truncation slipped straight past it. Every base entry was then present in `theirs` and
+    // absent from `ours`, which the retention loop reads as a legitimate deletion — for all of
+    // them at once. The result was ok:true with the canonical log replaced by the single new entry.
+    const base = log(OLD_A, OLD_B)
+    const truncated = '# AS_BUILT\n\nRunning log of what shipped, newest first. One entry per merged change.\n'
+    const appended = log(NEW_ONE, OLD_A, OLD_B)
+
+    expect(mergeAsBuiltLog(base, truncated, appended).ok).toBe(false)
+    // and in the other direction — `ours`/`theirs` swap with the direction of the merge
+    expect(mergeAsBuiltLog(base, appended, truncated).ok).toBe(false)
+
+    // CONTROL — the same two sides with the truncation replaced by an ordinary no-op DO merge, so
+    // the refusals above are caused by the truncation and not by the shape of the fixture.
+    const control = mergeAsBuiltLog(base, base, appended)
+    expect(control.ok).toBe(true)
+    expect((control as { text: string }).text).toContain('body of oldest thing')
+  })
+})
+
+describe('fence tracking is CommonMark, not a boolean toggle', () => {
+  test('a four-backtick fence quoting a three-backtick block stays ONE entry', () => {
+    // THE BUG: `fenced = !fenced` on every fence line. The inner ``` closed the block early, the
+    // sample `## ` heading below it was read as a real entry, and one entry silently became two —
+    // which the merge then date-sorts independently, so another entry can be placed between the
+    // two halves of what was one entry.
+    // The sample heading sits after an ODD number of inner fence lines on purpose. A boolean
+    // toggle is back to "open" after a balanced inner block, which would hide the bug; it is
+    // "closed" here, so the toggle reads the sample as a real entry and the entry splits in two.
+    const text = log(
+      '## 2026-08-16 — documents a fenced format\n\n````md\n```sh\n## 2026-01-01 — sample, not an entry\n```\n````\n\ntail\n\n',
+    )
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(1)
+    expect(serializeLog(parsed)).toBe(text)
+
+    // CONTROL — the same sample heading OUTSIDE any fence is still found, so the fix suppressed a
+    // false positive rather than blinding the parser to real headings.
+    expect(parseLog(log('## 2026-08-16 — real\n\nx\n\n## 2026-01-01 — also real\n\ny\n\n')).entries.length).toBe(2)
+  })
+
+  test('a shorter fence does not close a longer one, and a tilde does not close a backtick', () => {
+    expect(parseLog(log('## 2026-08-16 — a\n\n````\n```\n## 2026-01-01 — sample\n````\n\n')).entries.length).toBe(1)
+    expect(parseLog(log('## 2026-08-16 — a\n\n~~~\n```\n## 2026-01-01 — sample\n~~~\n\n')).entries.length).toBe(1)
+  })
+})
+
+describe('a reordering of existing entries survives the merge', () => {
+  test('one side reordering the retained entries has that order honoured, not reverted', () => {
+    // THE BUG: retained entries were emitted unconditionally in the BASE's order, so a
+    // restructuring pass over this file — #304 was exactly that — merged at ok:true and was
+    // silently reverted to the old order.
+    const base = log(OLD_A, OLD_B)
+    const reordered = log(OLD_B, OLD_A)
+    const appended = log(NEW_ONE, OLD_A, OLD_B)
+
+    const merged = mergeAsBuiltLog(base, reordered, appended)
+    expect(merged.ok).toBe(true)
+    expect(parseLog((merged as { text: string }).text).entries.map((e) => e.lines[0])).toEqual([
+      HEAD_NEW_ONE,
+      HEAD_OLD_B,
+      HEAD_OLD_A,
+    ])
+
+    // CONTROL — with neither side reordering, the base order is kept. So the assertion above is
+    // reached by the reorder, not by the placement logic putting things there anyway.
+    const straight = mergeAsBuiltLog(base, base, appended)
+    expect(parseLog((straight as { text: string }).text).entries.map((e) => e.lines[0])).toEqual([
+      HEAD_NEW_ONE,
+      HEAD_OLD_A,
+      HEAD_OLD_B,
+    ])
+  })
+
+  test('both sides reordering DIFFERENTLY is a conflict, not a coin flip', () => {
+    const base = log(OLD_A, OLD_B, NEW_ONE)
+    const ours = log(OLD_B, OLD_A, NEW_ONE)
+    const theirs = log(NEW_ONE, OLD_A, OLD_B)
+    expect(mergeAsBuiltLog(base, ours, theirs).ok).toBe(false)
+
+    // CONTROL — both sides reordering the SAME way is agreement, and merges.
+    expect(mergeAsBuiltLog(base, ours, ours).ok).toBe(true)
+  })
+})
+
+describe('an added undated continuation lands beside its parent', () => {
+  test('a new undated section sorts with the entry above it, not to the bottom of the file', () => {
+    // THE BUG: additions sorted on the bare heading date while `effectiveDates` was applied only to
+    // RETAINED entries. A newly added continuation therefore carried `''`, which sorts below every
+    // real date, and was emitted at the very end of the log — detached from the entry it continues.
+    const base = log(OLD_A, OLD_B)
+    const continuation = '## Follow-up, same change\n\nmore about build one\n\n'
+    const withBoth = log(NEW_ONE, continuation, OLD_A, OLD_B)
+
+    const merged = mergeAsBuiltLog(base, withBoth, base)
+    expect(merged.ok).toBe(true)
+    const headings = parseLog((merged as { text: string }).text).entries.map((e) => e.lines[0])
+    expect(headings[0]).toBe(HEAD_NEW_ONE)
+    expect(headings[1]).toBe('## Follow-up, same change')
+    // and specifically NOT at the end, which is where it used to land
+    expect(headings[headings.length - 1]).not.toBe('## Follow-up, same change')
   })
 })
