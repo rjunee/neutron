@@ -995,7 +995,7 @@ not whether `gh` is merely installed. A GitHub origin with an incapable publishe
 loud dispatch error rather than a silent downgrade to local mode. Repositories without
 a GitHub origin retain the existing local behavior.
 
-### Argus round-two hardening
+#### Argus round-two hardening
 
 The publish checkpoint now carries the review round and Ralph remaining-task count
 (`trident/inner-workflow.mjs`), so an outer re-fire cannot reset a non-converging fix
@@ -1037,7 +1037,7 @@ obsolete inner-publisher tests were removed instead of remaining skipped.
   behavioral prompt assertion (0 pass, 1 fail). Both guards were restored before
   the green verification run.
 
-## Integrations surface scope declaration (ISSUES #572)
+### Integrations surface scope declaration (ISSUES #572)
 
 `gateway/http/cores-integrations-surface.ts` now declares in its response that
 the enumerated credential slots belong to bundled Cores. The web client in
@@ -1494,7 +1494,7 @@ negative fraction divided by elapsed renders as a negative pace — "−0.2×", 
 as comfortably within the refill rate. Kimi refused negatives at its own edge; the
 Anthropic header path did not, so one writer's guard was never the property.
 
-Detail: `docs/as-built/2026-08-13-usage-dashboard-phase-1.md`.
+Detail: § 2026-08-13 — Usage dashboard Phase 1 — every connected account on one screen, and when capacity comes back.
 
 ## 2026-08-13 — the BUILD phase runs on codex: a second executor for the most expensive step
 
@@ -2299,7 +2299,7 @@ Plus the two things the owner added after the design was accepted, which are Pha
 scope rather than a follow-up: **a countdown to when capacity comes back**, and
 **that countdown paired with the utilisation of the window it belongs to.**
 
-## Why a countdown is not the pace we already had
+### Why a countdown is not the pace we already had
 
 Pace answers "at this rate, when do I hit the cap". The owner's question is the
 opposite one — "when does capacity come back" — because he is using it as the input
@@ -2329,7 +2329,7 @@ clients at once (one account with an imminent 5-hour reset and a spent weekly wi
 one healthy account: the line points at the SECOND), and in both screens. A mutant
 that picks the soonest reset while ignoring the other window turns those red.
 
-## Never optimistic — the rule every refusal follows
+### Never optimistic — the rule every refusal follows
 
 Each of these is a place where the plausible implementation renders fine and states
 something false, so each is a named test:
@@ -2403,7 +2403,7 @@ something false, so each is a named test:
   cadence plus ONE missed probe of grace, because a failed probe writes no row and a
   zero-grace deadline blanks an account with headroom over a single flaky request.
 
-## Store the instant, render the delta — and NOTHING on the wire is a delta
+### Store the instant, render the delta — and NOTHING on the wire is a delta
 
 Reset times are persisted and served as absolute epoch-MS instants; the countdown is
 subtracted at paint time against the client's own clock, which ticks every 30
@@ -2465,7 +2465,7 @@ importing the store's own deadlines — so a pool cannot be given a tighter dead
 than the screens can keep up with. Each screen also has a mutation-checked test: a
 tick that advances the clock and does not refetch turns them red.
 
-## The window LENGTH is data, not a constant
+### The window LENGTH is data, not a constant
 
 `summariseWindow` used to divide by a hardcoded 5h/7d. That is true of Anthropic and
 false in general: Codex changed regime (300 → 10,080 minutes, observed 2026-07-12),
@@ -2475,7 +2475,7 @@ length reported and no documented default refuses to report a pace rather than
 borrowing another provider's constant. Window LABELS follow the same rule — the card
 prints "5h window" / "7d window" derived from the length, not a fixed string.
 
-## Per-account retention, and why the key moved
+### Per-account retention, and why the key moved
 
 The owner asked, of one specific account, "when it resets in 17m, how much WEEKLY
 capacity is left at that time" — and it was unanswerable from stored state. The
@@ -2524,7 +2524,7 @@ A recency cut-off was considered and refused — it would delete exactly the
 non-active-account headroom this store exists to retain, and "no readings yet" about
 an account that has readings is a worse sentence than an honest old one.
 
-## The Kimi poller, against an endpoint nobody has published
+### The Kimi poller, against an endpoint nobody has published
 
 `trident/kimi-usage-probe.ts` reads `GET {KIMI_BASE_URL}/v1/usages`;
 `open/kimi-usage-monitor.ts` polls it every 10 minutes on a `SupervisedLoop` armed
@@ -2604,7 +2604,7 @@ Per-key attribution is not offered: the endpoint is account-wide (two keys on on
 subscription return identical numbers), so the card is titled "Kimi (account-wide)"
 and a response that names no account carries a null label.
 
-## What the surface says, and what it refuses to
+### What the surface says, and what it refuses to
 
 Three pools are served every time, in `USAGE_POOLS` order, each with a `connection`
 of `connected` / `not_connected` / `no_meter` / `no_gauge` / `unreadable` resolved
@@ -2623,7 +2623,7 @@ anywhere** — the subscription is flat, so a currency figure would assert a mar
 cost the owner does not incur. (The design's cost-weighted column uses list prices
 as unrendered WEIGHTS and is Phase 6.)
 
-## Half a reading buys no standing
+### Half a reading buys no standing
 
 `accountCapacity` (both clients) refuses to project ANY capacity for an account with
 only one of its two windows measured. "The worst of the windows I can see" is only
@@ -2649,7 +2649,7 @@ refusal at the writer and one at the renderer, and neither depends on the other 
 right — the store's shape cannot express "measured as absent", so the renderer has to
 be safe against any writer, present or future.
 
-## Three smaller honesty fixes in the same pass
+### Three smaller honesty fixes in the same pass
 
 **The staleness deadline now budgets for the client's poll hold.** The deadline is
 checked on the CLIENT against a payload it refetches every `USAGE_POLL_MS` (30 s), so
@@ -2678,7 +2678,7 @@ through every comparison and prints "NaNd NaNh", which is neither a countdown no
 admission that there is none. One comparison makes the bad render unreachable rather
 than merely unreached.
 
-## "Asked and refused" is not "no readings yet" — and neither is "nothing is asking"
+### "Asked and refused" is not "no readings yet" — and neither is "nothing is asking"
 
 Two more `connection` values, `unreadable` and `no_gauge`, and they are the two that
 do not resolve themselves. Take `unreadable` first. "No readings yet." promises a first reading is coming; when the gauge has
@@ -2740,7 +2740,7 @@ REQUEST rather than latched at boot — and asserts `no_gauge`, still no account
 no `measured_at`, and the sentence the shipped client renders from it. The mutant is
 returning `'connected'`, which flips the sentence back to the promise.
 
-## The one thing this phase still cannot demonstrate
+### The one thing this phase still cannot demonstrate
 
 **The Kimi alias list has never been checked against a real response**, and no
 mechanism inside this repo can check it: the endpoint is undocumented upstream and no
@@ -2784,7 +2784,7 @@ decision — which makes the entry unreadable and the whole response `unrecognis
 loud, with the key names travelling out. Pinned with a positive control that a real
 7-day window expressed in seconds is still believed.
 
-## The gauge's own base URL was operator input, joined the one way that breaks
+### The gauge's own base URL was operator input, joined the one way that breaks
 
 `open/composer.ts` threads `ANTHROPIC_BASE_URL` straight into the probe's
 `apiBaseUrl`, so whatever the operator typed is what the probe is handed. It was
@@ -2823,7 +2823,7 @@ asserts the loop's own error sink logged no escaped throw, then that the card st
 credential or drawing a zero. Restoring `new URL` turns it red on the reached-an-outcome
 assertion, verified.
 
-## Two client-side fixes in the same pass
+### Two client-side fixes in the same pass
 
 **A slow poll could roll a screen backwards.** Both screens refetch on a 30-second
 interval that does not wait for the previous response, so two requests are routinely
@@ -2850,7 +2850,7 @@ concurrency, which makes it the same failure class as an absent reset rendering 
 with a positive control that a KNOWN standing still names its account, so a note that
 returned null unconditionally would go red.
 
-## What the tests assert, and where
+### What the tests assert, and where
 
 - `persistence/usage-samples-store.test.ts` — the pace maths and every refusal; the
   reset instant travelling as DATA (two reports of the same window 8s apart differ
@@ -2928,7 +2928,7 @@ returned null unconditionally would go red.
   names nobody when every account's standing is unknown, with a positive control that a
   known standing still names its account.
 
-## Wire-shape change worth naming
+### Wire-shape change worth naming
 
 `PoolSummary` moved its windows from the pool level onto `accounts[]` and gained
 `connection` and `stale_after_ms`. It deliberately does NOT carry `age_ms`, `stale`,
@@ -3666,7 +3666,7 @@ what the code does.
 
 Behaviour unchanged in this round: tests, comments and docs only.
 
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+Detail: § 2026-08-09 — Naming the account behind a reading.
 
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
@@ -3805,7 +3805,7 @@ layer that reads it and check the guarantee is still true there.** The generalis
 adjacent lesson from the same file: a comment describing a mode is a claim about reachability, and
 the way to check it is to walk the layer ABOVE the one the comment is written in.
 
-### Round 2 — the correction had itself carried the false claim, and one sentinel had escaped to the screen
+#### Round 2 — the correction had itself carried the false claim, and one sentinel had escaped to the screen
 
 Same PR **#171**, second review round. Nothing about the reservation changed; four things that
 DESCRIBED it did, plus one user-visible leak the reservation created.
@@ -3879,7 +3879,7 @@ brief on `type: plan` — was invisible.
   treats empty as "no usable spec" and falls back to the card title — so it degrades to
   the title rather than dispatching a blank brief.
 
-### The tests were worthless on the first pass, and the mutation run is what caught it
+#### The tests were worthless on the first pass, and the mutation run is what caught it
 
 Seven cases passed, and **both mutants survived**:
 
@@ -4240,7 +4240,7 @@ The header's prose description of the algorithm was deleted: a cross-process con
 spelled out in prose drifts silently, and a writer trusting the stale line would produce a
 digest the reader rejects with no symptom but missing labels. Writers import the function.
 
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+Detail: § 2026-08-09 — Naming the account behind a reading.
 
 ## 2026-08-10 — the sidecar contract drifted in the DOCS, which are its only interface
 
@@ -4269,7 +4269,7 @@ drift", and it survived in the MORE load-bearing of the two places: a rotator au
 the sidecar doc, not the module header. Fixing the code and leaving the doc is not half a
 fix — where the only consumer is an external writer, the doc IS the interface.
 
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+Detail: § 2026-08-09 — Naming the account behind a reading.
 
 ## 2026-08-10 — the label reached the monitor and stopped there: the PRODUCTION sink was unpinned
 
@@ -4312,7 +4312,7 @@ today. Left at N=4096 deliberately rather than changing a security parameter ins
 round; the comment now carries the real numbers so whoever ships the writer decides with
 them. Behaviour unchanged: comments and tests only.
 
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+Detail: § 2026-08-09 — Naming the account behind a reading.
 
 ## 2026-08-10 — Two guards in that change were decorative; review found both
 
@@ -4355,7 +4355,7 @@ time; `chatPushExcerpt` clamps a non-positive budget so it cannot return a bare
 ellipsis; and five in-code pointers that sent readers to `reminder-outbound.ts` for the
 notification — contradicted by that file's own header — now name the seam that has it.
 
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
 
 ## 2026-08-10 — resolving what review left unverified on the notification lane
 
@@ -4453,7 +4453,7 @@ classified every row as a nudge — so a ritual row composed from its stored `me
 is the dispatch token, and the owner's lock screen read `ritual:kaizen` by a second route.
 The dispatcher now refuses a ritual row it cannot plan, keyed on `reminder.ritual_id`.
 
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
 
 ## 2026-08-10 — refusing to compose is only half of a refusal
 
@@ -4485,7 +4485,7 @@ stored `message`" as the notification body — the exact sentence the reported d
 `gateway/http/deliver.ts`'s 3 s bound still does not CANCEL the send; that is named in
 place as a possible duplicate buzz, not silently.
 
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote
 (§ Round-4 review fixes).
 
 ## 2026-08-10 — the push-tap latch is released when the tap's target goes away
@@ -4528,7 +4528,7 @@ the owner was placed in correctly.
 
 Found by the cross-model (codex) review lane, in this change's own new code.
 
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
 
 ## 2026-08-10 — five comments that asserted things the code does not do, and one P1 named not fixed
 
@@ -4558,7 +4558,7 @@ entered on a background/foreground transition) but belongs with a mounted test t
 `projectId`, `ready` and a real list remount, in the ISSUES #505/#511 hot path. Raised as a P1
 follow-up.
 
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
 
 ## 2026-08-10 — the token prune was an index join nobody checked the index of
 
@@ -4615,13 +4615,13 @@ same file asserted "Expo can return fewer tickets than messages" in one place an
 identifies message i's recipient" in another. When a diff teaches a file something new about
 its own failure mode, the next question is which OTHER paragraph was built on the old belief.
 
-## 2026-08-10 — 2026-08-10 — Two guards that read a value nothing wrote
+## 2026-08-10 — Two guards that read a value nothing wrote
 
-Round-3 follow-up to `docs/as-built/2026-08-09-notification-is-a-chat-message.md`.
+Round-3 follow-up to § 2026-08-09 — A ritual post is a chat message, so its notification is a chat message.
 Both defects came out of review, both were guards whose INPUT was never written, and
 both had passing tests. That shared shape is the useful part of this entry.
 
-## 1. The re-emit suppression was inert
+### 1. The re-emit suppression was inert
 
 **What it claimed.** `gateway/http/deliver.ts` computed
 `alreadySeen = !emitted.was_new && emitted.was_delivered` and skipped the device
@@ -4680,7 +4680,7 @@ Mutation-verified: deleting the `stampDelivered` call reds 3 tests. The pre-exis
 fakes gained a `markDelivered` so the stamp is a real call rather than a `TypeError`
 absorbed by its own catch.
 
-## 2. A legacy General reminder tap opened an error
+### 2. A legacy General reminder tap opened an error
 
 `resolvePushRoute` emits the mobile RAIL spelling of the no-project scope —
 `/projects/~general/reminders` — and `app/lib/reminders-client.ts` interpolated the
@@ -4704,7 +4704,7 @@ returns `~general` unchanged. The tilde survives encoding intact and dies at the
 validator, which is why the existing "encodes the project_id" test could never see it.
 Mutation-verified by restoring the raw interpolation: 2 tests red on `/projects/~general/`.
 
-## 3. Smaller, from the same review
+### 3. Smaller, from the same review
 
 - **The notification can no longer hold a delivery open.** `POST /api/app/system-notice`
   AWAITS `deliver` to answer its caller, and the only bound underneath the notification
@@ -4744,7 +4744,7 @@ Mutation-verified by restoring the raw interpolation: 2 tests red on `/projects/
   and this tsconfig has no `noPropertyAccessFromIndexSignature`, so the reads compiled
   through the index signature and a rename would have compiled too.
 
-## The pattern worth keeping
+### The pattern worth keeping
 
 Both defects are the same failure: **a guard that reads a field, and nothing in the
 system writes it.** Both were covered by tests that asserted the reading side against a
@@ -4760,11 +4760,11 @@ the real store.
 
 ---
 
-## Round-3 review fixes — `ok: true` is not a delivery, and a ritual row must never nudge
+### Round-3 review fixes — `ok: true` is not a delivery, and a ritual row must never nudge
 
 Two blockers from the adversarial review round, both fixed here.
 
-### 1. A push that reached nobody was recorded as delivered
+#### 1. A push that reached nobody was recorded as delivered
 
 `gateway/push/chat-message-push.ts` decided "was this notification sent?" by looking at
 `PushResult.ok` alone. But `ok` means only *no HTTP/network exception*, and it is `true`
@@ -4787,7 +4787,7 @@ resolves `undefined` reads as success" — that permissive default is what let t
 through, and it meant the test doubles could not distinguish "accepted for a device"
 from "sent nowhere". Fixtures now carry the count.
 
-### 2. The `ritual:<id>` token could still reach the owner, by a second route
+#### 2. The `ritual:<id>` token could still reach the owner, by a second route
 
 `ritual_planner` is null on a box with no LLM (`init_ritual_planner` never runs), and
 `reminders/dispatcher.ts` then classified **every** row as a nudge — including ritual
@@ -4804,7 +4804,7 @@ what makes the row a ritual, and a prefix test would also swallow a plain remind
 owner happened to word that way. The composer comment now says what actually makes the
 null safe.
 
-### Verification
+#### Verification
 
 Each guard was mutation-tested by deleting it and confirming a red run: the delivery
 guard kills 3 of its 4 new cases (the fourth, "one accepted ticket among failures IS a
@@ -4820,9 +4820,9 @@ narrower true statement was sitting right next to the broader false one.
 
 ---
 
-## Round-4 review fixes — refusing to compose is only half of a refusal
+### Round-4 review fixes — refusing to compose is only half of a refusal
 
-### 1. The refused occurrence was consumed in silence
+#### 1. The refused occurrence was consumed in silence
 
 The round-3 fix above stopped a ritual row from composing its dispatch token when no
 planner is wired. It then returned normally with a single `log()` line — and the next
@@ -4873,7 +4873,7 @@ rather than throwing on the ordinary path, and a REJECTED notice rejects. Mutati
 verified: replacing the post with `const noticed = true` reds 2, and neutering the
 `if (!noticed)` throw reds 1.
 
-### 2. Two comments that a reader would have been right to trust
+#### 2. Two comments that a reader would have been right to trust
 
 Both in `gateway/push/chat-message-push.ts`, both found by probing the claim rather than
 reading it — and one of them was hiding a real behaviour gap.
@@ -4894,7 +4894,7 @@ reading it — and one of them was hiding a real behaviour gap.
   it and a test asserting it, so the next reader does not "finish the job" by admitting
   every `\p{S}`.
 
-### 3. And one seam named rather than closed
+#### 3. And one seam named rather than closed
 
 `withTimeout` in `gateway/http/deliver.ts` bounds the notification at 3 s but does not
 CANCEL it. If Expo answers at 3.1 s the buzz still goes out, while the call already
@@ -4912,7 +4912,7 @@ falling back to the untrimmed clip was correct and left the string possibly empt
 cases the code after the guard was doing work the guard's author had stopped thinking
 about.
 
-## Round 5 — a latch that is never released is a one-shot feature
+### Round 5 — a latch that is never released is a one-shot feature
 
 Cross-model review (codex, `gpt-5.6-sol`) found the one reachable defect the Opus lanes
 missed, and it was in this change's own new code: `honouredDeepLink` in
@@ -4975,7 +4975,7 @@ per process".** The docblock said "ONCE PER TARGET" and the code honoured it exa
 was never written down is that a target is scoped to a VISIT, and the missing sentence was
 the missing line of code.
 
-## Round 6 — "EVERY out-of-turn post" was a claim about one seam, not about the surface
+### Round 6 — "EVERY out-of-turn post" was a claim about one seam, not about the surface
 
 The codex lane's second pass found no code defect and one comment that overclaimed, which
 is the same failure class as the round-3 docblock: `deliver` is not the only path a durable
@@ -4998,13 +4998,13 @@ one is deliberate: the owner sent the message that caused it, so it is in-turn.
 seam.** The fix for that is not a hedge, it is naming the exceptions — a reader can check a
 named exception and cannot check an absent one.
 
-## Round 7 — the rubric lane found one real defect that is not this change's, and five comments that lie
+### Round 7 — the rubric lane found one real defect that is not this change's, and five comments that lie
 
 The codex RUBRIC lane (a different prompt on the same model as the codex review lane) ran to
 a verdict and returned REQUEST_CHANGES on one MAJOR plus a cluster of contradicting comments.
 Adjudicated as follows.
 
-### The MAJOR is real and PRE-EXISTING: the anchor freeze can read the previous scope's rows
+#### The MAJOR is real and PRE-EXISTING: the anchor freeze can read the previous scope's rows
 
 `projectId` arrives as a PROP, so the render that first sees a new scope still holds the OLD
 scope's `rows` and `selfDeviceId` in state — `useMobileChat` clears those in its effect
@@ -5025,7 +5025,7 @@ a background/foreground transition — but it belongs with a mounted regression 
 untested anchor change is precisely how the original defect shipped. Named at the site and
 raised as a P1 follow-up.
 
-### Five comments asserted things the code does not do
+#### Five comments asserted things the code does not do
 
 Each one is the same failure the round-3 and round-6 notes describe, and two of them were
 copies of a sentence already corrected elsewhere in this very branch:
@@ -5172,7 +5172,7 @@ and the other 400'd. Routing deliberately keeps two ids: the board client is
 scope-addressed (General ⇒ `''`), the route is rail-addressed (⇒ `~general`), and
 a push built from the scope yields the dead `/projects//docs`.
 
-Detail: `docs/as-built/2026-08-09-general-docs-reachable.md`.
+Detail: § 2026-08-09 — General's documents became reachable — on both surfaces.
 
 ## 2026-08-09 — which model runs which phase became configuration
 
@@ -5198,7 +5198,7 @@ asserted the ambient pool had "NO FAILOVER" as a KNOWN LIMITATION. The single
 credential-less entry is the mechanism, not a defect; rotation swaps the credential file
 underneath the child. Retracted in place, with the generalisable lesson kept.
 
-Detail: `docs/as-built/2026-08-09-per-phase-model-config.md`.
+Detail: § 2026-08-09 — which model runs which phase became configuration.
 
 ## 2026-08-09 — a spoken word is findable in chat search
 
@@ -5224,7 +5224,7 @@ The FTS DDL was split out of the schema array so column migrations run before th
 triggers that name the new column — otherwise a fresh install works and every upgrade
 fails. Rebuild is detected from `sqlite_master` DDL, not by probing a query.
 
-Detail: `docs/as-built/2026-08-09-voice-transcript-searchable.md`.
+Detail: § 2026-08-09 — a spoken word is findable in chat search.
 
 ## 2026-08-09 — a voice note's words survive the device (correcting the same day's fix)
 
@@ -5249,7 +5249,7 @@ feature was dead.
 Also lands two arbiter design docs (multi-substrate build agent; model usage dashboard),
 both awaiting owner decisions rather than implementation.
 
-Detail: `docs/as-built/2026-08-09-voice-transcript-survives-device.md`.
+Detail: § 2026-08-09 — A voice note's words survive the device.
 
 ## 2026-08-09 — the per-phase model config gets a producer
 
@@ -5271,7 +5271,7 @@ but an absent `overrides` key is a 400 rather than an accidental wipe.
 Three mutants, one per link, each caught by exactly one test. The UI is still missing —
 this is the producer, not the pane.
 
-Detail: `docs/as-built/2026-08-09-phase-model-producer.md`.
+Detail: § 2026-08-09 — the per-phase model config gets a producer.
 
 ## 2026-08-09 — Codex and Kimi are connectable from a phone
 
@@ -5294,7 +5294,7 @@ silent, so the test asserts it.
 12 tests that PRESS the real controls; four mutants each caught, including "the Connect
 button is rendered but inert" — the failure a source check cannot see.
 
-Detail: `docs/as-built/2026-08-09-mobile-model-providers.md`.
+Detail: § 2026-08-09 — Codex and Kimi are connectable from a phone.
 
 ## 2026-08-09 — the Kimi key comes from the store, and only the store
 
@@ -5320,7 +5320,7 @@ looked like permissions or locking; the cause was `{ create: false }`, an option
 production never passes. A probe that does not use the production call shape fails in a
 way that sends you debugging the wrong system.
 
-Detail: `docs/as-built/2026-08-09-kimi-store-only.md`.
+Detail: § 2026-08-09 — the Kimi key comes from the store, and only the store.
 
 ## 2026-08-09 — the build-phase models are settable from a phone
 
@@ -5345,7 +5345,7 @@ effort chips are rendered but inert".
 DEFERRED AND NAMED: the web half (`SettingsTab.tsx`) — same endpoint, no new server work,
 but genuinely not done.
 
-Detail: `docs/as-built/2026-08-09-codegen-settings-mobile.md`.
+Detail: § 2026-08-09 — the build-phase models are settable from a phone.
 
 ## 2026-08-09 — the build-phase models are settable on the web too
 
@@ -5372,7 +5372,7 @@ behaviour was untested — found by mutation, not by reading). Also fixed a CSS 
 would have shipped an invisible chip border: `--hairline` is not a token here, `--border`
 is, and it is defined for both themes.
 
-Detail: `docs/as-built/2026-08-09-codegen-settings-web.md`.
+Detail: § 2026-08-09 — the build-phase models are settable on the web too.
 
 ## 2026-08-09 — a review panel cannot see a red build, so now something else does
 
@@ -5399,7 +5399,7 @@ each caught. The new agent label was caught by #157's coverage test and routed t
 cheap tier — leaving it to the fallback is how head-probe sat on the most expensive tier
 for months.
 
-Detail: `docs/as-built/2026-08-09-trident-ci-gate.md`.
+Detail: § 2026-08-09 — A review panel cannot see a red build — so now something else does.
 
 ## 2026-08-09 — the usage readings are remembered, and turned into a pace
 
@@ -5429,7 +5429,7 @@ Six mutants; five caught immediately and the sixth exposed the dead branch. The 
 tests had to move from `persistence/` to `open/__tests__/` — `open` depends on
 `persistence`, never the reverse, and the lint refusal was the architecture talking.
 
-Detail: `docs/as-built/2026-08-09-usage-sample-series.md`.
+Detail: § 2026-08-09 — the usage readings are remembered, and turned into a pace.
 
 ## 2026-08-09 — Usage dashboard: the endpoint and the web card
 
@@ -5448,7 +5448,7 @@ label reads "active credential" and never guesses.
 The wiring test now checks the READ half separately from the write half — the write
 assertion had passed for a whole PR during which nothing read the series.
 
-Detail: `docs/as-built/2026-08-09-usage-dashboard-card.md`.
+Detail: § 2026-08-09 — Usage dashboard — the endpoint and the web card.
 
 ## 2026-08-09 — The chat agent can search the web
 
@@ -5466,7 +5466,7 @@ Guarded by a new test asserting every bundled ritual's declared built-ins are a 
 of the live surface — the join between two green suites whose union was broken, the same
 shape as the push-kind drift.
 
-Detail: `docs/as-built/2026-08-09-live-agent-web-tools.md`.
+Detail: § 2026-08-09 — The chat agent can search the web.
 
 ## 2026-08-09 — Model usage on the phone
 
@@ -5483,7 +5483,7 @@ production code in `app/lib` never imports `landing`.
 Every refusal mutation-tested separately, including one attempt that was NOT faithful and
 proved nothing until rewritten.
 
-Detail: `docs/as-built/2026-08-09-mobile-usage-card.md`.
+Detail: § 2026-08-09 — Model usage on the phone.
 
 ## 2026-08-09 — Naming the account behind a usage reading
 
@@ -5504,7 +5504,7 @@ but never carried", one layer along from "built but never wired". Now covered.
 
 Nothing writes a sidecar yet, so every label is still null and behaviour is unchanged.
 
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+Detail: § 2026-08-09 — Naming the account behind a reading.
 
 ## 2026-08-09 — A ritual post is a chat message, and so is its notification
 
@@ -5541,13 +5541,13 @@ already-mounted project can be re-anchored at all. With no pushed id, nothing sc
 and the anchor is byte-identical — asserted, because this is the #505/#511 blast
 radius.
 
-Detail: `docs/as-built/2026-08-09-notification-is-a-chat-message.md`.
+Detail: § 2026-08-09 — A ritual post is a chat message, so its notification is a chat message.
 
 ## 2026-08-09 — The ambient tier's comments said "macOS Keychain". That cost an investigation.
 
 **Landed:** 2026-08-09 · **ISSUES:** #517 (safe half) · **Docs-only, no behaviour change**
 
-## What was wrong
+### What was wrong
 
 Two docblocks described the ambient credential tier as a macOS-only convenience:
 
@@ -5572,7 +5572,7 @@ A reader who believed the old comments would conclude the install was misconfigu
 and "fix" it by disabling ambient — leaving that deployment with **no credential at
 all**. That is exactly what the #517 tracker note proposed.
 
-## What changed
+### What changed
 
 The comments now describe both platform branches, say plainly that `allowAmbient`
 is a statement about which *composer* enables the tier rather than which
@@ -5586,7 +5586,7 @@ every warm REPL, the same stranded-pool-key hazard #143's review reproduced. Tha
 is a migration, not a rename. My own SPEC note called it "safe and separable"; it
 is separable but **not safe**, and that note is corrected too.
 
-## Coverage
+### Coverage
 
 No new test: the platform branch was **already** pinned
 (`open/__tests__/ambient-claude-auth.test.ts` — linux consults the creds file, not
@@ -5597,7 +5597,7 @@ doesn't delete the guard. Mutant: collapsing the probe to Keychain-only — the 
 
 ## 2026-08-09 — The build-phase models are settable from a phone
 
-## What this completes
+### What this completes
 
 The per-phase model/effort config was built in three layers over two days: the phase
 vocabulary and validation, then the store + per-launch resolver + HTTP surface, and
@@ -5607,7 +5607,7 @@ Settings → **Code generation**.
 Each phase gets a row — Build, Adversarial review, Synthesis and the rest — with model
 and effort chips.
 
-## Three decisions
+### Three decisions
 
 **The phase list is server-supplied.** Labels, descriptions, defaults and the legal
 values all arrive in the payload; the screen knows the *shape* of a phase and nothing
@@ -5628,7 +5628,7 @@ wrong. Discarding the edits would punish a typo by throwing away the rest of the
 Nothing auto-saves: a chip is an edit, Save is a write. Every chip auto-saving would
 make a mis-tap a live config change on the next build.
 
-## Reachability is part of the feature
+### Reachability is part of the feature
 
 A registered route nothing pushes is the ISSUES #385 defect, and a push at an
 unregistered route goes nowhere — **the two fail independently**, so the nav row in
@@ -5636,7 +5636,7 @@ unregistered route goes nowhere — **the two fail independently**, so the nav r
 own assertion in `server-editor-reachability.test.ts`. Either alone leaves a dead
 control.
 
-## Verification
+### Verification
 
 `app/__tests__/codegen-settings-reachable.test.tsx` — 12 tests that **press the real
 chips on the real screen**, plus 2 added to the reachability guard.
@@ -5651,7 +5651,7 @@ failed LOAD says so rather than rendering an empty list — zero phases would re
 
 Typecheck 51/51 · lint clean · byte-scanned.
 
-## Deferred, and named
+### Deferred, and named
 
 **The web half.** `landing/chat-react/SettingsTab.tsx` gets the same section against
 the same endpoint; it is not in this PR. The endpoint, the validation and the payload
@@ -5660,20 +5660,20 @@ but it is genuinely not done, and the owner uses both surfaces.
 
 ## 2026-08-09 — The build-phase models are settable on the web too
 
-## Closing what #163 deferred
+### Closing what #163 deferred
 
 #163 shipped the mobile screen and named the web half as deferred. **Deferred work that
 exists only in a PR body is work that quietly doesn't happen**, so this closes it. Same
 endpoint, same payload, no new server work — a Code generation section in the web
 Settings tab with the same per-phase chips.
 
-## The three decisions are mirrored, deliberately and identically
+### The three decisions are mirrored, deliberately and identically
 
 Server-supplied phase list · **choosing the default clears the override** rather than
 pinning it · **a rejected save keeps the edits** and shows the server's message
 verbatim. Nothing auto-saves.
 
-## The interesting part: a parity test, and where it had to live
+### The interesting part: a parity test, and where it had to live
 
 `effectiveRow` and `applyRowEdit` now exist **twice** — once per client — because each
 bundle is deliberately free of the other's workspace. That duplication is the right
@@ -5698,7 +5698,7 @@ exactly why the helpers are duplicated. `gateway` is the one package declaring b
 it is where `runtime/__tests__/doc-links-parity.test.ts` already puts the same kind of
 mirror check for the same reason. Moved there.
 
-## Verification
+### Verification
 
 `landing/chat-react/__tests__/codegen-settings-web.test.tsx` (11) and
 `gateway/__tests__/phase-models-client-parity.test.ts` (20).
@@ -5733,7 +5733,7 @@ The usage series has carried an `account_label` column since it was created, nul
 every row. This is the reader that fills it — the Open half of the owner-approved
 per-account breakdown.
 
-## The sidecar
+### The sidecar
 
 `<same dir as .credentials.json>/.credentials.meta.json`:
 
@@ -5760,7 +5760,7 @@ whole feature is arranged to avoid.
 description here. See the closing note: this line previously spelled the algorithm
 out, and spelling it out is the drift.
 
-## ⚠️ The fingerprint is the whole design
+### ⚠️ The fingerprint is the whole design
 
 The label is used ONLY when its fingerprint matches the token actually resolved.
 
@@ -5773,7 +5773,7 @@ under load. A mismatch degrades to null, silently and deliberately.
 It also means a writer cannot half-succeed: install a token without updating the
 sidecar and labels stop appearing rather than going stale invisibly.
 
-## Resolved WITH the credential, never separately
+### Resolved WITH the credential, never separately
 
 `resolveActiveCredential` returns `{ token, account_label }` from ONE call. If those
 came from two calls, a swap landing between them would pair one account's reading
@@ -5785,7 +5785,7 @@ The default label reader deliberately does NOT inherit `deps.readFile`. Otherwis
 test could pass by feeding the credentials blob to the label parser, and the seam
 would look isolated while sharing one source.
 
-## The mutant that survived first
+### The mutant that survived first
 
 Dropping the fingerprint check fails a test immediately. But making the MONITOR
 persist `account_label: null` while the resolver kept working correctly passed
@@ -5793,7 +5793,7 @@ everything — the "resolved but never carried" shape, one layer along from "bui
 never wired". Now `usage-sample-persistence.test.ts` asserts the label arrives at
 the sink AND lands on the row, and that mutant dies.
 
-## Not in this change
+### Not in this change
 
 Nothing writes a sidecar yet. Until something does, every label is null and the
 behaviour is exactly what shipped before — which is the point of landing the reader
@@ -5801,7 +5801,7 @@ first: the writer can appear without a second deploy of this code.
 
 ---
 
-## The fingerprint is scrypt, not SHA-256 — CodeQL was right
+### The fingerprint is scrypt, not SHA-256 — CodeQL was right
 
 `credentialFingerprint` hashed the live OAuth token with a bare SHA-256, and CodeQL's
 `js/insufficient-password-hash` failed the PR on it. Open's `main` ruleset requires that
@@ -5870,7 +5870,7 @@ all, which the reader rejects.
 
 **Landed:** 2026-08-09 · **Surface:** `trident/inner-workflow.mjs`
 
-## The defect
+### The defect
 
 A fix round runs with `isolation: 'worktree'` — its own throwaway git worktree.
 Edits that are not committed AND pushed die with it, and the round still reports
@@ -5884,7 +5884,7 @@ in uncommitted tree."* Three rounds, four reviewers each, essentially all of it
 spent on a head that never moved. The work was found afterwards in a `git stash`
 on the build host and pushed by hand.
 
-## The gate
+### The gate
 
 After every fix round, before the re-review, a one-command probe reads the
 branch's current head — from the REMOTE in PR mode (`git ls-remote`), because
@@ -5908,7 +5908,7 @@ A lost round is reported as its own `blockKind` rather than as `code`, for the
 same reason `infra-only` exists: the code was not re-judged, so calling it a code
 rejection is a false statement about the diff.
 
-## Coverage
+### Coverage
 
 `trident/round-landed.test.ts` — 13 tests against the real function bodies
 extracted from the shipped script. Mutants killed: making an unreadable head count
@@ -5916,13 +5916,13 @@ as landed fails the failed-fetch test; inverting the comparison fails three.
 
 ## 2026-08-09 — General's documents became reachable — on both surfaces
 
-## What changed
+### What changed
 
 A work card's spec-doc chip now opens that document, in **every** scope including
 General, on **both** the web shell and the mobile app. General also gained a
 Documents tab on the web, ordered `chat → work → docs` to match named projects.
 
-## Why it was broken, and why each half looked fine
+### Why it was broken, and why each half looked fine
 
 The owner reported one symptom — a General work card whose plan link did nothing,
 and no documents in General at all — that turned out to be **four independent
@@ -5953,7 +5953,7 @@ was written, which is what made the whole chain invisible:
 remembering: a feature can be dead behind several independently-reasonable
 decisions, and each one reviews as correct in isolation.
 
-## The consolidation
+### The consolidation
 
 `landing/chat-react/general-scope.ts` is new: the ONE place General changes
 spelling on the web, mirroring the mobile client's `app/lib/general-scope.ts`.
@@ -5967,7 +5967,7 @@ Routing keeps two ids on purpose. The board client is **scope**-addressed
 built from the scope yields `/projects//docs` — dead, and dead on General
 specifically, the one board where this was hit.
 
-## Verification
+### Verification
 
 `landing/chat-react/__tests__/general-docs-reachable.test.tsx` (10) and
 `app/__tests__/workboard-doc-link.test.tsx` (5). Both halves were
@@ -5988,7 +5988,7 @@ Full typecheck matrix: 51 tsconfigs, all pass.
 
 **Landed:** 2026-08-09 · **Reported:** owner, "there is an item in the work board, but clicking the link to its plan document doesn't work. There are no documents in general"
 
-## What was happening
+### What was happening
 
 The doc existed. It was at `Projects/<owner-slug>/docs/plans/…`, while General's
 Documents tab reads `Projects/general/docs` — a directory that **did not exist at
@@ -6002,7 +6002,7 @@ rather than owner-level — and the phantom is missing everything a real project
 into it. A second phantom sits beside it named after the internal instance id, from
 the same mistake.
 
-## The mistake, in one argument
+### The mistake, in one argument
 
 ```ts
 await this.docs.writeDoc({ project_id: project_slug, … })
@@ -6013,7 +6013,7 @@ value actually arriving there was neither: the HTTP surface passes the **board
 scope key** in a parameter named `project_slug`, and for General that key collapses
 to the owner slug. **Three concepts, one name, one argument.**
 
-## The fix
+### The fix
 
 `createCardWithOptionalSpec(scope, docs_project_id, input)` — the board keeps its
 scope key (its legacy rows genuinely live there, and that collapse is deliberate),
@@ -6028,14 +6028,14 @@ that stores per project. The owner's criterion was explicit: no multiple code pa
 and no special cases. `general` is a valid project id under the store's own
 alphabet, so this adds **zero** conditionals.
 
-## Coverage
+### Coverage
 
 The regression guard landed exactly on the defect and was found by the test rather
 than designed: `agent-tool.test.ts`'s context has `project_id: null`, so the docs id
 must be `general` while the board row stays owner-scoped. **Mutant: collapsing the
 argument back to the scope — literally the original bug — reds it.**
 
-## Not included
+### Not included
 
 Existing docs are NOT moved by this change; the two on the box need a one-time
 migration. The mobile work-board doc link is still unwired and web's is still
@@ -6046,7 +6046,7 @@ before the root is right, since a working link would have opened a 404.
 
 **Landed:** 2026-08-09 · **PR:** #147 · **Surface:** mobile app (`app/`)
 
-## What the owner saw
+### What the owner saw
 
 One screenshot of the General scope on the APK, reported as two bugs:
 
@@ -6057,7 +6057,7 @@ One screenshot of the General scope on the APK, reported as two bugs:
 
 It was **one** defect.
 
-## Root cause
+### Root cause
 
 The mobile rail spells the General scope `~general`. The `~` is deliberately
 OUTSIDE the gateway's `[A-Za-z0-9_.-]` project-id alphabet so the sentinel can
@@ -6078,7 +6078,7 @@ Two clients did:
 fixed it with its own private copy of the mapping plus a parity test. Two copies
 read as a convention; it is what let the third and fourth client forget.
 
-## What changed
+### What changed
 
 - **New `app/lib/general-scope.ts`** — the one place General changes spelling.
   Import-free on purpose (every consumer is an RN-free client that must not gain
@@ -6100,7 +6100,7 @@ read as a convention; it is what let the third and fourth client forget.
   layout synthesises `GENERAL_SCOPE_PROJECT` for the chrome precisely because
   there is no row to fetch. `project-state.tsx` no longer asks.
 
-## Why the tests bind
+### Why the tests bind
 
 `general-tab-set.test.tsx` mounts the real layout and its fake gateway
 **replicates the server's validator** — any id outside the alphabet gets the same
@@ -6121,7 +6121,7 @@ still sending the sentinel — which is the state that shipped, twice over.
 
 **Landed:** 2026-08-09 · **Surface:** `trident/kimi-key.ts`, `open/composer.ts`
 
-## The gap
+### The gap
 
 The K3 cross-model reviewer only ever read `process.env.KIMI_API_KEY`. There is no
 supported way to set a gateway env var from inside the product, so **a self-hoster
@@ -6133,7 +6133,7 @@ Settings already stored arbitrary per-service credentials, and the store accepts
 any lowercase service id, so a key could be *filed* under `kimi` today. **Nothing
 read it.** That is the recurring shape: the storage exists, the reader does not.
 
-## What changed
+### What changed
 
 `resolveKimiApiKey(env, lookup)` — **env first, store second**. An install that
 already exports the key is bit-for-bit unchanged; the store is consulted only when
@@ -6158,7 +6158,7 @@ instance, and this resolver is handed no run to scope by.
 The settings placeholder now reads `e.g. openai, github, kimi`, which is the only
 thing that makes the service id discoverable in an otherwise free-text field.
 
-## Coverage
+### Coverage
 
 `trident/kimi-key.test.ts` (12) pins the precedence and the export. The extended
 `tests/integration/kimi-panelist-wired.open.test.ts` (8) asserts it through the
@@ -6174,7 +6174,7 @@ the new imports fail to resolve at all.
 
 ## 2026-08-09 — The Kimi key comes from the store, and only the store
 
-## The decision
+### The decision
 
 Owner-directed: *"we shouldn't be using an env var at all — that was a temporary hack,
 not a production-grade decision."*
@@ -6191,7 +6191,7 @@ is structural rather than stylistic:
 
 That is the no-dual-code-paths rule applied to configuration.
 
-## What changed
+### What changed
 
 `resolveKimiApiKey(lookup)` — the env argument is **gone from the signature**, which is
 the strongest available form of "it is not read": there is nothing to pass.
@@ -6212,7 +6212,7 @@ Two behaviours flipped as a consequence, and both are now asserted:
   keeps running on a credential the owner believes they removed — the mirror image of
   the bug being fixed.
 
-## The live key was migrated BEFORE this shipped
+### The live key was migrated BEFORE this shipped
 
 The reference deployment had its key in the unit env and **nothing at all in the
 credential store** (`project_credentials` was empty, verified). Shipping store-only
@@ -6232,7 +6232,7 @@ looks like an environment problem and sends you debugging the wrong system. This
 same family as "a store probe must use the production READ path" — extended now to its
 open options.
 
-## Verification
+### Verification
 
 `trident/kimi-key.test.ts` (12) and `tests/integration/kimi-panelist-wired.open.test.ts`
 (8) — the integration one asserts through the **production composer's** resolver, not a
@@ -6255,7 +6255,7 @@ neither could ordinary chat. `LIVE_AGENT_TOOL_NAMES` in
 `gateway/wiring/build-live-agent-turn.ts` had never contained `WebSearch` or
 `WebFetch`, and that array is the only thing that decides.
 
-## Why it was invisible
+### Why it was invisible
 
 A missing built-in produces **no error**. The agent simply reports it has no such
 tool, in prose, inside an answer that otherwise looks complete. The kaizen run that
@@ -6263,7 +6263,7 @@ surfaced this ended with *"No WebSearch tool is available in this session, so th
 outside-idea section is omitted rather than faked"* — which is the correct
 behaviour for an agent and the reason nothing upstream ever noticed.
 
-## The part that mattered more than the missing feature
+### The part that mattered more than the missing feature
 
 A ritual declaring a web tool must be approved for `egress: 'web'` through a
 SEPARATE grant whose prompt says the ritual "may reach the public internet". The
@@ -6279,7 +6279,7 @@ never declared, and could not reach the WebSearch it did.
 An approval prompt that overstates what is being granted costs more than a missing
 feature. It spends the credibility the entire gate depends on.
 
-## The guard
+### The guard
 
 `gateway/wiring/__tests__/ritual-declared-surface-is-real.test.ts` asserts every
 bundled ritual's declared built-ins are a SUBSET of the live surface, and that a
@@ -6295,7 +6295,7 @@ five assertions.
 It is explicitly NOT a containment check — a ritual can always reach more than it
 declared. It pins the direction that silently under-delivers: never less.
 
-## Surface change
+### Surface change
 
 Adding to `LIVE_AGENT_TOOL_NAMES` is safe because it stays a CONSTANT surface, just
 a larger one; the reuse guard refuses a VARYING surface. The first turn after deploy
@@ -6303,7 +6303,7 @@ respawns the warm child once, as any deploy does.
 
 ## 2026-08-09 — Codex and Kimi are connectable from a phone
 
-## The gap, stated accurately
+### The gap, stated accurately
 
 The gateway's Codex surface is **explicitly app-scoped** — `/api/app/codex-auth` — and
 the **web** client has used it since it was built: `IntegrationsTab` carries the
@@ -6322,7 +6322,7 @@ had a full Codex UI all along. Checking before repeating it narrowed the work fr
 Kimi was reachable in principle — but only by knowing the exact service id and typing
 it into a free-text "Service (e.g. openai)" box.
 
-## What changed
+### What changed
 
 A **Model providers** section on the mobile Integrations screen, above *Shared
 credentials* so the free-text form reads as the escape hatch it is:
@@ -6332,7 +6332,7 @@ credentials* so the free-text form reads as the escape hatch it is:
 - **Kimi K3** — paste a key, remove it, and a status line derived from the shared
   credential list.
 
-## Three decisions
+### Three decisions
 
 **The Kimi row writes through the SAME store the free-text form uses.** A named row
 with its own storage path would mean a key entered here and a key entered there
@@ -6355,7 +6355,7 @@ Status text names the **consequence**, not the state — "reviews run without a 
 model family" rather than "not connected" — because an owner cannot be expected to
 know what an unconnected Codex costs them.
 
-## Verification
+### Verification
 
 `app/__tests__/model-providers-reachable.test.tsx` — 12 tests that **press the real
 controls on the real screen**. A source check confirms a component mentions a handler;
@@ -6387,14 +6387,14 @@ Typecheck 51/51 · lint clean · byte-scanned.
 The web card shipped a day earlier and the phone had nothing. ☰ → Settings →
 **Model usage**: the same two windows, the same pace, the same refusals.
 
-## Two wiring points that fail independently
+### Two wiring points that fail independently
 
 A screen needs BOTH a nav row in `settings.tsx` AND a `<Stack.Screen>` in
 `_layout.tsx`. A registered route nothing pushes is the ISSUES #385 defect; a
 pushed route nothing registers is a dead tap. Both are present and the screen test
 presses the real controls.
 
-## What the twin does NOT duplicate
+### What the twin does NOT duplicate
 
 A first draft re-declared `usageBand` and `clampFraction` on the phone, with a
 docblock justifying it by bundle independence. **`app/components/UsageMeter.tsx:20`
@@ -6407,7 +6407,7 @@ client exports its own.
 The FORMATTERS are still twinned, and that is correct: production code in `app/lib`
 never imports `landing`. Only the mirror-parity tests cross that line.
 
-## The parity test is where the product decisions live
+### The parity test is where the product decisions live
 
 `gateway/__tests__/usage-dashboard-client-parity.test.ts` executes both copies over
 the same inputs — nulls first, because that is where a divergence hides. Both "—"
@@ -6416,7 +6416,7 @@ and "0.0×" render perfectly and only one is true.
 Mutants killed: drifting the phone's band threshold by 0.01, changing its duration
 rounding from round to floor, and making it treat an empty pool list as unreachable.
 
-## The refusals, mutation-tested one at a time
+### The refusals, mutation-tested one at a time
 
 - unreachable → **no bar**. The faithful mutant makes `DASHBOARD_UNREACHABLE` a
   zero reading, which is exactly the "a 0% bar invents a measurement" bug; it fails
@@ -6430,7 +6430,7 @@ fall through to a pools branch with no pools, which renders nothing rather than
 rendering a false bar. A mutant that does not reproduce the real bug proves nothing
 about the test.
 
-## Not built
+### Not built
 
 The band rides on an `accessibilityLabel` as well as a colour, because a test that
 can read only a style cannot tell amber from red on a 6px bar.
@@ -6440,7 +6440,7 @@ can read only a style cannot tell amber from red on a 6px bar.
 **Landed:** 2026-08-09 · **Surface:** `gateway/http/deliver.ts`, `gateway/push/`,
 `wire-types/`, `app/lib/push-deep-link-dispatch.ts`, `app/components/ChatSyncSurface.tsx`
 
-## What the owner saw
+### What the owner saw
 
 > "the notification that comes in on Android says 'ritual:kaizen'. I don't need a
 > special case notification for rituals. I should just get notifications of chat
@@ -6450,7 +6450,7 @@ can read only a style cannot tell amber from red on a 6px bar.
 > project (in this case it should have opened in general scrolled to unread
 > messages)"
 
-## One root cause under both halves
+### One root cause under both halves
 
 The push was composed from the **reminder row**, not from the message the fire
 posted. `PushDispatcher.pushReminder` built `{ title: 'Reminder', body:
@@ -6468,7 +6468,7 @@ reminder tick's `on_fired` hook.
 Both symptoms were the same mistake, so both are fixed by moving composition to the
 one place that holds the posted text **and** its durable row id.
 
-## What changed
+### What changed
 
 **The notification is composed by the DELIVERY SEAM.** `gateway/push/chat-message-push.ts`
 is new and pure: `chatPushExcerpt` collapses whitespace and truncates on a word
@@ -6576,7 +6576,7 @@ A bare `fetch` has no deadline, and this call is now awaited inside a durable
 delivery, so a stalled connection to `exp.host` would park a reminder fire — and the
 tick that claimed its row — for as long as the socket stayed open.
 
-## Tests
+### Tests
 
 - `gateway/http/__tests__/deliver.test.ts` — a `'reply'` post notifies, an `'inert'`
   post notifies, a `'none'` pill does not, a failed persist does not, the topic's
@@ -6621,7 +6621,7 @@ a failure, so reverting it does not flip a result.
 
 **Landed:** 2026-08-09 · **ISSUES:** #518 · **Surface:** `scripts/eas-update.sh`, `scripts/ci/verify-expo-export.ts`
 
-## What happened
+### What happened
 
 A Metro/Watchman failure produced a broken export and `eas update` **published it
 anyway** — exit 0, an update id, a permalink, every signal of success. The OTA
@@ -6629,14 +6629,14 @@ reached the owner's phone dead. Nothing in the pipeline had ever looked at what
 was being shipped, and there was no publish wrapper at all: the command was being
 run by hand each time.
 
-## Why the obvious check doesn't work
+### Why the obvious check doesn't work
 
 The bundle is Hermes **bytecode**. `grep` for a symbol you know you just added
 returns nothing — and reads as "the code is missing" rather than "this tool cannot
 read this format". Three wrong diagnoses came out of exactly that during the
 original debugging session. A text search over a binary is not a check.
 
-## What it does instead
+### What it does instead
 
 `verify-expo-export.ts` checks the **format**, not the content:
 
@@ -6662,7 +6662,7 @@ stale `dist` first — otherwise a FAILED export republishes the previous run's
 bundle, which is the same silent success this exists to prevent — and refuses
 `--branch production` outright.
 
-## Coverage
+### Coverage
 
 `scripts/ci/__tests__/verify-expo-export.test.ts` — 10 tests, every one writing a
 REAL directory tree, because the failure being guarded is "the bytes on disk are
@@ -6680,7 +6680,7 @@ This is a **publish-time** gate, not a CI gate — CI has no `dist` to inspect.
 
 ## 2026-08-09 — Which model runs which phase became configuration
 
-## What changed
+### What changed
 
 `trident/phase-models.ts` is new: a stable, owner-facing vocabulary of build phases
 (decomposition · build · build-mechanical · rubric review · adversarial review ·
@@ -6691,7 +6691,7 @@ strict validation. `buildWorkflowArgs` threads validated overrides to the workfl
 Every default is unchanged. An instance that never touches the setting produces
 byte-identical args — the key is **omitted**, not sent as `{}`.
 
-## Why the vocabulary is not the agent labels
+### Why the vocabulary is not the agent labels
 
 The workflow's labels are internal and several are dynamic (`forge:fix-round-3`,
 `checkpoint:argus-approved`, `head-probe-round-2`). Exposing them as settings keys would
@@ -6700,7 +6700,7 @@ would require the owner to know that "the thing that reviews adversarially" is s
 `argus:adversarial`. So the settings keys are stable phase names and the label → phase
 mapping lives beside them.
 
-## The bug the coverage test found on its first run
+### The bug the coverage test found on its first run
 
 **`head-probe-round-N` had escaped the routing table**, so it resolved to the fallback —
 the most expensive tier at **high** effort — for a step whose entire job is to run one
@@ -6714,7 +6714,7 @@ phase or listed in `UNROUTED_LABELS` **with a reason**. The four cross-model rev
 lanes are listed there: they dispatch an external CLI in a subprocess, so offering a
 model control for them would be a lie in the UI.
 
-## Two design decisions worth keeping
+### Two design decisions worth keeping
 
 **Validation fails LOUD at the boundary and degrades QUIETLY in the workflow**, because
 the two need opposite behaviour. At the settings boundary an unknown phase or a bogus
@@ -6729,7 +6729,7 @@ not a channel anyone reads.
 meaning the workflow's progress group (`Build`/`Review`/`Synthesis`). Two different
 concepts under one name in one file is how the wrong one gets read.
 
-## Also in this change: a false claim removed from the tree
+### Also in this change: a false claim removed from the tree
 
 `gateway/wiring/resolve-llm-credentials.ts` carried a docblock headed **"KNOWN
 LIMITATION … NO FAILOVER"** about the ambient credential pool. **That claim was wrong**,
@@ -6745,7 +6745,7 @@ asserting a limitation is read as design documentation, so it needs the same evi
 as a claim about behaviour — arguably a higher one, since nothing executes it and no test
 can go red.
 
-## Verification
+### Verification
 
 `trident/__tests__/phase-model-coverage.test.ts` — 31 tests. Trident suite: 577 pass.
 Typecheck matrix: 51 tsconfigs, all pass. Lint clean.
@@ -6763,7 +6763,7 @@ now bitten twice in one day, in both directions.
 
 ## 2026-08-09 — The per-phase model config gets a producer
 
-## What was wrong
+### What was wrong
 
 `trident/phase-models.ts` (the owner-facing vocabulary + validation),
 `InnerLoopInput.phase_models` (the workflow argument) and the workflow's own router
@@ -6776,7 +6776,7 @@ isolation.** That is the built-but-never-connected shape `SPEC.md` names as this
 repo's repeat offender — and it was found by an independent design review a few hours
 after the config landed, not by a test.
 
-## What changed
+### What changed
 
 - **Migration 0118** adds `trident_phase_models` to `instance_metadata` — the
   documented home for instance-level settings, whose own docblock says future fields
@@ -6792,7 +6792,7 @@ after the config landed, not by a test.
 - **`GET`/`PUT /api/app/trident/phase-models`**, registered in the composition input,
   the route-slot table, the composer, and the route-slot coverage inventory.
 
-## Three decisions worth keeping
+### Three decisions worth keeping
 
 **The write fails whole; the read degrades quietly.** A `PUT` with any invalid entry
 is a 400 that stores *nothing* and names every problem. The read path and the workflow
@@ -6813,7 +6813,7 @@ returns to its default. But an absent key is ambiguous between "clear everything
 "the client forgot the field", and clearing every pin by accident is not a mistake
 worth making possible.
 
-## Verification
+### Verification
 
 `gateway/__tests__/trident-phase-models-producer.test.ts` — 17 tests, weighted toward
 the CHAIN rather than the parts, because each link was independently absent.
@@ -6832,7 +6832,7 @@ migration snapshot regenerated and the runner's expected list extended to 118 (t
 first attempt appended a duplicate `117`, caught by the runner test) · lint clean ·
 byte-scanned for control characters.
 
-## Still missing
+### Still missing
 
 **The UI.** This is the producer, not the pane — an owner still cannot set a phase from
 the app. That is the next PR, and it now has a real endpoint to talk to rather than a
@@ -6842,12 +6842,12 @@ seam that would have silently done nothing.
 
 **Landed:** 2026-08-09 · **ISSUES:** #520 · **Surface:** `wire-types/push-kind.ts`, `app/lib/push-deep-link-dispatch.ts`
 
-## What the owner saw
+### What the owner saw
 
 > "when I tap on a push notification, it opens the app, but it doesn't open in the
 > right project and at the unread message marker like it should."
 
-## Why
+### Why
 
 The gateway picks a `kind` when it builds a push; the mobile client switches on
 that string to decide where the tap lands. The two lists were written
@@ -6868,7 +6868,7 @@ builds; the resolver's tests assert the payloads they hand it. Both were green a
 their union was broken — the gap lived in the space between two files that never
 met.
 
-## The fix
+### The fix
 
 `wire-types/push-kind.ts` owns `PUSH_KINDS` plus a named constant per kind, and
 the three senders now import those constants instead of writing string literals.
@@ -6891,7 +6891,7 @@ bug.
 `@neutronai/wire-types` had to be added to `gateway`'s dependencies — the senders
 could not import the shared list at all without it.
 
-## Not fixed here
+### Not fixed here
 
 The **unread-marker** half of the report. Routing now lands on the right project's
 chat; where that chat opens scroll-wise is the chat surface's own behaviour and is
@@ -6904,12 +6904,12 @@ shared list reds the fixture-coverage assertion.
 
 **Landed:** 2026-08-09 · **ISSUES:** #519 (first bullet) · **Surface:** mobile only
 
-## The request
+### The request
 
 > "Can you move the hairline session status bar to instead be on the top of the
 > message input box, rather than at the top of the screen?"
 
-## The consequence the issue called out, and honouring it
+### The consequence the issue called out, and honouring it
 
 The meter was not merely *sitting* at the top — it **was the tab band's bottom
 seam**. `ProjectTabBar`'s own comment said so: *"The band no longer draws its own
@@ -6920,7 +6920,7 @@ So moving it without restoring that hairline would have left the band with no ed
 at all. The narrow band draws its own again. **The wide sidebar needed nothing** —
 its visible boundary is the RIGHT border, which never depended on the meter.
 
-## Where it lives now
+### Where it lives now
 
 `ComposerDock` renders it above the published composer node. That is the one place
 both facts are in scope: the composer is published from deep inside `<Slot/>` and
@@ -6933,7 +6933,7 @@ every such mount.
 `ProjectTabBar` no longer takes a `usage` prop at all: one owner, or the hairline
 doubles up.
 
-## Coverage
+### Coverage
 
 The old test asserted the *opposite* — that the band renders the meter as its own
 edge. It is **inverted rather than deleted**, so the move is visible in the history,
@@ -6956,7 +6956,7 @@ through to the dock's own `usage=` and failed on correct code.
 
 ## 2026-08-09 — A review panel cannot see a red build — so now something else does
 
-## The gap
+### The gap
 
 Four reviewers read the **diff**. None of them runs the tests. So a change that
 type-errors, fails a lint gate or reds a shard could be **unanimously APPROVED** — and
@@ -6967,7 +6967,7 @@ there. That is the problem, not the reassurance: **the discipline lived in repos
 configuration rather than in the harness, so every self-hoster and every local-merge
 run had nothing at all.** The predecessor harness has had a CI gate for months; Open had none.
 
-## The design
+### The design
 
 **Deterministic, never interpreted.** The agent is handed one command and asked to
 report its output *verbatim*; every judgement happens in JS. A model asked "is CI
@@ -6989,7 +6989,7 @@ near-identical gate (which is how one of the two quietly stops being enforced):
 for, and blocking it would deadlock every self-hoster who hasn't set CI up. Local mode
 short-circuits before spending an agent, because a local build has no PR and never will.
 
-## The hole this nearly shipped with
+### The hole this nearly shipped with
 
 Attaching CI findings was not enough. **`enforceCrossModelGate` returns the synthesis
 untouched when there are no deferred peers** — so a red build with no other problems
@@ -7002,7 +7002,7 @@ That is the unsafe direction — a reply we cannot parse would produce no gate a
 anything unparseable is now always `unknown`. **My own test caught this, not my reading
 of the code.**
 
-## Verification
+### Verification
 
 `trident/__tests__/ci-gate.test.ts` — 22 tests against the **real functions extracted
 from the `.mjs` and evaluated**, the same technique the cross-model gate tests use and
@@ -7024,7 +7024,7 @@ around the JSON.
 tier — the CI probe is the same shape as the head probe, and leaving it to the fallback
 is exactly how head-probe silently sat on the most expensive tier for months.
 
-## Two source-shape assertions moved, and that is worth naming
+### Two source-shape assertions moved, and that is worth naming
 
 Adding a third parameter to `reviewAndSynthesize` broke two existing tests **whose
 subject was untouched** — one pinning `enforceCrossModelGate(synthesisRaw, …)` by
@@ -7039,7 +7039,7 @@ Trident suite: 599 pass. Typecheck 51/51 · lint clean · byte-scanned.
 The series landed the day before and nothing read it. This is the read half:
 `GET /api/app/usage/dashboard` plus the Model usage card in web Settings.
 
-## The endpoint went into the EXISTING surface, not a new one
+### The endpoint went into the EXISTING surface, not a new one
 
 `gateway/http/app-usage-surface.ts` now owns two paths — the live meter it always
 owned, and the dashboard. A separate surface would have needed its own composition
@@ -7056,7 +7056,7 @@ The payload is `{ pools: [...] }` — an array even though exactly one pool exis
 so a second subscription can be reported without changing the shape under a
 client that has already shipped.
 
-## What the card refuses to say
+### What the card refuses to say
 
 Three fields are legitimately null and each has a different honest rendering. All
 three are places where the wrong choice still renders and still looks plausible:
@@ -7073,14 +7073,14 @@ three are places where the wrong choice still renders and still looks plausible:
   2026-08-10 null no longer means "unknowable": a sidecar beside the credential can
   name the account, and null is now either *nothing named it* or *the name on disk
   described a different token* — see
-  `docs/as-built/2026-08-09-credential-account-label.md`. The rendering is unchanged,
+  § 2026-08-09 — Naming the account behind a reading. The rendering is unchanged,
   which is why the card needed no edit.)
 
 Band colours come from `@neutronai/contracts/credential-usage.ts`, the same three
 tokens the 2px divider meter uses, so the card and the hairline above it cannot
 disagree about where amber starts.
 
-## Two guards worth keeping
+### Two guards worth keeping
 
 - **The wiring test now checks BOTH halves separately.** The write assertion
   passed for an entire PR during which nothing read the series. Links in a chain
@@ -7092,7 +7092,7 @@ disagree about where amber starts.
 
 ## 2026-08-09 — The usage readings are remembered, and turned into a pace
 
-## What was missing
+### What was missing
 
 `open/credential-usage-monitor.ts` has always probed the active credential every 60
 seconds, cached **one** reading, and aged it out after five minutes. So the product
@@ -7104,7 +7104,7 @@ hour ago, or when it last hit the ceiling.
 instantaneous number cannot answer it. That is why the dashboard needed a migration
 before it needed a chart — PR1 of `docs/plans/2026-08-09-model-usage-dashboard.md`.
 
-## What landed
+### What landed
 
 Migration `0119` + `persistence/usage-samples-store.ts` + a fail-soft `onSample` hook on
 the monitor, wired in the composer alongside the existing `onStanding` observer. The
@@ -7116,7 +7116,7 @@ means burning faster than the window refills, and that single number is what tur
 into a decision. It is computed at read time, never stored: a stored derivative goes
 stale the moment the formula improves, and this formula will.
 
-## Two things the tests found that reading did not
+### Two things the tests found that reading did not
 
 **The exhaustion projection was wrong.** My first draft divided by pace *twice* —
 arithmetically incorrect and entirely plausible-looking, which would have projected
@@ -7134,7 +7134,7 @@ cannot be tested, so it reads as protection that has never been exercised. Remov
 the proof written down, and the test rewritten as a property over a grid (with a
 positive control, since a property test over an empty grid asserts nothing).
 
-## What it deliberately does not claim
+### What it deliberately does not claim
 
 `account_label` exists and is **always null today**. The rotation happens *outside* this
 process — a credential file is replaced underneath a running child — so the instance
@@ -7149,14 +7149,14 @@ would be worse than no name at all.**
 > The paragraph above stands as the state on 2026-08-09 and is left as written, but do not
 > read it as current: an instance *can* name the account now, when something names it for
 > the instance. The last sentence is the part that did not change, and is the whole reason
-> the fingerprint exists. See `docs/as-built/2026-08-09-credential-account-label.md`.
+> the fingerprint exists. See § 2026-08-09 — Naming the account behind a reading.
 
 A sample with nothing measurable in it is not written: all-null rows would make "no
 data" indistinguishable from "we measured nothing", which are different facts. And a
 failed or unauthorized probe writes nothing, because it learned nothing about
 utilisation — a gap is not a zero.
 
-## Verification
+### Verification
 
 `persistence/usage-samples-store.test.ts` (20) — mostly about the **refusals**, since a
 plausible number out of one sample is easy and hard to eyeball once rendered: a
@@ -7178,7 +7178,7 @@ has exactly one writer, and enrolling it now is what keeps that true.
 Typecheck 51/51 · lint clean · byte-scanned · migration snapshot regenerated and the
 runner's list extended to 119.
 
-## Still to come
+### Still to come
 
 No endpoint and no card yet — this is the store. `GET /api/app/usage/dashboard` and the
 web card are the next PR, and they now have a series to read rather than a single
@@ -7188,11 +7188,11 @@ five-minute-old number.
 
 **Landed:** 2026-08-09 · **ISSUES:** #521 · **Surface:** `app/components/InputComposer.tsx`
 
-## What the owner saw
+### What the owner saw
 
 > "'slide to cancel' on the voice note recorder doesn't work."
 
-## Why — and the arithmetic was never the problem
+### Why — and the arithmetic was never the problem
 
 `Pressable` releases a press once the touch leaves the button plus its retention
 offset. RN's default retention is a couple of dozen points and the mic button is
@@ -7206,7 +7206,7 @@ didn't cancel the recording — **it sent it**, which is the worst possible read
 of "cancel": the thing the user was trying to destroy is the thing that got
 delivered.
 
-## The fix
+### The fix
 
 `pressRetentionOffset={VOICE_PRESS_RETENTION_PT}`, derived from the slide
 threshold rather than a loose literal — 2× vertically, 4× horizontally, with room
@@ -7214,7 +7214,7 @@ for the arc a one-handed thumb takes. Retention costs nothing until a press is
 already in progress, and the failure it prevents is unrecoverable in the wrong
 direction.
 
-## Coverage, stated honestly
+### Coverage, stated honestly
 
 `app/__tests__/voice-slide-to-cancel.test.tsx` is **mostly source assertions, not a
 driven gesture**, and its docblock says so. Two things make the real gesture
@@ -7235,7 +7235,7 @@ an aspirational docblock.
 
 ## 2026-08-09 — A spoken word is findable in chat search
 
-## The gap
+### The gap
 
 A voice note was transcribed at upload, the text was written durably beside the audio,
 and the memory pipeline received it. **Search could not see any of it.** The search
@@ -7246,7 +7246,7 @@ system and unreachable from the one surface built for reaching them.
 Owner: *"I don't want to lose my voice chat messages in opaque binary blobs."* They
 weren't opaque. They were just invisible to search.
 
-## The shape of the fix
+### The shape of the fix
 
 **The transcript rides back on the UPLOAD RESPONSE.** A user's own message is never
 persisted server-side — only agent messages get a durable row — so the client owns it,
@@ -7265,7 +7265,7 @@ the durable FTS5 mirror gains a second indexed column, and the in-memory path ma
 against `body + transcript` through a **single shared `searchableText`** so "what is
 searchable" has one definition.
 
-## Two details that would each have produced a working-but-useless search
+### Two details that would each have produced a working-but-useless search
 
 **`snippet(tbl, -1, …)`, not column 0.** FTS5 reads a negative column index as "the
 column with the most matches". Pinned at `body`, a voice-note hit would render the
@@ -7277,7 +7277,7 @@ re-invoke the ASR seam, so returning only what *this* call transcribed would mak
 same audio searchable the first time and silently not the second. That reads as a flaky
 feature rather than an absent one, which is harder to diagnose than never working.
 
-## The migration is the risky half
+### The migration is the risky half
 
 An FTS5 table cannot gain a column, so an existing single-column index must be dropped,
 recreated and **rebuilt** — and the triggers go with it, because they were compiled
@@ -7293,7 +7293,7 @@ The rebuild is detected from the stored DDL in `sqlite_master`, not by probing a
 a `MATCH` against a missing column throws the same way a dozen other faults do, and a
 rebuild triggered by the wrong error would discard a healthy index.
 
-## Verification
+### Verification
 
 `app/__tests__/voice-transcript-searchable.test.ts` (14, against a real bun:sqlite FTS5
 engine) and four new cases in `gateway/__tests__/app-upload-surface.test.ts` (36 total).
@@ -7310,7 +7310,7 @@ incident earlier the same day). Leak gate silent on every changed file.
 
 ## 2026-08-09 — A voice note's words survive the device
 
-## The correction
+### The correction
 
 The earlier half of this fix (#158) returned the transcript on the upload response so the
 uploading device could index it locally. **It shipped on a belief that turned out to be
@@ -7326,7 +7326,7 @@ back with their audio and none of their words: unsearchable again, permanently, 
 nothing to indicate anything was missing. The owner caught it by questioning the sentence
 rather than the code.
 
-## What changed
+### What changed
 
 Migration `0117` adds a nullable `transcript` column to `app_chat_messages`; the store
 persists and returns it; the replay envelope carries it; the client applies it on inbound
@@ -7352,7 +7352,7 @@ which is a far larger blast radius than adding a column. Existing voice notes be
 exactly as they do today; new ones are searchable everywhere. A backfill is a separate,
 reversible tool if it is ever wanted.
 
-## Verification, and what the mutants exposed
+### Verification, and what the mutants exposed
 
 `channels/adapters/app-ws/__tests__/voice-transcript-survives-device.test.ts` (11) and
 five new cases in `persistence/app-chat-store.test.ts` (20 total).
@@ -7379,7 +7379,7 @@ let a decoder silently omit it). Schema snapshot regenerated; migration runner's
 list extended. Byte-scanned for control characters. Leak gate silent on every changed
 file.
 
-## Also in this change: two arbiter design docs
+### Also in this change: two arbiter design docs
 
 `docs/plans/2026-08-09-multi-substrate-build-agent.md` and
 `docs/plans/2026-08-09-model-usage-dashboard.md`. Both are design recommendations awaiting
@@ -8031,7 +8031,7 @@ hit in live use, one PR, two commits. Changed: `open/wiring/app-ws.ts`,
 `landing/chat-react/ChatApp.tsx`, `landing/chat-react.html`,
 `app/components/ProjectRail.tsx`, `docs/SYSTEM-OVERVIEW.md`, plus four test files.
 
-### 1. Supervisor alerts sorted to the bottom of the transcript
+#### 1. Supervisor alerts sorted to the bottom of the transcript
 
 **The symptom.** The owner sent a message and days-old `⚠️ Supervisor alert`
 bubbles jumped BELOW it, each still printing its own true date, so the transcript
@@ -8076,7 +8076,7 @@ own framing of this push as a best-effort SECONDARY surface over the durable
 louder surface is a product decision for the SPEC, not something to smuggle into
 a bug fix — flagged rather than taken.
 
-### 2. The rail's idle dot painted a hollow grey ring
+#### 2. The rail's idle dot painted a hollow grey ring
 
 The owner: "i dont want this hollow grey circle when there is no activity. I only
 want to see a pulsing indicator when there is activity." `railDotClass` now
@@ -8702,7 +8702,7 @@ short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
 no-reply gate is untouched. No feature flag — the gate ships on as default
 behaviour.
 
-## Mid-turn message injection (#516)
+### Mid-turn message injection (#516)
 
 The web composer keeps Send enabled while the agent is typing. A second message
 for the same topic bypasses the completed-turn chain and is posted immediately to
@@ -8886,7 +8886,7 @@ what the code does. Self-healing re-registration is a separate change.
 
 No schema change, no feature flag. Gateway + app code.
 
-## Wall-clock timing assertions in tests — triaged, mostly removed (ISSUES #438)
+### Wall-clock timing assertions in tests — triaged, mostly removed (ISSUES #438)
 
 **What changed.** A sweep of every test assertion that compares REAL elapsed wall
 time against a threshold. These red when the machine is loaded, which is exactly
@@ -9215,7 +9215,7 @@ This is the restyle. **No playback behaviour changed** — the four things PR #3
 player, and `--:--` rather than a fabricated `0:00`) are untouched and their tests are still
 green.
 
-### The reference
+#### The reference
 
 **Apple's own asset**, pixel-measured — the method the composer rework
 (`2026-07-31-composer-imessage-affordances.md`) used, not a description from memory.
@@ -9235,7 +9235,7 @@ device = **1.153 px/pt**. Independently validated two ways — the bubble's corn
 comes out at 17.3pt against the 18pt this codebase already uses (`BUBBLE_RADIUS_PT`), and
 the disc comes out at 28.7pt against 29.0pt measured on the 3x reference.
 
-### The measured numbers
+#### The measured numbers
 
 Ratios are expressed against the disc DIAMETER so they hold at any size, and the code
 derives from them rather than hardcoding a point size.
@@ -9255,7 +9255,7 @@ derives from them rather than hardcoding a point size.
 **The gaps are asymmetric and that is deliberate.** 12 on the left, 16 on the right.
 Copying them symmetric is one of the things that makes a clone read as "close, but off".
 
-### What changed, element by element
+#### What changed, element by element
 
 | Element | Was (PR #39) | Now |
 |---|---|---|
@@ -9276,7 +9276,7 @@ then fixed separately and honestly, with `hitSlop` — the paint stays at the re
 and the touch box goes to 44pt, because growing the paint to 44 would push the bubble taller
 than iMessage's.
 
-### `BubbleTone` — why a new concept
+#### `BubbleTone` — why a new concept
 
 With no panel of its own, the player has no background it controls, so it has to be told
 what it is sitting on. iMessage paints every mark in the bubble's foreground and knocks the
@@ -9292,7 +9292,7 @@ from the words above them, but a voice note has no words (`send('', [url])`), so
 message it was dead space at the top of the bubble — the other half of why the player read
 as a panel floating inside a box. It is now applied only when there is a body.
 
-### The one deliberate departure: the track is not a waveform
+#### The one deliberate departure: the track is not a waveform
 
 Apple draws a **real amplitude envelope** — the silence at the head of the clip and the
 speech in the middle are both visible. We have no amplitude to draw:
@@ -9317,7 +9317,7 @@ is shared with the recorder's `formatElapsed`, and breaking their agreement so a
 reads `0:01` while recording and `00:01` on playback would cost more than the padding is
 worth.
 
-### The web client had the identical defect, and it was worse
+#### The web client had the identical defect, and it was worse
 
 `<audio controls>` was the right first move — a real player, keyboard-accessible, for free —
 but Chrome draws its own filled rounded panel, so on the blue user bubble it was a light-grey
@@ -9338,7 +9338,7 @@ browser has no `expo-audio`. That is the same split `audio-exclusivity.ts` and
 through `currentColor` and a `--bubble-ground` custom property set on the bubble classes, so
 the CSS names no palette entry and cannot drift either.
 
-### Tests
+#### Tests
 
 `app/__tests__/voice-note-playback.test.tsx` — 9 existing cases untouched and green (the four
 failure modes PR #39 pinned), plus 4 new cases pinning the ARRANGEMENT:
@@ -9359,7 +9359,7 @@ typing the glyph as text, shrinking the tap target, restoring `controls`, deleti
 keyboard scrubber, and restoring the fabricated `0:00` each fail exactly their own case and
 leave the rest green. They are not false positives.
 
-### What was verified, and what was not
+#### What was verified, and what was not
 
 **Verified visually.** The real component tree was rendered through react-native-web — the
 same harness the tests use — serialised with its generated CSS and screenshotted in headless
@@ -9383,7 +9383,7 @@ not on a phone:
 
 These are the first things to check on the next device pass.
 
-### Scope
+#### Scope
 
 **JS only** — no `app.json`, no `package.json`, no native module, no new dependency. This
 ships over the air to a build whose fingerprint matches `main`; no reinstall.
@@ -9676,7 +9676,7 @@ and, sharpening it:
 
 So: keep the tool rows, fix their names, and put the model's own words on the same timeline. The unit of the view becomes a **turn transcript**, not an event log.
 
-### What was actually wrong — measured on the device, not inferred
+#### What was actually wrong — measured on the device, not inferred
 
 `uiautomator dump` against the running app, drawer open. The panel's right edge is at x=320. Three separate defects, all visible in one dump:
 
@@ -9688,7 +9688,7 @@ So: keep the tool rows, fix their names, and put the model's own words on the sa
 
 The 52-char rows are the ones that mattered most, and they were the most misleading thing on the screen.
 
-### The finding: two of the three were NEVER CAPTURED, one was captured and thrown away
+#### The finding: two of the three were NEVER CAPTURED, one was captured and thrown away
 
 This is the part a rendering-only pass would have got wrong.
 
@@ -9698,7 +9698,7 @@ This is the part a rendering-only pass would have got wrong.
 
 **Tool arguments — captured, but only one field.** `summarizeToolInput` picked the first of `file_path|path|command|pattern|query|url|description|prompt` and returned `''` for anything else, deliberately, because unknown args "are frequently large and occasionally sensitive". Large is what the cap is for; sensitive is not a reason to blank the row, because the only destination is the OWNER's own authenticated panel rendering his own session — the same content chat already shows him. The blank had a real cost, and it produced the single most confusing row on the screen (below). Now falls back to a compact `key=value` render.
 
-### The unreadable row was the assistant's entire message
+#### The unreadable row was the assistant's entire message
 
 `mcp__neutron-<32 hex>__reply` is not a tool name, it is a transport address. `spawn.ts` names the dev-channel MCP server `neutron-${randomBytes(16).toString('hex')}` — a value that is DIFFERENT on every spawn and means nothing to anyone — and `dev-channel-impl.ts` registers `reply` on it with a single `text` argument holding "your COMPLETE response for this turn".
 
@@ -9709,7 +9709,7 @@ Two consequences:
 1. **`humanizeToolName`** parses `mcp__<server>__<tool>` → the TOOL becomes the label, the server is demoted to a dim `source` qualifier (kept, not discarded — a same-named tool from another server must stay distinguishable), and the random incarnation is stripped so the qualifier is stable across spawns. Matched as `-[0-9a-f]{8,}$`, which covers both the current 16-byte form and the pre-2026-07-20 4-byte one. Anything that does not parse passes through UNCHANGED: showing an odd name truthfully beats inventing a pretty wrong one. Note that `mcp__neutron__memory_search` was never "already readable" — it is the identical form, merely short enough to fit — so one rule fixes both.
 2. **The `reply` call IS the interleave.** The agent's words arrive at the hook at the exact instant it produces them, so a `reply` call now becomes an ASSISTANT MESSAGE row (`kind: 'token'`), peer to the tool rows on one chronological list. No merging of two streams was needed — the ordering was always correct in the ring; only the content was missing.
 
-### The duplicate that interleaving creates, and why it is collapsed on ADJACENCY
+#### The duplicate that interleaving creates, and why it is collapsed on ADJACENCY
 
 Wiring the `reply` call as an assistant row surfaces the same message twice: once from the hook, and once from the substrate's end-of-turn `token` — because `onReply` is precisely what pushes that token (`repl-session.ts`, "the 1:1 bridge: one reply → one token"). Same string, microseconds apart, and a transcript that prints the owner's message twice looks broken.
 
@@ -9717,7 +9717,7 @@ Collapsed in `record` on the only shape the artifact can take: an assistant row 
 
 The `reply` tool's `post` phase is dropped outright — it returns a bare ack, and "finished replying" is noise beside the reply itself.
 
-### Nothing runs off the right edge any more
+#### Nothing runs off the right edge any more
 
 The overflow was the same *symptom* in both clients — a label that would not shrink — but **the operative property differs per engine, and conflating them would mislead the next person to debug this.**
 
@@ -9730,11 +9730,11 @@ Long values truncate-with-expand rather than being cut: a row whose `body` says 
 
 Assistant rows are rendered in the PROPORTIONAL face with a left rule; tool rows stay monospace. That contrast is what makes the model's own words findable at a glance in the stream.
 
-### Privacy
+#### Privacy
 
 This feature renders the owner's private conversation in a PUBLIC repo, so every fixture here is synthesised: `a-command`, `a_tool`, `a-server`, `a synthesised assistant sentence`. No real message text, arguments, results, project names or ids appear in any test, fixture or commit. The device evidence above is reported as measurements (lengths, x-coordinates, row counts, `^\d+ chars$` matches) precisely so the finding could be recorded without the content that produced it.
 
-### Tests
+#### Tests
 
 `open/activity-inspector.test.ts` 40 (was 24) — `humanizeToolName` incl. incarnation-stripping and unparseable pass-through; reply-as-assistant; the dropped post-ack; the adjacency dedupe and its three negative cases; body/detail newline handling; `BODY_MAX`. `activity-tap-hook.test.ts` 30 — `tool_response` forwarding, the reply `text` argument, `renderToolArgs`/`renderToolResult` across the five result shapes incl. unknown-shape fallthrough. `activity-inspector-panel.test.tsx` 21 — prose rendering with no `chars` anywhere, human label + demoted source, expand/collapse, no affordance when body would repeat detail, and one chronological list. Plus wire-parse coverage on both clients.
 
@@ -9742,7 +9742,7 @@ This feature renders the owner's private conversation in a PUBLIC repo, so every
 
 `bunx tsc --noEmit` clean on the root and on `app/`.
 
-### Honest gaps
+#### Honest gaps
 
 - **`thinking` rows remain unreachable.** The persistent-REPL adapter emits no `thinking` event, so the intermediate reasoning a real Claude Code transcript shows between tool calls is not on the wire at all. What interleaves today is tool calls + the agent's user-visible messages. Closing that needs an adapter change, not a panel change.
 - **One assistant message per turn on the shipped path.** `reply` is called exactly once per turn by contract, so the transcript reads tools-then-message rather than alternating prose. Multi-part streamed replies would render in order for free if the adapter ever sends them.
@@ -9754,7 +9754,7 @@ The composer was still behind the keyboard on Android after the 2026-07-29 fix. 
 with a screenshot: *"Text entry window and send button still not visible when keyboard is
 showing"* — "still" being the operative word, because this is the second attempt.
 
-### What was actually wrong
+#### What was actually wrong
 
 `2026-07-29-mobile-send-webcrypto-and-keyboard-inset.md` replaced `KeyboardAvoidingView`
 with a window-space subtraction — the container's bottom from `measureInWindow`, minus the
@@ -9771,7 +9771,7 @@ Android**, read this session out of the installed `react-native@0.81.5`:
 So the container's bottom was reported one status-bar-height above where the keyboard's
 `screenY` lived, and the subtraction came out short by exactly that.
 
-### Measured on the device, before any code changed
+#### Measured on the device, before any code changed
 
 Android 14 emulator, 320x640 mdpi, status bar 24px. With the keyboard up in a project's
 Chat tab, `adb shell dumpsys window displays` reports the IME frame at `[0,405][320,640]`
@@ -9791,7 +9791,7 @@ Why edge-to-edge is what exposed this: `adjustResize` stopped resizing the windo
 app went edge-to-edge (`app/app.json` android `edgeToEdgeEnabled: true`; targetSdk 36 makes
 it non-optional regardless), so nothing shrinks on the app's behalf any more.
 
-### The fix
+#### The fix
 
 Android stops subtracting and adds inside one coordinate space instead
 (`app/lib/keyboard-inset.ts` `androidKeyboardInset`):
@@ -9817,7 +9817,7 @@ edge. Verified on device — with the keyboard down `chat-keyboard-inset` measur
 inset only, and chat is its bottom-most child), and if bottom chrome is ever added the
 failure mode is a visible dead band rather than a hidden composer.
 
-### Also in this change
+#### Also in this change
 
 The composer's duplicate hint is gone. `ChatSyncSurface` rendered
 *"Or type a response to the prompt above."* as a permanent extra line directly above the
@@ -9825,7 +9825,7 @@ keyboard while the placeholder two lines away already said *"Or type a response�
 same instruction twice, in the region with the least room. Owner: *"Unnecessary"*. The
 `hint` prop stays for the upload affordance, which says something the placeholder does not.
 
-### Tests
+#### Tests
 
 `app/__tests__/chat-keyboard-avoidance-android.test.tsx` (new, 8 cases) drives the real
 keyboard subscription on `Platform.OS === 'android'`. The discriminating case feeds a
@@ -9835,13 +9835,13 @@ branch back on fails 4 of the 8. `app/__tests__/keyboard-inset.test.ts` gains 5 
 for the arithmetic, including the no-navigation-bar device where the two numbers coincide
 (which is why the emulator hides half of the defect).
 
-### NOT covered
+#### NOT covered
 
 The harness fakes every element's layout rect, so no JS test proves the visual result.
 "The composer is visible above the keyboard" is a DEVICE claim and is settled with
 `uiautomator` bounds, not here.
 
-### Delivery
+#### Delivery
 
 JS only — no `app.json`, manifest, or native-module change. Over-the-air deliverable.
 
@@ -9888,7 +9888,7 @@ drawn back inside the column — is the whole thing being fixed. The test harnes
 the band the way the shell does (`app/__tests__/support/mount.tsx`), so existing
 mounted-screen tests needed no edits.
 
-### The keyboard lift moved WITH the composer, deliberately
+#### The keyboard lift moved WITH the composer, deliberately
 
 This is the part that had to be got right rather than assumed: the lift has already
 regressed twice and the owner reported it both times.
@@ -9903,7 +9903,7 @@ up the space, and the transcript shrinks exactly as it did before. The voice rec
 overlay moved too — it renders directly above the composer bar and must span the same
 width.
 
-### Verified on a device
+#### Verified on a device
 
 A cloud Genymotion Pixel 9 (Android 14, 1080×2424) — a clean instance, never pointed at
 any production instance. An EAS development client running this branch's JS from Metro,
@@ -9932,7 +9932,7 @@ positioned control):
 - **The usage meter is untouched**: it is the tab band's bottom seam at `y≈403`, ~1750px
   above the composer. No overlap and no second seam.
 
-### In the harness
+#### In the harness
 
 `app/__tests__/composer-full-width-dock.test.tsx` (new, 5 tests) asserts the placement as
 a containment question about real nodes: the bar is NOT a descendant of the
@@ -9946,7 +9946,7 @@ turns the two placement tests red; the existing
 docked path, which is what proves the lift survived the move rather than being re-pinned
 to something that no longer holds the input.
 
-### Not covered
+#### Not covered
 
 - **iOS.** The measured-overlap path is unchanged in arithmetic and its container now has
   a strictly better claim to being window-bottom-anchored, but it has not been run on an
@@ -9959,7 +9959,7 @@ to something that no longer holds the input.
   exactly where the band begins in every state above, so the band cannot overlap a rail
   entry regardless of list length — a longer list scrolls rather than being clipped.
 
-### Scope
+#### Scope
 
 JS only — no `app.json`, manifest, native module or dependency change. Ships over the air;
 no native rebuild.
@@ -9983,7 +9983,7 @@ So this converts `333ca1d7` to iMessage rather than layering a third style on to
 not reproducible are Apple's proprietary assets — SF Pro and the exact `arrow.up` outline —
 which are approximated, as expected, and are not a capability blocker.
 
-### The reference, and which iMessage
+#### The reference, and which iMessage
 
 **Target: the iOS 17/18 composer, deliberately — NOT iOS 26's Liquid Glass treatment.**
 The reasoning matters, because picking the newer one would have repeated the mistake this
@@ -10010,7 +10010,7 @@ pill implemented here, arrived at independently.
 
 **Not verified on a device** — see "What is not verified" below.
 
-### What changed, element by element
+#### What changed, element by element
 
 | Element | Was (WhatsApp pass) | Now (iMessage) |
 |---|---|---|
@@ -10038,7 +10038,7 @@ possible if the head is two strokes rather than a filled wedge, and the shaft is
 width as the arms. The solid-triangle version is the common wrong one and is exactly what
 makes iMessage clones look cheap.
 
-### The measured numbers
+#### The measured numbers
 
 Scale-calibrated off Apple's own iPhone User Guide screenshots and Send-button asset. The
 glyph ratios are expressed against the button's DIAMETER so they hold at any size, and the
@@ -10097,7 +10097,7 @@ composer refuses to ship elsewhere.
 **The tint is the app's own accent** (`THEME.accent`), not Apple's blue — for the send
 circle's fill and for the caret, as before.
 
-### The one deliberate deviation from Apple
+#### The one deliberate deviation from Apple
 
 iOS 17/18 puts a **dictation** mic in the field's trailing slot — speech-to-text into the
 field. Ours puts the **voice-message recorder** there instead. Recording and sending audio is
@@ -10107,7 +10107,7 @@ swap and the mark are iMessage's; only what the control *does* differs.
 Worth one line of justification: iOS 26 later replaced the dictation mic in this same slot
 with a waveform Record-Audio control. Apple converged on this usage.
 
-### What was preserved
+#### What was preserved
 
 - **The empty/typing swap.** Mic while empty, send arrow once there is something to send.
   Both press and long-press still dispatch; the hold still tracks the finger, so releasing
@@ -10123,7 +10123,7 @@ with a waveform Record-Audio control. Apple converged on this usage.
   content and the bar stops rising. Both the leading `+` and the in-field action button are
   bottom-aligned, so they track the LAST line rather than centring against a grown field.
 
-### Tests
+#### Tests
 
 `app/__tests__/composer-action-swap.test.tsx` — rewritten, 8 cases. Three are new and pin
 the ARRANGEMENT, which is the thing this change is actually about and the thing a future
@@ -10138,7 +10138,7 @@ are honestly testable. **Mutation-tested**: moving the action slot back outside 
 the WhatsApp arrangement — fails exactly the first two and leaves the other six green. They
 are not false positives.
 
-### What is NOT verified
+#### What is NOT verified
 
 - **Nothing was verified on a device or emulator.** The Android emulator was taken out of use
   mid-change at the owner's request (it was loading his laptop), so there is no screenshot and
@@ -10154,7 +10154,7 @@ are not false positives.
   the fix is a new theme token, not a local hex literal.
 - **No reference screenshot of iMessage was used** — see "The reference" above.
 
-### Adjacent gap found, NOT fixed here
+#### Adjacent gap found, NOT fixed here
 
 **The voice recorder from PR #24 (`1bddf3df`) is built but not wired.** This contradicts a
 belief in circulation that the mic is "already wired via `expo-audio`" — it is not, and the
@@ -10173,7 +10173,7 @@ anyway (recording against the owner's live instance was out of bounds, and then 
 withdrawn). It needs its own change and its own verification. Left untouched and reported
 rather than half-wired.
 
-### Scope
+#### Scope
 
 JS only — no `app.json`, manifest, or native-module change, so this ships over the air.
 
@@ -10188,7 +10188,7 @@ kinda ugly."* Then, after an iMessage pass: *"In that case we copy Whatsapp on A
 he is on Android and wanted the platform-native pattern rather than an iOS one ported onto
 it. He supplied a real WhatsApp dark-mode screenshot, which is what this was built against.
 
-### What the reference actually shows
+#### What the reference actually shows
 
 Read off the supplied frame, not from memory — two of these corrected the brief:
 
@@ -10200,7 +10200,7 @@ Read off the supplied frame, not from memory — two of these corrected the brie
    an up-arrow.
 6. The circle vertically centred against a one-line field.
 
-### What was built
+#### What was built
 
 - **The field** is now a capsule (`borderRadius` = half the resting height, so one line is a
   true pill and extra lines grow it into a rounded box), filled with `surface_raised`
@@ -10215,7 +10215,7 @@ Read off the supplied frame, not from memory — two of these corrected the brie
 - **The caret is accent-tinted** (`selectionColor` + Android's `cursorColor`).
 - **Touch targets** are ≥44pt via `hitSlop`, without inflating the artwork.
 
-### The glyphs are drawn, not typed
+#### The glyphs are drawn, not typed
 
 There is no icon set in the dependency tree — no `@expo/vector-icons`, no
 `react-native-svg` — and this has to ship over the air, so a native font or SVG package was
@@ -10233,7 +10233,7 @@ This is also why the old send mark was wrong: it was a `Text` glyph (`↑`), so 
 came from the system font's ascent/descent and it sat low in its circle with whatever
 weight the font happened to give it.
 
-### The voice button is a real control with a seam, not a placeholder
+#### The voice button is a real control with a seam, not a placeholder
 
 Voice messages are being built as a separate module which owns capture, permissions and
 upload. The composer owns only the BUTTON, and reports what the finger did through
@@ -10252,14 +10252,14 @@ and a gesture that only cancels one way strands whoever arcs the other.
 renders under the bar for a few seconds. A control that looks live and silently does
 nothing is exactly the failure this avoids, and there is a test for it.
 
-### NOT ported, deliberately
+#### NOT ported, deliberately
 
 The reference's **emoji/sticker button** at the field's leading edge. This app has no emoji
 picker to open (no picker component, no such dependency), and a button that opens nothing is
 the same defect as a microphone that records nothing. The leading edge is plain padding
 until there is a picker behind it.
 
-### Tests
+#### Tests
 
 `app/__tests__/composer-action-swap.test.tsx` (new, 5 cases): the mic is mounted while
 empty, the send plane replaces it on the first character, the mic returns after a send, the
@@ -10271,7 +10271,7 @@ stay green against the restructured tree.
 rect, so capsule radius, last-line alignment and optical centring are DEVICE claims and are
 settled with screenshots and `uiautomator` bounds, not here.
 
-### Delivery
+#### Delivery
 
 JS only — no `app.json`, manifest, or native-module change, so this ships over the air. The
 voice RECORDER will need a native audio dependency and therefore a real build; keeping the
@@ -10449,7 +10449,7 @@ closes that gap.
 
 ## 2026-07-31 — the voice recorder is WIRED: mic → recorder → upload → message
 
-### What was actually wrong
+#### What was actually wrong
 
 Voice messages had shipped as five modules and zero reachable feature. PR #24 landed
 `app/lib/voice-recording.ts`, `app/lib/voice-send.ts`, `app/lib/use-voice-recorder.ts`,
@@ -10469,7 +10469,7 @@ green over a feature the owner could not use. This is the same shape as the pers
 incident — built, tested, never wired — and the reason "done" here means served and
 reachable, not merged.
 
-### What changed
+#### What changed
 
 **`app/lib/voice-composer-handlers.ts` (new).** The join, as a pure function of the recorder
 value. The composer speaks gestures (`onVoiceTap` / `onVoiceHoldStart` / `onVoiceHoldMove` /
@@ -10505,7 +10505,7 @@ which is the iMessage arrangement PR #32 had just landed and the owner had just 
 mic buttons is exactly the dual code path this repo forbids, so the losing one went rather than
 sitting there looking available.
 
-### Verification
+#### Verification
 
 **On a device.** A cloud Genymotion Pixel 9 (Android 14) — a clean instance, not the owner's
 phone and not the local emulator, never pointed at any production instance. An EAS development
@@ -10542,7 +10542,7 @@ time, so it was proven to fail before being trusted.
 including a type-level assertion that the handlers still satisfy `InputComposerProps` — if the
 composer renames a callback, that stops compiling instead of quietly unwiring the mic again.
 
-### Two things found on the way
+#### Two things found on the way
 
 **`expo-audio` was never missing — it was never installed.** The earlier note that
 `use-voice-recorder.ts` "does not currently typecheck locally" was an artefact of a stale
@@ -10557,7 +10557,7 @@ calls and driveable into a permission refusal — because "did the press reach a
 is the exact question an inert stub cannot answer, and it is the question this whole change
 exists to keep answered.
 
-### Not covered
+#### Not covered
 
 - The long-press gesture as a finger performs it. The composer starts hold-mode capture on
   RN's `onLongPress` (`delayLongPress={250}`), so a hold loses its first ~250ms; a press
@@ -10743,7 +10743,7 @@ Three things about the brief turned out to be wrong in the code, and two of them
 
 So there are **two taps**, not one. The second is a `Pre`/`PostToolUse` hook (`hooks/activity-tap.ts`, sibling of the shipped `todo-sync.ts`) POSTing to a new `/activity` route on the loopback sink, dispatched through a late-bound `setReplActivityTap` the composer wires — the same three-part pattern as the tool bridge and the todo reconciler, because the hook runs in a different process and shares no memory with the gateway. Both phases with an unscoped matcher: `pre` gives "started Bash: bun test", `post` gives "finished Bash", and **a `pre` with no matching `post` for minutes IS the hang signal** that neither a single-phase tap nor a liveness pulse can express. Gated on `enableToolBridge`, so the disposable Trident build REPLs and the untrusted history-import REPL never report onto the owner's panel. `summarizeToolInput` picks the field that identifies the call (path → command → pattern → query → url → description → prompt) and returns EMPTY for unknown args rather than dumping JSON, which is frequently large and occasionally sensitive.
 
-### The two clocks — why a naive build would have rebuilt ISSUES #386
+#### The two clocks — why a naive build would have rebuilt ISSUES #386
 
 `pool.ts:551-568` runs a **synthetic** liveness keepalive: `{kind:'status', message:'working'}` every ~10 s for as long as the `claude` child is alive, *including while it is livelocked or parked on a wedged menu*. It exists to stop the synthesis drain false-wedging a silently-reading pass, and it is byte-identical to a real status notice. So "events are still arriving" does not mean "work is happening", and an inspector that measured liveness from `last_event_at` would report a permanently-stalled session as working forever — which is precisely #386, the dot that pulsed for days on a project where nothing ran, rebuilt in the very panel meant to verify it.
 
@@ -10756,13 +10756,13 @@ The keepalive push now carries an additive `keepalive?: boolean` (`runtime/event
 
 An earlier draft carried a separate `turn_started_at` field for that floor. Mutation testing proved it could not change any outcome (the `turn_start` row already moves `last_real_activity_at` to the same instant), so it is DELETED rather than left as untested complexity. Same call on its `turns_in_flight === 0` re-stamp guard and its 1→0 clear: both reddened zero tests because both were unobservable.
 
-### Wired + served, proven against the real composer
+#### Wired + served, proven against the real composer
 
 `open/__tests__/activity-inspector-served.test.ts` boots the REAL Open composer and drives the whole chain unmocked: hook-shaped POST → sink `/activity` → the composer's registered tap → the in-memory ring → `GET /api/app/projects/<id>/activity`. Nothing in the middle is stubbed, so the test fails if the composer stops constructing the inspector, stops registering the tap, or stops handing the surface to the graph. `open/__tests__/open-composition-fields-characterization.test.ts` (also a real composer boot) gained `app_activity_surface` to its exact-keys list — that key's presence is the done-means-served evidence. The route reaches the ladder through the `appActivity` slot in `gateway/http/route-slots.ts`, and both `route-slots-transition.test.ts` ratchet lists were extended per the documented "adding a surface" step.
 
 The snapshot endpoint is load-bearing, not a convenience: a wedged session emits nothing, so a purely-live panel would open BLANK on exactly the session the owner is worried about and could not say how long ago the last event was.
 
-### The dot is the entry point, and it is now always there
+#### The dot is the entry point, and it is now always there
 
 Ryan-locked: no new icon. But `railDotClass` (web) / `railDotKind` (mobile) returned `null` for an idle scope **and** for General — so the affordance would have vanished exactly when the owner wants it, and the acceptance ("the dot stays clickable when IDLE — an idle session must be distinguishable from a wedged one") would have been unmeetable. Both are now TOTAL: idle renders a quiet hollow ring. General gets a dot too — it is a real chat scope with its own warm session — while still never showing ATTENTION (no bound runs), which degrades to idle. Four existing assertions encoded the old `null` contract and were rewritten with the reason recorded inline; none were weakened to make something pass.
 
@@ -10770,7 +10770,7 @@ Web: a `role="button"` span inside the row's existing `<button>` (a nested `<but
 
 Mobile carries a third hazard: General has **three** spellings (rail id `'~general'`, chat scope `''`, server scope key `'general'`). `activityScopeKey` accepts all of them so a caller that forgets `railIdToScope` cannot silently inspect a project literally named `~general`.
 
-### Mutation results — 30 mutants, 30 killed
+#### Mutation results — 30 mutants, 30 killed
 
 | # | Mutation | Reds |
 |---|---|---|
@@ -10807,11 +10807,11 @@ Mobile carries a third hazard: General has **three** spellings (rail id `'~gener
 
 G8 initially killed ZERO. The `pool.ts` keepalive marker is the linchpin of the whole design — drop it and every keepalive counts as work, so wedges become undetectable, silently, because nothing else reads the flag — but exercising it behaviourally means spawning a real `claude` REPL and waiting out a ~10 s interval. Rather than leave the highest-consequence guard untested, it gained a narrow source-level gate (`keepalive-marker-gate.test.ts`, in the spirit of the repo's existing "no `claude -p` in the live path" grep gate) which also pins that the INJECT-time status is NOT marked (that one is real progress) and that exactly one push in the pool is marked at all.
 
-### Tests
+#### Tests
 
 New: 24 (`open/activity-inspector.test.ts`), 5 (drain tee), 11 (hook I/O), 6 (build-settings wiring), 7 (sink route), 3 (keepalive gate), 6 (live-agent-turn tee), 5 (served e2e), 20 (web client), 16 (web panel + dot), 18 (mobile client) = **121 new**. Existing files touched and green: `component.test.tsx` 19, `project-rail-view.test.ts` 9, `route-slots-transition.test.ts` 61, `open-composition-fields-characterization.test.ts` 1, plus `o8-drain-to-text-equivalence` 19, `o3-substrate-error-codes` 13, `persistent-repl-substrate` 18, `build-settings` 12, `todo-sync-hook` 5, `synthesis-session` 23, `build-llm-call-substrate` 32, `open-route-matrix` 54, `controller` 51, `project-shell` 9, `chat-rail-stability` 5, `ws-envelope-parity` 8, `general-rail-scope` 10, `mobile-rail-ux` 6, `projects-rail-live` 10. `bunx tsc --noEmit` clean on both the root and `app/` projects.
 
-### Honest gaps
+#### Honest gaps
 
 - **No live browser/device walk.** Everything above is test-level and composer-level: a real composer serves the route and the whole tap chain runs unmocked, but nobody has watched the panel tick in a browser against a real `claude` REPL. The first real dispatch is its live confirmation.
 - **`thinking` / `tool_call` / `tool_result_ack` rows are mapped but unreachable on the shipped CC path**, since that adapter never emits them. They cost nothing and light up for any adapter that does; today the tool rows all come from the hook.
@@ -10831,7 +10831,7 @@ Mutation-verified in both directions: reverting to the three-outcome set fails t
 
 ## 2026-07-29 — the history lane JOINS the projects manifest instead of re-deriving project ids
 
-### The defect
+#### The defect
 
 `open/legacy-import/history/topic-map.ts` derived a topic's destination project id
 as `basename(topic.project_path)`, with a comment asserting that this was
@@ -10850,7 +10850,7 @@ loudly. History would silently bind chat rows to a `projects.id` that may not
 exist and report success — an import that looks clean while messages land
 against a dangling project.
 
-### The fix
+#### The fix
 
 **One manifest reader, shared.** `documents/manifest.ts` moved to
 `open/legacy-import/manifest.ts`, taking the four manifest types with it
@@ -10877,7 +10877,7 @@ writes into the manifest), never the destination. The destination is
 too, so the flag is no longer `--apply`-only. `import-legacy all` already passed
 it (`lanes.ts`), so nothing downstream changed.
 
-### The orphan decision: EXCLUDE and exit 1, not fatal
+#### The orphan decision: EXCLUDE and exit 1, not fatal
 
 A project topic whose `legacy_slug` has no manifest record is reported per-topic
 with the number of messages the drop cost, and the run exits 1 on both the dry
@@ -10899,7 +10899,7 @@ BINDINGS rather than from what the corpus happened to contain, so a
 manifest/topic-map disagreement is reported even when it costs zero messages —
 the disagreement is the thing the operator has to reconcile.
 
-### Preview/apply rule — unchanged, and now verified from this lane too
+#### Preview/apply rule — unchanged, and now verified from this lane too
 
 `selectManifestPath` still enforces it in one place: an apply reads ONLY the
 applied manifest, a preview prefers the dry-run manifest and falls back to the
@@ -10908,7 +10908,7 @@ preview hand-copied onto the applied path. Both layers are now asserted from the
 history CLI, and mutation (d) proves the path-split layer is independently
 load-bearing rather than shadowed by the flag check.
 
-### Mutation results — all four killed
+#### Mutation results — all four killed
 
 | # | Mutation | Result |
 |---|---|---|
@@ -10922,7 +10922,7 @@ printed `1  app:owner  redwood (no project — user-scoped topic)` — the
 project's conversation demoted into General, exactly the silent corruption the
 guard prevents.
 
-### Real-vault run (read-only, scratch `--data-dir`)
+#### Real-vault run (read-only, scratch `--data-dir`)
 
 `projects` (dry) → preview manifest, then `history` (dry):
 
@@ -10940,7 +10940,7 @@ guard prevents.
 `history --apply` against that home correctly REFUSED (exit 2, no database
 created): the preview manifest does not satisfy an apply.
 
-### Other lanes
+#### Other lanes
 
 `memory` and `entities` do NOT share the pattern — verified, not assumed.
 `entities` is explicitly global/not project-scoped (`entities/types.ts:4`), and
@@ -10950,7 +10950,7 @@ the registry yet; when it lands it must take the manifest index the same way.
 The only `slugifyProjectId` call sites left in `open/legacy-import/` are in the
 projects lane's own scanners, where deriving the id is the job.
 
-### Not covered
+#### Not covered
 
 The history lane's SYNTHESIS step is still unwired — that gap is unchanged.
 
@@ -10958,7 +10958,7 @@ The history lane's SYNTHESIS step is still unwired — that gap is unchanged.
 
 Both reported by Ryan from the phone the same night. Both root causes were correctly identified before the code was read; both were confirmed against source, and one was **worse than diagnosed**.
 
-### Defect 1 — "arbitrarily narrow, should fill the screen"
+#### Defect 1 — "arbitrarily narrow, should fill the screen"
 
 `app/components/ChatSyncSurface.tsx` had TWO percentage `maxWidth` declarations in one ancestor chain: `bubbleColumn: { maxWidth: '82%' }` (`:894`) wrapping `bubble: { maxWidth: '82%' }` (`:822`). **Yoga multiplies them.** `calculateAvailableInnerDimension` clamps a node's `availableInnerWidth` by its own resolved `maxWidth` (`app/node_modules/react-native/ReactCommon/yoga/yoga/algorithm/CalculateLayout.cpp:519-527`) and that clamped value is passed down as the child's `ownerWidth` for percentage resolution (`:1397-1404`, then `:595-598`). Effective cap: 0.82 × 0.82 = **67%** of a row that `listContent`'s `paddingHorizontal: SPACING.md` had already narrowed — about 200pt on a 393pt phone, which is the ~5-words-per-line Ryan saw.
 
@@ -10975,7 +10975,7 @@ iMessage's ~78% of 393pt                       = 307pt
 
 The row is **narrower than the bubble cap we would be imitating**, so scaling it down again is the wrong move — 82% applied even ONCE is the wrong number for this surface. What has to survive is the speaker asymmetry: a user bubble must visibly not reach the left edge and an agent bubble must visibly not reach the right, or both sides read as full-width blocks. That needs a reliably visible gutter, not a small percentage. 90% leaves ~30pt (≈ `SPACING.xxl`) on a 393pt phone and ~22pt on a 320pt iPhone SE, while giving the bubble 267pt instead of 200pt.
 
-### Defect 2 — "switching projects flickers and feels laggy"
+#### Defect 2 — "switching projects flickers and feels laggy"
 
 Confirmed, and the diagnosis understated it. `app/app/projects/[id]/_layout.tsx:327-334` gated the WHOLE shell on the settings fetch, returning only a centred `ActivityIndicator` — tearing down the rail, the header and the tab bar and rebuilding all three on every rail tap. Not slow rendering: a full teardown/rebuild per switch.
 
@@ -10995,7 +10995,7 @@ A fourth, independent flicker source: `SlotFader` keyed its 1.0 → 0.4 → 1.0 
 - `SlotFader` takes a `scopeId` and re-baselines without animating when it changes. The dip is for tab switches within a project.
 - While the doc is in flight the header names the project from the already-loaded rail list (`scopeName`); `''` is the last resort, never a fabricated placeholder (ISSUES #393). The Invite pill is suppressed until the doc loads — `canInviteToProject` reads `billing_mode` + `members` and there is no honest answer without them.
 
-### Failing-before + mutation results
+#### Failing-before + mutation results
 
 Both suites were run against the pre-fix tree, and every guard was individually neutralised. Numbers are `fail` counts for the named test file.
 
@@ -11019,7 +11019,7 @@ No guard reddens zero tests.
 
 **Part of each suite is deliberately STRUCTURAL, reading the component's source.** Both bugs are wrong SHAPES, not wrong values, and this suite has no RN mount harness (`project-card-interactivity.test.ts`). A value assertion cannot catch someone re-adding a second `maxWidth` — the constant would still be 90% and the arithmetic still right — and a snapshot cannot catch the early return, because the broken build's snapshot is a perfectly valid spinner. So the guards are: exactly one percentage `maxWidth` in the chat surface with `bubbleWrap` and `bubbleColumn` occurring in equal numbers, and exactly one UI-returning `return` in `ProjectShell` with the chrome inside it. Same reasoning as `app/lib/entry-route.ts`: hoist the decision somewhere assertable, then pin the wiring.
 
-### ALSO INVESTIGATED, NOT FIXED — the duplicate "took too long" bubble
+#### ALSO INVESTIGATED, NOT FIXED — the duplicate "took too long" bubble
 
 Ryan's screenshot showed the same timeout bubble twice, each with its own Retry. **Verdict: two genuinely separate turn failures, so per the brief this is reported, not fixed.** Ruled out by tracing:
 
@@ -11037,7 +11037,7 @@ Cheap fixes exist (an idempotency key on the timeout prompt; resolving `prompt_i
 
 **Undetermined from code alone:** which trigger fired in Ryan's session. Settling it needs the gateway logs for that topic — `retry_tap` (`build-live-agent-turn.ts:923`) is decisive, with `turn_failed` (`:1462`) and `turn_auto_retry` (`:1472`) counts and the `chat_log` `seq` ordering.
 
-### Not covered
+#### Not covered
 
 - **Not verified on a device.** Typecheck, lint and the two suites are green; the bar Ryan set is a real install, and only he can close that.
 - The rail-tap → `/projects/<id>` → async last-tab read → `/projects/<id>/chat` hop remains. It is now honest (a spinner scoped to the content pane, chrome intact) rather than removed; collapsing it would mean resolving the last tab synchronously, which AsyncStorage cannot do.
@@ -11106,7 +11106,7 @@ than assumed.
 
 Ryan, from the phone: *"the mobile keyboard just covers the text entry box. You can't see it at all."* And separately: a sent message never leaves the device. Three OTAs had shipped that evening, all green on unit tests, typecheck and lint. He has been the integration test three times in one night and said plainly that is unacceptable — so the third deliverable here is the test harness, not a fix.
 
-### Defect 1 — every mobile send was destroyed before it existed
+#### Defect 1 — every mobile send was destroyed before it existed
 
 **`chat-core/send-queue.ts:49`** (pre-fix):
 
@@ -11139,7 +11139,7 @@ The device ids are themselves the measurement: the mobile runtime demonstrably h
 
 **Also fixed: the silence itself.** Even with the id generator correct, ANY enqueue fault used to vanish. `useMobileChat.send` now returns `Promise<boolean>`, catches, and sets `sendError`, which `StatusStrip` renders ABOVE the connection label. Two consequences: a null session reports "Still connecting — message not sent" instead of no-oping, and the composer's `if (ok)` contract — which `ChatSyncSurface.handleSend` satisfied with a hardcoded `return true` — is now truthful, so a send that could not be queued **leaves the owner's text in the box** instead of deleting it along with the message.
 
-### Defect 2 — `KeyboardAvoidingView` cannot avoid a keyboard from inside nested chrome
+#### Defect 2 — `KeyboardAvoidingView` cannot avoid a keyboard from inside nested chrome
 
 `ChatSyncSurface` wrapped itself in `<KeyboardAvoidingView behavior="padding">`. That component measures itself with `onLayout`, whose `nativeEvent.layout.y` is **parent-relative**, and pads by `frame.y + frame.height - keyboardScreenY`. That identity only holds for a full-screen root. This surface is not one: it sits under the project shell's `paddingTop: SPACING.xxl + SPACING.lg`, the `ProjectHeader`, and the `ProjectTabBar`.
 
@@ -11153,7 +11153,7 @@ The list also follows the newest message when the viewport shrinks (`listRef.scr
 
 **No new native dependency**, deliberately: `Keyboard` and `measureInWindow` are already in the shipped binary, so this is OTA-deliverable. `react-native-keyboard-controller` would be the more polished answer and requires a new native build.
 
-### Defect 3 — the mobile app could not mount a single component, and now can
+#### Defect 3 — the mobile app could not mount a single component, and now can
 
 The convention note at the top of `app/__tests__/comments-side-pane.test.tsx` stated the gap outright: *"the Neutron app's bun:test suite does NOT mount React Native components."* 1,200-odd app tests covered pure helpers and HTTP clients. The entire React wiring layer — where all three of tonight's defects lived, and where the rolled-back `ProjectShell` spinner regression lived — had no coverage at all. That is why "unit tests, typecheck and lint are green" kept coexisting with an unusable app.
 
@@ -11177,7 +11177,7 @@ Verified by reproducing the mixed chunk locally: `upload-client` + a harness sui
 
 **One more landmine, worth knowing about.** Four existing app tests call `mock.module('react-native', () => ({ View, Text, … }))` with a three-export fake. Bun module mocks are process-global and permanent, and Bun runs many test FILES per process — so whichever loads first owns `react-native` for everything after it, and a real component tree fails to link on the first omitted export (`AppState`). Reproduced deterministically by running `authed-attachment-image-hooks.test.tsx` before `chat-keyboard-avoidance.test.tsx`. A module mock outranks an `onLoad` alias, and re-registering the mock either deadlocks (async factory) or loses (sync). The harness therefore does not contest the specifier: it rewrites `from 'react-native'` inside the app's own sources to the stub path, so its graph never asks the registry and those four tests keep the fake they want. `native-harness-selfcheck.test.tsx` asserts the harness has a DOM, a complete RN surface, a phone platform, a non-zero viewport and removable WebCrypto — so a degraded harness fails loudly instead of turning the device suites into no-ops.
 
-### Measured
+#### Measured
 
 Mutation-tested every guard, because a guard whose removal reddens nothing is not a guard:
 
@@ -11191,7 +11191,7 @@ Mutation-tested every guard, because a guard whose removal reddens nothing is no
 
 Suites: `chat-core` 145 pass, `app/__tests__` 1,237 pass (was 1,218 + 19 new), typecheck matrix 51/51, lint 5/5 gates, leak gate SILENT.
 
-### NOT covered
+#### NOT covered
 
 - **Nothing here is verified on a phone.** Both fixes are JS-only and OTA-deliverable, but "the keyboard no longer covers the composer" and "a typed message arrives" are device claims. Treat them as unverified until Ryan confirms on the handset.
 - The harness sees no native layout, gestures, Hermes semantics, or native-module behaviour.
@@ -11236,7 +11236,7 @@ Consolidated: `tasks/manifest.ts` is DELETED and the lane joins `../manifest.ts`
 
 **`open/__tests__/legacy-import-all-dry-run.test.ts` needed its fixture.** Registering a 6th lane made that file's vault incomplete (no `tasks.md`), which broke 3 of its tests. Fixture gained a `tasks.md` whose `[project:]` tags name the two vault projects, so the walk exercises the real join — and a new test scopes to the tasks lane's own section and asserts it joined the PREVIEW manifest path with 2 writable rows and 0 exclusions. That test is the direct regression guard: a lane with a private applied-only reader cannot pass it.
 
-### Mutation results — 4 mutants, 4 killed
+#### Mutation results — 4 mutants, 4 killed
 
 | # | Mutation | Result |
 |---|---|---|
@@ -11247,7 +11247,7 @@ Consolidated: `tasks/manifest.ts` is DELETED and the lane joins `../manifest.ts`
 
 No mutant survived; no test needed strengthening after the fact. (b) killing only one test is expected — the plan-level tests set `apply` directly and are blind to a CLI-only mutation, which is why (b2) was run as well.
 
-### The real vault, end to end
+#### The real vault, end to end
 
 `./bin/neutron import-legacy all --dry-run --legacy-home ~/legacy --data-dir <fresh>` — **exit 1**, all SIX lanes previewed, no `STOPPED`:
 
@@ -11270,7 +11270,7 @@ Test totals: registry 24/24, tasks 42/42 (was 37), documents 45/45, history 58/5
 
 The the legacy harness→Neutron migration code was written directly into this PUBLIC repo, and it carried the reference vault's real contents into it. Not secrets — no keys, no tokens — but personal data: the owner's real portfolio/project slugs used as test fixture names, their home-directory paths, their messaging handle and numeric account id, and comment prose that inventoried which specific projects in their vault had which frontmatter defects. This change replaces all of it with neutral synthetic equivalents. Working tree only; no history rewrite.
 
-### What was removed, by category
+#### What was removed, by category
 
 1. **Real project / business slugs used as fixture identifiers.** Test trees, manifest fixtures, expected display names and report assertions were all keyed on the owner's actual portfolio. Replaced with synthetic slugs chosen to preserve the shapes the tests exercise: hyphenation, acronym segments, CamelCase brands, and the prefix-collision pair (`<slug>` vs `<slug>-2`) that the history lane's topic-id check depends on.
 2. **Personal filesystem paths and the account name inside them.** Absolute home paths and the Claude Code `~/.claude/projects/<encoded-cwd>/` directory slugs that embed them, in both comments and fixtures.
@@ -11280,18 +11280,18 @@ The the legacy harness→Neutron migration code was written directly into this P
 6. **Third-party personal names** appearing in fixture content and entity-page fixtures.
 7. **A private counterparty name** used as a column-padding demo string, and residual owner-name possessives throughout the lane's comments (now "the owner").
 
-### One behaviour change, deliberate
+#### One behaviour change, deliberate
 
 `DEFAULT_OWNER_HANDLE` (`open/legacy-import/history/classify.ts`) was a real handle and is now the placeholder `'owner'`. The history lane classifies an entry as the owner's only when the `<channel user="…">` attribute matches, so any install whose transcripts use a different handle must now pass `--owner-handle <handle>` (the flag already existed and is surfaced in `--help`). A mismatch is loud, not silent: the lane classifies zero owner messages and the dry-run report shows that before anything is written.
 
-### Verification
+#### Verification
 
 - Repo-wide grep for the removed identifier set across `open/`, `docs/`, `bin/` returns zero hits.
 - Every affected test file passes with the **same** test and assertion counts as before the rename (311 tests / 1293 assertions across the ten migration-lane files; 336 / 1413 including the substrate-wiring test). No assertion was relaxed, deleted, or made less specific — fixture *names* changed, the properties asserted did not.
 - `bunx tsc -p open/tsconfig.json --noEmit` clean; `scripts/ci/leak-gate.sh --tree .` silent.
 - **Mutation-checked** that the load-bearing assertions still bite after the rename: re-deriving the destination project id from the source directory name instead of reading the manifest → 7 failures; trimming the body in the document write path → 12 failures; trimming the extracted `<channel>` body → 4 failures. All three were reverted after measurement.
 
-### Known residue (not closed here)
+#### Known residue (not closed here)
 
 The owner's first name still appears in comments, fixture slugs and test data across roughly fifty files OUTSIDE the migration lane — onboarding, connect, landing, gateway, work-board, reminders, trident, runtime and the mobile app — as does at least one collaborator's first name. That is the same class of leak and wants a follow-up sweep; it was left alone here to keep this change reviewable and to avoid touching subsystems whose tests were out of scope.
 
@@ -11388,17 +11388,18 @@ Mutation-verified: removing `isBareRoot` fails 2 of the 5 new tests. The other t
 
 Gates: 42 pass / 0 fail across `open/__tests__/open-owner-gate.test.ts` + `gateway/http/__tests__/auth-gate-seam-both-modes.test.ts`; the rest runs in CI.
 Gates: 21 pass / 0 fail in `open/__tests__/open-owner-gate.test.ts`; the rest runs in CI.
-> **CLOSED FOR NEW ENTRIES (2026-07-28).** Write new as-built entries as one file
-> per entry under [`docs/as-built/`](as-built/README.md) instead.
+> **REVERSED (2026-08-16) — this file is canonical again, and everything came back into it.**
+> Between 2026-07-28 and 2026-08-16 new entries were written one-file-per-entry under
+> `docs/as-built/`. That directory is gone; its 46 entries are folded back in above, in
+> date order, and this is the one place an as-built entry is ever written.
 >
-> Every PR used to prepend here, at the same offset, so two open PRs conflicted by
-> construction rather than by subject — five rebases in one evening across four
-> unrelated PRs, every resolution being the same mechanical "keep both". That toll
-> scales with concurrency, and the M2 migration fans out across independent lanes
-> on purpose. One file per entry makes the conflict impossible instead of easy.
->
-> This file stays exactly as it is and remains the place to read history through
-> 2026-07-28. Nothing is migrated out of it.
+> The split was not arbitrary and the reason it was tried is worth keeping: every PR
+> prepended here at the same offset, so two open PRs conflicted by construction rather
+> than by subject — five rebases in one evening across four unrelated PRs, every
+> resolution the same mechanical "keep both". What it cost instead was discoverability:
+> the history of a subsystem stopped being readable in one pass, and a doc-drift guard
+> that pinned a filename broke the moment the file moved. The owner weighed both and
+> chose one canonical file. Resolve the append conflicts; they are cheap and local.
 
 ## 2026-07-28 — `neutron import-legacy`: Lane A of the the legacy harness cutover (PROJECTS)
 
@@ -11798,7 +11799,7 @@ Branch `trident/app-login-first-discovery`. The OPEN/app half of the login-first
 - **Error taxonomy read from the SERVER, not assumed.** Mapped on the BODY'S SHAPE first and status second, because two distinct routing failures both answer **404** — status alone cannot distinguish them, but the discriminating field the service attaches does: `409 + slugs[]` → several instances (the list feeds the picker), `404 + userId` → the account owns no active instance, `404 + slug` → that slug isn't an active instance we own, `401` → bad credentials or a rejected session token. Verified by reading the control plane's error serialiser and its routing error classes at the SHA that shipped `/v1/route`, not inferred. The reply also carries a `kind` discriminator that would be more direct, but its values name a hosting-layer concept Open's vocabulary gate (`scripts/ci/leak-gate.sh`) excludes from this public tree, so the shape check — equally determined by the server's own output — is used instead. Anything unrecognised degrades to `server` with the REAL status rather than being mislabelled.
 - **`app/lib/auth.ts` — the DEAD OAuth lane is DELETED, not left beside the live one.** It held a `signInWithGoogle`/`signInWithApple` implementation built against `<auth-base>/oauth/<p>/start` + `/api/v1/install-token/exchange` — paths the control plane does not serve — with ZERO call sites anywhere in `app/`. Two OAuth implementations, one pointing nowhere, is precisely the dual-code-path trap the repo bans, and it was a live trap: the next agent to "wire up OAuth" would have wired the broken one. `lib/auth.ts` now keeps only the self-host dev-token lane plus the shared `AuthUser` shape; `buildStartUrl` went with it (the service composes and returns the `authorizeUrl` now), and `parseOauthCallback` was retargeted from the old install-token redirect to a standard `?code=&state=` authorization-code redirect. A test enumerates app sources and fails if `install-token`, `signInWithOauthProvider` or `buildStartUrl` reappears in code.
 
-### Round 2 — the two blockers Argus raised, and the majors alongside them
+#### Round 2 — the two blockers Argus raised, and the majors alongside them
 
 - **BLOCKER 1 (fixed, and proven end-to-end): the instance-scoped bearer was a credential NO Open gateway accepted.** Every `/api/app/*` surface is gated by one resolver, `appOwnerAuth` (`open/composer.ts`), which accepted only the per-install owner bearer (`constantTimeEqual(token, appWsToken)` — a value a phone cannot know) or a base-resolver result whose `user_id === OWNER_USER_ID`. The base resolver had exactly three modes (`channels/adapters/app-ws/auth.ts`): dev-bypass, HS256, unconfigured. The identity service mints the route token as **RS256**, so it hit dev-bypass and was rejected as `malformed_token` — sign-in succeeded, then everything 401'd. Worse, the flow's own adoption probe is UNAUTHENTICATED `/healthz`, so it reported success and hid the failure. **`channels/adapters/app-ws/auth.ts` gains a real `jwks` mode**: offline RS256 verification against the identity service's published JWKS via jose's `createRemoteJWKSet` (which owns fetch, cache, rotation and cooldown — no cache maintained here), configured by `NEUTRON_IDENTITY_JWKS_URL` and an OPTIONAL `NEUTRON_IDENTITY_AUDIENCE`. The claim contract is all-or-nothing: RS256 signature, `exp`, a non-empty `sub`, and a non-empty `slug` claim that constant-time-equals this gateway's own slug. **A token with NO `slug` is REFUSED** — that is the account-scoped bearer every signed-in account holds, and accepting it would let any account drive any install. `jwks_url` **outranks** `bypass`, deliberately: `bypass` is derived from a loopback bind and a hosted instance binds loopback behind a reverse proxy, so checking `bypass` first would make the production mode unreachable on exactly the deployments that need it. There is no credential CHAIN — a token that fails the configured mode is rejected, not retried against a weaker one. A malformed `NEUTRON_IDENTITY_JWKS_URL` throws at composition rather than degrading to "identity quietly off", because a typo must not reproduce the sign-in-then-401 confusion this removes.
 - **…and `appOwnerAuth` normalises a JWKS-verified identity onto the owner.** The resolver returns the identity service's account id as `user_id`, but Open is single-owner and everything downstream (the WS channel topic, the owner-timezone write, every `/api/app/*` gate) compares against `OWNER_USER_ID`. Returning the remote account id would authenticate the owner and then deny them, and would fork the chat transcript per account id. Since the control plane mints a slug-scoped token only for that slug's owner, and the resolver already checked the slug, that bearer IS the owner: `if (resolved.mode === 'jwks') return { ...resolved, user_id: OWNER_USER_ID }`.
@@ -11814,7 +11815,7 @@ Branch `trident/app-login-first-discovery`. The OPEN/app half of the login-first
 - **NITs (fixed):** the "nothing is hardcoded" test matched only the assignment form `= 'https://…'`, so a returned template literal, an object-literal value or a baked `fetch('https://…')` argument all slipped through a test whose stated guarantee is "anywhere" — it now matches ANY http(s) string literal, carries two NAMED reviewable allowances (the localhost suggestion in the self-host form; a third-party favicon endpoint) instead of a category exemption, and a companion test proves the widened regex catches all four forms the old one missed. The instance-picker button no longer no-ops silently when the session is gone (it says so). Both password inputs gained `autoComplete` / `textContentType` so platform password managers fill AND offer to save on the app's new primary surface. Stale docstrings in `lib/server-url.ts`, `lib/config.ts` and `lib/token-storage.ts` that still described the deleted setup gate were corrected, and `app/README.md` — the first doc a future agent reads, and untouched in round 1 — was updated for the login-first boot path and all three sign-in lanes.
 - **NIT (reverted): the unrelated gbrain test-timeout bump is GONE.** Round 1 raised `gbrain-memory/__tests__/raw-op-seam-ban.test.ts`'s per-test budget to 30s and justified it with a machine-specific measurement a reviewer could not reproduce. `scripts/run-tests.sh` already runs with `--timeout=15000`, so CI was never near the budget. Reverted to `main`; verified that file still passes on a bare `bun test` (1.38s of the 5s default, measured in this worktree).
 - **Round-2 verification, with the environment named.** Run in worktree `/private/tmp/wt-login-first` on macOS (darwin 24.6.0), `bun test v1.3.9 (cf6cdbbb)`: root `bunx tsc --noEmit` clean; `cd app && bunx tsc --noEmit` clean; `scripts/ci/lint.sh` clean; `scripts/ci/depcruise.sh` 8 known violations, 0 new; `scripts/ci/leak-gate.sh` SILENT; `bun test app/` 1037 pass / 0 fail; full `bun test` result recorded in the PR. Round 1 asserted a clean root `tsc` and a green full suite without naming where — reviewers could not reproduce either in a fresh worktree (workspace-symlink resolution), and the root `tsconfig.json` excludes `app/`, which is why the app typecheck is a SEPARATE command above rather than covered by the root one.
-### Round 3 — the rotation bug, the predicate extraction, and the diagnostic for the cross-repo gap
+#### Round 3 — the rotation bug, the predicate extraction, and the diagnostic for the cross-repo gap
 
 - **MAJOR (fixed): a rotated refresh token was DROPPED when the route hop failed, turning one flaky request into a permanent logout.** Refresh tokens are single-use — the moment the service answers a refresh, the token just presented is revoked and the reply carries its replacement. `renewInstanceSession` refreshed, then called `/v1/route`, and on a route failure returned a bare `deferred` that had **nowhere to put** the replacement. So it was discarded, the next launch replayed the revoked token, the service read that as a reuse attack and revoked the whole family, and the owner was thrown back to credentials for good. That exactly inverts this flow's own guarantee that "being on a train at launch cannot log anyone out": a single transient route failure logged them out permanently instead. `RenewalOutcome`'s `deferred` and `sign_in_required` variants now carry `rotated_refresh_token`, threaded through `classifyRenewalFailure` so no exit path past the refresh can silently drop a rotation (`undefined` = the refresh never happened; `null` is a real service value and is preserved as distinct). `app/app/index.tsx` persists it before returning. **The coverage gap that hid this is closed too**: both existing defer tests failed at the REFRESH step, so no test had ever exercised "refresh succeeded, route did not" — there are now four, including the `null`-rotation case.
 - **…and the same function's success path no longer risks a partial write.** `Promise.all([setToken, setIdentitySession])` could land the NEW bearer beside the OLD (revoked) refresh token — unrecoverable, since the next launch replays it. The two writes are now SEQUENTIAL with the refresh token FIRST, so the only possible partial state is a fresh refresh token beside a still-valid older bearer, which the next launch simply renews again. Pinned by a test asserting the ordering and the absence of `Promise.all`.
@@ -12197,7 +12198,7 @@ and `current()===null` (row NOT resurrected). Updated partial-store construction
 `OnboardingStateStore` objects) to wire `patchPhaseState` through to the real store. 968
 onboarding tests + 3761 gateway+onboarding tests pass; `tsc -p onboarding/gateway/open` clean.
 
-## M2 P0 parity — input modalities task 1: attachment→agent threading + PDF documents (2026-07-21)
+### M2 P0 parity — input modalities task 1: attachment→agent threading + PDF documents (2026-07-21)
 
 Scope: `IMPLEMENTATION_PLAN.md` task 1. Attachments (including images) never reached
 the agent — `open/wiring/app-ws.ts` read `adapter_metadata.attachments` and dropped
@@ -12240,7 +12241,7 @@ now reach the agent for the first time.
 - OUT OF SCOPE (later tasks): voice-note transcription (task 2), `/status` + `/reset`
   chat commands (task 3), office formats beyond PDF, SVG, the import-ZIP path.
 
-### Round-2 hardening (Argus review, 2026-07-21)
+#### Round-2 hardening (Argus review, 2026-07-21)
 
 - **`landing/chat-react/ChatApp.tsx` — `attachmentBasename` no longer throws on a
   poisoned URL.** It runs during render for every non-image chip; a malformed
@@ -12260,7 +12261,7 @@ now reach the agent for the first time.
   in `build-live-agent-turn-attachments.test.ts` prove the retried prompt re-embeds the
   path (and injects no block when the original had none).
 
-### Round-3 hardening (Argus review round-2, 2026-07-21)
+#### Round-3 hardening (Argus review round-2, 2026-07-21)
 
 - **BLOCKER — mobile PDFs no longer paint as broken images.** The Expo bubble
   routed EVERY attachment URL through `AuthedAttachmentImage` (a pure RN `<Image>`),
@@ -12303,7 +12304,7 @@ now reach the agent for the first time.
   parts (assistant-ui exposes only text|image parts here; the renderer branches on the
   URL, so it is correct in practice).
 
-### CI-green hotfix (PR #428, task 2) — de-pollute process-global react/react-native test mocks
+#### CI-green hotfix (PR #428, task 2) — de-pollute process-global react/react-native test mocks
 
 - The canonical `test` job went RED across `a235eea3..141d2c1c` (3 consecutive runs). The
   two new app test files (`app/__tests__/authed-attachment-image-hooks.test.tsx`,
@@ -12341,7 +12342,7 @@ now reach the agent for the first time.
   green (image 4/0, file 5/0); the 12 branch-changed files in ONE bun process 125/0;
   `bash scripts/ci/typecheck-all.sh` exit 0 (51 tsconfigs).
 
-### Round-2 findings fix (Argus review round-1 on PR #428, 2026-07-22)
+#### Round-2 findings fix (Argus review round-1 on PR #428, 2026-07-22)
 
 - **BLOCKER — native non-authed `data:`/`file:`/`content:` attachments no longer open
   silently-fail.** The file-chip `open()` handler's `bearer === undefined` branch
@@ -12370,7 +12371,7 @@ now reach the agent for the first time.
 - Verified: both target suites 12/0; the full `app/__tests__/` dir in ONE bun process
   872/0 (the CI-pollution scenario, clean); `tsc --noEmit -p app/tsconfig.json` exit 0.
 
-## M2 P0 parity — input modalities task 3 (partial): `/status` chat command (2026-07-22)
+### M2 P0 parity — input modalities task 3 (partial): `/status` chat command (2026-07-22)
 
 Scope: `IMPLEMENTATION_PLAN.md` task 3, the `/status` half of the narrow Neutron
 chat commands (`/status` + `/reset`; NOT the the legacy harness topic-lifecycle vocabulary).
@@ -12413,7 +12414,7 @@ below.
 - Verified: `bunx tsc --noEmit` exit 0; `gateway/__tests__/status-command-wiring.test.ts`
   9/0.
 
-## M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
+### M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
 
 Scope: `IMPLEMENTATION_PLAN.md` task 5. Audio voice notes (MP3/M4A/WAV) upload on
 the SAME chat surface as images + PDF, transcribed at upload-complete by a new
@@ -16762,7 +16763,7 @@ renders clean; normal reconnect preserves; absent `last_seen_seq` never wipes).
 
 ---
 
-## Hobby projects + one-time agentic per-project kickoff (2026-07-01)
+### Hobby projects + one-time agentic per-project kickoff (2026-07-01)
 
 **Problem.** Two gaps in what onboarding produces on a fresh install: (1) the
 interview asks about outside-work interests/hobbies but those answers materialized
@@ -16834,13 +16835,13 @@ deterministic fallback for declined projects).
 
 ---
 
-## M1 UX REDESIGN — backend data contracts (PR-1, 2026-07-02)
+### M1 UX REDESIGN — backend data contracts (PR-1, 2026-07-02)
 
 First redesign PR: the two design-independent backend contracts the redesigned
 Work pane + project rail consume. NO feature flag, one code path, NO visual
 change (PR-2+ build the UI on top of these).
 
-### A. Per-run inner-step (`step_label`) + a live push that retires the 15 s poll
+#### A. Per-run inner-step (`step_label`) + a live push that retires the 15 s poll
 
 **Problem.** The outer `code_trident_runs.phase` sits at `forge-init` the WHOLE
 inner build, and NOTHING pushed the inner workflow's checkpoint advances — the
@@ -16878,7 +16879,7 @@ item's board scope key) + `emitProjectsChangedIfChanged`. `WorkBoardTab.tsx`'s
 15 s poll is retained as a FALLBACK only (dropped-frame resilience + the
 elapsed/stall clock).
 
-### B. Per-project rail fields (`activity` / `preview` / `preview_from` / `live_runs`)
+#### B. Per-project rail fields (`activity` / `preview` / `preview_from` / `live_runs`)
 
 `readProjectRows` (`open/composer.ts`) — feeding both the `projects_changed` frame
 and the page bootstrap — now derives four per-project fields:
@@ -16922,7 +16923,7 @@ stall-crossing fan; `store.latestByProjectScope` scoping).
 
 ---
 
-## Work-Board project-scope fix — agent tools + trident builds scope to the ACTIVE project (P0)
+### Work-Board project-scope fix — agent tools + trident builds scope to the ACTIVE project (P0)
 
 **Symptom (reproduced on the box 2026-07-02).** Chatting inside a NAMED project
 (e.g. "Tabs"), the agent created Work items + kicked trident builds, but BOTH the
@@ -17016,7 +17017,7 @@ owner slug), `agent-dispatch/surface.test.ts` (the tool builds the req with the
 active-project `board_scope`). The dormant `/dispatch` *chat command* is not wired in
 Open (like `/code`); it keeps the owner-slug default, unchanged.
 
-## UX Batch-4 (#347/#348/#349/#350) — mobile/web-mobile chat-react polish (2026-07-03)
+### UX Batch-4 (#347/#348/#349/#350) — mobile/web-mobile chat-react polish (2026-07-03)
 
 Four fixes from the owner's live dogfood, all in the responsive web chat-react client
 (no feature flags, one code path, both light+dark + desktop preserved).

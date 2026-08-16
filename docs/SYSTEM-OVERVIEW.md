@@ -8179,7 +8179,7 @@ Native component; ~1,200 app tests covered pure helpers and HTTP clients only, s
 the entire React WIRING layer was untested. That is how mobile chat shipped
 green-on-everything while having **never delivered one message from a phone**
 (`crypto.randomUUID()` in `SendQueue` on a runtime with no `crypto` global — see
-`docs/as-built/2026-07-29-mobile-send-webcrypto-and-keyboard-inset.md`). Unit
+`docs/AS_BUILT.md` § 2026-07-29 — Mobile chat had NEVER sent a message). Unit
 tests, typecheck and lint cannot see a keyboard covering an input, a send that
 never fires, or a loading state that is never left. This harness can see two of
 those three.
