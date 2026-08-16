@@ -587,6 +587,21 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(calls[0]!.prompt).toContain('"reflectionGuidance":""')
   })
 
+  // The TEST EXECUTION block rides the SAME carriage as `reflectionGuidance`, but is
+  // derived one layer up (the orchestrator holds the live run count + host budget), so
+  // this layer's whole job is to pass it through verbatim as a string.
+  test('args carry the orchestrator-composed testStrategy verbatim', () => {
+    const args = buildWorkflowArgs(input({ test_strategy: 'TEST EXECUTION\nX' }))
+    expect(args['testStrategy']).toBe('TEST EXECUTION\nX')
+  })
+
+  test('args carry an EMPTY testStrategy when none was composed (byte-identical legacy contract)', () => {
+    // '' — never undefined and never null: the `.mjs` compares against '' to decide
+    // whether to splice, and an absent arg must reproduce the pre-existing prompt.
+    expect(buildWorkflowArgs(input()).testStrategy).toBe('')
+    expect(buildWorkflowArgs(input({ test_strategy: null })).testStrategy).toBe('')
+  })
+
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {
     const fire: FireInnerWorkflow = async () => {
       throw new Error('unexpected launcher crash')

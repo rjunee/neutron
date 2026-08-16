@@ -2925,19 +2925,48 @@ actionable `dispatchConstraint` describing the wrapper or executor required to w
     naming the conflicting paths), never a `REQUEST_CHANGES`. A resolved conflict
     shortcuts nothing: resolution is a mergeability operation, not a verdict, and
     the branch goes through the full review gate exactly as a clean replay does.
-    The credential
+    The outer loop's own credential
     is injected at the host-command boundary in `open/composer.ts`; it never enters the
-    wrapper command, the Forge transcript, or any process below the inner workflow.
+    wrapper command or the Forge transcript.
+  - **THE BUILD SUBSTRATE NOW CARRIES A GITHUB CREDENTIAL OF ITS OWN, and the older
+    "nothing below the inner workflow has one" invariant is RETIRED.** This paragraph
+    used to end "…or any process below the inner workflow", and `SPEC.md` cited
+    `/proc/<pid>/environ` as verified free of `GH_TOKEN`. That was true when the outer
+    loop's `run_host` was the only credentialed path, and it stopped being true with
+    `github_credential` (`gateway/wiring/substrate-profiles.ts`): `PROFILE_EPHEMERAL`
+    (disposable trident / agent-dispatch builds) and `PROFILE_WARM_FIRE` (the trident
+    fire seam) both set it, and `gateway/wiring/build-llm-call-substrate.ts` resolves
+    `githubSpawnEnvRef` and merges `GH_TOKEN` plus the credential helper into the spawn
+    env. Stating the retired invariant beside the shipped grant is worse than stating
+    neither, so: the grant is REAL, it is deliberate, and here is what bounds it.
+    - **Why it exists.** Measured on the owner's instance 2026-08-15: without it every
+      enterprise dispatch against a PRIVATE repo built, committed, and then died at
+      `fatal: could not read Username for 'https://github.com'`, burning a full Forge
+      round each time. A build that cannot reach its own remote is not a build.
+    - **What bounds it.** It is a PER-PROFILE decision, not a per-call one, and the
+      profile list is the audit surface: every attacker-influenced trust class
+      (`PROFILE_UNTRUSTED_IMPORT`, `PROFILE_PHASE_SPEC`, `PROFILE_ISOLATED_COMPOSE`,
+      `PROFILE_TOOLLESS_UTILITY`) is explicitly `github_credential: false`, and
+      `__tests__/substrate-profiles.test.ts` freezes that split. Resolution is per
+      spawn, so a rotated credential is never stale and a revoked one is simply gone.
+    - **What is honestly NOT bounded.** The build agent reads the repository it is
+      building, so repo-authored content (a README, a test fixture, a task card) is in
+      the context of a process that holds the owner's token — the same exposure the
+      owner's own `PROFILE_WARM_CHAT` has always had. The scope of the token is the
+      real limit here, not the process boundary. The one boundary that DOES still hold
+      below this is the codex sandbox's, described next: the wrapper's environment may
+      now hold a credential, and the `codex` child is `env -u`'d free of it.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
     MAY reach the network; it says nothing about what environment it is handed.
     `codex exec` filters that (`shell_environment_policy`), defaulting to
     `inherit = "core"` plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*`.
     An earlier version of the wrapper turned both off (`inherit=all` +
     `ignore_default_excludes=true`) to deliver `GH_TOKEN` and `GIT_CONFIG_KEY_0` to the
-    build's push, and that was wrong twice: the credential is wired to trident's OUTER
-    loop only (`open/composer.ts` `run_host`), so the inner workflow that launches the
-    wrapper never had it to inherit — `SPEC.md` records `/proc/<pid>/environ` as
-    verified free of `GH_TOKEN` and `GIT_CONFIG_*` — while clearing the excludes DID
+    build's push, and that was wrong twice: at the time the credential was wired to
+    trident's OUTER loop only (`open/composer.ts` `run_host`), so the inner workflow that
+    launches the wrapper had nothing to inherit — `SPEC.md` records `/proc/<pid>/environ`
+    as verified free of `GH_TOKEN` and `GIT_CONFIG_*` for that build — while clearing the
+    excludes DID
     expose the owner's Anthropic credential, which
     `gateway/wiring/build-import-substrate.ts` puts in that same REPL environment as
     `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It handed the quota this route
