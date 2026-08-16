@@ -20146,7 +20146,7 @@ second fresh-eyes certification audit followed this closeout.
 
 ## 2026-08-16 — a fired reminder was rewriting the owner's chat down to the fast tier
 
-Landed via PR #PRNUM.
+Landed via PR #340.
 
 The owner's project chat answered on Haiku twice in one day. He reported it both
 times; a hand-repointed registry record held for hours and then reverted, which is
