@@ -2,6 +2,79 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — a stalled driver is not a driver, and a silent skip is going quiet
+
+Landed via PR #341.
+
+The overnight work-wakeup loop shipped hours earlier and then stopped after a
+single firing. It was not broken; it was standing down, forever, in favour of
+peers that had stopped working.
+
+The wakeup's work list withheld any `in_progress` board item whose
+`linked_run_id` named a run that was not in a terminal phase, on the reasoning
+that the trident tick was already that item's driver
+(`open/composer.ts:5840-5852`, pre-change). The reasoning is right and the test
+for it was wrong: the outer `phase` stays `forge-init` for the WHOLE inner
+Forge→Argus→fix workflow — relied on at `trident/run-progress.ts:12-18`, and
+enforced at `trident/orchestrator.ts:2392` where only a terminal transition moves
+it. So `!isTerminalPhase(phase)` is equally true of a run building hard and of a
+run parked for hours, and the guard deferred to both. Every board item bound to a
+parked run became invisible to the only autonomy mechanism, and the `continue`
+wrote nothing anywhere, so the disappearance left no trace to find.
+
+THE DECISION, and why it landed on the wakeup rather than in run reaping — the
+brief left that open and the code closed it. Both trident reap paths are gated on
+a dispatch id: the 90-minute hang watchdog (`trident/orchestrator.ts:2529`) and
+the 2-hour inflight ceiling (`:2573`) both sit inside
+`if (run.subagent_run_id !== null || run.subagent_status === 'crashed')`
+(`:2427`). A run that never obtained a dispatch id is reachable by neither. So a
+reaper-side fix would need a new never-launched case AND would run on the very
+loop whose stall it was compensating for — a backstop that depends on the
+liveness of the thing it backs up is not a backstop. The side that is
+demonstrably still ticking stops deferring unconditionally instead; nothing about
+reaping is weakened.
+
+The mechanism is `trident/run-driving.ts` — `runDrivingVerdict(run, now_ms,
+no_advance_hang_ms?)` → `{ driving, reason, since_advance_ms }`, consumed by
+`gateway/proactive/work-wakeup-selection.ts` (the composer closure moved into a
+module so the policy could be tested at all). The signal is `last_advanced_at`,
+verified on its write sites rather than trusted for its name: re-stamped by
+`TridentRunStore.update` (`trident/store.ts:650`) on every outer transition and
+by `trident/checkpoint.sh:196` on every inner-workflow phase boundary. `round`
+was rejected for the same reason it is documented as unreliable at
+`run-progress.ts:145-159` — pinned at 1 for a whole build.
+
+The THRESHOLD is `NO_ADVANCE_HANG_MS` (`trident/liveness.ts:70`), deliberately
+the reaper's own number and not the 30-minute display threshold
+`STALLED_WARN_MS`. That identity is the design: while a run is young enough for
+the reaper to trust it the wakeup stands down, and the moment it is old enough
+for the reaper to call it hung the wakeup takes the item — there is no window
+where the two disagree, so nothing new can double-drive a healthy build. In the
+ordinary case the reaper wins the race and flips the run terminal, which is a
+stronger not-driving answer; this only bites where the reaper structurally cannot
+act. `STALLED_WARN_MS` was rejected on the evidence in its own docblock
+(`liveness.ts:16-31`): it is a DISPLAY threshold that had already been raised
+from 10 min because it fired on healthy builds, and a false positive that costs a
+scary label is not a false positive that may cost a second agent inside a live
+build.
+
+The silence was treated as a second defect rather than a symptom. Deferrals are
+returned on the project entry and `runWorkWakeupSweep` logs one line each, BEFORE
+any gate, at INFO — `wakeup_deferred_to_live_run project=… item=… run_id=…
+phase=… since_advance_ms=…`, the shape of the loop's existing diagnostics. A
+project whose items are ALL deferred still yields an entry, so "everything is
+being built" is legible instead of reading as an empty board.
+
+Each safety property was mutation-tested with a control proving the mutation
+landed (the marker grepped present, and the untouched tests still passing so a
+red could not be an import error): restoring the unconditional skip turns 4 tests
+red including the three-parked-runs regression; making the verdict never defer
+turns 7 red including the long-healthy-build cases; renaming the emitted event
+turns the observability test red. `bash scripts/ci/lint.sh` exit 0;
+`typecheck-all.sh` 50/51 with the one `app/tsconfig.json` failure reproduced
+identically on an untouched `origin/main` checkout in the same environment
+(absent `@types/node`, and nothing under `app/` is touched here).
+
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 
 Landed via PR #322.
