@@ -34,6 +34,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   symlinkSync,
   writeFileSync,
@@ -1669,5 +1670,63 @@ describe('THE TRANSCRIPT CANNOT FORGE A TRAILER — the two live in different pl
     expect(r.status).toBe(0)
     expect(r.trailerRaw).not.toContain(FABRICATED)
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
+  })
+})
+
+describe('atomic trailer publication', () => {
+  const expectCompleteTrailer = (raw: string): void => {
+    const lines = raw.trimEnd().split('\n')
+    expect(lines).toHaveLength(6)
+    expect(lines[0]).toStartWith('NEUTRON_CODEX_BUILD_BRANCH=')
+    expect(lines[5]).toStartWith('NEUTRON_CODEX_BUILD_WORKTREE=')
+  }
+
+  test('a trailer planted by the build itself is atomically replaced, leaving no temp residue', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        NEUTRON_CODEX_BUILD_EXEC_CMD:
+          `${FAKE_BUILD}; printf 'NEUTRON_CODEX_BUILD_HEAD=attacker-junk\\n' > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"`,
+      },
+    })
+    expect(r.status).toBe(0)
+    expectCompleteTrailer(r.trailerRaw)
+    expect(r.trailerRaw).not.toContain('attacker-junk')
+    expect(readdirSync(r.dir).some((entry) => /^build\.trailer\.tmp\./.test(entry))).toBe(false)
+  })
+
+  test('a concurrent reader never observes a partial trailer', async () => {
+    const observer =
+      `sh -c 'i=0; while [ $i -lt 600 ]; do if [ -s "$NEUTRON_CODEX_BUILD_TRAILER_FILE" ]; then cat "$NEUTRON_CODEX_BUILD_TRAILER_FILE" > "$HOME/observed.trailer"; exit 0; fi; sleep 0.05; i=$((i+1)); done' >/dev/null 2>&1 &`
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD}; ${observer}` },
+    })
+    expect(r.status).toBe(0)
+    const observed = join(r.dir, 'observed.trailer')
+    for (let i = 0; i < 200 && !existsSync(observed); i++) await Bun.sleep(50)
+    expect(existsSync(observed)).toBe(true)
+    const observedRaw = readFileSync(observed, 'utf8')
+    expect(observedRaw).toBe(r.trailerRaw)
+    expectCompleteTrailer(observedRaw)
+  }, 15_000)
+
+  test('the failed-build path also publishes atomically', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD}; exit 1` },
+    })
+    expect(r.status).toBe(5)
+    expectCompleteTrailer(r.trailerRaw)
+    expect(readdirSync(r.dir).some((entry) => /^build\.trailer\.tmp\./.test(entry))).toBe(false)
+  })
+
+  test('the script publishes only by renaming a fully-written temp file', () => {
+    expect(SCRIPT_TEXT).toContain('mv -f "$TRAILER_TMP" "$TRAILER_FILE"')
+    expect(SCRIPT_TEXT).not.toContain('> "$TRAILER_FILE"')
+    expect(SCRIPT_TEXT).toContain('rm -f "$TRAILER_TMP" "$TRAILER_FILE"')
   })
 })
