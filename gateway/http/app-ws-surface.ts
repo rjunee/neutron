@@ -331,11 +331,18 @@ export interface AppWsSocketData {
   /**
    * Web presence (2026-08-15) — an id for THIS SOCKET, minted at upgrade.
    *
-   * Deliberately not `device_id`. That one is client-minted and stable across
-   * reconnects, so two browser tabs can present the same value — and presence is
-   * per-SCREEN: closing one tab must not mark the owner absent while he is still
-   * reading in the other. A fresh id per connection is the only key for which
-   * "the socket closed" and "that screen is gone" are the same statement.
+   * Deliberately not `device_id`. That one is CLIENT-SUPPLIED and treated as
+   * stable across reconnects, so two clients may legitimately present the same
+   * value — and presence is per-SCREEN: the first of them to close must not evict
+   * the other's record and start buzzing the owner's phone while he reads. A
+   * fresh id per connection is the only key for which "the socket closed" and
+   * "that screen is gone" are the same statement.
+   *
+   * (Today's web client mints a per-page-load id — `landing/chat-react/config.ts`
+   * `makeDeviceId` — so two tabs happen to differ anyway. That is a property of
+   * one client, not of the field, and it is not what this key relies on;
+   * `gateway/__tests__/app-ws-web-presence.test.ts` drives the shared-id case
+   * directly rather than trusting it.)
    */
   conn_id: string
   /**

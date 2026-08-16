@@ -96,8 +96,11 @@ async function waitFor(pred: () => boolean, ms = 2000): Promise<void> {
 async function openClient(
   base: string,
   platform: 'web' | 'native' | null,
+  device_id?: string,
 ): Promise<{ ws: WebSocket; events: AppWsOutbound[]; close: () => Promise<void> }> {
-  const suffix = platform === null ? '' : `&platform=${platform}`
+  const suffix =
+    (platform === null ? '' : `&platform=${platform}`) +
+    (device_id === undefined ? '' : `&device_id=${device_id}`)
   const ws = new WebSocket(`${base.replace(/^http/, 'ws')}/ws/app/chat?token=${OWNER}${suffix}`)
   const events: AppWsOutbound[] = []
   await new Promise<void>((resolve, reject) => {
@@ -215,6 +218,30 @@ describe('app-ws surface — web presence', () => {
     a.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
     b.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
     await waitFor(() => h.presence.size() === 2)
+
+    await a.close()
+    await waitFor(() => h.presence.size() === 1)
+    expect(h.presence.isForeground(OWNER)).toBe(true)
+
+    await b.close()
+    await waitFor(() => h.presence.size() === 0)
+    await h.close()
+  })
+
+  it('two tabs SHARING a client-supplied device id are still two screens', async () => {
+    // The reason presence is keyed on a per-socket `conn_id` rather than on
+    // `device_id`. The upgrade accepts a client-supplied `device_id` and treats it
+    // as stable across reconnects, so two clients can legitimately present the
+    // same one — and if that were the presence key, the first tab to close would
+    // evict the second tab's record and the owner's phone would start buzzing at
+    // him while he reads. Same value on both sockets here, on purpose.
+    const h = await startGateway()
+    const a = await openClient(h.base, 'web', 'shared-device')
+    const b = await openClient(h.base, 'web', 'shared-device')
+    a.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    b.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.size() === 2)
+    expect(h.presence.size()).toBe(2)
 
     await a.close()
     await waitFor(() => h.presence.size() === 1)
