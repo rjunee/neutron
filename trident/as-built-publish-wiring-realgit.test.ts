@@ -238,6 +238,88 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     expect(show.stdout).toContain('## 2026-08-16 — the build that published second')
   }, 60_000)
 
+  test('SECURITY — the credential is not in the driver\'s environment, and neither is the checkout\'s .env', async () => {
+    // TWO SEPARATE HOLES, MEASURED THROUGH REAL GIT RATHER THAN REASONED ABOUT.
+    //
+    //   1. bun auto-loads a `.env` from its cwd — under a merge driver, the checked-out repository —
+    //      and does so INDEPENDENTLY of `bunfig.toml`, so `--config=/dev/null` does not cover it.
+    //   2. the driver is a child of the publisher's `run_host`, whose environment carries the
+    //      owner's `GH_TOKEN` (`github/credential.ts` `githubProcessEnv`) — the credential that
+    //      publishes every PR — in a process whose entire job is reading three files.
+    //
+    // Neither is a demonstrated exploit on its own; together they are an untrusted input and a
+    // valuable secret in one process, which is the pair that only has to line up once.
+    const world = await seedWorld({ shipsInstaller: true, label: 'envscope' })
+    writeFileSync(join(world.checkout, '.env'), 'INJECTED_BY_CHECKOUT=yes\n')
+    await git(world.checkout, 'add', '-A')
+    await git(world.checkout, ...GIT_ID, 'commit', '-q', '-m', 'a repo that ships a .env, like every bun project')
+
+    // Installed by the production path, not by a hand-written config line.
+    expect(await ensureAsBuiltMergeDriver(spawnCapture, world.checkout)).toBe(true)
+    const read = await spawnCapture(['git', '-C', world.checkout, 'config', '--get', 'merge.as-built-log.driver'], world.checkout)
+    const configured = read.stdout.trim()
+    expect(configured).toContain('--env-file=/dev/null')
+    expect(configured).toContain('-u GH_TOKEN')
+
+    // A probe standing in for the driver: the SAME command, interpreter and flags, recording the
+    // environment it was actually started with. Swapping only the script is what makes the two runs
+    // below differ by exactly the controls under test.
+    const canary = join(world.root, 'driver-env.json')
+    const probe = join(world.root, 'probe.ts')
+    writeFileSync(
+      probe,
+      `import { writeFileSync } from 'node:fs'\n` +
+        `writeFileSync(${JSON.stringify(canary)}, JSON.stringify({\n` +
+        `  GH_TOKEN: process.env.GH_TOKEN ?? null,\n` +
+        `  INJECTED_BY_CHECKOUT: process.env.INJECTED_BY_CHECKOUT ?? null,\n` +
+        `}))\n`,
+    )
+    const asProbe = configured.replace(/'[^']*as-built-merge-driver\.ts'/, `'${probe}'`)
+    expect(asProbe).not.toBe(configured)
+
+    const head = (await spawnCapture(['git', '-C', world.checkout, 'rev-parse', 'HEAD'], world.checkout)).stdout.trim()
+    /** Merge the racing branch, which makes git run the configured driver on the log. */
+    const mergeWithDriver = async (command: string): Promise<void> => {
+      await spawnCapture(['git', '-C', world.checkout, 'config', 'merge.as-built-log.driver', command], world.checkout)
+      await spawnCapture(
+        ['git', '-C', world.checkout, ...GIT_ID, 'merge', '--no-edit', world.branch],
+        world.checkout,
+        { GH_TOKEN: 'sentinel-credential-value' },
+      )
+      await spawnCapture(['git', '-C', world.checkout, 'reset', '-q', '--hard', head], world.checkout)
+    }
+
+    // CONTROL FIRST — the same command with the two controls removed and nothing else changed. A
+    // test asserting "the token is absent" proves nothing until the token has been shown present.
+    const unprotected = asProbe.replace(/^\S*env(?: -u \S+)+ /, '').replace(' --env-file=/dev/null', '')
+    expect(unprotected).not.toContain('-u GH_TOKEN')
+    await mergeWithDriver(unprotected)
+    const leaked = JSON.parse(readFileSync(canary, 'utf8')) as Record<string, string | null>
+    expect(leaked.GH_TOKEN).toBe('sentinel-credential-value')
+    expect(leaked.INJECTED_BY_CHECKOUT).toBe('yes')
+    rmSync(canary)
+
+    // …and now the command the publisher actually writes.
+    await mergeWithDriver(asProbe)
+    const scoped = JSON.parse(readFileSync(canary, 'utf8')) as Record<string, string | null>
+    expect(scoped.GH_TOKEN).toBeNull()
+    expect(scoped.INJECTED_BY_CHECKOUT).toBeNull()
+
+    // …and the real driver, with those controls in place, still merges — the isolation was not
+    // bought by breaking the thing it protects.
+    await spawnCapture(['git', '-C', world.checkout, 'config', 'merge.as-built-log.driver', configured], world.checkout)
+    const real = await spawnCapture(
+      ['git', '-C', world.checkout, ...GIT_ID, 'merge', '--no-edit', world.branch],
+      world.checkout,
+      { GH_TOKEN: 'sentinel-credential-value' },
+    )
+    expect(real.ok).toBe(true)
+    const log = readFileSync(join(world.checkout, 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(log).not.toContain('<<<<<<<')
+    expect(log).toContain('## 2026-08-16 — the build that published first')
+    expect(log).toContain('## 2026-08-16 — the build that published second')
+  }, 60_000)
+
   test('a failed driver-config write never reaches the fatal half — there is nothing to roll back', async () => {
     // `merge.<name>.name` set with no `.driver` is the one state git refuses outright —
     // `fatal: custom merge driver as-built-log lacks command line`, exit 128, measured on git

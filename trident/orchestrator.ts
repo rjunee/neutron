@@ -516,6 +516,17 @@ const AS_BUILT_LOG_PATH = 'docs/AS_BUILT.md'
 const AS_BUILT_DRIVER_NAME = 'as-built-log'
 
 /**
+ * The environment variables the merge driver is run WITHOUT.
+ *
+ * `GH_TOKEN` is the owner's credential, the one that publishes every PR; the `GIT_CONFIG_*` triple
+ * is the credential helper that reads it back out (`github/credential.ts` `githubProcessEnv`), so
+ * leaving those behind would hand a child `git` the same access under a different name.
+ * `GITHUB_TOKEN` is not set by this codebase and is unset anyway because CI and developer shells
+ * commonly do set it. A merge driver reads three files and writes one — none of this belongs in it.
+ */
+const CREDENTIAL_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']
+
+/**
  * THIS INSTALLATION's copy of the merge driver — never the checkout's.
  *
  * Walks up from this module rather than joining a fixed `..`, because trident is a workspace
@@ -563,14 +574,40 @@ function shellQuote(value: string): string {
  * `$HOME/.bunfig.toml` was not measured and nothing here depends on it — `$HOME` on the publisher
  * host is as trusted as the interpreter itself.)
  *
+ * …AND `--env-file=/dev/null`, BECAUSE `--config` DOES NOT COVER `.env`. bun auto-loads a `.env`
+ * from its cwd, which under a merge driver is the checked-out repository, and it does so
+ * INDEPENDENTLY of `bunfig.toml` — measured on bun 1.3.9: with `--config=/dev/null` alone, a `.env`
+ * sitting in the cwd still reached `process.env` inside the driver; with `--env-file=/dev/null` in
+ * front of it, it did not. No escalation from that injection was demonstrated (the inherited `PATH`
+ * wins over one supplied this way), so this is closing an input rather than a proven exploit — but
+ * the property this code is FOR is that nothing the checkout ships decides anything inside the
+ * driver process, and an environment it writes is such a thing.
+ *
+ * AND THE CREDENTIAL IS TAKEN OUT OF SCOPE ENTIRELY. `env -u GH_TOKEN …` prefixes the command, so
+ * the owner's token — and the `GIT_CONFIG_*` triple whose credential helper reads it
+ * (`github/credential.ts` `githubProcessEnv`) — is simply not in the environment of a process whose
+ * whole job is to read three files and write one. The isolation above is about what the checkout
+ * can INJECT; this is about what is there to steal if some future injection succeeds anyway. Two
+ * independent controls, because "nothing can get in" is a claim that has already been wrong twice
+ * on this code path.
+ *
  * `null` when the interpreter is not bun. The driver is a `.ts` module, so nothing else can run it
  * anyway, and rather than infer that some other interpreter would honour a `--config` flag with the
  * same meaning, this refuses to install — which leaves the checkout merging the log exactly as it
  * does today.
+ *
+ * KNOWN LIMIT, AND IT FAILS IN THE SAFE DIRECTION. Both `/dev/null` flags and `/usr/bin/env` are
+ * POSIX paths; a host without them would fail the merge (exit non-zero → git reports a conflict)
+ * rather than merge wrongly. Trident runs on macOS and Linux, where all three exist.
  */
 function asBuiltDriverCommand(driver: string): string | null {
   if (basename(process.execPath).replace(/\.exe$/i, '') !== 'bun') return null
-  return `${shellQuote(process.execPath)} --config=/dev/null ${shellQuote(driver)} %O %A %B %L %P`
+  // An absolute `env`, not a bare one, so the lookup does not depend on a PATH at all. POSIX puts
+  // it at `/usr/bin/env` and both hosts trident runs on have it there; the bare name is a fallback
+  // rather than a guess, and a host with neither fails the merge loudly instead of quietly.
+  const env = existsSync('/usr/bin/env') ? '/usr/bin/env' : 'env'
+  const scrubbed = CREDENTIAL_ENV.map((name) => `-u ${name}`).join(' ')
+  return `${env} ${scrubbed} ${shellQuote(process.execPath)} --config=/dev/null --env-file=/dev/null ${shellQuote(driver)} %O %A %B %L %P`
 }
 
 /**
@@ -597,11 +634,13 @@ function asBuiltDriverCommand(driver: string): string | null {
  * touching this path.
  *
  * …AND NEITHER IS THE INTERPRETER'S CONFIGURATION, WHICH IS THE THIRD WAY IN. Naming a trusted
- * script is not sufficient while the checkout still supplies the `bunfig.toml` that script starts
- * under — see `asBuiltDriverCommand`, where the `--config=/dev/null` that closes it lives, with the
- * reproduction. The property to hold onto is the one this whole docblock is about: NOTHING the
- * target checkout contains — not a script, not a config, not a `PATH` — decides what runs on the
- * publisher host.
+ * script is not sufficient while the checkout still supplies the `bunfig.toml` and the `.env` that
+ * script starts under — see `asBuiltDriverCommand`, where the `--config=/dev/null` and
+ * `--env-file=/dev/null` that close those live, with the reproductions. The property to hold onto
+ * is the one this whole docblock is about: NOTHING the target checkout contains — not a script, not
+ * a config, not an environment file, not a `PATH` — decides what runs on the publisher host. And
+ * because that property has been stated confidently and been incomplete twice already, the
+ * credential itself is now taken out of the driver's environment as a second, independent control.
  *
  * ONLY WHERE IT APPLIES. Two conditions, both read as DATA and neither executed: the checkout has
  * the log, and it carries this log's merge contract (`scripts/git/as-built-log-merge.ts`), which is
@@ -625,8 +664,19 @@ function asBuiltDriverCommand(driver: string): string | null {
  * reason.
  *
  * BEST EFFORT, NEVER FATAL. A failure to install leaves the checkout merging exactly as it does
- * today — a conflict on the log — which is the same outcome as not calling this at all. Publishing
- * must not be blocked by an optimisation to publishing.
+ * today, which is the same outcome as not calling this at all. Publishing must not be blocked by an
+ * optimisation to publishing.
+ *
+ * WHAT "EXACTLY AS IT DOES TODAY" ACTUALLY IS, IN THIS REPOSITORY, SAID PRECISELY. It is NOT a
+ * conflict: `.gitattributes` carries `docs/AS_BUILT.md merge=union`, which never conflicts and
+ * interleaves the two sides line by line — the failure this driver exists to replace. The attribute
+ * written here lives in `$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE the tracked
+ * `.gitattributes` (measured: with both present, `git check-attr merge -- <path>` reports the
+ * info/attributes value), so a successful install genuinely displaces `union`. An UNSUCCESSFUL one
+ * leaves `union` in charge — worse than a conflict, and the honest floor, which is why it is written
+ * here rather than a nicer sentence about conflict markers. The tracked line stays because deleting
+ * it would hand every fresh clone, outside contributor and CI job the conflict storm it was added to
+ * stop; displacing it where the driver IS installed is the whole mechanism.
  *
  * Returns whether the driver is installed and usable afterwards.
  */

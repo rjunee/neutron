@@ -102,7 +102,57 @@ perfectly (the driver ran, exit 0 — `.name` is only the description
 is `fatal: custom merge driver as-built-log lacks command line`, exit 128. Both
 of those are now pinned by tests, the lock-contention path included.
 
-Tests: 54 across `scripts/git/as-built-log-merge.test.ts`,
+THE REFUSAL WAS NOT REACHING GIT AS A REFUSAL. The rule above returns
+`{ ok: false }` for a one-sided deletion, and the driver handed that to
+`git merge-file` — which reads a one-sided deletion as a CLEAN HUNK, resolves it,
+exits 0 and writes no markers. Measured on a 20-entry log with one middle entry
+dropped on one side and an ordinary concurrent build on the other: exit 0, zero
+conflict markers, the entry gone. The refusal fired, said the right thing on
+stderr, and changed nothing about the outcome — the headline guarantee was true
+of the merge function and false end-to-end. A refusal now carries
+`wouldLoseEntries`, and the two kinds are handled differently: one about a
+MISSING ENTRY is terminated by the driver itself, which writes both sides whole
+between conflict markers with the reason on the marker label and exits non-zero,
+so nothing downstream can resolve it silently and no byte of either side is lost
+on the way; a TEXTUAL disagreement is still delegated, because there git's
+line-level three-way is a real answer and is the pre-driver behaviour. Both
+halves are pinned, through real `git merge` and with the control that shows git
+alone calling the same merge clean.
+
+THE FENCE CLASSIFIER DID NOT RUN AT ALL ON CRLF. Its trailing group was `(.*)`,
+and JavaScript's `.` excludes a carriage return along with a newline — so on a
+file with CRLF line endings the pattern matched NOTHING, no fence ever opened,
+every `## ` quoted inside a code block parsed as a real entry, and a concurrent
+addition merged into the block. Worse than the behaviour it replaced, on the one
+input class where it silently never ran. The group is `[^\n]*` now, and the
+CommonMark rule that an opening backtick fence's info string may not itself
+contain a backtick is enforced alongside it.
+
+TWO MORE INPUTS THE CHECKOUT CONTROLLED, AND THE CREDENTIAL TAKEN OUT OF SCOPE.
+`--config=/dev/null` covers `bunfig.toml` and NOT `.env`: bun auto-loads one from
+its cwd — the merged repository — independently of the config file, measured
+reaching `process.env` inside the driver with the flag already in place.
+`--env-file=/dev/null` closes it. Separately, the configured command is now
+prefixed with `env -u GH_TOKEN -u GITHUB_TOKEN` and the `GIT_CONFIG_*` triple
+that reads the token back, so the credential is not in the environment of a
+process that reads three files and writes one. Two independent controls, and the
+test proves each fails alone: with the interpreter unconfigured but the token
+scrubbed, the injected payload still runs and finds nothing.
+
+Also in this round: an ADDED undated section now sorts at the date of the entry
+it continues instead of at `''`, which had put it below every real date — i.e. at
+the very tail of the file, hundreds of entries from the text it continues — and
+one added under an entry the base already had is emitted directly after that
+entry. The driver checks `%P` and declines paths that are not this log. And two
+docs claims were corrected rather than defended: the floor when the driver is NOT
+installed is `.gitattributes merge=union` (which interleaves silently), not a
+conflict — the driver's own attribute in `$GIT_COMMON_DIR/info/attributes` takes
+precedence over the tracked file, which is what displaces it, verified with
+`git check-attr`; and the installer prevents the FATAL half-state (attribute
+without driver), while the INERT one (driver without attribute) is reachable and
+harmless, so "both halves or neither" was one word too strong.
+
+Tests: 66 across `scripts/git/as-built-log-merge.test.ts`,
 `scripts/git/as-built-merge-realgit.test.ts` and
 `trident/as-built-publish-wiring-realgit.test.ts`, up from 29 on the base
 commit — measured by running the three files on each side, not counted by hand

@@ -222,6 +222,92 @@ describe('two concurrent builds publishing against a moved base', () => {
 })
 
 /**
+ * THE REFUSAL HAS TO SURVIVE THE TRIP THROUGH GIT, WHICH IS A DIFFERENT CLAIM FROM "IT REFUSES".
+ *
+ * The merge function returning `{ ok: false }` is worth nothing on its own: what git DOES with a
+ * refusal is decided by the driver, and delegating one to `git merge-file` throws it away. A
+ * one-sided deletion is a clean hunk to a line-based merge — git resolves it, exits 0, writes no
+ * markers — so a refusal that names a missing entry and then delegates deletes the entry anyway,
+ * loudly on stderr and silently in the file. Measured with the real installer through a real
+ * `git merge` below, both halves in the same test.
+ */
+describe('an entry that exists on one side and not the other stops the merge, through real git', () => {
+  /** A log deep enough that the deletion and the addition are separate hunks — the ordinary shape. */
+  const DEEP = Array.from({ length: 20 }, (_, i) => {
+    const n = 20 - i
+    return entry(`2026-07-${String(n).padStart(2, '0')}`, `entry ${n}`, `body of entry ${n}`)
+  })
+
+  function truncationScenario(): string {
+    const repo = mkdtempSync(join(tmpdir(), 'as-built-truncation-'))
+    created.push(repo)
+    git(repo, 'init', '-q', '-b', 'main')
+    git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+    git(repo, 'config', 'user.name', 'Trident Test')
+    git(repo, 'config', 'commit.gpgsign', 'false')
+    mkdirSync(join(repo, 'docs'), { recursive: true })
+    mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+    for (const rel of [
+      ['scripts', 'install-merge-drivers.sh'],
+      ['scripts', 'git', 'as-built-merge-driver.ts'],
+      ['scripts', 'git', 'as-built-log-merge.ts'],
+    ]) {
+      cpSync(join(REPO_ROOT, ...rel), join(repo, ...rel))
+    }
+
+    writeLog(repo, DEEP.flat())
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-qm', 'base')
+
+    // `other` is an ordinary concurrent build: it prepends its entry and touches nothing else.
+    git(repo, 'checkout', '-q', '-b', 'other')
+    writeLog(repo, [...entry('2026-08-16', 'an ordinary concurrent build', 'Written by the other build.'), ...DEEP.flat()])
+    git(repo, 'commit', '-qam', 'other')
+
+    // `main` arrives having lost one entry from the middle — a bad apply, a partial checkout, a
+    // hand-edit. Every one of those presents exactly like a deliberate deletion.
+    git(repo, 'checkout', '-q', 'main')
+    writeLog(repo, DEEP.filter((_, i) => i !== 10).flat())
+    git(repo, 'commit', '-qam', 'a side that arrived one entry short')
+    return repo
+  }
+
+  test('CONTROL — git alone calls it clean and the entry leaves without a word', () => {
+    // Not a hypothetical fallback: this is what the driver used to hand the case to.
+    const repo = truncationScenario()
+    const merged = run(repo, ['git', 'merge', '--no-edit', 'other'])
+    expect(merged.ok).toBe(true)
+    const log = readFileSync(join(repo, 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(log).not.toContain('<<<<<<<')
+    expect(log).not.toContain('body of entry 10')
+  }, 30_000)
+
+  test('with the driver installed the merge STOPS, and both sides are still readable in the file', () => {
+    const repo = truncationScenario()
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    const merged = run(repo, ['git', 'merge', '--no-edit', 'other'])
+    expect(merged.ok).toBe(false)
+    expect(merged.stderr + merged.stdout).not.toContain('fatal')
+
+    // git is left holding a real conflict — the path is unmerged, so nothing commits by accident.
+    const unmerged = run(repo, ['git', 'diff', '--name-only', '--diff-filter=U'])
+    expect(unmerged.stdout.trim()).toBe('docs/AS_BUILT.md')
+
+    const log = readFileSync(join(repo, 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(log).toContain('<<<<<<< ours')
+    expect(log).toContain('>>>>>>> theirs')
+    // NOTHING WAS LOST ON THE WAY TO THE CONFLICT. Every entry from both sides is present, including
+    // the one this merge would have deleted, and the new entry the other build wrote.
+    expect(log).toContain('body of entry 10')
+    expect(log).toContain('Written by the other build.')
+    for (const [, , body] of DEEP) expect(log).toContain(body as string)
+    // …and the marker line says why, so the file explains itself without the stderr.
+    expect(log).toContain('append-only')
+  }, 30_000)
+})
+
+/**
  * THE CHECKOUT SUPPLIES THE FILES BEING MERGED. IT MUST NOT ALSO SUPPLY THE INTERPRETER'S CONFIG.
  *
  * git runs a merge driver with its cwd at the top of the working tree being merged, and bun reads
@@ -281,14 +367,26 @@ describe('a checkout cannot inject code into the driver through bunfig.toml', ()
     const installed = run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()
     expect(installed).toContain('--config=/dev/null')
 
-    // CONTROL FIRST — prove the attack is real and this scenario reaches it. The ONLY change is
-    // removing the flag from the configured command; a test asserting "no canary" is worthless
-    // without the half that shows a canary is producible at all.
-    git(repo, 'config', 'merge.as-built-log.driver', installed.replace(' --config=/dev/null', ''))
+    // CONTROL FIRST — prove the attack is real and this scenario reaches it. Both controls are
+    // removed and nothing else changes; a test asserting "no canary" is worthless without the half
+    // that shows a canary is producible at all.
+    const undefended = installed.replace(' --config=/dev/null', '').replace(/^\S*env(?: -u \S+)+ /, '')
+    expect(undefended).not.toContain('-u GH_TOKEN')
+    git(repo, 'config', 'merge.as-built-log.driver', undefended)
     const unprotected = replayWithToken(repo, forkPoint, 'exfil-control')
     expect(unprotected.ok).toBe(true) // the merge still worked — the payload is silent, which is the point
     expect(existsSync(canary)).toBe(true)
     expect(readFileSync(canary, 'utf8')).toBe('sentinel-credential-value')
+    rmSync(canary)
+
+    // THE SECOND CONTROL IS THE POINT OF HAVING TWO: with the interpreter still unconfigured but
+    // the credential scrubbed, the payload STILL RUNS — and finds nothing. Each control fails
+    // independently of the other, which is why both are installed rather than whichever one was
+    // discovered first.
+    git(repo, 'config', 'merge.as-built-log.driver', installed.replace(' --config=/dev/null', ''))
+    expect(replayWithToken(repo, forkPoint, 'exfil-scrubbed').ok).toBe(true)
+    expect(existsSync(canary)).toBe(true)
+    expect(readFileSync(canary, 'utf8')).toBe('undefined')
     rmSync(canary)
 
     // …and now the command the installer actually writes.

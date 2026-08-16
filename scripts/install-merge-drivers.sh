@@ -10,8 +10,20 @@
 # both the config and the attributes file live in the COMMON git dir, so installing once serves
 # every worktree, which is what the publisher's throwaway rebase worktree depends on).
 #
-# WHAT IT INSTALLS, AND WHY BOTH HALVES GO IN TOGETHER
-# ---------------------------------------------------
+# WHAT IT INSTALLS, AND WHICH HALF-STATE IS IMPOSSIBLE — WHICH IS NOT THE SAME AS "NEITHER"
+# -----------------------------------------------------------------------------------------
+# Stated exactly, because "both halves or neither" is the sentence a reader will trust and it is
+# one word too strong. There are two half-states and they are NOT symmetric:
+#
+#   • ATTRIBUTE WITHOUT DRIVER is FATAL (git exits 128 on any merge of the path) and is IMPOSSIBLE
+#     here: the attribute is written only after the driver config landed, and is removed again by
+#     the verification at the end if the driver is not readable back.
+#   • DRIVER WITHOUT ATTRIBUTE is INERT — the config names a command nothing points at, so the path
+#     merges exactly as it did before — and it IS reachable: if `mkdir -p` or the append to the
+#     attributes file fails, the script exits 3 loudly and leaves the config behind. That is the
+#     deliberate choice, not an oversight, and re-running is enough to finish the job.
+#
+# So the guarantee is "never the fatal half, always loudly", not "never a half".
 #   1. `merge.as-built-log.driver` in the repo config — the command git runs.
 #   2. `docs/AS_BUILT.md merge=as-built-log` in `$GIT_COMMON_DIR/info/attributes` — the binding
 #      from the path to that command.
@@ -24,10 +36,10 @@
 # — for `git merge` and for the `git apply --3way` the publisher uses. Committing the attribute
 # would therefore break every fresh clone, every outside contributor and CI on any merge touching
 # this file, until each of them ran this script. Keeping it untracked means the attribute and its
-# driver arrive together or not at all; a clone that never runs this behaves exactly as it does
+# driver never arrive attribute-first; a clone that never runs this behaves exactly as it does
 # today. Same rule `install-git-hooks.sh` applies to the leak gate and its denylist.
 #
-# "TOGETHER OR NOT AT ALL" IS ENFORCED, NOT MERELY INTENDED. This script has no `errexit` (and
+# "NEVER THE FATAL HALF" IS ENFORCED, NOT MERELY INTENDED. This script has no `errexit` (and
 # cannot safely acquire one — `git config --unset` exits 5 on an already-absent key and `grep -v`
 # exits 1 on an empty result, both of which are normal here). So every step below that can leave
 # the fatal half behind is checked BY HAND, and the ordering is load-bearing:
@@ -139,7 +151,17 @@ fail_unwritable() {
 # on every merge of this path, inheriting whatever credentials the invoking shell holds. Reproduced
 # on bun 1.3.9; `--config=/dev/null` is an empty TOML file, and the driver needs no config of its
 # own (it reads three files and writes one).
-DRIVER_COMMAND="$BUN --config=/dev/null $DRIVER_SCRIPT %O %A %B %L %P"
+#
+# `--env-file=/dev/null` COVERS WHAT `--config` DOES NOT. bun auto-loads a `.env` from that same
+# cwd — the merged repository — independently of `bunfig.toml`. Measured on bun 1.3.9: with only
+# `--config=/dev/null`, a `.env` in the cwd still reached `process.env`; with this flag it did not.
+#
+# …AND THE TOKEN IS NOT IN THE PROCESS AT ALL. `env -u` drops the owner's `GH_TOKEN` and the
+# `GIT_CONFIG_*` credential-helper triple that reads it, so there is nothing for a future injection
+# to find. Two independent controls: one over what can get in, one over what is there to take.
+ENV_BIN="env"
+[ -x /usr/bin/env ] && ENV_BIN=/usr/bin/env
+DRIVER_COMMAND="$ENV_BIN -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 '$BUN' --config=/dev/null --env-file=/dev/null '$DRIVER_SCRIPT' %O %A %B %L %P"
 
 # THE LOAD-BEARING HALF FIRST — see the header. A lone `.driver` works; a lone `.name` is fatal.
 if ! git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$DRIVER_COMMAND"; then

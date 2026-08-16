@@ -26,12 +26,18 @@
  *
  * WHAT IT REFUSES. If both sides modify the SAME existing entry differently, or the preamble
  * diverges, or A BASE ENTRY IS ABSENT FROM ONE SIDE WHILE THE OTHER STILL HAS IT, that is a
- * genuine semantic conflict and this returns `{ ok: false }`. The caller then falls back to
- * `git merge-file`, so the floor of this whole mechanism is exactly today's behaviour — conflict
- * markers a human reads — never a silent mis-merge. A driver that guessed here would be worse than
- * the conflict it replaced. Every ambiguous case is biased toward refusing: this file rewrites the
- * project's permanent history, so a conflict costs a human five minutes and a plausible-looking
- * result costs entries nobody notices are gone.
+ * genuine semantic conflict and this returns `{ ok: false }`. A driver that guessed here would be
+ * worse than the conflict it replaced. Every ambiguous case is biased toward refusing: this file
+ * rewrites the project's permanent history, so a conflict costs a human five minutes and a
+ * plausible-looking result costs entries nobody notices are gone.
+ *
+ * A REFUSAL SAYS WHETHER GIT MAY BE ASKED TO FINISH IT, BECAUSE FOR HALF OF THEM IT MAY NOT.
+ * `wouldLoseEntries` (see `MergeRefusal`) separates the two kinds. A textual disagreement — two
+ * rewrites of one entry, a diverged header, a file that is not this log — goes to `git merge-file`,
+ * so that floor is exactly today's behaviour. A refusal ABOUT A MISSING ENTRY cannot: to a
+ * line-based merge a one-sided deletion is a clean hunk, so git resolves it, exits 0 and the
+ * entries leave anyway — measured, 3 of 21 headings surviving with no markers written. Those
+ * refusals are terminated by the driver itself.
  *
  * DELETION REQUIRES AGREEMENT — THE ONLY REMOVAL THIS ACCEPTS IS ONE BOTH SIDES MADE. That rule
  * replaces a weaker one that only refused when a side kept NONE of the base's entries, and the
@@ -80,8 +86,16 @@ const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/
  * against, only inside. Three spaces is also CommonMark's limit for a CLOSING fence, which the same
  * bound gives for free. Nothing is lost in the other direction: `HEADING` only matches at column 0,
  * so a `## ` that is itself indented into a code block was never read as a heading anyway.
+ *
+ * THE TRAILER IS `[^\n]*`, NOT `.`, BECAUSE `.` DOES NOT MATCH A CARRIAGE RETURN. Lines are split on
+ * `\n`, so a CRLF file hands every line a trailing `\r` — and in JavaScript `.` excludes `\r` along
+ * with `\n`. With `(.*)$` the regex therefore matched NOTHING on a CRLF file: measured,
+ * ``FENCE.exec('```\r')`` returned `null`, so no fence ever opened, every `## ` quoted inside a code
+ * block parsed as a real entry, and a concurrent addition was merged INTO the block — the exact
+ * corruption the fence tracker exists to prevent, on the one input class where the tracker silently
+ * did not run at all. Worse than the pre-driver behaviour, which handled that file correctly.
  */
-const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+const FENCE = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/
 
 export interface LogEntry {
   /**
@@ -93,6 +107,16 @@ export interface LogEntry {
   key: string
   /** `YYYY-MM-DD` from the heading, or `''` for the undated subsections. */
   date: string
+  /**
+   * The date this entry sorts AT within the file it was parsed from: its own date, or — for an
+   * undated subsection — the date of the entry it continues.
+   *
+   * An ADDED undated section used to sort at `''`, which is below every real date, so it was
+   * appended at the very END of the file, hundreds of entries away from the entry it continues.
+   * The date is carried here, at parse time, because that is the only place the section's own
+   * neighbourhood is still known — by merge time the sides have been indexed into maps.
+   */
+  sortDate: string
   /** Heading line + body, verbatim, as lines. */
   lines: string[]
 }
@@ -118,28 +142,42 @@ export function parseLog(text: string): ParsedLog {
   let current: LogEntry | null = null
   /** The delimiter that OPENED the block we are inside, or `null` outside any block. */
   let fence: { char: string; length: number } | null = null
+  /** The date the most recent DATED heading carried — what an undated section sorts at. */
+  let carriedDate = ''
 
   for (const line of lines) {
     const delimiter = FENCE.exec(line)
+    // Whether this line is a fence delimiter rather than content. It is tracked separately from the
+    // regex match because a run of backticks whose info string CONTAINS a backtick is not a fence
+    // at all (CommonMark 4.5: an opening backtick fence's info string may not contain a backtick,
+    // which is what keeps `` `foo` `` in a paragraph from opening a block).
+    let isDelimiter = false
     if (delimiter !== null) {
       const run = delimiter[1] as string
       const trailer = delimiter[2] as string
       if (fence === null) {
-        fence = { char: run[0] as string, length: run.length }
-      } else if (run[0] === fence.char && run.length >= fence.length && trailer.trim() === '') {
-        fence = null
+        if (run[0] !== '`' || !trailer.includes('`')) {
+          fence = { char: run[0] as string, length: run.length }
+          isDelimiter = true
+        }
+      } else {
+        isDelimiter = true
+        if (run[0] === fence.char && run.length >= fence.length && trailer.trim() === '') fence = null
       }
     }
     // A line that is itself a fence delimiter is never a heading, whichever side of the block it
     // sits on, so it is excluded here rather than depending on the order the state was updated in.
-    if (fence === null && delimiter === null && HEADING.test(line)) {
+    if (fence === null && !isDelimiter && HEADING.test(line)) {
       if (current !== null) entries.push(current)
       const heading = line.trimEnd()
       const occurrence = (seen.get(heading) ?? 0) + 1
       seen.set(heading, occurrence)
+      const date = DATE_IN_HEADING.exec(line)?.[1] ?? ''
+      if (date !== '') carriedDate = date
       current = {
         key: `${heading} ${occurrence}`,
-        date: DATE_IN_HEADING.exec(line)?.[1] ?? '',
+        date,
+        sortDate: carriedDate,
         lines: [line],
       }
     } else if (current !== null) {
@@ -186,7 +224,60 @@ function effectiveDates(entries: LogEntry[]): string[] {
   return dates
 }
 
-export type MergeResult = { ok: true; text: string } | { ok: false; reason: string }
+/**
+ * A refusal, and — the part the driver acts on — WHETHER GIT MAY BE TRUSTED TO FINISH IT.
+ *
+ * `wouldLoseEntries` marks the refusals whose whole content is "an entry that exists on one side is
+ * absent from the other". Handing one of those to `git merge-file` DEFEATS IT: a one-sided deletion
+ * is a clean hunk to a line-based merge, so git resolves it, exits 0, writes no markers, and the
+ * entries leave anyway. Measured on a 20-entry log with `ours` truncated newest-first to two
+ * entries: `git merge-file` exit 0, zero conflict markers, 3 of 21 headings surviving. So these
+ * refusals are terminated by the driver itself, and only the rest — where the disagreement is
+ * textual and git's own three-way is exactly the pre-driver behaviour — are delegated.
+ */
+export type MergeRefusal = { ok: false; reason: string; wouldLoseEntries: boolean }
+export type MergeResult = { ok: true; text: string } | MergeRefusal
+
+/**
+ * A run of added entries that moves together: a head, plus any undated sections that continue it.
+ *
+ * `attachAfter` is set only for a run whose HEAD is undated — a section added as a continuation of
+ * an entry that was already in the base. It names that entry, so the section is emitted directly
+ * after it instead of being date-sorted away from it.
+ */
+interface Addition {
+  entries: LogEntry[]
+  sortDate: string
+  attachAfter: string | null
+}
+
+/**
+ * Group one side's additions into runs, in the order that side wrote them.
+ *
+ * Two properties come out of walking the side in order rather than filtering it: entries a single
+ * build added stay in the order it added them, and an undated section stays with whatever it was
+ * written under — its own run's head if that is also new, otherwise the base entry it continues.
+ */
+function additionsFrom(side: ParsedLog, isAddition: (entry: LogEntry) => boolean): Addition[] {
+  const runs: Addition[] = []
+  let run: Addition | null = null
+  let previousKey: string | null = null
+  for (const entry of side.entries) {
+    if (!isAddition(entry)) {
+      run = null
+      previousKey = entry.key
+      continue
+    }
+    if (run !== null && entry.date === '') {
+      run.entries.push(entry)
+    } else {
+      run = { entries: [entry], sortDate: entry.sortDate, attachAfter: entry.date === '' ? previousKey : null }
+      runs.push(run)
+    }
+    previousKey = entry.key
+  }
+  return runs
+}
 
 /**
  * Three-way merge of the log. `base` is the common ancestor, `ours` the side being merged into,
@@ -204,7 +295,9 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
   // A file with no entries is not this log — a rename, a truncation, something unexpected. Let
   // git's own merge handle it rather than inventing structure that is not there.
   if (A.entries.length === 0 && B.entries.length === 0) {
-    return { ok: false, reason: 'neither side parses as an entry log' }
+    // Not a history-loss refusal: with no entries on either side there is no entry to lose, and
+    // git's textual three-way is precisely what this path did before the driver existed.
+    return { ok: false, reason: 'neither side parses as an entry log', wouldLoseEntries: false }
   }
 
   // A WHOLESALE TRUNCATION GETS ITS OWN SENTENCE. The per-entry rule further down already refuses
@@ -221,6 +314,7 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
       return {
         ok: false,
         reason: `the ${side} side keeps none of the ${O.entries.length} entries the base had — refusing to merge what looks like a truncated log`,
+        wouldLoseEntries: true,
       }
     }
   }
@@ -231,7 +325,7 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
   let preamble: string[]
   if (preambleA === preambleB || preambleB === preambleO) preamble = A.preamble
   else if (preambleA === preambleO) preamble = B.preamble
-  else return { ok: false, reason: 'both sides changed the log header differently' }
+  else return { ok: false, reason: 'both sides changed the log header differently', wouldLoseEntries: false }
 
   // (1) Entries the base already had, in the base's order, with each side's edits applied.
   const retained: LogEntry[] = []
@@ -256,49 +350,77 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
       return {
         ok: false,
         reason: `the ${side} side is missing an entry the other still has, and an append-only log does not lose entries by accident: ${original.key}`,
+        // THE REFUSAL GIT MUST NOT BE ASKED TO FINISH. A one-sided deletion is a clean hunk to a
+        // line-based merge — delegating this is how the entries left anyway. See `MergeRefusal`.
+        wouldLoseEntries: true,
       }
     }
     if (body(ours_) === body(theirs_)) retained.push(ours_)
     else if (body(ours_) === body(original)) retained.push(theirs_)
     else if (body(theirs_) === body(original)) retained.push(ours_)
-    else return { ok: false, reason: `both sides edited the same entry differently: ${original.key}` }
+    else {
+      // Both sides rewrote one entry. Nothing is being DELETED here, so git's line-level three-way
+      // is a real answer: it merges disjoint edits inside the entry and conflicts on overlapping
+      // ones, which is exactly what this file's merges did before the driver existed.
+      return { ok: false, reason: `both sides edited the same entry differently: ${original.key}`, wouldLoseEntries: false }
+    }
   }
 
   // (2) Additions — an entry present on a side and absent from the base. THIS is the union that
   //     makes two concurrent builds land together.
-  const added: LogEntry[] = []
-  for (const entry of A.entries) if (!inO.has(entry.key)) added.push(entry)
   for (const entry of B.entries) {
     if (inO.has(entry.key)) continue
     const alsoOurs = inA.get(entry.key)
-    if (alsoOurs !== undefined) {
-      // Both sides added an entry with the same heading. Identical bytes → one copy. Different
-      // bytes → two different entries that collide on identity; refuse rather than pick.
-      if (body(alsoOurs) !== body(entry)) {
-        return { ok: false, reason: `both sides added a different entry under the same heading: ${entry.key}` }
+    // Both sides added an entry with the same heading. Identical bytes → one copy (taken from ours
+    // below). Different bytes → two different entries that collide on identity; refuse rather than
+    // pick. Nothing is deleted either way, so git's own three-way is a fair fallback.
+    if (alsoOurs !== undefined && body(alsoOurs) !== body(entry)) {
+      return {
+        ok: false,
+        reason: `both sides added a different entry under the same heading: ${entry.key}`,
+        wouldLoseEntries: false,
       }
-      continue
     }
-    added.push(entry)
+  }
+  const added = [
+    ...additionsFrom(A, (entry) => !inO.has(entry.key)),
+    ...additionsFrom(B, (entry) => !inO.has(entry.key) && !inA.has(entry.key)),
+  ]
+
+  // (3) Place the additions among the retained entries, newest-first. A same-day addition sorts
+  //     ABOVE a same-day retained entry, which is where a build prepending by hand would put it —
+  //     except for an undated section added as a CONTINUATION of a retained entry, which is emitted
+  //     directly after the entry it continues, because that is the only place it means anything.
+  const dates = effectiveDates(retained)
+  const retainedKeys = new Set(retained.map((entry) => entry.key))
+  const continuations = new Map<string, LogEntry[]>()
+  const free: Addition[] = []
+  for (const addition of added) {
+    if (addition.attachAfter !== null && retainedKeys.has(addition.attachAfter)) {
+      const list = continuations.get(addition.attachAfter) ?? []
+      list.push(...addition.entries)
+      continuations.set(addition.attachAfter, list)
+    } else free.push(addition)
   }
 
   // Newest first, then by heading — a plain string compare, NOT `localeCompare`, so the result
   // cannot depend on the locale of whichever machine ran the merge.
-  added.sort((x, y) => {
-    if (x.date !== y.date) return x.date < y.date ? 1 : -1
-    return x.key < y.key ? -1 : x.key > y.key ? 1 : 0
+  free.sort((x, y) => {
+    if (x.sortDate !== y.sortDate) return x.sortDate < y.sortDate ? 1 : -1
+    const xKey = x.entries[0]!.key
+    const yKey = y.entries[0]!.key
+    return xKey < yKey ? -1 : xKey > yKey ? 1 : 0
   })
 
-  // (3) Place the additions among the retained entries, newest-first. A same-day addition sorts
-  //     ABOVE a same-day retained entry, which is where a build prepending by hand would put it.
-  const dates = effectiveDates(retained)
   const merged: LogEntry[] = []
   let next = 0
   for (let i = 0; i < retained.length; i++) {
-    while (next < added.length && added[next]!.date >= dates[i]!) merged.push(added[next++]!)
+    while (next < free.length && free[next]!.sortDate >= dates[i]!) merged.push(...free[next++]!.entries)
     merged.push(retained[i]!)
+    const continuation = continuations.get(retained[i]!.key)
+    if (continuation !== undefined) merged.push(...continuation)
   }
-  while (next < added.length) merged.push(added[next++]!)
+  while (next < free.length) merged.push(...free[next++]!.entries)
 
   return { ok: true, text: serializeLog({ preamble, entries: merged }) }
 }

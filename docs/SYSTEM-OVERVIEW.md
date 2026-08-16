@@ -6487,14 +6487,35 @@ The fix is a git merge driver that works on **whole entries**:
   additions land INSIDE somebody's code block. Fence indentation is bounded at
   CommonMark's three spaces — `^\s*` accepted any, so a four-space-indented
   ` ``` ` (which CommonMark reads as ordinary indented-code text) opened a block
-  that swallowed every heading after it.
+  that swallowed every heading after it. The delimiter's trailing group is
+  `[^\n]*` and **not** `.`, because JavaScript's `.` excludes a carriage return:
+  with `(.*)` the pattern matched **nothing at all** on a CRLF file, so no fence
+  ever opened there and the tracker silently did not run on the one input class
+  where its absence corrupts the file.
   interleaving inside one entry is what produced broken TypeScript in an earlier
   incident.
-- `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls.
-  Anything it will not merge (both sides editing one entry, a diverged header, a
-  file that does not parse as a log, an unexpected throw) is handed to
-  `git merge-file`, so the floor of the mechanism is exactly today's behaviour:
-  conflict markers a human reads, never a plausible file nobody diffed.
+- A refusal also records **whether git may be asked to finish it**
+  (`wouldLoseEntries`). This is the difference between refusing and refusing
+  *effectively*: to a line-based merge a one-sided deletion is a clean hunk, so
+  `git merge-file` resolves it, exits 0 and writes no markers — measured, 3 of 21
+  headings surviving. So a refusal about a MISSING ENTRY is terminated by the
+  driver itself (both sides written whole between conflict markers, non-zero
+  exit, the reason on the marker label), while a textual disagreement — two
+  rewrites of one entry, a diverged header, a file that is not this log — is
+  still delegated, because there git's own three-way is a real answer and is
+  exactly the pre-driver behaviour.
+- An **added undated section** sorts at the date of the entry it continues, not
+  at `''`. Sorting at `''` put it below every real date, i.e. at the very tail of
+  the file, hundreds of entries away from the entry whose text it continues; one
+  added under an entry the base already had is emitted directly after that entry.
+- `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls. A
+  TEXTUAL disagreement it will not merge (both sides editing one entry, a
+  diverged header, a file that does not parse as a log) is handed to
+  `git merge-file`, so that floor is exactly today's behaviour: conflict markers
+  a human reads. A refusal about a MISSING ENTRY, and an unexpected throw, are
+  conflicted here instead — see `wouldLoseEntries` above. It also checks `%P`, so
+  a checkout that points `merge=as-built-log` at other paths through its own
+  `.gitattributes` gets git's merge for them rather than this log's semantics.
 - `scripts/install-merge-drivers.sh` — installs the driver config AND the
   binding. **The binding lives in `.git/info/attributes`, not in a tracked
   `.gitattributes`**, because git treats an attribute naming an unconfigured
@@ -6502,8 +6523,24 @@ The fix is a git merge driver that works on **whole entries**:
   for `git merge` and for the `git apply --3way` the publisher uses. A committed
   attribute would break every fresh clone, outside contributor and CI until each
   ran an install step they had no reason to know about. Untracked, the attribute
-  and its driver arrive together or neither does — the same rule
-  `install-git-hooks.sh` applies to the leak gate and its denylist.
+  is never present without the driver it names — the same rule
+  `install-git-hooks.sh` applies to the leak gate and its denylist. Stated
+  exactly, because the two half-states are not symmetric: **attribute without
+  driver is fatal and is impossible** (written last, and removed again if the
+  driver cannot be read back), while **driver without attribute is inert and IS
+  reachable** (a failed `mkdir`/append exits 3 loudly and leaves the config).
+  The guarantee is "never the fatal half, always loudly" — not "never a half".
+
+**What "the repo merges exactly as it does today" means here, precisely.** It is
+**not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,
+which never conflicts and interleaves the two sides line by line. The driver's
+attribute lives in `$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE
+the tracked `.gitattributes` (measured with `git check-attr merge -- <path>` with
+both present), so a successful install genuinely displaces `union`; an
+unsuccessful one leaves `union` in charge, which is worse than a conflict and is
+the honest floor. The tracked line stays, because removing it would hand every
+fresh clone, outside contributor and CI job the conflict storm it was added to
+stop.
 
 `rebaseOntoObservedBase` (`trident/orchestrator.ts`) binds the driver before it
 replays a branch, so build lanes get this without anyone remembering.
@@ -6525,10 +6562,25 @@ with `--config=/dev/null` it printed nothing and the driver still ran. What was
 measured is the **cwd** `bunfig.toml`, which is the one an untrusted checkout
 controls; nothing here depends on the flag's effect on `$HOME`. The
 property to hold is that **nothing the target checkout contains — not a script,
-not a config, not a `PATH` — decides what runs on the publisher host.** Both
-halves of that are pinned with a control that produces the credential before the
-treatment suppresses it (`scripts/git/as-built-merge-realgit.test.ts`,
+not a config, not an environment file, not a `PATH` — decides what runs on the
+publisher host.** Both halves of that are pinned with a control that produces the
+credential before the treatment suppresses it
+(`scripts/git/as-built-merge-realgit.test.ts`,
 `trident/as-built-publish-wiring-realgit.test.ts`).
+
+**`--config` does not cover `.env`, and the credential does not belong there at
+all.** bun auto-loads a `.env` from that same cwd — the merged repository —
+independently of `bunfig.toml`; measured on bun 1.3.9, with `--config=/dev/null`
+alone a checkout's `.env` still reached `process.env` inside the driver, and with
+`--env-file=/dev/null` it did not. Separately, the command is prefixed with
+`env -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u
+GIT_CONFIG_VALUE_0`, so the owner's credential and the helper that reads it back
+are simply not in the environment of a process that reads three files and writes
+one. Two independent controls — one over what can get **in**, one over what is
+there to **take** — because "nothing can get in" has already been stated
+confidently and been incomplete twice on this code path. The wiring test proves
+each fails on its own: with the interpreter unconfigured but the credential
+scrubbed, the injected payload still runs and finds nothing.
 
 That matters because the publisher's `run_host` carries the owner's `GH_TOKEN`
 (`open/composer.ts` composes it via `makeLazyCredentialedHostRunner` over

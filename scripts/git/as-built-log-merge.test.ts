@@ -5,6 +5,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -150,6 +151,58 @@ describe('parse/serialize', () => {
     expect(res.text).toContain('```md\nintro\n~~~\n## 2000-01-01 — sample only\nstill sample\n```')
   })
 
+  test('a fence is tracked on CRLF lines too — `.` does not match a carriage return', () => {
+    // THE DEFECT THIS PINS. Lines are split on `\n`, so every line of a CRLF file carries a trailing
+    // `\r`, and JavaScript's `.` excludes `\r`. The classifier's trailer group was `(.*)`, so the
+    // regex matched NOTHING on a CRLF file and no fence ever opened — the tracker did not run at
+    // all, silently, on the one input class where its absence corrupts the file.
+    //
+    // CONTROL, so the mutation is visibly landed rather than asserted: the OLD pattern, run here on
+    // the exact line that reaches it.
+    expect(/^ {0,3}(`{3,}|~{3,})(.*)$/.exec('```\r')).toBeNull()
+    expect(/^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec('```\r')).not.toBeNull()
+
+    const text = log('## 2026-08-16 — quotes markdown\n\n```md\n## 2000-01-01 — not a real entry\n```\n\ntail\n\n')
+    const crlf = text.replaceAll('\n', '\r\n')
+    const parsed = parseLog(crlf)
+    expect(parsed.entries.length).toBe(1)
+    expect(serializeLog(parsed)).toBe(crlf)
+  })
+
+  test('the CRLF fence bug END TO END — an addition never lands inside a CRLF entry\'s code block', () => {
+    // The same shape as the LF end-to-end case above, on the line endings that made the classifier
+    // blind. Under the old pattern the sample heading inside the fence parsed as a 2000-01-01 entry
+    // and the addition sorted into the gap — i.e. into the code block.
+    const quoting = '## 2026-08-16 — quotes markdown\n\n```md\nintro\n## 2000-01-01 — sample only\nstill sample\n```\n\ntail\n\n'
+    const mid = '## 2020-06-02 — a build from between the two dates\n\nmid body\n\n'
+    const base = log(quoting).replaceAll('\n', '\r\n')
+    const res = mergeAsBuiltLog(base, log(quoting, mid).replaceAll('\n', '\r\n'), base)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    const lines = res.text.split('\n')
+    const fenceOpen = lines.indexOf('```md\r')
+    const fenceClose = lines.lastIndexOf('```\r')
+    expect(fenceOpen).toBeGreaterThan(-1)
+    expect(fenceClose).toBeGreaterThan(fenceOpen)
+    const at = lines.indexOf('## 2020-06-02 — a build from between the two dates\r')
+    expect(at).toBeGreaterThan(-1)
+    expect(at > fenceOpen && at < fenceClose).toBe(false)
+    expect(res.text).toContain('```md\r\nintro\r\n## 2000-01-01 — sample only\r\nstill sample\r\n```')
+  })
+
+  test('a backtick run whose info string contains a backtick opens nothing (CommonMark 4.5)', () => {
+    // ```` ```a`b ```` is a paragraph, not a fence. Reading it as one opens a block that never
+    // closes, and every entry after it is swallowed into the entry that quoted it.
+    const text = log(
+      '## 2026-08-16 — mentions ```a`b in prose\n\n```a`b\n\n',
+      '## 2026-08-15 — must stay reachable\n\nbody\n\n',
+    )
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(2)
+    expect(parsed.entries[1]!.lines[0]).toBe('## 2026-08-15 — must stay reachable')
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
   test('repeated headings stay distinct entries', () => {
     // The real log genuinely repeats four headings verbatim; folding them would delete history.
     const dup = '## 2026-08-09 — Model usage on the phone\n\nfirst\n\n'
@@ -227,6 +280,32 @@ describe('merge', () => {
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.text).toBe(log(NEW_ONE, OLD_A, sub, OLD_B))
+  })
+
+  test('an ADDED undated section stays under the entry it continues, not at the end of the file', () => {
+    // THE DEFECT THIS PINS: an undated heading has no date, sorted at `''` — below every real
+    // date — so a newly-added continuation was appended at the very TAIL of the log, hundreds of
+    // entries away from the entry whose text it continues. In the real file that is a section
+    // orphaned in 2024 under a 2026 entry, with nothing marking it as displaced.
+    const sub = '## the continuation of build one\n\nsub body\n\n'
+    const base = log(OLD_A, OLD_B)
+    const res = mergeAsBuiltLog(base, log(NEW_ONE, sub, OLD_A, OLD_B), log(NEW_TWO, OLD_A, OLD_B))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    // Directly under its own entry, and above the entries it is newer than — never at the tail.
+    expect(res.text).toBe(log(NEW_ONE, sub, NEW_TWO, OLD_A, OLD_B))
+  })
+
+  test('…and one added under an entry the base ALREADY had lands under that entry, not above it', () => {
+    // Here the section continues a RETAINED entry, so date order alone would place it ABOVE the
+    // thing it continues (same effective date, and additions sort above same-date retained
+    // entries). It is emitted directly after the entry it followed on its own side instead.
+    const sub = '## a note appended under the older thing\n\nnote body\n\n'
+    const base = log(OLD_A, OLD_B)
+    const res = mergeAsBuiltLog(base, log(OLD_A, sub, OLD_B), log(NEW_TWO, OLD_A, OLD_B))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toBe(log(NEW_TWO, OLD_A, sub, OLD_B))
   })
 
   test('ordering does not depend on locale — same-date additions break ties by heading bytes', () => {
@@ -326,11 +405,15 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     expect(res.text).toContain('body of oldest thing')
   })
 
-  test('THE REAL LOG — a truncation keeping ONE of its 308 entries is refused, not merged minus 307', () => {
+  test('THE REAL LOG — a truncation keeping ONE entry is refused, not merged minus all the others', () => {
     // The fixtures above are three-entry toys. This is the file the driver is actually pointed at,
     // in the shape the bug takes there: `ours` truncated newest-first to a single base entry,
     // `theirs` an ordinary concurrent build. Measured against the previous rule, this exact input
-    // returned `ok: true` with 307 of the 308 entries gone.
+    // returned `ok: true` with every entry but one gone.
+    //
+    // The counts are READ FROM THE FILE, never written into the name or the body: the log gains an
+    // entry on most days, so "308 entries minus 307" was a name that stopped being true on the next
+    // append while the assertion under it went on passing.
     const parsed = parseLog(readFileSync(REAL_LOG, 'utf8'))
     expect(parsed.entries.length).toBeGreaterThan(250)
 
@@ -359,6 +442,40 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     expect(res.ok).toBe(false)
     if (res.ok) return
     expect(res.reason).toContain('append-only')
+    // …and it is marked as the kind of refusal git must not be asked to finish, because a
+    // line-based merge resolves a one-sided deletion cleanly. See the driver test of the same name.
+    expect(res.wouldLoseEntries).toBe(true)
+  })
+
+  test('the two KINDS of refusal are distinguished, because only one of them may be delegated', () => {
+    // The flag is what stands between "refused" and "refused, and then resolved anyway by the
+    // fallback". A refusal about a missing entry must never be delegated; a textual disagreement
+    // must still be, or the driver buys its safety by breaking merges that were fine.
+    const base = log(OLD_A, OLD_B)
+
+    const missing = mergeAsBuiltLog(base, log(OLD_B), base)
+    const truncated = mergeAsBuiltLog(base, 'TRUNCATED\n', log(NEW_ONE, OLD_A, OLD_B))
+    for (const res of [missing, truncated]) {
+      expect(res.ok).toBe(false)
+      if (!res.ok) expect(res.wouldLoseEntries).toBe(true)
+    }
+
+    const bothEdited = mergeAsBuiltLog(
+      base,
+      log('## 2026-08-10 — older thing\n\nours version\n\n', OLD_B),
+      log('## 2026-08-10 — older thing\n\ntheirs version\n\n', OLD_B),
+    )
+    const notALog = mergeAsBuiltLog('nothing', 'no entries here', 'none here either')
+    const header = mergeAsBuiltLog(log(OLD_A), `# OURS\n\n${OLD_A}`, `# THEIRS\n\n${OLD_A}`)
+    const sameHeading = mergeAsBuiltLog(
+      log(OLD_A),
+      log('## 2026-08-16 — same title\n\nours body\n\n', OLD_A),
+      log('## 2026-08-16 — same title\n\ntheirs body\n\n', OLD_A),
+    )
+    for (const res of [bothEdited, notALog, header, sameHeading]) {
+      expect(res.ok).toBe(false)
+      if (!res.ok) expect(res.wouldLoseEntries).toBe(false)
+    }
   })
 
   test('an empty base is still merged — the guard is about LOSING history, not about having none', () => {
@@ -458,5 +575,76 @@ describe('the driver CLI — what git actually gets back', () => {
 
   test('too few arguments is refused rather than guessed at', () => {
     expect(runDriver([])).toBe(2)
+  })
+
+  test('THE BLOCKER — a refusal about a MISSING ENTRY is not handed to git, which would resolve it', () => {
+    // The gap between "the merge function refuses" and "the merge does not happen". `git
+    // merge-file` reads a one-sided deletion as a CLEAN hunk: it resolves it, exits 0 and writes no
+    // markers, so delegating this refusal deleted the entries anyway — the refusal fired, said the
+    // right thing on stderr, and changed nothing about the outcome.
+    // A log with some depth to it, because the reproduction needs the DELETION and the ADDITION to
+    // be far enough apart that git sees two independent hunks — which is the ordinary shape of this
+    // bug on a 300-entry file, and the reason a three-entry fixture cannot show it. (With the
+    // deletion adjacent to the addition git happens to conflict, which is how the delegation looked
+    // safe.)
+    const history = Array.from({ length: 20 }, (_, i) => `## 2026-07-${String(20 - i).padStart(2, '0')} — entry ${20 - i}\n\nbody of entry ${20 - i}\n\n`)
+    const base = log(...history)
+    const ours = log(...history.filter((_, i) => i !== 10)) // one entry in the middle, dropped
+    const theirs = log(NEW_ONE, ...history)
+
+    // CONTROL — the delegate this used to call, on these exact bytes. If git ever started
+    // conflicting here the guard below would be unnecessary, and this line would say so.
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-delegate-'))
+    dirs.push(dir)
+    const paths = { O: join(dir, 'base'), A: join(dir, 'ours'), B: join(dir, 'theirs') }
+    writeFileSync(paths.O, base)
+    writeFileSync(paths.A, ours)
+    writeFileSync(paths.B, theirs)
+    const delegated = spawnSync('git', ['merge-file', '--marker-size=7', paths.A, paths.O, paths.B])
+    expect(delegated.status).toBe(0) // clean, in git's opinion
+    const asGitLeftIt = readFileSync(paths.A, 'utf8')
+    expect(asGitLeftIt).not.toContain('<<<<<<<')
+    expect(asGitLeftIt).not.toContain('body of entry 10') // …and the entry is gone, silently
+
+    // THE PROPERTY — the driver terminates this itself.
+    const { code, result } = drive(base, ours, theirs)
+    expect(code).not.toBe(0)
+    expect(result).toContain('<<<<<<< ours')
+    expect(result).toContain('>>>>>>> theirs')
+    // Nothing was dropped on the way to the conflict: every entry from both sides is still readable.
+    for (const entry of history) expect(result).toContain(entry.trimEnd())
+    expect(result).toContain('body one')
+    // …and the marker line says why, so the human opening the file does not need the stderr.
+    expect(result).toContain('append-only')
+  })
+
+  test('…and a TEXTUAL disagreement is still delegated, so the fallback did not become "always conflict"', () => {
+    // The other half of the same rule. Both sides rewrote one entry in DISJOINT places; nothing is
+    // being deleted, so git's line-level three-way is a real answer and this must still reach it.
+    // Without this the change would have bought its safety by refusing merges that were fine.
+    const long = ['## 2026-08-10 — older thing', '', 'alpha', 'beta', 'gamma', '', ''].join('\n')
+    const base = log(long)
+    const ours = log(long.replace('alpha', 'ALPHA'))
+    const theirs = log(long.replace('gamma', 'GAMMA'))
+    const { code, result } = drive(base, ours, theirs)
+    expect(code).toBe(0)
+    expect(result).toContain('ALPHA')
+    expect(result).toContain('GAMMA')
+    expect(result).not.toContain('<<<<<<<')
+  })
+
+  test('a path this driver was not written for gets git\'s merge, not this log\'s semantics', () => {
+    // A checked-out repository can point `merge=as-built-log` at anything through its own tracked
+    // `.gitattributes`. That is a semantics question, not a security one — nothing from the checkout
+    // is executed either way — but a driver bound to a file it does not understand should decline.
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-otherpath-'))
+    dirs.push(dir)
+    const paths = { O: join(dir, 'base'), A: join(dir, 'ours'), B: join(dir, 'theirs') }
+    writeFileSync(paths.O, 'one\ntwo\nthree\n')
+    writeFileSync(paths.A, 'ONE\ntwo\nthree\n')
+    writeFileSync(paths.B, 'one\ntwo\nTHREE\n')
+    expect(runDriver([paths.O, paths.A, paths.B, '7', 'src/unrelated.ts'])).toBe(0)
+    // git's own three-way, not ours: both disjoint edits taken, no entry structure imposed.
+    expect(readFileSync(paths.A, 'utf8')).toBe('ONE\ntwo\nTHREE\n')
   })
 })
