@@ -6,7 +6,7 @@
  * `gateway/__tests__/cores-integrations-surface.test.ts:85` calls
  * `createCoresIntegrationsSurface` directly, `gateway/cores/__tests__/
  * integrations-tools.test.ts:94` calls `buildIntegrationsTools` directly, and
- * `open/__tests__/composition-slug-provenance.test.ts:63` stops at the
+ * `open/__tests__/composition-slug-provenance.test.ts:64` stops at the
  * composition field. The only two places that decide what the SHIPPED surfaces
  * receive are `gateway/composition/wire-cores-surfaces.ts:190` (HTTP) and `:222`
  * (the agent tool) — and hard-coding EITHER of them to `false` left every one of
@@ -30,15 +30,30 @@
  * handle, but changing two things at once would let a test pass for the wrong
  * reason.
  *
- * MUTATION TESTS (each performed and reverted; counts in the PR body). Every run
- * included the three suites named above as the control, and all three stayed
- * green throughout — which is the blind spot, stated as a measurement:
- *   - `wire-cores-surfaces.ts:190` → `slug_is_fallback: false` — ONLY "SERVED
- *     route: a fallback boot refuses to move the rows" reds (25 pass / 1 fail).
- *   - `wire-cores-surfaces.ts:222` → `slug_is_fallback: false` — ONLY
- *     "REGISTERED tool: a fallback boot refuses…" reds (25 pass / 1 fail).
- *   - `:190` → `true` — ONLY "SERVED route: a configured boot DOES move…" reds.
- *   - `:222` → `true` — ONLY "REGISTERED tool: a configured boot DOES move…" reds.
+ * MUTATION TESTS — RE-RUN AND RE-MEASURED, not carried prose. A previous review
+ * round declined to take this paragraph on trust ("prose is not mutation
+ * evidence"), correctly: a claimed mutation and a performed one read identically
+ * on the page. Each of the four below was performed, measured, and reverted, and
+ * the tree was confirmed clean afterwards (`git status --porcelain` empty).
+ *
+ * BASELINE, all four files together: 26 pass / 0 fail / 94 expect() calls.
+ *
+ * Every run carried the three constructing suites above as the CONTROL, and all
+ * three stayed green in every one — 22 pass / 0 fail. That green IS the finding:
+ * it is the measurement of the blind spot, not a passing grade.
+ *
+ *   - `wire-cores-surfaces.ts:190` → `false` — reds ONLY "SERVED route: a
+ *     fallback boot refuses to move the rows" (target 3 pass / 1 fail).
+ *   - `:190` → `true` — reds ONLY "SERVED route: a configured boot DOES move
+ *     the rows" (target 3 pass / 1 fail).
+ *   - `:222` → `false` — reds ONLY "REGISTERED tool: a fallback boot refuses to
+ *     move the rows" (target 3 pass / 1 fail).
+ *   - `:222` → `true` — reds ONLY "REGISTERED tool: a configured boot DOES move
+ *     the rows" (target 3 pass / 1 fail).
+ *
+ * Target + control together are the 25 pass / 1 fail quoted in the PR body. To
+ * reproduce: change one of those two lines to a bare constant and run this file
+ * plus the three named above.
  */
 
 import { afterEach, expect, test } from 'bun:test'

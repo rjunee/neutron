@@ -104,16 +104,36 @@ describe('the boot resolver and the CLI resolver agree', () => {
     expect(resolveOwnerSlug(env)).toBe('from-env')
   })
 
+  /**
+   * ⚠️ THE NEXT TWO PIN `NEUTRON_HOME` TO THE EMPTY TEMP DIR, AND MUST.
+   *
+   * They are the only assertions in this file with an ABSOLUTE expected value
+   * rather than a `resolveOwnerSlug(env) === bootSlug(env)` comparison — and the
+   * comparisons are self-hermetic precisely because both sides read the same
+   * box. An absolute one is not. With neither `NEUTRON_HOME` nor `OWNER_HOME`
+   * set, the home is `join(homedir(), 'neutron')` (`migrations/db-path.ts:41`)
+   * and the FILE beats the env (`gateway/index.ts:218` — `.url_slug` >
+   * `NEUTRON_INSTANCE_SLUG` > `'dev'`), so on any machine that has
+   * `~/neutron/.url_slug` these two read that operator's real instance name and
+   * go red for a reason that has nothing to do with the code under test.
+   *
+   * They passed on the machine they were written on because that file did not
+   * happen to exist there. That is a green with a dependency on the developer's
+   * home directory, which is the kind of green that later reads as a real
+   * failure. The default-home axis itself is still covered — by the relative
+   * assertions below, which vary nothing and so cannot be fooled by it.
+   */
   it('resolves a blank value to the fallback, not to the blank itself', () => {
     // The specific regression: `neutron doctor` reporting project_slug "   " and
     // recent_events [] while the instance was running perfectly well as `dev`.
-    const env = { NEUTRON_INSTANCE_SLUG: '   ' } as NodeJS.ProcessEnv
+    // `home` is freshly made and empty, so there is no `.url_slug` to outrank it.
+    const env = { NEUTRON_HOME: home, NEUTRON_INSTANCE_SLUG: '   ' } as NodeJS.ProcessEnv
     expect(resolveOwnerSlug(env)).toBe('dev')
     expect(bootSlug(env)).toBe('dev')
   })
 
   it('still honours a real slug, so the guard has not simply been disabled', () => {
-    const env = { NEUTRON_INSTANCE_SLUG: 'live-owner' } as NodeJS.ProcessEnv
+    const env = { NEUTRON_HOME: home, NEUTRON_INSTANCE_SLUG: 'live-owner' } as NodeJS.ProcessEnv
     expect(resolveOwnerSlug(env)).toBe('live-owner')
     expect(bootSlug(env)).toBe('live-owner')
   })
