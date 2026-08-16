@@ -101,6 +101,15 @@ export type SystemEventName =
   //         what a reader of the generic sentence was being steered toward.
   //     Either way the row exists so a scope miss is distinguishable from
   //     "never connected", which is the expensive half of the defect.
+  //     BOTH the automatic reconciler and the EXPLICIT owner-driven migration
+  //     (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`) emit the
+  //     refusal row, with the same `reason`, so one query over this event finds
+  //     every refusal regardless of which surface asked. The explicit one adds
+  //     `surface: 'explicit_migrate'` to tell them apart — the same shape as
+  //     `credential_scope_migrated`, where the explicit path already carries a
+  //     `skipped` key the boot payload does not have. The explicit refusal used
+  //     to journal NOTHING, because that path's emit was gated on
+  //     `total_moved > 0` and a refusal moves nothing.
   // Payload is COUNTS + HANDLES + TABLE NAMES only — never a secret kind/label,
   // never ciphertext, never plaintext.
   | 'credential_scope_migrated'
