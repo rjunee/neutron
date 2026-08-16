@@ -7,8 +7,8 @@
  * lines, and git's three-way merge sees two different insertions against identical context. A
  * stubbed merge would prove nothing about that — the whole question is what REAL git does. So this
  * file uses a real repository, real commits, a real moved base, and the publisher's own replay
- * mechanism (`git apply --3way`, `trident/orchestrator.ts:715`), the way
- * `trident/publish-rebase-realgit.test.ts` does.
+ * mechanism (the `git apply --3way` in `rebaseOntoObservedBase`, `trident/orchestrator.ts`), the
+ * way `trident/publish-rebase-realgit.test.ts` does.
  *
  * THE FAILURE IS PROVEN BEFORE THE FIX IS. `replay()` is run twice over the identical scenario:
  * once with the merge driver NOT installed, which MUST conflict, and once with it installed, which
@@ -653,9 +653,13 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // left exactly as the installer left it, so the command is the ONLY thing under test.
       //
       // Spelled with the RESOLVED bun and driver paths, because that is what the predecessor
-      // actually wrote (`origin/main` scripts/install-merge-drivers.sh:145 — `"$BUN $DRIVER_SCRIPT
-      // %O %A %B %L %P"`, both already absolute). A literal `bun` here would be a command no
-      // release of this script has ever installed.
+      // actually wrote (commit 63a342b2, scripts/install-merge-drivers.sh:145 — `"$BUN
+      // $DRIVER_SCRIPT %O %A %B %L %P"`, both already absolute). A literal `bun` here would be a
+      // command no release of this script has ever installed.
+      //
+      // PINNED TO A SHA RATHER THAN TO `origin/main`, which is what this said first. A branch name
+      // plus a line number is a citation whose target moves on its own: the same words became false
+      // the moment the fix merged, and `origin/main`'s line 145 now reads `DRIVER_RELPATH=...`.
       const { bun, driver } = words(hardened)
       const predecessor = `${bun} ${driver} %O %A %B %L %P`
       expect(predecessor).not.toBe(hardened)
@@ -1200,6 +1204,59 @@ describe('the installer under a locked config — the FATAL half-state must be i
       expect(credentialEnv, 'CREDENTIAL_ENV is no longer a literal array').not.toBeNull()
       const names = [...credentialEnv![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
       expect(scrubbed).toEqual(names)
+    }, 30_000)
+
+    /**
+     * THE CITATIONS IN THIS CLUSTER POINT AT SYMBOLS, NOT AT LINE NUMBERS THAT MOVE.
+     *
+     * Every one of them was correct when it was typed and three of the four had rotted by the time
+     * anyone read them again, because nothing pointed at them and so nothing failed. Measured at
+     * caf6928e: `install-merge-drivers.sh` twice sent the reader to line 633 of
+     * `trident/orchestrator.ts` for `asBuiltDriverCommand`, which is at 677 — the intervening 44
+     * lines are a docblock that grew under it. This file's own header sent them to line 715 for the
+     * publisher's `git apply --3way`, which is in `rebaseOntoObservedBase` and runs at 1122; 715 is
+     * prose about `--env-file=/dev/null`. A citation that lands on unrelated prose is worse than no
+     * citation, because it reads as though it were checked.
+     *
+     * RENUMBERING THEM WOULD BUY ONE COMMIT. This file already applies the durable form of the rule
+     * one level up — "the two are pinned in agreement by a test rather than by this comment, because
+     * a comment asserting they match is the thing that goes stale first" — and a line number into a
+     * living file is exactly that comment in its most fragile spelling. So the citations name a
+     * symbol, and this test resolves each one: a rename or a deletion fails here, and reflowing the
+     * file above them cannot.
+     *
+     * A LINE NUMBER IS STILL ALLOWED WHERE IT CANNOT MOVE — against an immutable commit. The
+     * predecessor-command citation below is of that kind and is kept, now pinned to a sha; it named
+     * a branch first, which is a moving target wearing a fixed target's clothes.
+     */
+    test('cross-file citations name a symbol that resolves, or pin an immutable commit', () => {
+      const cluster = ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts', 'scripts/git/as-built-merge-driver.ts']
+
+      // A citation that names a file and then a line number is only durable when the same line also
+      // names the commit it is relative to. Anything else points into a file that edits above it
+      // will silently renumber. (Spelling the offending form out literally here would trip this
+      // very check — which is the check working, so the description stays in words.)
+      const offenders: string[] = []
+      for (const rel of cluster) {
+        const text = readFileSync(join(REPO_ROOT, rel), 'utf8')
+        text.split('\n').forEach((line, i) => {
+          if (!/[\w./-]+\.(?:ts|sh):\d+/.test(line)) return
+          if (/\b[0-9a-f]{8,40}\b/.test(line)) return // pinned to a sha — cannot move
+          offenders.push(`${rel}:${i + 1} — ${line.trim()}`)
+        })
+      }
+      expect(offenders, `citations into a living file must name a symbol, not a line:\n${offenders.join('\n')}`).toEqual([])
+
+      // …and the symbols those citations now name have to be findable in the file they name.
+      const anchors: Array<[string, string]> = [
+        ['trident/orchestrator.ts', 'function asBuiltDriverCommand'],
+        ['trident/orchestrator.ts', 'export async function rebaseOntoObservedBase'],
+        ['trident/orchestrator.ts', "basename(process.execPath).replace(/\\.exe$/i, '')"],
+      ]
+      for (const [rel, symbol] of anchors) {
+        const text = readFileSync(join(REPO_ROOT, rel), 'utf8')
+        expect(text.includes(symbol), `${rel} no longer contains the cited \`${symbol}\``).toBe(true)
+      }
     }, 30_000)
   })
 })
