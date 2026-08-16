@@ -2,6 +2,66 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — two builds can append to this file at once
+
+This log is newest-first, so every build prepends its entry at the same offset
+under the same three header lines directly above. Two builds publishing at once
+therefore write different bytes against identical context — a conflict by
+construction, not by bad luck. Measured: three concurrent builds all failed at
+publish on this file and nothing else on 2026-08-15T23:20Z.
+
+The sibling offender is already closed. `IMPLEMENTATION_PLAN.md` was a
+whole-file scratch plan each build REPLACED with its own, so any two builds
+conflicted on 100% of it; nine of nine stalled branches conflicted there, and
+three of them conflicted on that file and nothing else — their code merged
+clean, and they sat unmergeable for two days over a scratch file. #302 gave each
+build `.trident/plans/<branch>.md` and the shared file is gone from the tree.
+
+Splitting this log the same way was tried and REVERSED by owner lock (#304:
+"AS BUILT is canonical … everything needs to be put into AS BUILT"). #304's own
+body names what was left: "an entry-aware merge driver for this path — which
+keeps one file *and* removes the conflict". That is what this is.
+
+`scripts/git/as-built-log-merge.ts` merges WHOLE ENTRIES. An entry present on
+one side and absent from the base is an addition, and additions from both sides
+are unioned; retained entries keep their existing order, additions are placed
+newest-first among them. Entry-aware and never line-aware on purpose — a `union`
+driver interleaves, and interleaving inside one entry is what produced broken
+TypeScript in an earlier incident. What it will not merge — both sides editing
+one entry, a diverged header, a file that does not parse as a log — goes to
+`git merge-file`, so the floor is exactly today's behaviour: markers a human
+reads, never a plausible file nobody diffed.
+
+THE ATTRIBUTE IS UNTRACKED, AND THAT IS THE DESIGN. `.gitattributes` naming a
+driver git has no config for is FATAL, not a fallback: `fatal: custom merge
+driver … lacks command line`, exit 128, for `git merge` AND for the
+`git apply --3way` the publisher uses (both measured). Committing it would break
+every fresh clone, outside contributor and CI run until each one executed an
+install step it had no reason to know about. So
+`scripts/install-merge-drivers.sh` writes the config and the
+`.git/info/attributes` line in one step: they arrive together or neither does,
+and a clone that never runs it behaves exactly as it does today. Same rule
+`install-git-hooks.sh` already applies to the leak gate and its denylist. Both
+live in the COMMON git dir, so one install serves every linked worktree —
+including the publisher's throwaway rebase worktree, verified.
+
+`rebaseOntoObservedBase` runs the installer before replaying a branch, gated on
+the checkout actually shipping it, so the other repositories trident builds are
+untouched.
+
+Proven against real git rather than asserted. `git apply --3way` DOES consult a
+custom merge driver — checked with a sentinel driver before any of this was
+written, because the publisher does not use `git merge` and the whole design
+rests on it. `scripts/git/as-built-merge-realgit.test.ts` replays two branches
+onto a moved base and asserts the CONFLICT without the driver before asserting
+the clean merge with it, then uninstalls to bring the conflict back.
+`trident/as-built-publish-wiring-realgit.test.ts` drives the real publish step
+and installs nothing itself; deleting the production call was mutation-tested
+and turns it red with the production error. The parser round-trips this
+17,000-line file byte-for-byte — 300+ entries, four verbatim-duplicated headings
+and ten undated sections included — because a merge driver that cannot reproduce
+its own input is a corruption engine.
+
 ## 2026-08-15 — the gateway had no idea whether he was looking, and the two ways to fake it both end in silence
 
 Landed via PR #305. The owner: *"can you also check if I'm actively using the web app, and if so dont
