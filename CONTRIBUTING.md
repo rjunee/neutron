@@ -140,7 +140,10 @@ a driver nobody has configured, and — measured on git 2.50.1 — a clone with 
 would quietly go back to conflicting for everyone who had not run the installer.
 (A half-install, `merge.<name>.name` with no `.driver`, is the case that really
 is `fatal: … lacks command line`, exit 128.) The attribute and its driver arrive
-together or neither does.
+together or neither does: the installer checks every write, writes `.driver`
+before `.name` — measured on git 2.50.1, `.driver` alone merges fine while
+`.name` alone is the exit-128 abort — and rolls the pair back and exits non-zero
+rather than reporting success over a partial install.
 
 Trident's publisher runs this itself before replaying a branch, so builds get it
 without anyone remembering.

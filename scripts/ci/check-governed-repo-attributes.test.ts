@@ -18,13 +18,30 @@
  */
 import { afterAll, describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const GATE = fileURLToPath(new URL('./check-governed-repo-attributes.ts', import.meta.url))
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
+
+/**
+ * Everything a fixture commit needs from the machine it runs on, pinned.
+ *
+ * `commit.gpgsign=false` is the load-bearing one: a maintainer with
+ * `commit.gpgSign = true` set globally has every fixture below reach for a
+ * signing key, which fails on a machine without one and BLOCKS on a pinentry
+ * prompt on a machine with one — in a suite that is supposed to be unattended.
+ */
+const COMMIT_IDENTITY_PIN = [
+  '-c',
+  'user.email=a@b',
+  '-c',
+  'user.name=a',
+  '-c',
+  'commit.gpgsign=false',
+] as const
 
 const created: string[] = []
 afterAll(() => {
@@ -73,7 +90,7 @@ function initRepoWithOverlay(dir: string, overlay: string): void {
   execFileSync('git', ['-C', dir, 'add', '-A'], { stdio: 'pipe' })
   execFileSync(
     'git',
-    ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'seed'],
+    ['-C', dir, ...COMMIT_IDENTITY_PIN, 'commit', '-qm', 'seed'],
     { stdio: 'pipe' },
   )
   mkdirSync(join(dir, '.git', 'info'), { recursive: true })
@@ -93,7 +110,7 @@ function runGate(root: string, env?: NodeJS.ProcessEnv): { status: number; out: 
 function initRepo(dir: string): void {
   execFileSync('git', ['init', '-q', dir], { stdio: 'pipe' })
   execFileSync('git', ['-C', dir, 'add', '-A'], { stdio: 'pipe' })
-  execFileSync('git', ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'seed'], {
+  execFileSync('git', ['-C', dir, ...COMMIT_IDENTITY_PIN, 'commit', '-qm', 'seed'], {
     stdio: 'pipe',
   })
 }
@@ -347,6 +364,100 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     expect(out).toContain('not a governed repo')
   })
 
+  test('a `binary` MACRO is not reported as a `-merge` rule the reader never wrote', () => {
+    // Measured on git 2.50.1: the built-in `binary` macro expands to
+    // `-diff -merge -text`, so check-attr answers `merge: unset` from a line
+    // with no `merge` token in it. Telling that reader "your '<path> -merge'
+    // rule" sends them grepping for a string their repo does not contain.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md binary\n' })
+    initRepo(dir)
+
+    // Control: git really does report `unset` for the macro.
+    expect(
+      execFileSync('git', ['-C', dir, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'], {
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('docs/AS_BUILT.md: merge: unset')
+
+    const { status, out } = runGate(dir)
+    expect(status).toBe(1)
+    expect(out).toContain('merge=unset')
+    // Both spellings named, so whichever one is in the file, the reader finds it.
+    expect(out).toContain("'binary' MACRO")
+    expect(out).toContain('-diff -merge -text')
+  })
+
+  test('a WILDCARD beating duplicate exact rules is not reported as "the LAST wins"', () => {
+    // Both exact rules lose to `docs/*.md`. Printing them under "the LAST wins"
+    // points at line 2, the reader edits line 2, the wildcard still wins, and
+    // the gate stays red for a reason its own output denied.
+    const dir = fixture({
+      attributes: 'docs/AS_BUILT.md merge=union\ndocs/AS_BUILT.md merge=union\ndocs/*.md merge=binary\n',
+    })
+    const { status, out } = runGate(dir)
+    expect(status).toBe(1)
+    expect(out).toContain('merge=binary')
+    expect(out).toContain('NONE of them is what')
+    expect(out).toContain('broader pattern overrides them all')
+    expect(out).not.toContain('the LAST wins')
+  })
+
+  test('a governed repo whose SPEC.md is COMMITTED but not checked out is still gated', () => {
+    // A sparse checkout has the spec in the tree and not on disk. Deciding
+    // governedness from disk alone turned the whole gate off there — exit 0,
+    // "not a governed repo", over a floor nothing had looked at.
+    const dir = fixture({ attributes: '# the union line was deleted\n' })
+    initRepo(dir)
+    rmSync(join(dir, 'SPEC.md'), { force: true })
+
+    // Control: the spec is gone from disk and present in the tree.
+    expect(existsSync(join(dir, 'SPEC.md'))).toBe(false)
+    expect(
+      execFileSync('git', ['-C', dir, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'SPEC.md'], {
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('SPEC.md')
+
+    const { status, out } = runGate(dir)
+    expect(status).toBe(1)
+    expect(out).not.toContain('not a governed repo')
+  })
+
+  test('an overlay with merge.<name>.name but no .driver is called HALF-INSTALLED', () => {
+    // The overlay binds `merge=as-built-log` and `.name` is set with `.driver`
+    // absent. Measured on git 2.50.1, that is `fatal: custom merge driver
+    // as-built-log lacks command line.` — exit 128, no merge at all. Crediting
+    // it to install-merge-drivers.sh describes the one state that merges nothing
+    // as the sanctioned upgrade.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+    initRepoWithOverlay(dir, 'docs/AS_BUILT.md merge=as-built-log\n')
+    execFileSync('git', ['-C', dir, 'config', 'merge.as-built-log.name', 'entry-aware'], { stdio: 'pipe' })
+
+    const { status, out } = runGate(dir)
+    expect(status).toBe(0) // the FLOOR is intact; this is informational
+    expect(out).toContain('HALF-INSTALLED')
+    expect(out).toContain('(exit 128)')
+    expect(out).not.toContain('install-merge-drivers.sh installs')
+  })
+
+  test('an overlay with NO merge.<name>.* config is not reported as the exit-128 abort', () => {
+    // The near-miss in this very change: reading only `.driver` cannot tell
+    // "half-installed" from "not installed at all", and they are different git
+    // outcomes. Measured on git 2.50.1: with NEITHER key set git falls back to
+    // the ordinary text merge — exit 1, CONFLICT (content) — which is not fatal.
+    // Printing "exit 128" here would be exactly the kind of confident wrong
+    // sentence about git this gate exists to stop producing.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+    initRepoWithOverlay(dir, 'docs/AS_BUILT.md merge=as-built-log\n')
+
+    const { status, out } = runGate(dir)
+    expect(status).toBe(0)
+    expect(out).toContain('NO merge.as-built-log.* config at all')
+    expect(out).toContain('ordinary text merge')
+    expect(out).not.toContain('lacks command line')
+    expect(out).not.toContain('install-merge-drivers.sh installs')
+  })
+
   test('PASSES a governed repo with no build log to protect', () => {
     const dir = fixture({ logs: [], attributes: '# nothing here\n' })
     const { status, out } = runGate(dir)
@@ -395,14 +506,19 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     expect(out).toContain('unspecified')
   })
 
-  test('an intact floor PLUS a local upgrade passes, and names the overlay it came from', () => {
+  test('an intact floor PLUS a FULLY installed local upgrade passes, and names the overlay', () => {
     const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
     initRepoWithOverlay(dir, 'docs/AS_BUILT.md merge=as-built-log\n')
+    // The driver config is half of the install, and the credit below is only
+    // true when it is present — the other half is its own test.
+    execFileSync('git', ['-C', dir, 'config', 'merge.as-built-log.driver', 'true %A'], { stdio: 'pipe' })
     const { status, out } = runGate(dir)
     expect(status).toBe(0)
     expect(out).toContain('✅')
     expect(out).toContain('informational, not gated')
     expect(out).toContain('as-built-log')
+    expect(out).toContain('install-merge-drivers.sh installs')
+    expect(out).not.toContain('HALF-INSTALLED')
     // The note must point at the actual file it read, not at an "untracked
     // overlay" it assumed was there.
     expect(out).toContain(join('info', 'attributes'))

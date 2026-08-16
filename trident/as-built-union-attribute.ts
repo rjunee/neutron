@@ -95,6 +95,20 @@ export const BUILT_IN_MERGE_DRIVERS = ['text', 'binary', 'union'] as const
  * "'set' is a CUSTOM driver … no merge.set.* config", naming a config key that
  * does not exist.
  *
+ * ⚠️ `unset` DOES NOT MEAN THE READER WROTE `-merge`. The built-in `binary`
+ * MACRO expands to `-diff -merge -text`, so it produces the same `unset` from a
+ * line that contains no `merge` token at all. Measured on git 2.50.1, with
+ * `.gitattributes` = `docs/AS_BUILT.md binary`:
+ *
+ *     $ git check-attr -a -- docs/AS_BUILT.md
+ *     docs/AS_BUILT.md: binary: set
+ *     docs/AS_BUILT.md: diff: unset
+ *     docs/AS_BUILT.md: merge: unset
+ *     docs/AS_BUILT.md: text: unset
+ *
+ * A diagnostic that says "your `-merge` rule" over that sends the reader
+ * grepping for a string that is not in the file. It has to name both spellings.
+ *
  * (`<path> !merge` reports `unspecified`, which this module already maps to
  * `null` — no rule reaches the path.)
  */
@@ -312,6 +326,22 @@ export function presentAsBuiltLogs(
   repoRoot: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): string[] {
+  return clonedTreeContains(repoRoot, AS_BUILT_CANDIDATES, baseEnv)
+}
+
+/**
+ * Which of `candidates` a FRESH CLONE of `repoRoot` would actually contain.
+ *
+ * The same reading `presentAsBuiltLogs` needs for the log, factored out because
+ * the gate needs it for `SPEC.md` too: a spec that is committed but not checked
+ * out (sparse checkout) is still a governed repo, and answering that from disk
+ * alone turns the entire gate off with an exit 0.
+ */
+export function clonedTreeContains(
+  repoRoot: string,
+  candidates: readonly string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): string[] {
   const env = checkAttrEnv(baseEnv)
   const treeish = clonedTreeish(repoRoot, env)
   if (treeish !== null) {
@@ -320,20 +350,28 @@ export function presentAsBuiltLogs(
       // an unborn HEAD is the one case that must ask `ls-files` instead.
       const argv =
         treeish === ''
-          ? ['-C', repoRoot, 'ls-files', '-z', '--', ...AS_BUILT_CANDIDATES]
-          : ['-C', repoRoot, 'ls-tree', '-r', '-z', '--name-only', treeish, '--', ...AS_BUILT_CANDIDATES]
+          ? ['-C', repoRoot, 'ls-files', '-z', '--', ...candidates]
+          : ['-C', repoRoot, 'ls-tree', '-r', '-z', '--name-only', treeish, '--', ...candidates]
       const stdout = execFileSync('git', argv, {
         encoding: 'utf8',
         env,
         stdio: ['ignore', 'pipe', 'ignore'],
       })
       const tracked = new Set(stdout.split('\0').filter((p) => p.length > 0))
-      return AS_BUILT_CANDIDATES.filter((c) => tracked.has(c))
-    } catch {
-      return []
+      return candidates.filter((c) => tracked.has(c))
+    } catch (cause) {
+      // FAIL CLOSED. Returning `[]` here made the caller print "no append-only
+      // build log found — nothing to enforce" and exit 0, so any failure to read
+      // the tree of a governed repo read as a clean bill of health. Every other
+      // error path in this module fails closed; this one was the exception, and
+      // it was the exception on the branch where being wrong is silent.
+      throw new Error(
+        `could not read the committed tree of ${repoRoot} — refusing to report "nothing to enforce" over a repository that could not be read`,
+        { cause },
+      )
     }
   }
-  return AS_BUILT_CANDIDATES.filter((c) => existsSync(join(repoRoot, c)))
+  return candidates.filter((c) => existsSync(join(repoRoot, c)))
 }
 
 /**
@@ -392,11 +430,30 @@ function isRepositoryTopLevel(dir: string, env: NodeJS.ProcessEnv): boolean {
  * maintainer's machine can answer "yes, union" for a repo that tracks no such
  * rule — a false PASS that travels nowhere and reproduces on nobody else's
  * machine. With the pin, the same probe reports `unspecified`.
+ *
+ * `GIT_NO_REPLACE_OBJECTS` is here for the same reason one level down: a local
+ * `refs/replace/<sha>` rewrites what OBJECT READS return, so `git show
+ * HEAD:.gitattributes` can hand back a blob the commit does not contain.
+ * Measured on git 2.50.1, in a repo whose committed `.gitattributes` is
+ * `# broken, no union rule`, with that blob replaced by a healthy one:
+ *
+ *     $ git show HEAD:.gitattributes
+ *     docs/AS_BUILT.md merge=union            ← the replacement
+ *     $ GIT_NO_REPLACE_OBJECTS=1 git show HEAD:.gitattributes
+ *     # broken, no union rule                 ← the commit's real content
+ *     $ git clone … && cat clone/.gitattributes
+ *     # broken, no union rule                 ← what every clone gets
+ *
+ * `git clone` does not carry `refs/replace/*` (and neither does
+ * `actions/checkout`), so the replacement is exactly a local reading that
+ * travels nowhere — the same class as a machine-global attributes file, and the
+ * same false PASS.
  */
 export const CHECK_ATTR_ISOLATION_ENV = {
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_SYSTEM: '/dev/null',
   GIT_ATTR_NOSYSTEM: '1',
+  GIT_NO_REPLACE_OBJECTS: '1',
 } as const
 
 /**
@@ -422,6 +479,32 @@ export const CHECK_ATTR_ISOLATION_ENV = {
  * from its absence is not a defence, it is something to maintain.
  */
 export const CHECK_ATTR_ARGV_PIN = ['-c', 'core.attributesFile=/dev/null'] as const
+
+/**
+ * Pinned on the THROWAWAY PROBE only, never on the reading of this clone.
+ *
+ * `git init` probes the filesystem and writes `core.ignorecase = true` into the
+ * new repo's own config on a case-insensitive one, which every macOS `$TMPDIR`
+ * is. Attribute patterns are then matched case-insensitively, so a rule whose
+ * path is spelled in the wrong case matches anyway — in the scratch repo, and
+ * nowhere a Linux CI runner or a case-sensitive clone would agree. Measured on
+ * git 2.50.1 (Apple Git-155), scratch repo under `$TMPDIR`, `.gitattributes` =
+ * `docs/as_built.md merge=union`:
+ *
+ *     $ git config --get core.ignorecase                       → true
+ *     $ git check-attr merge -- docs/AS_BUILT.md               → merge: union
+ *     $ git -c core.ignorecase=false check-attr …              → merge: unspecified
+ *
+ * So without this the gate passes a wrong-case rule on a maintainer's Mac and
+ * fails it in CI — the floor claim is about every clone, and the strictest
+ * clone is the one that has to hold. `-c` outranks the config `init` wrote.
+ *
+ * Deliberately NOT part of {@link CHECK_ATTR_ARGV_PIN}: that pin is also applied
+ * to {@link localEffectiveMergeDrivers}, which reports what THIS clone really
+ * does, and forcing case-sensitivity there would make it describe a repository
+ * the developer is not using.
+ */
+export const PROBE_CASE_SENSITIVITY_PIN = ['-c', 'core.ignorecase=false'] as const
 
 /**
  * Variables REMOVED from every probe git process. Pinning the three above is
@@ -575,7 +658,17 @@ export function resolveTrackedMergeDrivers(input: {
     // scratch tree stays empty apart from the attributes files themselves.
     const stdout = execFileSync(
       'git',
-      [...CHECK_ATTR_ARGV_PIN, '-C', scratch, 'check-attr', '-z', 'merge', '--', ...input.paths],
+      [
+        ...CHECK_ATTR_ARGV_PIN,
+        ...PROBE_CASE_SENSITIVITY_PIN,
+        '-C',
+        scratch,
+        'check-attr',
+        '-z',
+        'merge',
+        '--',
+        ...input.paths,
+      ],
       { env, encoding: 'utf8' },
     )
     return parseCheckAttrZ(stdout)
@@ -621,6 +714,47 @@ export function localEffectiveMergeDrivers(
   } catch {
     return null
   }
+}
+
+/**
+ * What `merge.<driver>.*` config this clone actually has — BOTH keys, because
+ * which of them is missing changes what git does, and the three states have
+ * three different outcomes.
+ *
+ * MEASURED on git 2.50.1 (Apple Git-155), same repo, same two-branch
+ * conflicting merge on a path bound to `merge=as-built-log`:
+ *
+ *   - `.driver` set (with or without `.name`) → exit 0, the driver ran.
+ *   - `.name` set, `.driver` UNSET → `fatal: custom merge driver as-built-log
+ *     lacks command line.` (exit 128) — no merge at all.
+ *   - NEITHER set → an ordinary text merge: exit 1, `CONFLICT (content)`,
+ *     markers. Not fatal, just not union.
+ *
+ * A diagnostic must therefore ask for both. Reporting the exit-128 abort for the
+ * neither-set case is the same shape of false claim about git that this whole
+ * change exists to remove — and it is the one I nearly shipped here.
+ */
+export function mergeDriverConfig(
+  repoRoot: string,
+  driver: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): { driver: string | null; name: string | null } {
+  const env = checkAttrEnv(baseEnv)
+  const read = (key: string): string | null => {
+    try {
+      const out = execFileSync('git', ['-C', repoRoot, 'config', '--get', `merge.${driver}.${key}`], {
+        encoding: 'utf8',
+        env,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+      return out.length > 0 ? out : null
+    } catch {
+      // `config --get` exits 1 when the key is unset — that is the answer, not
+      // an error, and it is the half-installed case this exists to name.
+      return null
+    }
+  }
+  return { driver: read('driver'), name: read('name') }
 }
 
 /**

@@ -39,10 +39,12 @@
 
 import {
   BUILT_IN_MERGE_DRIVERS,
+  clonedTreeContains,
   collectTrackedAttributesFiles,
   INSTALLER_MERGE_DRIVER,
   localEffectiveMergeDrivers,
   MERGE_ATTRIBUTE_STATES,
+  mergeDriverConfig,
   mergeRulesAcross,
   presentAsBuiltLogs,
   resolveTrackedMergeDrivers,
@@ -52,14 +54,31 @@ import {
 
 const root = process.argv[2] ?? process.cwd()
 
-// `SPEC.md` is read from DISK on purpose, and it is the one thing here that is.
-// It decides only WHETHER to run; a governed tree that has not committed its
-// spec yet is still one, and the cost of being wrong is running a check that
-// then finds nothing to enforce. What is GATED — the log and the rule reaching
-// it — is read from the COMMITTED TREE, because that is what a fresh clone
-// gets. The index is not: it also holds staged-but-uncommitted work, and
-// reading it printed ✅ over a floor that existed only in one working copy.
-const isGoverned = await Bun.file(`${root}/SPEC.md`).exists()
+/** Is `SPEC.md` in the tree a fresh clone would get, even if not checked out? */
+function specIsCommitted(dir: string): boolean {
+  return clonedTreeContains(dir, ['SPEC.md']).length > 0
+}
+
+// Governedness is the union of DISK and the COMMITTED TREE, and it is the one
+// question here decided that way — deliberately, because both halves of it fail
+// in a direction that turns the whole gate off silently.
+//
+//   - disk alone: a repo whose SPEC.md is committed but NOT CHECKED OUT (a
+//     sparse checkout, or a cone that excludes the root) reads as ungoverned,
+//     and the gate exits 0 with "not a governed repo" over a floor it never
+//     looked at.
+//   - tree alone: a governed tree that has not committed its spec yet — the
+//     first commit of a new repo, and every fixture in this gate's own tests —
+//     reads as ungoverned too.
+//
+// Either way the failure is an exit 0 that looks like an answer. Taking the
+// union costs at worst running a check that then finds nothing to enforce.
+//
+// What is GATED — the log and the rule reaching it — is still read from the
+// COMMITTED TREE alone, because that is what a fresh clone gets. The index is
+// not: it also holds staged-but-uncommitted work, and reading it printed ✅ over
+// a floor that existed only in one working copy.
+const isGoverned = (await Bun.file(`${root}/SPEC.md`).exists()) || specIsCommitted(root)
 if (!isGoverned) {
   console.log(`governed-repo attributes: ${root} has no root SPEC.md — not a governed repo, nothing to enforce`)
   process.exit(0)
@@ -110,13 +129,34 @@ function localNote(): string[] {
     // scripts/install-merge-drivers.sh installs" — so a hand-written local
     // `merge=binary` overlay was reported as the sanctioned upgrade, which
     // sends the reader to an installer that never wrote it.
-    const fromInstaller = explained.every((p) => local.get(p) === INSTALLER_MERGE_DRIVER)
-    out.push(
-      fromInstaller
-        ? `    that is what scripts/install-merge-drivers.sh installs, and it does not change the floor)`
-        : `    that file is untracked, so it changes your merges and nobody else's, and it does`,
-    )
-    if (!fromInstaller) out.push('    not change the floor)')
+    const namesInstaller = explained.every((p) => local.get(p) === INSTALLER_MERGE_DRIVER)
+    // Naming the installer's driver is not the same as HAVING it, and the two
+    // ways of not having it do DIFFERENT things. Measured on git 2.50.1:
+    // `.name` set with `.driver` unset aborts the merge outright (`fatal: custom
+    // merge driver <name> lacks command line.`, exit 128); with NEITHER key set
+    // git just falls back to the ordinary text merge and conflicts. Crediting
+    // either to the installer describes a broken clone as a sanctioned upgrade —
+    // and reporting exit 128 for the neither-set case would be its own false
+    // claim about git.
+    const config = namesInstaller
+      ? mergeDriverConfig(root, INSTALLER_MERGE_DRIVER)
+      : { driver: null, name: null }
+    if (namesInstaller && config.driver !== null) {
+      out.push(`    that is what scripts/install-merge-drivers.sh installs, and it does not change the floor)`)
+    } else if (namesInstaller && config.name !== null) {
+      out.push(`    but merge.${INSTALLER_MERGE_DRIVER}.driver is NOT set while .name IS, so this clone is`)
+      out.push(`    HALF-INSTALLED: measured on git 2.50.1, git aborts the merge with 'lacks command`)
+      out.push(`    line' (exit 128) rather than merging at all. Re-run scripts/install-merge-drivers.sh,`)
+      out.push(`    or scripts/install-merge-drivers.sh --uninstall. The floor itself is unaffected.)`)
+    } else if (namesInstaller) {
+      out.push(`    but this clone has NO merge.${INSTALLER_MERGE_DRIVER}.* config at all, so the binding`)
+      out.push(`    does nothing: measured on git 2.50.1, git falls back to the ordinary text merge and`)
+      out.push(`    this log conflicts with markers. Run scripts/install-merge-drivers.sh, or`)
+      out.push(`    scripts/install-merge-drivers.sh --uninstall. The floor itself is unaffected.)`)
+    } else {
+      out.push(`    that file is untracked, so it changes your merges and nobody else's, and it does`)
+      out.push('    not change the floor)')
+    }
   }
   for (const p of unexplained) {
     out.push(`   (this clone resolves ${p} → ${local.get(p) ?? 'unspecified'}, which differs from the`)
@@ -161,14 +201,21 @@ for (const path of failing) {
     // `set`/`unset` are attribute STATES, not driver names. Saying "no
     // merge.set.driver config" sends the reader after a config key git has
     // never had.
-    console.error(`       '${driver}' is not a driver name — it is what git reports for a bare`)
+    console.error(`       '${driver}' is not a driver name — it is the attribute STATE git reports.`)
     if (driver === 'set') {
-      console.error(`       '<path> merge' rule. Measured on git 2.50.1: that is the ordinary text`)
-      console.error(`       merge, so this log still conflicts with markers on every concurrent append.`)
+      console.error(`       It comes from a bare '<path> merge' rule. Measured on git 2.50.1: that is`)
+      console.error(`       the ordinary text merge, so this log still conflicts with markers on every`)
+      console.error(`       concurrent append.`)
     } else {
-      console.error(`       '<path> -merge' rule. Measured on git 2.50.1: git then treats the file as`)
-      console.error(`       BINARY — 'Cannot merge binary files', ours kept whole, the other side's`)
-      console.error(`       entries dropped from the working file entirely.`)
+      // Do NOT tell the reader they wrote `-merge`. Measured on git 2.50.1, the
+      // built-in `binary` MACRO expands to `-diff -merge -text`, so it reports
+      // `merge: unset` from a line containing no `merge` token at all — and
+      // sending someone to grep for `-merge` in that repo finds nothing.
+      console.error(`       It comes from a rule that UNSETS merge — spelled '<path> -merge', or via the`)
+      console.error(`       built-in 'binary' MACRO, which expands to '-diff -merge -text'. Measured on`)
+      console.error(`       git 2.50.1: git then treats the file as BINARY — 'Cannot merge binary files',`)
+      console.error(`       ours kept whole, the other side's entries dropped from the working file`)
+      console.error(`       entirely.`)
     }
     console.error(`       Write the driver out in full:`)
     console.error(`         ${unionAttributeLine(path)}`)
@@ -192,14 +239,32 @@ for (const path of failing) {
   // Name the lines that are actually in the files. When the union line IS there
   // and something later beats it, "add this line" is unactionable advice — the
   // line is already there and the reader needs to be shown the override.
+  //
+  // "the LAST wins" is only true when the last EXACT-path rule is in fact what
+  // git resolved. A later WILDCARD outranks every exact rule collected here, and
+  // printing the list under that heading points at the wrong line: the reader
+  // edits the last exact rule, the wildcard still wins, and the gate stays red
+  // for a reason its own output denied.
   const rules = mergeRulesAcross(attributesFiles, path)
-  const only = rules.length === 1 ? rules[0] : undefined
-  if (rules.length > 1) {
-    console.error(`       ${rules.length} tracked rules assign this exact path; the LAST wins:`)
+  const last = rules.length > 0 ? rules[rules.length - 1] : undefined
+  const listRules = () => {
     for (const rule of rules) console.error(`         ${rule.file} line ${rule.line}: ${rule.text}`)
-  } else if (only !== undefined && only.driver !== driver) {
-    console.error(`       ${only.file} line ${only.line} says '${only.text}', but a later`)
-    console.error(`       or broader pattern overrides it — git's answer above is the one that counts.`)
+  }
+  if (last !== undefined && last.driver === driver) {
+    if (rules.length > 1) {
+      console.error(`       ${rules.length} tracked rules assign this exact path; the LAST wins:`)
+      listRules()
+    }
+  } else if (last !== undefined) {
+    if (rules.length === 1) {
+      console.error(`       ${last.file} line ${last.line} says '${last.text}', but a later`)
+      console.error(`       or broader pattern overrides it — git's answer above is the one that counts.`)
+    } else {
+      console.error(`       ${rules.length} tracked rules assign this exact path and NONE of them is what`)
+      console.error(`       git resolved, so a later or broader pattern overrides them all:`)
+      listRules()
+      console.error(`       git's answer above is the one that counts.`)
+    }
   }
 }
 

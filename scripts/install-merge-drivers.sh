@@ -33,11 +33,13 @@
 # this script would quietly go back to conflicting on the log — the exact regression
 # `scripts/ci/check-governed-repo-attributes.ts` now gates.
 #
-# The third case is why the two config keys go in together or not at all: half-installed IS the
-# exit-128 state, for `git merge` and for the `git apply --3way` the publisher uses. Keeping the
-# binding untracked means the attribute and its driver arrive together; a clone that never runs
-# this behaves exactly as it does today. Same rule `install-git-hooks.sh` applies to the leak gate
-# and its denylist.
+# The SECOND case is why the two config keys go in together or not at all: `.name` without
+# `.driver` IS the exit-128 state, for `git merge` and for the `git apply --3way` the publisher
+# uses. Note the asymmetry — `.driver` without `.name` merges perfectly well (measured, same rig) —
+# which is why the install below writes `.driver` FIRST and checks every step. Keeping the binding
+# untracked means the attribute and its driver arrive together; a clone that never runs this
+# behaves exactly as it does today. Same rule `install-git-hooks.sh` applies to the leak gate and
+# its denylist.
 
 set -uo pipefail
 
@@ -111,12 +113,55 @@ if [ -z "$BUN" ]; then
   exit 2
 fi
 
-git -C "$ROOT" config "merge.$DRIVER_NAME.name" "entry-aware merge for the AS_BUILT log"
-git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$BUN $DRIVER_SCRIPT %O %A %B %L %P"
+# EVERY STEP BELOW IS CHECKED, AND THE ORDER IS THE SAFE ONE.
+#
+# `set -uo pipefail` has no `-e`, so an unchecked failure here used to fall
+# through to `echo "merge drivers: installed"` and exit 0. The dangerous
+# intermediate state is the one the comment at the top of this file names as
+# fatal, and it was reachable in exactly one step: `.name` written, `.driver`
+# not. MEASURED on git 2.50.1 (Apple Git-155), same repo, same two-branch
+# conflicting merge on a path bound to `merge=as-built-log`:
+#
+#   .driver set, .name UNSET  → exit 0, the driver ran, both entries kept.
+#   .name set, .driver UNSET  → fatal: custom merge driver as-built-log lacks
+#                               command line.   (exit 128) — no merge at all.
+#
+# So `.driver` goes in FIRST. An interruption between the two now leaves a
+# WORKING clone rather than a wedged one, and any failure rolls the pair back
+# and exits non-zero instead of printing success over a half-install.
+rollback() {
+  git -C "$ROOT" config --unset "merge.$DRIVER_NAME.driver" 2>/dev/null
+  git -C "$ROOT" config --unset "merge.$DRIVER_NAME.name" 2>/dev/null
+  remove_attr_line
+}
 
-mkdir -p "$(dirname "$ATTRS")"
+fail() {
+  echo "install-merge-drivers: FAILED — $1" >&2
+  echo "                       rolled back; this clone merges $LOG_PATH the default way." >&2
+  rollback
+  exit 1
+}
+
+if ! git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$BUN $DRIVER_SCRIPT %O %A %B %L %P"; then
+  fail "could not set merge.$DRIVER_NAME.driver"
+fi
+if ! git -C "$ROOT" config "merge.$DRIVER_NAME.name" "entry-aware merge for the AS_BUILT log"; then
+  fail "could not set merge.$DRIVER_NAME.name"
+fi
+
+mkdir -p "$(dirname "$ATTRS")" || fail "could not create $(dirname "$ATTRS")"
 remove_attr_line
-printf '%s\n' "$ATTR_LINE" >> "$ATTRS"
+printf '%s\n' "$ATTR_LINE" >> "$ATTRS" || fail "could not append '$ATTR_LINE' to $ATTRS"
+
+# Prove the pair actually landed rather than trusting that it did — this is the
+# same check `--check` runs, and it is the difference between reporting success
+# and having succeeded.
+if [ -z "$(git -C "$ROOT" config --get "merge.$DRIVER_NAME.driver" 2>/dev/null)" ]; then
+  fail "merge.$DRIVER_NAME.driver is unset after writing it"
+fi
+if ! grep -q -x -F "$ATTR_LINE" "$ATTRS" 2>/dev/null; then
+  fail "'$ATTR_LINE' is missing from $ATTRS after writing it"
+fi
 
 echo "merge drivers: installed"
 echo "       driver → $BUN $DRIVER_SCRIPT %O %A %B %L %P"

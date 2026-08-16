@@ -19,7 +19,7 @@
 
 import { afterAll, describe, expect, it } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,9 +27,11 @@ import { fileURLToPath } from 'node:url'
 import {
   AS_BUILT_CANDIDATES,
   checkAttrEnv,
+  clonedTreeContains,
   collectTrackedAttributesFiles,
   INSTALLER_MERGE_DRIVER,
   localEffectiveMergeDrivers,
+  mergeDriverConfig,
   mergeRulesAcross,
   mergeRulesFor,
   parseCheckAttrZ,
@@ -61,6 +63,29 @@ function scratchRepo(): string {
   return dir
 }
 
+/**
+ * Everything a fixture commit needs from the machine it runs on, pinned.
+ *
+ * The identity halves are obvious. `commit.gpgsign=false` is the one that bites:
+ * a maintainer with `commit.gpgSign = true` globally has every fixture commit
+ * here reach for a signing key, and it fails — or worse, blocks on a pinentry
+ * prompt in a suite that is supposed to be unattended. `log.showSignature` is
+ * pinned for the same reason on the read side: it prepends signature blocks to
+ * output some assertions read.
+ */
+const COMMIT_IDENTITY_PIN = [
+  '-c',
+  'user.email=a@b',
+  '-c',
+  'user.name=a',
+  '-c',
+  'commit.gpgsign=false',
+  '-c',
+  'tag.gpgsign=false',
+  '-c',
+  'log.showSignature=false',
+] as const
+
 /** Write `files` into `dir` and commit them, so they are in the COMMITTED TREE. */
 function commitFiles(dir: string, files: Record<string, string>): void {
   for (const [path, content] of Object.entries(files)) {
@@ -69,11 +94,7 @@ function commitFiles(dir: string, files: Record<string, string>): void {
     writeFileSync(target, content)
   }
   execFileSync('git', ['-C', dir, 'add', '-A'], { stdio: 'pipe' })
-  execFileSync(
-    'git',
-    ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'seed'],
-    { stdio: 'pipe' },
-  )
+  execFileSync('git', ['-C', dir, ...COMMIT_IDENTITY_PIN, 'commit', '-qm', 'seed'], { stdio: 'pipe' })
 }
 
 /** `git check-attr merge` in `dir`, as a plain string, for use as a CONTROL. */
@@ -160,10 +181,29 @@ describe('parseCheckAttrZ', () => {
 })
 
 describe('AS_BUILT_CANDIDATES', () => {
+  it('is EXACTLY the four log paths the two repos use', () => {
+    // Pinned as a set, not as a shape. The previous version asserted only that
+    // every entry contained the substring `BUILT`, which is true of
+    // `docs/REBUILT-NOTES.md` and of any three of the four — so both dropping a
+    // real candidate and adding a wrong one left it green, and the candidate
+    // list is what decides which files get gated at all.
+    expect([...AS_BUILT_CANDIDATES]).toEqual([
+      'AS_BUILT.md',
+      'AS-BUILT.md',
+      'docs/AS_BUILT.md',
+      'docs/AS-BUILT.md',
+    ])
+  })
+
   it('covers the append-only logs and nothing that is edited in place', () => {
+    // SPEC.md and ISSUES.md are rewritten in place, and union would silently
+    // double a rewrite instead of conflicting on it.
     expect(AS_BUILT_CANDIDATES).not.toContain('SPEC.md' as never)
     expect(AS_BUILT_CANDIDATES).not.toContain('ISSUES.md' as never)
-    for (const candidate of AS_BUILT_CANDIDATES) expect(candidate).toContain('BUILT')
+  })
+
+  it('names the log THIS repo actually keeps, so the gate is not vacuous here', () => {
+    expect(AS_BUILT_CANDIDATES).toContain(LOG)
   })
 })
 
@@ -486,6 +526,93 @@ describe('resolveTrackedMergeDrivers isolation (real git, each with an unpinned 
  * dropping `env` from the `git show` call leaves these four green and fails the
  * four subprocess ones; using the raw env instead of `checkAttrEnv` fails these.
  */
+/**
+ * `refs/replace/*` rewrites OBJECT READS, so it reaches the reads that feed the
+ * probe rather than the probe itself — and it is a purely local reading: `git
+ * clone` does not carry replace refs, and neither does `actions/checkout`.
+ */
+describe('a local git replace ref cannot forge the committed floor', () => {
+  /** A repo whose committed `.gitattributes` is broken, with a healthy blob replacing it. */
+  function replacedRepo(): { repo: string; healthy: string } {
+    const repo = scratchRepo()
+    commitFiles(repo, { '.gitattributes': '# broken, no union rule\n', [LOG]: '# log\n' })
+    const broken = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD:.gitattributes'], {
+      encoding: 'utf8',
+    }).trim()
+    const healthy = execFileSync('git', ['-C', repo, 'hash-object', '-w', '--stdin'], {
+      encoding: 'utf8',
+      input: `${LOG} merge=union\n`,
+    }).trim()
+    execFileSync('git', ['-C', repo, 'replace', broken, healthy], { stdio: 'pipe' })
+    return { repo, healthy }
+  }
+
+  it('reads the COMMIT\'s blob, not the replacement — and matches a fresh clone', () => {
+    const { repo } = replacedRepo()
+
+    // Control 1: the replacement is real. An unisolated read hands back the
+    // healthy blob for a commit that does not contain it.
+    expect(
+      execFileSync('git', ['-C', repo, 'show', 'HEAD:.gitattributes'], { encoding: 'utf8' }),
+    ).toContain('merge=union')
+
+    // Control 2: and a fresh clone — the thing the floor claim is ABOUT — does
+    // not carry refs/replace/*, so it gets the broken file.
+    const clone = scratch('union-attr-replace-clone')
+    rmSync(clone, { recursive: true, force: true })
+    execFileSync('git', ['clone', '-q', repo, clone], { stdio: 'pipe' })
+    scratchDirs.push(clone)
+    expect(readFileSync(join(clone, '.gitattributes'), 'utf8')).toBe('# broken, no union rule\n')
+
+    // The module agrees with the clone, not with this machine's replace ref.
+    expect(collectTrackedAttributesFiles(repo, [LOG])).toEqual([
+      { path: '.gitattributes', content: '# broken, no union rule\n' },
+    ])
+  })
+
+  it('is what checkAttrEnv pins, so the pin is visible rather than implied', () => {
+    expect(checkAttrEnv({}).GIT_NO_REPLACE_OBJECTS).toBe('1')
+  })
+})
+
+/**
+ * `git init` writes `core.ignorecase = true` on a case-insensitive filesystem,
+ * which every macOS `$TMPDIR` is — and the probe's scratch repo lives there.
+ */
+describe('the probe answers case-SENSITIVELY, like a Linux clone', () => {
+  it('does not let a wrong-case rule satisfy the floor', () => {
+    const attributes = 'docs/as_built.md merge=union\n'
+
+    // Control, where the filesystem provides one. A scratch repo made exactly as
+    // the probe makes one inherits `core.ignorecase` from `git init`'s probe of
+    // $TMPDIR: true on macOS, absent on a Linux runner. Where it is true the
+    // wrong-case rule really does resolve — that IS the false PASS. Where the
+    // filesystem is case-sensitive there is nothing to defeat, and asserting the
+    // poison would red CI for the platform being right.
+    const repo = scratchRepo()
+    writeFileSync(join(repo, '.gitattributes'), attributes)
+    const ignorecase = spawnSync('git', ['-C', repo, 'config', '--get', 'core.ignorecase'], {
+      encoding: 'utf8',
+    }).stdout.trim()
+    if (ignorecase === 'true') {
+      expect(directCheckAttr(repo)).toBe(`${LOG}: merge: union`)
+    } else {
+      expect(directCheckAttr(repo)).toBe(`${LOG}: merge: unspecified`)
+    }
+
+    // Either way the probe answers case-SENSITIVELY, so the verdict is the one
+    // the strictest clone gives — which is the clone the floor claim is about.
+    expect(resolveTrackedMergeDrivers({ attributesFiles: rootOnly(attributes), paths: [LOG] }).get(LOG)).toBeNull()
+  })
+
+  it('still answers union for the correctly-spelled rule', () => {
+    // The other half: a pin that fails everything is not a pin.
+    expect(
+      resolveTrackedMergeDrivers({ attributesFiles: rootOnly(`${LOG} merge=union\n`), paths: [LOG] }).get(LOG),
+    ).toBe('union')
+  })
+})
+
 describe('collectTrackedAttributesFiles isolation (real git, each with an unpinned control)', () => {
   /** A repo whose tracked floor is INTACT, to be pointed at from elsewhere. */
   function healthyRepo(): string {
@@ -599,6 +726,84 @@ describe('presentAsBuiltLogs (real git)', () => {
     ).toBe('AS-BUILT.md')
 
     expect(presentAsBuiltLogs(repo, poison)).toEqual([LOG])
+  })
+
+  it('FAILS CLOSED when the committed tree cannot be read', () => {
+    // It used to `catch { return [] }`, which the gate prints as "no
+    // append-only build log found — nothing to enforce" and exits 0 on. So any
+    // unreadable governed repo read as a clean bill of health — the one failure
+    // direction this module is not allowed to have.
+    const repo = scratchRepo()
+    commitFiles(repo, { [LOG]: '# log\n' })
+
+    // Control: it works before the object store is broken.
+    expect(presentAsBuiltLogs(repo)).toEqual([LOG])
+
+    // Break the read without breaking the repo: point HEAD at a branch that does
+    // not exist (so the unborn-HEAD path is taken, which reads the index) and
+    // corrupt the index it would read. Measured: `git ls-files` then exits 128
+    // with `fatal: .git/index: index file smaller than expected`.
+    execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/does-not-exist'], { stdio: 'pipe' })
+    writeFileSync(join(repo, '.git', 'index'), 'GARBAGE-NOT-AN-INDEX')
+    expect(spawnSync('git', ['-C', repo, 'ls-files'], { encoding: 'utf8' }).status).toBe(128)
+
+    expect(() => presentAsBuiltLogs(repo)).toThrow(/could not read the committed tree/)
+  })
+})
+
+describe('clonedTreeContains', () => {
+  it('answers for any path, which is how SPEC.md governedness survives a sparse checkout', () => {
+    const repo = scratchRepo()
+    commitFiles(repo, { 'SPEC.md': '# spec\n', [LOG]: '# log\n' })
+    // Committed, then removed from the working tree — the shape a sparse
+    // checkout leaves behind.
+    rmSync(join(repo, 'SPEC.md'), { force: true })
+    expect(existsSync(join(repo, 'SPEC.md'))).toBe(false)
+    expect(clonedTreeContains(repo, ['SPEC.md'])).toEqual(['SPEC.md'])
+  })
+
+  it('does not invent a path the tree does not have', () => {
+    const repo = scratchRepo()
+    commitFiles(repo, { [LOG]: '# log\n' })
+    expect(clonedTreeContains(repo, ['SPEC.md'])).toEqual([])
+  })
+
+  it('falls back to disk outside a repository', () => {
+    const dir = scratch('union-attr-tree-norepo')
+    writeFileSync(join(dir, 'SPEC.md'), '# spec\n')
+    expect(clonedTreeContains(dir, ['SPEC.md'])).toEqual(['SPEC.md'])
+  })
+})
+
+describe('mergeDriverConfig', () => {
+  function withConfig(entries: Record<string, string>): string {
+    const repo = scratchRepo()
+    for (const [key, value] of Object.entries(entries)) {
+      execFileSync('git', ['-C', repo, 'config', `merge.${INSTALLER_MERGE_DRIVER}.${key}`, value], { stdio: 'pipe' })
+    }
+    return repo
+  }
+
+  it('reports BOTH keys, because which one is missing changes what git does', () => {
+    // The three states have three outcomes — exit 0, exit 128, exit 1 — so a
+    // diagnostic that reads only `.driver` cannot tell the last two apart, and
+    // saying "exit 128" over the neither-set case is a false claim about git.
+    expect(mergeDriverConfig(withConfig({ name: 'entry-aware' }), INSTALLER_MERGE_DRIVER)).toEqual({
+      driver: null,
+      name: 'entry-aware',
+    })
+    expect(mergeDriverConfig(withConfig({ driver: 'true %A' }), INSTALLER_MERGE_DRIVER)).toEqual({
+      driver: 'true %A',
+      name: null,
+    })
+    expect(mergeDriverConfig(withConfig({}), INSTALLER_MERGE_DRIVER)).toEqual({ driver: null, name: null })
+  })
+
+  it('is empty outside a repository', () => {
+    expect(mergeDriverConfig(scratch('union-attr-nodriver'), INSTALLER_MERGE_DRIVER)).toEqual({
+      driver: null,
+      name: null,
+    })
   })
 })
 
@@ -789,8 +994,12 @@ describe('untrackedOverlayAttributes (real git)', () => {
  * conflict). A reader debugging from a wrong sentence looks in the wrong place,
  * so the sentences are pinned to real merges here.
  *
- * The version is asserted alongside, because "measured on 2.50.1" stops being a
- * true statement about THIS run the moment the runner's git differs.
+ * So "2.50.1" in those docblocks is PROVENANCE — the machine a sentence was
+ * first measured on — and these merges are what keep it true on every other
+ * machine. The version test below records what git actually ran and asserts a
+ * floor; it deliberately does not pin the number, because a version string is
+ * not a behaviour and pinning it would red this suite on the Linux runner for a
+ * reason unrelated to the property.
  */
 describe('what git ACTUALLY does with each merge attribute (real merges)', () => {
   interface MergeOutcome {
@@ -808,7 +1017,7 @@ describe('what git ACTUALLY does with each merge attribute (real merges)', () =>
   function realMerge(attribute: string, config: Record<string, string> = {}): MergeOutcome {
     const repo = scratchRepo()
     const git = (...args: string[]) =>
-      execFileSync('git', ['-C', repo, '-c', 'user.email=a@b', '-c', 'user.name=a', ...args], { stdio: 'pipe' })
+      execFileSync('git', ['-C', repo, ...COMMIT_IDENTITY_PIN, ...args], { stdio: 'pipe' })
 
     for (const [key, value] of Object.entries(config)) git('config', key, value)
     writeFileSync(join(repo, '.gitattributes'), `${attribute}\n`)
@@ -826,7 +1035,7 @@ describe('what git ACTUALLY does with each merge attribute (real merges)', () =>
     writeFileSync(join(repo, 'log.txt'), 'OURS\nbase\n')
     git('commit', '-qam', 'ours')
 
-    const merge = spawnSync('git', ['-C', repo, '-c', 'user.email=a@b', '-c', 'user.name=a', 'merge', 'other'], {
+    const merge = spawnSync('git', ['-C', repo, ...COMMIT_IDENTITY_PIN, 'merge', 'other'], {
       encoding: 'utf8',
     })
     const file = readFileSync(join(repo, 'log.txt'), 'utf8')
@@ -838,8 +1047,36 @@ describe('what git ACTUALLY does with each merge attribute (real merges)', () =>
     }
   }
 
-  it('runs against the git version these claims were measured on', () => {
-    expect(execFileSync('git', ['--version'], { encoding: 'utf8' })).toContain('git version 2.')
+  it('records the git it is running against, and is not hostage to a version string', () => {
+    // The previous assertion was `toContain('git version 2.')` under a docblock
+    // claiming the version was pinned "because 'measured on 2.50.1' stops being
+    // a true statement the moment the runner's git differs". It accepted git
+    // 2.0 — every git anyone has run this decade — so the docblock's promise and
+    // the assertion were different claims, and the weaker one was the one that
+    // ran.
+    //
+    // The promise is not repairable by tightening the number, because that is
+    // not where the guarantee comes from. Pinning `2.50.1` would red this suite
+    // on the Linux runner for reasons that have nothing to do with the property;
+    // and it would still prove nothing, because a version string is not a
+    // behaviour. THE GUARANTEE COMES FROM THE MERGES BELOW: every claim the
+    // module's docblocks and the gate's remediation text make is re-performed
+    // here, against whatever git is on this machine, on every run. `2.50.1` in
+    // those docblocks is provenance — where the sentence came from — and the
+    // tests are what keep it true.
+    //
+    // What is left for this test is a floor and a name. `merge=union`,
+    // `merge=binary`, the custom-driver fallback, `-merge`-as-binary and the
+    // `set`/`unset` spellings of `check-attr` all predate 2.0 by years; anything
+    // older than that cannot run this repo at all.
+    const raw = execFileSync('git', ['--version'], { encoding: 'utf8' }).trim()
+    const parsed = /^git version (\d+)\.(\d+)/.exec(raw)
+    expect(parsed).not.toBeNull()
+    const [major, minor] = [Number(parsed![1]), Number(parsed![2])]
+    expect(Number.isNaN(minor)).toBe(false)
+    // Written this way so a failure names the git it actually found, rather than
+    // reporting "expected 1 to be >= 2" about a number with no context.
+    expect(major >= 2 ? raw : `${raw} is older than git 2.0`).toBe(raw)
   })
 
   it('merge=union keeps BOTH entries, with no conflict — the property being gated', () => {

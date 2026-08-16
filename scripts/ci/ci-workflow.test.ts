@@ -348,6 +348,16 @@ describe('scheduled full leak-gate scan', () => {
  * into. The check below is a pure function over YAML text so the MUTATIONS can
  * be run against it here — a guard whose own bypass is untested is the shape of
  * hole it exists to close.
+ *
+ * AND THE THIRD CLASS IS THE SHELL, which this suite missed while its own
+ * docblock said "with its exit code honoured". Appending `|| true` to the `run:`
+ * line leaves the step present, unconditional, `continue-on-error`-free — and
+ * green regardless of what the gate decides. It was reproduced against this file
+ * as a CONFIRMED blocker: the mutation landed, the suite stayed 0-fail, and the
+ * deleted-step control still went red, so the suite was proving only that a
+ * string was present in a file. `|| :`, `; true`, a pipe, a trailing `&` and a
+ * `set +e` prefix are the same edit in other spellings, and all six are
+ * mutations below.
  */
 describe('governed-repo attributes gate is wired into ci.yml', () => {
   const GATE_RUN = 'bun scripts/ci/check-governed-repo-attributes.ts'
@@ -366,9 +376,11 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
   /**
    * Why the gate would not decide anything, or `null` if it would.
    *
-   * A step runs unconditionally when it carries neither an `if:` (which can
-   * evaluate false) nor `continue-on-error: true` (which discards its exit
-   * code), and when the job around it carries neither either.
+   * A step runs unconditionally, with its exit code honoured, when it carries
+   * neither an `if:` (which can evaluate false) nor `continue-on-error: true`
+   * (which discards its exit code); when the job around it carries neither
+   * either; AND when the gate is the whole shell command, since `|| true` and
+   * friends discard the status without either key appearing anywhere.
    */
   function whyNotGating(source: string): string | null {
     const job = jobBlock(source, 'layering')
@@ -383,6 +395,21 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
     // constant into a pattern.
     const stepAt = lines.findIndex((l) => /^\s+- run: /.test(l) && l.includes(GATE_RUN))
     if (stepAt === -1) return 'no step runs the gate'
+
+    // `if:` and `continue-on-error:` are not the only single-edit bypasses. The
+    // SHELL swallows an exit code just as quietly and does not read as
+    // configuration at all: `… || true` is the canonical one, and `; true`, a
+    // pipe (a pipeline reports its LAST command's status), a trailing `&`, and a
+    // `set +e;` prefix are the same move in other spellings. A step wearing any
+    // of them still shows up green in the log with the gate's own ❌ printed
+    // above it. So the gate command must be the WHOLE command: nothing before
+    // it, and nothing after it but its argument.
+    const runLine = lines[stepAt] ?? ''
+    const command = runLine.slice(runLine.indexOf('- run:') + '- run:'.length)
+    const before = command.slice(0, command.indexOf(GATE_RUN))
+    const after = command.slice(command.indexOf(GATE_RUN) + GATE_RUN.length)
+    if (before.trim().length > 0) return 'step wraps the gate in another command'
+    if (/[|;&]/.test(after)) return 'step discards the gate exit code'
 
     // The step is every line from its `- ` marker until the next one at the
     // same indent (a step's own keys are indented deeper than its dash).
@@ -445,6 +472,24 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
     [
       'the whole job is disabled',
       (s) => s.replace('\n  layering:\n', '\n  layering:\n    if: false\n'),
+    ],
+    // The SHELL-level bypasses. None of these is an `if:` or a
+    // `continue-on-error:`, every one of them is a single trailing edit, and
+    // every one leaves the step present, running, and green whatever the gate
+    // decides. `|| true` is the one that actually got through: it was reported
+    // as a CONFIRMED blocker against this very suite, whose own docblock claims
+    // the exit code is honoured.
+    ['the failure is swallowed with || true', (s) => s.replace(GATE_STEP, `${GATE_STEP} || true`)],
+    ['the failure is swallowed with || :', (s) => s.replace(GATE_STEP, `${GATE_STEP} || :`)],
+    ['the exit code is hidden behind a ; ', (s) => s.replace(GATE_STEP, `${GATE_STEP}; true`)],
+    [
+      'the gate is piped, so the pipeline reports the last command',
+      (s) => s.replace(GATE_STEP, `${GATE_STEP} | tee /dev/null`),
+    ],
+    ['the gate is backgrounded with &', (s) => s.replace(GATE_STEP, `${GATE_STEP} &`)],
+    [
+      'errexit is turned off ahead of the gate',
+      (s) => s.replace(GATE_STEP, `      - run: set +e; ${GATE_RUN} .`),
     ],
   ]
 
