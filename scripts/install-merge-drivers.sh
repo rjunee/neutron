@@ -291,11 +291,19 @@ if [ "${1:-}" = "--check" ]; then
     exit 1
   fi
   # THE LINE BEING PRESENT IS NOT THE PATH BEING BOUND TO IT, which is this script's own title
-  # applied to its own check. Attributes are last-match-wins, so a later line in the same file —
-  # or a tracked `.gitattributes` consulted after it — reassigns `merge` and the driver named
-  # above never runs. Measured on git 2.50.1: with `$ATTR_LINE` present and a subsequent
-  # `docs/AS_BUILT.md merge=union` appended to the same file, `git check-attr` answers `union`,
-  # git performs a union merge, and the grep two lines up still finds its line.
+  # applied to its own check. Attributes are last-match-wins WITHIN a file, so a later line in
+  # `$ATTRS` reassigns `merge` and the driver named above never runs. Measured on git 2.50.1: with
+  # `$ATTR_LINE` present and a subsequent `docs/AS_BUILT.md merge=union` appended to the same file,
+  # `git check-attr` answers `union`, git performs a union merge, and the grep two lines up still
+  # finds its line.
+  #
+  # A TRACKED `.gitattributes` CANNOT CAUSE THIS, which is why the message below does not send the
+  # reader looking there. `$GIT_DIR/info/attributes` has the HIGHEST precedence of any attributes
+  # source, so the tracked file loses to it in both directions — measured on git 2.50.1 in a repo
+  # carrying both: info=as-built-log + tracked=union resolves to `as-built-log`, and the reverse
+  # pairing resolves to `union`. Each time the answer is whatever `info/attributes` says. That is
+  # also the property the install depends on, since the tracked `.gitattributes` in this repository
+  # binds this same path to `merge=union` and a successful install has to displace it.
   #
   # So the verdict is taken from the resolver git itself uses rather than from the text we wrote.
   # `--all` is deliberately not used: one attribute is asked for and the answer is the last field.
@@ -304,8 +312,9 @@ if [ "${1:-}" = "--check" ]; then
   if [ "$bound" != "$DRIVER_NAME" ]; then
     echo "merge drivers: NOT installed — '$ATTR_LINE' is present but OVERRIDDEN." >&2
     echo "                       git resolves $LOG_PATH to merge=$bound, so the driver never runs." >&2
-    echo "                       A later attribute line wins; remove it from $ATTRS" >&2
-    echo "                       (or from a tracked .gitattributes) and re-run this script." >&2
+    echo "                       A later line in the SAME file wins. Remove it from" >&2
+    echo "                       $ATTRS and re-run this script." >&2
+    echo "                       (Not a tracked .gitattributes — info/attributes outranks it.)" >&2
     exit 1
   fi
   # WHAT is installed, not merely THAT something is — see the header. Without this a clone still

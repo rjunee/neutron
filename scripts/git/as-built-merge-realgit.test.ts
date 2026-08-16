@@ -867,6 +867,41 @@ describe('the installer under a locked config — the FATAL half-state must be i
       expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
     }, 30_000)
 
+    test('MEASUREMENT — a tracked .gitattributes cannot cause that override, in either direction', () => {
+      // The message above deliberately does NOT send the reader to look in a tracked
+      // `.gitattributes`, and that is a claim about git rather than a style choice:
+      // `$GIT_DIR/info/attributes` outranks every other attributes source, so the tracked file
+      // loses to it whichever way round the two are. Pinned here because the message asserts it,
+      // and an assertion in a message is the thing that goes stale first.
+      //
+      // It is also the property the INSTALL depends on: this repository's tracked `.gitattributes`
+      // binds this same path to `merge=union`, and a successful install has to displace it.
+      const repo = freshRepo()
+      git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+      git(repo, 'config', 'user.name', 'Trident Test')
+      git(repo, 'config', 'commit.gpgsign', 'false')
+      mkdirSync(join(repo, 'docs'), { recursive: true })
+      writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), '# AS_BUILT\n')
+      const attrs = join(commonDir(repo), 'info', 'attributes')
+      mkdirSync(dirname(attrs), { recursive: true })
+
+      function resolved(): string {
+        git(repo, 'add', '-A')
+        git(repo, 'commit', '-qm', 'attrs')
+        return git(repo, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md').stdout.trim()
+      }
+
+      writeFileSync(attrs, 'docs/AS_BUILT.md merge=as-built-log\n')
+      writeFileSync(join(repo, '.gitattributes'), 'docs/AS_BUILT.md merge=union\n')
+      expect(resolved()).toContain('merge: as-built-log')
+
+      // The REVERSE pairing, which is the half that makes this a precedence result rather than a
+      // preference for one of the two values.
+      writeFileSync(attrs, 'docs/AS_BUILT.md merge=union\n')
+      writeFileSync(join(repo, '.gitattributes'), 'docs/AS_BUILT.md merge=as-built-log\n')
+      expect(resolved()).toContain('merge: union')
+    }, 30_000)
+
     test('the driver at the named path must be THIS checkout\'s driver, not merely a file at that path', () => {
       // The command deliberately names the MAIN worktree's copy, so the path can be current while
       // the CODE behind it is an older revision — one predating `MAX_MARKER_SIZE` or the entry-loss
