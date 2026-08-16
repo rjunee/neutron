@@ -13,7 +13,7 @@
  * constants with a comment between them).
  *
  * So the TTL is DERIVED from the refresh rather than written down beside it.
- * Three intervals of tolerance: a foregrounded tab may miss two refreshes to a
+ * Three intervals of tolerance: a foregrounded tab may miss ONE refresh to a
  * hiccup or a slow event loop and still be believed, while a browser that dies
  * without a close frame is forgotten within a minute and the owner starts
  * getting notified again on his phone.
@@ -44,8 +44,17 @@ export const WEB_PRESENCE_REFRESH_MS = 20_000
 /**
  * How long the gateway believes a `foreground` declaration (ms).
  *
- * DERIVED, never typed as a literal — see the module docblock. Three refresh
- * intervals: two may be lost before the owner's phone starts buzzing again.
+ * DERIVED, never typed as a literal — see the module docblock.
+ *
+ * THE REAL TOLERANCE IS ONE MISSED REFRESH, NOT TWO, and the arithmetic is worth
+ * writing down because the off-by-one runs in the SILENT direction if you assume
+ * the generous reading. The gateway prunes on `>=`, so a declaration made at t=0
+ * dies at exactly t=3×REFRESH. Refreshes are due at 20 s, 40 s and 60 s: lose the
+ * first two and the third lands ON the boundary, where prune-then-read expires
+ * the entry before the frame that would have renewed it is processed. So: miss
+ * one refresh and the owner stays quiet, miss two and his phone starts buzzing
+ * again. That is the correct direction to be wrong in — a redundant buzz, never
+ * a missed one — but it is not what "three intervals" reads like at a glance.
  */
 export const WEB_PRESENCE_TTL_MS = WEB_PRESENCE_REFRESH_MS * 3
 

@@ -5,6 +5,16 @@ export const SESSION_BUILD_TIMEOUT_MS = 8_000
 export interface CacheableChatSession {
   stop(): void
   setActive(active: boolean): void
+  /**
+   * Web presence (2026-08-15) — is the owner actively using this surface?
+   *
+   * OPTIONAL so the native surface and existing fakes satisfy the interface
+   * unchanged: a session that does not implement it simply never reports
+   * inattention, which leaves it exactly where it was before this signal existed.
+   * That is the safe default in the only direction that matters — a missing
+   * implementation costs a redundant buzz, never a missed one.
+   */
+  setAttentive?(attentive: boolean): void
   /** Closed sessions are discarded on checkout. Optional for legacy adapters. */
   status?(): string
 }
@@ -63,6 +73,19 @@ export class WarmSessionCache<T extends CacheableChatSession> {
 
   setActive(active: boolean): void {
     for (const entry of this.entries.values()) entry.session.setActive(active)
+  }
+
+  /**
+   * Web presence — fan the attention signal to every warm session.
+   *
+   * EVERY session, not just the checked-out one, and that is the point: the cache
+   * keeps up to {@link MAX_WARM_SESSIONS} sockets alive across a project switch,
+   * each holding its own presence declaration on the server. Telling only the
+   * active one that the owner walked away would leave the others declaring
+   * `foreground` on their own conversations until the TTL expired them.
+   */
+  setAttentive(attentive: boolean): void {
+    for (const entry of this.entries.values()) entry.session.setAttentive?.(attentive)
   }
 
   clear(): void {

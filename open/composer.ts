@@ -398,11 +398,8 @@ import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
 import { parseAppWsSendMarker, shouldNotifyForSend } from './wiring/app-ws-marker.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
-import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
-import {
-  createWebPresenceTracker,
-  suppressPushWhileWebForeground,
-} from '@neutronai/gateway/push/web-presence.ts'
+import { createWebPresenceTracker } from '@neutronai/gateway/push/web-presence.ts'
+import { buildPresenceAwareChatPushSink } from './wiring/chat-push-sink.ts'
 import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
@@ -2585,15 +2582,21 @@ export function buildOpenGraphComposer(
     // few lines down (out-of-turn posts) and the `ownsNotify` branch of
     // `buildAppWsSendReply` (ordinary in-turn replies, #300). Two copies of the
     // presence question would be two chances for them to answer it differently.
+    //
+    // The composition itself lives in `open/wiring/chat-push-sink.ts` rather than
+    // here, for the reason that module's docblock gives: while it was inline,
+    // "the presence check is actually wrapped around the sink" and "the question
+    // is asked per-conversation" were claims nothing could test without booting
+    // this whole file, so deleting either left every test green and the owner's
+    // phone silent.
     const webPresence = createWebPresenceTracker()
-    const chatMessagePush = suppressPushWhileWebForeground({
-      sink: buildChatMessagePushSink({
-        fanOut: pushTransport,
-        project_slug,
-      }),
+    const chatMessagePush = buildPresenceAwareChatPushSink({
+      fanOut: pushTransport,
+      project_slug,
+      presence: webPresence,
       // The owner, and only the owner: presence is per-user, so a guest sitting
       // in a shared project cannot silence his phone by having a tab open.
-      isWebForeground: () => webPresence.isForeground(OWNER_USER_ID),
+      owner_user_id: OWNER_USER_ID,
     })
     /**
      * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign

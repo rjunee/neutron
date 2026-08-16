@@ -97,10 +97,12 @@ async function openClient(
   base: string,
   platform: 'web' | 'native' | null,
   device_id?: string,
+  project_id?: string,
 ): Promise<{ ws: WebSocket; events: AppWsOutbound[]; close: () => Promise<void> }> {
   const suffix =
     (platform === null ? '' : `&platform=${platform}`) +
-    (device_id === undefined ? '' : `&device_id=${device_id}`)
+    (device_id === undefined ? '' : `&device_id=${device_id}`) +
+    (project_id === undefined ? '' : `&project_id=${project_id}`)
   const ws = new WebSocket(`${base.replace(/^http/, 'ws')}/ws/app/chat?token=${OWNER}${suffix}`)
   const events: AppWsOutbound[] = []
   await new Promise<void>((resolve, reject) => {
@@ -138,11 +140,44 @@ describe('app-ws surface — web presence', () => {
   it('records a WEB client that declares itself foregrounded', async () => {
     const h = await startGateway()
     const client = await openClient(h.base, 'web')
-    expect(h.presence.isForeground(OWNER)).toBe(false) // control: nothing declared yet
+    expect(h.presence.isForeground(OWNER, null)).toBe(false) // control: nothing declared yet
 
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.isForeground(OWNER))
-    expect(h.presence.isForeground(OWNER)).toBe(true)
+    await waitFor(() => h.presence.isForeground(OWNER, null))
+    expect(h.presence.isForeground(OWNER, null)).toBe(true)
+
+    await client.close()
+    await h.close()
+  })
+
+  it("records the declaration against THE SOCKET'S OWN project, not globally", async () => {
+    // The end-to-end proof of the conversation scope. The socket carries its
+    // project on the upgrade query string and a web client reconnects to switch
+    // projects, so the socket's scope IS the chat on screen — and a declaration
+    // from it must not answer for any other conversation.
+    const h = await startGateway()
+    const client = await openClient(h.base, 'web', undefined, 'proj-a')
+
+    client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.isForeground(OWNER, 'proj-a'))
+
+    expect(h.presence.isForeground(OWNER, 'proj-a')).toBe(true) // control: recorded
+    expect(h.presence.isForeground(OWNER, 'proj-b')).toBe(false)
+    expect(h.presence.isForeground(OWNER, null)).toBe(false) // …and not General either
+
+    await client.close()
+    await h.close()
+  })
+
+  it('a socket with NO project records against General', async () => {
+    const h = await startGateway()
+    const client = await openClient(h.base, 'web')
+
+    client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
+    await waitFor(() => h.presence.isForeground(OWNER, null))
+
+    expect(h.presence.isForeground(OWNER, null)).toBe(true)
+    expect(h.presence.isForeground(OWNER, 'proj-a')).toBe(false)
 
     await client.close()
     await h.close()
@@ -164,7 +199,7 @@ describe('app-ws surface — web presence', () => {
     await web.close()
     await waitFor(() => h.presence.size() === 0)
     // With the web socket gone, the native declaration left nothing behind.
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await native.close()
     await h.close()
@@ -178,7 +213,7 @@ describe('app-ws surface — web presence', () => {
     // its frames by driving a `ping` and waiting for the `pong`.
     client.ws.send(JSON.stringify({ v: 1, type: 'ping' }))
     await waitFor(() => client.events.some((e) => (e as { type?: string }).type === 'pong'))
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await client.close()
     await h.close()
@@ -188,11 +223,11 @@ describe('app-ws surface — web presence', () => {
     const h = await startGateway()
     const client = await openClient(h.base, 'web')
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.isForeground(OWNER))
+    await waitFor(() => h.presence.isForeground(OWNER, null))
 
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'background' }))
-    await waitFor(() => !h.presence.isForeground(OWNER))
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    await waitFor(() => !h.presence.isForeground(OWNER, null))
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await client.close()
     await h.close()
@@ -202,10 +237,10 @@ describe('app-ws surface — web presence', () => {
     const h = await startGateway()
     const client = await openClient(h.base, 'web')
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.isForeground(OWNER))
+    await waitFor(() => h.presence.isForeground(OWNER, null))
 
     await client.close()
-    await waitFor(() => !h.presence.isForeground(OWNER))
+    await waitFor(() => !h.presence.isForeground(OWNER, null))
     expect(h.presence.size()).toBe(0)
 
     await h.close()
@@ -221,7 +256,7 @@ describe('app-ws surface — web presence', () => {
 
     await a.close()
     await waitFor(() => h.presence.size() === 1)
-    expect(h.presence.isForeground(OWNER)).toBe(true)
+    expect(h.presence.isForeground(OWNER, null)).toBe(true)
 
     await b.close()
     await waitFor(() => h.presence.size() === 0)
@@ -245,7 +280,7 @@ describe('app-ws surface — web presence', () => {
 
     await a.close()
     await waitFor(() => h.presence.size() === 1)
-    expect(h.presence.isForeground(OWNER)).toBe(true)
+    expect(h.presence.isForeground(OWNER, null)).toBe(true)
 
     await b.close()
     await waitFor(() => h.presence.size() === 0)
@@ -275,7 +310,7 @@ describe('app-ws surface — web presence', () => {
     // and it must not be swallowed either.
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'visible' }))
     await waitFor(() => client.events.some((e) => (e as { type?: string }).type === 'error'))
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await client.close()
     await h.close()

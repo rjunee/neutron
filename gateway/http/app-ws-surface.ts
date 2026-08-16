@@ -855,11 +855,20 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // not send this frame today (only `chat-core/web-session.ts` reports
         // presence); the gate is here so that a client which someday does cannot
         // silence the owner by accident.
+        //
+        // SCOPED TO THIS SOCKET'S CONVERSATION. `data.project_id` is captured at
+        // upgrade and a web client holds ONE topic per connection — it reconnects
+        // to switch projects (see `channel_topic_id` above) — so the socket's
+        // project IS the chat on the owner's screen, and it is the only scope
+        // available here that is a fact rather than an inference. Reporting
+        // without it would let one open tab silence every OTHER conversation's
+        // notifications for as long as it stayed open, which is the opposite of
+        // what `app/lib/push-foreground-policy.ts` does on the phone.
         const presence = decodeAppWsPresence(parsed)
         if (presence !== null) {
           if (web_presence !== undefined && data.platform === 'web') {
             if (presence.state === 'foreground') {
-              web_presence.foreground(data.user_id, data.conn_id)
+              web_presence.foreground(data.user_id, data.conn_id, data.project_id ?? null)
             } else {
               web_presence.background(data.conn_id)
             }

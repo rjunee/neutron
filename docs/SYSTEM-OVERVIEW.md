@@ -4267,9 +4267,7 @@ real answer instead of an inference. The owner: *"can you also check if I'm acti
 the web app, and if so dont send push notifications to my phone."* A socket cannot answer
 that — a browser tab holds one open while minimised exactly as Android does — so the web
 client now SAYS so: `chat-core/web-session.ts` sends `{ v:1, type:'presence', state }` on
-every socket open, on every `visibilitychange` (wired at
-`landing/chat-react/useNeutronChat.ts`, which also states the level once on mount because
-`visibilitychange` is an edge), and then repeats `foreground` every
+every socket open, on every attention change, and then repeats `foreground` every
 `WEB_PRESENCE_REFRESH_MS`. The app-ws surface records it per CONNECTION — not per device,
 so two tabs are two screens and closing one does not mark the owner absent — and ONLY for
 `platform=web` sockets, because a native client's foreground is the device's own question
@@ -4277,18 +4275,56 @@ so two tabs are two screens and closing one does not mark the owner absent — a
 for the conversation on screen; a push never sent and a push sent-but-not-shown are
 different things).
 
+**"Actively using" is three signals, not one.** `landing/chat-react/web-attention.ts`
+computes it: the tab is VISIBLE, the window is FOCUSED, and the owner has interacted within
+`DEFAULT_ATTENTION_IDLE_MS` (5 min). Visibility alone was the first cut and it is not the
+question the owner asked — a chat tab parked on a second monitor is `visible` all day, so it
+would re-declare `foreground` every twenty seconds forever and the TTL would never fire.
+That protects against a browser that DIED, not against the resting state of a live one,
+which is where a chat tab spends most of its life. Attention rides on `setAttentive`, kept
+strictly separate from `setActive`: `setActive` is the TRANSPORT signal (heartbeat,
+reconnect), so folding the two together would tear down the socket of a tab sitting there
+waiting for the very message this feature is about. An inattentive tab stays connected and
+keeps receiving live; the only thing that changes is that the phone starts buzzing again.
+
+**Suppression is SCOPED to the conversation.** The tracker keys each declaration by the
+socket's own `project_id` — a web client holds one topic per connection and reconnects to
+switch projects — and `isForeground(user, project_id)` only answers `true` for that chat.
+A tab open on project A therefore never silences project B or General. This is deliberately
+the same distinction `app/lib/push-foreground-policy.ts` draws on the phone ("is he looking
+at THIS conversation?"), which is what makes the two policies compose rather than merely
+coexist; every spelling of General (`null`, `''`, `~general`) normalises to one key on both
+sides, the ISSUES #410/#411 hazard.
+
 The decision itself is one wrapper, `suppressPushWhileWebForeground`
-(`gateway/push/web-presence.ts`), applied at the SINGLE `buildChatMessagePushSink`
-construction in `open/composer.ts`, so both pushing paths — `createDeliver`'s `notify` and
-the `ownsNotify` branch of the app-ws send — inherit it and cannot disagree. A suppressed
-push answers `false`, so the row is NOT stamped `delivered_at` and a later re-emit is still
-free to buzz him.
+(`gateway/push/web-presence.ts`), composed with the real sink in
+`open/wiring/chat-push-sink.ts` and applied at the SINGLE construction in
+`open/composer.ts`, so both pushing paths — `createDeliver`'s `notify` and the `ownsNotify`
+branch of the app-ws send — inherit it and cannot disagree. It lives in a wiring module
+rather than inline because the two claims it makes (the wrapper is applied; the question is
+per-conversation) were otherwise reachable only by booting the whole composer, i.e. tested
+by nothing.
+
+**On `delivered_at`, stated precisely, because the obvious reading is wrong.** A suppressed
+push answers `false`, which keeps the `notified` arm of deliver's stamp condition false —
+but that condition is `notified || delivered`, and `delivered` is the live socket fan-out,
+so a suppressed push whose message went out over a live socket still stamps the row. What
+makes that CORRECT is the conversation scope: suppression requires a tab foregrounded on the
+message's own chat, which is the same socket the fan-out just delivered to, so the stamp
+records that he was reached rather than guessing it. The dangerous combination is suppressed
+AND not delivered live — which is what a GLOBAL presence check produced for every other
+conversation — and there both arms are false, nothing is stamped, and the re-emit still
+buzzes. `gateway/http/__tests__/deliver-web-presence.test.ts` drives `deliver` and the
+wrapper together over a real `ButtonStore`, because neither half's own suite can see this
+seam.
 
 Every uncertain case biases toward NOTIFYING, because the failure this feature can cause is
 SILENCE and nobody notices silence: a `foreground` claim is believed for
 `WEB_PRESENCE_TTL_MS` and no longer (derived as 3× the refresh in
 `wire-types/web-presence.ts`, so the two numbers cannot drift apart), so a browser killed
-without a close frame is forgotten within a minute; an absent tracker, an unknown owner and
+without a close frame is forgotten within a minute; the expiry clock is MONOTONIC
+(`performance.now()`) because a backward wall-clock step would make the elapsed delta
+negative and turn "expires" into "believed forever"; an absent tracker, an unknown owner and
 a THROWING presence check all read as not-present; and the decoder refuses any `state` it
 does not recognise rather than treating "not background" as present.
 

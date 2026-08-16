@@ -92,7 +92,7 @@ function fakeTimers(): {
   }
 }
 
-function setup(): {
+function setup(over: { presenceRefreshMs?: number } = {}): {
   session: WebChatSession
   sockets: FakeSocket[]
   advance: (ms: number) => void
@@ -111,6 +111,7 @@ function setup(): {
     // Off: this suite is about presence, and a resume frame on every open would
     // only add noise to the assertions.
     resumeFallbackMs: 0,
+    ...(over.presenceRefreshMs !== undefined ? { presenceRefreshMs: over.presenceRefreshMs } : {}),
     setTimeoutFn: timers.setTimeoutFn,
     clearTimeoutFn: timers.clearTimeoutFn,
   })
@@ -194,7 +195,11 @@ describe('web presence reporting', () => {
     sockets[0]!.fireClose()
     session.setActive(false)
     session.setActive(true)
-    expect(sockets.length).toBeGreaterThan(1)
+    // EXACTLY two, not "more than one". `toBeGreaterThan(1)` passed for any
+    // number of accidental reconnects, and each extra socket is an extra
+    // connection the server tracks presence for — precisely the leak this suite
+    // would need to catch, hidden by inspecting only the last one.
+    expect(sockets).toHaveLength(2)
     const reconnected = sockets.at(-1)!
     reconnected.open()
     // The declaration is made by the OPEN, not by the visibility toggle above:
@@ -221,5 +226,104 @@ describe('web presence reporting', () => {
     const after = sockets[0]!.presenceStates().length
     advance(DEFAULT_PRESENCE_REFRESH_MS * 5)
     expect(sockets[0]!.presenceStates()).toHaveLength(after)
+  })
+
+  it('a NON-FINITE refresh disables the repeat instead of flooding frames', () => {
+    // `NaN <= 0` is false, so a NaN sails past a bare `<= 0` disable check into
+    // `setTimeout`, which coerces NaN to 0 — and because this timer re-arms from
+    // its own callback that is not a fast timer but an unbounded loop of presence
+    // frames, one per event-loop turn, for as long as the tab is open.
+    const { session, sockets, advance } = setup({ presenceRefreshMs: Number.NaN })
+    session.start()
+    sockets[0]!.open()
+    // The declaration on open still happens — only the REPEAT is disabled.
+    expect(sockets[0]!.presenceStates()).toEqual(['foreground'])
+    advance(DEFAULT_PRESENCE_REFRESH_MS * 10)
+    expect(sockets[0]!.presenceStates()).toEqual(['foreground'])
+  })
+
+  it('CONTROL for the guard above: a FINITE refresh does repeat on the same harness', () => {
+    // Without this, the NaN test would pass equally against a session that had
+    // stopped sending presence frames altogether.
+    const { session, sockets, advance } = setup({ presenceRefreshMs: 1_000 })
+    session.start()
+    sockets[0]!.open()
+    advance(3_500)
+    expect(sockets[0]!.presenceStates()).toHaveLength(4)
+  })
+})
+
+describe('attention is a SEPARATE signal from transport activity', () => {
+  it('an INATTENTIVE but visible tab reports background — "visible" is not "using"', () => {
+    // The gap this closes: a chat tab parked on a second monitor is
+    // `visibilityState === 'visible'` all day, so on visibility alone it
+    // re-declares `foreground` every 20 s forever and the server's TTL never
+    // fires. Presence would then protect only against a DEAD client, not against
+    // the resting state of a live one.
+    const { session, sockets, advance } = setup()
+    session.start()
+    sockets[0]!.open()
+    expect(sockets[0]!.presenceStates()).toEqual(['foreground']) // control
+
+    session.setAttentive(false)
+    expect(sockets[0]!.presenceStates()).toEqual(['foreground', 'background'])
+    // …and it stops repeating, so the server expires it rather than being told
+    // `foreground` again on the next tick.
+    advance(DEFAULT_PRESENCE_REFRESH_MS * 10)
+    expect(sockets[0]!.presenceStates()).toEqual(['foreground', 'background'])
+  })
+
+  it('attention does NOT touch the transport — the socket stays open and connected', () => {
+    // Load-bearing: folding attention into `setActive` would tear down the
+    // connection of a tab that is sitting there waiting for the very message this
+    // feature is about. An idle tab must keep receiving messages live; the only
+    // thing that changes is that his phone starts buzzing again.
+    const { session, sockets } = setup()
+    session.start()
+    sockets[0]!.open()
+    session.setAttentive(false)
+    expect(sockets).toHaveLength(1) // no reconnect
+    expect(sockets[0]!.closed).toBe(false) // and no teardown
+  })
+
+  it('coming back re-declares foreground and resumes the repeat', () => {
+    const { session, sockets, advance } = setup()
+    session.start()
+    sockets[0]!.open()
+    session.setAttentive(false)
+    session.setAttentive(true)
+    advance(DEFAULT_PRESENCE_REFRESH_MS + 1)
+    expect(sockets[0]!.presenceStates()).toEqual([
+      'foreground',
+      'background',
+      'foreground',
+      'foreground',
+    ])
+  })
+
+  it('BOTH must hold — a hidden tab stays background however attentive it claims to be', () => {
+    const { session, sockets } = setup()
+    session.start()
+    sockets[0]!.open()
+    session.setActive(false)
+    session.setAttentive(true)
+    expect(sockets[0]!.presenceStates()).toEqual(['foreground', 'background', 'background'])
+  })
+
+  it('an inattentive session that RECONNECTS does not declare foreground on the new socket', () => {
+    // The reconnect path re-states presence from scratch (a fresh socket carries
+    // no server-side record). If it restated the visibility level only, a
+    // network flap would silently re-silence the owner's phone while he was away.
+    const { session, sockets } = setup()
+    session.start()
+    sockets[0]!.open()
+    session.setAttentive(false)
+    sockets[0]!.fireClose()
+    session.setActive(false)
+    session.setActive(true)
+    expect(sockets).toHaveLength(2)
+    const reconnected = sockets.at(-1)!
+    reconnected.open()
+    expect(reconnected.presenceStates()).toEqual(['background'])
   })
 })

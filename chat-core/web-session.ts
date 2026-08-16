@@ -212,6 +212,19 @@ export class WebChatSession {
    *  `landing/chat-react/useNeutronChat.ts` also states it once on mount so a tab
    *  opened in the background never reports a foreground it doesn't have. */
   private active = true
+  /**
+   * Web presence — is the owner ACTUALLY USING this tab, as opposed to merely
+   * having it un-hidden? See {@link setAttentive}.
+   *
+   * SEPARATE FROM {@link active} BECAUSE THEY DRIVE DIFFERENT MACHINERY AND MUST
+   * NOT BE COLLAPSED. `active` is a TRANSPORT signal: it starts and stops the
+   * heartbeat and reconnects the socket, so folding "he stopped typing" into it
+   * would tear down the connection of a tab that is sitting there waiting for the
+   * very message this feature is about. Attention is a PRESENCE signal and
+   * touches nothing but the frame we send. A `foreground` declaration requires
+   * both.
+   */
+  private attentive = true
   /** Web presence — the pending re-declare timer (null while backgrounded, while
    *  the socket is down, or when the refresh is disabled). */
   private presenceHandle: unknown = null
@@ -296,6 +309,28 @@ export class WebChatSession {
   setActive(active: boolean): void {
     this.active = active
     this.ws.setActive(active)
+    this.reportPresence()
+  }
+
+  /**
+   * Web presence — report whether the owner is ACTIVELY USING this tab.
+   *
+   * "Visible" is not "using", and the gap between them is where this feature
+   * silently stops being what the owner asked for. A chat tab parked on a second
+   * monitor is `visibilityState === 'visible'` for as long as the machine is
+   * awake, so on visibility alone it re-declares `foreground` every twenty
+   * seconds forever and the TTL never fires — it protects against a DEAD client,
+   * not against the resting state of a live one, which is the common case.
+   * `landing/chat-react/web-attention.ts` computes the real answer (visible AND
+   * window-focused AND recently interacted-with) and feeds it here.
+   *
+   * TOUCHES NO TRANSPORT STATE, deliberately — see {@link attentive}. An
+   * inattentive tab stays connected and keeps receiving messages live; the only
+   * thing that changes is that the owner's phone starts buzzing again, which is
+   * the whole point.
+   */
+  setAttentive(attentive: boolean): void {
+    this.attentive = attentive
     this.reportPresence()
   }
 
@@ -685,8 +720,9 @@ export class WebChatSession {
    */
   private reportPresence(): void {
     this.clearPresenceRefresh()
-    this.ws.send(presenceFrame(this.active ? 'foreground' : 'background'))
-    if (this.active) this.armPresenceRefresh()
+    const present = this.active && this.attentive
+    this.ws.send(presenceFrame(present ? 'foreground' : 'background'))
+    if (present) this.armPresenceRefresh()
   }
 
   /**
@@ -703,10 +739,18 @@ export class WebChatSession {
    * about to be pointlessly notified about.
    */
   private armPresenceRefresh(): void {
-    if (this.presenceRefreshMs <= 0) return
+    // `Number.isFinite` FIRST, and it is not belt-and-braces. `NaN <= 0` is
+    // `false`, so a NaN refresh sails past the disable check into `setTimeout`,
+    // which coerces NaN to 0 — and because this timer re-arms itself from its own
+    // callback, the result is not a fast timer but an unbounded loop of presence
+    // frames, one per event-loop turn, for as long as the tab is open. The server
+    // twin (`createWebPresenceTracker`'s `ttl_ms`) already refuses a non-finite
+    // value for the mirror-image reason; this is the same guard on the same
+    // number at the other end of the wire.
+    if (!Number.isFinite(this.presenceRefreshMs) || this.presenceRefreshMs <= 0) return
     this.presenceHandle = this.setTimeoutFn(() => {
       this.presenceHandle = null
-      if (!this.active) return
+      if (!this.active || !this.attentive) return
       if (this.ws.getStatus() !== 'open') return
       this.ws.send(presenceFrame('foreground'))
       this.armPresenceRefresh()

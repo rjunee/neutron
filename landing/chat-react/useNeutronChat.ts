@@ -19,6 +19,7 @@ import {
 import type { ChatViewModel, NeutronChatController, RenderMessage } from './controller.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import { toThreadMessage } from './message-adapter.ts'
+import { observeWebAttention } from './web-attention.ts'
 
 /** Pull the plain text out of an assistant-ui AppendMessage's content parts. */
 export function extractText(message: AppendMessage): string {
@@ -81,9 +82,22 @@ export function useNeutronChatVm(controller: NeutronChatController): ChatViewMod
     // once. Cheap and idempotent — the session re-declares on every open anyway,
     // and this only matters for the case where the optimistic default is wrong.
     onVisibility()
+    // Web presence — the ATTENTION half, kept separate from `setActive` above
+    // because they drive different machinery. `setActive` is the transport
+    // signal (heartbeat, reconnect); this one only decides whether the server is
+    // told the owner is looking, so an idle-but-open tab stays connected and
+    // simply stops silencing his phone. `observeWebAttention` emits once
+    // immediately, which is what corrects the session's optimistic default for a
+    // tab that mounted unfocused.
+    const stopAttention = observeWebAttention({
+      doc: document,
+      win: window,
+      onChange: (attentive) => controller.setAttentive(attentive),
+    })
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('online', onOnline)
+      stopAttention()
       unsub()
       controller.stop()
     }

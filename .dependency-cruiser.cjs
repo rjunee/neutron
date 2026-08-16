@@ -120,6 +120,28 @@ module.exports = {
       to: { path: [...L.platform, ...L.services, ...L.product, ...L.composition] },
     },
     {
+      name: 'chat-core-imports-wire-types-as-types-only',
+      comment:
+        'chat-core may import @neutronai/wire-types ONLY as a TYPE. A runtime ' +
+        '(value) import puts wire-types into the browser bundle graph through ' +
+        "chat-core's own node_modules link, and Bun.build then intermittently " +
+        'fails the whole /chat-react.js bundle with "No matching export" for ' +
+        'exports that are plainly there — but only inside a loaded multi-file ' +
+        'bun test process, never in isolation. The web chat client 404s when that ' +
+        'build fails, so this is a production outage, not a test annoyance. It was ' +
+        'hit for real on 2026-08-15 wiring web presence (chat-core/web-session.ts ' +
+        'mirrors WEB_PRESENCE_REFRESH_MS as a literal for exactly this reason). ' +
+        'Both modules sit in the `contracts` band, so `contracts-are-leaves` ' +
+        'cannot see this edge — it only forbids importing UPWARD, and this one is ' +
+        'sideways. The bundle-build test is the other half of the guard and is ' +
+        'admittedly non-deterministic; THIS rule is the deterministic half. ' +
+        'Fix by importing the type with `import type`, or by mirroring the value ' +
+        'and pinning the two with an equality assertion in a test.',
+      severity: 'error',
+      from: { path: '^chat-core', pathNot: TEST },
+      to: { path: '^wire-types', dependencyTypesNot: ['type-only'] },
+    },
+    {
       name: 'platform-stays-low',
       comment: 'Platform (runtime, cron, tools, channels, auth, project-credentials) ' +
         'must not import services/product/composition.',

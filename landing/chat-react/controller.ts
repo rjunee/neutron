@@ -239,6 +239,10 @@ export interface ControllerSession {
   start(): void
   stop(): void
   setActive(active: boolean): void
+  /** Web presence (2026-08-15) — is the owner actively USING the tab, as opposed
+   *  to merely having it un-hidden? Presence only; touches no transport state
+   *  (optional so legacy fakes still satisfy the interface). */
+  setAttentive?(attentive: boolean): void
   /** W5 GAP-2 — network-reachability signal: reset backoff + reconnect NOW
    *  (optional so legacy fakes still satisfy the interface). */
   notifyReachable?(): void
@@ -433,6 +437,9 @@ export class NeutronChatController {
    *  started/active state as the one it replaced. */
   private started = false
   private activeState = true
+  /** Web presence — see {@link setAttentive}. Optimistic `true`, corrected by
+   *  `landing/chat-react/web-attention.ts` on the first observation after mount. */
+  private attentiveState = true
   private msgs: ChatMessage[] = []
   /** message_id → accumulated streaming text (not yet persisted). */
   private readonly streaming = new Map<string, StreamEntry>()
@@ -637,6 +644,21 @@ export class NeutronChatController {
   }
 
   /**
+   * Web presence — the owner is (or is no longer) actively using this tab.
+   *
+   * Held on the controller as well as fanned to the cache, because a project
+   * switch builds a NEW session (`sessionForProject` below) and that session
+   * would otherwise start life declaring `foreground` on its fresh socket while
+   * the owner is away — re-silencing his phone by switching tabs. `setActive`
+   * has always been replayed onto a switched-in session for the same reason;
+   * this is that invariant extended to the signal that now rides beside it.
+   */
+  setAttentive(attentive: boolean): void {
+    this.attentiveState = attentive
+    this.sessionCache.setAttentive(attentive)
+  }
+
+  /**
    * W5 GAP-2 — the browser regained connectivity (`online` event). Forward to the
    * session so it resets its reconnect backoff and reconnects immediately instead
    * of waiting out the dead-air backoff. A no-op against a legacy fake session that
@@ -739,6 +761,11 @@ export class NeutronChatController {
     if (this.started) {
       this.session.start()
       this.session.setActive(this.activeState)
+      // Web presence — replay attention onto the switched-in session too. Without
+      // this, switching projects while the owner is away would hand the new
+      // socket the optimistic `attentive = true` default and silence his phone
+      // for the newly-opened conversation.
+      this.session.setAttentive?.(this.attentiveState)
     }
     // Publish the empty/scoped VM immediately (instant switch feel), then
     // hydrate the new topic's durable transcript.

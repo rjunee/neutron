@@ -2,6 +2,84 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — web presence, round two: the docblock described a protection the code did not have
+
+Follow-up to #305. Review found six things worth fixing, and the two that mattered most were both
+cases of a claim that read as verified and was not.
+
+**THE SAFETY CONTRACT WAS ASSERTED IN THREE PLACES AND TRUE IN NONE OF THEM.** The wrapper's
+docblock, `docs/SYSTEM-OVERVIEW.md`, and the round-1 as-built entry all said the same thing: a
+suppressed push answers `false`, so the durable row is not stamped `delivered_at`, so a later
+idempotent re-emit is still free to buzz. The stamp condition is
+`if (durability === 'reply' && (notified || delivered)) await stampDelivered(...)` — **two arms**.
+The wrapper only controls `notified`; `delivered` is the live socket fan-out and stamps on its own.
+📌 **This is rule 3a with an unusually convincing disguise: the docblock was not describing an
+intended MODE, it was describing a real mechanism and stopping one operand short of the truth.** A
+half-read boolean expression reads exactly like a whole one, and the half that was read was the half
+the author had just written.
+
+**NO TEST COULD HAVE CAUGHT IT, BECAUSE THE SEAM BELONGED TO NEITHER SUITE.**
+`gateway/push/web-presence.test.ts` asserted `wrapped(...) === false`; `gateway/http/__tests__/deliver.test.ts`
+asserted the row stamps when the owner is reached. Both green, both correct, and the sentence that
+joined them was fiction. The fix is `gateway/http/__tests__/deliver-web-presence.test.ts`, which drives
+`deliver` and the wrapper together over a real `ButtonStore`. 📌 **When a property is stated as "A
+implies B" and A and B live in different modules, the assertion belongs in a third file — otherwise
+each suite proves its own half and the implication is the untested part.**
+
+**THE ACTUAL BUG UNDERNEATH WAS THE ONE NOBODY WOULD EVER REPORT: suppression was GLOBAL.**
+`isForeground(OWNER_USER_ID)` carried no scope, so a single tab open on any project silenced the
+phone for **every other conversation** for as long as it stayed open — and because nothing was
+delivered live to those other chats, nothing was stamped either, so it was not even a delayed alert.
+Just quiet. The socket already knew its own project (`gateway/http/app-ws-surface.ts` captures
+`project_id` at upgrade and a web client reconnects to switch projects), and that field was in scope at
+the recording call site and dropped. Presence is now keyed by conversation, which is the same
+distinction `app/lib/push-foreground-policy.ts` draws on the phone — the two policies were documented
+as "composing cleanly" while contradicting each other.
+
+📌 **And scoping is what makes the stamp honest, which is why the two findings were one.** Suppression
+now requires a tab foregrounded on the message's OWN chat — the same socket the fan-out just delivered
+to — so `delivered: true` and "it is on his screen" became two readings of one fact. The dangerous
+combination (suppressed AND not delivered live) is exactly what the global check manufactured.
+
+**"VISIBLE" WAS NEVER "ACTIVELY USING", AND THE GAP IS THE NORMAL RESTING STATE OF A CHAT TAB.** The
+owner asked about *actively using*; the implementation read `document.visibilityState`. A window parked
+on a second monitor is `visible` all day, so it re-declared `foreground` every twenty seconds forever
+and the TTL never fired — the expiry protected against a browser that DIED, not against a live one at
+rest. `landing/chat-react/web-attention.ts` now requires visible AND focused AND interacted-within-5-min.
+The idle bound is a poll rather than a listener because **nothing in the DOM fires an event when a human
+stops doing something**.
+
+The signal is deliberately NOT folded into `setActive`: that one is the transport (heartbeat, reconnect),
+so collapsing them would tear down the socket of a tab sitting there waiting for the very message the
+feature exists for. An inattentive tab stays connected; only the phone changes behaviour.
+
+**A WALL CLOCK MAKES AN EXPIRY OPTIONAL.** The TTL is a subtraction, so a backward NTP step or a
+suspend/resume made `now - at` negative, no entry ever satisfied `>= ttl`, and "expires after a minute"
+silently became "believed until the process dies" — the exact permanent silence the TTL exists to
+prevent, reintroduced by its own clock. Now `performance.now()`, plus a negative-delta branch that
+expires rather than trusts.
+
+**TWO TESTS PROVED LESS THAN THEIR NAMES CLAIMED.** The boundedness test asserted the map cannot grow
+by calling `size()` — which performs the very prune it was verifying, so it demonstrated that reading
+prunes and nothing about the bound. Writes now prune too, and the test drives a thousand writes without
+a single read. The reconnect test asserted `sockets.length > 1`, which passes for any number of
+accidental reconnects while inspecting only the last. 📌 **A test whose assertion is satisfied by the
+mechanism it is testing is not a weak test, it is a tautology with a good name.**
+
+**AND THE INVARIANT THAT WAS PROSE IS NOW A GATE.** Round 1 discovered that a runtime import from
+`chat-core` to `wire-types` intermittently breaks the `/chat-react.js` browser bundle, and defended it
+with a comment plus a non-deterministic build test. Both modules sit in the same dependency-cruiser
+band, so `contracts-are-leaves` could never see that edge — it only forbids importing UPWARD, and this
+one is sideways. A `dependencyTypesNot: ['type-only']` rule now fails CI on it deterministically;
+mutation-tested in both directions.
+
+**WIRING GUARDS, because the round-1 suite would have stayed green with the feature deleted.** Removing
+`web_presence` from `open/wiring/app-ws.ts` failed nothing; the tracker was supplied to the wiring test
+and never read. Four tests now drive a real presence frame through the wired surface. The composer's
+sink construction moved out of the 6000-line file into `open/wiring/chat-push-sink.ts` for the same
+reason — while it was inline, "the wrapper is applied" and "the question is per-conversation" were
+reachable only by booting the whole composer. Both mutations verified to red.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset

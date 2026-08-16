@@ -390,6 +390,107 @@ describe('wireAppWs — recovered-reply drain on reconnect (O6)', () => {
 })
 
 /**
+ * Web presence — the WIRING, not the tracker.
+ *
+ * `gateway/push/web-presence.test.ts` proves the tracker records what it is told;
+ * this proves anything is ever telling it. Those are different claims, and the
+ * gap between them is the shape of the persona-gen incident: a module that
+ * exists, is correct, is tested, and is never composed. Before these tests
+ * `buildDeps()` supplied a tracker that nothing in the suite ever read, so
+ * deleting `web_presence: webPresence` from `open/wiring/app-ws.ts` left every
+ * test green and the feature silently off.
+ *
+ * So each test drives a real presence FRAME through the wired surface and reads
+ * the tracker afterwards. There is no way to pass them with the wiring removed.
+ */
+describe('wireAppWs — the web-presence wiring is live', () => {
+  /** A socket the surface will accept a presence frame from. */
+  function presenceWs(over: {
+    platform?: string
+    project_id?: string
+    conn_id?: string
+  } = {}): ReturnType<typeof fakeOpenWs> {
+    const ws = fakeOpenWs('app:owner') as unknown as { data: Record<string, unknown> }
+    ws.data['platform'] = over.platform ?? 'web'
+    ws.data['conn_id'] = over.conn_id ?? 'conn-test-1'
+    if (over.project_id !== undefined) ws.data['project_id'] = over.project_id
+    return ws as unknown as ReturnType<typeof fakeOpenWs>
+  }
+
+  function send(
+    wired: ReturnType<typeof wireAppWs>,
+    ws: ReturnType<typeof fakeOpenWs>,
+    frame: unknown,
+  ): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    void (wired.appWsSurface.websocket.message as any)(ws, JSON.stringify(frame))
+  }
+
+  test('a foreground frame from a WEB socket reaches the tracker the composer reads', () => {
+    const { deps } = buildDeps()
+    const presence = createWebPresenceTracker()
+    const wired = wireAppWs(buildCtx(), { ...deps, webPresence: presence })
+    const ws = presenceWs()
+
+    expect(presence.isForeground('owner', null)).toBe(false) // control: nothing yet
+    send(wired, ws, { v: 1, type: 'presence', state: 'foreground' })
+    expect(presence.isForeground('owner', null)).toBe(true)
+  })
+
+  test("…and it lands on THE SOCKET'S project, not globally", () => {
+    const { deps } = buildDeps()
+    const presence = createWebPresenceTracker()
+    const wired = wireAppWs(buildCtx(), { ...deps, webPresence: presence })
+
+    send(wired, presenceWs({ project_id: 'proj-a' }), {
+      v: 1,
+      type: 'presence',
+      state: 'foreground',
+    })
+
+    expect(presence.isForeground('owner', 'proj-a')).toBe(true) // control
+    expect(presence.isForeground('owner', 'proj-b')).toBe(false)
+    expect(presence.isForeground('owner', null)).toBe(false)
+  })
+
+  test('a background frame clears it', () => {
+    const { deps } = buildDeps()
+    const presence = createWebPresenceTracker()
+    const wired = wireAppWs(buildCtx(), { ...deps, webPresence: presence })
+    const ws = presenceWs()
+
+    send(wired, ws, { v: 1, type: 'presence', state: 'foreground' })
+    expect(presence.isForeground('owner', null)).toBe(true) // control
+    send(wired, ws, { v: 1, type: 'presence', state: 'background' })
+    expect(presence.isForeground('owner', null)).toBe(false)
+  })
+
+  test('a NATIVE socket is ignored — its foreground is the device policy question', () => {
+    // A phone holds its socket open while backgrounded. Honouring its foreground
+    // here would suppress exactly the notification that exists for that case.
+    const { deps } = buildDeps()
+    const presence = createWebPresenceTracker()
+    const wired = wireAppWs(buildCtx(), { ...deps, webPresence: presence })
+
+    send(wired, presenceWs({ platform: 'native', conn_id: 'conn-native' }), {
+      v: 1,
+      type: 'presence',
+      state: 'foreground',
+    })
+    expect(presence.isForeground('owner', null)).toBe(false)
+
+    // Control on the SAME harness, so "nothing recorded" cannot be an artefact of
+    // the frame never arriving at all.
+    send(wired, presenceWs({ platform: 'web', conn_id: 'conn-web' }), {
+      v: 1,
+      type: 'presence',
+      state: 'foreground',
+    })
+    expect(presence.isForeground('owner', null)).toBe(true)
+  })
+})
+
+/**
  * ISSUES #40 — the PRODUCTION owner-timezone WRITE path exercised end-to-end
  * through the REAL `wireAppWs` seam: the composer binds `on_client_timezone` to
  * `persistOwnerTimezoneIfChanged(db, project_slug, tz)`, and the app-ws surface
