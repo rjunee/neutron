@@ -1,0 +1,16 @@
+# AS_BUILT.md is an append-only log: every change adds an entry at the top, so
+# two open PRs conflict by construction rather than by subject. Every resolution
+# has been the same mechanical "keep both" — five rebases in one evening across
+# four unrelated PRs at the worst of it, which is what motivated the (now
+# reversed) one-file-per-entry split.
+#
+# `union` is git's built-in driver for exactly this shape: it takes both sides of
+# a conflicting hunk instead of raising. Verified with a control before landing —
+# the same two-branch merge conflicts without this line and resolves with it,
+# both entries intact.
+#
+# It is correct here ONLY because the file is append-only. Union NEVER reports a
+# conflict, so a change that genuinely rewrites existing lines gets silently
+# doubled rather than flagged. A restructuring pass over this file wants a real
+# review, not a merge driver.
+docs/AS_BUILT.md merge=union
