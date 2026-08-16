@@ -393,7 +393,13 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
     // inside the brief; it does not, and this is what says so.
     expect(assembled).not.toContain('.brief.a1')
     expect(assembled).not.toContain('.brief.a2')
-    partsList.forEach((p, i) => expect(briefIntegrity(readFileSync(local(p), 'utf8'))).toBe(receipts[i]))
+    partsList.forEach((p, i) => {
+      // A missing receipt must fail LOUDLY, not compare a real integrity value
+      // against `undefined` and report it as a mismatched receipt.
+      const receipt = receipts[i]
+      if (receipt === undefined) throw new Error(`no receipt recorded for segment ${i}`)
+      expect(briefIntegrity(readFileSync(local(p), 'utf8'))).toBe(receipt)
+    })
     return { assembled, receipts, partsList }
   }
 
