@@ -1,0 +1,359 @@
+/**
+ * T3 — THE EXPLICIT MIGRATE ACTION, COLLISION-GUARDED (card 2026-08-14).
+ *
+ * Boot auto-migrates only the UNAMBIGUOUS case (T1); T2 made the ambiguous
+ * leftovers legible as `orphaned` instead of "not connected". This is the way
+ * OUT of them — and it must not become the data-loss bug the ambiguous branch
+ * exists to prevent. Quoting the card: "if a stale `dev` row and a freshly-
+ * connected `juno` row both exist for the same service, rewriting the stale one
+ * overwrites the new one." An EXPLICIT request does not make that acceptable,
+ * so every orphaned row whose UNIQUE slot is FREE under the boot handle moves
+ * and every row that would collide is SKIPPED and reported.
+ *
+ * THE CARD'S FAKE-TEST GUARDS, both of them:
+ *   - T3.1 asserts on the DECRYPTED VALUE of the colliding slot, not on a row
+ *     count: a migration that clobbered the fresh credential would still leave
+ *     exactly one row under the boot handle, so counting proves nothing.
+ *   - T3.1 also reads the NON-colliding secret back decrypted under the boot
+ *     handle. Stub the move to a noop and that assertion goes red — the
+ *     delete-the-migration mutation guard.
+ *
+ * Plus acceptance (c) — all three swept tables move — and (d): no plaintext or
+ * ciphertext in the result, the message, or the audit row (T3.2).
+ */
+
+import { afterEach, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import {
+  ProjectDb,
+  asOwnerHandle,
+  type OwnerHandle,
+  type SystemEventInput,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import type { ToolCallContext, ToolRegistration } from '@neutronai/tools/registry.ts'
+import { installBundledCores } from '../install-bundled.ts'
+import { OAuthTokenManager, GOOGLE_REVOKE_URL } from '../oauth-token-manager.ts'
+import { buildIntegrationsTools } from '../integrations-tools.ts'
+import {
+  buildIntegrationsStatus,
+  migrateOrphanedCredentials,
+  MIGRATE_ORPHANED_ACTION,
+  type MigrateOrphanedCredentialsResult,
+} from '../integrations.ts'
+
+const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
+/** The handle this process "boots" as. */
+const BOOT = asOwnerHandle('juno-test')
+/** The pre-provisioning handle the stale rows were frozen under. */
+const STALE = asOwnerHandle('dev-old')
+
+/** The FRESH credential occupying the `tavily` slot under BOOT — must survive. */
+const FRESH = 'tvly-FRESH-must-survive'
+/** The STALE twin of that slot — must NOT overwrite FRESH. */
+const STALE_VAL = 'tvly-STALE-must-not-win'
+/** A stale-only secret with a free slot — must move and read back. */
+const OTHER = 'other-key-plaintext-must-move'
+/** Filler for the `project_credentials` ciphertext column; never decrypted. */
+const CREDENTIAL_CIPHERTEXT = 'Y2lwaGVydGV4dC1maWxsZXItZG8tbm90LWxlYWs='
+
+const CTX: ToolCallContext = {
+  project_slug: BOOT,
+  project_id: null,
+  topic_id: null,
+  call_id: 'call-1',
+  speaker_user_id: null,
+}
+
+const cleanups: Array<() => void | Promise<void>> = []
+afterEach(async () => {
+  while (cleanups.length > 0) await cleanups.pop()!()
+})
+
+async function makeBench() {
+  const home = mkdtempSync(join(tmpdir(), 'neutron-integrations-migrate-'))
+  cleanups.push(() => rmSync(home, { recursive: true, force: true }))
+  const dbDir = join(home, 'db')
+  mkdirSync(dbDir, { recursive: true })
+  const dbPath = join(dbDir, 'owner.db')
+  const raw = new Database(dbPath, { create: true })
+  applyMigrations(raw)
+  raw.close()
+  const db = ProjectDb.open(dbPath)
+  cleanups.push(() => db.close())
+  const secrets = new SecretsStore({ data_dir: home, db })
+  const tools = new ToolRegistry()
+  const cores = await installBundledCores({
+    project_slug: BOOT,
+    projectDb: db,
+    dataDir: home,
+    tools,
+    secretsStore: secrets,
+    rootDirs: [REPO_ROOT],
+  })
+  const fakeFetch = (async (input: string | URL | Request) => {
+    const url = typeof input === 'string' ? input : input.toString()
+    if (url.startsWith(GOOGLE_REVOKE_URL)) return new Response('{}', { status: 200 })
+    return new Response('not found', { status: 404 })
+  }) as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+  const tokens = new OAuthTokenManager({
+    secretsStore: secrets,
+    owner_handle: BOOT,
+    client_id: 'cid',
+    client_secret: 'csecret',
+    fetch: fakeFetch,
+  })
+  return { home, db, secrets, tokens, registry: cores.registry }
+}
+
+/**
+ * Seed a `byo_api_key` secret under `owner`. The SecretsStore keys on the
+ * handle, so this is exactly how a row ends up frozen under a stale one.
+ */
+async function seedSecret(
+  secrets: SecretsStore,
+  owner: OwnerHandle,
+  label: string,
+  plaintext: string,
+): Promise<void> {
+  await secrets.put({ owner_handle: owner, kind: 'byo_api_key', label, plaintext })
+}
+
+/** Raw `project_credentials` insert (its store lives in another package). */
+async function seedProjectCredential(db: ProjectDb, owner_slug: string): Promise<void> {
+  await db.run(
+    `INSERT INTO project_credentials
+       (id, owner_slug, project_id, scope, service, ciphertext, label, created_at, updated_at, expires_at)
+     VALUES (?, ?, '', 'global', 'codex', ?, NULL, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z', NULL)`,
+    [`${owner_slug}-codex`, owner_slug, CREDENTIAL_CIPHERTEXT],
+  )
+}
+
+/** Raw `api_keys` metadata insert — the BYO read path keys off ITS project_slug. */
+async function seedApiKeyRow(db: ProjectDb, project_slug: string): Promise<void> {
+  await db.run(
+    `INSERT INTO api_keys (id, project_slug, provider, label, secret_id, added_at, last_used_at)
+     VALUES (?, ?, 'openai', 'onboarding', ?, 1755100000000, NULL)`,
+    [`${project_slug}-openai`, project_slug, `${project_slug}-secret-id`],
+  )
+}
+
+/** The stored ciphertext of one `secrets` row, addressed by (handle, label). */
+function ciphertextOf(db: ProjectDb, handle: string, label: string): string | null {
+  const row = db.get<{ ciphertext: string }, [string, string]>(
+    "SELECT ciphertext FROM secrets WHERE project_slug = ? AND kind = 'byo_api_key' AND label = ?",
+    [handle, label],
+  )
+  return row === null ? null : row.ciphertext
+}
+
+function countSecrets(db: ProjectDb, handle: string, label: string): number {
+  const row = db.get<{ n: number }, [string, string]>(
+    'SELECT count(*) AS n FROM secrets WHERE project_slug = ? AND label = ?',
+    [handle, label],
+  )
+  return row === null ? 0 : row.n
+}
+
+function byName(tools: ToolRegistration[], name: string): ToolRegistration {
+  const t = tools.find((x) => x.name === name)
+  if (t === undefined) throw new Error(`tool ${name} not built`)
+  return t
+}
+
+/** Fake sink capturing every journaled event (see `SystemEventSink`). */
+function fakeSink(): { sink: SystemEventSink; captured: SystemEventInput[] } {
+  const captured: SystemEventInput[] = []
+  return {
+    captured,
+    sink: {
+      record: (e: SystemEventInput) => {
+        captured.push(e)
+        return { id: 'x' }
+      },
+    },
+  }
+}
+
+/**
+ * The T3.1 fixture: one COLLIDING slot (`tavily` under both handles) plus three
+ * stale-only rows with free slots, one in each swept table.
+ */
+async function seedAmbiguous(b: { db: ProjectDb; secrets: SecretsStore }): Promise<void> {
+  await seedSecret(b.secrets, BOOT, 'tavily', FRESH)
+  await seedSecret(b.secrets, STALE, 'tavily', STALE_VAL)
+  await seedSecret(b.secrets, STALE, 'other_key', OTHER)
+  await seedProjectCredential(b.db, STALE)
+  await seedApiKeyRow(b.db, STALE)
+}
+
+// ── T3.1 THE ROTATION HAZARD, ASSERTED ON THE VALUE ───────────────────────
+test('the explicit migrate moves free slots across all three tables and never clobbers a fresh credential', async () => {
+  const b = await makeBench()
+  await seedAmbiguous(b)
+
+  // Pinned BEFORE the move: a re-scope is a metadata move, so these bytes must
+  // come out identical (the crypto binds no AAD — nothing is re-encrypted).
+  const otherCiphertextBefore = ciphertextOf(b.db, STALE, 'other_key')
+  expect(otherCiphertextBefore).not.toBeNull()
+
+  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT })
+
+  // (i) THE POINT: the FRESH value still occupies the slot. A clobbering
+  // migration would also leave exactly one row here — only the decrypted value
+  // tells the two apart.
+  expect(
+    await b.secrets.get({ owner_handle: BOOT, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBe(FRESH)
+
+  // (ii) …and the colliding stale row is still sitting under STALE, untouched,
+  // for the owner to reconnect or disconnect deliberately.
+  expect(countSecrets(b.db, STALE, 'tavily')).toBe(1)
+
+  // (iii) THE MUTATION GUARD: the non-colliding stale secret is now readable
+  // under the BOOT handle and decrypts to its original plaintext. Stub the move
+  // to a noop and this line goes red.
+  expect(
+    await b.secrets.get({ owner_handle: BOOT, kind: 'byo_api_key', label: 'other_key' }),
+  ).toBe(OTHER)
+
+  // (iv) acceptance (c): EVERY swept table moves, not just `secrets`.
+  expect(
+    b.db.get<{ owner_slug: string }, []>(
+      "SELECT owner_slug FROM project_credentials WHERE service = 'codex'",
+      [],
+    )?.owner_slug,
+  ).toBe(BOOT)
+  expect(
+    b.db.get<{ project_slug: string }, []>(
+      "SELECT project_slug FROM api_keys WHERE provider = 'openai' AND label = 'onboarding'",
+      [],
+    )?.project_slug,
+  ).toBe(BOOT)
+
+  // (v) the skip is REPORTED, not silent — and the three free slots all moved.
+  expect(result.skipped).toEqual([{ table: 'secrets', handle: STALE, rows: 1 }])
+  expect(result.total_skipped).toBe(1)
+  expect(result.total_moved).toBe(3)
+  expect(result.moved).toContainEqual({ table: 'secrets', rows: 1 })
+  expect(result.moved).toContainEqual({ table: 'project_credentials', rows: 1 })
+  expect(result.moved).toContainEqual({ table: 'api_keys', rows: 1 })
+  expect(result.stale_handles).toEqual([STALE])
+  expect(result.message).toContain('Skipped 1 row(s)')
+
+  // (vi) metadata move, not a re-encrypt: byte-identical ciphertext.
+  expect(ciphertextOf(b.db, BOOT, 'other_key')).toBe(otherCiphertextBefore)
+})
+
+// ── T3.2 AUDIT ROW + NO SECRET MATERIAL (acceptance (d)) ──────────────────
+test('the migration journals credential_scope_migrated with counts only — no secret material anywhere', async () => {
+  const b = await makeBench()
+  await seedAmbiguous(b)
+  const { sink, captured } = fakeSink()
+
+  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, sink })
+
+  expect(captured).toHaveLength(1)
+  const event = captured[0]!
+  expect(event.event).toBe('credential_scope_migrated')
+  expect(event.project_slug).toBe(BOOT)
+  expect(event.payload).toEqual({
+    from: [STALE],
+    tables: result.moved,
+    skipped: result.skipped,
+  })
+
+  const journaled = JSON.stringify(event)
+  const returned = JSON.stringify(result)
+  for (const secret of [FRESH, STALE_VAL, OTHER, CREDENTIAL_CIPHERTEXT]) {
+    expect(journaled).not.toContain(secret)
+    expect(returned).not.toContain(secret)
+  }
+  // …and no envelope fragment either (the ciphertext column is never SELECTed).
+  expect(journaled).not.toContain('iv_b64')
+  expect(returned).not.toContain('iv_b64')
+})
+
+// ── T3.3 NOOP WHEN THERE IS NOTHING TO MOVE ───────────────────────────────
+test('with every row already on the boot handle the migration moves nothing and journals nothing', async () => {
+  const b = await makeBench()
+  await seedSecret(b.secrets, BOOT, 'tavily', FRESH)
+  await seedProjectCredential(b.db, BOOT)
+  await seedApiKeyRow(b.db, BOOT)
+  const { sink, captured } = fakeSink()
+
+  const result = await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT, sink })
+
+  expect(result.total_moved).toBe(0)
+  expect(result.moved).toEqual([])
+  expect(result.skipped).toEqual([])
+  expect(result.stale_handles).toEqual([])
+  expect(result.message).toBe('No credential rows are scoped to a previous owner handle.')
+  expect(captured).toHaveLength(0)
+  // Nothing was disturbed.
+  expect(
+    await b.secrets.get({ owner_handle: BOOT, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBe(FRESH)
+})
+
+// ── T3.4 THE TOOL SURFACE IS THE ACTION THE STATUS NAMES ──────────────────
+test('integrations_migrate_orphaned is registered under the advertised name and really migrates', async () => {
+  const b = await makeBench()
+  await seedSecret(b.secrets, STALE, 'other_key', OTHER)
+
+  const built = buildIntegrationsTools({
+    registry: b.registry,
+    tokens: b.tokens,
+    secretsStore: b.secrets,
+    project_slug: BOOT,
+    db: b.db,
+    startOAuth: async (labels: string[]) => ({
+      ok: true as const,
+      authorize_url: `https://accounts.google.com/o/oauth2/v2/auth?labels=${labels.join(',')}`,
+      state: 'st-1',
+      expires_at: 0,
+    }),
+  })
+  const tool = byName(built, MIGRATE_ORPHANED_ACTION)
+  // A write the owner must consent to — never `auto`.
+  expect(tool.approval_policy).toBe('prompt-user')
+  expect(tool.capability_required).toBe('write:project_data')
+
+  const out = (await tool.handler({}, CTX)) as MigrateOrphanedCredentialsResult
+  expect(out.ok).toBe(true)
+  expect(out.total_moved).toBe(1)
+  expect(
+    await b.secrets.get({ owner_handle: BOOT, kind: 'byo_api_key', label: 'other_key' }),
+  ).toBe(OTHER)
+})
+
+// ── T3.5 THE STATUS SURFACE CLOSES THE LOOP ───────────────────────────────
+test('after migrating, the status reports ONLY the skipped colliding row as orphaned', async () => {
+  const b = await makeBench()
+  await seedAmbiguous(b)
+  await migrateOrphanedCredentials({ db: b.db, project_slug: BOOT })
+
+  const status = await buildIntegrationsStatus({
+    registry: b.registry,
+    tokens: b.tokens,
+    secretsStore: b.secrets,
+    project_slug: BOOT,
+    db: b.db,
+  })
+
+  const summary = status.orphaned_credentials
+  expect(summary).not.toBeNull()
+  expect(summary!.total_rows).toBe(1)
+  expect(summary!.tables).toEqual([{ table: 'secrets', handle: STALE, rows: 1 }])
+  // The slot the fresh credential won reads plainly connected, not orphaned.
+  const tavily = status.api_keys.find((k) => k.label === 'tavily')
+  expect(tavily?.connected).toBe(true)
+  expect(tavily?.orphaned).toBe(false)
+})

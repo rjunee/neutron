@@ -17,6 +17,9 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  *     NO Google OAuth client wired.
  *   - DELETE /api/cores/api-keys/<label> clears it.
  *   - unknown label → 400; missing bearer → 401.
+ *   - POST /api/cores/integrations/migrate-orphaned moves credential rows off a
+ *     previous owner handle (T3, card 2026-08-14) — auth-gated like the rest,
+ *     and 405 on a non-POST.
  */
 
 import { afterEach, expect, test } from 'bun:test'
@@ -83,6 +86,9 @@ async function makeBench() {
     registry: cores.registry,
     tokens,
     secretsStore: secrets,
+    // Threaded exactly as `wireCoresSurfaces` wires it in production — the
+    // migrate-orphaned route needs the credential tables.
+    db,
     project_slug: OWNER,
     auth,
   })
@@ -91,7 +97,7 @@ async function makeBench() {
     fetch: async (req) => (await surface.handler(req)) ?? new Response('nf', { status: 404 }),
   })
   cleanups.push(() => server.stop(true).then(() => undefined))
-  return { secrets, base: `http://127.0.0.1:${server.port}` }
+  return { secrets, db, base: `http://127.0.0.1:${server.port}` }
 }
 
 function authed(base: string, path: string, init: RequestInit = {}): Promise<Response> {
@@ -204,4 +210,46 @@ test('GET /api/cores/integrations without bearer returns 401', async () => {
   const b = await makeBench()
   const res = await fetch(`${b.base}/api/cores/integrations`)
   expect(res.status).toBe(401)
+})
+
+// ── T3.6 the migrate-orphaned route (card 2026-08-14) ─────────────────────
+const MIGRATE_PATH = '/api/cores/integrations/migrate-orphaned'
+/** The pre-provisioning handle the seeded row is frozen under. */
+const STALE_HANDLE = asOwnerHandle('dev-old')
+
+test('POST /api/cores/integrations/migrate-orphaned without bearer returns 401', async () => {
+  const b = await makeBench()
+  const res = await fetch(`${b.base}${MIGRATE_PATH}`, { method: 'POST' })
+  expect(res.status).toBe(401)
+})
+
+test('authed POST /api/cores/integrations/migrate-orphaned moves rows off the previous handle', async () => {
+  const b = await makeBench()
+  // Same store, a DIFFERENT handle — exactly how a pre-provisioning row is
+  // frozen out of reach of this instance.
+  await b.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+
+  const res = await authed(b.base, MIGRATE_PATH, { method: 'POST' })
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as { ok: boolean; total_moved: number; message: string }
+  expect(body.ok).toBe(true)
+  expect(body.total_moved).toBeGreaterThanOrEqual(1)
+  // The row is now readable under THIS instance's handle — and no plaintext
+  // rode back out on the response.
+  expect(
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBe('tvly-stale')
+  expect(JSON.stringify(body)).not.toContain('tvly-stale')
+})
+
+test('GET /api/cores/integrations/migrate-orphaned returns 405 (POST-only mutation)', async () => {
+  const b = await makeBench()
+  const res = await authed(b.base, MIGRATE_PATH)
+  expect(res.status).toBe(405)
+  expect((await res.json() as { code: string }).code).toBe('method_not_allowed')
 })
