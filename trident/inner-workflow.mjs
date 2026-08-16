@@ -1178,7 +1178,12 @@ function forgePushStep(reenter) {
 const FORGE_PR_LINE = isPr ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
 // `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
-function forgeBuildContract(reenter) {
+function forgeBuildContract(reenter, artifactCheckpointName) {
+  const artifactCommand = artifactCheckpointCommand(artifactCheckpointName)
+  const artifactStep = artifactCommand === null
+    ? ''
+    : `\n6. DURABILITY CHECKPOINT — the INSTANT your commit is in and the diff file is written, run EXACTLY this single Bash command, verbatim (idempotent; it must NOT fail your build — if it errors, ignore the error and continue): ${artifactCommand}`
+  const reportStep = artifactCommand === null ? 6 : 7
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
@@ -1188,8 +1193,8 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
-6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
+5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -1824,6 +1829,12 @@ ${plan.implementationPlan}
 // written the same way and for the same reason — always, so it is never stale —
 // through the temp-file + `readfile()` indirection `writeTerminalResult` uses, so
 // the JSON's own quotes cannot break the sqlite argument.
+function artifactCheckpointCommand(name) {
+  if (!dbPath || !runId) return null
+  const findingsTmp = `/tmp/trident-checkpoint-findings-${runId}.json`
+  return `printf '%s' '[]' > ${shSingleQuote(findingsTmp)} && bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} branch ${shSingleQuote(forgeBranch)} inner_checkpoint ${shSingleQuote(name)} inner_checkpoint_head "$(git rev-parse --verify HEAD)" inner_findings_file ${shSingleQuote(findingsTmp)} subagent_status running`
+}
+
 async function checkpoint(name, opts) {
   if (!dbPath || !runId) return
   const o = opts || {}
@@ -5449,7 +5460,7 @@ try {
     const forge = await forgeAgent(
       { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
       complexityTag,
-      `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
+      `${forgeBuildContract(resuming, 'forge-done')}${ralphNote}${reuseNote}
 
 TASK:
 ${task}${reflectionGuidance}`,
@@ -5737,7 +5748,7 @@ ${task}${reflectionGuidance}`,
     const fix = await forgeAgent(
       { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree' },
       complexityTag,
-      `${forgeBuildContract(true)}
+      `${forgeBuildContract(true, `fix-round-${round}`)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). Commit on the SAME local branch; ${isPr ? 'the durable outer loop publishes after you exit, so do not push or run `gh`.' : 'there is no remote and no PR.'} Address every BLOCKER + important finding, run tests until green, commit locally, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):

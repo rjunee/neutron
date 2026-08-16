@@ -212,6 +212,17 @@ const LARGE_TASK = [
 const forgeBuildPrompt = (captured: Captured[]): string =>
   captured.find((c) => c.label === 'forge:build')?.prompt ?? ''
 
+describe('inner-workflow.mjs — artifact-time durability checkpoint', () => {
+  test('threads the semantic checkpoint names into round-one and fix-round contracts', async () => {
+    const { captured } = await runWorkflow('', { recordCheckpoints: true })
+    const roundOne = captured.find((c) => c.label === 'forge:build')?.prompt ?? ''
+    const fixRound = captured.find((c) => c.label === 'forge:fix-round-2')?.prompt ?? ''
+    const command = (name: string) => `printf '%s' '[]' > '/tmp/trident-checkpoint-findings-run-assembly-1.json' && bash '/repo/trident/checkpoint.sh' '/tmp/does-not-exist.db' 'run-assembly-1' branch 'trident/test-run' inner_checkpoint '${name}' inner_checkpoint_head "$(git rev-parse --verify HEAD)" inner_findings_file '/tmp/trident-checkpoint-findings-run-assembly-1.json' subagent_status running`
+    expect(roundOne).toContain(command('forge-done'))
+    expect(fixRound).toContain(command('fix-round-2'))
+  })
+})
+
 describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
   const taskParts = (task = LARGE_TASK) => ({
     taskFile: '/tmp/t.part',

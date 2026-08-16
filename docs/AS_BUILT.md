@@ -365,6 +365,15 @@ can still only ever disable the fast-fail.
 Recorded because the review lane that raised the first of these had itself timed
 out on the previous round: a mandatory reviewer that did not RUN is not a pass,
 and the finding it was carrying turned out to be real.
+## 2026-08-16 — Forge checkpoints at artifact time
+
+Forge and fix-round contracts now write their existing semantic checkpoint through
+`checkpoint.sh` immediately after the commit and reviewer diff land. The command
+records the branch, an empty findings set, and the real `HEAD` resolved by the
+agent's shell; the post-return checkpoint remains the authoritative re-stamp.
+This closes the measured 31-minute blind window in run 6f794290, where finished
+artifacts existed locally while the run row still looked dead. Dry workflows with
+no database path or run id omit the durability step entirely.
 
 ## 2026-08-16 — the guard that proved the gate runs accepted `|| true`
 
