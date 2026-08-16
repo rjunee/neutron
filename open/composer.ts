@@ -46,6 +46,7 @@ import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
 import { buildOpenInstallTokenHandler, buildReconnectHandoff } from './install-token-handoff.ts'
 import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-token-env.ts'
 import { buildLocalPlatformAdapter } from '@neutronai/runtime/platform-adapter-local.ts'
+import { buildTridentLauncherLivenessProbe } from './wiring/trident-launcher-liveness.ts'
 import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { resolveLandingStaticDir } from '@neutronai/gateway/wiring/build-landing-stack.ts'
@@ -6162,6 +6163,9 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: tridentOnRunTerminal,
+              // PULL launcher-death detection covers missed push events instead
+              // of leaving the lane occupied until the 90-minute reaper.
+              probe_launcher_alive: buildTridentLauncherLivenessProbe(),
               // EVERY host command a build makes carries the instance's GitHub
               // credential, resolved PER COMMAND. Without this line the whole
               // github/ module is code nothing calls: `build-core-modules.ts`

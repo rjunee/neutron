@@ -62,7 +62,13 @@ import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
-import { TridentTickLoop, type TridentTerminalHook, type TridentTransitionHook } from '@neutronai/trident/tick.ts'
+import {
+  TridentTickLoop,
+  type TridentDeadLauncherLatch,
+  type TridentLivenessProbe,
+  type TridentTerminalHook,
+  type TridentTransitionHook,
+} from '@neutronai/trident/tick.ts'
 import { stubAdvanceDeps } from '@neutronai/trident/state-machine.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
@@ -539,6 +545,19 @@ export function buildCoreModules(
         tridentWiring?.watch_interval_ms === undefined
           ? {}
           : { watch_interval_ms: tridentWiring.watch_interval_ms }
+      // The external signal observes the warm launcher, not the detached build.
+      // Route it through #267's durable crash latch so harvest-first continuation
+      // remains authoritative across gateway restarts.
+      const livenessOpt: {
+        probe_launcher_alive?: TridentLivenessProbe
+        latch_launcher_dead?: TridentDeadLauncherLatch
+      } =
+        tridentWiring?.probe_launcher_alive === undefined
+          ? {}
+          : {
+              probe_launcher_alive: tridentWiring.probe_launcher_alive,
+              latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
+            }
       let loop: TridentTickLoop
       // §F1 — the orchestrator's `drain()` (previously destructured away and
       // never called) settles every in-flight FIRE turn on shutdown. Captured
@@ -643,6 +662,7 @@ export function buildCoreModules(
           on_terminal,
           ...transitionOpt,
           ...watchOpt,
+          ...livenessOpt,
         })
         drain = orchestrator.drain
       } else {
@@ -652,12 +672,13 @@ export function buildCoreModules(
           on_terminal,
           ...transitionOpt,
           ...watchOpt,
+          ...livenessOpt,
         })
       }
       // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
-      // `describeAll`, not `describe`: trident owns TWO timers — the 90 s sweep and
-      // the 2 s wake-on-change watcher — and an unregistered timer is one the
-      // inventory reports as healthy by never mentioning it.
+      // `describeAll`, not `describe`: trident owns up to THREE timers — the 90 s sweep,
+      // the 2 s wake-on-change watcher, and the 15 s liveness probe — and an
+      // unregistered timer is one the inventory reports as healthy by never mentioning it.
       for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       loop.start()
       return drain !== undefined ? { store, loop, drain } : { store, loop }

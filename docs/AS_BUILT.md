@@ -434,6 +434,22 @@ cases. The reproduction and its mirror are both there on purpose — a gate that
 also failed a developer mid-edit on a file every clone still resolves correctly
 would be strictness, not correctness, so the committed-floor-intact-with-a-
 staged-deletion case asserts exit 0, with a real `git clone` as its control.
+## 2026-08-16 — dead Trident launchers are detected externally in seconds
+
+Trident now polls the recorded launcher generation every 15 seconds in the supervised
+`trident-liveness` loop. `probeLauncherGenerationAlive` checks the live persistent
+pool child first and its durable PID registry fallback; the production wiring derives
+both supervision-path candidates and reports ambiguity or unreadable state as
+`unknown`. Only a positive `dead` answer reaches the existing durable
+`TridentRunStore.crashRunningByLauncher` latch, with an honest `inner workflow
+launcher crashed:` reason.
+
+The launcher is shared infrastructure, not the detached build. Pull and push detection
+therefore converge on the same harvest-first, bounded continuation path: an already-written
+result wins, otherwise the next sweep releases and relaunches the lane from its checkpoint.
+A registry UPSERT can supersede an older generation before
+the probe sees it; that ambiguity remains `unknown` and the existing reaper is retained.
+`trident/liveness-death-e2e.test.ts` proves a stale but positively alive run is untouched.
 
 ## 2026-08-16 — two builds can append to this file at once
 
@@ -18215,4 +18231,3 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
-
