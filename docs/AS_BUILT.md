@@ -250,6 +250,8 @@ and the new fixture used a fraction the OLD code already rejected, so it
 discriminated nothing. Both fixed; the mutation test now replays both weaker
 guards, including the one that shipped.
 
+Landed via PR #330.
+
 **One more round, and the three findings it answered all share a shape: a value
 that MEANS "no constraint" was read as a constraint, and the gate then waited for
 something that could never arrive.**
