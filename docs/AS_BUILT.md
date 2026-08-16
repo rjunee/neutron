@@ -1109,6 +1109,7 @@ and turns it red with the production error. The parser round-trips this
 17,000-line file byte-for-byte — 300+ entries, four verbatim-duplicated headings
 and ten undated sections included — because a merge driver that cannot reproduce
 its own input is a corruption engine.
+
 ## 2026-08-16 — the staged-marker gate catches the bare separator
 
 The publish-path staged-byte scan (`stagedMarkerFiles` in `trident/orchestrator.ts`) matched

@@ -1113,7 +1113,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
-  test('a resolver that STAGES A FILE WITH THE MARKERS STILL IN IT never gets `<<<<<<<` onto the branch', async () => {
+  test('a resolver that stages a resolved .md with an outer marker still in it is REFUSED', async () => {
     // THE INDEX BIT IS NOT PROOF OF RESOLUTION. `git add <path>` clears the unmerged bit for the
     // whole path no matter what is left inside the file, so the realistic failure — resolve hunk
     // 1 of 2, `git add`, report RESOLVED, which is exactly what the resolver's own contract tells
@@ -1136,17 +1136,17 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
         if (joined.includes('gh pr diff'))
-          return ghPrDiffTo(joined, 'diff --git a/shared.ts b/shared.ts\n@@ -1 +1 @@\n-a\n+b\n')
-        if (joined.includes('apply --3way')) return failWith('error: patch failed: shared.ts:1')
+          return ghPrDiffTo(joined, 'diff --git a/notes.md b/notes.md\n@@ -1 +1 @@\n-a\n+b\n')
+        if (joined.includes('apply --3way')) return failWith('error: patch failed: notes.md:1')
         // The index says DONE after the resolver's `git add` — this is the lie.
-        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'shared.ts' : '')
+        if (joined.includes('--diff-filter=U')) return ok(resolverCalls === 0 ? 'notes.md' : '')
         // The staged bytes say otherwise. Hunk 1 was resolved, hunk 2 was not.
         if (joined.includes('diff --cached -U0'))
           return ok(
             [
-              'diff --git a/shared.ts b/shared.ts',
-              '--- a/shared.ts',
-              '+++ b/shared.ts',
+              'diff --git a/notes.md b/notes.md',
+              '--- a/notes.md',
+              '+++ b/notes.md',
               '@@ -1,0 +2,4 @@',
               '+publishHead: oidClaim(branchHead)',
               '+<<<<<<< ours',
@@ -1163,7 +1163,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(resolverCalls).toBe(1)
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
-    expect(final.failure_reason).toContain('shared.ts')
+    expect(final.failure_reason).toContain('notes.md')
     expect(final.failure_reason).not.toContain('REQUEST_CHANGES')
     // NOTHING IS COMMITTED, NOTHING IS SWAPPED, NOTHING IS PUSHED. The marker text never leaves
     // the throwaway worktree, which is then removed.
@@ -1173,7 +1173,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
-  test('a resolver that deleted the outer markers but left the bare ======= separator is REFUSED', async () => {
+  test('a resolver that left a wide CRLF separator is REFUSED', async () => {
     // THE SEPARATOR IS THE RESIDUE MOST LIKELY TO SURVIVE. `<<<<<<< ours` and `>>>>>>> theirs`
     // are the visually obvious lines; a hand-resolution that keeps both sides and strips the
     // outer markers leaves a bare `=======` sitting between them, and that line used to pass this
@@ -1208,7 +1208,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
               '+++ b/shared.ts',
               '@@ -1,0 +2,3 @@',
               '+publishHead: oidClaim(branchHead)',
-              '+=======',
+              '+============\r',
               '+publishHead: oidClaim(forgeSha)',
             ].join('\n'),
           )
