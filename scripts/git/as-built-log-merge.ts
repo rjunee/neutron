@@ -68,8 +68,8 @@
  * An entry begins at a `## ` heading. `#` (the file title) and `### ` (subsections) do not.
  *
  * THE DELIMITER AFTER THE `##` IS REQUIRED, AND THE FIRST CUT OF THIS ONLY REQUIRED IT NOT TO BE A
- * `#`. `/^##[^#]/` accepted `##foo`, which CommonMark 4.2 does not read as a heading at all — the
- * run of `#` must be followed by a space, a tab, or the end of the line. So an ordinary BODY line
+ * `#`. `/^##[^#]/` accepted `##foo`, which CommonMark 4.2 does not read as a heading at all — there
+ * the run of `#` must be followed by a space, a tab, or the end of the line. So an ordinary BODY line
  * beginning `##` (a shell comment, a C preprocessor line, an `##` in prose) parsed as an entry of
  * its own, and the consequence was not cosmetic: the split changed the entry KEYS either side of
  * it, so an edit to that entry's body read as an entry missing from one side and this file
@@ -85,12 +85,24 @@
  * THE TAB IS DELIBERATE AND IT IS NOT THE SAME AS `/^## /`. CommonMark accepts `##\ttitle`, and
  * `as-built-heading-uniqueness.ts` — which shares this parser precisely so a gate and a driver can
  * never disagree about where an entry begins — pins that case in its own test file. Narrowing to a
- * literal space would have counted a real heading as body text, which is the SILENT direction: the
- * gate would swear two colliding entries are one. A line of exactly `##` with nothing after it is
- * a valid empty heading to CommonMark and is still not matched here; an entry with no title is not
- * something this log can carry, and treating one as body text loses nothing.
+ * literal space would have counted a real heading as body text, which is the SILENT direction:
+ * measured on that fixture, the gate parses ZERO entries and reports the log clean, so a genuine
+ * collision goes unreported rather than being reported wrongly.
+ *
+ * A TITLE IS REQUIRED, WHICH IS THIS LOG'S CONTRACT AND NOT CommonMark'S. `/^##[ \t]/` alone left
+ * the original defect standing in a narrower form, found by a cross-model reviewer: it rejects a
+ * bare `##` but ACCEPTS `## ` and `##\t`, which are the same empty heading with trailing
+ * whitespace. So a whitespace-only `## ` line in a body was still an entry, and the reviewer's
+ * scenario reproduces exactly — base carrying one such line parses to THREE entries, and an
+ * ours-side edit that merely strips the trailing space returns `ok: false, wouldLoseEntries: true`
+ * on key `## 1`. Requiring a non-space character after the delimiter closes all three spellings at
+ * once. It is deliberately NARROWER than CommonMark, which also allows up to three leading spaces
+ * and an end-of-line straight after the hashes: `docs/AS_BUILT.md` line 3 says "One entry per
+ * merged change", an entry with no title is not one, and a line that heads nothing is safer as
+ * body text than as an entry whose identity is a stray keystroke. CRLF is handled by construction —
+ * `\r` is whitespace, so `## \r` is correctly not a heading while `## title\r` is.
  */
-const HEADING = /^##[ \t]/
+const HEADING = /^##[ \t]+\S/
 /** `## 2026-08-15 — title`. Ten historical sections carry no date; see `effectiveDates`. */
 const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/
 /**

@@ -42,30 +42,38 @@ describe('parse/serialize', () => {
     const parsed = parseLog(text)
 
     // THE COUNT IS READ FROM THE FILE, NEVER RESTATED. This assertion used to be
-    // `toBeGreaterThan(250)`, which is the same defect the truncation test below already had fixed
-    // out of it: a restated count asserts nothing about the parse, and it forbids a legitimate
-    // future in which the log is archived down — 200 entries would have gone red with no defect
-    // anywhere. What this test's NAME claims is the property, so it is what is asserted: every
-    // heading line the file contains heads exactly one entry ("finds every entry"), and no entry
-    // was minted from anything else ("only real ones"). Both counts are read from the same bytes,
-    // so archiving, appending and rewriting all move them together.
+    // `toBeGreaterThan(250)`, which forbids a legitimate future in which the log is archived down —
+    // 200 entries would have gone red with no defect anywhere — and which is blind in BOTH
+    // directions at the magnitudes real regressions come in. Measured: an over-parse of one entry
+    // (309, the shape of the `##foo` bug `HEADING` used to have) and an under-parse of three (305,
+    // a fence swallowing headings) both clear it. It was not worthless — a stuck fence taking the
+    // log from 308 to 13 does trip it, and that is the case it caught — but it only ever saw the
+    // catastrophic end, and it paid for that with a false red on an ordinary archive. Measured on
+    // the equality: green at 308, 200 and 50; red at 309, 305 and 13.
     //
-    // It is an EQUALITY rather than a floor because a floor is blind in BOTH directions at small
-    // magnitudes, which is the size real regressions come in. Measured: an over-parse of one entry
-    // (309, the shape of the `##foo` bug that `HEADING` used to have) and an under-parse of three
-    // (305, a fence swallowing headings) BOTH clear `toBeGreaterThan(250)`. The floor only ever
-    // caught the catastrophic case — a stuck fence taking the log from 308 to 13, which it did
-    // notice — while going red on an archive to 200 that has nothing wrong with it. The equality
-    // is the exact opposite: green at 308, 200 and 50, red at 309, 305 and 13.
+    // WHAT IT IS AND IS NOT. It compares the parse against a RAW line scan, which has no idea what
+    // a fence is, so it is a cross-check between two oracles and not a proof of a bijection — a
+    // simultaneous over- and under-parse could cancel. What it does hold is the property this
+    // test's NAME claims often enough to be worth having, and the per-entry shape check below
+    // covers the "only real ones" half exactly.
     //
-    // The one legitimate change that would move them apart is an entry quoting a `## ` at COLUMN
-    // ZERO inside a code fence, which is sample text and correctly heads no entry. The log has
-    // none today (verified: every one of its heading lines heads an entry) and its quoted markdown
-    // is indented; if one ever lands, subtract the fenced samples here rather than loosening this
-    // to a floor.
-    const atColumnZero = text.split('\n').filter((line) => /^##[ \t]/.test(line)).length
+    // ONE LEGITIMATE CHANGE WOULD MOVE THE TWO APART: an entry quoting a heading at COLUMN ZERO
+    // inside a code fence, which is sample text and correctly heads no entry. That is a real cost
+    // and it is accepted rather than unnoticed. The alternative is to teach this test the fence
+    // rules so it can skip such lines — i.e. a SECOND implementation of the parser, which is the
+    // exact drift `as-built-heading-uniqueness.ts` was rewritten to avoid (its docblock lists the
+    // three ways its own re-derived scanner had already diverged before it shipped). A one-line
+    // subtraction the day a fenced sample lands is cheaper than a duplicate parser maintained
+    // forever. The log has no such line today: verified, every one of its heading lines heads an
+    // entry, and its quoted markdown is indented.
+    const isHeadingLine = (line: string): boolean => /^##[ \t]+\S/.test(line)
+    const atColumnZero = text.split('\n').filter(isHeadingLine).length
     expect(parsed.entries.length).toBe(atColumnZero)
-    for (const entry of parsed.entries) expect(entry.lines[0]?.startsWith('## ')).toBe(true)
+    // The same shape the parser uses, NOT `startsWith('## ')`. A literal space here would forbid
+    // the tab spelling this suite deliberately accepts two tests below — the real log carries none
+    // today, so the contradiction was latent, but a test may not quietly outlaw what the parser and
+    // the heading-uniqueness gate both admit.
+    for (const entry of parsed.entries) expect(isHeadingLine(entry.lines[0] ?? '')).toBe(true)
     // The preamble is the title block, never an entry.
     expect(parsed.preamble.join('\n')).toContain('# AS_BUILT')
     expect(parsed.preamble.join('\n')).not.toContain('\n## ')
@@ -246,10 +254,22 @@ describe('parse/serialize', () => {
     expect(parsed.entries[0]!.lines.join('\n')).toContain('##not-a-heading')
   })
 
+  test('…and so is an EMPTY heading, in all three of its spellings', () => {
+    // `/^##[ \t]/` closed `##foo` and left this: `##` alone was rejected while `## ` and `##\t` —
+    // the same empty heading with trailing whitespace — were accepted, so a stray marker in a body
+    // was still an entry. An entry with no title is not "one entry per merged change", and its
+    // identity would be a keystroke.
+    for (const marker of ['##', '## ', '##\t']) {
+      const parsed = parseLog(log(`## 2026-08-16 — has a stray marker\n\n${marker}\n\ntail\n\n`))
+      expect(parsed.entries.length).toBe(1)
+    }
+  })
+
   test('…while a TAB after the hashes still is one, which `/^## /` would have silently missed', () => {
     // CommonMark accepts a tab as the delimiter, and `as-built-heading-uniqueness.ts` shares this
-    // parser and pins the same case — narrowing to a literal space would make the gate read two
-    // colliding entries as one, which is the silent direction of the same bug.
+    // parser and pins the same case — narrowing to a literal space would make the gate parse that
+    // fixture as ZERO entries and report the log clean, which is the silent direction: a real
+    // collision goes unreported rather than being reported wrongly.
     const parsed = parseLog(log('##\t2026-08-16 — tab after the hashes\n\nbody\n\n'))
     expect(parsed.entries.length).toBe(1)
     expect(parsed.entries[0]!.lines[0]).toBe('##\t2026-08-16 — tab after the hashes')
@@ -324,6 +344,22 @@ describe('merge', () => {
     const plain = '## 2026-08-16 — quotes a hash\n\n##not-a-heading\n\ntail, corrected\n\n'
     const control = mergeAsBuiltLog(base, log(plain, OLD_B), log(NEW_TWO, withHash, OLD_B))
     expect(control.ok).toBe(true)
+  })
+
+  test('…and stripping the trailing space off a stray `## ` is an ordinary edit too', () => {
+    // The same defect in its narrower spelling, which survived the first fix and was found by a
+    // cross-model reviewer: `/^##[ \t]/` rejected a bare `##` but accepted `## `, so a
+    // whitespace-only marker in a body was an entry whose key was the whitespace. Reproduced
+    // exactly as reported — the base parsed to THREE entries and this merge returned
+    // `ok: false, wouldLoseEntries: true` on key `## 1`, a fabricated hard conflict raised by an
+    // edit that removed one space.
+    const withBlank = '## 2026-08-16 — has a stray marker\n\n## \n\ntail\n\n'
+    const stripped = '## 2026-08-16 — has a stray marker\n\n##\n\ntail\n\n'
+    const base = log(withBlank, OLD_B)
+    const res = mergeAsBuiltLog(base, log(stripped, OLD_B), log(NEW_TWO, withBlank, OLD_B))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toBe(log(NEW_TWO, stripped, OLD_B))
   })
 
   test('a dated addition older than the newest entry slots into date order, not on top', () => {

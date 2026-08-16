@@ -245,9 +245,8 @@ missing from one side while the other still has it, and the merge returns
 `wouldLoseEntries: true` — the refusal the driver must never delegate, raised on
 a body edit that loses nothing. Measured on a two-entry base carrying one
 `##not-a-heading` line: three entries parsed, and an ours-side edit of that line
-came back `ok: false, wouldLoseEntries: true`. It is `/^##[ \t]/` now, which is
-CommonMark 4.2 — the run of `#` must be followed by a space, a tab, or the end of
-the line.
+came back `ok: false, wouldLoseEntries: true`. The delimiter is required now, as
+CommonMark 4.2 requires it — the run of `#` must be followed by a space or a tab.
 
 The reviewer's suggested fix was the narrower `/^## /`, and that would have been
 a worse bug in the quieter direction. CommonMark accepts a tab, and
@@ -255,19 +254,39 @@ a worse bug in the quieter direction. CommonMark accepts a tab, and
 gate and a driver can never disagree about where an entry begins; its own test
 file pins `##\ta — one`. Mutation-tested both ways: `/^##[^#]/` fails the two new
 `##`-body tests and nothing else, and `/^## /` fails the tab tests in BOTH files —
-the gate would have read two colliding entries as one and reported clean. Zero
-live occurrences of `^##[^# ]` exist in the tracked markdown (control: 308 for
-`^## ` in this log), so this was a latent trap, not an outage.
+under it that fixture parses as ZERO entries and the gate reports the log clean,
+so a real collision goes unreported. Zero live occurrences of `^##[^# ]` exist in
+the tracked markdown (control: 308 for `^## ` in this log), so this was a latent
+trap, not an outage.
+
+REQUIRING THE DELIMITER WAS NOT ENOUGH, AND A CROSS-MODEL REVIEWER FOUND THE
+REMAINDER IN THE SAME ROUND. `/^##[ \t]/` rejects a bare `##` but ACCEPTS `## `
+and `##\t` — the same empty heading with trailing whitespace — so a stray marker
+in a body was still an entry whose identity was the whitespace. Reproduced as
+reported: a base carrying one `## ` line parses to THREE entries, and an
+ours-side edit that merely strips the trailing space returns `ok: false,
+wouldLoseEntries: true` on key `## 1`. The rule is now that an entry needs a
+TITLE, which is this log's contract rather than CommonMark's — `/^##[ \t]+\S/`,
+deliberately narrower than the spec, which also allows up to three leading spaces
+and an end-of-line straight after the hashes. All three spellings of the empty
+heading are body text now, `\r` is whitespace so CRLF falls out by construction,
+and the per-entry assertion in the real-log test was changed off
+`startsWith('## ')` to the same shape — it had been quietly outlawing the tab
+spelling the parser and the gate both accept.
 
 And the SECOND restated count, in the test one line above the one already fixed:
-`toBeGreaterThan(250)` on the real log's entry count. A floor is blind in both
-directions at the magnitudes real regressions come in — measured, an over-parse
-of one entry (309, the shape of the `##` bug above) and an under-parse of three
-(305) both clear it, while an archive down to 200 that has nothing wrong with it
-goes red. It now asserts what the test's name claims: the entry count equals the
-number of heading lines the file contains, both read from the same bytes. Green
-at 308, 200 and 50; red at 309, 305, and at 13 (a stuck-open fence, produced by
-mutating the fence-close bound).
+`toBeGreaterThan(250)` on the real log's entry count. A floor is blind at the
+magnitudes real regressions come in — measured, an over-parse of one entry (309,
+the shape of the `##` bug above) and an under-parse of three (305) both clear it —
+while an archive down to 200 that has nothing wrong with it goes red. It was not
+worthless: a stuck-open fence taking the log from 308 to 13 does trip it, and
+that is the end it caught. The assertion now compares the parse against a raw
+line scan of the same bytes. Green at 308, 200 and 50; red at 309, 305 and 13.
+Stated for what it is rather than more: two oracles cross-checking, not a proof
+of a bijection, and it accepts one known false failure — an entry quoting a
+heading at column zero inside a fence would need a one-line subtraction. The
+alternative is teaching the test the fence rules, i.e. a second implementation of
+the parser, which is the exact drift the uniqueness gate was rewritten to avoid.
 
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
