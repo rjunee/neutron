@@ -102,3 +102,65 @@ describe('WebDiagnosticsClient — a refused report is not a delivered one', () 
     expect((caught as Error).message).not.toContain('secret-bearer')
   })
 })
+
+/**
+ * The default fetch must survive being stored and called as a method.
+ *
+ * `globalThis.fetch` assigned to a property and invoked as `this.fetchImpl(...)`
+ * carries the CLIENT as its receiver, and a browser refuses: "Illegal
+ * invocation". The request never leaves the page — which is why not one web
+ * report ever reached the box, while the diagnosis chased bearers and payloads.
+ *
+ * Every other test in this file injects `fetchImpl`, so none of them ever
+ * exercised the default. That is the gap this closes.
+ */
+describe('WebDiagnosticsClient — the DEFAULT fetch is called with the right receiver', () => {
+  const report: WebClientReport = {
+    schema: 1,
+    report_id: 'r-default',
+    created_at: 1,
+    origin: 'https://example.invalid',
+    reason: 'perf',
+    app: { version: 'web', build: null, platform: 'web', os_version: null },
+    session: { signed_in: true },
+    events: [],
+  }
+
+  test('a receiver-checking global fetch is invoked correctly, not as a method of the client', async () => {
+    // Stands in for the browser's real check: the DOM binding throws unless
+    // `this` is the global object.
+    const original = globalThis.fetch
+    let sawUrl = ''
+    const strict = function (this: unknown, url: string | URL | Request): Promise<Response> {
+      if (this !== globalThis) {
+        throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation")
+      }
+      sawUrl = String(url)
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    }
+    ;(globalThis as { fetch: unknown }).fetch = strict
+    try {
+      // No fetchImpl — this is the path production actually takes.
+      const client = new WebDiagnosticsClient({ base_url: 'https://example.invalid', token: 't' })
+      await client.sendReport(report)
+      expect(sawUrl).toBe('https://example.invalid/api/app/admin/diagnostics/reports')
+    } finally {
+      ;(globalThis as { fetch: unknown }).fetch = original
+    }
+  })
+
+  test('an injected fetchImpl is still used unchanged', async () => {
+    // The binding must not steal the seam every other test depends on.
+    let called = false
+    const client = new WebDiagnosticsClient({
+      base_url: 'https://example.invalid',
+      token: 't',
+      fetchImpl: async () => {
+        called = true
+        return new Response('{}', { status: 200 })
+      },
+    })
+    await client.sendReport(report)
+    expect(called).toBe(true)
+  })
+})
