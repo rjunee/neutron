@@ -22,6 +22,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 
 import {
   buildTestStrategy,
@@ -75,7 +76,44 @@ const GiB = 1024 ** 3
 describe('resolveTestCommand', () => {
   test('tier 1 — package.json scripts.test wins, trimmed', () => {
     const repo = fixture({ 'package.json': JSON.stringify({ scripts: { test: '  bash scripts/run-tests.sh  ' } }) })
-    expect(resolveTestCommand(repo)).toEqual({ command: 'bash scripts/run-tests.sh', source: 'package-json' })
+    expect(resolveTestCommand(repo)).toEqual({
+      command: 'npm test',
+      source: 'package-json',
+      rawScript: 'bash scripts/run-tests.sh',
+    })
+  })
+
+  test.each([
+    ['packageManager bun', { packageManager: 'bun@1.2.3' }, {}, 'bun run test'],
+    ['packageManager pnpm', { packageManager: 'pnpm@10.0.0' }, { 'yarn.lock': '' }, 'pnpm test'],
+    ['packageManager yarn', { packageManager: 'yarn@4.1.0' }, {}, 'yarn test'],
+    ['packageManager npm', { packageManager: 'npm@11.0.0' }, {}, 'npm test'],
+    ['bun.lock', {}, { 'bun.lock': '' }, 'bun run test'],
+    ['bun.lockb', {}, { 'bun.lockb': '' }, 'bun run test'],
+    ['pnpm-lock.yaml', {}, { 'pnpm-lock.yaml': '' }, 'pnpm test'],
+    ['yarn.lock', {}, { 'yarn.lock': '' }, 'yarn test'],
+    ['npm fallback', {}, {}, 'npm test'],
+  ])('tier 1 detects %s', (_name, packageFields, files, command) => {
+    const repo = fixture({
+      'package.json': JSON.stringify({ ...packageFields, scripts: { test: 'local-test-runner' } }),
+      ...files,
+    })
+    expect(resolveTestCommand(repo)).toEqual({ command, source: 'package-json', rawScript: 'local-test-runner' })
+  })
+
+  test('tier 1 executes through the package manager so node_modules/.bin is on PATH', () => {
+    const repo = fixture({
+      'package.json': JSON.stringify({ scripts: { test: 'fixture-only-test-runner' } }),
+    })
+    const runner = join(repo, 'node_modules/.bin/fixture-only-test-runner')
+    mkdirSync(join(runner, '..'), { recursive: true })
+    writeFileSync(runner, '#!/usr/bin/env bash\nexit 0\n')
+    chmodSync(runner, 0o755)
+
+    const resolution = resolveTestCommand(repo)
+    expect(spawnSync('bash', ['-c', resolution.rawScript!], { cwd: repo }).status).toBe(127)
+    expect(resolution.command).toBe('npm test')
+    expect(spawnSync('bash', ['-c', resolution.command!], { cwd: repo }).status).toBe(0)
   })
 
   test('tier 2 — a fenced block in CLAUDE.md when package.json cannot answer', () => {
@@ -127,7 +165,11 @@ describe('resolveTestCommand', () => {
 
   test('tier 1 KEEPS a legitimate compound command — the project owns its own script', () => {
     const repo = fixture({ 'package.json': JSON.stringify({ scripts: { test: 'tsc --noEmit && bun test' } }) })
-    expect(resolveTestCommand(repo)).toEqual({ command: 'tsc --noEmit && bun test', source: 'package-json' })
+    expect(resolveTestCommand(repo)).toEqual({
+      command: 'npm test',
+      source: 'package-json',
+      rawScript: 'tsc --noEmit && bun test',
+    })
   })
 
   test('tier 2 REFUSES a recognised prefix followed by arbitrary shell', () => {
@@ -206,7 +248,11 @@ describe('resolveTestCommand', () => {
     // The exemption is about compound scripts, and it is why the guard above is a
     // FILE-NAMING check and not a "tier 1 is now as strict as tier 2" change.
     const repo = fixture({ 'package.json': JSON.stringify({ scripts: { test: 'tsc --noEmit && bun test' } }) })
-    expect(resolveTestCommand(repo)).toEqual({ command: 'tsc --noEmit && bun test', source: 'package-json' })
+    expect(resolveTestCommand(repo)).toEqual({
+      command: 'npm test',
+      source: 'package-json',
+      rawScript: 'tsc --noEmit && bun test',
+    })
   })
 
   // ── THE NON-JS RUNNERS (round-3 review) ────────────────────────────────────
@@ -598,7 +644,7 @@ describe('buildTestStrategy', () => {
     // 8 cores / max(FANOUT=4, 2 active) = 2 jobs, paired with 8/2 = 4 concurrency.
     expect(block).toContain('export NEUTRON_TEST_JOBS=2')
     expect(block).toContain('export NEUTRON_TEST_CONCURRENCY=4')
-    expect(block).toContain('bash scripts/run-tests.sh')
+    expect(block).toContain('npm test')
     expect(block).toContain(FULL_SUITE_REQUIRED)
   })
 
@@ -609,8 +655,12 @@ describe('buildTestStrategy', () => {
     // back to sequential with a cheerful "knobs not found" line.
     const repoRoot = fileURLToPath(new URL('..', import.meta.url))
     const resolution = resolveTestCommand(repoRoot)
-    expect(resolution).toEqual({ command: 'bash scripts/run-tests.sh', source: 'package-json' })
-    expect(probeParallelKnobs(repoRoot, resolution.command)).toEqual({
+    expect(resolution).toEqual({
+      command: 'bun run test',
+      source: 'package-json',
+      rawScript: 'bash scripts/run-tests.sh',
+    })
+    expect(probeParallelKnobs(repoRoot, resolution.rawScript ?? resolution.command)).toEqual({
       jobs_env: 'NEUTRON_TEST_JOBS',
       concurrency_env: 'NEUTRON_TEST_CONCURRENCY',
       probed_file: 'scripts/run-tests.sh',
@@ -635,7 +685,7 @@ describe('buildTestStrategy', () => {
       mem_available_bytes: 25 * GiB,
       base_branch: 'main',
     })
-    expect(block).toContain('go test ./...')
+    expect(block).toContain('npm test')
     expect(block).toContain(NO_KNOBS_LINE)
     expect(block).not.toContain('NEUTRON_TEST_JOBS=')
   })

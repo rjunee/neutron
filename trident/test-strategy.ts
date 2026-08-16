@@ -43,9 +43,11 @@ import { isAbsolute, resolve } from 'node:path'
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface TestCommandResolution {
-  /** e.g. `bash scripts/run-tests.sh`. `null` = could not be resolved. */
+  /** Executable stage-2 command, e.g. `npm test`. `null` = could not be resolved. */
   command: string | null
   source: 'package-json' | 'agent-docs' | null
+  /** The package script text used for static knob probing, never direct execution. */
+  rawScript?: string
 }
 
 const UNRESOLVED: TestCommandResolution = { command: null, source: null }
@@ -167,6 +169,26 @@ function readTextOrNull(path: string, maxBytes = 1024 * 1024): string | null {
   }
 }
 
+function packageManagerTestCommand(repoRoot: string, packageManager: unknown): string {
+  const declared = typeof packageManager === 'string' ? packageManager.split('@', 1)[0] : ''
+  if (declared === 'bun') return 'bun run test'
+  if (declared === 'pnpm') return 'pnpm test'
+  if (declared === 'yarn') return 'yarn test'
+  if (declared === 'npm') return 'npm test'
+
+  const hasFile = (name: string): boolean => {
+    try {
+      return statSync(resolve(repoRoot, name)).isFile()
+    } catch {
+      return false
+    }
+  }
+  if (hasFile('bun.lock') || hasFile('bun.lockb')) return 'bun run test'
+  if (hasFile('pnpm-lock.yaml')) return 'pnpm test'
+  if (hasFile('yarn.lock')) return 'yarn test'
+  return 'npm test'
+}
+
 /**
  * Tier 1 `package.json` `scripts.test`; tier 2 the repo's agent docs. Never throws:
  * a missing/malformed `package.json` falls through to tier 2, and a repo that says
@@ -178,7 +200,7 @@ export function resolveTestCommand(repoRoot: string): TestCommandResolution {
     const pkgText = readTextOrNull(resolve(repoRoot, 'package.json'))
     if (pkgText !== null) {
       try {
-        const pkg = JSON.parse(pkgText) as { scripts?: { test?: unknown } }
+        const pkg = JSON.parse(pkgText) as { packageManager?: unknown; scripts?: { test?: unknown } }
         const declared = pkg?.scripts?.test
         if (
           typeof declared === 'string' &&
@@ -189,7 +211,12 @@ export function resolveTestCommand(repoRoot: string): TestCommandResolution {
           // subset whoever declared it, and the full-suite gate would accept its pass.
           !namesASubsetOfTheSuite(declared)
         ) {
-          return { command: declared.trim(), source: 'package-json' }
+          const rawScript = declared.trim()
+          return {
+            command: packageManagerTestCommand(repoRoot, pkg.packageManager),
+            source: 'package-json',
+            rawScript,
+          }
         }
       } catch {
         // Malformed JSON is not fatal — fall through to the agent docs.
@@ -794,7 +821,7 @@ export function buildTestStrategyDetail(
   let summary = 'test-strategy: unavailable'
   try {
     const resolution = resolveTestCommand(repoRoot)
-    const knobs = probeParallelKnobs(repoRoot, resolution.command)
+    const knobs = probeParallelKnobs(repoRoot, resolution.rawScript ?? resolution.command)
     const divisor = testBudgetDivisor(env?.active_runs)
     const jobs = computeTestJobs({
       cores: env?.cores,
@@ -826,7 +853,7 @@ export function buildTestStrategy(
 ): string {
   try {
     const resolution = resolveTestCommand(repoRoot)
-    const knobs = probeParallelKnobs(repoRoot, resolution.command)
+    const knobs = probeParallelKnobs(repoRoot, resolution.rawScript ?? resolution.command)
     const jobs = computeTestJobs({
       cores: env?.cores,
       active_runs: env?.active_runs,
