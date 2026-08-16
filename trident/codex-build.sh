@@ -601,6 +601,20 @@ emit_trailer() {
   if [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && [ -s "${NEUTRON_CODEX_BUILD_DIFF_FILE}" ]; then
     diff_path="${NEUTRON_CODEX_BUILD_DIFF_FILE}"
   fi
+  # Artifact-time durability for the detached Codex lane. The workflow re-stamps
+  # this after return; this early write closes the committed-but-apparently-stalled gap.
+  if [ -n "$head" ] && [ -n "$diff_path" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_NAME:-}" ]; then
+    "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT}" \
+      "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" \
+      "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" \
+      inner_checkpoint "${NEUTRON_CODEX_BUILD_CHECKPOINT_NAME}" \
+      inner_checkpoint_head "$(git rev-parse --verify HEAD)" \
+      || echo "CODEX_BUILD_CHECKPOINT_FAILED: artifact checkpoint could not be written; continuing." >&2
+  fi
   # `>` TRUNCATES, deliberately: the build had full write access and may have created
   # this path itself. What the reader gets is what this function measured, nothing
   # appended to it.

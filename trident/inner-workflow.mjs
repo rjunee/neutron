@@ -1493,7 +1493,7 @@ function codexBriefByPath(brief) {
   }
 }
 
-function codexBuildPrompt(slot, brief, route) {
+function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   const uniq = runId || slug
   const briefFile = `/tmp/trident-codex-build-${uniq}-${slot}.brief`
   const byPath = codexBriefByPath(brief)
@@ -1579,6 +1579,9 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
     partMissingInstructions += `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_CORRUPT in ${errFile} → read the named file in the error: if it is one of YOUR two segment files (${a1File} or ${a2File}), re-run ALL segment calls from CALL 1 exactly once; if it is a HOST-written part path, no retry by you can fix it and you must NOT rewrite the file — report codexStatus='deferred'.`
   }
   const diffFile = codexBuildDiffFile()
+  const checkpointEnv = !dbPath || !runId
+    ? ''
+    : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)}`
   // The model assignment, exactly as the review lane does it: the id belongs to the
   // subprocess, never to the wrapping agent. Empty when no registry was threaded,
   // which invokes the wrapper on its own pinned default.
@@ -1605,7 +1608,7 @@ ${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -1639,7 +1642,12 @@ async function forgeAgent(opts, tag, brief, slot) {
     return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
   }
   const res = await agent(
-    codexBuildPrompt(slot, `${brief}${codexBuildCoda()}`, route),
+    codexBuildPrompt(
+      slot,
+      `${brief}${codexBuildCoda()}`,
+      route,
+      opts.label === 'forge:build' ? 'forge-done' : opts.label.slice('forge:'.length),
+    ),
     withModel({ ...opts, schema: CODEX_FORGE_SCHEMA }, tag),
   )
   if (!res) return null

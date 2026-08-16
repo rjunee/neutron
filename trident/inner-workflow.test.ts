@@ -164,6 +164,18 @@ describe('inner-workflow.mjs — inlined contracts + rules in EVERY agent', () =
     expect(helper.match(/bash \$\{shSingleQuote\(checkpointSh\)\}/g)).toHaveLength(1)
   })
 
+  test('Codex dispatch threads the same artifact checkpoint names only with run storage', () => {
+    const prompt = grabFunction('codexBuildPrompt')
+    const dispatch = grabFunction('forgeAgent')
+    expect(prompt).toContain("const checkpointEnv = !dbPath || !runId")
+    for (const name of ['SCRIPT', 'DB', 'RUN_ID', 'NAME']) {
+      expect(prompt).toContain(`NEUTRON_CODEX_BUILD_CHECKPOINT_${name}`)
+    }
+    expect(dispatch).toContain("opts.label === 'forge:build' ? 'forge-done' : opts.label.slice('forge:'.length)")
+    expect(SRC).toContain('await checkpoint(`fix-round-${round}`')
+    expect(SRC).toContain("await checkpoint('forge-done'")
+  })
+
   test('inlines the Forge build contract (PR_NUMBER/BRANCH/WORKTREE, push + open PR, smallest-correct-change)', () => {
     expect(SRC).toContain('PR_NUMBER=')
     expect(SRC).toContain('BRANCH=')
