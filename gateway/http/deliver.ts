@@ -215,7 +215,7 @@ const errMsg = (err: unknown): string => (err instanceof Error ? err.message : S
  * of a message that is correct and present in the transcript either way. The opposite
  * default — treating a timeout as sent — is the one that loses information, because it
  * stamps the row for a buzz that may never arrive and silences every retry (see
- * `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`). Revisit only
+ * `docs/AS_BUILT.md` § 2026-08-10 — Two guards that read a value nothing wrote). Revisit only
  * if the duplicate is ever observed, not on the strength of this paragraph.
  */
 async function withTimeout(work: Promise<boolean>, budget_ms: number): Promise<boolean> {

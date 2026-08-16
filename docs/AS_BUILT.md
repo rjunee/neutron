@@ -791,33 +791,6 @@ phrased strictly as measurements rather than an asserted cause, per #240. And
 harvest-before-reap is preserved: a crashed row that already carries a terminal
 `inner_result` still harvests on the next tick, with zero relaunches spent.
 
-## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
-
-`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
-build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
->30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
-the host-held part files into a temp dir, the real workflow composes the forge:build
-prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
-by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
-then concatenated in the listed order and measured against the prompt's
-`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
-recomputes before it spends a token. Chained with the by-path suite in
-`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
-reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
-agent retyping anywhere in the path. Test-only; no production file changed.
-
-Two findings from building it. First, the chunk blocks may NOT have their paths
-rewritten wholesale: the coda forming the `.a2` segment names
-`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
-bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
-the assembled brief is asserted to mention neither segment path. Second, dropping the
-trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
-`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
-newline; the sensitivity check therefore uses mutations that move a real byte. Under a
-one-character head-slice shift and under a one-character tail edit, both new tests go
-RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
-gap this task existed to close.
-
 ## 2026-08-15 — a pr-mode build rebases onto observed main before review
 
 `trident/orchestrator.ts` `publishBuiltCommit` now rebases the built branch onto
@@ -855,6 +828,99 @@ contains both sides and is an ancestor-descendant of main's tip in a full clone,
 proves a conflicting seed throws the attention error naming the path without
 moving the ref, and proves a third-party advance makes the pinned lease push
 refuse against a real remote.
+
+## 2026-08-15 — an unreadable resume head stops the run before the fire
+
+`launch()` (`trident/orchestrator.ts`) already reads the live branch head in code
+(`resolveResumeLiveHead`, three attempts, tri-state `40-hex` / `absent` / `''`). When
+that read comes back `''` — the launcher itself could not tell — firing the workflow
+bought nothing: `classifyResume` returns the bounded stop
+(`{ mode: 'stop', reason: 'head-unreadable' }`) for every checkpoint except the TWO it
+answers BEFORE it looks at the head — `pr-merged` (resolved to `merged`) and the EMPTY
+name (resolved to `rebuild`, reason `no-checkpoint`; there is nothing recorded to
+preserve). Both are exempt from the fast exit for exactly that reason, and both have
+their own test. The
+launcher now takes that one known outcome at the boundary: no fire, the run is failed
+through `innerTerminalFailureReason` with `block_kind: 'infra-only'` and the inner
+stop's wording verbatim ("could not read the head of `<branch>`; the recorded work is
+at `<oid>`; re-run when the read succeeds"), so the persisted `failure_reason` is
+byte-identical to the one `applyResult` writes for the inner stop and never reads
+"without Argus APPROVE" for a run Argus never reached.
+
+`classifyResume` remains the single semantic decider — this is only the cheap
+fast-exit, and the two names above are exempted for exactly the reason given. `failedRun`
+spreads the row, so `inner_checkpoint` / `inner_checkpoint_head` /
+`inner_checkpoint_findings` survive untouched. Coverage lives in the "the resume live head
+is read in code, never relayed by a model" block of `trident/orchestrator.test.ts`: the
+never-succeeding read now asserts three attempts, zero fires, the persisted reason,
+and the preserved checkpoint columns; `pr-merged` and the local-mode `''` route have
+their own tests; a successful OID read and an `absent` answer still fire unchanged.
+
+**WHAT THE PRESERVED COLUMNS ACTUALLY BUY, AND WHAT THEY DO NOT (corrected at Argus r4 —
+two reviewers reached it independently).** Earlier revisions of this entry said "a re-run
+resumes at exactly this point". THAT IS NOT AS-BUILT, and the claim is withdrawn rather
+than merged. A terminal row is never advanced again (`step()` short-circuits on
+`isTerminalPhase`, and `advanceTridentRun` no-ops the same way), and re-running a card is a
+FRESH DISPATCH — `TridentRunStore.create` inserts `inner_checkpoint`,
+`inner_checkpoint_head` and `inner_checkpoint_findings` as NULL. So the preserved columns
+are read by NOBODY: they are the durable EVIDENCE of what the failed run built and where,
+for a human or a follow-up. A re-run REBUILDS. A real resume-a-terminal-run path is a
+separate card (recorded in `IMPLEMENTATION_PLAN.md`); the stop message's "re-run when the
+read succeeds" stays accurate as written — it says when to try again, and it never
+promised the re-run would skip the build.
+
+**THE RETRIES ARE SPACED, AND THE SPACING IS A SEAM.** The consequence of `''` here is a
+TERMINAL, non-self-healing run failure, and in `pr` mode the read is `git ls-remote` — a
+NETWORK call. Three attempts fired back to back complete inside a few milliseconds, which
+is short enough that a single dropped packet fails all three.
+`resolveResumeLiveHead` waits `RESUME_HEAD_RETRY_DELAYS_MS` (`[250, 1000]`) BETWEEN
+attempts — never before the first, never after the last — through an injected `sleep`
+(`BuildTridentOrchestratorOptions.sleep`) that the suite replaces with a no-op, so the
+delay is real in production and free in the tests.
+
+**WHAT THAT WINDOW ACTUALLY COVERS, STATED HONESTLY** (an earlier revision of this
+paragraph claimed a "momentary GitHub 5xx", which ~1.25 s of total spacing does not
+credibly outlive): it covers a sub-second blip — one dropped packet, a DNS retry, a single
+connection reset — and nothing longer. A sustained outage still fails all three attempts.
+That is a tuning question rather than a correctness one, and the trade is stated honestly
+rather than dressed up (Argus r4): a blip that outlives ~1.25 s now ends the run, where
+before this change it produced a self-healing automatic REBUILD. The regression is
+AVAILABILITY, not work — the branch, its commits and its PR are untouched, and the failed
+row records what was built and where — and it is the trade the card asked for: "could not
+tell" must not silently spend a max-effort rebuild of already-pushed work (measured on the
+neutron-enterprise run: 3,813 → 84,875 → 133,169 output tokens, the third being the
+rebuild). What the operator loses is the automation of that rebuild, not its result; the
+re-run rebuilds, because there is no resume-a-terminal-run path (see above). Widening the
+window trades a longer stall on every genuinely-dead branch for a rarer manual re-run; the
+numbers live in one exported constant so that trade can be made with evidence rather than
+by guess.
+
+## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
+
+`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
+build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
+>30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
+the host-held part files into a temp dir, the real workflow composes the forge:build
+prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
+by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
+then concatenated in the listed order and measured against the prompt's
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
+recomputes before it spends a token. Chained with the by-path suite in
+`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
+reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
+agent retyping anywhere in the path. Test-only; no production file changed.
+
+Two findings from building it. First, the chunk blocks may NOT have their paths
+rewritten wholesale: the coda forming the `.a2` segment names
+`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
+bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
+the assembled brief is asserted to mention neither segment path. Second, dropping the
+trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
+`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
+newline; the sensitivity check therefore uses mutations that move a real byte. Under a
+one-character head-slice shift and under a one-character tail edit, both new tests go
+RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
+gap this task existed to close.
 
 ## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
 
@@ -903,6 +969,187 @@ The canonical assertion goes RED for all three named mutants. Conflict auto-repa
 is deliberately not included: proving append-only keep-both resolution without ever
 touching a code conflict would expand this precondition gate beyond its narrow,
 fail-closed purpose; the deferral instead names the conflict and its repair.
+
+## 2026-08-14 — turn state is resynchronised on reconnect
+
+Rebuilt on current `main` 2026-08-14. Two assertions in
+`open/__tests__/open-app-ws-durable-chatlog.test.ts` demanded that a connecting
+socket receive NO `agent_typing` frame at all. That was correct only while
+silence was the sole way to avoid a spurious indicator — and silence is exactly
+what strands a client that missed the real `end` while disconnected, because
+nothing ever contradicts its stale belief. Both now assert the property instead
+of the old spelling: no `start` for a quiet topic, and typing still never
+durable (the row count off `app_chat_messages` is untouched and remains the real
+guard). Mutation-checked: making an idle topic announce `start` fails the first;
+dropping the snapshot send fails both this suite and `typing-refcount`.
+
+The chat transport now sends every newly connected socket an explicit live-turn
+snapshot. `open/wiring/app-ws.ts` reads the same `activeChatProjects` set used by
+the project rail through `open/wiring/typing-catchup.ts`, then sends
+`agent_typing:start` when that topic is live or `agent_typing:end` when it is
+idle. The explicit idle answer is the terminal record for a client that missed a
+failure, completion, or kill while disconnected: the web and mobile clients
+already adopt those frames, so the stale running belief is cleared immediately
+without a timeout. A reconnect during a real turn continues to receive `start`.
+
+Coverage in `open/__tests__/typing-refcount.test.ts` pins both server answers and
+their shared derivation with the rail. The client-level regression in
+`landing/chat-react/__tests__/controller.test.ts` begins with an optimistic
+running belief, reconnects, applies the idle snapshot, and proves another send is
+accepted; its paired test preserves a genuinely running reconnect.
+
+
+## 2026-08-14 — web typing opens the scoped activity inspector
+
+`landing/chat-react/ProjectShell.tsx` now threads its existing inspector opener
+through `landing/chat-react/ChatApp.tsx`. The live-turn indicator is a real button;
+tapping it opens the inspector for the mounted conversation's project, matching the
+native gesture. `landing/chat-react/__tests__/component.test.tsx` presses that
+control and asserts the General scope, while
+`app/__tests__/chat-core-render-model.test.ts` proves a five-minute tool-only turn
+with no streamed text remains visibly typing.
+
+The early-clear mechanism was overlapping turn edges, not the fail-safe: a nested
+turn's quick `end` could clear the outer turn. `open/wiring/typing-refcount.ts`
+suppresses nested edges and rejects stale timer callbacks; its fail-safe remains at
+46 minutes, beyond the live turn's 45-minute ceiling, and still synthesises `end`
+when the genuine edge is lost. Connect catch-up stays a direct per-socket send in
+`open/wiring/typing-catchup.ts`, so it is neither durable nor broadcast.
+
+## 2026-08-14 — pr-mode publishing belongs to the durable outer loop
+
+The inner build process now ends at a local commit. `trident/codex-build.sh` has no
+`git push`, `gh pr create`, `git credential fill`, or `gh auth status` execution path;
+it reports the local commit and leaves `REMOTE_HEAD` and the PR number empty.
+`trident/inner-workflow.mjs` persists a `publishRequested` handoff and stops before
+review. `trident/orchestrator.ts` verifies the local branch, pushes the explicit ref,
+re-measures `origin` with `git ls-remote`, creates or reuses the PR, materializes the
+review diff, and re-fires from an `outer-published:<sha>` checkpoint. The credentialed
+runner is composed in `open/composer.ts`; no credential-bearing variable is added to
+the wrapper invocation.
+
+Mode detection now asks whether that publisher can authenticate (`gh auth status`),
+not whether `gh` is merely installed. A GitHub origin with an incapable publisher is a
+loud dispatch error rather than a silent downgrade to local mode. Repositories without
+a GitHub origin retain the existing local behavior.
+
+#### Argus round-two hardening
+
+The publish checkpoint now carries the review round and Ralph remaining-task count
+(`trident/inner-workflow.mjs`), so an outer re-fire cannot reset a non-converging fix
+loop to round one or terminate a multi-task run early. Before review resumes,
+`trident/orchestrator.ts` verifies branch provenance, retries push and origin witness
+operations, refuses an empty base-to-head diff, and treats an already-merged PR as
+terminal. The shared host runner bounds each child command to 60 seconds
+(`trident/git-mode.ts`).
+
+The credential-absence proof is live rather than skipped: `trident/codex-build.test.ts`
+injects both GitHub token names, proves the captured child environment is populated
+with positive controls, and asserts neither secret reached the Codex process. Its
+command-absence guard matches wrapped commands as well as line-leading commands. The
+obsolete inner-publisher tests were removed instead of remaining skipped.
+
+## 2026-08-14 — Quiet live turns survive
+
+- Pre-change verification searched the prior
+  `runtime/adapters/claude-code/persistent/repl-agent-base.md` for
+  `full-buffering|output-suffix|tail -20|inactivity timeout` and found no match;
+  `AskUserQuestion` in the same input was the positive control.
+- `runtime/adapters/claude-code/persistent/autocompact-support.ts` probes the
+  configured CLI's help, and `runtime/adapters/claude-code/persistent/spawn.ts`
+  passes `--autocompact 300000` only when the installed CLI advertises the option.
+  This is the upstream token budget; the unchanged 5 MB/10 MB post-compact JSONL
+  watchdog remains the downstream byte backstop that protects `--resume`.
+- `runtime/adapters/claude-code/persistent/repl-agent-base.md`, the prompt appended to
+  chat REPLs, now prohibits full-buffering consumers for turn-launched commands and
+  explains that withheld activity can trip the inactivity timeout. A mechanical shell
+  guard was not added. The unscoped activity `PreToolUse` hook is an interception
+  seam, but parsing arbitrary shell syntax there would risk rejecting legitimate
+  streaming, post-exit inspection, and early-exit pipelines.
+- Regression coverage asserts both the exact token budget and the behavioral prompt
+  rule in `runtime/adapters/claude-code/persistent/__tests__/build-repl-argv.test.ts`,
+  `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`,
+  and `runtime/adapters/claude-code/persistent/__tests__/repl-agent-base.test.ts`.
+- Mutation results: `unconditional-autocompact` failed the unsupported-CLI spawned-
+  argv assertion (5 pass, 1 fail), and `remove-quiet-turn-prompt-rule` failed the
+  behavioral prompt assertion (0 pass, 1 fail). Both guards were restored before
+  the green verification run.
+
+### Integrations surface scope declaration (ISSUES #572)
+
+`gateway/http/cores-integrations-surface.ts` now declares in its response that
+the enumerated credential slots belong to bundled Cores. The web client in
+`landing/chat-react/IntegrationsTab.tsx` renders that server-provided scope.
+`gateway/__tests__/cores-integrations-surface.test.ts` uses a connected GitHub
+credential to prove the partial view is explicit, existing Core slots remain,
+and secret plaintext never enters the response. No credential store or registry
+was added; the change makes the existing view boundary legible.
+
+Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
+tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
+after its expected red run.
+
+## 2026-08-14 — host deploy resolves remote refs against the remote
+
+`open/host-deploy.ts:544` now resolves a deploy target through a distinct
+remote-aware seam while reading the current pin from local `HEAD`. The production
+implementation in `open/host-deploy-runtime.ts:81` recognizes configured
+remote-tracking names, performs a bounded fetch into the matching tracking ref,
+and then resolves the fetched commit. Fetch was chosen over `ls-remote` because
+the approval at `open/host-deploy.ts:573` must render the commits the owner is
+approving; a remote sha without its objects cannot satisfy that contract. Local
+branches, `HEAD`, and raw shas still use local `rev-parse` without a fetch.
+
+The fetch changes Git objects and tracking metadata only. It cannot mutate the
+working tree, `HEAD`, or deployed state, which is the read-only boundary described
+in `docs/SYSTEM-OVERVIEW.md`. A fetch timeout, authentication error, or unreachable
+remote propagates to the existing `refused` result and can never become the benign
+`up_to_date` answer. Request and approval-time resolution both pin a full 40-hex
+commit, and the dispatch continues to send that approved sha.
+
+Positive control, written and run before the production change: a real bare remote
+was advanced after cloning the pinned host checkout. The new request test was RED
+because it received `up_to_date`; the unchanged suite had 49 passes. After the
+change, the focused host-deploy suites pass 66 tests, including the fetched commit
+subject in the approval, local/no-fetch resolution, explicit timeout propagation,
+remote failure from both stale-local states, and full-sha dispatch.
+
+Mutation checks (each production guard was removed independently and restored):
+
+| Mutant | Result |
+| --- | --- |
+| M1 `remote-target-resolution`: target uses local `revParse` | RED — remote-ahead request returned `up_to_date` |
+| M2 `remote-ref-fetch`: skip the fetch | RED — remote-ahead request returned `up_to_date` and fetch-call assertion failed |
+| M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
+| M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
+| M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
+## 2026-08-14 — launcher-held build brief segments travel by path
+
+Task and reflection brief segments now travel by path via the `briefParts` manifest
+and `NEUTRON_CODEX_BUILD_BRIEF_PARTS` (defect 2026-08-13, run `000cedc8`). Chunked
+transport remains for workflow-composed segments and as the whole-brief fallback.
+The receipt remains one `<bytes>:<fnv32>` measurement over the assembled whole, while
+args-transit corruption now fails closed with `CODEX_BUILD_BRIEF_ARGS_CORRUPT`.
+Coverage lives in `trident/inner-workflow-assembly.test.ts`; the unchanged fallback
+and wrapper corruption coverage remains in `trident/codex-brief-chunking.test.ts` and
+`trident/codex-build.test.ts`.
+
+## 2026-08-14 — any tier in either cross-model review seat
+
+`trident/phase-models.ts` and `trident/inner-workflow.mjs` now dispatch `none`,
+Claude, Codex, and Kimi tiers from either generic review seat. An explicitly selected
+Claude tier uses the reviewer prompt, verdict schema, chosen model, and effort; an
+unavailable CLI remains `not_connected` and never falls back to Claude. Deferred
+retry and blocker diagnostics follow the selected route family instead of the seat's
+historical name. The single-family warning counts only review seats that can actually
+dispatch and does not count the build route.
+
+`trident/__tests__/cross-model-dispatch.test.ts` executes the production launcher and
+real workflow for every declared group, GPT-build/Opus-review, configured but
+unavailable Codex CLI behavior, Claude retry success and exhaustion, and same-family
+warning semantics. Mutation checks made each corresponding guard red before the
+production behavior was restored.
 
 ## 2026-08-13 — generic named credentials configure host deploy without a public slot
 
@@ -1285,7 +1532,7 @@ negative fraction divided by elapsed renders as a negative pace — "−0.2×", 
 as comfortably within the refill rate. Kimi refused negatives at its own edge; the
 Anthropic header path did not, so one writer's guard was never the property.
 
-Detail: `docs/as-built/2026-08-13-usage-dashboard-phase-1.md`.
+Detail: § 2026-08-13 — Usage dashboard Phase 1 — every connected account on one screen, and when capacity comes back.
 
 ## 2026-08-13 — the BUILD phase runs on codex: a second executor for the most expensive step
 
@@ -1814,6 +2061,923 @@ branch so a stacked branch can go through the actual pipeline with the actual
 merge gate. Until that lands, every phase after P1.5 goes through trident from
 `main`, which is now possible precisely because these two merged.
 
+## 2026-08-13 — the instance can ASK for a host deploy; it still cannot perform one
+
+Work merged into Open did not reach the box it was for, and the reason was not a lag: **there
+is no automatic deploy**. The host's only timers are a lane sweeper, a credential rotator, a
+CLI update doctor and a backup. A deploy happens when a human runs one. From inside the
+instance that total absence is indistinguishable from "deploys land on their own and just lag",
+which is exactly what the agent on that box believed.
+
+The fix is a request that crosses the privilege boundary while the capability never does.
+`open/host-deploy.ts` gains one thing: the ability to ASK. No deploy rights, no host
+filesystem access, no privileged credential. `host_deploy_request`
+(`gateway/wiring/host-deploy-tool.ts`, registered into the same tools registry
+`create_project` uses at `gateway/composition/build-core-modules.ts:255-266`) resolves what
+WOULD be deployed and raises an approval. It dispatches nothing. Only the owner's tap makes
+the one authenticated call, and only if the sha has not moved.
+
+**This is a second caller, not a new approval mechanism.** It rides `ApprovalManager`
+(`tools/approval.ts`, migration 0004) and the CODE-rendered Approve/Deny prompt shape
+`reminders/ritual-registration.ts:768-806` established, including the opaque-token codec —
+imported, not re-derived, because a strict-inverse token decoder is a bad thing to have two
+copies of. The owner's tap arrives through the SAME live-turn capture seam
+(`gateway/wiring/build-live-agent-turn.ts:1209`); the composer now chains the ritual handler
+and this one, and each returns null for a token that is not its own (`rap:` vs `hdp:`), so no
+new capture path was added either.
+
+**The approval renders the actual commit list, and that is the whole security.** The owner is
+the only gate, so the thing he is gating has to be legible in the message he taps: the sha the
+host runs now, the sha it would run, and every commit between them. An approval whose content
+the approver cannot see is a rubber stamp with extra steps. Rendering is capped at 40 commits
+with the TRUE remainder counted — `rev-list --count` is a second git invocation precisely so
+"40 commits would land" can never be said when 300 would. Commit subjects are stripped of
+bidi/zero-width/C0 characters and fenced with a backtick run longer than any inside them,
+because a commit subject is chosen by whoever lands the commit and the button body is
+Markdown-rendered (`channels/button-primitive.ts:194`). Stripped rather than refused: refusing
+would let one commit subject make the host undeployable.
+
+**The approval binds to ONE sha.** The target is re-resolved at approve time and a moved ref
+is refused as stale, naming the new sha, with the grant killed so it cannot be replayed.
+Without that, "approve" quietly means "deploy whatever is newest when this executes" — a
+different and unbounded permission that reads identically in the transcript.
+
+**No control plane configured → visible and disabled, with the reason.** A self-hoster has no
+endpoint to call. Both tools still register and still answer, naming `NEUTRON_HOST_DEPLOY_URL`
+and `NEUTRON_HOST_DEPLOY_TOKEN` as what would enable it. No default endpoint is fabricated —
+inventing one would point a self-hoster's deploy at somebody else's control plane. The
+endpoint and credential are resolved at CALL time, never captured at composition (a credential
+read at composition time is a credential that is never there — 2026-08-07). The credential
+rides an `Authorization` header and nothing else, and everything the control plane says is
+scrubbed of both the token and the URL before it reaches chat or a log line.
+
+**Mutants run: 15 of 16 killed, and the 16th is recorded as SURVIVING.** stale-sha gate
+removed; owner-only (no-self-approval) gate removed; prior-option eligibility removed;
+pending-status gate removed (kills the timeout and the replay tests); unconfigured
+early-return removed; secret scrub neutered; commit list dropped from the body; ref charset
+guard removed; emit-failure rollback removed; bidi/zero-width strip removed; tools hidden when
+nothing is configured; `request()` made to dispatch before asking; config captured once at
+composition instead of per call; credential moved into the request body; true commit total
+replaced by the rendered count; `rev-parse` stripped of `^{commit}`. Each of those turned a
+named test RED.
+
+> **CORRECTION (round 2).** This paragraph originally read "all 16 killed", and that was
+> false for one of them. Argus applied the `--verify --quiet` removal to
+> `open/host-deploy-runtime.ts` and ran both host-deploy suites: 45 pass / 0 fail. The mutant
+> was behaviour-equivalent because the `/^[0-9a-f]{40}$/` check on stdout rejected git's
+> echoed argument either way, so the flags were decorative rather than load-bearing. **A
+> permanent record that claims a guard was proven when it was not is worse than no record**,
+> because the next person reads it as evidence and stops looking. The claim is corrected here
+> rather than deleted, and the underlying weakness is now fixed: the resolver no longer passes
+> `allowNonZero`, so `--quiet`'s exit status IS the signal it is read for, and re-running that
+> same mutant in round 2 turns two named tests RED.
+
+The secret-absence assertions are constructed so they can fail in BOTH directions: the control
+plane's error body is `boom: upstream <url> rejected Bearer <token>`, and the test asserts the
+owner IS still shown `boom` and `upstream` while the token and URL are gone. An absent scrub
+fails the negative half; an over-eager one fails the positive half.
+
+The production seams are tested through their real wiring, not only through stubs:
+`open/__tests__/host-deploy-runtime.test.ts` builds a real git repo and asserts where the
+resolver looks and what it returns, including a positive control on the same instance that
+returned the null — so "unknown ref → null" is a real answer rather than a resolver that
+always fails.
+
+Known limitation, stated rather than papered over: the current pin is the HEAD of the checkout
+the instance can read (`NEUTRON_REPO_ROOT`). On a box where the running code and that checkout
+are the same tree — which is what a self-hoster and a single-box install both have — that is
+the sha the host runs. Nothing here verifies that claim against the control plane, and a
+deploy whose plumbing lands the code elsewhere would show a pin that is locally true and
+globally wrong.
+
+Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
+
+
+## 2026-08-13 — host deploy, round 2: the gate that two taps could walk through
+
+Argus reviewed the branch above and found the approval was gated by a check, not by a claim.
+`handleOwnerButtonAnswer` read the pending row, then AWAITED `git.revParse` to re-check the
+sha, then dispatched. Two taps that interleaved inside that await both saw `status:'pending'`,
+both passed the stale check, and both dispatched — and `ApprovalManager.respondApproval`
+returned `Promise<void>`, so the loser had no way to discover the row had already been claimed.
+The same window let an Approve deploy something a concurrent Deny had just settled.
+
+**A decision is now a CLAIM, not a read.** `respondApproval` (`tools/approval.ts:145`) runs its
+`UPDATE ... WHERE status='pending'` and reads the affected-row count inside one transaction, and
+returns TRUE only for the call that actually moved the row. `open/host-deploy.ts` gates the
+dispatch on that boolean and nothing else. Everything before it is advisory; the claim is the
+gate. Existing callers that ignore the return value are unaffected. Two concurrent Approves now
+dispatch exactly once, and an Approve parked behind a Deny dispatches nothing.
+
+**Secrets are scrubbed before they are truncated, never after.** The control-plane body was
+sliced to `HOST_DEPLOY_DETAIL_CAP` and only then handed to the scrubber — and the scrubber is a
+`split`/`join` on the FULL secret, so a token straddling the cut left a real prefix of itself
+behind and rode into the owner's chat and the `host-deploy call refused` log line. Two reviewers
+reproduced it independently. The scrub now happens in `createHostDeployDispatch`
+(`open/host-deploy-runtime.ts`), which is the only place holding the url and the token at the
+moment the bytes arrive; the service scrubs again on the way out.
+
+**A credential the scrubber will not hide is no longer accepted as a credential.** The scrubber
+skipped values under a length floor while `resolveHostDeployConfig` accepted any non-empty
+token, so a five-character `NEUTRON_HOST_DEPLOY_TOKEN` was live AND unredactable and printed
+verbatim. One constant (`HOST_DEPLOY_MIN_SECRET_CHARS`) now governs both ends, and the config
+refuses anything shorter — visibly, with a reason, like every other unconfigured state.
+
+**A git failure is a refusal again.** `allowNonZero` routes through `isExecChildError`, which is
+`err instanceof Error` (`gateway/git/git-exec.ts:135`), so a missing binary, a timeout and a
+maxBuffer overrun all collapsed into the same empty stdout an unknown ref produces. The
+"commit list could not be built → refuse" guard was therefore unreachable, and a broken checkout
+showed the owner the SIDEWAYS/BACKWARD warning above an empty fence. `commitsBetween` no longer
+passes the flag at all, and `revParse` translates only the one exit status `--quiet` documents
+(1, empty stdout) into null — everything else propagates.
+
+**The documented approval lifetime is real.** `ApprovalManager.expireStale()` has no production
+caller on this box (both reviewers grepped it independently, and so did this round), so the
+5-minute TTL never fired and a grant tapped the next morning on an unmoved ref still deployed.
+Rather than wire a sweep the rest of the system does not have, the age is enforced on the
+ANSWER against the row's own `requested_at`, so it holds whether or not anything ever sweeps.
+
+**Smaller things, each with a test.** A rollback now itemizes the commits it would take away
+(`target..current`) instead of showing the owner an empty block and asking him to approve the
+removal of N commits sight-unseen. CR and LF are stripped from commit subjects — CR is the
+line-overwrite hiding character the docblock already claimed to defend against, and it was not
+in the range. `HOST_DEPLOY_REF_RE` rejects a leading `-`, so `--parseopt` and friends are
+refused structurally rather than contained incidentally by a check on git's stdout.
+
+**The two composition lines that switch the feature on are now covered.** Argus deleted each in
+turn and the suite stayed identically green: the only tests touching `host_deploy` asserted the
+composer EMITS the key and that the surface registers against a stub registry, so the wire
+between them could be cut with the whole tree passing.
+`gateway/composition/build-core-modules-host-deploy-wiring.test.ts` drives `buildCoreModules`
+itself and asserts the tools are registered AND reachable, that they are absent when the field
+is (the negative control), and that `install` receives the EXACT `ApprovalManager` the graph
+hands out.
+
+**Round-2 mutants, applied to the shipped source. 13 killed, 1 recorded as surviving.**
+
+| # | mutant | result |
+|---|---|---|
+| M1 | approve path ignores the claim result (the original TOCTOU) | RED — 2 tests |
+| M2 | deny path ignores the claim result | **SURVIVES — see below** |
+| M3 | `respondApproval` always reports a claim | RED — 3 tests |
+| M4 | grant-age (TTL) gate removed | RED |
+| M5 | rollback reverse-range read removed | RED |
+| M6 | CR+LF dropped from the subject strip | RED |
+| M7 | leading-dash ref guard removed | RED |
+| M8 | minimum-credential-length gate removed | RED |
+| M9 | truncate-before-scrub restored | RED |
+| M10a | `allowNonZero` restored on `commitsBetween` | RED — 2 tests |
+| M10b | `revParse` swallows every failure as "unknown ref" | RED |
+| M11 | tool-registration line deleted from `buildCoreModules` | RED |
+| M12 | `install()` line deleted from `buildCoreModules` | RED |
+| M13 | `rev-parse` stripped of `--verify --quiet` (the round-1 survivor) | RED — 2 tests |
+| M14 | `rev-parse` stripped of `^{commit}` | RED |
+
+**M2 SURVIVES, and is reported rather than papered over.** Ignoring the claim result on the DENY
+path changes no observable behaviour, because the synchronous `row.status !== 'pending'` check
+dominates every sequential case, and the interleaving that would make a Deny lose its claim
+cannot be constructed through the public seam — the deny path has no `await` between reading the
+row and claiming it. The guard is kept as defence-in-depth against a future edit that adds one,
+but it is NOT proven and this table says so. A test that passes both before and after certifies
+nothing while looking like proof, which is the whole reason the round-1 record needed correcting.
+
+That mutant did surface a real, reachable defect on the way through: a late Deny tap on an
+already-approved row was answered "That deploy request was already approved — **nothing was
+deployed**", which is false, because the deploy went out on the earlier tap. The transcript is
+the only record the owner keeps, so it now says what actually happened. That correction has its
+own test.
+
+Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
+
+## 2026-08-13 — adversarial review can dispatch on Codex
+
+`review_adversarial` now declares `alsoRunsOn: ['codex']` in
+`trident/phase-models.ts:215`, matching its executable route in
+`trident/inner-workflow.mjs:378`. A GPT tier therefore selects CLI transport: the
+thin bridge invokes `trident/codex-review.sh`, carries the resolved model through
+`CODEX_REVIEW_MODEL`, and carries the adversarial instructions separately through
+`NEUTRON_CODEX_REVIEW_RUBRIC`. The wrapper uses that rubric as the beginning of the
+actual stdin prompt, so this seat keeps trying to refute the change instead of
+quietly duplicating the generic second-opinion seat.
+
+The rubric reviewer remains on Anthropic. A Codex selection disables effort because
+the CLI transport does not consume that setting. Core-seat completeness also treats
+a deferred, unavailable, or dead Codex adversarial run as incomplete, so
+`enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
+the panel gate.
+
+## 2026-08-13 — killed Codex builds report themselves and survive the bridge bound
+
+The `typing-on-connect` artifacts establish the failure mechanism. The wrapper's
+stderr was modified from 22:29:26 through 22:40:01 while its trailer remained empty;
+that is the Claude Code Bash tool's 600-second maximum plus launch overhead, not the
+30-minute inactivity or 45-minute absolute fire watchdog. The stderr ends mid-diff,
+and both terminal branches in `trident/codex-build.sh` write the trailer, so the
+wrapper was killed before either branch ran.
+
+`trident/inner-workflow.mjs` now launches the wrapper with `nohup` in the background
+and polls its trailer in 540-second calls, below the Bash bound, for at most the fire
+session's 45-minute absolute ceiling. The trailer is the completion signal. An empty
+or missing trailer hard-DEFERREDs at the single Forge-result reader, naming the
+`.trailer`, `.err`, and preserved worktree; if `git status --porcelain` finds changes,
+the terminal result explicitly says the worktree holds uncommitted work. Existing
+completed `ok` and `CALL_FAILED` trailers keep their prior paths.
+
+`trident/__tests__/cross-model-dispatch.test.ts` contains the scaled real-mechanism
+proof: a foreground caller killed before a slow child completes no longer kills the
+detached child. It also pins the killed-wrapper message and artifact paths, the
+uncommitted-work recovery message, the existing failed-trailer mapping, and the happy
+path reaching review.
+
+## 2026-08-13 — model rows describe dispatch capability, and review seats can be off
+
+`trident/phase-models.ts` now declares the complete executor set on every phase rather
+than deriving it from the default tier and relying on an optional escape hatch. Both
+clients consume that server declaration, keep their older-server fallback, and show an
+actionable constraint for every row that remains Claude-only.
+
+The persisted `review_codex` and `review_kimi` keys render as provider-agnostic review
+slots 1 and 2. Existing values remain attached to their original slot; either slot now
+accepts every non-Claude registry tier. All four review rows accept the first-class
+`none` tier. An off seat dispatches nothing and does not fail completeness, while a
+configured seat that dies or defers still blocks. With all seats off, the terminal
+record explicitly says no review ran and that only build and CI gates supported merge.
+
+Mutation checks: `NONE_DISPATCH_GUARD` (forcing the rubric NONE branch to dispatch)
+failed the no-agent assertion; `CONFIGURED_DEAD_COMPLETENESS` (removing core missing-seat
+collection) produced APPROVE for a dead configured reviewer and failed four gate tests.
+
+## 2026-08-13 — typing catches up on connect and explains the live step
+
+Typing is now level-triggered for a socket opening during a turn and remains
+edge-triggered after that. `open/wiring/app-ws.ts:1153` reads the same
+`activeChatProjects` state as the project rail and directly targets the new socket;
+`open/wiring/typing-catchup.ts:4` does not touch the refcount or its fail-safe.
+Because the socket is registered before the synchronous check-and-send, an end can
+only happen before the check (no start) or afterward (the registered socket receives
+the end). Typing still bypasses the durable adapter and replay.
+
+Mobile now consumes the existing `activity_event` stream in
+`app/lib/chat-core/use-mobile-chat.ts:330`, displays a status row's `detail` instead
+of its generic `label`, and opens the existing inspector when the indicator is
+tapped through `app/lib/activity-inspector-opener.tsx:3`. Shell PreToolUse rows use
+the conservative command reducer in `open/activity-inspector.ts:620`: prefixes and
+control headers are skipped, scripts surface their filename, and command families
+carry their informative verb. Ambiguous input falls back to the tool name.
+
+## 2026-08-13 — Usage dashboard Phase 1 — every connected account on one screen, and when capacity comes back
+
+Phase 1 of `docs/plans/usage-quota-dashboard-design-2026-08-13.md` (§9): widen the
+pool vocabulary, carry window LENGTHS per sample, add the Kimi poller, and render
+pool cards with account chips, age chips and the stale-pace fix — on both clients.
+Phases 2-6 (the spend ledger, the lane writers, the OTLP intake, the waste metric,
+the full surface) are untouched.
+
+Plus the two things the owner added after the design was accepted, which are Phase 1
+scope rather than a follow-up: **a countdown to when capacity comes back**, and
+**that countdown paired with the utilisation of the window it belongs to.**
+
+### Why a countdown is not the pace we already had
+
+Pace answers "at this rate, when do I hit the cap". The owner's question is the
+opposite one — "when does capacity come back" — because he is using it as the input
+to a throughput decision: whether to raise build concurrency. Both ship. Neither
+replaces the other, and the card renders them next to each other.
+
+The first cut of the countdown had a real defect, and fixing it is the interesting
+part of this change. **The two windows reset independently.** An account whose
+5-hour window resets in 17 minutes but whose 7-day window is 97% spent has almost no
+capacity coming back, and a headline reading "next capacity in 17m" would have told
+the owner to push concurrency into a wall. So:
+
+- every window's countdown is rendered beside that window's own utilisation, never
+  bare;
+- an ACCOUNT's standing is the WORST of its windows, not the soonest reset
+  (`accountCapacity`, in both clients: `landing/chat-react/usage-dashboard-client.ts`
+  and `app/lib/usage-dashboard-client.ts` — it is a function of the RENDER clock, so
+  it lives with the clock and not in the store; see "Store the instant" below);
+- the pool line names the binding window and the other window's utilisation:
+  `Next capacity in 3d 0h (7d window; 5h window 98% used)`;
+- and it names WHICH account it is about (`nextAccountNote`), on a pool with more
+  than one, because "when" without "whose" is not yet a routing decision.
+
+The acceptance case is pinned twice — in
+`gateway/__tests__/usage-dashboard-client-parity.test.ts`, which runs it through BOTH
+clients at once (one account with an imminent 5-hour reset and a spent weekly window,
+one healthy account: the line points at the SECOND), and in both screens. A mutant
+that picks the soonest reset while ignoring the other window turns those red.
+
+### Never optimistic — the rule every refusal follows
+
+Each of these is a place where the plausible implementation renders fine and states
+something false, so each is a named test:
+
+- **An absent reset instant renders "unknown"** — never "0m", never "now", never
+  omitted. `CapacityStanding` is a tagged union (`available` / `returns` /
+  `unknown`) rather than a nullable number precisely so a client cannot collapse
+  the two with `if (!ms)`.
+- **A STALE reading that says there is room cannot claim availability.** Usage only
+  climbs between samples, so "40% used, three hours ago" does not prove there is
+  room now; the honest answer is unknown. A stale reading that says SPENT still
+  yields a countdown, because "at least this much used" cannot become less used
+  inside one window.
+- **A window with under 5% headroom counts as spent.** 1% of a weekly window is not
+  capacity to push into. Erring this way costs one build routed elsewhere; erring
+  the other way costs a wall.
+- **Countdowns round UP; AGES round DOWN.** 16m59s of countdown rendered as "16m"
+  reports capacity arriving sooner than it will. An age is the opposite kind of
+  claim — about the past, and exact — so a 61-second-old reading is "1m ago". An
+  earlier cut had `formatAge` delegate to the countdown formatter, which printed
+  "2m ago" at 61 seconds and skipped "1m ago" entirely.
+- **A cap-out projection that has already passed is OMITTED, not dashed.** It can
+  only belong to a stale reading, and the card is already saying that much louder
+  (floored figure, age chip, capacity unknown); a "Caps out in —" reads as a failed
+  computation. The plain duration formatter is gone with it — one formatter, so
+  "unknown" and "already past" cannot collapse into one dash.
+- **A failed gauge read writes NO row and logs loudly.** Asserted by count with a
+  control write proving the counter can move, so "zero rows" cannot be a test that
+  never wired the sink.
+- **A percent-named field inside `(0, 1]` is resolved from the SAME payload, and
+  refused only when that payload proves nothing.** `used_percent: 0.85` read alone is
+  either 0.85% or 85%, a factor of 100 apart, and dividing by 100 anyway is the
+  optimistic reading — an 85%-spent window painted as a 1% bar labelled "available".
+  But a field carrying fractions can never exceed 1, so a sibling entry in the same
+  response reading `used_percent: 64` is positive proof that this response writes
+  percents, and the 0.85 beside it means 0.85%. The inference runs one way only and
+  cannot misfire; it is scoped per payload and per key name, because evidence about
+  `used_percent` says nothing about `percentage` and evidence from last week says
+  nothing about a schema that changed since. Refusing the whole payload for a healthy
+  5-hour window sitting at 1% next to a readable 64% weekly window was a false fault
+  banner on a working install — the card said "check the key, then the logs" about a
+  gauge that was answering correctly, and flapped in and out of it as the short window
+  crossed 1%. Where nothing proves the scale (every percent reading in `(0, 1]`) the
+  payload is still refused outright, and "no readings yet" is the honest card.
+- **A named field that is present and unreadable refuses the entry — it never falls
+  through to another alias.** `{used_percent: 150, utilization: 0.5}` answering 0.5
+  reports one key's number under another key's meaning. The window-length parser
+  already stated this policy in its docstring; the utilisation parser now applies it
+  too, on both the percent-named and the fraction-named side. An ABSENT alias is not a
+  broken one, so the search still moves on past a key the response simply omitted.
+- **A utilisation outside `[0, 1]` is refused at the store boundary, for every
+  writer.** `Number.isFinite` is not the check it looks like: a negative fraction is
+  finite, and it survives to the paint as a negative pace rendered as "−0.2× — within
+  the refill rate", which is confident, reassuring and meaningless. The Kimi parser
+  refuses negatives at its own edge, but the Anthropic header path passes any finite
+  parse straight through, so an upstream `-1` sentinel arrived intact. The bound now
+  sits in `persistence/usage-samples-store.ts` where every writer crosses, on the write
+  side AND on the read side (rows written by an earlier build are already on disk).
+  Above 1 is refused rather than clamped for the same reason: 64 where a fraction was
+  expected is a percent under a fraction's name, and clamping it to 1.0 renders an
+  unreadable field as a confident "fully spent".
+- **A sub-hour window is named in minutes.** Rounding one to hours prints
+  "0h window" — a fabricated zero, in a feature whose doctrine is that a fabricated
+  zero must be structurally impossible. Kimi's endpoint can report a length in
+  minutes or seconds, so this is reachable rather than theoretical.
+- **Every pool has a FINITE staleness deadline, including the one with no cadence.**
+  Codex's gauge is harvested from real runs rather than polled; "no cadence" became
+  "never stale" in the first cut, which would have let a three-week-old harvested
+  reading claim "available now" beside a "21d ago" chip the moment Phase 3's writer
+  landed. It gets a flat 30-minute max age instead. The polled pools get their
+  cadence plus ONE missed probe of grace, because a failed probe writes no row and a
+  zero-grace deadline blanks an account with headroom over a single flaky request.
+
+### Store the instant, render the delta — and NOTHING on the wire is a delta
+
+Reset times are persisted and served as absolute epoch-MS instants; the countdown is
+subtracted at paint time against the client's own clock, which ticks every 30
+seconds. A stored duration is wrong the moment after it is written, and a cached
+"17m" rendered an hour later is a confidently precise lie — the same class of bug as
+a stale gauge rendering as fresh.
+
+**The countdown is not the only delta, and the first cut of this branch got the rest
+wrong.** The AGE of a reading, whether it is STALE, whether a gauge is a FLOOR and
+what CAPACITY an account has are all functions of "now" too, and all four were being
+computed when the response was built. Both clients fetch once and hold the payload
+between fetches while their own render clocks tick, so a poller dead for six hours
+painted as "just now, available" with a live countdown running beside it — the exact
+confident-fresh number the brief forbids, and the killed-poller acceptance criterion
+defeated in the render even though the store had the right data.
+
+The fix is structural rather than careful. The wire now carries only facts that do
+not age — `measured_at`, each window's length and reset instant, the pace and
+projection anchored at the measurement, and `stale_after_ms`, a THRESHOLD rather
+than a verdict — and `summariseWindow` takes no `now` parameter at all, so the
+server cannot bake a delta because it cannot see the clock
+(`persistence/usage-samples-store.test.ts`: the same series summarised nine days
+apart is identical, with `prune` as the positive control that the clock really did
+move). The capacity policy moved WITH the clock into the two clients' `projectPool`,
+which the card calls on every paint; it is executed on both copies over the same
+payload by `gateway/__tests__/usage-dashboard-client-parity.test.ts`, so every
+policy case there is a parity case too. `open/__tests__/usage-dashboard-wiring.test.ts`
+greps the SERIALISED composed response for `age_ms` / `stale` / `floor` / `capacity`
+(with a positive control on the fields that should be present), because "the store
+does not compute it" is a different claim from "the wire does not carry it".
+
+Two consequences worth naming. `CapacityStanding`'s `returns` arm carries an `in_ms`
+computed at projection and strictly positive by construction — a window whose reset
+has passed is not returning, it has rolled — which makes "capacity in ‹countdown›"
+unable to render "capacity in available now" once a card outlives the countdown it
+was showing. And an absent `stale_after_ms` decodes to a CAUTIOUS five-minute
+default rather than to "never stale": a missing field must make a card more careful,
+never less, which is the inverse of the `age_ms ?? 0` this branch used to carry.
+
+Pace moves the other way for the same reason: it is now computed **as of
+`measured_at`**, not as of the render clock. Dividing a stale fraction by
+elapsed-since-now reports a calmer and calmer burn the longer a writer has been
+dead, which is exactly backwards.
+
+**And the payload is REFETCHED, which is the other half of the same rule.** Moving
+the deltas to the paint fixes the lie; on its own it does not fix the data. A screen
+that only advanced its clock would walk a perfectly HEALTHY install into staleness:
+the Anthropic pool's deadline is two and a half minutes (`60_000 × 2 + 30_000` — the
+constant, not a round number in prose), so that soon after the screen opened the card
+would floor its gauges to "≥", drop capacity to "unknown"
+and stay there for as long as the owner left it up — while the poller behind it wrote
+a fresh row every 60 seconds. Ageing a held payload is right across a DEAD poller and
+wrong across a live one, and a screen that paints a working install as broken is the
+same defect as one that paints a broken install as working. Both screens therefore
+poll on `USAGE_POLL_MS` (30s), on the SAME interval that advances the render clock so
+the data and the clock it is measured against cannot drift. The parity test bounds
+the RELATIONSHIP rather than the number — `USAGE_POLL_MS × 2 < min(POOL_STALE_AFTER_MS)`,
+importing the store's own deadlines — so a pool cannot be given a tighter deadline
+than the screens can keep up with. Each screen also has a mutation-checked test: a
+tick that advances the clock and does not refetch turns them red.
+
+### The window LENGTH is data, not a constant
+
+`summariseWindow` used to divide by a hardcoded 5h/7d. That is true of Anthropic and
+false in general: Codex changed regime (300 → 10,080 minutes, observed 2026-07-12),
+and a historical series straddles it. Migration 0121 adds `session_window_ms` /
+`weekly_window_ms`, each sample is summarised with its OWN length, and a pool with no
+length reported and no documented default refuses to report a pace rather than
+borrowing another provider's constant. Window LABELS follow the same rule — the card
+prints "5h window" / "7d window" derived from the length, not a fixed string.
+
+### Per-account retention, and why the key moved
+
+The owner asked, of one specific account, "when it resets in 17m, how much WEEKLY
+capacity is left at that time" — and it was unanswerable from stored state. The
+hosting layer's rotation state persists a
+per-account cooldown instant plus a single `lastProbe` for whichever account was
+probed most recently. So Phase 1's store keeps BOTH windows PER ACCOUNT, and a card
+can render a non-active account's headroom (with its age) without a live probe.
+
+That required the primary key to carry the account. Under `(ts, pool)` two accounts
+of one pool measured in the same millisecond collapsed into one row, and the
+`ON CONFLICT DO UPDATE` that makes a double-write idempotent then served the second
+account's numbers under the first one's name. 0121 is the standard SQLite
+table-rebuild onto `(ts, pool, account_label)`, with `account_label NOT NULL` and an
+empty-string sentinel for "nothing can name this account" — a nullable column in a
+primary key is not a key (SQLite compares NULL to NULL as unequal), so every
+unlabelled row would have been distinct and the idempotency would have silently
+stopped working on the ordinary case. The store maps the sentinel back to `null` at
+the boundary; nothing above it ever sees an empty string, and it is not a guess — it
+is the absence of one, spelled so a key can compare it.
+
+**One known limitation, handled honestly:** multi-account credential rotation does
+not exist in this repo (it lives in the hosting layer). So an install here holds one
+Anthropic credential and renders one Anthropic card. The surface renders N cards
+correctly and N happens to be 1 — no pool is faked, and the single-account path is
+not special-cased.
+
+**A second, smaller one, pinned by a test rather than hidden.** The label is resolved
+by a sidecar outside this process. If it stops resolving, the SAME credential begins
+writing rows that name no account, and the series then holds two account keys for one
+physical credential — a chip for each, until the older one falls out of retention.
+Nothing in the store can tell that from a second account genuinely appearing, so it
+does not guess.
+
+**What it costs, stated exactly**, because an earlier draft of this paragraph claimed
+the ghost "can never add availability that is not there" and that is FALSE while the
+ghost is still fresh. Inside `stale_after_ms` the older row is projected like any
+other reading, so one physical credential briefly counts twice and the headline can
+read "2 available now" on a pool holding one account. The window is BOUNDED by
+`stale_after_ms` (150 s for Anthropic) and closes on its own: past the deadline the
+reading floors, its standing falls to `unknown`, and from then on the ghost only ever
+subtracts confidence (a "(1 unknown)" suffix). Both halves of that — the transient
+double count and the bound that ends it — are pinned by name in
+`gateway/__tests__/usage-dashboard-client-parity.test.ts`.
+
+A recency cut-off was considered and refused — it would delete exactly the
+non-active-account headroom this store exists to retain, and "no readings yet" about
+an account that has readings is a worse sentence than an honest old one.
+
+### The Kimi poller, against an endpoint nobody has published
+
+`trident/kimi-usage-probe.ts` reads `GET {KIMI_BASE_URL}/v1/usages`;
+`open/kimi-usage-monitor.ts` polls it every 10 minutes on a `SupervisedLoop` armed
+unconditionally beside the credential probe, reading the key PER TICK from the
+credential store the Settings pane writes (a key that only took effect on the next
+restart is the shape that looks broken).
+
+The endpoint's schema is not published and no live response has been printed into
+this repo, so **the parser is built to be wrong loudly rather than right by
+accident**: a written-down alias set per field, and `unrecognised` — carrying the KEY
+NAMES it saw, never values — for anything else. That log line IS the "print a real
+value before keying logic on it" step, performed in production instead of skipped:
+one occurrence corrects the alias list against reality. An unrecognised payload
+writes no row, so the card ages visibly instead of showing a confident zero.
+
+Units are checked rather than trusted, because both slips render as plausible
+numbers: a `*_percent` above 100 and a fraction-named field above 1 are refused
+rather than clamped, and every reset instant is plausibility-checked against the
+clock AFTER conversion — so a seconds value read as ms (1970, which would render as
+"available now") and an ms value converted again (year 57,000) both fail loudly.
+Window SLOTS are chosen by reported length, never by array position.
+
+**That plausibility bound is ASYMMETRIC, and it took two cuts to get right.** The
+first accepted any instant within ±400 days of now. Downstream, a reset that has
+already passed means "the window rolled, this account is free", so a year-old instant
+on a 99%-spent window rendered as capacity — the optimistic answer the whole feature
+exists to refuse. The second narrowed the past side to ONE WINDOW LENGTH, which was
+still too loose by a whole window: a 5-hour window whose reported reset was four
+hours in the PAST passed the check, and a 99%-spent account rendered "1 available
+now". Against an unpublished schema that is exactly what a `reset`/`reset_time` field
+carrying the window's START would produce.
+
+Each side is now measured in the thing that actually bounds it:
+
+- the PAST side is CLOCK SKEW and nothing more (`RESET_PAST_TOLERANCE_MS`, five
+  minutes). For a rolling window of length L the current window's reset is in
+  `(now, now + L]`, so the only legitimate past instant is the one that rolled
+  moments ago — bounded by latency and skew, which do not grow because the window is
+  longer. Scaling that allowance with the window is precisely what let five hours
+  absorb four hours of "skew";
+- the FUTURE side is ONE WINDOW LENGTH, scaled, because that is where window length
+  genuinely applies — a rolling window resets within its own length. Window length is
+  not a constant, so the same instant that is implausible for a 5-hour window is
+  ordinary for a 7-day one, and a test pins both directions. `RESET_FUTURE_PLAUSIBILITY_MS`
+  survives only as the backstop for an absurd reported length.
+
+A refused instant leaves `reset_at` null, which renders as "unknown" — the honest
+answer, and the one the acceptance case pins.
+
+**A PARTIAL read is a refusal, not a smaller answer.** An earlier cut dropped the
+entries it could not parse and returned `ok` with whatever it understood — which is
+the confident-zero failure wearing a different hat, because nothing downstream can
+tell a sample carrying one window from a provider that only HAS one window. An
+account whose weekly figure was dropped would render as an account with no weekly
+limit, so a 99%-spent week became "Next capacity in 40m (5h window)". So a single
+unreadable entry — an unmodelled shape, a missing length, or a second window landing
+in an already-filled slot — makes the WHOLE response `unrecognised`, no row is
+written, and the key names go out so one real response corrects the alias list.
+`observedKeys` reports every element of the list rather than the first, because the
+entry that fails to parse is rarely the first one.
+
+**And "all" means BOTH SLOTS, which the first version of that rule missed.** A
+response listing ONE window read cleanly: nothing was unreadable, so it returned `ok`
+with `weekly: null` — byte-for-byte the wire shape the dropped-window case produces,
+and the same wall. `{session: 20%, weekly: null}` rendered "1 available now" with zero
+unknowns; `{session: 99%, resets in 40m, weekly: null}` rendered the bare "Next
+capacity in 40m (5h window)" — the verbatim failure string this document already
+named as the thing the design prevents. The endpoint reports both standings, so one of
+them is a shape this parser does not model, and `KimiUsageSample.session`/`weekly` are
+now NON-NULLABLE: the invariant is a type rather than a habit, and no caller holds
+half a reading or needs a branch for one.
+
+**The clients refuse the same reading independently**, which is the half that does not
+depend on any one writer being right — see "half a reading buys no standing" below.
+
+Per-key attribution is not offered: the endpoint is account-wide (two keys on one
+subscription return identical numbers), so the card is titled "Kimi (account-wide)"
+and a response that names no account carries a null label.
+
+### What the surface says, and what it refuses to
+
+Three pools are served every time, in `USAGE_POOLS` order, each with a `connection`
+of `connected` / `not_connected` / `no_meter` / `no_gauge` / `unreadable` resolved
+from the SAME
+functions the rest of the product uses. Codex has no writer until Phase 3: with no
+credential it renders "Not connected.", and WITH one it renders `no_gauge` — never a
+row of zeros. A connected-and-idle account, an unconfigured one and one this build
+does not meter at all are three different problems with three different fixes (and
+the third is not a fix at all). A per-token Anthropic
+API key is `no_meter`, not "not connected", because telling the owner to reconnect a
+working account sends them to fix the wrong thing.
+
+Per provider, in its own unit, never summed: the three meter different things, so a
+combined headline would be a number about nothing. **No dollar value appears
+anywhere** — the subscription is flat, so a currency figure would assert a marginal
+cost the owner does not incur. (The design's cost-weighted column uses list prices
+as unrendered WEIGHTS and is Phase 6.)
+
+### Half a reading buys no standing
+
+`accountCapacity` (both clients) refuses to project ANY capacity for an account with
+only one of its two windows measured. "The worst of the windows I can see" is only
+safe when what is absent is nothing, and `weekly: null` is not a measured zero — it
+is the absence of a measurement, indistinguishable from a provider with no weekly
+limit, a parser that dropped the entry, or a sample predating the column.
+
+The two shapes it was reproduced in: `{session: 20%, weekly: null}` rendered
+"1 available now" with `unknown: 0`, and `{session: 99%, resets in 40m, weekly: null}`
+rendered the bare "Next capacity in 40m (5h window)". That is the same defect as
+naming the soonest reset while ignoring the other window, reached by the other road —
+not by mis-ranking two windows, but by ranking one and reporting it as the pair.
+
+**The rest of the card is untouched.** The measured window keeps its figure, its bar,
+its pace and its own countdown; the missing one already rendered "not reported". Only
+the capacity CLAIM is withheld, because that is the single output that requires both.
+And the withholding is LOUD rather than merely quiet: the chip reads
+"capacity unknown — one window not reported", so "capacity unknown" beside a
+full-looking bar cannot be mistaken for a glitch.
+
+This is deliberately redundant with the Kimi parser's both-slots rule. One is a
+refusal at the writer and one at the renderer, and neither depends on the other being
+right — the store's shape cannot express "measured as absent", so the renderer has to
+be safe against any writer, present or future.
+
+### Three smaller honesty fixes in the same pass
+
+**The staleness deadline now budgets for the client's poll hold.** The deadline is
+checked on the CLIENT against a payload it refetches every `USAGE_POLL_MS` (30 s), so
+a written row can be up to one poll away from being on screen. Budgeting cadence × 2
+alone spent the grace twice: rows at t=0, t=60 and t=180 (one missed probe at t=120)
+against a 120 s deadline painted the card stale from t=181 until the next fetch landed
+the t=180 row — ~29 s of "stale" on an install that had already recovered, falsifying
+the property the arrangement exists for. `POOL_STALE_AFTER_MS` is now
+`cadence × 2 + CLIENT_POLL_BUDGET_MS`; `persistence` cannot import a client, so the
+budget is held equal to `USAGE_POLL_MS` by the wiring test rather than by an import.
+Two consecutive misses still cross it, which is the half a bigger grace would give
+away.
+
+**The client's fallback staleness deadline is tighter than every real one.** It is
+used only on version skew, when the payload omits the threshold, and it was five
+minutes — 2.5× LOOSER than Anthropic's real 120 s, so the "cautious" default was the
+loosest number on the screen and a five-minute-old reading painted fresh and
+non-floored. It is now 60 s: below the tightest deadline the store ships, and still
+twice the poll interval, with the relationship pinned by the parity test rather than
+the number.
+
+**`formatCountdown` and `formatAge` fold a non-finite input into their absent arm.**
+Every production caller was traced and none can produce one today, but these are
+exported policy functions and the failure would be silent and total: `NaN` walks
+through every comparison and prints "NaNd NaNh", which is neither a countdown nor an
+admission that there is none. One comparison makes the bad render unreachable rather
+than merely unreached.
+
+### "Asked and refused" is not "no readings yet" — and neither is "nothing is asking"
+
+Two more `connection` values, `unreadable` and `no_gauge`, and they are the two that
+do not resolve themselves. Take `unreadable` first. "No readings yet." promises a first reading is coming; when the gauge has
+been asked and its answer refused — a rejected key, a non-auth 4xx from a path this
+build has wrong, or a payload shape it does not model — none is. Kimi's usages schema
+is unpublished, so that is the realistic first-install failure, and without this the
+card would say "No readings yet." forever while the poller logged the key names to a
+file nobody is watching.
+
+**It is decided by the live probe, never by a credential file, and on BOTH pools that
+have a writer.** `resolveActiveCredential` answers "is a credential present", which is
+a different question from "does upstream still accept it" and performs no validity
+check — so a revoked Anthropic token resolved as present forever while its 401 dropped
+the cache and wrote no sample, leaving the ONE pool with a shipping writer stuck on a
+sentence promising a reading that could never arrive. So the composer reads
+`CredentialUsageMonitor.readStanding()` for Anthropic and
+`KimiUsageMonitor.readStanding()` for Kimi, PER REQUEST and never latched into a
+sample, so a card recovers the moment a tick succeeds. A transient failure — dropped
+packet, timeout, 5xx — stays `connected` on both, because the next tick retries and a
+dropped packet must not repaint the card as broken.
+
+**The sentence is a banner above the rows, not a replacement for them.** Samples are
+retained thirty days, so the refusal that actually happens is not an empty pool — it
+is a pool that read fine for a week and then had its key rotated or its schema shift
+underneath it. Gated on the card being empty, that card kept its figures, kept ageing
+its chips, and said nothing about the fact that no reading would ever replace them.
+The last known values keep rendering with their age chips beside the note; an empty
+refused card still shows NO number: loud and empty, never a zero.
+
+Two wiring tests prove it end to end against the production composer, each with a
+positive control that a pool nobody asked is not reported unreadable —
+`open/__tests__/usage-dashboard-unreadable-wiring.test.ts` against a loopback server
+answering 200 with an unmodelled body, and
+`open/__tests__/usage-dashboard-lapsed-wiring.test.ts` against one answering 401 with
+a subscription token on disk. A hand-built `connection: 'unreadable'` literal would
+prove only that a test file can write one.
+
+**And `no_gauge` is the same promise broken one step earlier: nothing is polling that
+provider at all.** Codex is the live case. Its credential resolves through
+`resolveActiveCodexHome`, so the pool used to report `connected` — which means "empty
+because the first reading has not landed YET" — and the card said "No readings yet." on
+every install that has Codex connected. No writer records `pool: 'codex'` in this
+build: grepping the sample writers hits the positive controls `pool: 'anthropic'` and
+`pool: 'kimi'` in `open/composer.ts` and nothing for `'codex'`, so the tick being
+waited for is not in the binary. `not_connected` would be the opposite lie on a box
+that HAS the credential. So the arm reports `no_gauge` and the card says "Connected.
+This build doesn't meter this provider yet, so there is nothing to read." It is kept
+apart from `unreadable` because the two send the owner to different places: a refusal
+is a FAULT (check the key, then the logs), an unshipped phase is not — nothing is
+misconfigured and there is nothing to go and fix. It disappears BY DELETION when the
+Codex gauge lands: that arm stops returning it and the state is simply unreachable for
+the pool. No flag, no second path.
+
+`open/__tests__/usage-dashboard-wiring.test.ts` pins it against the production
+composer: it reads the composed payload with no Codex credential (`not_connected`),
+stores one through the SAME credential store the Settings pane writes to, re-fetches
+from the SAME composition — which also pins that the connection is resolved PER
+REQUEST rather than latched at boot — and asserts `no_gauge`, still no accounts, still
+no `measured_at`, and the sentence the shipped client renders from it. The mutant is
+returning `'connected'`, which flips the sentence back to the promise.
+
+### The one thing this phase still cannot demonstrate
+
+**The Kimi alias list has never been checked against a real response**, and no
+mechanism inside this repo can check it: the endpoint is undocumented upstream and no
+live body has been printed here. The direction is safe — every unmatched field yields
+`unrecognised`, which writes no row — but the honest reading of Phase 1's stated
+acceptance ("two populated cards") is that the Kimi card will most likely render an
+empty state on a real install until the alias list is corrected.
+
+What this build does about it, given it cannot fix it:
+
+- the refusal carries the KEY NAMES it saw (never values) into a log line, so ONE
+  real response is enough to correct the list — the "print it before keying logic on
+  it" step performed in production instead of skipped;
+- the empty card now says the gauge was asked and refused, rather than implying a
+  first reading is on its way, so the owner discovers it at a glance instead of
+  waiting on it;
+- nothing is fabricated in the meantime.
+
+Correcting the alias list from that log line is a one-line follow-up and is
+deliberately NOT guessed at here.
+
+**So the first `kimi_usage_shape_unrecognised` log on a real install is EXPECTED
+CALIBRATION WORK, not a regression.** Stating it here is the point: without it, the
+line reads as a defect against a parser that was never validated end to end, and the
+demonstrated acceptance for this pool is the honest failure path rather than a live
+reading. The log carries the key names; the fix is to add them to `WINDOW_LIST_KEYS` /
+`PERCENT_KEYS` / `FRACTION_KEYS` / `WINDOW_LENGTH_KEYS` / `RESET_KEYS` in
+`trident/kimi-usage-probe.ts` and nothing else.
+
+**One input on that path was unbounded and now is not: the window LENGTH.** The reset
+INSTANTS were plausibility-checked from the start, but `window_seconds` was believed
+for any positive finite value — so a field that meant something else produced a
+confident label ("11574074d window") and, worse, silently decided the SLOT, since every
+length above the 24-hour divider is filed as the WEEKLY window. One absurd number put a
+short-window standing in the seven-day row under the right name. `MAX_WINDOW_LENGTH_MS`
+is 400 days, deliberately the same figure as `RESET_FUTURE_PLAUSIBILITY_MS`: a rolling
+window of length L resets at most L away, so a length the parser believes but whose
+resets it would refuse is two bounds disagreeing with each other. Out of range REFUSES
+rather than clamps — a clamped length is a made-up number driving the same slot
+decision — which makes the entry unreadable and the whole response `unrecognised`,
+loud, with the key names travelling out. Pinned with a positive control that a real
+7-day window expressed in seconds is still believed.
+
+### The gauge's own base URL was operator input, joined the one way that breaks
+
+`open/composer.ts` threads `ANTHROPIC_BASE_URL` straight into the probe's
+`apiBaseUrl`, so whatever the operator typed is what the probe is handed. It was
+joined with `new URL('/v1/messages', base)`, which is wrong twice over on that input
+and silent both times.
+
+**It THROWS on a base with no scheme.** `ANTHROPIC_BASE_URL=api.example.com` is an
+ordinary thing to type and `new URL` answers it with a `TypeError`. The URL was built
+BEFORE the probe's `try`, which only wraps the fetch — so the throw escaped a function
+whose header promises it NEVER throws, out of a body running inside a 60-second tick
+loop. `SupervisedLoop`'s catch-all meant nothing crashed and nothing recovered either:
+every tick failed identically, the monitor never left its pre-tick state, the card
+never got a reading, and five ticks in the loop escalated. A one-character typo took
+the whole meter out quietly.
+
+**And it DISCARDS the base's path.** A root-relative reference resolves against the
+ORIGIN, so a gateway at `https://gw.example.com/anthropic` was probed at
+`https://gw.example.com/v1/messages` — a different service. The probe then reported
+whatever that answered, and a 401 from the wrong door is indistinguishable from a dead
+credential: enough to fire the "reconnect your account" lapse notice about a
+credential that is fine.
+
+The fix is the join the Kimi twin already used: trim trailing slashes and APPEND, in a
+named `probeMessagesUrl`. Concatenation cannot throw, so a malformed base becomes a
+failed FETCH — already a tagged `error` outcome, transient, retried next tick — and a
+path prefix is kept.
+
+Two tests, at two altitudes. `auth/__tests__/credential-usage-probe.test.ts` pins the
+join itself (prefix kept, trailing slash not doubled, scheme-less base does not throw,
+default used verbatim) and that the probe reports a scheme-less base as an ordinary
+`error`. `open/__tests__/usage-dashboard-base-url-wiring.test.ts` pins the COMPOSED
+path: it boots the real composer with a scheme-less `ANTHROPIC_BASE_URL`, waits for the
+monitor to leave `not_measured_yet` — which is exactly what the bug prevented — and
+asserts the loop's own error sink logged no escaped throw, then that the card stays
+`connected` with no accounts and no `measured_at` rather than accusing a working
+credential or drawing a zero. Restoring `new URL` turns it red on the reached-an-outcome
+assertion, verified.
+
+### Two client-side fixes in the same pass
+
+**A slow poll could roll a screen backwards.** Both screens refetch on a 30-second
+interval that does not wait for the previous response, so two requests are routinely
+in flight together and either can settle first. Nothing sequenced them: an older
+response landing last won purely by arriving late, repainting a reading already known
+to be superseded — with the newer reading's age chip beside it. That is fabricated
+freshness reached from the client side, the one class this surface exists to prevent.
+Each load now takes a generation number and a superseded response is dropped rather
+than rendered. A counter rather than an `AbortController`: a late reading is still a
+good reading and the next tick is seconds away, so there is nothing to gain by
+cancelling it, only a discarded one to avoid painting. The owner-pressed refresh still
+clears its spinner either way — he pressed the button and it has to stop saying
+"Refreshing…". Pinned on BOTH screens with two gated responses released newest-first.
+
+**And "Next up:" named an account nobody could vouch for.** `capacityRank` documents
+that an `unknown` standing sorts LAST, "not the one to point the owner at" — but the
+note was rendered for any pool with two or more accounts regardless of standing. With
+every reading stale, all accounts rank equal and the "winner" is whichever the
+tie-break reached first, so the card printed "Next capacity unknown (2 unknown)" and
+"Next up: ‹account›" directly beneath it: the one line that admits ignorance with a
+confident answer stapled to it. The owner reads that name as where to send
+concurrency, which makes it the same failure class as an absent reset rendering as
+"now". It now returns null on an `unknown` standing — the headline already said why —
+with a positive control that a KNOWN standing still names its account, so a note that
+returned null unconditionally would go red.
+
+### What the tests assert, and where
+
+- `persistence/usage-samples-store.test.ts` — the pace maths and every refusal; the
+  reset instant travelling as DATA (two reports of the same window 8s apart differ
+  by exactly those 8s, and a jittered instant survives the round trip unrounded, so
+  nothing rounds it away or keys a decision on equality); a series straddling a
+  window-regime change summarised per sample; pace as of measurement; per-account
+  retention; the killed poller whose last reading and instant survive; and the
+  summary being identical nine days apart, which is the structural form of "nothing
+  here is a delta". The capacity policy is NOT tested here any more, because it is
+  not computed here any more.
+- `trident/__tests__/kimi-usage-probe.test.ts` — the modelled shape, and every
+  refusal including both unit slips, both sides of the asymmetric reset bound (a
+  four-hour-old reset refused on a 5-hour AND a 7-day window; a two-day-out reset
+  refused on the 5-hour one and believed on the weekly one, with a positive control
+  so the pair cannot pass on a parser that refuses everything), and a one-window
+  response refused in both directions.
+- `open/__tests__/kimi-usage-monitor.test.ts` — gauge-failure-is-loud, by count,
+  with a control write; and the read standing, including a permanent non-auth 4xx
+  reported as a refusal and the control that a transport error is NOT.
+- `open/__tests__/credential-usage-monitor.test.ts` — the Anthropic standing the card
+  reads: null before the first tick, `healthy` on a good read, `lapsed` on a 401, and
+  `indeterminate` on a dropped packet, plus the case that a throwing standing observer
+  does not cost the card the fact that the credential was rejected.
+- `auth/__tests__/credential-usage-probe.test.ts` — the reset plausibility bound, on
+  both sides, with the control that an instant a minute in the past (a window that
+  just rolled) is still believed.
+- `open/__tests__/usage-dashboard-lapsed-wiring.test.ts` — **against the production
+  composer's output.** A subscription token on disk and a loopback server answering
+  401: the composed payload reports `unreadable` for the Anthropic pool, still with no
+  accounts and no `measured_at`, and the sentence comes from the shipped client. The
+  mutant it kills is deriving "connected" from the credential file.
+- `open/__tests__/usage-dashboard-base-url-wiring.test.ts` — **also against the
+  production composer's output.** A scheme-less `ANTHROPIC_BASE_URL`: the monitor
+  leaves its pre-tick state (so the tick REACHED an outcome rather than throwing past
+  its own `try`), the loop's error sink logged no escaped throw, and the card stays
+  `connected` with no accounts and no `measured_at` — a transport failure is transient
+  and must not accuse a working credential. No host is contacted; a scheme-less base
+  cannot be fetched at all, which is the point.
+- `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` — **also against the
+  production composer's output.** The sibling wiring test points the poller at a
+  CLOSED port, so it can only ever produce a transport error; this one boots the real
+  composer against a loopback server that ANSWERS with an unmodelled body and asserts
+  the composed payload's `connection`, the empty accounts beside it, the sentence the
+  shipped client renders from it, and a positive control that a pool nobody asked is
+  not reported as unreadable.
+- `open/__tests__/usage-dashboard-wiring.test.ts` — **against the production
+  composer's output.** It boots the real Open composer, takes the handler the
+  composition actually carries in `app_usage_surface`, and issues a real request:
+  three pools in store order, two cards with windows/pace/countdowns/age, the Codex
+  card honestly empty, the connection states, and `kimi-usage` present in the loop
+  registry. The composed bytes are then decoded and projected by the SHIPPED web
+  client at the render clock, so the assertion is on the sentence the card paints
+  ("1 available now") rather than on a restatement of the server's shape — a field
+  the client does not read falls to "unknown" there. It also pins `POOL_CADENCE_MS`
+  and `POOL_STALE_AFTER_MS` against the pollers' own intervals — constants in two
+  packages that cannot import each other, where a poller slowed down without moving
+  its cadence would silently mark every reading stale.
+- Both screens (`landing/chat-react/__tests__/usage-dashboard-web.test.tsx`,
+  `app/__tests__/usage-dashboard-reachable.test.tsx`) press the real components with
+  payloads that carry NO verdicts — a stale card is produced by backdating
+  `measured_at`, the same lever a dead poller pulls — and
+  `gateway/__tests__/usage-dashboard-client-parity.test.ts` executes the twin
+  formatters AND the twin projections side by side, including the killed poller
+  ageing off one payload, the half-measured account refused in both directions with a
+  positive control, and the lapsed-label ghost counted twice INSIDE the staleness
+  window and only subtracting after it. It also pins the two headroom tie-breaks (the
+  roomier of two AVAILABLE accounts headlines the pool, asserted with the payload in
+  both orders so a fix that simply took the last account goes red), the spent boundary
+  at exactly 95%, and a window that rolled between measurement and paint rendering
+  "just reset" rather than at its pre-roll percentage. Both screens additionally assert
+  that a REFUSED pool which already has readings shows the figures AND the sentence,
+  with a control that a healthy pool carries no banner. Both screens also pin poll
+  SEQUENCING — two responses held open and released newest-first, where the superseded
+  one must be discarded rather than painted — and the parity test pins that "Next up:"
+  names nobody when every account's standing is unknown, with a positive control that a
+  known standing still names its account.
+
+### Wire-shape change worth naming
+
+`PoolSummary` moved its windows from the pool level onto `accounts[]` and gained
+`connection` and `stale_after_ms`. It deliberately does NOT carry `age_ms`, `stale`,
+`floor`, `binding`, `capacity` or `resets_in_ms`: every one of those is a delta, and
+the section above is why. `connection` gained two values beyond the meter's
+vocabulary, `unreadable` and `no_gauge`; an older
+client decodes an unknown value as `connected`, which is the honest degradation — it
+says nothing rather than blaming the owner's setup. There is no dual path and no flag: the two clients ship in
+this PR. A client older than this one decodes zero accounts and renders its honest
+empty state rather than a fabricated reading.
+
 ## 2026-08-12 — the email pipeline reads only the mailboxes the owner switched on, and defaults to none
 
 Branch `trident/email-pipeline-p1-implement-the-esc` (P1.5, on top of P1 below).
@@ -1913,150 +3077,6 @@ enable — the difference between "your history stays quiet" and "your history
 arrives in chat". `list` on a fresh install distinguishes "no mailboxes
 discovered yet — wait one poll interval" from "mailboxes are known and all of
 them are off", because those have different remedies.
-
-## 2026-08-11 — an important email now reaches the owner's chat within five minutes
-
-Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation
-P1 (SPEC.md § "Email Core consolidation"; plan
-`docs/plans/2026-08-06-email-core-consolidation-plan.md` § 5-6).
-
-**The composition seam is `open/composer.ts`.** A new
-`CompositionInput.email_pipeline` bundle is assembled next to `tasks:
-tasksConfig` and turned into a cron job + handler on the shared registries by
-`gateway/composition/build-core-modules.ts` (tasksModule init, immediately after
-the proactive block), through the new `gateway/cores/email-pipeline-wiring.ts`.
-The bundle is where the four things the Core cannot reach for itself are
-threaded: `deliver` (the ONE out-of-turn chat seam), the `PushDispatcher`,
-`readOwnerTimezone`, and the substrate one-shot LLM. Registration is the
-`registerIdleNudgeSweepCron` shape verbatim — `email-pipeline-poll`,
-`{kind:'interval_ms', interval_ms:300000}`, `skip_if_running:true`.
-
-**Chat is the guaranteed surface; push is alongside, never instead.**
-Escalations post through `deliver(topic_id, {durability:'reply'})` onto
-`appWsTopicId(OWNER_USER_ID)` — the owner's BARE app topic, the one topic the
-client both binds and hydrates. That is the exact discipline the PR #105
-deliver-to-nobody incident produced, and it is what makes the escalation
-survive an offline device: the durable row is written before any live push is
-attempted. `PushDispatcher.pushAll` is then fired in its own try/catch, and its
-outcome NEVER touches `escalated_at`. Marking an escalation delivered because a
-push returned would silently swallow every escalation on a box with zero
-registered devices — which, until PR #114's self-heal, was every box.
-
-**Most mail classifies with no model at all.** `src/pipeline/classify.ts` is a
-deterministic-first cascade: owner `sender_rules` (exact address beats domain,
-`protected` rules are important and immune to everything below), then three
-importance patterns (authentication code / billing action / deadline), then the
-mass-mailer downgrade (an `unsubscribe` affordance or `CATEGORY_PROMOTIONS`
-forces `newsletter`, not-important), then the learned `sender_cache`, then the
-LLM, then a plain default. The ordering is load-bearing twice: a "payment
-failed" notice with a marketing footer stays important, and bulk mail — the bulk
-of an inbox — never reaches the model. The LLM seam is the substrate one-shot
-caller ONLY (`buildOneShotSubstrateLlm`, now exported); there is no provider
-dependency and no new secret. A `null` LLM or a throwing one falls through to
-the default, so an LLM-less box degrades instead of failing a tick.
-
-**Turning it on does not escalate a decade of backlog — and does not touch it
-either.** Before anything is processed, a ONE-TIME sweep pages the inbox and
-records every message already there as `handling='preexisting'` with
-`category NULL`. It issues NO Gmail writes at all: no processed label, no
-archive, nothing classified, nothing escalated. The owner's existing mail was
-triaged by hand and stays exactly where they left it (owner decision,
-2026-08-12). The sweep is resumable across ticks via a `backlog_cursor`
-checkpoint and completes at `backlog_marked='1'`.
-
-**The boundary is BOOT, not the first fire, and a paused sweep no longer
-blocks live mail.** Two ways switch-on could swallow the owner's first
-important message, both found by review rather than by tests:
-
-- An `interval_ms` cron waits a full period before its first execution, so a
-  cutoff stamped inside the tick is drawn five minutes late and everything that
-  arrived in that window is filed as history. `buildEmailPipelinePollHandler`
-  captures `activated_at` where the handler is BUILT and threads it in as
-  `activation_at`. A mailbox connected LATER keeps `now()` as its own cutoff —
-  using activation for a late-joining account would escalate months of its
-  back-catalogue.
-- The sweep is bounded per tick (`max_backlog_pages × backlog_page_size`), and
-  it used to return before the live pass. An inbox larger than that budget
-  therefore pushed new mail to the next cron fire, breaking the one-poll-interval
-  acceptance criterion on exactly the installs where switch-on is most visible.
-  A paused sweep now continues into a RESTRICTED pass: the newest page only,
-  and only messages that arrived after the account's cutoff. History is excluded
-  by the same one-time migration boundary the sweep itself uses — explicit
-  rather than structural, and the restricted pass writes no continuation cursor.
-
-Afterwards, "is this history?" is a ROW LOOKUP — `store.hasEmail(id)` — not a
-date comparison re-run on every message for the life of the install. The
-earlier design gated each message on `received_at < go_live_after`, which had
-to be right forever and resolved an unparseable date toward "treat as new";
-`go_live_after` is still stamped, but only as provenance for P2. Marking the
-backlog once is what makes the invariant structural instead of conditional.
-An escalated message deliberately KEEPS `INBOX` (the owner still has to act on
-it in their mail client), so the label set cannot double as "handled"; the row
-in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
-failed chat delivery increments `escalation_attempts`, records `last_error`, and
-is retried by the next tick's resume step under an attempt cap.
-
-**The dedup guarantee had to be extended into the gateway to be true.** Every
-escalation carries a deterministic `idempotency_key`, and `ButtonStore.emit`
-collapses the durable row on it — but `gateway/http/deliver.ts` pushed live
-UNCONDITIONALLY underneath that collapse. So the retry `escalate.ts`
-deliberately permits (deliver succeeded, `markEscalated` threw, row still
-eligible) re-notified an online owner on every attempt while the transcript
-stayed correctly deduped. `deliver` now implements the predicate its own
-`EmitResult` docstring specifies and the onboarding engine already used
-(`engine.ts:1186`): re-render only when the row is NEW or when it landed in the
-DB and never reached a client. The second clause needs a writer, so a
-successful `durability:'reply'` push stamps `markDelivered`; without that write
-`was_delivered` is false forever and the guard is dead code. Pinned by an
-integration boundary test (`tests/integration/email-escalation-live-dedup.test.ts`)
-using the real store and the real seam — the unit tests on either side both
-pass while the bug is present, which is why neither found it.
-
-**The sidecar is instance-level, with its own migration tree.**
-`<owner_home>/email/pipeline.db`, opened `openSidecar` +
-`applyProjectScopedMigrations` exactly like `cache.ts:328-329` but with no
-`project_id` and no `ProjectSidecarResolver` — the inbox is instance-scoped
-because the multi-account client merges accounts into one stream. The tree is
-`cores/free/email/migrations-pipeline/0001_email_pipeline.sql` and it starts at
-0001, not 0002: a migration namespace is per-DB-FILE
-(`migrations/runner.ts:58-63`), and reusing the per-project cache tree would
-drag `triage_cache` into the pipeline DB. `sender_rules` ships EMPTY — there is
-no seed row anywhere in the tree, because every rule is owner data and lands at
-runtime only (P2.5's survey/interview, or the P4 importer).
-
-**Contract additions.** `modifyMessage` (`users.messages.modify`) and a
-generalized `ensureLabel({name})` on both Gmail backends and the multi-account
-router. `modifyMessage` is deliberately message-scoped rather than
-thread-scoped: archiving a whole conversation because one of its messages was
-bulk mail is a data-loss-shaped bug. The router honours the `account_id` the
-fan-out already stamps on every row, so a write derived from a read addresses
-the mailbox the message actually lives in; without an id it falls back to the
-same by-id probe `getMessage` uses. The former private
-`ensureLabelImpl(project_id)` is now `ensureLabelByName(name)` and
-`ensureProjectLabel` delegates to it — one mechanism, two callers.
-
-**Tests + mutation results.** Four named mutations, each verified red by hand
-and reverted: inverting the `has_unsubscribe` downgrade reds two
-`pipeline-classify.test.ts` arms; an escalation that fires but says nothing
-(boilerplate body) reds two arms across `pipeline-poller` / `pipeline-dedup`;
-removing the `hasEmail` skip reds three dedup arms and removing the
-`escalated_at IS NULL` guard reds the resume arm; letting the backlog sweep
-fall through to the processing path reds the two sweep arms, which assert the
-mailbox is untouched (`modified` and `ensured` both empty, `backlog-1` still
-carrying exactly `['INBOX']`) — the seeded backlog message is deliberately
-shaped like the billing escalation, so a regression escalates it rather than
-failing quietly. The producer side is pinned too:
-`open/__tests__/open-email-pipeline-wiring.test.ts` boots the REAL composer and
-reads `composition.email_pipeline`, so deleting the composer block reds rather
-than shipping a declared capability nobody wires (the ISSUES #439/#440 lesson).
-Every fixture address is `*.example.com`. Incidental: the
-`open-composition-fields-characterization` expected-key list was already stale
-for `cores_oauth_broker_surface` on `main`; that one line is fixed here so the
-guard is green again.
-
-**Out of scope, deliberately:** the twice-daily brief/digest, the
-`email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
-fan-out migration. Those are P2/P3.
 
 ## 2026-08-12 — the GitHub-connect test that could not fail, and four dead ends behind it (#204 review)
 
@@ -2347,6 +3367,224 @@ rejecting a string exit code, dropping the `___EXIT=` fallback, dropping the
 PRESERVED-records fallback, removing the dirty-list cap, and dropping
 `GIT_TERMINAL_PROMPT=0` / the `ls-remote` deadline.
 
+## 2026-08-12 — a resumed lane no longer re-buys a review it already paid for
+
+**What broke.** When a lane's host process dies mid-loop — the common case is the shared
+account hitting its session limit, which returns a 429 and ends the session — the relaunch
+rebuilt and re-reviewed from zero. The branch and its pushed commits survive, so no code was
+lost; what was lost was every review round already bought. Fifteen lanes died that way in
+three waves on 2026-08-12; several had completed round-1 review and one was at fix round 7.
+
+`resumeCheckpoint` existed (`trident/inner-workflow.mjs`) but the workflow understood exactly
+ONE value, `argus-approved`; every other checkpoint fell through to a full rebuild.
+
+**Why distrusting the checkpoint was CORRECT, and what actually had to change.** A verdict is
+about a COMMIT, not about a branch. Reviewers approved commit A; if anything pushed B into the
+crash window, "the last checkpoint said approved" is a statement about code nobody reviewed —
+so a resume that probed the head and called the answer `reviewedHead` would let the outer merge
+pin to B and SUCCEED, certifying an unreviewed commit (#545). The enabling gap was that
+`checkpoint()` persisted the NAME, the branch and the PR number, and no OID: a resumed run
+genuinely could not tell A from B, which is precisely why failing closed was right.
+
+**The fix, in the order it has to be built.**
+- `checkpoint()` now records the branch head OID the checkpoint APPLIES TO
+  (`code_trident_runs.inner_checkpoint_head`, migration `0122`) in the SAME
+  `trident/checkpoint.sh` UPDATE as the name, so the pair is atomic and can never drift. It is
+  written on EVERY checkpoint — including as an empty string when a phase reported no sha,
+  because a skipped write would leave the PREVIOUS phase's OID sitting next to the new name.
+  An `argus-request-changes-round-N` checkpoint additionally records the findings and spent
+  round it was recorded with
+  (`inner_checkpoint_findings`), through the same temp-file + `readfile()` indirection the
+  terminal result uses.
+- `classifyResume` centralizes the decision. Recorded OID == live head → non-Ralph
+  `forge-done`/`fix-round-N` skip the build and review the recorded commit;
+  `argus-request-changes-round-N` (+ findings) goes straight to the fix round, inheriting the
+  spent
+  round budget so the cap keeps bounding across crashes; `argus-approved` skips build+review.
+  Head moved, head unreadable, an abbreviated/malformed sha, NO recorded OID (a row written
+  before `0122`), an unknown checkpoint name (`ralph-task-built` — its next task is still
+  unbuilt), Ralph `forge-done` (the remaining-task count was not recorded), or a diff that
+  could not be regenerated → REBUILD and RE-REVIEW.
+- The existing `outer-published:<oid>:<remaining>:<round>` handoff composes with
+  this classifier instead of bypassing it. Its encoded OID takes precedence over
+  the companion checkpoint column, is compared with the live head, and only then
+  restores the published diff, round, and Ralph remainder. A matching published
+  handoff skips Forge and planning; a mismatch rebuilds. `ralph-task-built` still
+  rebuilds and re-plans because it denotes unfinished work.
+- The resume diff is regenerated `git diff <base>..<oid>` — BY OID, never by branch name, so a
+  push landing between the comparison and the diff cannot swap the code under review.
+- `reviewedHead` may still only ever be set from a RECORDED value (the checkpoint's OID) or a
+  Forge agent's own reported `commitSha`. NEVER from the live probe: the probe is an input to
+  the comparison and nothing more. `--match-head-commit` re-checks the same equality at merge
+  time, so a push landing after the resume fails the merge LOUDLY rather than shipping.
+- Only then do the launchers pass the checkpoint through (they hardcoded
+  `"resumeCheckpoint": None`, so even the single old path never engaged). They deliberately do
+  NOT accept a head: an operator-typed OID is not a recorded one, and only
+  `trident/checkpoint.sh` may write the value a merge is allowed to pin to.
+
+**Tested in the direction that matters — a FALSE resume.** `trident/inner-workflow-resume.test.ts`
+drives the REAL workflow body and asserts WHICH PHASES DID NOT RUN, because a "resume" that
+silently re-runs everything is the current behaviour wearing a new name and would pass a naive
+"it returned APPROVE" test. Covered: head moved → re-review (and the recorded findings are not
+replayed); no recorded OID → re-review, without even spending the probe; `argus-approved` +
+head moved → NO instant APPROVE, and the only APPROVE the run can emit is pinned to the commit
+THIS run's panel read; a legitimate skip runs no `forge:build` and no `plan:fable`; a resumed
+`fix-round-7` continues at round 8 and can still exhaust the cap.
+
+Mutants run, proven applied by grepping the mutated source before believing a green result:
+disabling the head comparison (4 tests die, including the #545 case), and pinning
+`reviewedHead` to the probe instead of the record (the source-level invariant test dies).
+
+Also fixed while here, because the resume would otherwise have walked into it: the fix-round
+prompt now names the EXACT diff path to re-write (`git diff <base>..HEAD > <diffFile>`). The
+next review reads that path, and a fix agent writing its diff somewhere else left the panel
+reading pre-fix code — latent before, and a resume whose diff file is named after the recorded
+OID would have hit it every time.
+
+## 2026-08-11 — an important email now reaches the owner's chat within five minutes
+
+Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation
+P1 (SPEC.md § "Email Core consolidation"; plan
+`docs/plans/2026-08-06-email-core-consolidation-plan.md` § 5-6).
+
+**The composition seam is `open/composer.ts`.** A new
+`CompositionInput.email_pipeline` bundle is assembled next to `tasks:
+tasksConfig` and turned into a cron job + handler on the shared registries by
+`gateway/composition/build-core-modules.ts` (tasksModule init, immediately after
+the proactive block), through the new `gateway/cores/email-pipeline-wiring.ts`.
+The bundle is where the four things the Core cannot reach for itself are
+threaded: `deliver` (the ONE out-of-turn chat seam), the `PushDispatcher`,
+`readOwnerTimezone`, and the substrate one-shot LLM. Registration is the
+`registerIdleNudgeSweepCron` shape verbatim — `email-pipeline-poll`,
+`{kind:'interval_ms', interval_ms:300000}`, `skip_if_running:true`.
+
+**Chat is the guaranteed surface; push is alongside, never instead.**
+Escalations post through `deliver(topic_id, {durability:'reply'})` onto
+`appWsTopicId(OWNER_USER_ID)` — the owner's BARE app topic, the one topic the
+client both binds and hydrates. That is the exact discipline the PR #105
+deliver-to-nobody incident produced, and it is what makes the escalation
+survive an offline device: the durable row is written before any live push is
+attempted. `PushDispatcher.pushAll` is then fired in its own try/catch, and its
+outcome NEVER touches `escalated_at`. Marking an escalation delivered because a
+push returned would silently swallow every escalation on a box with zero
+registered devices — which, until PR #114's self-heal, was every box.
+
+**Most mail classifies with no model at all.** `src/pipeline/classify.ts` is a
+deterministic-first cascade: owner `sender_rules` (exact address beats domain,
+`protected` rules are important and immune to everything below), then three
+importance patterns (authentication code / billing action / deadline), then the
+mass-mailer downgrade (an `unsubscribe` affordance or `CATEGORY_PROMOTIONS`
+forces `newsletter`, not-important), then the learned `sender_cache`, then the
+LLM, then a plain default. The ordering is load-bearing twice: a "payment
+failed" notice with a marketing footer stays important, and bulk mail — the bulk
+of an inbox — never reaches the model. The LLM seam is the substrate one-shot
+caller ONLY (`buildOneShotSubstrateLlm`, now exported); there is no provider
+dependency and no new secret. A `null` LLM or a throwing one falls through to
+the default, so an LLM-less box degrades instead of failing a tick.
+
+**Turning it on does not escalate a decade of backlog — and does not touch it
+either.** Before anything is processed, a ONE-TIME sweep pages the inbox and
+records every message already there as `handling='preexisting'` with
+`category NULL`. It issues NO Gmail writes at all: no processed label, no
+archive, nothing classified, nothing escalated. The owner's existing mail was
+triaged by hand and stays exactly where they left it (owner decision,
+2026-08-12). The sweep is resumable across ticks via a `backlog_cursor`
+checkpoint and completes at `backlog_marked='1'`.
+
+**The boundary is BOOT, not the first fire, and a paused sweep no longer
+blocks live mail.** Two ways switch-on could swallow the owner's first
+important message, both found by review rather than by tests:
+
+- An `interval_ms` cron waits a full period before its first execution, so a
+  cutoff stamped inside the tick is drawn five minutes late and everything that
+  arrived in that window is filed as history. `buildEmailPipelinePollHandler`
+  captures `activated_at` where the handler is BUILT and threads it in as
+  `activation_at`. A mailbox connected LATER keeps `now()` as its own cutoff —
+  using activation for a late-joining account would escalate months of its
+  back-catalogue.
+- The sweep is bounded per tick (`max_backlog_pages × backlog_page_size`), and
+  it used to return before the live pass. An inbox larger than that budget
+  therefore pushed new mail to the next cron fire, breaking the one-poll-interval
+  acceptance criterion on exactly the installs where switch-on is most visible.
+  A paused sweep now continues into a RESTRICTED pass: the newest page only,
+  and only messages that arrived after the account's cutoff. History is excluded
+  by the same one-time migration boundary the sweep itself uses — explicit
+  rather than structural, and the restricted pass writes no continuation cursor.
+
+Afterwards, "is this history?" is a ROW LOOKUP — `store.hasEmail(id)` — not a
+date comparison re-run on every message for the life of the install. The
+earlier design gated each message on `received_at < go_live_after`, which had
+to be right forever and resolved an unparseable date toward "treat as new";
+`go_live_after` is still stamped, but only as provenance for P2. Marking the
+backlog once is what makes the invariant structural instead of conditional.
+An escalated message deliberately KEEPS `INBOX` (the owner still has to act on
+it in their mail client), so the label set cannot double as "handled"; the row
+in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
+failed chat delivery increments `escalation_attempts`, records `last_error`, and
+is retried by the next tick's resume step under an attempt cap.
+
+**The dedup guarantee had to be extended into the gateway to be true.** Every
+escalation carries a deterministic `idempotency_key`, and `ButtonStore.emit`
+collapses the durable row on it — but `gateway/http/deliver.ts` pushed live
+UNCONDITIONALLY underneath that collapse. So the retry `escalate.ts`
+deliberately permits (deliver succeeded, `markEscalated` threw, row still
+eligible) re-notified an online owner on every attempt while the transcript
+stayed correctly deduped. `deliver` now implements the predicate its own
+`EmitResult` docstring specifies and the onboarding engine already used
+(`engine.ts:1186`): re-render only when the row is NEW or when it landed in the
+DB and never reached a client. The second clause needs a writer, so a
+successful `durability:'reply'` push stamps `markDelivered`; without that write
+`was_delivered` is false forever and the guard is dead code. Pinned by an
+integration boundary test (`tests/integration/email-escalation-live-dedup.test.ts`)
+using the real store and the real seam — the unit tests on either side both
+pass while the bug is present, which is why neither found it.
+
+**The sidecar is instance-level, with its own migration tree.**
+`<owner_home>/email/pipeline.db`, opened `openSidecar` +
+`applyProjectScopedMigrations` exactly like `cache.ts:328-329` but with no
+`project_id` and no `ProjectSidecarResolver` — the inbox is instance-scoped
+because the multi-account client merges accounts into one stream. The tree is
+`cores/free/email/migrations-pipeline/0001_email_pipeline.sql` and it starts at
+0001, not 0002: a migration namespace is per-DB-FILE
+(`migrations/runner.ts:58-63`), and reusing the per-project cache tree would
+drag `triage_cache` into the pipeline DB. `sender_rules` ships EMPTY — there is
+no seed row anywhere in the tree, because every rule is owner data and lands at
+runtime only (P2.5's survey/interview, or the P4 importer).
+
+**Contract additions.** `modifyMessage` (`users.messages.modify`) and a
+generalized `ensureLabel({name})` on both Gmail backends and the multi-account
+router. `modifyMessage` is deliberately message-scoped rather than
+thread-scoped: archiving a whole conversation because one of its messages was
+bulk mail is a data-loss-shaped bug. The router honours the `account_id` the
+fan-out already stamps on every row, so a write derived from a read addresses
+the mailbox the message actually lives in; without an id it falls back to the
+same by-id probe `getMessage` uses. The former private
+`ensureLabelImpl(project_id)` is now `ensureLabelByName(name)` and
+`ensureProjectLabel` delegates to it — one mechanism, two callers.
+
+**Tests + mutation results.** Four named mutations, each verified red by hand
+and reverted: inverting the `has_unsubscribe` downgrade reds two
+`pipeline-classify.test.ts` arms; an escalation that fires but says nothing
+(boilerplate body) reds two arms across `pipeline-poller` / `pipeline-dedup`;
+removing the `hasEmail` skip reds three dedup arms and removing the
+`escalated_at IS NULL` guard reds the resume arm; letting the backlog sweep
+fall through to the processing path reds the two sweep arms, which assert the
+mailbox is untouched (`modified` and `ensured` both empty, `backlog-1` still
+carrying exactly `['INBOX']`) — the seeded backlog message is deliberately
+shaped like the billing escalation, so a regression escalates it rather than
+failing quietly. The producer side is pinned too:
+`open/__tests__/open-email-pipeline-wiring.test.ts` boots the REAL composer and
+reads `composition.email_pipeline`, so deleting the composer block reds rather
+than shipping a declared capability nobody wires (the ISSUES #439/#440 lesson).
+Every fixture address is `*.example.com`. Incidental: the
+`open-composition-fields-characterization` expected-key list was already stale
+for `cores_oauth_broker_surface` on `main`; that one line is fixed here so the
+guard is green again.
+
+**Out of scope, deliberately:** the twice-daily brief/digest, the
+`email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
+fan-out migration. Those are P2/P3.
+
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 
 `PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through
@@ -2426,6 +3664,3768 @@ exemption over the entire IMPLEMENTED section: a present-tense "the mutation
 prover still vetoes a bad APPROVE today" written in the swallowed region passed
 at 17 pass / 0 fail. An exemption that widens on its own is a gate that stops
 firing with nobody watching, so an edit to either end now throws instead.
+
+## 2026-08-11 — the account-label reader's REAL path had no positive test (review round 2)
+
+Every positive test for the sidecar injected its own reader. That left the two things which
+can only ever be wrong in production asserted by nothing: WHERE the sidecar is looked for,
+and whether the default reader is wired to look there at all. The one test that used the
+default reader pointed at a directory that does not exist and expected null — an assertion a
+completely wrong path satisfies exactly as well as a correct one.
+
+Two tests now write real files into a temp dir and pass no deps: one proves a good sidecar is
+found and used, one proves a STALE sidecar is refused *through the same wiring that accepts
+the good one*. The refusal is the whole value of the feature, and until now it was only ever
+proven against a stub.
+
+Mutants run, not asserted: renaming the sidecar basename (dies), looking for it inside the
+credentials path instead of beside it (dies), and replacing the fingerprint comparison with a
+check that only rejects an empty string — the refusal replaced by a guess — which now dies at
+BOTH layers instead of only against the injected reader.
+
+**The 0600 sidecar permission was a security argument that asked nothing of anyone.** The case
+for scrypt over a bare digest cites a mode-0600 sidecar as one of three facts making a weak
+digest unexploitable, while the writer-facing contract required no permission at all. The
+reader cannot check the mode, and refusing a loose one would drop the label silently — the one
+failure mode this feature is arranged to avoid — so the requirement now lives in the contract
+where a writer reads it, and a doc guard asserts it stays there. Mutant: softening the
+requirement to prose fails the guard.
+
+**The label limit was 64 with no test at 64.** A 200-character rejection is satisfied by any
+off-by-one version of the check. Boundary covered; the `>` → `>=` mutant now dies.
+
+**Three current-state docs claimed the feature was impossible.** `docs/as-built/…-usage-sample-series.md`
+said the column is "always null today" and the instance "genuinely cannot name the account";
+both dashboard clients' docblocks said nothing on the box can name it. All true before this
+branch and false after it — the aspirational-docblock hazard in reverse. The dated entries keep
+their text with a superseded note (they are a log, not current state); the live docblocks now
+say null means *nothing named it, or the name on disk described a different token*, which is
+what the code does.
+
+Behaviour unchanged in this round: tests, comments and docs only.
+
+Detail: § 2026-08-09 — Naming the account behind a reading.
+
+Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
+(adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
+failed, so this is not a four-lane APPROVE and should not be read as one.
+
+## 2026-08-11 — the no-project scope was addressing a real project, and one comment claimed a tap that never arrives
+
+Landed via PR #171. Two review findings on the ritual-push branch, from a panel where two
+independent lanes converged on the first. Both are about the same failure shape from opposite
+ends: a name that means two things, and a comment that describes a path no code takes.
+
+**A SCOPE IS NOT AN ID, and `general` is a legal project id.** The mobile rail spells the
+no-project General scope `~general`, deliberately outside the gateway's `[A-Za-z0-9_.-]`
+alphabet so the sentinel cannot collide with a real project — that is what #410 bought, and
+`app/lib/project-rail-view.ts` says so at length. `app/lib/general-scope.ts` then mapped it back
+onto the literal HTTP segment `general`, which **is** inside that alphabet. So a rail-tap on
+General and a rail-tap on a project whose id is literally `general` produced a byte-identical
+request, and the reminders surface derived one `app-project:general` topic for both. Collision-proof
+by construction, then mapped onto something that is not.
+
+What made it worth a round rather than a note: **reminders was about to be the first MUTATING
+surface on that mapping.** The four other clients (docs, tabs, work-board, activity) have shared it
+for months. This branch routed `list`, `create`, `snooze`, `cancel` and `convert-to-task` through
+it, so two unrelated rail entries would have shared a pending list *and* its writes — a cancel
+aimed at General destroying a real project's row. Before the branch that path 400'd
+(`sanitizeProjectId` rejects `~`), which is loud and harmless; the branch would have converted it
+into a silent wrong-scope read AND write. **Quieter is worse.**
+
+**Fixed by reserving a segment on the server, not by renaming anything.** There is no value inside
+`[A-Za-z0-9_.-]` that can mean "no project" without also naming a project that might exist, so the
+fix had to come from outside the alphabet. `gateway/http/app-reminders-surface.ts`
+`resolveScopeSegment` accepts `GENERAL_RAIL_ID` — exact match, never a prefix — ahead of
+`sanitizeProjectId`, and the scope lands on `app-project:~general`. Deliberately **not** a new topic
+prefix: that string reuses the one shape every existing topic reader already decodes, and what they
+decode it back to (`~general`) is the rail id, which is the right answer for each of them —
+`push-deep-link-dispatch` builds `/projects/~general/reminders`, which is exactly where a General
+tap belongs. `reminders/dispatcher.ts` `deriveReminderProjectId` needed one addition: the
+sentinel resolves to `owner_slug`, as its `web:<user_id>` General twin already did, or the context
+source would go looking for a `Projects/~general/STATUS.md` that cannot exist.
+
+**TWO readers needed the sentinel, not one — corrected in round 3, and the sentence above said "the
+one addition" until it was.** Reserving a segment does not just create a new topic to decode; it
+creates a value that every consumer of `topic_id` must now recognise, and the second one was missed
+because it is a WRITE on a different substrate. `cores/free/reminders/src/backend.ts`
+`resolveTaskProjectId` — the convert-to-task path — resolved `~general` to itself, so promoting a
+General reminder would have created a task whose `project_id` is the sentinel and made
+`tasks/projection/write.ts` `mkdirSync` a `Projects/~general/` directory for a project that cannot
+exist. `tasks/store.ts` `create` does not re-validate the id, so the Core was the only guard.
+Normalised to `NO_PROJECT` (`''`) at a single exit rather than inline, because THREE paths carry the
+sentinel there: the caller's explicit override, the `app-project:~general` topic this entry's own
+change introduced, and the bare `~general` the Core's create path stores raw. `NO_PROJECT` rather
+than `owner_slug` because the destination differs — General IS the unprojected bucket, which is the
+bucket the General Tasks tab lists, whereas the dispatcher's consumer needs a real directory.
+
+Not reachable from the app today and fixed anyway: `open/composer.ts` leaves `convertReminderToTask`
+unwired so the HTTP route answers 501, but the Core's own `reminders_convert_to_task` tool reaches
+it, and this branch is what put the sentinel on that path. **`gateway/http/app-tasks-surface.ts`
+still gates on `sanitizeProjectId` and therefore still answers 400 for `~general`** — the tasks
+surface has NOT learned the reserved segment the way reminders has. That is the same shape as #183
+and is left to it rather than widened into a push fix.
+
+Client side, `httpScopeSegment` / `httpScopeSegmentEncoded` sit beside `httpProjectSegment` rather
+than replacing it. Two functions, not a flag: a server that has not learned the reservation answers
+`~general` with a 400, so the halves must agree, and different names are how that is enforced.
+`~` is RFC-3986 unreserved so `encodeURIComponent` leaves it alone — the same property that made it
+the right route sentinel after `#general` shipped and broke on-device (#411).
+
+**SCOPE OF THE FIX, STATED RATHER THAN IMPLIED: reminders ONLY.** Docs, tabs, work-board and
+activity still collapse General onto `general` and still alias. They pre-date this module, and
+closing them is a **data migration** — `Projects/general/docs` is a directory with files in it, and
+either way the split goes, one scope stops seeing content it can see today. Filed as **#183** with
+both fix directions, not ridden in on a push fix. Open has no root `ISSUES.md` (the purity gate
+reserves that path); its defect tracker is GitHub Issues.
+
+**AND THE RESIDUAL IS NOT READ-ONLY — corrected in round 2, because the first version of this
+entry, of `general-scope.ts`'s docblock, of the test comment and of #183 itself all called those
+four clients "read-only".** Two of them write: `docs-client.ts` (`writeFile`, `moveFile`,
+`createFolder`, `uploadBinary`, `deleteFile`, `deleteFolder`, `deleteBinary`,
+`deleteBinariesUnderPrefix`) and `work-board-client.ts` (`create`, `update`, `complete`, `reorder`,
+`delete`, `start`). Only `tabs-client.ts` and `activity-client.ts` are reads. So #183 is an **open
+wrong-scope write** on the same terms that made reminders worth closing first — a docs delete from
+one scope removes the other scope's file — and reminders was the surface worth closing FIRST, not
+the only mutating one. The sequencing behind a migration is unchanged; what changed is that it is no
+longer justified by a severity claim that was false.
+
+**THE SECOND FINDING IS A COMMENT, AND THE FIX IS TO CORRECT THE CLAIM.** The latch-release from the
+previous round is correct by inspection and stays. What was wrong is the sequence used to motivate
+it, in this file's own comment and in commit 93245925's message: *"tap the notification for X,
+rail-tap elsewhere, then tap the SAME notification again — it is still sitting in the shade"*. The
+premise is true and the conclusion is not. A real second tap never reaches the equality check,
+because `app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute` —
+so the re-tap produces no navigation at all and never re-supplies `?message_id=`. It is swallowed one
+layer up. The dedupe TTL is 7 days and warm taps pass `{dismiss:false}`, so the notification really
+does stay in the shade, which is precisely what made the false claim read as plausible.
+
+Corrected in `ChatSyncSurface.tsx` and in the sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, which now says what it actually drives:
+two `rerender` calls, proving the latch releases on a targetless visit — real, and still
+mutation-killed — and saying plainly that it proves nothing about tap-twice reachability. The dedupe
+gap itself is filed as **#182** rather than fixed here; a push-notification fix should not grow a
+navigation change on the way past.
+
+**Mutation-tested, each mutant named with the tests it reds:**
+
+* `resolveScopeSegment` → bare `sanitizeProjectId` (drop the reservation): **5 red** in
+  `gateway/__tests__/app-reminders-surface.test.ts` — accepts-the-sentinel, own-topic,
+  create-invisible-in-the-other, cannot-snooze-or-cancel, include_id-no-leak.
+* `resolveScopeSegment` → `startsWith` instead of `===`: **1 red** — the exact-match arm, which
+  is the one that would otherwise hand `~generalize` the General scope with a 200.
+* `reminders-client.ts` → back to `httpProjectSegmentEncoded`: **7 red** across
+  `general-scope.test.ts` + `legacy-reminder-push-tap-reaches-general.test.ts`.
+* `httpScopeSegment` → collapse the empty scope to `general`: **3 red**. Collapse the sentinel too
+  (i.e. make it identical to `httpProjectSegment`): **7 red**.
+* `deriveReminderProjectId` → drop the sentinel line: **1 red** in `reminders/dispatcher.test.ts`.
+* The latch release → back to the bare `if (deepLinkTarget.length === 0) return;`: still reds the
+  sixth arm and nothing else. Re-run rather than cited — the comment around it changed, so the
+  earlier round's evidence was not assumed to carry over.
+
+The comment corrections have **no mutant**, and that is stated rather than papered over: nothing
+executable changed, so there is no test to red. What they buy is that the next reader does not build
+on a reachability that does not hold.
+
+`legacy-reminder-push-tap-reaches-general.test.ts` needed its premise inverted, not just its
+literals: it existed to assert the tilde must NOT reach the wire, and now the tilde reaching the wire
+is the correct outcome. It pins the segment against `wire-types`, the one definition both sides
+import, so a drift in either copy reds here instead of 400ing on a device. `wire-types/topic-id.ts`
+also said the gateway "rejects `~general` … on every `/api/app/projects/<id>/…` route" — true when
+written, and now false of exactly one route, so it names the exception.
+
+📌 **A sentinel is only collision-proof at the layer that spells it.** `~general` was engineered to
+be unmistakable on the client and then translated, one function later, into a string a user can name
+their project. The property was real and it did not survive the mapping — and nothing failed, because
+both halves were individually correct. **When a value exists to be unforgeable, follow it to the last
+layer that reads it and check the guarantee is still true there.** The generalisation of the
+adjacent lesson from the same file: a comment describing a mode is a claim about reachability, and
+the way to check it is to walk the layer ABOVE the one the comment is written in.
+
+#### Round 2 — the correction had itself carried the false claim, and one sentinel had escaped to the screen
+
+Same PR **#171**, second review round. Nothing about the reservation changed; four things that
+DESCRIBED it did, plus one user-visible leak the reservation created.
+
+**THE SEVERITY CLAIM WAS WRONG IN SIX PLACES AT ONCE.** "Read-only clients" was written into
+`app/lib/general-scope.ts` (twice), `app/lib/reminders-client.ts`,
+`gateway/http/app-reminders-surface.ts`, `app/__tests__/general-scope.test.ts`, this file, and the
+body of GitHub issue #183 — and it is false of two of the four. It survived a whole round because it
+was *plausible*: reminders genuinely was the surface being made to mutate in this branch, so "the
+mutating one" read as a description of the SET when it was only a description of the DIFF. All six now
+name the writing methods by symbol, and #183's title and table say WRITES. The reason to care is not
+tidiness — a residual filed as read-only gets scheduled like a cosmetic, and this one can delete a
+document.
+
+The count went from five to six *after* the first correction pass, and that is the finding, not a
+footnote: the sixth was in `reminders-client.ts` — the module whose entire purpose is to NOT use the
+aliased mapper — and the first pass missed it because the pass re-read the files it had already
+opened instead of searching for the sentence. 📌 **A claim that is wrong in one file is wrong wherever
+it was copied to. Grep the CLAIM, not the file** — this branch hit that same shape three times
+(`625d29d2`, `a2ab3a0e`, and here), which is twice more than a coincidence.
+
+**THE RESERVATION PUT `~general` ON THE FOCUS SCREEN.** `app-focus-surface.ts`'s
+`extractProjectIdFromTopic` decodes `app-project:<id>` back to whatever id it carries, so the moment
+General's reminders got their own topic, a General row's project chip rendered the literal string
+`~general` — an internal routing token displayed as though the owner had named a project that. It was
+unreachable before this branch (the surface 400'd on `~`), which is why no existing test could have
+caught it: `focus-row-formatters.test.ts` hand-builds its items, so it only ever sees values someone
+thought to type. `projectChipLabel` now maps the sentinel to `General`, and deliberately does NOT
+route it through `isInstanceLevel` — General is a routable scope with its own tabs, and flipping that
+predicate would have silently redirected the tap to the projects list.
+
+**TWO CITATIONS HAD GONE STALE INSIDE THEIR OWN BRANCH.** A prose edit in one commit cited
+`app-reminders-surface.ts:212` and `:247`; a later commit on the same branch added lines above both.
+Rather than repoint them at 271 and 307 — which the next commit would break again — they now name the
+call and the expression. 📌 **A `file:line` citation into a file the same branch is still editing is
+stale before it merges. Cite the symbol.**
+
+**THE BIDIRECTIONAL TEST WAS ONLY UNIDIRECTIONAL.** `"neither scope can snooze or cancel the other's
+row"` created a General row and attacked it through the project's URL — and never built the mirror.
+The two directions are not symmetric by inspection: the reserved segment is matched by an exact-match
+branch that runs *before* `sanitizeProjectId`, so the General-as-attacker path executes different
+code. Split into two named tests over one parameterised helper. Mutation-tested by aliasing the
+sentinel back to `general` **on the snooze/cancel branch only**, leaving list and create reserved: the
+new test reds, the original passes — which is the proof that it covered one half while reading as
+though it covered both.
+
+📌 **A test whose NAME quantifies over both directions ("neither", "either", "any") is asserting
+something its body may not reach.** The name is the claim; the fixtures are the coverage. When they
+disagree, the name is what everyone believes.
+## 2026-08-10 — the builder gets the spec doc's BODY, not its YAML frontmatter
+
+`WorkBoardSpecDocService.resolveTaskForItem` returned `doc.content.trim()` — the whole
+document. `buildSpecDocMarkdown` prepends a frontmatter block (`type` / `title` /
+`created`), so **the builder's first instruction was YAML metadata** rather than the scope.
+
+Observed live on two separate email-core runs, whose dispatch branches came out
+`trident/type-plan-title-p1-email-pipeline-s`. The slug is derived from the task text, so
+the leak was visible in the BRANCH NAME while the real damage — a builder opening its
+brief on `type: plan` — was invisible.
+
+`stripFrontmatter` is exported and deliberately narrow:
+
+* the fence must **open on line 1** (leading blank lines tolerated). A `---` further down
+  is a horizontal rule, and this repo's plan docs use those constantly — treating one as a
+  closing fence would silently truncate the brief from the top, strictly worse than
+  leaving the header on.
+* the fence is a line that is **exactly** `---` after trimming, not one that merely starts
+  with it.
+* an **unclosed** opener is returned untouched; guessing where it ends would discard content.
+* a doc that is **only** frontmatter strips to empty, and `resolveTaskForItem` already
+  treats empty as "no usable spec" and falls back to the card title — so it degrades to
+  the title rather than dispatching a blank brief.
+
+#### The tests were worthless on the first pass, and the mutation run is what caught it
+
+Seven cases passed, and **both mutants survived**:
+
+* **Reverting `resolveTaskForItem` to raw content passed all seven** — every case tested
+  the pure helper and none called the function actually being fixed. **The fix's own call
+  site had zero coverage.** Now covered by a real round-trip: create a card with a spec,
+  read the task back, assert no `type: plan` and no `created:` reach it, and assert it does
+  not merely begin past the header by accident.
+* **The "mid-document `---` is a rule, not a fence" case had ONE `---`** — so a mutant that
+  scans for a fence *anywhere* still finds no closer and returns the input unchanged. The
+  fixture could not distinguish the correct rule from the broken one. It has two rules now.
+
+Each mutant now dies on a **different** test.
+
+📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
+it looks identical to the real thing in a green run.** Second occurrence today. The
+mutation step is the only thing that separates them.
+
+## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
+
+Observed live: the owner cancelled a running email-core build and the row settled at
+`phase='stopped'` with **`subagent_status='running'`**. The child was already dead — the
+column was asserting something false.
+
+> ⚠️ **"The child was already dead" is WRONG too, and is kept only as the record of what
+> was believed.** Cancelling does NOT kill the detached workflow (#177): it keeps running
+> and keeps checkpointing. This incident held by TIMING — the workflow happened not to
+> checkpoint again before the row was read — not by construction, which is exactly why the
+> fix needs the durability half in `trident/checkpoint.sh`. What is true of EVERY cancel is
+> narrower: the column is wrong about the RUN (nothing will advance it again), not
+> necessarily about the process. Corrected in round 3 below; marked here because the
+> ⚠️ block that follows scopes only the paragraph after it, and a reader who stops at the
+> opening would carry away two false claims rather than one.
+
+`subagent_status` is documented (migration 0077) as the CURRENTLY in-flight subagent, and
+gates key on it: #143's fix widened the harvest/terminal block on
+`subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery read it too. A
+terminal row reading `running` is precisely the stale field those readers can act on, so
+this is not tidiness.
+
+> ⚠️ **That paragraph is WRONG and is kept only as the record of what was believed.** All
+> three named readers are unreachable on a terminal row — `step()` no-ops on
+> `isTerminalPhase` before the harvest gate or orphan recovery run, and the hang watchdog
+> keys on `last_advanced_at`. The reader that is actually load-bearing is `update()`'s crash
+> veto. Corrected in "Two corrections to the round-1 text" ~110 lines below; the correction
+> is repeated here because a reader who stops after the opening rationale would otherwise
+> carry away the false one.
+
+`TridentRunStore.terminalTransition` now clears it **in the same atomic UPDATE** that
+writes the terminal phase:
+
+```sql
+-- as of round 2 the set is IN ('running', 'pending') — see the round-2 note below
+subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END
+```
+
+**Only `'running'` is cleared, and that restriction is the load-bearing half.** Nulling
+unconditionally would erase a `'crashed'` marker whenever anything terminated an
+already-crashed run as `'failed'` — deleting the signal #143 added a gate for, while
+looking like a cleanup. `completed`/`failed`/`crashed` are OUTCOMES worth keeping;
+`running` is the only value that is a live CLAIM, so it is the only one a terminal
+transition has business touching.
+
+`NULL` rather than a new `'cancelled'` enum value because the column carries a CHECK
+constraint (`migrations/0077_code_trident_runs.sql:107-108`) that SQLite cannot alter
+without a table rebuild — heavier than the defect warrants — and `null` already means
+"nothing in flight" here (`trident/orchestrator.ts` writes it on the no-subagent paths).
+The reason for the stop survives in `failure_reason`, so nothing is lost.
+
+**Verification:** 6 cases in `trident/store.test.ts` against a REAL migrated DB, each with
+a non-empty precondition asserting the row actually carried the status first. Two mutants
+killing DIFFERENT tests — dropping the retraction reds the cancel case; nulling
+unconditionally reds the `crashed` AND `completed` cases — so both halves of the CASE are
+proven necessary. A loser transition (second terminate on an already-terminal row) is
+covered too: it must not clear a status on its way past.
+
+📌 **The first draft of these tests went in the wrong file.** `trident/terminate.test.ts`
+uses a FAKE store, so a SQL-level fix is invisible there — the tests would have passed
+without exercising the change at all. Test the SQL where the SQL lives.
+
+**Review pass (3-lane panel) added two cases and corrected one claim above.**
+
+The blast-radius question resolved clean: the only production path into
+`terminalTransition` is `terminate.ts:143`, its four callers read `.phase`/`.failure_reason`
+only, and no reader of `subagent_status` exists outside
+`trident/{orchestrator,state-machine,store,inner-loop-sim}.ts`. The tick loop is a separate
+terminal writer (`saveIfActive`), so the hang watchdog and orphan recovery — which set the
+column explicitly in their outcome — are untouched.
+
+Two gaps the original 6 cases left:
+
+1. **The SHORT `params` branch was unpinned.** Omitting `failure_reason` makes `params` one
+   element shorter, and the board X-cancel (`work-board-surface.ts:531`) and `/code stop`
+   (`code-command.ts:281`) BOTH terminate without a reason — two of the four callers take
+   the branch no test covered. It binds correctly, but nothing held it there. Now pinned
+   column-by-column, killed by a mutant that pushes the parameter unconditionally.
+
+2. **The stated reason the `'running'`-only restriction is load-bearing is not the real
+   one.** The comment credits #143's harvest gate, but `step()` no-ops on an already-terminal
+   phase (`orchestrator.ts:680-683`), so that gate is unreachable once the row is terminal.
+   The path where preserving `'crashed'` actually bites is `update()` — the ONE writer with
+   no `phase NOT IN (terminal)` guard, whose `subagent_status IS NOT 'crashed'` veto
+   (`store.ts:447-449`) is all that latches a crash on a terminal row. Nulling
+   unconditionally would lift that veto. The restriction is right; the justification was
+   aimed at the wrong mechanism, so a future "simplify to NULL" could have cleared the
+   cited-but-unreachable gate and still broken the real one.
+
+Both `'running'`-clearing guards elsewhere are also gated on `phase NOT IN (terminal)`
+(`store.ts:411`, `:638`), so clearing the claim at terminal time makes no guard unreachable:
+`crashRunningByLauncher` could never sweep a terminal row regardless.
+
+📌 **A placeholder/parameter arity mismatch is LOUD, not silent** — sqlite throws, and the
+mutant that introduced one reddened eleven tests. The dangerous shape is a same-count
+REORDER, which is why the new case asserts each column separately instead of just the status.
+
+**Round 2 — the retraction was not DURABLE. `trident/checkpoint.sh` now refuses a terminal row.**
+
+The panel's blocker: the retraction held by TIMING, not by construction. Cancelling a build
+writes the terminal phase but does not kill the detached inner workflow — nothing in the
+cancel path reaps the child. That workflow keeps going, and every per-phase checkpoint pushes
+`subagent_status running` (`trident/inner-workflow.mjs:567`) through `trident/checkpoint.sh`,
+whose UPDATE was `WHERE id='<run-id>'` with no phase predicate. So the sequence `/code stop`
+mid-Build → row goes terminal with the claim retracted → next inner checkpoint → the claim is
+back, on a terminal row, with `branch` and `last_advanced_at` re-stamped. The exact state this
+work exists to remove, recreated by the only writer that had no terminal guard.
+
+The fix is the matching predicate, so the terminal chokepoint and the out-of-band writer agree:
+
+```sql
+UPDATE code_trident_runs SET <fields> WHERE id='<run-id>'
+  AND phase NOT IN ('done', 'failed', 'stopped')
+```
+
+Nothing useful is dropped, because `step()` returns early on `isTerminalPhase`
+(`trident/orchestrator.ts:679-683`): no reader ever consults a value a post-terminal
+checkpoint would have written, `inner_result` included — a terminal row is never harvested. A
+skipped write stays exit-0 (the checkpoint step must never fail a build) but now reports on
+stderr, because a silently-dropped checkpoint is exactly the kind of absence that costs hours;
+`changes()` is read in the same sqlite3 invocation and `tail -1` drops the busy_timeout
+PRAGMA's own echo.
+
+**Two corrections to the round-1 text above.**
+
+1. The docblock in `trident/store.ts` still justified the retraction via #143's harvest gate,
+   the hang watchdog and orphan recovery — all three unreachable on a terminal row (`step()`
+   no-ops first; the watchdog keys on `last_advanced_at`). Round 1 corrected that in this log
+   and left the comment saying it. Now the comment names what is actually load-bearing: the
+   CRASH VETO on the two write paths (`store.ts` `update()` and `saveIfActive()`), plus the
+   human read of a finished row, which is where the false claim was spotted in the first place.
+   Rule 3a shape — a confidently specific wrong rationale is worse than none, because the next
+   reader trusts it.
+2. The loser-transition test could not prove what it claimed. It set the already-terminal row
+   to `'crashed'`, which the CASE preserves anyway, so the assertion passed whether the loser
+   wrote nothing or wrote the preserving CASE. It now puts back `'running'` — the one value the
+   CASE *would* clear — and asserts row state before `won`, so a leaked write cannot hide
+   behind the `won` assertion. Killed by the mutant that drops the terminal predicate.
+
+`'pending'` is cleared too now. No production path writes it (the orchestrator writes only
+running/completed/failed/crashed/null), but it is in the type and in migration 0077's CHECK,
+and it ASSERTS a child just as `'running'` does. The split that matters is claim vs outcome,
+not one enum value.
+
+**Verification:** 613 trident tests green. Five new cases in `trident/checkpoint-sh.test.ts`
+against a real throwaway sqlite db — a per-phase checkpoint against `stopped`/`failed`/`done`
+writes nothing and re-stamps nothing, the terminal-result write is refused too, a non-terminal
+phase is unaffected (the guard is not a blanket refusal). Mutant: deleting the predicate reds
+four of them. That suite needed a `phase` column added to its fixture table, which is its own
+small lesson — a hand-rolled fixture schema silently omits the column your new guard reads.
+
+📌 **A SQL-level guard on the read side is only half a fix when an unreaped process still holds
+a pen.** The question that found this was not "is the write correct?" but "who else can write
+this row after it is terminal, and what stops them?" — and the answer was a shell script three
+directories away that no one had thought of as part of the state machine.
+
+**Round 3 — the freeze was too WIDE, and two of its tests could not fail.**
+
+Round 2's guard was `AND phase NOT IN (terminal)` on the whole UPDATE, which threw away the
+orphan's `branch`/`pr`/`inner_checkpoint`/`inner_result` along with its liveness claim — and the
+comment asserting "nothing useful is dropped" was false in exactly the case this work is about.
+The cancel does not kill the workflow, so it can push a branch and open a PR **after** the
+cancel; those columns are the only trail from the run row to that PR, and `run-progress.ts:188`
+surfaces `pr` to the board. On a first launch this script is the ONLY writer of either — the
+launch persist carries `branch`/`pr` forward but cannot invent them (a fresh run's `branch` is
+null and `detectExistingPr` probes a branch that does not exist yet). Blanket-refusing them left
+an untraceable orphan PR.
+
+The freeze is now SCOPED to the two liveness columns, and nothing else:
+
+```sql
+subagent_status  = CASE WHEN phase IN ('done','failed','stopped') THEN subagent_status ELSE '<new>' END
+last_advanced_at = CASE WHEN phase IN ('done','failed','stopped') THEN last_advanced_at ELSE '<now>' END
+```
+
+`subagent_status` is the claim; `last_advanced_at` is the hang watchdog's heartbeat. Everything
+else lands: inert on a terminal row (`step()` no-ops, so nothing resumes from a checkpoint or
+harvests a result) but readable, which is the point. A cancelled row carrying a stale parseable
+`inner_result` is an ANTICIPATED state rather than one this change introduces —
+`isTridentHarvestTerminal` keys on the durable `harvested_at` marker that `terminalTransition`
+never sets, explicitly so such a row emits no handoff (RC2, `orchestrator.ts:220-235`). The `inner_result_file` path nests both
+guards — terminal freeze outermost, then the original readfile column-consistency CASE. Because
+the freeze now lives in the SET expressions rather than the WHERE clause, a terminal row still
+matches and `changes()` still reports 1, so the stderr report re-reads the phase in the same
+sqlite3 invocation and distinguishes *frozen* from *run not found*.
+
+The un-reaped workflow itself is now filed as **rjunee/neutron#177** and cited from both halves
+of the fix — this PR makes the record honest, it does not stop the orphan.
+
+**Two blockers in the round-2 TESTS — both were assertions that could not fail.**
+
+1. **`checkpoint-sh.test.ts` seeded `phase='Build'` / `'Review'`** — values migration 0077's
+   `CHECK` rejects. The terminal guard was therefore never once exercised against a legal ACTIVE
+   phase: a mutant guard that froze only `('Build','Review')` passed the entire suite while
+   freezing every phase production can actually hold. The throwaway fixture table now carries
+   0077's real `phase` CHECK (so an illegal seed throws — pinned by its own case), the terminal
+   cases iterate `TERMINAL_PHASES`, and the "not a blanket refusal" control iterates **all five**
+   active phases.
+2. **The `subagent_status` matrix omitted `'failed'`** — the fifth and last value the CHECK
+   admits. A mutant clearing `IN ('running','pending','failed')` survived the whole suite while
+   erasing the subagent-level outcome of every failed build. Covered now; the matrix is complete
+   against the CHECK.
+
+Three mutants killed on the scoped freeze: removing it (4 red), applying it to every phase (7
+red), extending it to `branch`/`inner_checkpoint`/`inner_verdict` — i.e. regressing to round 2's
+blanket refusal (4 red).
+
+Two smaller corrections. The store docblock credited `saveIfActive()`'s crash veto as
+load-bearing alongside `update()`'s; it is not — `saveIfActive` also carries
+`phase NOT IN (terminal)`, so on a terminal row it cannot land whatever the column says, and only
+`update()` (the ONE writer with no phase predicate) actually latches a crash there. And the
+short-params test's rationale claimed a shifted parameter "would be silent": a timestamp bound to
+`phase` is rejected loudly by the CHECK — `failure_reason` is the column that shape would quietly
+hit, which is why the case pins each column separately.
+
+The terminal-set literal in `checkpoint.sh` is a fourth copy of `TERMINAL_PHASES`, so
+`inner-workflow.test.ts` — which already asserts that script's SQL as text — now pins the literal
+against the constant and asserts it appears exactly once.
+
+📌 **A test can be green because the code is right, or because the fixture made the wrong answer
+unreachable.** Both blockers here were the second kind, and both were invisible in review until
+someone compared the fixture's values against the production CHECK constraint. When a guard keys
+on an enum, the fixture must carry that enum's constraint — otherwise the test is asserting over
+a value space production never has.
+
+**Round 3 — the docblock's OPENING claim was false, and the fixture was still laxer than
+production in two more columns.**
+
+1. **"The child is dead" contradicted the same docblock's own DURABILITY paragraph.** The
+   comment above `terminalTransition` opened by asserting that after a cancel the child
+   process is dead, while its DURABILITY paragraph — twelve lines below — correctly stated
+   that cancelling does NOT kill the detached workflow, which keeps checkpointing
+   (#177). Both cannot be true. The observed incident held by TIMING, not by
+   construction: the workflow happened not to checkpoint again before the row was read.
+   The opening now claims only what is actually true of every cancel — the column is wrong
+   about the RUN (nothing will advance it again), and explicitly NOT that the process is
+   gone. The same false sentence was corrected in the PR description.
+
+   The round-2 correction of the *reader* rationale (crash veto, not #143's harvest gate)
+   was already in the code at this round's start; only the opening sentence was outstanding.
+
+2. **`last_advanced_at` was declared nullable and seeded NULL — a state production cannot
+   hold** (`migrations/0077_code_trident_runs.sql:118` is `TEXT NOT NULL`, re-stamped on
+   every transition). The fixture also seeded `subagent_status='pending'` in every single
+   case, never NULL — even though NULL is exactly what `terminalTransition` itself leaves
+   on a cancelled row, so it is the value the very next checkpoint after a cancel sees.
+   The throwaway table now carries the NOT NULL and the `subagent_status` CHECK, seeds a
+   real timestamp, and seeds the claim BOTH ways.
+
+Two mutants that the laxer fixture let live, each **executed** rather than reasoned about:
+
+| mutant (one extra AND-clause on the OLD value in `frozen()`) | old fixture | new fixture |
+| --- | --- | --- |
+| (a) freeze `subagent_status` only when it was `'pending'` | survives, 23 pass / 0 fail | dies, **3** red at `expect(r.subagent_status).toBeNull()` |
+| (b) freeze `last_advanced_at` only when it was NULL | survives, 23 pass / 0 fail | dies, 8 red at `expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT)` |
+
+(a) would have written `'running'` straight back onto a row a cancel had just cleared —
+re-creating the exact reported bug through the one writer with no terminal guard. (b) is
+the sharper one: its condition can NEVER hold in production, so the mutant refreshes the
+heartbeat of every real finished run — and under a NULL-seeded fixture the condition always
+held, so the suite stayed green while the guard did nothing.
+
+📌 **The two failure shapes in this PR are the same shape at different altitudes.** A
+fixture laxer than production puts the wrong answer out of the test's reach; a comment that
+justifies a design via a path that cannot execute puts the wrong reason out of the reader's
+reach. Both survive review by looking like the finished article — a green suite, and prose
+that reads as design documentation. The control that catches the first is running the mutant
+against BOTH fixtures and showing it survives one; the control that catches the second is
+grepping for the code that enters the mode the comment describes.
+
+**Round 4 — the mutation EVIDENCE was itself a claim, and one of the two guards has no
+reachable failure on this platform.** Both findings are about the same thing: prose that
+asserts coverage it does not have.
+
+1. **A comment claimed a test killed a mutant that in fact passes it.** The terminal-result
+   case in `trident/checkpoint-sh.test.ts` was annotated "the value mutant (a) would let
+   through here". It would not: that case passes only `inner_result_file` + `inner_verdict`,
+   so its `subagent_status` comes from the freeze arm built INLINE in
+   `trident/checkpoint.sh` (the `inner_result_file` branch), which is a second,
+   hand-written copy of the terminal predicate and does not route through `frozen()` at
+   all. Executed: mutant (a) takes **3** tests red and this is not one of them.
+
+   Re-measuring it also caught a stale number in the round-3 table above: it recorded
+   mutant (a) as "4 red", and the count on that same commit is **3** (the three terminal
+   phases of the already-retracted case). Corrected in place, and in the PR description.
+   The number was wrong when it was written, not made wrong by a later edit — the suite
+   count is unchanged at 27 either side of this round.
+
+   The second copy does need its own mutants, so the comment now names the ones this case
+   actually kills, both executed:
+
+   | mutant on the INLINE readfile freeze arm | result |
+   | --- | --- |
+   | (c) drop the `WHEN phase IN (terminal) THEN subagent_status` arm | dies, 2 red |
+   | (c2) narrow it with `AND subagent_status = 'pending'` | dies, **1** red — ONLY the already-NULL case |
+
+   (c2) is the one that justifies the case existing: its sibling seeds `'pending'`, which
+   the narrowed arm still freezes, so the sibling stays green and a row whose claim a
+   cancel had ALREADY retracted is the only thing that catches it.
+
+2. **A guard was pinned by a test that could not fail, so the test was deleted.** The
+   stderr diagnostics parse sqlite3's list-mode `N|state` line, and the invocation now
+   carries `-init /dev/null -list -separator '|'` so a host rc file cannot mute them. A
+   fixture pointing `HOME` at a hostile `.sqliterc` was written, and then removed after
+   the negative control: measured on sqlite3 3.43.2 (Apple), an rc file changes the format
+   when passed as `-init <file>` (`'c;s\n0;active\n'`) but is NOT picked up from a `HOME`
+   override — so the fixture passed **identically with the pins removed**. Covering it for
+   real would mean writing into a developer's actual home directory. The pins stay as
+   environment hardening for builds that do read an rc; both files now say so, including
+   that no test covers it.
+
+Doc-accuracy fixes in the same pass: the "`update()` is the ONE writer with no terminal
+predicate" claim was false — `save()` has neither the predicate nor the crash veto, and is
+inert only because it has ZERO production callers (production commits go through
+`saveIfActive`, `trident/tick.ts:263`); the claim now says "the only writer REACHABLE on a
+terminal row that both lacks the predicate and carries the veto" and names why each of the
+other two is excluded. `trident/store.test.ts` had also kept the superseded rationale
+attributing the load-bearing veto to `saveIfActive()`, contradicting the same branch's
+docblock two files over. And the opening line of this entry — "the child was already dead"
+— carries its own ⚠️ retraction above, because the existing marker scoped only the
+paragraph after it.
+
+📌 **Mutation evidence decays into folklore the moment it is written down next to the wrong
+test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the failure mode is
+specific: a guard that exists in TWO independently-built copies gets one copy's evidence
+pasted onto the other's test, and the untested copy is then defended by a citation. The
+control is mechanical — run the named mutant and read WHICH tests go red, not how many.
+
+## 2026-08-10 — the credential fingerprint is scrypt (CodeQL `js/insufficient-password-hash`)
+
+`credentialFingerprint` hashed the live OAuth token with a bare SHA-256; CodeQL flagged it
+and, being a required check on Open's `main`, blocked the PR. The finding is right in form
+— a bare digest of a credential is one dictionary from reversible — and while it is not
+exploitable here (long random tokens, 0600 sidecar beside the credentials file), that
+rests on three facts a later change could remove. Now `scryptSync` at `N=4096, r=8, p=1`,
+output shape unchanged at 12 hex. The salt is fixed because two processes must derive the
+same value sharing only the token; it buys domain separation and nothing more, and says so.
+
+The header's prose description of the algorithm was deleted: a cross-process contract
+spelled out in prose drifts silently, and a writer trusting the stale line would produce a
+digest the reader rejects with no symptom but missing labels. Writers import the function.
+
+Detail: § 2026-08-09 — Naming the account behind a reading.
+
+## 2026-08-10 — the sidecar contract drifted in the DOCS, which are its only interface
+
+The scrypt change corrected the algorithm in `open/credential-label.ts` and left both
+writer-facing docs stating a recipe the reader silently rejects: the as-built detail file's
+§ The sidecar still printed `sha256(token)`, and
+`docs/plans/2026-08-09-model-usage-dashboard.md` Tier 1 still described a bare
+`{"label": "acct-2"}` with no fingerprint at all.
+
+Half of this contract runs in ANOTHER PROCESS and has nothing but the docs, so a stale
+sentence there is a defect in the feature, not a typo. Proven by following each documented
+recipe literally against the real reader: sha256 slice → null, bare label → null,
+`credentialFingerprint` → `"acct-2"`. The symptom of getting it wrong is that labels never
+appear, which is indistinguishable from the ordinary unlabelled case — so nobody would have
+found it from the outside.
+
+Both docs now point at the function instead of restating an algorithm, and a test pins the
+CONTRACT statements — the fenced JSON block and the Tier-1 bullet — rather than the prose,
+because the as-built file legitimately discusses SHA-256 and scrypt in its history section
+and a guard tripping on that would be a false positive on the document it protects. Each
+stale form was restored as a mutant and killed the test.
+
+📌 **The 📌 note recording a lesson is not exempt from the lesson.** This drifted a second
+time inside the very change that wrote "a cross-process contract described in prose will
+drift", and it survived in the MORE load-bearing of the two places: a rotator author reads
+the sidecar doc, not the module header. Fixing the code and leaving the doc is not half a
+fix — where the only consumer is an external writer, the doc IS the interface.
+
+Detail: § 2026-08-09 — Naming the account behind a reading.
+
+## 2026-08-10 — the label reached the monitor and stopped there: the PRODUCTION sink was unpinned
+
+Review round on the account-label reader. Three defects, none of them in the refusal itself
+— that part holds: deleting the fingerprint check fails
+`REFUSES a label whose fingerprint describes a different token` immediately.
+
+**The surviving mutant was one layer past the one the feature was proud of catching.** The
+commit message records that "the MONITOR persists a null label" passed the whole suite and
+is now killed. It is. But the tests that prove the label is *carried* supply their OWN
+`onSample`, so they pin the monitor and say nothing about the sink that actually runs.
+Rewriting `open/composer.ts` to name columns one at a time —
+`record({ pool, ts, session, weekly })` instead of `record({ pool, ...reading })` — dropped
+`account_label` on every production row and passed **36/36** tests across all three of the
+feature's files. Repo-wide: only `open/__tests__/usage-sample-persistence.test.ts` covers
+that wiring at all. Its composer guard asserted `usageSamplesStore.record(` was *present*,
+never that the reading rode along whole. Now it asserts the spread, and the mutant dies.
+
+📌 **A test that supplies its own seam proves the layer above the seam, not the seam.** Both
+mutants here are the same "resolved but never carried" shape; killing it at the monitor made
+the next copy of it downstream *look* covered, because the assertion that died was about a
+sink the test wrote itself.
+
+**`slice(at, -1)` is not a failure, it is a silent widening.** The doc-drift guard added to
+stop the sidecar contract rotting a third time scoped itself with
+`doc.slice(at, doc.indexOf(to, …))` and checked only that the START was found. Renaming the
+plan's Tier-2 heading made the terminator unfindable, `indexOf` returned -1, and the
+"Tier 1 bullet" grew from **982 to 11328 characters** — the rest of the document — with all
+three assertions still green. Verified both ways: the mutant passes 15/15 against the
+original helper and fails against the guarded one. Same pattern fixed at both composer-block
+slice sites.
+
+**The scrypt cost docblock described a system that does not exist.** It claimed N=4096 stayed
+"invisible on the tick" and that ~100 ms was what the *default* N would have cost. Measured
+under bun: **~73 ms steady-state, ~280 ms on the first call, synchronous, on the event
+loop**; the default N=16384 is ~534 ms, and N=1024 is the setting that would cost the "few
+milliseconds" the comment implied. What actually bounds the cost is placement, not size —
+the fingerprint is computed only after a sidecar is found and parsed, so no box pays it
+today. Left at N=4096 deliberately rather than changing a security parameter inside a review
+round; the comment now carries the real numbers so whoever ships the writer decides with
+them. Behaviour unchanged: comments and tests only.
+
+Detail: § 2026-08-09 — Naming the account behind a reading.
+
+## 2026-08-10 — Two guards in that change were decorative; review found both
+
+Follow-up on the entry above, and the interesting part is not the fixes — it is that
+both defects were guards that READ a value nothing WROTE, and both were covered by
+passing tests.
+
+The re-emit suppression was INERT. `deliver` asked the ButtonStore whether the owner
+had already been shown a row, and the store answers from `delivered_at` — but
+`markDelivered`'s only callers were the onboarding engines, so no row `deliver` created
+was ever stamped, `was_delivered` was structurally false, and the double-buzz the guard
+was added to stop still happened on every idempotent re-emit (the ritual-approval
+prompt, the credential-lapse notice). The test that "proved" the suppression used a fake
+whose `emit` returned `was_delivered: true` from a literal, so it asserted the branch
+and assumed the write. `deliver` now stamps the row after the owner has ACTUALLY been
+reached — a device notification the transport accepted, or a live socket — and the
+suppression is asserted against the REAL `ButtonStore` on a real migrated DB, which is
+the only harness where "the answer was written" is a fact rather than a fixture. Not
+stamping on failure is load-bearing: a row that persisted while every transport failed
+must still buzz on the retry, so `ChatMessagePushSink` now RESOLVES a boolean and reads
+`PushResult.ok` — `pushAll` catches an Expo outage and resolves rather than throwing, so
+a sink watching only for a throw would have called an outage a delivered notification.
+
+A legacy General reminder tap 400ed. `resolvePushRoute` emits the mobile RAIL spelling
+`~general`, and `reminders-client.ts` interpolated it raw into
+`/api/app/projects/<id>/reminders`, which `sanitizeProjectId` rejects — so the tap
+opened `invalid_project_id` where the reminders should be, on the rail's General
+Reminders tab as well as on the push tap. It now maps through `general-scope.ts` like
+`docs-client` and `tabs-client` do; that module exists because the fifth client to talk
+to a project-scoped surface was the fifth to forget. The regression test walks the real
+resolver's output into the real client, because both modules' own suites were green —
+the same sender/resolver seam this whole change was about. It asserts the raw sentinel
+rather than `%7E`: `~` is UNRESERVED, so `encodeURIComponent` leaves it intact, which is
+why every existing "does it encode the segment?" test was blind to it.
+
+Also: the notification can no longer hold a delivery open (`POST
+/api/app/system-notice` awaits `deliver`, and the only bound underneath was Expo's 10 s
+per batch), bounded at 3 s and asserted as an ORDERING rather than elapsed wall-clock
+time; `chatPushExcerpt` clamps a non-positive budget so it cannot return a bare
+ellipsis; and five in-code pointers that sent readers to `reminder-outbound.ts` for the
+notification — contradicted by that file's own header — now name the seam that has it.
+
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
+
+## 2026-08-10 — resolving what review left unverified on the notification lane
+
+`createDeliver` now validates `notify_timeout_ms` at construction, the way
+`ExpoPushClient` validates `timeout_ms` and `batch_size`. `??` defaults `undefined` only,
+so a literal `0` or a `NaN` from a parsed setting reached `withTimeout` intact, and
+`setTimeout(0)` settles the bound on the next macrotask — before the notification can
+answer. Every notification would have reported not-sent, no row would ever have been
+stamped, and the re-emit suppression would have been silently OFF while every other test
+on this path still passed. Unreachable from the sole live call site, which omits the
+field; guarded because that failure mode is invisible at runtime rather than loud.
+
+The stamp condition `notified || delivered` is unchanged, and the seam in it is now named
+where it is decided. A backgrounded phone holding an open socket while Expo is down gives
+`delivered: true, notified: false`, so the row is stamped and the ALERT for that key is
+gone for good — an approval prompt then waits until the app is next opened. Accepted: the
+socket handed the message to the client and it is in the transcript, so this delays an
+alert rather than dropping information, whereas requiring `notified` makes the stamp
+unreachable on any install with no registered device (every fresh one) and the re-emit
+would then re-notify forever with nothing able to buzz.
+
+The zero-width guard and its test were both written with the LITERAL invisible characters
+pasted in, and both are now escape sequences. The guard's own character class was
+unreadable — a reviewer could not tell which codepoints it held or count them, and any
+tool that re-encodes the file could drop one silently. The test was worse, because it could
+be DEFANGED WITHOUT GOING RED: strip the invisibles from its fixtures and every case
+degrades to `chatPushExcerpt('')`, which returns `''` and passes for the wrong reason,
+so the test would stop exercising zero-width handling at all while still reporting green.
+Mutation-tested after the rewrite — dropping U+200B from the class still reds the
+budget-accounting case, so the escapes are load-bearing and not decoration.
+
+The two docblocks about `[id]`-route param staleness contradicted each other, and the
+inaccurate one was the child screen's: it claimed its OWN param had been observed to go
+stale. The recorded incident is the opposite — `useLocalSearchParams` is sticky in a
+component that stays MOUNTED, so the LAYOUT kept reporting the old id while the
+freshly-rendered chat screen already saw the new one. That matters beyond tidiness: the
+child being the fresh side is the reason re-entering a scope without `?message_id=` cannot
+resurrect a previous tap's target and re-anchor an ordinary open onto an old row. The
+screen reads the path for AGREEMENT with the shell, not because its params lag, and the
+comment now says so.
+
+## 2026-08-10 — the fail-closed delivery guard was reading a fail-open number
+
+The previous entry made `gateway/push/chat-message-push.ts` require `delivered >= 1` before
+a durable row is stamped `delivered_at`. Review then found that `delivered` itself was
+computed as `messages.length - errored.length` in `gateway/push/dispatcher.ts`. Those two
+are equal only when Expo returns one ticket per message; on a 200 carrying fewer tickets —
+`{data: []}`, a body with no `data` key at all, anything that parses as JSON — subtraction
+reported EVERY message as delivered on a response that accepted nothing. Measured
+`{attempted: 2, delivered: 2, errored: 0, ok: true}` for an empty ticket array, and the
+sink answered `true`. The zero-delivery stamp the guard exists to prevent was therefore
+reachable again, by a second route, through the guard itself. `delivered` now COUNTS
+`status: 'ok'` tickets, so a short batch reads honestly as `delivered + errored < attempted`.
+
+The invariant `chatPushExcerpt` documents — never a buzz with no words — did not hold for
+bodies that are invisible or punctuation-only. `\s` does not match U+200B/U+2060/U+FEFF, so
+neither does `trim()`: a zero-width body survived normalization at full length, cleared the
+sink's `length === 0` check and pushed a notification with no visible characters. Wordless
+bodies now excerpt to the empty string, checked on the OUTPUT as well as the input because
+a budget landing inside a leading run of punctuation manufactures the same thing from a good
+message. The guard is scoped by `\p{L}`/`\p{N}`/`\p{Extended_Pictographic}` rather than
+`\w`, so CJK-only, Cyrillic-only and emoji-only messages still count as content.
+
+`timeout_ms` is now validated at construction beside `batch_size`. `AbortSignal.timeout`
+rejects a non-finite argument rather than coercing it, and it is reached per batch, so an
+unvalidated deadline would have surfaced a permanent config mistake as a transient Expo
+outage on every fire.
+
+Two things review raised are recorded as deliberate rather than fixed, both in the code that
+decides them. `deliver`'s 3 s notification bound ABANDONS the send instead of cancelling it,
+so a merely-slow notification can land after being reported not-sent and the next re-emit
+buzzes again — chosen over stamping on no evidence, which silences a message forever. And
+there is no atomic claim between `emit` and `markDelivered`, so two deliveries sharing an
+idempotency key that overlap in flight can both notify; the reachable producers do not race
+(the reminder tick claims its row first, and the live keys are per-artifact), and closing it
+would put a claim-on-emit into the ButtonStore contract every caller inherits.
+
+The union hazard `wire-types/push-kind.ts` is named after recurred here and is now covered
+the same way: `gateway/push/dispatcher.test.ts` drives the REAL sink against the REAL
+dispatcher, because a hand-written `{ok, delivered}` fake on either side is exactly what let
+the two halves be independently green and jointly wrong. Every guard is mutation-tested —
+each reverts to red on its own negative cases while the positive controls keep passing.
+
+## 2026-08-10 — `ok: true` is not a delivery; a ritual row must never fall through to a nudge
+
+Two adversarial-review blockers on the notification lane. `gateway/push/chat-message-push.ts`
+treated `PushResult.ok` as proof of delivery, but `ok` is `true` with `delivered: 0` both
+when no device is registered (the state of a fresh install, short-circuited before Expo is
+called) and when every ticket errored — so `gateway/http/deliver.ts` stamped `delivered_at`
+and silenced the idempotent re-emit forever for a message nobody received. The sink now
+requires `delivered >= 1` and fails closed on a result that reports no count.
+
+Separately, `ritual_planner` is null on an LLM-less box, and `reminders/dispatcher.ts` then
+classified every row as a nudge — so a ritual row composed from its stored `message`, which
+is the dispatch token, and the owner's lock screen read `ritual:kaizen` by a second route.
+The dispatcher now refuses a ritual row it cannot plan, keyed on `reminder.ritual_id`.
+
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
+
+## 2026-08-10 — refusing to compose is only half of a refusal
+
+The round-3 refusal above stopped the dispatch token reaching the owner and then returned
+normally with one debug-level line. `reminders/tick.ts` claims an occurrence BEFORE
+dispatch and reverts only in its `catch`, so a normal return RETIRES it: a scheduled
+ritual on an instance whose model credential expired vanished with no post, no ledger
+row, and no journal line at the default level, which `reminders/AGENTS.md` forbids for a
+ritual (a failure is recorded AND noticed). `reminders/dispatcher.ts` now logs at error
+level and posts one plain-language notice (`formatRitualUnplannableNotice`,
+`reminders/ritual-delivery.ts`) — and THROWS if that notice is refused, because consuming
+the occurrence is only defensible when the owner was told. It deliberately does not throw
+on the ordinary path (a missing credential cannot resolve by the next tick, so that would
+re-fire every 30 s) and writes no `code_ritual_runs` row (the ledger writer and run-id
+mint live inside the absent planner, and `skip_reason` is a closed set in
+`migrations/0106_ritual_schema.sql`).
+
+`gateway/push/chat-message-push.ts` `hasVisibleContent` claimed emoji-only posts count,
+but a regional-indicator pair carries no `\p{L}`, `\p{N}` or `\p{Extended_Pictographic}`
+— so a flag-only body sent NO notification while `✅` sent one. `\p{Regional_Indicator}`
+joins the class; bare symbols (`→`, `✓`, `★`) stay deliberately silent.
+
+Four comments that a reader would have been right to trust were corrected rather than
+left: the "untrimmed clip cannot be empty" invariant (it can, at budget 1 behind a
+dropped surrogate), the `ritual_planner` docblock and `ritual-fire.ts` header that still
+described the nudge fall-through as the design, and `gateway/push/expo-push-client.ts`,
+which still documented the retired `{ kind: 'reminder' }` payload and "the reminder's
+stored `message`" as the notification body — the exact sentence the reported defect was.
+`gateway/http/deliver.ts`'s 3 s bound still does not CANCEL the send; that is named in
+place as a possible duplicate buzz, not silently.
+
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote
+(§ Round-4 review fixes).
+
+## 2026-08-10 — the push-tap latch is released when the tap's target goes away
+
+`ChatSyncSurface`'s imperative re-anchor latched the honoured `message_id` and never
+cleared it, which made a per-tap instruction behave as a per-process one.
+
+⚠️ **THE SEQUENCE THIS ENTRY ORIGINALLY GAVE AS THE MOTIVATION IS REFUTED — see the
+2026-08-11 entry below.** It read: *"tap the notification for a message, rail-tap to another
+project (a chat route with no `?message_id=`), then tap the SAME notification again — and the
+transcript did not move: the equality check had already spent the target."* The premise is
+true and the conclusion is not. A real second tap never reaches the equality check, because
+`app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
+`?message_id=` — it is
+swallowed one layer up, and that dedupe gap is filed as **#182**. The latch-release fix
+described below is correct by inspection and stands; only this motivating sequence was wrong.
+
+The COMPONENT is not remounted along that path — the shell is a single root-stack screen
+named `projects/[id]` and expo-router only diverges on a route named exactly `[id]`, so a
+rail tap re-renders it and the ref outlives the switch. The LIST is remounted, though:
+`useMobileChat`'s attach effect is keyed on `projectId` and its cleanup drops `ready`
+(`app/lib/chat-core/use-mobile-chat.ts:447`), and the surface renders
+`!ready ? <spinner> : <FlashList/>`, so `isInitialScrollComplete` comes back fresh and the
+frozen anchor can act on the way back if it is populated in time. So: a latch with no exit
+is a defect by inspection and one line to close; whether it was owner-VISIBLE on the
+rail-switch path rests on that repaint race and is not claimed here. The imperative seam is
+the only path when the list is not remounted, which is what the new arm drives.
+
+A render with no target now clears the latch. Mutation-verified: restoring the bare
+early-return reds the new sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, and only that arm.
+
+Also caught in the same pass: `scrollToIndex` is typed `(params) => Promise<void>` and its
+executor calls `getLayout` synchronously, which throws before the layout manager exists — a
+rejection the call site was dropping. Now caught. The latch is deliberately NOT re-armed on
+a rejection: the only state that can reject is a pre-layout list, whose position the frozen
+`initialScrollIndex` already owns, and re-arming would let a later commit yank a transcript
+the owner was placed in correctly.
+
+Found by the cross-model (codex) review lane, in this change's own new code.
+
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
+
+## 2026-08-10 — five comments that asserted things the code does not do, and one P1 named not fixed
+
+Comment-only follow-up on the push-notification change, from the rubric review lane.
+
+Two of the five were COPIES of a sentence this branch had already corrected elsewhere:
+`gateway/composition/build-core-modules.ts` and `gateway/composition/input/notifier-input.ts`
+both still said an LLM-less box makes every reminder row compose as an ordinary nudge "which
+is fail-closed", the exact claim `reminders/dispatcher.ts` and `open/composer.ts` were fixed
+for — a ritual row's stored `message` IS the dispatch token, so nudging it is how that token
+reached the owner's lock screen. The same file also opened by describing the push dispatcher
+attached as the tick's `on_fired` hook and then said that hook was gone twenty-five lines
+later. `wire-types/push-kind.ts` said the legacy `reminder` kind was "gone from this list and
+from the resolver" — it is gone from the list, while the resolver keeps a decode-only branch
+deliberately, so a reader could have acted on that sentence by deleting a live compatibility
+path. And `ChatSyncSurface` said its deep-link latch is set after a successful jump when it is
+set when the jump is issued.
+
+Also NAMED AND DELIBERATELY NOT FIXED, at the site a reader hits it: the initial-anchor freeze
+can read the PREVIOUS scope's rows. `projectId` arrives as a prop, so the first render under a
+new scope still holds the old scope's `rows`/`selfDeviceId` — those are cleared in
+`useMobileChat`'s effect cleanup, which runs later (`app/lib/chat-core/use-mobile-chat.ts:447-451`)
+— so the freeze re-computes the OLD project's index under the NEW project's key, and the list
+remount consumes it. Byte-identical to `main` on this path, so this change neither introduces
+nor widens it. The fix is small (refuse to freeze while `ready` is false — verified not to be
+entered on a background/foreground transition) but belongs with a mounted test that drives
+`projectId`, `ready` and a real list remount, in the ISSUES #505/#511 hot path. Raised as a P1
+follow-up.
+
+Detail: § 2026-08-10 — Two guards that read a value nothing wrote.
+
+## 2026-08-10 — the token prune was an index join nobody checked the index of
+
+Review round 2 on the notification lane. The two guards under review held on the tip, and
+re-deriving them found a third thing in the same file that did not.
+
+`PushDispatcher.dispatch` prunes the tokens Expo reports `DeviceNotRegistered`, by INDEX:
+ticket `i` names `messages[i]`. Its comment justified that with "tickets come back in
+submission order". True, and not sufficient — `ExpoPushClient` appends only the tickets Expo
+actually **returned** (`for (const t of data) tickets.push(t)`), so a chunk that comes back
+short shifts every later ticket left by one and the join silently identifies the wrong
+device. A `DeviceNotRegistered` for one token then deletes a **live** one, and push for that
+device stays dark until it next re-registers.
+
+The two comments in the file **contradicted each other**, which is how it surfaced: fifty
+lines up, the `delivered` tally had just been rewritten *because* a short response is real
+("a short batch now shows up honestly as `delivered + errored < attempted`"). One file, one
+mechanism, two opposite beliefs about it — and the prune held the wrong half.
+
+`pruneUnregistered` now checks `tickets.length === messages.length` before it trusts an
+index, prunes nothing on a mismatch, and logs the counts. Fail-closed in the same direction
+as the `delivered >= 1` guard beside it, and for the same asymmetry: a dead token left behind
+costs quota and one warning line per fire; a live token deleted costs the owner his
+notifications.
+
+Mutation-tested. Guard removed → exactly the new test reds (28 pass / 1 fail), and it reds on
+the assertion that BOTH tokens survive, asserted by name rather than by order because
+`listByProject` promises none.
+
+**Pre-existing gaps NAMED but deliberately not fixed here**, each because the honest fix is a
+migration or an API change rather than a rider on a push fix:
+
+* **`httpProjectSegment` maps the General sentinel onto a legal project id.** `~general` is
+  collision-proof on the client (#410); the segment it produces, `general`, is not — and the
+  owner's instance has a project whose id is exactly that. Both rail entries address one
+  server scope. Reads already shared it; this lane made reminders the first MUTATING surface
+  to. Closing it needs a distinct server route or `general` reserved, both migrations.
+* **Two `PUSH_KINDS` entries have a sender but no dispatcher.** `calendar_pre_meeting_brief`
+  and `email_daily_triage` are gated on `pushDispatcher !== null` and the only two assignment
+  sites in the repo pass `null`. They stay listed on purpose — the resolver must remain ready
+  or wiring the dispatcher would re-open the disjoint-lists defect — but the exhaustiveness
+  test proves the resolver is ready, not that anything is sent.
+* **`routedPush` collapses `app-ws:lost:*` and `app-ws:dropped:*` into one `false`**, so a
+  failed chat_log append plus a successful notification stamps `delivered_at` for a message
+  hydration cannot show. Needs the app target widened from `boolean` to the tri-state the
+  markers already carry.
+* **`fireRitual`'s settle-notice loops discard `post`'s boolean**, so a rejected settle notice
+  retires the occurrence with neither output nor notice (#506's shape, in one corner). The
+  unplannable guard added here does check its post; its comment no longer claims the loops do.
+
+📌 **Two comments in one file that contradict each other are a bug report already written
+down.** The reachable defect here was not found by hunting for it — it was found because the
+same file asserted "Expo can return fewer tickets than messages" in one place and "index i
+identifies message i's recipient" in another. When a diff teaches a file something new about
+its own failure mode, the next question is which OTHER paragraph was built on the old belief.
+
+## 2026-08-10 — Two guards that read a value nothing wrote
+
+Round-3 follow-up to § 2026-08-09 — A ritual post is a chat message, so its notification is a chat message.
+Both defects came out of review, both were guards whose INPUT was never written, and
+both had passing tests. That shared shape is the useful part of this entry.
+
+### 1. The re-emit suppression was inert
+
+**What it claimed.** `gateway/http/deliver.ts` computed
+`alreadySeen = !emitted.was_new && emitted.was_delivered` and skipped the device
+notification when true, so an idempotent re-emit — a reconnect re-render, a retried
+ritual-approval prompt — would not buzz the owner about a message already in his chat.
+
+**Why it could not work.** `was_delivered` is derived from `button_prompts.delivered_at`
+(`channels/button-store.ts` `emit`, both existing-row branches). The ONLY writer is
+`ButtonStore.markDelivered`, and a repo-wide grep found its callers were
+`onboarding/interview/engine*.ts` and nothing else. No row created through `deliver` was
+ever stamped, so `was_delivered` was false for every one of them, `alreadySeen` could
+never be true, and the double-buzz persisted exactly as before. Real producers pass an
+`idempotency_key` through this seam — `reminders/ritual-registration.ts` (approval and
+egress-approval prompts) and `open/credential-lapse-notice.ts` — so this was live
+behaviour, not a hypothetical.
+
+**Why the tests missed it.** The suite's fake ButtonStore returned
+`{ was_new: false, was_delivered: true }` from a literal. That exercises the BRANCH and
+assumes the WRITE. Two links in a chain, one of them asserted.
+
+**The fix.** After the notification, `deliver` stamps the row:
+
+```
+if (durability === 'reply' && (notified || delivered)) await stampDelivered(prompt_id)
+```
+
+Three things about that condition are deliberate:
+
+- **`durability === 'reply'` only.** `persistInertAgentTurn` stamps `delivered_at` in its
+  own INSERT ("delivered_at is stamped because the caller only persists what it already
+  sent"), so a brief or a nudge has nothing left to record. A second write would be a
+  redundant UPDATE on every one.
+- **Gated on actually reaching him.** The ButtonStore contract's exception is
+  load-bearing: `was_new: false` WITH `was_delivered: false` means the row landed in the
+  DB but never reached the owner, and the channel adapters re-render in that case. If the
+  stamp were unconditional, the first failed buzz would be the last one — an Expo outage
+  during the first attempt would silence the message permanently.
+- **Swallows its own failure.** The stamp is an audit write on a row that already exists.
+  Letting a locked DB surface here would revert the reminder tick's claim and re-post the
+  message (`reminders/tick.ts` #319) — trading a possible duplicate buzz for a certain
+  duplicate post.
+
+**Which forced a sink contract change.** `ChatMessagePushSink` now resolves `boolean`
+rather than `void`, because "did the owner get it?" is now a question with consequences.
+It reads `PushResult.ok`, not merely the absence of a throw:
+`PushDispatcher.pushAll` CATCHES its own network failure and resolves with `ok: false`
+(`gateway/push/dispatcher.ts`). A sink watching only for a throw would have reported an
+Expo outage as a delivered notification and stamped the row for a buzz that never
+happened — reintroducing the same defect one layer down.
+
+**Test.** `gateway/http/__tests__/deliver.test.ts` gained a suite driving the REAL
+`ButtonStore` against a real migrated DB — the only harness in which the write is a fact.
+It asserts the buzz count across two deliveries of one key, AND `deliveredAt()` on the
+row directly, AND that a refused transport leaves the row unstamped so the retry buzzes.
+Mutation-verified: deleting the `stampDelivered` call reds 3 tests. The pre-existing
+fakes gained a `markDelivered` so the stamp is a real call rather than a `TypeError`
+absorbed by its own catch.
+
+### 2. A legacy General reminder tap opened an error
+
+`resolvePushRoute` emits the mobile RAIL spelling of the no-project scope —
+`/projects/~general/reminders` — and `app/lib/reminders-client.ts` interpolated the
+segment raw. The gateway's `sanitizeProjectId` rejects `~` (outside its
+`[A-Za-z0-9_.-]` alphabet), so the tap opened the app and rendered `invalid_project_id`
+where the reminders belong. Not only on push taps: opening General's Reminders tab from
+the rail hit the same 400.
+
+Fixed by routing every project segment through `general-scope.ts`
+(`httpProjectSegmentEncoded`), which `docs-client` and `tabs-client` already do — the
+module exists precisely because the fifth client to talk to a project-scoped surface was
+the fifth to forget the mapping.
+
+**The test is a UNION test**
+(`app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts`) because both halves
+were independently green: it drives the real resolver's output through a router-shaped
+segment decode into the real client, and asserts the URL that would go over the wire.
+It asserts the absence of the raw sentinel and NOT of `%7E`, and that distinction is the
+hazard itself — `~` is an UNRESERVED character, so `encodeURIComponent('~general')`
+returns `~general` unchanged. The tilde survives encoding intact and dies at the
+validator, which is why the existing "encodes the project_id" test could never see it.
+Mutation-verified by restoring the raw interpolation: 2 tests red on `/projects/~general/`.
+
+### 3. Smaller, from the same review
+
+- **The notification can no longer hold a delivery open.** `POST /api/app/system-notice`
+  AWAITS `deliver` to answer its caller, and the only bound underneath the notification
+  was the Expo client's `EXPO_PUSH_TIMEOUT_MS` of 10 s PER BATCH — so a stalled `exp.host`
+  could hold an HTTP response for tens of seconds over a best-effort buzz. Bounded at 3 s
+  (`DEFAULT_NOTIFY_TIMEOUT_MS`), and a timeout counts as NOT sent, so the row stays
+  unstamped and the next re-emit tries again. Asserted as an ORDERING — the delivery
+  resolves while the transport is still outstanding — rather than as elapsed wall-clock
+  time (ISSUES #438); the lint gate rejected the wall-clock version, correctly.
+  Mutation-verified: removing the bound does not slow the test down, it hangs until
+  bun's own timeout kills it.
+- **`chatPushExcerpt` clamps its budget.** A 0 / negative / NaN `max` made every branch
+  return the bare `…` — a buzz with no words, the one output the function promises never
+  to produce. Unreachable from today's single call site, which is why it needed a test
+  rather than a promise.
+- **A foregrounded owner still gets a banner, and that is now pinned.** `deliver` does
+  NOT gate the notification on `delivered_live`, deliberately: Android keeps the app-ws
+  socket open while the app sits in the background, so a live socket is a render, not a
+  read receipt, and gating on it would silence exactly the case a notification exists
+  for. It looked like a bug in review, so there is now a test saying it is not.
+- **Five in-code pointers were sending readers to the wrong file.** `reminders/tick.ts`,
+  `gateway/push/dispatcher.ts`, `open/__tests__/composition-field-coverage-inventory.ts`,
+  `reminders/tick.test.ts` and `tests/integration/reminders-tab-and-push.open.test.ts`
+  all named `gateway/proactive/reminder-outbound.ts` as the notification's home — which
+  that file's own header explicitly denies ("THE NOTIFICATION IS NOT HERE,
+  deliberately"). They now name `gateway/http/deliver.ts` →
+  `gateway/push/chat-message-push.ts`. Related: a recorded mutation-test proof referenced
+  a `chat_push` field that does not exist in the shipped code, so the verification could
+  not be run as written; it now names the real one (`notify:` on the `createDeliver`
+  call in `open/composer.ts`).
+- **`wire-types/push-kind.ts` documented the retracted encoding.** Its `agent_message`
+  entry still said `project_id` was ABSENT for General, contradicting the sender
+  (`project_id: input.project_id ?? GENERAL_RAIL_ID`, always a string) and its own
+  passing test. The shared contract file is the worst place for a stale encoding, since
+  it is what a second implementer would read.
+- **`PushPayload` now declares `reminder_id` and `topic_id`.** The decoder reads both,
+  and this tsconfig has no `noPropertyAccessFromIndexSignature`, so the reads compiled
+  through the index signature and a rename would have compiled too.
+
+### The pattern worth keeping
+
+Both defects are the same failure: **a guard that reads a field, and nothing in the
+system writes it.** Both were covered by tests that asserted the reading side against a
+fixture supplying the value. This is the docblock-describing-a-mode trap in its
+executable form — the CLAUDE.md rule says to grep for the code that ENTERS a mode a
+comment describes, and the mechanical version is: *for every condition you branch on,
+grep for its WRITER.* If the only writers are in an unrelated subsystem, the branch is
+dead and the test proving it is a fixture talking to itself.
+
+The corollary for tests: a fake that supplies the value under test cannot verify the
+value is ever produced. Where a guard's correctness depends on a write, the test needs
+the real store.
+
+---
+
+### Round-3 review fixes — `ok: true` is not a delivery, and a ritual row must never nudge
+
+Two blockers from the adversarial review round, both fixed here.
+
+#### 1. A push that reached nobody was recorded as delivered
+
+`gateway/push/chat-message-push.ts` decided "was this notification sent?" by looking at
+`PushResult.ok` alone. But `ok` means only *no HTTP/network exception*, and it is `true`
+in two ordinary cases where nothing was delivered:
+
+* **zero registered devices** — `gateway/push/dispatcher.ts` short-circuits with
+  `{ attempted: 0, delivered: 0, ok: true }` and never calls Expo. This is the state of
+  every fresh install.
+* **every ticket errored** — e.g. all tokens `DeviceNotRegistered` after a reinstall.
+  `{ delivered: 0, errored: N, ok: true }`, because the gateway did receive the tickets.
+
+In both, the sink answered `true`, `gateway/http/deliver.ts` stamped `delivered_at`, and
+the idempotent re-emit was silenced **forever** for a message the owner never got — the
+precise failure that file's own docblock claims to prevent.
+
+The sink now requires a numeric `delivered >= 1`, and **fails closed**: a result that
+does not report a count has proven nothing. That inverts the previous contract, which
+said "anything without an explicit `ok: false` counts as accepted, so a fake that
+resolves `undefined` reads as success" — that permissive default is what let this
+through, and it meant the test doubles could not distinguish "accepted for a device"
+from "sent nowhere". Fixtures now carry the count.
+
+#### 2. The `ritual:<id>` token could still reach the owner, by a second route
+
+`ritual_planner` is null on a box with no LLM (`init_ritual_planner` never runs), and
+`reminders/dispatcher.ts` then classified **every** row as a nudge — including ritual
+rows, whose stored `message` IS the dispatch token. So the token went through
+`classifyReminderMessage` as literal intent and the lock screen read `ritual:kaizen`
+again, arriving by a completely different path from the one this lane originally fixed.
+
+The comment on `ritualPlanner` in `open/composer.ts` called that fall-through
+"fail-closed: nothing reads a ritual's prompt" — true about the prompt, silent about the
+notification, and it made a null planner read as harmless. The dispatcher now refuses a
+ritual row outright when it cannot plan one, keyed on `reminder.ritual_id`
+(`reminders/store.ts:59`) rather than on the shape of the message text: the column is
+what makes the row a ritual, and a prefix test would also swallow a plain reminder the
+owner happened to word that way. The composer comment now says what actually makes the
+null safe.
+
+#### Verification
+
+Each guard was mutation-tested by deleting it and confirming a red run: the delivery
+guard kills 3 of its 4 new cases (the fourth, "one accepted ticket among failures IS a
+delivery", is the positive control and must keep passing), and the ritual-row guard
+kills the no-planner case. A second control asserts a **plain** reminder still fires
+normally with no planner — without it the fix could have traded one reported bug for a
+much worse unreported one.
+
+📌 **Both fixes are the same shape as the two above them in this document: a success
+signal that was weaker than the thing it was taken to prove.** `ok` was read as
+"delivered"; "no prompt was read" was read as "nothing leaked". In each case the
+narrower true statement was sitting right next to the broader false one.
+
+---
+
+### Round-4 review fixes — refusing to compose is only half of a refusal
+
+#### 1. The refused occurrence was consumed in silence
+
+The round-3 fix above stopped a ritual row from composing its dispatch token when no
+planner is wired. It then returned normally with a single `log()` line — and the next
+review round found what that hid.
+
+`reminders/tick.ts` claims an occurrence BEFORE dispatch (`markFired` /
+`advanceRecurrence`) and reverts only in its `catch`. A normal return therefore RETIRES
+the occurrence. And the `log` seam defaults to `dispatcherLog.debug`, which
+`open/composer.ts` does not override. So a scheduled ritual on an instance with no model
+credential vanished completely: no post, no ledger row, no journal line at the default
+level, and nothing to distinguish it from a ritual that was never scheduled. That is the
+ISSUES #506 shape, and `reminders/AGENTS.md` states the contract the other way round —
+for a ritual, a failure is **recorded and noticed**.
+
+Reachable without any exotic state: `init_ritual_planner` is gated on `llmPool !== null`
+(`open/composer.ts`), so an expired or removed model credential is enough, and the
+rituals keep firing into a null planner meanwhile.
+
+Both halves now happen:
+
+- **Recorded** — `dispatcherLog.error('ritual_unplannable', { reminder, ritual_id, reason })`,
+  at a level nothing has to opt into.
+- **Noticed** — one plain-language chat post, `formatRitualUnplannableNotice`
+  (`reminders/ritual-delivery.ts`): *"Ritual 'x' did not run: this instance has no model
+  configured, so its approved prompt could not be checked or composed. This occurrence
+  was skipped, not retried."*
+- **And if the notice itself is refused, the dispatcher THROWS**, which reverts the tick's
+  claim and leaves the row pending. Consuming the occurrence is only defensible because
+  the owner was told; if he was not told, it must not be consumed. Same posture as the two
+  sibling post sites, and the #319 contract holds because the throw is before any
+  successful delivery.
+
+**Three deliberate non-choices, recorded so they are not mistaken for oversights.**
+*It does not throw on the ordinary path*: a missing credential cannot resolve by the next
+tick, so throwing would re-fire the row every 30 s until an operator intervened — the
+same reasoning the planner's own `skipped` branch rests on. *It writes no
+`code_ritual_runs` row*: the ledger writer and the run-id mint both live inside the
+planner, which is the absent thing, and `skip_reason` is a closed set at the schema level
+(`migrations/0106_ritual_schema.sql`) with no member for this state — so the record is the
+error log and the notice is what reaches the owner. *The notice cites no run id*, because
+a fabricated one would send him to `rituals_status` hunting a run that was never written.
+
+**Tests** (`gateway/push/__tests__/ritual-post-notifies-as-a-chat-message.test.ts`). The
+arm that used to assert `expect(chain.expo).toEqual([])` now asserts exactly ONE
+notification whose body is a sentence and not the token — the old emptiness was the bug,
+not the proof. Two arms beside it pin the deliberate halves: the occurrence resolves
+rather than throwing on the ordinary path, and a REJECTED notice rejects. Mutation-
+verified: replacing the post with `const noticed = true` reds 2, and neutering the
+`if (!noticed)` throw reds 1.
+
+#### 2. Two comments that a reader would have been right to trust
+
+Both in `gateway/push/chat-message-push.ts`, both found by probing the claim rather than
+reading it — and one of them was hiding a real behaviour gap.
+
+- **"the untrimmed clip … cannot be empty because `flat.length > budget >= 1`".** It can.
+  At budget 1 a leading emoji clips to a lone high surrogate, `dropDanglingSurrogate`
+  removes it, and the fallback is `''`: `chatPushExcerpt('😀 hello', 1)` walks that path.
+  The output is right, but the invariant is held by the `hasVisibleContent(kept)` check
+  below — not by this line — and a reader trusting the old claim would have thought that
+  check redundant and deleted it. Comment corrected, and a test now makes deleting it red.
+- **`hasVisibleContent` claimed emoji-only posts count; flags did not.** A regional-
+  indicator pair carries no `\p{L}`, `\p{N}` or `\p{Extended_Pictographic}`, so a `🇺🇸`
+  body read as EMPTY and sent no notification at all, while `✅` (a pictograph) sent one.
+  This one is a real defect rather than a wrong comment: `\p{Regional_Indicator}` joins the
+  class. Mutation-verified by removing it. The boundary that is still deliberate — `→`,
+  `✓`, `★`, `•` are NOT content, because Unicode does not call them emoji and a shade
+  containing one arrow says only that something happened — now has both a docblock naming
+  it and a test asserting it, so the next reader does not "finish the job" by admitting
+  every `\p{S}`.
+
+#### 3. And one seam named rather than closed
+
+`withTimeout` in `gateway/http/deliver.ts` bounds the notification at 3 s but does not
+CANCEL it. If Expo answers at 3.1 s the buzz still goes out, while the call already
+reported not-sent and left the row unstamped — so the next idempotent re-emit buzzes
+again: one message, two banners. Left as is and documented in place. Cancellation means
+threading an `AbortSignal` through `ChatMessagePushSink` into the Expo client, and what it
+buys back is a duplicate notification of a message that is correct and present in the
+transcript either way. The opposite default — treating a timeout as sent — is the one that
+loses information, and it is the defect this document opens with.
+
+📌 **The round-3 fix and the first comment above are the same error at different scales:
+a guard was written, and the question "what happens on the path it now takes?" was not
+asked.** Refusing to compose the token was correct and left the occurrence consumed;
+falling back to the untrimmed clip was correct and left the string possibly empty. In both
+cases the code after the guard was doing work the guard's author had stopped thinking
+about.
+
+### Round 5 — a latch that is never released is a one-shot feature
+
+Cross-model review (codex, `gpt-5.6-sol`) found the one reachable defect the Opus lanes
+missed, and it was in this change's own new code: `honouredDeepLink` in
+`app/components/ChatSyncSurface.tsx` latched the honoured target id and nothing ever
+cleared it.
+
+⚠️ **THE SEQUENCE THIS SECTION ORIGINALLY GAVE IS REFUTED.** It read: *"tap the notification
+for X (the transcript re-anchors, X is latched), rail-tap to another project —
+`/projects/<other>/chat`, no query, so no target — then tap the SAME notification again, which
+is still sitting in the shade. The equality check swallowed it and the transcript did not
+move."* The premise is true and the conclusion is not. A **real second tap never reaches the
+equality check**: `app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier`
+**before** `resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
+`?message_id=`. It is swallowed one layer up. The dedupe TTL is 7 days and warm taps pass
+`{dismiss:false}`, so the notification really does stay in the shade — which is precisely what
+made the false claim read as plausible. That dedupe gap is filed as **#182**; the latch-release
+fix below is correct by inspection and stands. Corrected in PR #171 (`docs/AS_BUILT.md`,
+2026-08-11 entry).
+
+What the latch defect actually is, without the unreachable sequence: `honouredDeepLink` is a
+per-tap instruction stored in a ref that nothing ever cleared, so it behaved as a per-process
+one. Any later render of this surface with no target left the spent id latched.
+
+**The latch survives the switch because this COMPONENT is not remounted.** The shell is a
+single root-stack screen named `projects/[id]`, and expo-router only diverges on a route
+named exactly `[id]`, so a rail tap RE-RENDERS this component rather than replacing it
+(`app/app/projects/[id]/_layout.tsx` carries the device-instrumented note) — the ref is the
+longest-lived state on this surface.
+
+**The list, however, DOES get remounted, and the first version of this note said the
+opposite.** `useMobileChat`'s attach effect is keyed on `projectId` and its cleanup sets
+`ready` false (`app/lib/chat-core/use-mobile-chat.ts:447`), and the surface renders
+`!ready ? <spinner> : <FlashList/>` — so a scope change unmounts the list and it returns
+with a fresh `isInitialScrollComplete`, which means the frozen anchor CAN act on the way
+back if it is populated before the new list's first paint. So the honest scope of this fix
+is: a latch with no exit is a defect by inspection, and whether the owner could SEE it on
+the rail-switch path depends on the frozen anchor winning that repaint race — a device
+claim not made here. The imperative seam is the only path when the list is NOT remounted,
+which is the sequence the new arm drives.
+
+The fix is that the target is a PER-VISIT instruction: a render with no target clears the
+latch, so a visit without one cannot leave a spent instruction behind. Mutation-verified —
+restoring the bare `if (deepLinkTarget.length === 0) return;` reds the new sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx` and nothing else.
+
+Same review raised a second, weaker one that is worth writing down because the mechanism is
+real even where the consequence is not. `scrollToIndex` is typed
+`(params) => Promise<void>`, and its executor calls `recyclerViewManager.getLayout(index)`
+synchronously, which THROWS when the layout manager is not yet initialised — a throw inside
+a Promise executor is a rejection, and the call site dropped it, so that is an unhandled
+rejection. It is now caught. What is NOT done, deliberately: re-arming the latch on a
+rejection. The only state that can reject is a list whose native layout has not landed,
+which is the cold open where the frozen `initialScrollIndex` owns the position anyway, and
+re-arming would let a later `rows` commit yank a transcript the owner was already placed in
+correctly. Not mutation-tested — the FlashList test stub cannot reject — and said plainly
+rather than claimed.
+
+📌 **A "once per X" latch needs a stated release condition, or "once" silently means "once
+per process".** The docblock said "ONCE PER TARGET" and the code honoured it exactly; what
+was never written down is that a target is scoped to a VISIT, and the missing sentence was
+the missing line of code.
+
+### Round 6 — "EVERY out-of-turn post" was a claim about one seam, not about the surface
+
+The codex lane's second pass found no code defect and one comment that overclaimed, which
+is the same failure class as the round-3 docblock: `deliver` is not the only path a durable
+agent message reaches the app-ws topic by, so wiring the sink into `deliver` does not make
+"every out-of-turn post notifies" true.
+
+The uncovered one is a TRIDENT TERMINAL. It posts through the ChannelRouter
+(`buildTridentDelivery({ sink: channelRouter })` → `trident/delivery.ts` `opts.sink.send`),
+never through `deliver`, so a build that finishes while the owner is elsewhere lands in his
+chat with no buzz. **Pre-existing, not a regression**: before this change the push was
+composed inside the reminder tick, so nothing but a fired reminder ever notified at all.
+Routing it through `deliver` is a change to the Trident delivery seam and belongs in its own
+change — recorded here and named at the wiring site so the next reader does not conclude
+from the comment that a completed build notifies.
+
+A steady-state live-agent reply also bypasses `deliver` (`buildAppWsSendReply`), and that
+one is deliberate: the owner sent the message that caused it, so it is in-turn.
+
+📌 **A comment that says EVERY is making a claim about a whole surface from inside one
+seam.** The fix for that is not a hedge, it is naming the exceptions — a reader can check a
+named exception and cannot check an absent one.
+
+### Round 7 — the rubric lane found one real defect that is not this change's, and five comments that lie
+
+The codex RUBRIC lane (a different prompt on the same model as the codex review lane) ran to
+a verdict and returned REQUEST_CHANGES on one MAJOR plus a cluster of contradicting comments.
+Adjudicated as follows.
+
+#### The MAJOR is real and PRE-EXISTING: the anchor freeze can read the previous scope's rows
+
+`projectId` arrives as a PROP, so the render that first sees a new scope still holds the OLD
+scope's `rows` and `selfDeviceId` in state — `useMobileChat` clears those in its effect
+CLEANUP, which runs after that render (`app/lib/chat-core/use-mobile-chat.ts:447-451`). The
+clear-and-recompute in `ChatSyncSurface` therefore drops project A's anchor and immediately
+re-freezes A's index under B's key. Cleanup then drops `ready`, the list unmounts, and the
+remount for B consumes that stale index — so opening B can land at a position computed from
+A's transcript.
+
+**Not introduced or widened here.** `git show main:app/components/ChatSyncSurface.tsx` carries
+the identical clear-and-recompute at lines 540-543, keyed on scope alone; adding `target` to
+the key changes nothing when there is no target, which is every ordinary project switch.
+
+**Deliberately not fixed in this change.** The fix looks like one line — refuse to freeze
+while `ready` is false, which is exactly the re-attach window and, verified, is not entered on
+a background/foreground transition — but it belongs with a mounted regression test that drives
+`projectId`, `ready` and a real list remount. This is the ISSUES #505/#511 hot path, and an
+untested anchor change is precisely how the original defect shipped. Named at the site and
+raised as a P1 follow-up.
+
+#### Five comments asserted things the code does not do
+
+Each one is the same failure the round-3 and round-6 notes describe, and two of them were
+copies of a sentence already corrected elsewhere in this very branch:
+
+* `gateway/composition/build-core-modules.ts` opened the reminders module by describing the
+  push dispatcher being attached as the tick's `on_fired` hook, and then said "what is NOT
+  here any more: a reminder-fired PUSH hook" twenty-five lines later. One file, both claims.
+* the same file, and `gateway/composition/input/notifier-input.ts`, both still said an
+  LLM-less box makes EVERY row compose as an ordinary nudge "which is fail-closed" — the
+  claim this branch refuted in `reminders/dispatcher.ts` and `open/composer.ts`. The prompt
+  is protected either way; the NOTIFICATION was not, and a ritual row's stored message IS
+  `ritual:<id>`. Third and fourth copies of one sentence.
+* `wire-types/push-kind.ts` said `reminder` is "gone from this list and from the resolver".
+  It is gone from the list; the resolver keeps a DECODE-ONLY branch on purpose, so taps
+  survive on already-delivered notifications and un-upgraded gateways. A reader could have
+  acted on that sentence by deleting a live compatibility path.
+* `ChatSyncSurface` said the latch is set "after a successful jump". It is set when the jump
+  is ISSUED, and is deliberately retained when the promise rejects.
+
+📌 **A sentence corrected in one file is not corrected. Grep for the claim, not the file** —
+this branch fixed the nudge/fail-closed sentence twice and shipped two more copies of it.
+
+## 2026-08-09 — the typing refcount's guard is now killable by a test
+
+PR #145's last open finding was exact: *"Typing-refcount suppression guard and
+46-minute fail-safe have zero killing test coverage, and depth can leak
+permanently."* Both halves were true, and neither was reachable — the logic was a
+closure inside `wireAppWs` keyed on a real `setTimeout(…, 46 * 60_000)`. No test
+waits 46 minutes, and a test that reaches into a closure is not testing the
+production path.
+
+The decision logic moved to `open/wiring/typing-refcount.ts`, pure apart from an
+INJECTED scheduler; `open/wiring/app-ws.ts` is the only caller and passes the real
+one. `open/__tests__/typing-refcount.test.ts` fires the captured timer, so the
+46-minute path runs under test with only the caller changed.
+
+Behaviour is unchanged and now pinned: the outermost `start` and the final `end`
+are the only visible edges (an inner pair emits nothing, so a fast second turn
+cannot clear the first turn's dots); a stray `end` never drives depth negative; the
+window is re-armed on every transition that leaves the count positive; a
+cancelled-but-still-running timer cannot clear an entry a newer start re-armed; and
+a lost `end` expires instead of suppressing every future typing start until
+restart. Mutants killed: removing the fail-safe fails 3, making every transition
+emit fails 2.
+
+
+## 2026-08-09 — `codegen_cancel`'s terminator is a required argument, and the composition path is covered
+
+The review's remaining blocker on the tool-initiated cancel was that the
+production observer composition had no coverage — "both the composer bind and the
+mountOpenCores path".
+
+The reason that mattered was a DEFAULT PARAMETER. `routeCodegenCancel` took
+`terminator: TridentTerminator = buildTridentTerminator({ store: trident })` — a
+terminator with no observer and no `onTransition`. If either hop broke, a cancel
+still flipped the phase and still returned `cancelled: true`, while the Work Board
+never reconciled, the skill-forge hook never ran, and no `projects_changed` reached
+the rail. No unit test could catch it, because each builds its own terminator; only
+the production composition could, and that was the untested part.
+
+The default is GONE. The parameter is required, so a missing thread is a typecheck
+failure — which it immediately was, on nine call sites. The one caller that
+legitimately has no observers to run (`boot-cores-factories.ts`, when no composer
+threaded one) now fabricates it EXPLICITLY via `codegenCancelTerminator` and logs
+`codegen_cancel_terminator_unwired`, the same precedent as the neighbouring
+`codegen_orchestrator_not_wired`. Verified firing, with a control.
+
+`open/__tests__/codegen-cancel-composition.test.ts` covers the pass-through
+behaviourally — a cancel through the MOUNTED backend must reach the terminator the
+caller supplied, and deleting the `mountOpenCores` forward reds it — plus three
+source-scoped assertions for the composer's bind, labelled weaker with the reason
+(the bind is inside the composer's closure; reaching it behaviourally needs the
+whole composition AND the Code-Gen Core installed).
+
+Also fixed: the codegen holder's unbound-deref error read "board terminator is not
+bound" — the SIBLING holder's name — which would send a reader to the wrong bind.
+
+Also on this branch: `TridentRunReferenceAmbiguousError` no longer escapes the
+Code-Gen tool contract. `resolveReference` throws it when a short prefix matches
+more than one run; the MCP guard maps the Core's own error types to structured tool
+failures and lets anything else out as a raw internal error, so an ambiguous prefix
+produced a stack-shaped failure instead of "pass more of the id". It is translated
+at the router boundary to `CodegenInputError` on `task_id`. An existing test had
+pinned the LEAKED message (`'reference is ambiguous'`) — updated to the contract
+error, with its real guarantee (an ambiguous prefix must not select by recency)
+left exactly as it was. Mutant: removing the translation reds three tests.
+
+# Trident child-crash reaping (#514)
+
+## 2026-08-09 — Trident child-crash reaping (#514)
+
+The persistent REPL watchdog now commits a retryable, edge-latched durable-work callback before replacing any dead or alive-but-wedged child. Each spawn receives a unique generation token that is persisted in the REPL registry, returned with launcher completion, and stored on its detached Trident run. The store records that generation's crash before marking only matching live rows `crashed`; a racing launcher completion cannot persist `running`, while a later child reusing the same warm pool slot has a different token and is unaffected. Tombstones older than seven days are pruned on crash writes. A gateway-restart tick can use the registry's persisted generation with the substrate-level callback even before the exact pool entry is rebuilt. The next `trident/tick.ts` sweep performs the normal terminal failure and Work Board reconciliation, so the board indicator clears within one tick interval. Transient store failures retry on the next watchdog tick before respawn, rather than losing the crash edge.
+
+## 2026-08-09 — a crash before the launch save no longer fires a build every tick
+
+A reviewer reproduced this live on the branch, with their own probe: make the
+firer record its crash tombstone BEFORE it returns `{ status: 'fired',
+launcher_session_key }` — the window `trident/store.test.ts` already covers — then
+tick. `fires=3` after three ticks, `phase='forge-init'`,
+`subagent_status='crashed'`, `subagent_run_id=null`. Three real detached builds,
+with no ceiling: one more every tick, forever, burning credentials and able to open
+duplicate PRs.
+
+The chain: `saveIfActive` is vetoed by the tombstone, so the dispatch id the firer
+returned is never written and `subagent_run_id` stays NULL. Harvest, the
+terminal-status guard, the hang watchdog and orphan recovery were ALL gated on
+`subagent_run_id !== null`, so nothing observed the `crashed` status — and control
+reached `if (run.subagent_run_id === null) return launch(run)`, which is
+unconditional.
+
+The fix is one widened gate: `subagent_status === 'crashed'` also opens the
+harvest/terminal block, because a crashed launcher is a dead run whether or not we
+ever learned its subagent id. Harvest still runs FIRST inside it, so a workflow that
+wrote its terminal result and only then lost its launcher still harvests instead of
+being reaped — a fix that reaped those would have traded an infinite loop for
+silently discarded results.
+
+`trident/crash-before-launch-save.test.ts` pins it. The guarantee is that the loop
+is BOUNDED, not instant: the tombstone lands during tick 1's fire and the phase is
+classified at the top of a tick, so the reap happens on tick 2. The test says so
+rather than asserting something the fix does not claim. Mutant: reverting the gate
+reds two of four.
+
+## 2026-08-09 — General's documents became reachable, on both surfaces
+
+The owner reported one symptom (a General work card whose plan link did nothing,
+and no documents in General) that was **four independent gaps**: the web never
+injected a `documents` tab for General; `ProjectShell` deliberately suppressed the
+doc link there *because* of that missing tab; `docs-client.ts` interpolated the
+scope id into nine URLs raw, so General (`''`) would have requested
+`/api/app/projects//docs/…`; and on mobile nothing ever passed `WorkBoardRow`'s
+long-declared `onOpenDoc`, leaving the ▸ chip inert on every phone.
+
+Fixing any ONE changes nothing observable — the shape worth remembering. None was
+a mistake when written; the web guard in particular encoded a fact about another
+module's tab set with no mechanical link back to it, so changing that tab set
+could not fail there.
+
+`landing/chat-react/general-scope.ts` is new — the one place General changes
+spelling on the web, mirroring `app/lib/general-scope.ts`. The work-board client's
+private normaliser now delegates to it instead of keeping a second copy, since
+having one client with the rule and one without is exactly why one surface worked
+and the other 400'd. Routing deliberately keeps two ids: the board client is
+scope-addressed (General ⇒ `''`), the route is rail-addressed (⇒ `~general`), and
+a push built from the scope yields the dead `/projects//docs`.
+
+Detail: § 2026-08-09 — General's documents became reachable — on both surfaces.
+
+## 2026-08-09 — which model runs which phase became configuration
+
+`trident/phase-models.ts` defines a stable owner-facing phase vocabulary (decomposition ·
+build · build-mechanical · rubric review · adversarial review · synthesis/arbitration ·
+bookkeeping) with per-phase default tier + effort and strict validation; validated
+overrides thread to the workflow as `phaseModels` and its router applies them over its own
+table. Every default is unchanged and the key is OMITTED when nothing is configured, so an
+untouched instance produces byte-identical args.
+
+The settings keys are deliberately NOT the agent labels — several labels are dynamic
+(`forge:fix-round-3`, `head-probe-round-2`), so exposing them would reshape the settings
+surface whenever the workflow's internals changed.
+
+The coverage test found a real defect on its first run: **`head-probe-round-N` had escaped
+the routing table** and was resolving to the fallback — the most expensive tier at high
+effort — for a step that runs one `git` command and reports a sha. A missing entry and a
+deliberate entry are indistinguishable when the fallback is silent, which is the argument
+for the test rather than just the fix.
+
+Also removed a FALSE docblock from `gateway/wiring/resolve-llm-credentials.ts`, which
+asserted the ambient pool had "NO FAILOVER" as a KNOWN LIMITATION. The single
+credential-less entry is the mechanism, not a defect; rotation swaps the credential file
+underneath the child. Retracted in place, with the generalisable lesson kept.
+
+Detail: § 2026-08-09 — which model runs which phase became configuration.
+
+## 2026-08-09 — a spoken word is findable in chat search
+
+A voice note was transcribed at upload, written durably beside the audio, and delivered
+to memory — and **search could not see any of it**, because the index mirrors the
+message `body` and a voice note's body is the attachment placeholder.
+
+The transcript now rides back on the UPLOAD RESPONSE. A user's own message is never
+persisted server-side, so the client owns it, and the response is the only point at
+which the client can learn the transcript without a new frame. `transcript` is a field
+of its own rather than appended to `body`: the body is what renders, and appending would
+change how every existing voice note displays. Both search paths were updated through
+one shared `searchableText`, since two independent searches over one model is how a
+field gets indexed on one platform and not the other.
+
+Two details each of which would have produced a search that passes its tests and is
+useless in the hand: `snippet(tbl, -1, …)` (FTS5's "column with the most matches" —
+pinned at `body` a voice hit renders an unhighlighted placeholder), and reading the
+sidecar on the IDEMPOTENT re-upload path (which deliberately skips the ASR seam, so the
+same audio would be searchable once and then silently not).
+
+The FTS DDL was split out of the schema array so column migrations run before the
+triggers that name the new column — otherwise a fresh install works and every upgrade
+fails. Rebuild is detected from `sqlite_master` DDL, not by probing a query.
+
+Detail: § 2026-08-09 — a spoken word is findable in chat search.
+
+## 2026-08-09 — a voice note's words survive the device (correcting the same day's fix)
+
+The earlier half (#158) shipped on a FALSE belief: that a user's own messages are not
+persisted server-side. They are — `app_chat_messages` holds user rows, and `replayAfter`
+is how a fresh or reconnecting device rebuilds its history. So the fix worked only on the
+phone that performed the upload; a reinstall brought voice notes back with their audio and
+none of their words.
+
+Migration 0117 adds a nullable `transcript` column; the store persists it, the replay
+envelope carries it, and the client merges it without ever regressing a known value to
+null. The SERVER resolves it from its own sidecar rather than accepting it from the
+client — the text is already ours, and trusting the client would let any client write into
+a field that is indexed and read by the agent. Deliberately not `meta_json`, whose
+contract says it is never populated for user messages.
+
+Four mutants; the first pass caught only ONE. The three that survived were: the column
+never written, the server never resolving it, and the composer never wiring the seam —
+that last being the repeat defect shape SPEC names, with every other test green while the
+feature was dead.
+
+Also lands two arbiter design docs (multi-substrate build agent; model usage dashboard),
+both awaiting owner decisions rather than implementation.
+
+Detail: § 2026-08-09 — A voice note's words survive the device.
+
+## 2026-08-09 — the per-phase model config gets a producer
+
+The vocabulary, the workflow argument and the router were all built and correct, and
+**nothing ever supplied a value** — the orchestrator never passed one and no surface
+wrote one, so every run used the defaults regardless of configuration and nothing could
+go red. Found by an independent design review hours after the config landed.
+
+Migration 0118 adds `trident_phase_models` to `instance_metadata` (the documented home
+for instance-level settings); read/write helpers; a per-launch `resolve_phase_models`
+resolver threaded orchestrator → composition → composer; and
+`GET`/`PUT /api/app/trident/phase-models` registered across all four required places.
+
+The write fails WHOLE on any invalid entry while the read degrades quietly — the
+asymmetry is deliberate: at the settings boundary the owner can be told, deeper in
+nobody is listening. `PUT` replaces rather than merges so clearing a pin is an omission,
+but an absent `overrides` key is a 400 rather than an accidental wipe.
+
+Three mutants, one per link, each caught by exactly one test. The UI is still missing —
+this is the producer, not the pane.
+
+Detail: § 2026-08-09 — the per-phase model config gets a producer.
+
+## 2026-08-09 — Codex and Kimi are connectable from a phone
+
+The gateway's Codex surface is app-scoped (`/api/app/codex-auth`) and the WEB client has
+used it since it was built. **Mobile had no client and no screen**, so an owner with only
+a phone could not connect the cross-model reviewer at all — the reference deployment
+works only because provisioning wrote the credential to disk directly.
+
+Adds a **Model providers** section to mobile Integrations (above Shared credentials, so
+the free-text form reads as the escape hatch): Codex status + paste `auth.json` +
+disconnect via a new `app/lib/codex-credential-client.ts`, and a named Kimi K3 row.
+
+The Kimi row writes through the SAME global-credential store the free-text form uses and
+DERIVES its status from that list — a named row with its own storage path would mean a
+key entered here behaved differently from one entered there. The service id is a
+repeated literal (the app bundle carries no workspace deps), which makes that string
+load-bearing: a mismatch stores the key where nothing reads it and the reviewer stays
+silent, so the test asserts it.
+
+12 tests that PRESS the real controls; four mutants each caught, including "the Connect
+button is rendered but inert" — the failure a source check cannot see.
+
+Detail: § 2026-08-09 — Codex and Kimi are connectable from a phone.
+
+## 2026-08-09 — the Kimi key comes from the store, and only the store
+
+Owner-directed: the env var *"was a temporary hack, not a production-grade decision."*
+`resolveKimiApiKey` read `KIMI_API_KEY` first and fell back to the store, which made the
+environment a second resolution path — the same settings screen behaving differently on
+two boxes, failing in the direction nobody checks (paste a key, see it saved, every
+review keeps using the shell's).
+
+The env argument is gone from the signature. `ensureKimiKeyExported` still writes the
+resolved key into the CHILD's env — that indirection keeps the key out of prompt text and
+stays. The variable is now purely an output, never an input. Two behaviours flipped: a
+pre-set env value is now OVERWRITTEN, and clearing the key in settings CLEARS the export
+(without which a stale key survives and the reviewer runs on a credential the owner
+believes they removed).
+
+The live key was migrated into the store BEFORE shipping — the box had it only in the unit
+env and `project_credentials` was empty, so store-only would have silenced K3. Migration
+printed only lengths and outcomes, never the value.
+
+Lesson from that migration: it failed twice with an opaque "failed to open SQLite" that
+looked like permissions or locking; the cause was `{ create: false }`, an option
+production never passes. A probe that does not use the production call shape fails in a
+way that sends you debugging the wrong system.
+
+Detail: § 2026-08-09 — the Kimi key comes from the store, and only the store.
+
+## 2026-08-09 — the build-phase models are settable from a phone
+
+Completes the per-phase model/effort chain: vocabulary → store + resolver + endpoint →
+**a surface a human can use**. Chat header ☰ → Settings → Code generation, one row per
+phase with model and effort chips.
+
+The phase list is SERVER-SUPPLIED (a phase added to the engine appears without an app
+release, and neither client keeps its own copy of a list they must agree on). Choosing a
+value equal to the default CLEARS the override rather than pinning it — otherwise the
+owner freezes a phase against a future default change they never intended. A rejected
+save KEEPS the local edits and shows the server's message verbatim, since the server
+rejects the whole set and names every fault. Nothing auto-saves.
+
+Reachability is part of the feature: a registered route nothing pushes and a push at an
+unregistered route fail INDEPENDENTLY, so the nav row and the Stack registration each got
+their own assertion in the #385 guard.
+
+12 press-the-control tests + 2 guard tests; three mutants each caught, including "the
+effort chips are rendered but inert".
+
+DEFERRED AND NAMED: the web half (`SettingsTab.tsx`) — same endpoint, no new server work,
+but genuinely not done.
+
+Detail: § 2026-08-09 — the build-phase models are settable from a phone.
+
+## 2026-08-09 — the build-phase models are settable on the web too
+
+Closes the half #163 named as deferred: a Code generation section in the web Settings tab
+over the same endpoint, mirroring the three decisions (server-supplied phase list;
+choosing the default CLEARS the override; a rejected save KEEPS the edits and shows the
+server message verbatim).
+
+The interesting part is a PARITY test. `effectiveRow`/`applyRowEdit` now exist twice
+because each client bundle is free of the other's workspace — correct, and also the risk,
+since those two functions encode product DECISIONS. A divergence is the failure nobody
+reports: each surface stays self-consistent and the owner just gets a different answer
+depending on the device. The copies are executed side by side over ten edit shapes and
+seven display shapes.
+
+WHERE it lives was not the first attempt: it began in `landing/` importing the mobile
+client relatively, the lint rule caught it, and the workspace specifier then failed to
+resolve — because `landing` does not depend on `@neutronai/app` and MUST NOT, that
+independence being why the helpers are duplicated. `gateway` declares both, and already
+hosts `doc-links-parity` for the same reason.
+
+Four mutants each caught, two of which SURVIVED the first pass (the web component's error
+behaviour was untested — found by mutation, not by reading). Also fixed a CSS token that
+would have shipped an invisible chip border: `--hairline` is not a token here, `--border`
+is, and it is defined for both themes.
+
+Detail: § 2026-08-09 — the build-phase models are settable on the web too.
+
+## 2026-08-09 — a review panel cannot see a red build, so now something else does
+
+Four reviewers read the DIFF and none runs the tests, so a change that type-errors or reds
+a shard could be unanimously APPROVED and merged. The reference deployment never showed
+this because a GitHub setting blocks it there — which is the problem: the discipline lived
+in repository CONFIGURATION, so every self-hoster and every local-merge run had nothing.
+
+DETERMINISTIC, NEVER INTERPRETED: the agent reports `gh pr checks --json` output verbatim
+and every judgement happens in JS. ONE GATE, PEERS AS DATA: red → code blockers that force
+REQUEST_CHANGES so the fix loop re-Forges; pending/unreadable → a deferred peer on the
+EXISTING list, so the loop exits infra-only rather than editing code to fix a timer;
+green/none → nothing. `none` is distinct from `green` (a repo with no CI has nothing to
+wait for), and local mode short-circuits before spending an agent.
+
+THE HOLE IT NEARLY SHIPPED WITH: `enforceCrossModelGate` returns the synthesis untouched
+when there are no deferred peers, so attaching CI findings without setting the verdict
+would have APPROVED a red build carrying a "CI FAILING" finding. Red now forces the
+verdict. A second near-miss: an unreadable exit-0 reply first classified as `none` — the
+unsafe direction; my own test caught it, not my reading.
+
+22 tests against the REAL functions extracted from the .mjs. FIVE MUTANTS, all fail-open,
+each caught. The new agent label was caught by #157's coverage test and routed to the
+cheap tier — leaving it to the fallback is how head-probe sat on the most expensive tier
+for months.
+
+Detail: § 2026-08-09 — A review panel cannot see a red build — so now something else does.
+
+## 2026-08-09 — the usage readings are remembered, and turned into a pace
+
+The monitor has always probed the active credential every 60s, cached ONE reading, and
+aged it out at five minutes — so the product measured utilisation continuously and
+remembered nothing. "Which pool can take this build?" is a question about a TREND, which
+is why the dashboard needed a migration before a chart.
+
+Migration 0119 + `persistence/usage-samples-store.ts` + a fail-soft `onSample` hook wired
+beside the existing `onStanding` observer. Prune rides on the same call (a cleanup job
+that can fall out of step with its writer grows forever or deletes something in use).
+PACE = fraction consumed ÷ fraction of window elapsed, computed at read time and never
+stored.
+
+TWO THINGS THE TESTS FOUND THAT READING DID NOT. The exhaustion projection divided by
+pace TWICE — plausible-looking and wrong; now derived, and pinned by a hand-checkable
+case (5h window, half elapsed, 75% used → pace 1.5 → 50 minutes). And an `at < reset_at`
+guard turned out to be MATHEMATICALLY UNREACHABLE: pace > 1 implies the projection is
+always earlier than the reset. Removed with the proof written down — a dead branch dressed
+as safety cannot be tested, so it reads as protection never exercised.
+
+`account_label` exists and is always NULL today: rotation happens outside this process, so
+the instance cannot name the account. An inferred name shown as a measurement would be
+worse than none.
+
+Six mutants; five caught immediately and the sixth exposed the dead branch. The wiring
+tests had to move from `persistence/` to `open/__tests__/` — `open` depends on
+`persistence`, never the reverse, and the lint refusal was the architecture talking.
+
+Detail: § 2026-08-09 — the usage readings are remembered, and turned into a pace.
+
+## 2026-08-09 — Usage dashboard: the endpoint and the web card
+
+`GET /api/app/usage/dashboard` + the Model usage card in web Settings. The endpoint
+went into the EXISTING usage surface rather than a new one: same owner gate, same
+subject, and a second near-identical surface is how one stops being wired. The cost
+of that is a prefix hazard — the meter's path is a strict prefix of the dashboard's —
+pinned in both directions.
+
+What the card refuses to say is the substance. An unreachable route draws no bar
+(a 0% bar invents a measurement); a null pace renders as an em dash, never `0.0×`;
+a null projection OMITS its row, because null is the common good case and a
+permanent dash trains the eye to hunt for an absent warning; and a null account
+label reads "active credential" and never guesses.
+
+The wiring test now checks the READ half separately from the write half — the write
+assertion had passed for a whole PR during which nothing read the series.
+
+Detail: § 2026-08-09 — Usage dashboard — the endpoint and the web card.
+
+## 2026-08-09 — The chat agent can search the web
+
+`LIVE_AGENT_TOOL_NAMES` had never contained `WebSearch` or `WebFetch`, and that array
+is the only thing that decides. Reported via a ritual, but it was never ritual-specific:
+ordinary chat could not look anything up either. A missing built-in produces no error,
+only an agent that says it has no such tool, which is why nothing upstream noticed.
+
+The worse half: a ritual declaring a web tool must be approved for `egress: 'web'`
+through a separate grant reading "may reach the public internet". That grant was given
+for `kaizen` over a capability the code could not exercise. An approval prompt that
+overstates what it grants spends the credibility the whole gate rests on.
+
+Guarded by a new test asserting every bundled ritual's declared built-ins are a subset
+of the live surface — the join between two green suites whose union was broken, the same
+shape as the push-kind drift.
+
+Detail: § 2026-08-09 — The chat agent can search the web.
+
+## 2026-08-09 — Model usage on the phone
+
+☰ → Settings → Model usage. Same two windows, same pace, same refusals as the web card.
+Both wiring points present (nav row + Stack.Screen — they fail independently) and the
+screen test presses real controls.
+
+A first draft re-declared `usageBand`/`clampFraction` on the phone with a bundle-
+independence justification that `app/components/UsageMeter.tsx:20` disproves — it already
+imports both from `@neutronai/contracts`. Both now come from the contract and the parity
+test asserts neither client exports its own. The formatters stay twinned, correctly:
+production code in `app/lib` never imports `landing`.
+
+Every refusal mutation-tested separately, including one attempt that was NOT faithful and
+proved nothing until rewritten.
+
+Detail: § 2026-08-09 — Model usage on the phone.
+
+## 2026-08-09 — Naming the account behind a usage reading
+
+The `account_label` column has been null on every row since it was created. This reads an
+optional `.credentials.meta.json` sidecar beside the credential, written by whatever swaps
+it, and uses the label ONLY when its fingerprint matches the token actually resolved.
+
+A missing label is harmless — it renders "active credential". A STALE one is not: it would
+attach the previous account's name to the current account's reading and send the owner to
+move quota away from an account that was never under load. Mismatch degrades to null.
+
+Token and label come from ONE `resolveActiveCredential` call, so a swap landing between two
+calls cannot pair one account's reading with another's name.
+
+The instructive mutant: dropping the fingerprint check fails immediately, but making the
+MONITOR persist a null label while the resolver stayed correct passed everything — "resolved
+but never carried", one layer along from "built but never wired". Now covered.
+
+Nothing writes a sidecar yet, so every label is still null and behaviour is unchanged.
+
+Detail: § 2026-08-09 — Naming the account behind a reading.
+
+## 2026-08-09 — A ritual post is a chat message, and so is its notification
+
+The owner's phone said `ritual:kaizen`, and tapping it opened the app but not the
+conversation. One root cause under both: the push was composed from the reminder ROW
+on the tick's `on_fired` hook, and a ritual row's `message` IS that dispatch token —
+so the notification could never carry the posted text, and its project field was the
+instance slug, which resolves to no project.
+
+Composition moved into the ONE out-of-turn delivery seam — `createDeliver` now takes a
+`notify` sink and fires it for every post that got a durable row
+(`gateway/http/deliver.ts` → `gateway/push/chat-message-push.ts`), never for a
+transient `'none'` pill. So a fired reminder, a ritual, the morning brief, the idle
+nudge and a system notice all notify identically, because they are all one thing.
+Composing it in the reminder outbound instead — the first version of this change —
+cured the reported message and left every other producer silent, which is the
+per-producer mistake `deliver` exists to have ended. `pushReminder`, `onFired`,
+`ReminderTickLoop.on_fired` and the `push_dispatcher` composition field are DELETED —
+the tick can only see the row, so it was never a place this could be built correctly.
+
+`agent_message` joined `PUSH_KINDS` (it was a resolver branch with no sender, kept out
+of the list precisely so the exhaustiveness test could not be padded); `reminder` left
+it, because nothing sends it — but its RESOLVER branch stays, because a store app and
+a self-hosted gateway do not upgrade together and undismissed notifications still
+carry that kind. General names itself with `GENERAL_RAIL_ID`, now defined once in
+`wire-types/topic-id.ts` and pinned to the client's copies: encoding it by ABSENCE
+(the first version) is malformed to every already-installed bundle, which would have
+preserved the exact symptom the change was for.
+
+`?message_id=` is finally consumed. It reached the chat route since 2026-05 with no
+reader. The frozen #505 anchor and a new once-per-target imperative `scrollToIndex`
+now ask ONE function, so a cold open cannot land in two places, and a tap into an
+already-mounted project can be re-anchored at all. With no pushed id, nothing scrolls
+and the anchor is byte-identical — asserted, because this is the #505/#511 blast
+radius.
+
+Detail: § 2026-08-09 — A ritual post is a chat message, so its notification is a chat message.
+
+## 2026-08-09 — The ambient tier's comments said "macOS Keychain". That cost an investigation.
+
+**Landed:** 2026-08-09 · **ISSUES:** #517 (safe half) · **Docs-only, no behaviour change**
+
+### What was wrong
+
+Two docblocks described the ambient credential tier as a macOS-only convenience:
+
+- `gateway/wiring/resolve-llm-credentials.ts` — "the macOS *Claude
+  Code-credentials* Keychain item", and "Open single-owner ONLY; Managed never
+  allows it";
+- `open/composer.ts` — "the owner ran `claude` login on this Mac", "the box owner's
+  own", "SINGLE-OWNER ONLY".
+
+Both mislead, and believing them produces a **dangerous** conclusion:
+
+1. The probe (`open/ambient-claude-auth.ts`) branches on **platform**. macOS reads
+   the Keychain; **every other platform reads `$HOME/.claude/.credentials.json`**.
+   On a hosted Linux deployment that file is written by the credential rotator, so
+   this tier is a normal production path there.
+2. "Managed never allows it" is true only of that one function. The Open composer
+   sets `allowAmbient: true` itself, and a hosted install boots that composer — so
+   ambient is reachable, and was **measured on a live hosted install as the ONLY tier that
+   resolved**, because tiers 2 and 4 were unset.
+
+A reader who believed the old comments would conclude the install was misconfigured
+and "fix" it by disabling ambient — leaving that deployment with **no credential at
+all**. That is exactly what the #517 tracker note proposed.
+
+### What changed
+
+The comments now describe both platform branches, say plainly that `allowAmbient`
+is a statement about which *composer* enables the tier rather than which
+*deployment* runs it, and record the known limitation where it is relevant: an
+ambient pool holds one credential-less entry, so it has **no failover** — rotation
+happens outside it, at the file level.
+
+**The pool id `ambient_keychain` is deliberately NOT renamed.** It becomes
+`credential_identity`, which is folded into `poolKeyFor()` — renaming it re-keys
+every warm REPL, the same stranded-pool-key hazard #143's review reproduced. That
+is a migration, not a rename. My own SPEC note called it "safe and separable"; it
+is separable but **not safe**, and that note is corrected too.
+
+### Coverage
+
+No new test: the platform branch was **already** pinned
+(`open/__tests__/ambient-claude-auth.test.ts` — linux consults the creds file, not
+the Keychain). Only the prose was wrong. What was added is a comment on those two
+cases explaining what they protect, so a future reader trusting the pool's NAME
+doesn't delete the guard. Mutant: collapsing the probe to Keychain-only — the exact
+"simplification" the old comments invited — reds both.
+
+## 2026-08-09 — The build-phase models are settable from a phone
+
+### What this completes
+
+The per-phase model/effort config was built in three layers over two days: the phase
+vocabulary and validation, then the store + per-launch resolver + HTTP surface, and
+**still no way for a human to set anything**. This is the surface. Chat header ☰ →
+Settings → **Code generation**.
+
+Each phase gets a row — Build, Adversarial review, Synthesis and the rest — with model
+and effort chips.
+
+### Three decisions
+
+**The phase list is server-supplied.** Labels, descriptions, defaults and the legal
+values all arrive in the payload; the screen knows the *shape* of a phase and nothing
+about the pipeline. A phase added to the engine appears here without an app release,
+and neither client carries its own copy of a list they both have to agree on.
+
+**Choosing the default CLEARS the override rather than pinning it.** Storing `opus` for
+a phase already defaulting to `opus` would freeze it against a future change to that
+default — the owner would have pinned something they only meant to leave alone. It also
+makes "reset" fall out for free: choose the value with the dot. This is the behaviour a
+reasonable implementation gets wrong, so it has a named test and a mutant.
+
+**A rejected save keeps the local edits.** The server validates the whole set, rejects
+it entire, and names every fault; the banner shows that verbatim, because the owner is
+the only one who can fix a bad value and a generic "save failed" hides which row was
+wrong. Discarding the edits would punish a typo by throwing away the rest of the work.
+
+Nothing auto-saves: a chip is an edit, Save is a write. Every chip auto-saving would
+make a mis-tap a live config change on the next build.
+
+### Reachability is part of the feature
+
+A registered route nothing pushes is the ISSUES #385 defect, and a push at an
+unregistered route goes nowhere — **the two fail independently**, so the nav row in
+`settings.tsx` and the `<Stack.Screen name="codegen" />` registration each have their
+own assertion in `server-editor-reachability.test.ts`. Either alone leaves a dead
+control.
+
+### Verification
+
+`app/__tests__/codegen-settings-reachable.test.tsx` — 12 tests that **press the real
+chips on the real screen**, plus 2 added to the reachability guard.
+
+**Three mutants, each caught:** choosing the default pinning instead of clearing (1) ·
+a rejected save discarding the edits (1) · the effort chips rendered but inert (4).
+
+Also asserted: the complete override set is sent on save (so saving one row cannot
+silently clear another), the "Saved" confirmation goes stale on the next edit, and a
+failed LOAD says so rather than rendering an empty list — zero phases would read as
+"this build has no phases", which is a lie the owner cannot act on.
+
+Typecheck 51/51 · lint clean · byte-scanned.
+
+### Deferred, and named
+
+**The web half.** `landing/chat-react/SettingsTab.tsx` gets the same section against
+the same endpoint; it is not in this PR. The endpoint, the validation and the payload
+shape are all shared, so the web version is a rendering job with no new server work —
+but it is genuinely not done, and the owner uses both surfaces.
+
+## 2026-08-09 — The build-phase models are settable on the web too
+
+### Closing what #163 deferred
+
+#163 shipped the mobile screen and named the web half as deferred. **Deferred work that
+exists only in a PR body is work that quietly doesn't happen**, so this closes it. Same
+endpoint, same payload, no new server work — a Code generation section in the web
+Settings tab with the same per-phase chips.
+
+### The three decisions are mirrored, deliberately and identically
+
+Server-supplied phase list · **choosing the default clears the override** rather than
+pinning it · **a rejected save keeps the edits** and shows the server's message
+verbatim. Nothing auto-saves.
+
+### The interesting part: a parity test, and where it had to live
+
+`effectiveRow` and `applyRowEdit` now exist **twice** — once per client — because each
+bundle is deliberately free of the other's workspace. That duplication is the right
+call and it is also the risk: **these two functions encode product decisions, not
+transport.**
+
+A divergence is the failure nobody reports. Each surface stays self-consistent, so
+neither looks broken; the owner just gets a different answer about their own settings
+depending on which device they opened. And the decision most likely to drift —
+whether choosing the default clears or pins — differs only in what happens *months
+later*, when a default changes.
+
+So the two copies are **executed side by side** over ten edit shapes and seven display
+shapes.
+
+**Where it lives matters and was not my first attempt.** The test began in `landing/`,
+importing the mobile client by relative path. The lint rule caught it (`no relative
+import from another package`), the workspace specifier then failed to resolve — and the
+reason was the point rather than an obstacle: **`landing` does not declare
+`@neutronai/app` as a dependency and must not start**, since that independence is
+exactly why the helpers are duplicated. `gateway` is the one package declaring both, and
+it is where `runtime/__tests__/doc-links-parity.test.ts` already puts the same kind of
+mirror check for the same reason. Moved there.
+
+### Verification
+
+`landing/chat-react/__tests__/codegen-settings-web.test.tsx` (11) and
+`gateway/__tests__/phase-models-client-parity.test.ts` (20).
+
+**Four mutants, each caught:** the web copy pinning where the phone clears — a real
+cross-client drift, caught by the parity test (2 tests) · a `PUT` body missing the
+`overrides` key, which the server would 400 · a rejected save discarding the edits and
+hiding the server's message · the Save button rendered but inert.
+
+**Two of those last mutants survived the first pass.** The web component's error
+behaviour was untested, which a mutation run found and a reading of the code did not.
+The guard added for it is a *scoped source* assertion rather than a press — said plainly
+in the test, because rendering `SettingsTab` means standing up five other clients it
+constructs on mount, and the mobile screen already has the real behavioural version.
+
+The parity suite carries a **positive control**: two functions that both returned their
+input unchanged would otherwise pass every comparison in it. It also asserts neither
+copy mutates its input — a copy that mutated in place would still "agree" on the
+returned value while corrupting the caller's state, which is an agreement test missing
+the actual divergence.
+
+**A CSS token was wrong and would have shipped invisible.** The chips used
+`var(--hairline)`, which is not a token in this stylesheet (it appears only with an
+inline fallback elsewhere). The real one is `--border`, defined for **both** the dark
+and light themes — so the border is now correct in each rather than absent in one.
+
+Typecheck 51/51 · lint clean · byte-scanned · neighbouring settings-tab suites green.
+
+## 2026-08-09 — Naming the account behind a reading
+
+The usage series has carried an `account_label` column since it was created, null on
+every row. This is the reader that fills it — the Open half of the owner-approved
+per-account breakdown.
+
+### The sidecar
+
+`<same dir as .credentials.json>/.credentials.meta.json`:
+
+```json
+{ "label": "acct-2", "fingerprint": "<12 hex — call credentialFingerprint>" }
+```
+
+Written by whatever swaps the credential — a hosting layer, a shell script, a
+self-hoster's cron. Same reasoning as reading `.credentials.json` itself: requiring
+an HTTP call would mean the rotator has to know this instance's port, bearer token
+and readiness to deliver one string.
+
+**A writer MUST create it mode 0600**, like the credentials file it sits beside. This
+was previously stated as an observed fact in the security note below and required of
+nobody, which is how a security argument turns into a wish: the reader cannot make a
+writer do it, so the requirement has to live here, in the contract, or it does not
+exist. The reader deliberately does NOT enforce it — refusing a loosely-permissioned
+sidecar would drop the label silently, and a silent drop is the one failure mode this
+whole feature is arranged to avoid.
+
+**The fingerprint has exactly one definition, and it is the function** —
+`credentialFingerprint` in `open/credential-label.ts`. A writer must call it
+(Managed's rotator imports it through `vendor/neutron`), never reimplement it from a
+description here. See the closing note: this line previously spelled the algorithm
+out, and spelling it out is the drift.
+
+### ⚠️ The fingerprint is the whole design
+
+The label is used ONLY when its fingerprint matches the token actually resolved.
+
+**A missing label is harmless** — it renders "active credential", which is true. **A
+STALE label is not.** A sidecar left behind by a previous swap would attach the old
+account's name to the new account's reading, producing a graph that looks right,
+reads right, and sends the owner to move quota away from an account that was never
+under load. A mismatch degrades to null, silently and deliberately.
+
+It also means a writer cannot half-succeed: install a token without updating the
+sidecar and labels stop appearing rather than going stale invisibly.
+
+### Resolved WITH the credential, never separately
+
+`resolveActiveCredential` returns `{ token, account_label }` from ONE call. If those
+came from two calls, a swap landing between them would pair one account's reading
+with another's name — the bug the fingerprint exists to catch, reintroduced at a
+different layer. A test asserts the label reader is asked about the same token that
+was resolved, and nothing else.
+
+The default label reader deliberately does NOT inherit `deps.readFile`. Otherwise a
+test could pass by feeding the credentials blob to the label parser, and the seam
+would look isolated while sharing one source.
+
+### The mutant that survived first
+
+Dropping the fingerprint check fails a test immediately. But making the MONITOR
+persist `account_label: null` while the resolver kept working correctly passed
+everything — the "resolved but never carried" shape, one layer along from "built but
+never wired". Now `usage-sample-persistence.test.ts` asserts the label arrives at
+the sink AND lands on the row, and that mutant dies.
+
+### Not in this change
+
+Nothing writes a sidecar yet. Until something does, every label is null and the
+behaviour is exactly what shipped before — which is the point of landing the reader
+first: the writer can appear without a second deploy of this code.
+
+---
+
+### The fingerprint is scrypt, not SHA-256 — CodeQL was right
+
+`credentialFingerprint` hashed the live OAuth token with a bare SHA-256, and CodeQL's
+`js/insufficient-password-hash` failed the PR on it. Open's `main` ruleset requires that
+check, so the PR could not merge.
+
+**The finding is correct in form.** The input is a credential, and a bare digest of a
+credential is one dictionary away from being reversible. It is not exploitable *here*:
+these tokens are long and random, the sidecar is *required* to be mode 0600 beside the
+credentials file it describes (§ The sidecar — a requirement on writers, not something this
+reader can check), and anyone who can read it can already read the token itself. But that
+is a property held up by three surrounding facts, each of which a later change could
+quietly remove — one of them by a writer simply not honouring a contract — and it is a
+strictly worse thing to depend on than a correct primitive.
+
+Arguing it down was the alternative, and it would have left a permanently red REQUIRED
+check on a public repo. A standing red gate trains everyone to merge past it, and it hides
+whatever fails behind it — the lesson `SPEC.md` already records from the Managed
+`Typecheck` step that masked a completely dead roadmap gate for days.
+
+So: `scryptSync(token, FIXED_SALT, 6)` at `N=4096, r=8, p=1`. Output shape is unchanged
+(12 hex), so the sidecar format and every test assertion still hold.
+
+**The salt is fixed, and that is doing less than a salt usually does.** A random per-write
+salt is right when you STORE the digest and verify against it later. Here two independent
+processes must reach the SAME 12 characters from the same token sharing nothing but the
+token, so a random salt is impossible. It buys domain separation and nothing more, and the
+docblock says exactly that rather than implying per-write uniqueness.
+
+**Cost was chosen against the call pattern, not copied from a password-storage example.**
+This runs once per usage reading, a minute apart, and `N=4096` is far above a bare SHA-256
+per guess.
+
+It is **not** "invisible on the tick", which is what both this section and the code docblock
+originally claimed while also attributing a ~100 ms figure to the default `N`. Both halves
+were wrong. MEASURED under bun 1.3.9, `scryptSync` at these parameters: **~73 ms
+steady-state, ~280 ms on the first call**, synchronously, on the event loop. The default
+`N=16384` is ~534 ms; `N=1024` (~5 ms) is the setting that would actually cost "a few
+milliseconds".
+
+What bounds the cost today is WHERE it is paid, not how small it is: the fingerprint is
+reached only after a sidecar has been found, read, parsed and found to carry a plausible
+label, so a box with no sidecar — every box, until something writes one — never calls it.
+The stall becomes real on the first tick after a writer ships, and it arrives **without this
+file changing**. Whoever lands that writer decides then whether to lower `N` or memoise per
+token, on these numbers rather than on a comment that said there was nothing to weigh.
+
+📌 **A cross-process contract described in prose will drift, and the drift is silent.** The
+file header spelled out "first 12 hex of sha256(token)" — a writer trusting that line would
+now produce a digest this reader rejects, and the only symptom is that labels quietly stop
+appearing. The header now points at the function as the single definition and says that
+Managed's rotator should IMPORT it through `vendor/neutron` rather than reimplement it.
+That also removes the duplicated-KDF-constants hazard the writer half would otherwise
+carry.
+
+**And it drifted a second time, in this document, in the same change that recorded the
+lesson.** The code header was corrected while § The sidecar above still printed
+`sha256(token)` — and that section, not the header, is where a rotator author looks for
+the format. The stale line therefore survived in the more load-bearing of the two places.
+Fixing the code and leaving the doc is not half a fix; for a contract whose only consumer
+is an external writer, the doc *is* the interface. Both now point at the function, and the
+plan doc's Tier-1 contract (`docs/plans/2026-08-09-model-usage-dashboard.md`) has been
+corrected too — it still described a bare `{"label": "acct-2"}` with no fingerprint at
+all, which the reader rejects.
+
+## 2026-08-09 — A fix round that never reached the branch now stops the run
+
+**Landed:** 2026-08-09 · **Surface:** `trident/inner-workflow.mjs`
+
+### The defect
+
+A fix round runs with `isolation: 'worktree'` — its own throwaway git worktree.
+Edits that are not committed AND pushed die with it, and the round still reports
+success. The next review then reads the UNCHANGED pushed head and re-reports the
+SAME findings, which reads as "the fixes didn't work" rather than "the fixes were
+never there".
+
+PR #145 is the record. Its review blocked it with, verbatim: *"pushed head does
+not contain the round-2 fix set; merging now ships rejected code … addressed only
+in uncommitted tree."* Three rounds, four reviewers each, essentially all of it
+spent on a head that never moved. The work was found afterwards in a `git stash`
+on the build host and pushed by hand.
+
+### The gate
+
+After every fix round, before the re-review, a one-command probe reads the
+branch's current head — from the REMOTE in PR mode (`git ls-remote`), because
+"pushed" is the property that matters and a local ref can be ahead of anything a
+reviewer or the merge will ever see. `roundLanded(before, after)` then decides, in
+code:
+
+- head moved → carry on,
+- head unchanged → **stop**, with `blockKind: 'round-lost'` and a finding naming
+  which round to recover and where to look,
+- head unreadable → does NOT count as landed (a failed fetch is not progress),
+- baseline unreadable → permissive, because with no baseline there is nothing to
+  compare and failing the run there would block builds for an unrelated reason.
+
+**The decision is in code, not in a prompt.** The agent is asked for one fact — a
+sha — and makes no judgement about it. An agent asked "did your round land?" is
+auditing itself, and the failing case is exactly the one where it believes it
+succeeded. Same reasoning as the deterministic cross-model gate.
+
+A lost round is reported as its own `blockKind` rather than as `code`, for the
+same reason `infra-only` exists: the code was not re-judged, so calling it a code
+rejection is a false statement about the diff.
+
+### Coverage
+
+`trident/round-landed.test.ts` — 13 tests against the real function bodies
+extracted from the shipped script. Mutants killed: making an unreadable head count
+as landed fails the failed-fetch test; inverting the comparison fails three.
+
+## 2026-08-09 — General's documents became reachable — on both surfaces
+
+### What changed
+
+A work card's spec-doc chip now opens that document, in **every** scope including
+General, on **both** the web shell and the mobile app. General also gained a
+Documents tab on the web, ordered `chat → work → docs` to match named projects.
+
+### Why it was broken, and why each half looked fine
+
+The owner reported one symptom — a General work card whose plan link did nothing,
+and no documents in General at all — that turned out to be **four independent
+gaps**, three on web and one on mobile. None of them was a mistake at the time it
+was written, which is what made the whole chain invisible:
+
+1. **Web: General had no `documents` tab.** The engine's global tab set is
+   Admin-only, so General received no docs descriptor even though its documents
+   are backend-reachable (`doc-store.ts` roots them at
+   `<owner_home>/Projects/general/docs`, the same rule every named project
+   follows).
+2. **Web: `ProjectShell` deliberately suppressed the link for General**
+   (`isGeneral ? undefined : onOpenDocLink`). Correct for a tab set with no
+   Documents tab — a link there would set a pending doc the resolver could never
+   satisfy, i.e. a dead button. The guard encoded a fact about **another module's
+   tab set with no mechanical link back to it**, so changing that tab set could
+   not fail here.
+3. **Web: `docs-client.ts` interpolated the scope id into nine URLs raw.** Even
+   with a tab and a handler, General (`''`) would have requested
+   `/api/app/projects//docs/…` and taken a 400.
+4. **Mobile: nothing ever passed `onOpenDoc`.** `WorkBoardRow` has declared it
+   since it was written and keys three behaviours off its presence — the a11y
+   role (`button` vs `text`), `disabled`, and the press handler. The sibling
+   `onPlay` **is** passed at the same call site, which is the control proving the
+   wiring point was reachable all along and the miss was specific to this prop.
+
+**Fixing any one of the four changes nothing observable.** That is the shape worth
+remembering: a feature can be dead behind several independently-reasonable
+decisions, and each one reviews as correct in isolation.
+
+### The consolidation
+
+`landing/chat-react/general-scope.ts` is new: the ONE place General changes
+spelling on the web, mirroring the mobile client's `app/lib/general-scope.ts`.
+`work-board-client.ts` already carried a private `'' → 'general'` normaliser and
+`docs-client.ts` carried none — which is precisely why one surface worked and the
+other 400'd. The work-board helper now **delegates** rather than keeping a second
+copy, and a test asserts the two agree for every input.
+
+Routing keeps two ids on purpose. The board client is **scope**-addressed
+(General ⇒ `''`); the route is **rail**-addressed (General ⇒ `~general`). A push
+built from the scope yields `/projects//docs` — dead, and dead on General
+specifically, the one board where this was hit.
+
+### Verification
+
+`landing/chat-react/__tests__/general-docs-reachable.test.tsx` (10) and
+`app/__tests__/workboard-doc-link.test.tsx` (5). Both halves were
+**mutation-tested and killed by DIFFERENT tests** — reverting the URL
+normalisation fails the docs-client assertion; removing the injected tab fails
+the tab-order assertion — so neither check is redundant.
+
+The source-level regression check on `ProjectShell.tsx` **caught itself on its
+first run**: the rewritten code carries a comment quoting the removed expression
+to explain why it went, and a naive substring search flagged the explanation as
+the regression. It now strips comments before checking — a check on source text
+has to look at code, or it punishes the documentation that makes the change
+legible.
+
+Full typecheck matrix: 51 tsconfigs, all pass.
+
+## 2026-08-09 — General's plan docs were being written to a phantom project directory
+
+**Landed:** 2026-08-09 · **Reported:** owner, "there is an item in the work board, but clicking the link to its plan document doesn't work. There are no documents in general"
+
+### What was happening
+
+The doc existed. It was at `Projects/<owner-slug>/docs/plans/…`, while General's
+Documents tab reads `Projects/general/docs` — a directory that **did not exist at
+all**. Two plan docs were sitting in a folder nothing displays.
+
+`Projects/<owner-slug>/` is not a design; it is a **phantom project directory**.
+The control that proves it: two REAL project directories carry the same
+`.nexus`, `calendar`, `docs` subdirectories, so those subsystems are per-project
+rather than owner-level — and the phantom is missing everything a real project has
+(`STATUS.md`, `README.md`, `.git`, `notes/`). It contains only what got written
+into it. A second phantom sits beside it named after the internal instance id, from
+the same mistake.
+
+### The mistake, in one argument
+
+```ts
+await this.docs.writeDoc({ project_id: project_slug, … })
+```
+
+`project_slug` is *which instance*. `project_id` is *which project*. Worse, the
+value actually arriving there was neither: the HTTP surface passes the **board
+scope key** in a parameter named `project_slug`, and for General that key collapses
+to the owner slug. **Three concepts, one name, one argument.**
+
+### The fix
+
+`createCardWithOptionalSpec(scope, docs_project_id, input)` — the board keeps its
+scope key (its legacy rows genuinely live there, and that collapse is deliberate),
+and the filesystem gets a real project id. In the General scope `ctx.project_id` is
+`null` — that is what General *is* — so it resolves to
+`GENERAL_WORK_BOARD_PROJECT_ID`, the **same constant** the board's own collapse
+tests against, so the two can never drift apart again.
+
+Chosen over teaching the docs store "if General, substitute the owner slug", which
+would have put a conditional in the storage layer and spread to every subsystem
+that stores per project. The owner's criterion was explicit: no multiple code paths
+and no special cases. `general` is a valid project id under the store's own
+alphabet, so this adds **zero** conditionals.
+
+### Coverage
+
+The regression guard landed exactly on the defect and was found by the test rather
+than designed: `agent-tool.test.ts`'s context has `project_id: null`, so the docs id
+must be `general` while the board row stays owner-scoped. **Mutant: collapsing the
+argument back to the scope — literally the original bug — reds it.**
+
+### Not included
+
+Existing docs are NOT moved by this change; the two on the box need a one-time
+migration. The mobile work-board doc link is still unwired and web's is still
+disabled for General — both tracked separately, and both are pointless to fix
+before the root is right, since a working link would have opened a 404.
+
+## 2026-08-09 — General renders Chat · Work · Docs, and its Docs tab works
+
+**Landed:** 2026-08-09 · **PR:** #147 · **Surface:** mobile app (`app/`)
+
+### What the owner saw
+
+One screenshot of the General scope on the APK, reported as two bugs:
+
+1. the tab bar read **Chat / Apps / Tasks / Reminders / Docs / Settings** — no Work
+   tab, Docs in fifth place;
+2. inside Docs, the raw validator string `invalid_project_id: project_id must be
+   1-128 chars from [A-Za-z0-9_.-]` where the file tree should be.
+
+It was **one** defect.
+
+### Root cause
+
+The mobile rail spells the General scope `~general`. The `~` is deliberately
+OUTSIDE the gateway's `[A-Za-z0-9_.-]` project-id alphabet so the sentinel can
+never collide with a real project — which means any client that sends it RAW to a
+project-scoped surface gets a 400.
+
+Two clients did:
+
+- `tabs-client.ts` → `GET /api/app/projects/~general/tabs` 400'd. The layout
+  **swallows** a failed tabs fetch by design ("whatever this scope already had
+  stands"), so General silently kept the PRE-FETCH loading default — which is
+  exactly the legacy set in the screenshot — **forever**. The ordering was never
+  wrong; the real tab set had never arrived.
+- `docs-client.ts` → the same 400 on all 21 of its path builders. There it had
+  nowhere to hide, so it rendered as the validator string.
+
+`work-board-client.ts` and `activity-client.ts` had each already hit this and each
+fixed it with its own private copy of the mapping plus a parity test. Two copies
+read as a convention; it is what let the third and fourth client forget.
+
+### What changed
+
+- **New `app/lib/general-scope.ts`** — the one place General changes spelling.
+  Import-free on purpose (every consumer is an RN-free client that must not gain
+  the rail-view import chain), with a parity test pinning the duplicated constant
+  to the rail's. `httpProjectSegment` maps `null` / `''` / `~general` → `general`
+  and passes every named id through, matching EXACTLY so a project merely starting
+  with the sentinel is not redirected at the General root.
+- `work-board-client.ts` + `activity-client.ts` now delegate; their private copies
+  are gone, public names unchanged.
+- `docs-client.ts` routes all 21 builders through it; `tabs-client.ts` its one.
+- **`generalScopeTabs`** (`project-tabs.ts`) narrows General to the three tabs a
+  no-project scope can actually serve — `chat`, `work_board`, `documents`. Applied
+  in the layout AFTER the Work injection, so General's pre-fetch frames show the
+  right three too. Registry order gives Chat (0) · Work (5) · Documents (10), so
+  Docs is third in General exactly as it is in a named project.
+- **Also fixed, found by the test rather than reported:** the shell fired
+  `GET /projects/~general/settings` on every General open, three times per mount,
+  since it was written. Guaranteed 400, and nothing consumed the answer — the
+  layout synthesises `GENERAL_SCOPE_PROJECT` for the chrome precisely because
+  there is no row to fetch. `project-state.tsx` no longer asks.
+
+### Why the tests bind
+
+`general-tab-set.test.tsx` mounts the real layout and its fake gateway
+**replicates the server's validator** — any id outside the alphabet gets the same
+400 with the same code and message, and every rejected path is recorded. A stub
+that answered `~general` happily would let the shipped defect pass with the tab bar
+looking right and the Docs pane as broken as the owner found it. That assertion is
+what surfaced the third request above.
+
+Mutants killed: reverting the tabs-client mapping fails the order test AND the
+no-sentinel test; applying the narrowing unconditionally fails the named-project
+test (which guards Settings, the only route to a project's credentials UI).
+
+`general-scope.test.ts` asserts on **fetched URLs**, not on the mapper: a test that
+only checks `httpProjectSegment('~general') === 'general'` passes with every client
+still sending the sentinel — which is the state that shipped, twice over.
+
+## 2026-08-09 — A Kimi key entered in Settings now turns the K3 reviewer on
+
+**Landed:** 2026-08-09 · **Surface:** `trident/kimi-key.ts`, `open/composer.ts`
+
+### The gap
+
+The K3 cross-model reviewer only ever read `process.env.KIMI_API_KEY`. There is no
+supported way to set a gateway env var from inside the product, so **a self-hoster
+could not enable the second model family at all** — it was reachable only by
+whoever could edit the service unit. The owner asked for the key to be enterable in
+Open's settings before cutover (SPEC Decisions Log 2026-08-07).
+
+Settings already stored arbitrary per-service credentials, and the store accepts
+any lowercase service id, so a key could be *filed* under `kimi` today. **Nothing
+read it.** That is the recurring shape: the storage exists, the reader does not.
+
+### What changed
+
+`resolveKimiApiKey(env, lookup)` — **env first, store second**. An install that
+already exports the key is bit-for-bit unchanged; the store is consulted only when
+the env value is absent, empty, or whitespace. An empty env var is the most common
+way a key is "set" and useless, and letting it win would make a good stored key
+unreachable while looking like a store bug. A throwing store read degrades to
+not-configured rather than taking down a launch.
+
+`ensureKimiKeyExported(env, lookup)` also **writes a stored key into the
+environment**, and that side effect is the point rather than a convenience.
+`trident/kimi-review-cli.ts` runs in its own process and reads `KIMI_API_KEY` from
+ITS env — the indirection that keeps the key out of prompt text, logs and chat.
+Reporting `configured: true` for a key the child cannot see would be strictly worse
+than being unconfigured: a deferred cross-model reviewer BLOCKS the verdict, so
+every review would return REQUEST_CHANGES for a reason the owner cannot see.
+
+The composer calls it per launch, so a key entered in settings takes effect on the
+next run rather than the next restart — the same rule the GitHub credential
+follows. Resolution is global-scope: a Kimi subscription is one account for the
+instance, and this resolver is handed no run to scope by.
+
+The settings placeholder now reads `e.g. openai, github, kimi`, which is the only
+thing that makes the service id discoverable in an otherwise free-text field.
+
+### Coverage
+
+`trident/kimi-key.test.ts` (12) pins the precedence and the export. The extended
+`tests/integration/kimi-panelist-wired.open.test.ts` (8) asserts it through the
+REAL composer, including that the stored key reaches `process.env`.
+
+Mutants killed at both levels: consulting the store before env reds 2 unit tests;
+dropping the export reds 3 unit tests AND the integration test that watches the
+production composer.
+
+`@neutronai/project-credentials` and `@neutronai/trident` were added to the root
+`dependencies` — the integration tests resolve against that list, and without it
+the new imports fail to resolve at all.
+
+## 2026-08-09 — The Kimi key comes from the store, and only the store
+
+### The decision
+
+Owner-directed: *"we shouldn't be using an env var at all — that was a temporary hack,
+not a production-grade decision."*
+
+`resolveKimiApiKey` read `KIMI_API_KEY` **first** and fell back to the credential
+store. That made the environment a second resolution path, and the reason to remove it
+is structural rather than stylistic:
+
+- **The same settings screen produced different behaviour on two boxes**, depending on
+  how one of them happened to be provisioned.
+- **It failed in the direction nobody checks.** Paste a new key in settings, see it
+  saved, and every review keeps using the shell's — with nothing anywhere reporting a
+  conflict.
+
+That is the no-dual-code-paths rule applied to configuration.
+
+### What changed
+
+`resolveKimiApiKey(lookup)` — the env argument is **gone from the signature**, which is
+the strongest available form of "it is not read": there is nothing to pass.
+
+`ensureKimiKeyExported` still writes the resolved key into the child's environment.
+**That indirection is load-bearing and stays** — `kimi-review-cli.ts` runs in its own
+process and reads the variable from there, which is what keeps the key out of prompt
+text. The env var is now purely an **output** — the channel the resolved key travels on
+— never an input.
+
+Two behaviours flipped as a consequence, and both are now asserted:
+
+- **A pre-set env value is overwritten** by the stored key. It used to be preserved
+  ("an operator-set value is left exactly as they set it"), which was the silent
+  failure above.
+- **Clearing the key in settings clears the export too.** Easy to forget, and without
+  it a previously-exported key survives in the process environment and the reviewer
+  keeps running on a credential the owner believes they removed — the mirror image of
+  the bug being fixed.
+
+### The live key was migrated BEFORE this shipped
+
+The reference deployment had its key in the unit env and **nothing at all in the
+credential store** (`project_credentials` was empty, verified). Shipping store-only
+first would have silenced the K3 reviewer.
+
+So the key was moved into the store first, on the box, by a one-shot script that
+printed only lengths and outcomes and never the value:
+`env-key-len=51 → migrated=true round-trip-matches=true`, and the row is now
+`kimi | global | Kimi K3`. The temporary file was removed and `vendor/` verified clean.
+
+**A lesson from that migration, worth more than the migration:** the script failed
+twice with an opaque `failed to open SQLite` that looked like a permissions or locking
+problem — root could read the same file with `sqlite3`, and running as the owning unix
+user changed nothing. **The cause was `{ create: false }`, an option production never
+passes.** A probe that does not use the production call shape can fail in a way that
+looks like an environment problem and sends you debugging the wrong system. This is the
+same family as "a store probe must use the production READ path" — extended now to its
+open options.
+
+### Verification
+
+`trident/kimi-key.test.ts` (12) and `tests/integration/kimi-panelist-wired.open.test.ts`
+(8) — the integration one asserts through the **production composer's** resolver, not a
+hand-built config.
+
+Tests that pinned the old behaviour were **inverted, not deleted**, so the reversal
+stays legible: "ENV WINS over a stored key" is now "the STORE wins over an env var", and
+"an operator-set env value is left exactly as they set it" is now "a pre-set env value
+is OVERWRITTEN".
+
+**Two mutants, each caught:** a cleared key leaving the stale export standing (2 tests);
+a pre-set env value not being overwritten, i.e. the old behaviour restored (3 tests).
+
+Typecheck 51/51 · lint clean.
+
+## 2026-08-09 — The chat agent can search the web
+
+Reported as *"Kaizen ritual said it can't do web search."* It couldn't — and
+neither could ordinary chat. `LIVE_AGENT_TOOL_NAMES` in
+`gateway/wiring/build-live-agent-turn.ts` had never contained `WebSearch` or
+`WebFetch`, and that array is the only thing that decides.
+
+### Why it was invisible
+
+A missing built-in produces **no error**. The agent simply reports it has no such
+tool, in prose, inside an answer that otherwise looks complete. The kaizen run that
+surfaced this ended with *"No WebSearch tool is available in this session, so the
+outside-idea section is omitted rather than faked"* — which is the correct
+behaviour for an agent and the reason nothing upstream ever noticed.
+
+### The part that mattered more than the missing feature
+
+A ritual declaring a web tool must be approved for `egress: 'web'` through a
+SEPARATE grant whose prompt says the ritual "may reach the public internet". The
+owner granted that for `kaizen`. **The tool was never present, so the grant could
+never do anything.**
+
+A ritual composes on the owner's warm chat session and cannot apply its own
+`tool_surface` — the reuse guard would evict and respawn the session
+(`reminders/ritual-fire.ts` module header). So the declaration bounded what could be
+APPROVED, not what could run, in both directions: the ritual could reach Bash it
+never declared, and could not reach the WebSearch it did.
+
+An approval prompt that overstates what is being granted costs more than a missing
+feature. It spends the credibility the entire gate depends on.
+
+### The guard
+
+`gateway/wiring/__tests__/ritual-declared-surface-is-real.test.ts` asserts every
+bundled ritual's declared built-ins are a SUBSET of the live surface, and that a
+ritual promising web access runs somewhere web tools exist.
+
+This is the same shape as the push-kind drift in `wire-types/push-kind.ts`:
+`reminders/rituals.ts` validated a declaration internally, `build-live-agent-turn.ts`
+owned the surface actually spawned, both suites were green, and their UNION was
+broken. The test is the join, and it lives in `gateway` because that is the one
+package legitimately declaring both. Removing `WebSearch` again fails two of its
+five assertions.
+
+It is explicitly NOT a containment check — a ritual can always reach more than it
+declared. It pins the direction that silently under-delivers: never less.
+
+### Surface change
+
+Adding to `LIVE_AGENT_TOOL_NAMES` is safe because it stays a CONSTANT surface, just
+a larger one; the reuse guard refuses a VARYING surface. The first turn after deploy
+respawns the warm child once, as any deploy does.
+
+## 2026-08-09 — Codex and Kimi are connectable from a phone
+
+### The gap, stated accurately
+
+The gateway's Codex surface is **explicitly app-scoped** — `/api/app/codex-auth` — and
+the **web** client has used it since it was built: `IntegrationsTab` carries the
+primary account-wide connect and `SettingsTab` carries a per-project override.
+
+**The mobile app had no client and no screen for it.** So an owner holding only a
+phone could not connect the cross-model reviewer at all. The reference deployment
+works solely because provisioning wrote the credential onto the filesystem directly,
+which is not something a self-hoster can do.
+
+*A carried note of mine said "Codex has a fully-built backend and zero UI". The `app/`
+half of that was grep-verified and correct; the general claim was not — the web has
+had a full Codex UI all along. Checking before repeating it narrowed the work from
+"build the whole thing" to "mirror what one client already does".*
+
+Kimi was reachable in principle — but only by knowing the exact service id and typing
+it into a free-text "Service (e.g. openai)" box.
+
+### What changed
+
+A **Model providers** section on the mobile Integrations screen, above *Shared
+credentials* so the free-text form reads as the escape hatch it is:
+
+- **Codex** — status with its consequence spelled out, paste `~/.codex/auth.json`,
+  disconnect. New `app/lib/codex-credential-client.ts`, global routes only.
+- **Kimi K3** — paste a key, remove it, and a status line derived from the shared
+  credential list.
+
+### Three decisions
+
+**The Kimi row writes through the SAME store the free-text form uses.** A named row
+with its own storage path would mean a key entered here and a key entered there
+behaved differently — exactly the split that makes a settings screen untrustworthy.
+The row is a labelled affordance over one code path, and its status is *derived* from
+the shared list rather than tracked separately, so a key added or removed by either
+control is reflected by both.
+
+**The service id is a repeated literal, not an import** — the app bundle is
+deliberately free of workspace dependencies. That makes the string load-bearing: a
+mismatch would store the key where nothing reads it, the row would look like it
+worked, and the reviewer would stay silent. The test asserts the id for that reason.
+
+**Global routes only.** A Codex subscription is one account for the whole instance.
+The per-project override stays a web-only advanced control; putting it on a phone
+would mean explaining resolution precedence on a 6-inch screen to solve a problem
+nobody has.
+
+Status text names the **consequence**, not the state — "reviews run without a second
+model family" rather than "not connected" — because an owner cannot be expected to
+know what an unconnected Codex costs them.
+
+### Verification
+
+`app/__tests__/model-providers-reachable.test.tsx` — 12 tests that **press the real
+controls on the real screen**. A source check confirms a component mentions a handler;
+it cannot tell a rendered-and-wired control from a rendered-and-inert one, and this
+repo has shipped precisely that bug.
+
+**Four mutants, each caught:** the Connect button rendered but inert (2 tests) · the
+Kimi key stored under the wrong service id (1) · the status never fetched on mount
+(4) · the Kimi row not deriving its state from the shared list (1).
+
+Also asserted: an empty box sends nothing; an expired credential offers *both* replace
+and clear; the paste box is hidden while connected; the server's error is shown
+verbatim (pasting a metered API key instead of a subscription bundle is the common
+mistake, and the gateway's reply is the only text that says which file to paste); and
+an unreachable server shows not-connected **without sending a DELETE** — a failed
+status read must never look like a credential to re-enter.
+
+Two harness lessons, both hit here first: **type through the prototype value setter**,
+because React tracks the node's value and skips a change it thinks it already has, so
+a direct assignment leaves the input looking typed with state unchanged. And
+**unmount between tests** — the queries are document-scoped (a `Modal` portals outside
+the mounted subtree), so a previous test's leftover DOM is indistinguishable from this
+test's, which is what two failures actually were.
+
+Typecheck 51/51 · lint clean · byte-scanned.
+
+## 2026-08-09 — Model usage on the phone
+
+The web card shipped a day earlier and the phone had nothing. ☰ → Settings →
+**Model usage**: the same two windows, the same pace, the same refusals.
+
+### Two wiring points that fail independently
+
+A screen needs BOTH a nav row in `settings.tsx` AND a `<Stack.Screen>` in
+`_layout.tsx`. A registered route nothing pushes is the ISSUES #385 defect; a
+pushed route nothing registers is a dead tap. Both are present and the screen test
+presses the real controls.
+
+### What the twin does NOT duplicate
+
+A first draft re-declared `usageBand` and `clampFraction` on the phone, with a
+docblock justifying it by bundle independence. **`app/components/UsageMeter.tsx:20`
+already imports both from `@neutronai/contracts/credential-usage.ts`**, so that
+justification was false and the copy bought a drift risk for nothing — the phone
+could have called something amber that the web still drew green for the same
+reading. Both are now taken from the contract, and the parity test asserts neither
+client exports its own.
+
+The FORMATTERS are still twinned, and that is correct: production code in `app/lib`
+never imports `landing`. Only the mirror-parity tests cross that line.
+
+### The parity test is where the product decisions live
+
+`gateway/__tests__/usage-dashboard-client-parity.test.ts` executes both copies over
+the same inputs — nulls first, because that is where a divergence hides. Both "—"
+and "0.0×" render perfectly and only one is true.
+
+Mutants killed: drifting the phone's band threshold by 0.01, changing its duration
+rounding from round to floor, and making it treat an empty pool list as unreachable.
+
+### The refusals, mutation-tested one at a time
+
+- unreachable → **no bar**. The faithful mutant makes `DASHBOARD_UNREACHABLE` a
+  zero reading, which is exactly the "a 0% bar invents a measurement" bug; it fails
+  both no-bar tests.
+- `pace: null` → an em dash, no note. Rendering `0.0×` fails.
+- `exhausts_at: null` → the row is **omitted**. Always rendering it fails.
+- `account_label: null` → "active credential", never a guess.
+
+A first mutation attempt here was NOT faithful — it made the unreachable branch
+fall through to a pools branch with no pools, which renders nothing rather than
+rendering a false bar. A mutant that does not reproduce the real bug proves nothing
+about the test.
+
+### Not built
+
+The band rides on an `accessibilityLabel` as well as a colour, because a test that
+can read only a style cannot tell amber from red on a 6px bar.
+
+## 2026-08-09 — A ritual post is a chat message, so its notification is a chat message
+
+**Landed:** 2026-08-09 · **Surface:** `gateway/http/deliver.ts`, `gateway/push/`,
+`wire-types/`, `app/lib/push-deep-link-dispatch.ts`, `app/components/ChatSyncSurface.tsx`
+
+### What the owner saw
+
+> "the notification that comes in on Android says 'ritual:kaizen'. I don't need a
+> special case notification for rituals. I should just get notifications of chat
+> messages, and a ritual posting is just a chat message. And the notification should
+> include at least the first part of the chat message in the notification itself.
+> Also when I tapped the notification it opened the app but didn't open in the right
+> project (in this case it should have opened in general scrolled to unread
+> messages)"
+
+### One root cause under both halves
+
+The push was composed from the **reminder row**, not from the message the fire
+posted. `PushDispatcher.pushReminder` built `{ title: 'Reminder', body:
+reminder.message, data: { kind: 'reminder', reminder_id, project_slug } }` on the
+reminder tick's `on_fired` hook.
+
+- For a ritual, `reminder.message` **is** the dispatch token `ritual:<id>`
+  (`reminders/ritual-registration.ts:982`). So the notification could never contain
+  the composed text — the text does not exist yet when the row is written, and the
+  tick never sees it.
+- `kind: 'reminder'` routed to `/projects/<id>/reminders` — the Reminders **tab**,
+  not the chat the message is in — and the project field it carried was
+  `reminder.owner_slug`, the instance slug, which resolves to no project at all.
+
+Both symptoms were the same mistake, so both are fixed by moving composition to the
+one place that holds the posted text **and** its durable row id.
+
+### What changed
+
+**The notification is composed by the DELIVERY SEAM.** `gateway/push/chat-message-push.ts`
+is new and pure: `chatPushExcerpt` collapses whitespace and truncates on a word
+boundary with an ellipsis; `buildChatMessagePush` emits `{ title, body, data: { kind:
+'agent_message', message_id, project_id } }`; `buildChatMessagePushSink` fans it over
+the Expo transport, swallowing its own failures. `createDeliver` takes that sink as
+`notify` and calls it after any post that got a **durable row** — `'reply'` (a fired
+reminder or ritual) and `'inert'` (the morning brief, the idle nudge, the overnight
+report, a system notice) — and never for `'none'`, a transient live-only pill with no
+row for a tap to land on.
+
+It lives there rather than in the reminder outbound, and that was a review
+correction worth recording. The first version of this change composed the
+notification in `gateway/proactive/reminder-outbound.ts`, which cured the reported
+message and **left every other out-of-turn producer silent** — the brief, the nudge
+and the overnight report post through the same `deliver` on a different sink, so a
+per-producer notification reproduced exactly the per-producer-registry mistake
+`deliver` exists to have ended. The owner's sentence is the rule: *"a ritual posting
+is just a chat message"* — and so is a brief, and so is a nudge.
+
+**What was deleted, because it could not be fixed in place.** `pushReminder` +
+`onFired` (`gateway/push/dispatcher.ts`, now a transport only), `ReminderFiredHook` +
+`on_fired` (`reminders/tick.ts`), and the `push_dispatcher` composition field with its
+`build-core-modules.ts` attachment. The tick can only see the row; it was never a
+place a truthful chat notification could be built. Deleting a composition field is
+explicitly permitted by `scripts/ci/composition-field-ratchet-guard.sh` — demoting one
+is not.
+
+**`agent_message` promoted, `reminder` kept as a DECODER only** in
+`wire-types/push-kind.ts` and `app/lib/push-deep-link-dispatch.ts`. `agent_message`
+was a resolver branch with no sender, deliberately kept out of `PUSH_KINDS` so the
+exhaustiveness test could not be padded by an unsent kind; now something sends it, so
+it is listed and covered. `reminder` has **no sender left** and is absent from
+`PUSH_KINDS` for the same reason — but its resolver branch stays, because its payloads
+are real: notifications already sitting in the shade, and self-hosted gateways that
+have not upgraded while a store-published app has. Deleting the decoder would turn
+those taps into "the app opens and nothing routes", which is the complaint. It also
+keeps the ISSUE #38 reminders deep-link surface reachable rather than orphaned. One
+behaviour did change there: a legacy payload with no resolvable project now falls back
+to General instead of refusing outright, which is a latent bug fixed in passing — the
+retired sender wrote the OWNER slug and no project id, so that branch had returned
+null for every General reminder notification it ever received.
+
+**General NAMES ITSELF, and this too was a review correction.** The first version
+encoded the no-project scope by OMITTING `project_id`, on the argument that the client
+owns General's route spelling and that a second copy of the sentinel is what caused the
+`~general` / `#general` / `general` confusion of ISSUES #410/#411. Right about the
+hazard, wrong about the fix: the released app bundle treats `agent_message` with no
+project as malformed and refuses to route, and a store artifact cannot be upgraded in
+lockstep with a self-hosted gateway — so the omission would have preserved the exact
+symptom. The answer to #410/#411 is one DEFINITION, not silence: `GENERAL_RAIL_ID`
+now lives in `wire-types/topic-id.ts`, above both sides of the wire, and
+`app/__tests__/general-scope.test.ts` pins the client's constants to it.
+
+**What the tap actually opens today, stated plainly.** Every out-of-turn producer in
+the Open composer delivers to the owner's **bare** `app:<user>` topic — suffixing it
+is the PR #105 deliver-to-nobody bug — so every notification is General-scoped, and
+that is correct: the message really did land in his General chat, which is where he
+asked the tap to take him. `chatMessagePushScope` also parses the project form
+(`app:<user>:<project>`, a topic the mobile client does bind when a project chat is
+open — `app/lib/chat-core/use-mobile-chat.ts:300`), which is the answer for the first
+producer that posts into one. That branch is covered by unit tests over the parser and
+deliberately not by an integration test, because there is nothing yet to integrate.
+
+**The `?message_id=` param is consumed.** It had reached the chat route since
+2026-05 with nothing reading it. `chat.tsx` now threads it as `targetMessageId`, and
+`ChatSyncSurface` uses it two ways from ONE rule:
+
+- at render, `chatDeepLinkAnchor` joins `projectId` in the frozen-anchor key, so a
+  **cold** open from a tap decides its anchor the latch-friendly way;
+- in an effect, `chatDeepLinkScrollIndex` drives `listRef.scrollToIndex` **once per
+  target**, because a tap into an ALREADY-MOUNTED project cannot be re-anchored any
+  other way — FlashList applies its initial scroll once and latches
+  `isInitialScrollComplete`.
+
+Both paths ask the same function, so on a cold open they land on the same index and
+cannot race to different places. The rule prefers the **unread run's start** when the
+referenced message is inside it (ISSUES #505: read the run from its beginning) and the
+referenced row itself when it is behind the read watermark. With no `targetMessageId`
+— every ordinary open — nothing scrolls imperatively and the anchor is byte-identical
+to before. That regression arm is asserted, because #505/#511 is the incident class
+this touches.
+
+Two details of that effect were tightened after review. It now applies the SAME
+`selfDeviceId.length > 0` guard the render path applies, so the two halves cannot
+answer differently for the same rows; and it latches `honouredDeepLink` only once a
+scroll can actually happen, because latching before an unattached ref burned the
+target with no retry. `chatDeepLinkScrollIndex` returns an index or `null` rather
+than an anchor union, which removed an unreachable `scrollToEnd` arm — once the target
+resolves, `chatDeepLinkAnchor` cannot return `bottom`.
+
+**An idempotent re-emit does not buzz twice.** `(topic_id, idempotency_key)` is
+unique on `button_prompts`, so a re-emit — a reconnect re-render, a retried
+ritual-approval prompt — collapses onto the existing row and returns
+`was_new: false`. `deliver` suppresses the notification in that case, and follows the
+exception the ButtonStore contract already spells out: `was_new: false` **with**
+`was_delivered: false` means the row landed in the DB but never reached the owner, so
+it still notifies, for the same reason the channel adapters still re-render it.
+Suppressing on `was_new` alone would have silenced a prompt he has never seen,
+permanently. Only the notification is affected — `persisted` and `prompt_id` are
+unchanged, so no producer's control flow moves.
+
+**Transport.** The Expo POST now carries `AbortSignal.timeout(EXPO_PUSH_TIMEOUT_MS)`.
+A bare `fetch` has no deadline, and this call is now awaited inside a durable
+delivery, so a stalled connection to `exp.host` would park a reminder fire — and the
+tick that claimed its row — for as long as the socket stayed open.
+
+### Tests
+
+- `gateway/http/__tests__/deliver.test.ts` — a `'reply'` post notifies, an `'inert'`
+  post notifies, a `'none'` pill does not, a failed persist does not, the topic's
+  scope is derived, an idempotent re-emit does not buzz twice while one the owner
+  never saw still does, and a THROWING notify cannot cost `persisted` (which is what
+  the tick reads to decide whether to fire the row again).
+- `gateway/push/__tests__/ritual-post-notifies-as-a-chat-message.test.ts` — the whole
+  chain, from a ritual `reminders` row through the REAL planner, dispatcher, outbound,
+  deliver and sink, to the bytes Expo is handed. The approved arm requires a composed
+  turn and a non-empty send BEFORE asserting anything about content; the unapproved
+  arm asserts `toEqual([])` through the real `ApprovalManager`.
+- `gateway/push/chat-message-push.test.ts` — the excerpt (word boundary, single
+  over-long word, blank body, all-punctuation head, surrogate pair), the scope
+  derivation, the payload's exact key set.
+- `app/__tests__/push-kind-coverage.test.ts` — the `agent_message` fixture is produced
+  BY the gateway builder, not hand-copied, so a field renamed server-side reds here.
+  Plus the sender → resolver union walked in one assertion, including the `message_id`
+  linkage read back out of the resolver's route rather than compared to a literal.
+- `app/__tests__/push-deep-link-routing.test.ts` — the legacy `reminder` decoder:
+  explicit project, `app-project:` topic decode, General fallback, and absence from
+  `PUSH_KINDS`.
+- `app/__tests__/chat-push-tap-lands-on-the-message.test.tsx` — mounts the real
+  surface; drives the real list ref (the stub forwards one and records imperative
+  calls, so a dead handler is visible); mounts the real ROUTE at the real tap URL so
+  nothing hand-passes the prop; and drives every socket callback through
+  `screen.dispatch`, which runs it inside an act window so the scroll-vs-frame
+  ordering these arms assert is not decided by React's scheduler.
+- `tests/integration/reminders-tab-and-push.open.test.ts` — fires a reminder through
+  the real composer's `reminder_dispatcher` and reads what reaches Expo, and drives a
+  NON-reminder producer (`POST /api/app/system-notice`, durability `'inert'`) to prove
+  the notification is a property of the seam rather than of one producer.
+
+Mutation-tested by deliberately breaking each guard and confirming a red: deleting
+the `notifyDevices` call from `deliver` (3 of 4 arms of the ritual suite red), posting
+`ritual:${reminder_id}` instead of the composed body (2 red, including the token
+assertion), omitting `project_id` for General (the tap-payload arm red), and dropping
+the `alreadySeen` guard (the duplicate-buzz test red). The act-wrapping change is the
+exception and is not claimed as mutation-tested: it removes nondeterminism rather than
+a failure, so reverting it does not flip a result.
+
+## 2026-08-09 — An OTA is no longer published without proving the bundle is real
+
+**Landed:** 2026-08-09 · **ISSUES:** #518 · **Surface:** `scripts/eas-update.sh`, `scripts/ci/verify-expo-export.ts`
+
+### What happened
+
+A Metro/Watchman failure produced a broken export and `eas update` **published it
+anyway** — exit 0, an update id, a permalink, every signal of success. The OTA
+reached the owner's phone dead. Nothing in the pipeline had ever looked at what
+was being shipped, and there was no publish wrapper at all: the command was being
+run by hand each time.
+
+### Why the obvious check doesn't work
+
+The bundle is Hermes **bytecode**. `grep` for a symbol you know you just added
+returns nothing — and reads as "the code is missing" rather than "this tool cannot
+read this format". Three wrong diagnoses came out of exactly that during the
+original debugging session. A text search over a binary is not a check.
+
+### What it does instead
+
+`verify-expo-export.ts` checks the **format**, not the content:
+
+- `metadata.json` parses, and declares BOTH platforms — one without the other
+  strands a device;
+- each declared bundle exists on disk;
+- each `.hbc` starts with the real Hermes magic `c61fbc03c103191f` — **read off
+  this app's own export, not remembered** (bytecode version 96). An HTML error
+  page, a truncated write, or plain text under a `.hbc` name all fail here with
+  the bytes they actually contained printed in the message;
+- each bundle clears an 8 KB floor. A real export is ~2.6 MB, so the floor never
+  fires on a genuine shrink but catches a structurally valid stub — the case the
+  magic check alone waves through;
+- every declared asset exists.
+
+A non-Hermes bundle is legitimate if the app is configured for JSC, so it is
+size-checked and **says so** rather than implying it was format-checked.
+
+`scripts/eas-update.sh` splits bundling from publishing: `expo export` → verify →
+`eas update --input-dir <verified> --skip-bundler`, so the thing verified is the
+thing shipped rather than a second bundling run that could differ. It deletes a
+stale `dist` first — otherwise a FAILED export republishes the previous run's
+bundle, which is the same silent success this exists to prevent — and refuses
+`--branch production` outright.
+
+### Coverage
+
+`scripts/ci/__tests__/verify-expo-export.test.ts` — 10 tests, every one writing a
+REAL directory tree, because the failure being guarded is "the bytes on disk are
+not what anyone assumed" and a mocked filesystem is the exact layer that would let
+a wrong assumption pass. Includes the **positive control**: a well-formed export
+must be ACCEPTED, or a reject-everything verifier would pass a suite of
+only-negative tests while blocking every real publish. Verified against the live
+`app/dist` too — 2.6 MB bundles, magic ok, 27 assets each.
+
+Mutants killed, and they kill **different** tests, which is what shows neither
+check is redundant: removing the magic check reds the HTML-error-page case and the
+message case; removing the size floor reds the truncated and empty cases.
+
+This is a **publish-time** gate, not a CI gate — CI has no `dist` to inspect.
+
+## 2026-08-09 — Which model runs which phase became configuration
+
+### What changed
+
+`trident/phase-models.ts` is new: a stable, owner-facing vocabulary of build phases
+(decomposition · build · build-mechanical · rubric review · adversarial review ·
+synthesis/arbitration · bookkeeping), each with a default tier + reasoning effort, plus
+strict validation. `buildWorkflowArgs` threads validated overrides to the workflow as
+`phaseModels`, and the workflow's router applies them over its own table.
+
+Every default is unchanged. An instance that never touches the setting produces
+byte-identical args — the key is **omitted**, not sent as `{}`.
+
+### Why the vocabulary is not the agent labels
+
+The workflow's labels are internal and several are dynamic (`forge:fix-round-3`,
+`checkpoint:argus-approved`, `head-probe-round-2`). Exposing them as settings keys would
+make the configuration surface change shape whenever the workflow's internals did, and
+would require the owner to know that "the thing that reviews adversarially" is spelled
+`argus:adversarial`. So the settings keys are stable phase names and the label → phase
+mapping lives beside them.
+
+### The bug the coverage test found on its first run
+
+**`head-probe-round-N` had escaped the routing table**, so it resolved to the fallback —
+the most expensive tier at **high** effort — for a step whose entire job is to run one
+`git` command and report the sha it printed, interpreting nothing. It had been that way
+since the step was introduced, and **nothing could have caught it: a missing entry and a
+deliberate entry are indistinguishable when the fallback is silent.**
+
+That is the argument for the test, not just for the one-line fix. `trident/__tests__/phase-model-coverage.test.ts`
+walks every `label:` literal in the workflow source and requires each to be claimed by a
+phase or listed in `UNROUTED_LABELS` **with a reason**. The four cross-model reviewer
+lanes are listed there: they dispatch an external CLI in a subprocess, so offering a
+model control for them would be a lie in the UI.
+
+### Two design decisions worth keeping
+
+**Validation fails LOUD at the boundary and degrades QUIETLY in the workflow**, because
+the two need opposite behaviour. At the settings boundary an unknown phase or a bogus
+effort is an error the owner sees — silently dropping it is the worst outcome available,
+since they would set `xhigh`, observe nothing, and reasonably conclude the feature is
+broken. Inside the workflow a bad entry must never abort an otherwise-fine build, so it
+logs the entry **by name** and uses the default. The typed layer therefore also drops
+invalid entries rather than forwarding them, because a log line in a background run is
+not a channel anyone reads.
+
+**The route field is `phaseKey`, not `phase`.** `agent()` opts already carry `phase`,
+meaning the workflow's progress group (`Build`/`Review`/`Synthesis`). Two different
+concepts under one name in one file is how the wrong one gets read.
+
+### Also in this change: a false claim removed from the tree
+
+`gateway/wiring/resolve-llm-credentials.ts` carried a docblock headed **"KNOWN
+LIMITATION … NO FAILOVER"** about the ambient credential pool. **That claim was wrong**,
+and it was wrong in the most durable place available — presented as design
+documentation, in a permanently public file. The single credential-less pool entry is
+the *mechanism*: the child authenticates from the credential file and rotation swaps
+that file underneath it, reactively and continuously. The reasoning that produced the
+claim skipped checking whether any layer above handled it.
+
+The replacement records the retraction and the generalisable form: **a component that
+legitimately holds no state can look broken when reasoned about alone.** A docblock
+asserting a limitation is read as design documentation, so it needs the same evidence bar
+as a claim about behaviour — arguably a higher one, since nothing executes it and no test
+can go red.
+
+### Verification
+
+`trident/__tests__/phase-model-coverage.test.ts` — 31 tests. Trident suite: 577 pass.
+Typecheck matrix: 51 tsconfigs, all pass. Lint clean.
+
+**Mutants, killed by different tests:** removing `head-probe` from the phase table reds
+the coverage assertion *and* the named regression test; making the router ignore the
+override (the "built but never wired" shape) reds the wiring assertion alone.
+
+**The extractor carries a positive control**, because a regex that matched nothing would
+have reported perfect coverage. It also needed two fixes found by its own first run: the
+scan matched the word `label:` inside *prose*, and its character class then ran past a
+newline to a backtick several lines later and swallowed a block of source as a "label".
+Comments are stripped and newlines forbidden — the same unscoped-regex mistake that has
+now bitten twice in one day, in both directions.
+
+## 2026-08-09 — The per-phase model config gets a producer
+
+### What was wrong
+
+`trident/phase-models.ts` (the owner-facing vocabulary + validation),
+`InnerLoopInput.phase_models` (the workflow argument) and the workflow's own router
+were all built, tested and correct — and **nothing ever supplied a value.** The
+orchestrator did not pass one when it fired a workflow, and no surface wrote one.
+
+A complete seam with no producer: **every run silently used the defaults no matter
+what was configured, and nothing could go red, because every piece worked in
+isolation.** That is the built-but-never-connected shape `SPEC.md` names as this
+repo's repeat offender — and it was found by an independent design review a few hours
+after the config landed, not by a test.
+
+### What changed
+
+- **Migration 0118** adds `trident_phase_models` to `instance_metadata` — the
+  documented home for instance-level settings, whose own docblock says future fields
+  land as additive columns on that row (`transcription_backend` is the precedent).
+  Instance-level rather than per-project: which model runs a build is a property of
+  the owner's quota and subscriptions, not of the thing being built.
+- **`readTridentPhaseModels` / `writeTridentPhaseModels`** in
+  `gateway/storage/owner-metadata.ts`.
+- **A per-launch `resolve_phase_models` resolver** on the orchestrator, threaded
+  through the composition layer and supplied by the composer — read per launch for the
+  same documented reason as its two siblings: a setting changed after boot must reach
+  the next run, not the next restart.
+- **`GET`/`PUT /api/app/trident/phase-models`**, registered in the composition input,
+  the route-slot table, the composer, and the route-slot coverage inventory.
+
+### Three decisions worth keeping
+
+**The write fails whole; the read degrades quietly.** A `PUT` with any invalid entry
+is a 400 that stores *nothing* and names every problem. The read path and the workflow
+do the opposite — drop the bad entry, keep going. The asymmetry is the design: at the
+settings boundary the owner is present and can be told, so a silent partial write is
+the worst outcome available (they set `xhigh`, see nothing, and conclude the feature is
+broken). Deeper in, nobody is listening, and aborting a build over config is worse.
+
+**Re-validated on read**, so a row written by an older or hand-edited build cannot
+reach the workflow — where the only available response is a log line in a detached
+background run.
+
+**`PUT` replaces rather than merges**, and an absent `overrides` key is a 400 rather
+than a wipe. A merge would leave no way to *clear* a pin: sending `{}` for a phase
+would mean "change nothing", and the owner would need a second verb to undo. Replacing
+makes clearing an omission, which is what a settings pane naturally does when a control
+returns to its default. But an absent key is ambiguous between "clear everything" and
+"the client forgot the field", and clearing every pin by accident is not a mistake
+worth making possible.
+
+### Verification
+
+`gateway/__tests__/trident-phase-models-producer.test.ts` — 17 tests, weighted toward
+the CHAIN rather than the parts, because each link was independently absent.
+
+**Three mutants, one per link, each caught by exactly one test:** the orchestrator not
+passing the value · the composition layer not copying the resolver · the composer not
+reading the store. Any one of them alone restores the original bug, and before this
+none of the three would have failed anything.
+
+The wiring assertions read the real source, comment-stripped and **scoped to the
+construct** — an unscoped match on a symbol name passes on an unrelated mention
+elsewhere in the file, which bit this repo twice in one day.
+
+Typecheck 51/51 · composition-wiring gate clean · route-slot coverage green ·
+migration snapshot regenerated and the runner's expected list extended to 118 (the
+first attempt appended a duplicate `117`, caught by the runner test) · lint clean ·
+byte-scanned for control characters.
+
+### Still missing
+
+**The UI.** This is the producer, not the pane — an owner still cannot set a phase from
+the app. That is the next PR, and it now has a real endpoint to talk to rather than a
+seam that would have silently done nothing.
+
+## 2026-08-09 — Every push kind the gateway sends now routes on tap
+
+**Landed:** 2026-08-09 · **ISSUES:** #520 · **Surface:** `wire-types/push-kind.ts`, `app/lib/push-deep-link-dispatch.ts`
+
+### What the owner saw
+
+> "when I tap on a push notification, it opens the app, but it doesn't open in the
+> right project and at the unread message marker like it should."
+
+### Why
+
+The gateway picks a `kind` when it builds a push; the mobile client switches on
+that string to decide where the tap lands. The two lists were written
+independently and had drifted until they were **disjoint except for one entry**:
+
+| SENT by the gateway | KNOWN to the tap resolver |
+|---|---|
+| `reminder` | `reminder` ← the only overlap |
+| `calendar_pre_meeting_brief` | `wow_fired` ← no sender, ever |
+| `email_daily_triage` | `agent_message` ← no sender, ever |
+
+So a pre-meeting brief or an email triage hit the resolver's "unknown kind"
+branch — warn, return null, nothing routes. Meanwhile two of the three kinds the
+client handled carefully could never arrive.
+
+**Neither side's tests could see it.** The dispatcher's tests assert the payload it
+builds; the resolver's tests assert the payloads they hand it. Both were green and
+their union was broken — the gap lived in the space between two files that never
+met.
+
+### The fix
+
+`wire-types/push-kind.ts` owns `PUSH_KINDS` plus a named constant per kind, and
+the three senders now import those constants instead of writing string literals.
+The resolver learned the two Core kinds. `app/__tests__/push-kind-coverage.test.ts`
+walks `PUSH_KINDS` and requires a route for each — **add a kind and forget the
+client, and CI reds.** It also asserts the fixture table matches `PUSH_KINDS`
+exactly, so a kind cannot be silently skipped by a loop that never sees it.
+
+`wow_fired` and `agent_message` have no senders (grep-verified). Their branches are
+LEFT IN PLACE with their tests — removing tested behaviour is a separate cleanup,
+not something to slip into a routing bugfix — and both are deliberately absent from
+`PUSH_KINDS`, so the exhaustiveness list covers only what is genuinely sent and
+cannot be padded by a kind no gateway emits.
+
+A Core push with no `project_id` still warns and refuses rather than falling back
+to `project_slug`, which is the OWNER slug: routing to `/projects/<owner>/…` would
+open a project that does not exist and read as a routing bug rather than a payload
+bug.
+
+`@neutronai/wire-types` had to be added to `gateway`'s dependencies — the senders
+could not import the shared list at all without it.
+
+### Not fixed here
+
+The **unread-marker** half of the report. Routing now lands on the right project's
+chat; where that chat opens scroll-wise is the chat surface's own behaviour and is
+not touched by this change.
+
+Mutants killed: removing the two Core routes reds 4; dropping a kind from the
+shared list reds the fixture-coverage assertion.
+
+## 2026-08-09 — The session meter moved above the message input
+
+**Landed:** 2026-08-09 · **ISSUES:** #519 (first bullet) · **Surface:** mobile only
+
+### The request
+
+> "Can you move the hairline session status bar to instead be on the top of the
+> message input box, rather than at the top of the screen?"
+
+### The consequence the issue called out, and honouring it
+
+The meter was not merely *sitting* at the top — it **was the tab band's bottom
+seam**. `ProjectTabBar`'s own comment said so: *"The band no longer draws its own
+bottom hairline: `UsageMeter` renders as the band's last child and IS that seam …
+One line, one owner."*
+
+So moving it without restoring that hairline would have left the band with no edge
+at all. The narrow band draws its own again. **The wide sidebar needed nothing** —
+its visible boundary is the RIGHT border, which never depended on the meter.
+
+### Where it lives now
+
+`ComposerDock` renders it above the published composer node. That is the one place
+both facts are in scope: the composer is published from deep inside `<Slot/>` and
+knows nothing about usage, while the dock is rendered by the shell, which already
+holds the reading. `usage` is optional there, so the test harness's bare
+`<ComposerDock/>` keeps composing — and an absent reading renders **nothing**
+rather than an "unknown" hairline, which would put a stray line above the input on
+every such mount.
+
+`ProjectTabBar` no longer takes a `usage` prop at all: one owner, or the hairline
+doubles up.
+
+### Coverage
+
+The old test asserted the *opposite* — that the band renders the meter as its own
+edge. It is **inverted rather than deleted**, so the move is visible in the history,
+and the recorded consequence gets its own case: the band must paint a bottom
+hairline. The call-site guard moved with the meter — it used to require every
+`<ProjectTabBar>` to be handed a reading (a forgotten call site once shipped the
+wide branch with no meter); it now requires the dock to carry it and the tab bar
+NOT to.
+
+Two mutants, killing different tests: removing the band's restored border reds the
+hairline case; removing the dock's meter reds the driven dock case.
+
+Two of my own mistakes are recorded in the file, because both are recurring shapes:
+reading `band.style.borderBottomColor` returns the empty string under RNW (styles
+compile to atomic CSS classes — `getComputedStyle` is what answers), and my
+one-owner assertion was an unbounded `/<ProjectTabBar[\s\S]*?usage=/` that matched
+through to the dock's own `usage=` and failed on correct code.
+
+**Web is NOT done.** The request said web + mobile; this is the mobile half.
+
+## 2026-08-09 — A review panel cannot see a red build — so now something else does
+
+### The gap
+
+Four reviewers read the **diff**. None of them runs the tests. So a change that
+type-errors, fails a lint gate or reds a shard could be **unanimously APPROVED** — and
+on a repo without branch protection, merged.
+
+The reference deployment never showed this because a GitHub setting blocks a red merge
+there. That is the problem, not the reassurance: **the discipline lived in repository
+configuration rather than in the harness, so every self-hoster and every local-merge
+run had nothing at all.** The predecessor harness has had a CI gate for months; Open had none.
+
+### The design
+
+**Deterministic, never interpreted.** The agent is handed one command and asked to
+report its output *verbatim*; every judgement happens in JS. A model asked "is CI
+green?" can answer yes for a plausible-looking wall of text, and a hallucinated green
+merges a broken build — the one failure this gate exists to prevent.
+
+**One gate, peers as data** — the file's own stated rule. Rather than adding a second
+near-identical gate (which is how one of the two quietly stops being enforced):
+
+- **red** → the failing checks become **code blocker findings** and force
+  `REQUEST_CHANGES`, so the fix loop re-Forges against them. There is something to
+  change, and the next round should change it.
+- **pending / unreadable** → a **deferred peer** on the existing `deferredPeers` list,
+  so `enforceCrossModelGate` refuses to APPROVE and `classifyBlock` returns
+  `infra-only`, which exits the loop rather than editing code to "fix" a timer.
+- **green / none** → nothing at all.
+
+`none` is deliberately distinct from `green`: a repo with no checks has nothing to wait
+for, and blocking it would deadlock every self-hoster who hasn't set CI up. Local mode
+short-circuits before spending an agent, because a local build has no PR and never will.
+
+### The hole this nearly shipped with
+
+Attaching CI findings was not enough. **`enforceCrossModelGate` returns the synthesis
+untouched when there are no deferred peers** — so a red build with no other problems
+would have produced an `APPROVE` carrying a "CI FAILING" finding, and merged. Red CI now
+sets the verdict explicitly, and that is asserted rather than left to reading.
+
+A second near-miss: an unreadable reply with exit 0 originally classified as `none`.
+That is the unsafe direction — a reply we cannot parse would produce no gate at all.
+`gh` prints `[]` for a repo with no checks, so the genuine case is already covered;
+anything unparseable is now always `unknown`. **My own test caught this, not my reading
+of the code.**
+
+### Verification
+
+`trident/__tests__/ci-gate.test.ts` — 22 tests against the **real functions extracted
+from the `.mjs` and evaluated**, the same technique the cross-model gate tests use and
+for the same reason: a hand-copied duplicate is a test that cannot fail for the reason
+it claims to check. The extractor has its own guard, loaded *inside* a test, because a
+load failure at describe time deletes the tests instead of failing them.
+
+**Five mutants, each caught — all of them fail-open:** red adding findings without
+forcing the verdict · an unreadable reply reading as no-checks · pending beating red ·
+an unusable answer never reaching the gate · the probe never being called.
+
+Also covered: every terminal-failure state (not just `FAILURE` — a cancelled or
+timed-out gate is red too), `SKIPPED`/`NEUTRAL` as non-failures, a non-zero exit with
+parseable rows still trusting the rows (`gh` exits 8 for pending and 1 for failures, so
+treating non-zero as an error would turn every red build into a deferral), and noise
+around the JSON.
+
+**The new agent label was caught by #157's own coverage test** and routed to the cheap
+tier — the CI probe is the same shape as the head probe, and leaving it to the fallback
+is exactly how head-probe silently sat on the most expensive tier for months.
+
+### Two source-shape assertions moved, and that is worth naming
+
+Adding a third parameter to `reviewAndSynthesize` broke two existing tests **whose
+subject was untouched** — one pinning `enforceCrossModelGate(synthesisRaw, …)` by
+variable name, one matching a call by its full argument list. Both now pin the
+construct rather than its spelling. One of them had already been loosened once for the
+same reason, which is the argument for doing it properly the second time.
+
+Trident suite: 599 pass. Typecheck 51/51 · lint clean · byte-scanned.
+
+## 2026-08-09 — Usage dashboard — the endpoint and the web card
+
+The series landed the day before and nothing read it. This is the read half:
+`GET /api/app/usage/dashboard` plus the Model usage card in web Settings.
+
+### The endpoint went into the EXISTING surface, not a new one
+
+`gateway/http/app-usage-surface.ts` now owns two paths — the live meter it always
+owned, and the dashboard. A separate surface would have needed its own composition
+field, route slot, gate entry, coverage row and snapshot line, and **a second
+near-identical surface is how one of them quietly stops being wired.** Same owner
+gate, same subject, one file.
+
+That decision has a cost worth naming: the meter's path is a strict PREFIX of the
+dashboard's, so a prefix match in either direction serves the wrong body with a
+200 — a wrong answer no client can detect. Both directions are pinned by tests,
+and a mutant that prefix-matched the meter killed three of them.
+
+The payload is `{ pools: [...] }` — an array even though exactly one pool exists,
+so a second subscription can be reported without changing the shape under a
+client that has already shipped.
+
+### What the card refuses to say
+
+Three fields are legitimately null and each has a different honest rendering. All
+three are places where the wrong choice still renders and still looks plausible:
+
+- **unreachable route** → no bar at all. An older server does not mount it, and a
+  0% bar would invent a measurement.
+- **`pace: null`** → an em dash, never `0.0×`. Null means the server declined to
+  answer (a barely-started window, or an unknown reset); a zero would read as
+  "you are burning nothing", the opposite.
+- **`exhausts_at: null`** → the row is OMITTED. Null is the common, GOOD case, and
+  a permanent "Caps out in —" trains the eye to hunt for a warning that is
+  normally absent.
+- **`account_label: null`** → "active credential". It never guesses. (As of
+  2026-08-10 null no longer means "unknowable": a sidecar beside the credential can
+  name the account, and null is now either *nothing named it* or *the name on disk
+  described a different token* — see
+  § 2026-08-09 — Naming the account behind a reading. The rendering is unchanged,
+  which is why the card needed no edit.)
+
+Band colours come from `@neutronai/contracts/credential-usage.ts`, the same three
+tokens the 2px divider meter uses, so the card and the hairline above it cannot
+disagree about where amber starts.
+
+### Two guards worth keeping
+
+- **The wiring test now checks BOTH halves separately.** The write assertion
+  passed for an entire PR during which nothing read the series. Links in a chain
+  are independently absent.
+- **A test asserts every `cset-usage-*` class the component emits has a rule in
+  `chat-react.html`.** This is the `var(--hairline)` shape — a class that renders,
+  is correct, and has no paint behind it. It carries a positive control: if the
+  scrape finds no classes the assertion would pass vacuously.
+
+## 2026-08-09 — The usage readings are remembered, and turned into a pace
+
+### What was missing
+
+`open/credential-usage-monitor.ts` has always probed the active credential every 60
+seconds, cached **one** reading, and aged it out after five minutes. So the product
+measured utilisation continuously and remembered nothing: the meter could say a window
+was 72% full and could not say whether that was climbing fast or flat, what was left an
+hour ago, or when it last hit the ceiling.
+
+**"Which pool can take this build?" is a question about a trend**, and a single
+instantaneous number cannot answer it. That is why the dashboard needed a migration
+before it needed a chart — PR1 of `docs/plans/2026-08-09-model-usage-dashboard.md`.
+
+### What landed
+
+Migration `0119` + `persistence/usage-samples-store.ts` + a fail-soft `onSample` hook on
+the monitor, wired in the composer alongside the existing `onStanding` observer. The
+prune rides on the same call rather than a separate schedule: a cleanup job that can fall
+out of step with its writer eventually either grows forever or deletes something in use.
+
+**Pace is the point.** `fraction consumed ÷ fraction of the window elapsed` — above 1
+means burning faster than the window refills, and that single number is what turns "72%"
+into a decision. It is computed at read time, never stored: a stored derivative goes
+stale the moment the formula improves, and this formula will.
+
+### Two things the tests found that reading did not
+
+**The exhaustion projection was wrong.** My first draft divided by pace *twice* —
+arithmetically incorrect and entirely plausible-looking, which would have projected
+exhaustion far too early on every fast window. It is now derived in the comment and
+pinned by a hand-checkable case: 5h window, half elapsed, 75% used → pace 1.5, and the
+remaining 25% at 1.5× takes **50 minutes**. Small enough to verify on paper, which is
+the point of choosing it.
+
+**A guard I wrote was mathematically unreachable.** I had an `at < reset_at` check for
+"the projection lands after the reset, so don't cry wolf". A mutation pass showed
+removing it changed nothing, and the derivation says why: `pace > 1` implies
+fraction > elapsed, and the projected time to burn the remainder is then *always*
+shorter than the time left. **A dead branch dressed as safety is worse than none** — it
+cannot be tested, so it reads as protection that has never been exercised. Removed, with
+the proof written down, and the test rewritten as a property over a grid (with a
+positive control, since a property test over an empty grid asserts nothing).
+
+### What it deliberately does not claim
+
+`account_label` exists and is **always null today**. The rotation happens *outside* this
+process — a credential file is replaced underneath a running child — so the instance
+genuinely cannot name the account behind a reading. The column is there so the history
+gains the dimension without a migration if the rotator ever writes a label; until then
+the card says "active credential". **An inferred account name shown as a measurement
+would be worse than no name at all.**
+
+> **Superseded on 2026-08-10** — the "if the rotator ever writes a label" half is now
+> built: `open/credential-label.ts` reads a `.credentials.meta.json` sidecar and fills the
+> column, using the label only when its fingerprint matches the token actually resolved.
+> The paragraph above stands as the state on 2026-08-09 and is left as written, but do not
+> read it as current: an instance *can* name the account now, when something names it for
+> the instance. The last sentence is the part that did not change, and is the whole reason
+> the fingerprint exists. See § 2026-08-09 — Naming the account behind a reading.
+
+A sample with nothing measurable in it is not written: all-null rows would make "no
+data" indistinguishable from "we measured nothing", which are different facts. And a
+failed or unauthorized probe writes nothing, because it learned nothing about
+utilisation — a gap is not a zero.
+
+### Verification
+
+`persistence/usage-samples-store.test.ts` (20) — mostly about the **refusals**, since a
+plausible number out of one sample is easy and hard to eyeball once rendered: a
+barely-started window, an unknown reset time, a NaN, a full window.
+`open/__tests__/usage-sample-persistence.test.ts` (4) — the wiring.
+
+**Six mutants, five caught immediately; the sixth is what exposed the dead branch.**
+The wrong arithmetic · no floor on a barely-started window · all-null rows entering the
+series · the monitor never calling the sink · the composer never pruning.
+
+**The test split is an architectural point, not housekeeping.** The wiring tests began
+in `persistence/` importing the monitor; the lint rule refused, and it was right —
+`open` depends on `persistence` and never the reverse. Same signal as the parity test in
+#164: the resolve failure was telling me the dependency direction.
+
+The table is enrolled in `table-ownership.json` on creation rather than retrofitted — it
+has exactly one writer, and enrolling it now is what keeps that true.
+
+Typecheck 51/51 · lint clean · byte-scanned · migration snapshot regenerated and the
+runner's list extended to 119.
+
+### Still to come
+
+No endpoint and no card yet — this is the store. `GET /api/app/usage/dashboard` and the
+web card are the next PR, and they now have a series to read rather than a single
+five-minute-old number.
+
+## 2026-08-09 — Slide-to-cancel: the press was dying before the slide could arm
+
+**Landed:** 2026-08-09 · **ISSUES:** #521 · **Surface:** `app/components/InputComposer.tsx`
+
+### What the owner saw
+
+> "'slide to cancel' on the voice note recorder doesn't work."
+
+### Why — and the arithmetic was never the problem
+
+`Pressable` releases a press once the touch leaves the button plus its retention
+offset. RN's default retention is a couple of dozen points and the mic button is
+44pt, while the gesture requires travelling `VOICE_CANCEL_SLIDE_PT` = **64pt** —
+comfortably outside it.
+
+So the press TERMINATED mid-slide. `onPressOut` fired while `holding.cancelling`
+was still false, the release resolved as **'send'**, and the View stopped
+receiving `onTouchMove` before the threshold could ever be crossed. Sliding away
+didn't cancel the recording — **it sent it**, which is the worst possible reading
+of "cancel": the thing the user was trying to destroy is the thing that got
+delivered.
+
+### The fix
+
+`pressRetentionOffset={VOICE_PRESS_RETENTION_PT}`, derived from the slide
+threshold rather than a loose literal — 2× vertically, 4× horizontally, with room
+for the arc a one-handed thumb takes. Retention costs nothing until a press is
+already in progress, and the failure it prevents is unrecoverable in the wrong
+direction.
+
+### Coverage, stated honestly
+
+`app/__tests__/voice-slide-to-cancel.test.tsx` is **mostly source assertions, not a
+driven gesture**, and its docblock says so. Two things make the real gesture
+undrivable in this harness: RN-web's Pressable does not model the native
+responder's retention region — so the very termination that caused the bug cannot
+occur here, and a driven test would pass with the fix removed — and `holding` is
+only entered through `onLongPress` after a delay the harness cannot cleanly elapse.
+
+What is asserted: the mic control is mounted and reachable (driven); it carries a
+retention offset derived from and larger than the slide threshold (source); the
+threshold counts travel in either direction (source). Mutant: removing the
+retention offset reds the retention assertion.
+
+**The device claim — that a real thumb sliding 64pt cancels — is settled on
+hardware, not here.** The first draft of that test file described itself as
+behavioural when it was not; it was rewritten before merge rather than shipped as
+an aspirational docblock.
+
+## 2026-08-09 — A spoken word is findable in chat search
+
+### The gap
+
+A voice note was transcribed at upload, the text was written durably beside the audio,
+and the memory pipeline received it. **Search could not see any of it.** The search
+index mirrors the message `body`, and a voice note's body is the attachment
+placeholder. Nothing was lost and nothing was findable — the owner's words were in the
+system and unreachable from the one surface built for reaching them.
+
+Owner: *"I don't want to lose my voice chat messages in opaque binary blobs."* They
+weren't opaque. They were just invisible to search.
+
+### The shape of the fix
+
+**The transcript rides back on the UPLOAD RESPONSE.** A user's own message is never
+persisted server-side — only agent messages get a durable row — so the client owns it,
+and the upload response is the only point at which the client can learn the transcript
+without a second round trip or a new frame. It stamps it on the message it is about to
+send, and its local store indexes it.
+
+**`transcript` is a field of its own, not appended to `body`.** The body is what
+renders; appending would change how every existing voice note displays and duplicate
+text the agent's turn already carries separately. So `body` stays the display text,
+`transcript` is indexed alongside it, and each has exactly one writer.
+
+Both search implementations were updated, because two independent searches over one
+data model is the classic place a field gets indexed on one platform and not the other:
+the durable FTS5 mirror gains a second indexed column, and the in-memory path matches
+against `body + transcript` through a **single shared `searchableText`** so "what is
+searchable" has one definition.
+
+### Two details that would each have produced a working-but-useless search
+
+**`snippet(tbl, -1, …)`, not column 0.** FTS5 reads a negative column index as "the
+column with the most matches". Pinned at `body`, a voice-note hit would render the
+unhighlighted placeholder — a result the owner cannot recognise. The search would pass
+every "does it return the row" test and be useless in the hand.
+
+**The idempotent re-upload path must READ the sidecar.** It deliberately does not
+re-invoke the ASR seam, so returning only what *this* call transcribed would make the
+same audio searchable the first time and silently not the second. That reads as a flaky
+feature rather than an absent one, which is harder to diagnose than never working.
+
+### The migration is the risky half
+
+An FTS5 table cannot gain a column, so an existing single-column index must be dropped,
+recreated and **rebuilt** — and the triggers go with it, because they were compiled
+against the old column list and an `IF NOT EXISTS` recreate would leave the old ones in
+place, silently out of step with the schema they mirror.
+
+The FTS DDL was **split out of the main `SCHEMA` array** so the column migration runs
+first: the triggers name `new.transcript`, which does not exist on a database written by
+an older build. Creating them in the same pass would work on a fresh install and fail on
+every upgrade — the asymmetry that makes a migration bug invisible in development.
+
+The rebuild is detected from the stored DDL in `sqlite_master`, not by probing a query:
+a `MATCH` against a missing column throws the same way a dozen other faults do, and a
+rebuild triggered by the wrong error would discard a healthy index.
+
+### Verification
+
+`app/__tests__/voice-transcript-searchable.test.ts` (14, against a real bun:sqlite FTS5
+engine) and four new cases in `gateway/__tests__/app-upload-surface.test.ts` (36 total).
+The upgrade path is tested against a **hand-built pre-fix schema** — the state on every
+phone that has ever run the app — including that a second open is idempotent and that
+pre-existing messages stay findable.
+
+**Four mutants, each killed by a different test:** pinning the snippet to column 0;
+dropping the index without backfilling; making in-memory search ignore the transcript;
+and skipping the sidecar read on the idempotent upload path.
+
+Typecheck matrix 51/51. Lint clean. Byte-scanned for control characters (the NUL
+incident earlier the same day). Leak gate silent on every changed file.
+
+## 2026-08-09 — A voice note's words survive the device
+
+### The correction
+
+The earlier half of this fix (#158) returned the transcript on the upload response so the
+uploading device could index it locally. **It shipped on a belief that turned out to be
+false: that a user's own messages are not persisted server-side.**
+
+They are. `app_chat_messages` holds user rows — on a live instance, 42 user rows beside
+124 agent rows, 13 of them carrying attachments — and `replayAfter` is how a reconnecting
+or freshly-installed device rebuilds its history from them.
+
+**So the fix worked only on the phone that happened to perform the upload.** On a new
+device, after a reinstall, or after a local database is cleared, the voice notes came
+back with their audio and none of their words: unsearchable again, permanently, with
+nothing to indicate anything was missing. The owner caught it by questioning the sentence
+rather than the code.
+
+### What changed
+
+Migration `0117` adds a nullable `transcript` column to `app_chat_messages`; the store
+persists and returns it; the replay envelope carries it; the client applies it on inbound
+and merges it without ever regressing a known value to null.
+
+**The server resolves the transcript itself rather than accepting it from the client.**
+The text already exists on this machine — the upload writes a content-addressed sidecar
+beside the audio — so asking the client to send it back would be a round trip of data we
+already hold, and would let any client write arbitrary text into a field that is indexed
+and read by the agent. The resolver is the same seam the scribe path already uses; the
+client's copy exists only for its own local index.
+
+**Not `meta_json`.** That column exists and is already carried through append and replay,
+which makes it the tempting answer. It is documented as agent-message presentation
+metadata and as "always null for user messages", and the replay envelope's user branch
+does not read it at all. Putting a user message's most important text in a field whose
+contract says it is never populated for user messages is the quiet overload that reads as
+correct for a year and then produces a bug nobody can locate.
+
+**Not backfilled.** The sidecars for existing audio are still on disk, so a sweep is
+possible — but it would have to walk the blob store and re-associate by content hash,
+which is a far larger blast radius than adding a column. Existing voice notes behave
+exactly as they do today; new ones are searchable everywhere. A backfill is a separate,
+reversible tool if it is ever wanted.
+
+### Verification, and what the mutants exposed
+
+`channels/adapters/app-ws/__tests__/voice-transcript-survives-device.test.ts` (11) and
+five new cases in `persistence/app-chat-store.test.ts` (20 total).
+
+**Four mutants. The first pass killed only one of them, and that is the useful part:**
+
+| mutant | first pass | after |
+|---|---|---|
+| replay drops the transcript | **caught** | caught |
+| the column is never written | **survived** | caught by 3 tests |
+| the server never resolves it from the sidecar | **survived** | caught by 2 tests |
+| the composer never wires the seam | **survived** | caught |
+
+The last one is the defect shape `SPEC.md` names as this repo's repeat offender — the
+module correct, its tests passing, and the composer never connecting it. Every other test
+in the file stayed green while the feature was dead. Its guard asserts against the real
+composer's source, scoped to the adapter construction rather than the whole file, because
+the resolver's name also appears in the scribe path and an unscoped match would pass on
+that alone.
+
+Typecheck matrix 51/51 (the row type gained a required field, so two existing fixtures
+were updated rather than the field being made optional — an optional row field would have
+let a decoder silently omit it). Schema snapshot regenerated; migration runner's expected
+list extended. Byte-scanned for control characters. Leak gate silent on every changed
+file.
+
+### Also in this change: two arbiter design docs
+
+`docs/plans/2026-08-09-multi-substrate-build-agent.md` and
+`docs/plans/2026-08-09-model-usage-dashboard.md`. Both are design recommendations awaiting
+owner decisions, not implementation. The first resolves a question that had been treated
+as settled: a Codex build turn **cannot** commit under `workspace-write`, by deliberate
+policy rather than by accident of the worktree layout — so the recommendation is that the
+harness commits and the model only edits, which removes the full-access question instead
+of mitigating it.
 
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
 
@@ -3069,7 +8069,7 @@ hit in live use, one PR, two commits. Changed: `open/wiring/app-ws.ts`,
 `landing/chat-react/ChatApp.tsx`, `landing/chat-react.html`,
 `app/components/ProjectRail.tsx`, `docs/SYSTEM-OVERVIEW.md`, plus four test files.
 
-### 1. Supervisor alerts sorted to the bottom of the transcript
+#### 1. Supervisor alerts sorted to the bottom of the transcript
 
 **The symptom.** The owner sent a message and days-old `⚠️ Supervisor alert`
 bubbles jumped BELOW it, each still printing its own true date, so the transcript
@@ -3114,7 +8114,7 @@ own framing of this push as a best-effort SECONDARY surface over the durable
 louder surface is a product decision for the SPEC, not something to smuggle into
 a bug fix — flagged rather than taken.
 
-### 2. The rail's idle dot painted a hollow grey ring
+#### 2. The rail's idle dot painted a hollow grey ring
 
 The owner: "i dont want this hollow grey circle when there is no activity. I only
 want to see a pulsing indicator when there is activity." `railDotClass` now
@@ -3618,6 +8618,161 @@ seam test. Every seam assertion reads the value the real
 
 Per SPEC § Decisions Log 2026-08-04.
 
+## 2026-08-04 — one OpenAI key serves every OpenAI-backed feature (ISSUES #496)
+
+The owner pasted an OpenAI key in Settings to turn on semantic search, then
+found voice transcription still reporting `openai_key_missing`. That was not a
+defect: `gateway/transcription/openai-key-store.ts` reserved its own credential
+name, `openai_transcription`, and the docblock beneath it argued the separation
+was deliberate — a generic OpenAI credential would be read by whatever else
+wanted an OpenAI key, so pasting a key for one purpose would silently switch on
+another.
+
+**That reasoning is now retired** (SPEC § Decisions Log 2026-08-04). It protects
+a user from a metered feature they did not choose to enable, and Neutron is
+single-owner: he pastes his own key and knows what he pays for. Making him paste
+the same secret twice to get voice notes working reads as a bug, not a
+safeguard.
+
+**What shipped — a resolution ORDER, not a branch.** `OpenAiKeyStore.resolve()`
+tries, in order: the dedicated `openai_transcription` credential → the SHARED
+general OpenAI credential → `OPENAI_API_KEY` from the environment. First
+non-empty answer wins. One key works everywhere by default; a dedicated key
+still scopes transcription spend for anyone who wants that, because it outranks
+the shared one. No flag, no mode, no second code path.
+
+**The fallback crosses a store boundary, which is the whole difficulty.** The
+general key is NOT a `project_credentials` row and has no `service` name. It
+lives in `ApiKeyStore` over `SecretsStore` (tables `api_keys` + `secrets`),
+keyed `provider='openai', label='onboarding'` — secrets label `openai:onboarding`
+(`auth/api-key-store.ts:101`, `gateway/cores/integrations.ts:145-146`), written
+by the onboarding optional-key offer and by Settings → Integrations, read by
+`gateway/wiring/resolve-onboarding-openai-key.ts`. A naive "also read service
+`openai`" fix would have compiled, passed a careless test, and done nothing:
+`project_credentials` rows with a hand-typed `openai` service are inert — no
+production reader consults them. So the composer injects
+`resolveOnboardingOpenAiKey` as a REQUIRED lazy thunk (the same thunk the GBrain
+embedder wiring already uses, lazy for the same reason: the composer runs once
+at boot but the key is pasted later, over the running server). Required rather
+than optional so a construction site cannot silently omit it — which the
+typechecker immediately proved by flagging the two test sites that had.
+
+`resolve()` and `status()` became async and walk the SAME order, deliberately:
+if they drift, Settings reports "no key" while voice notes transcribe. A new
+`shared` source label reports the provenance rather than hiding it, and DELETE
+returns 409 `key_from_shared_credential` pointing at Integrations rather than a
+200 that reads as "deleted" over a box that still transcribes.
+
+**Tests + mutation results.** New `gateway/transcription/__tests__/openai-key-store.test.ts`
+(16 tests over a service-AWARE fake store — the sibling surface fake answers to
+any name, which cannot distinguish a correct lookup from a wrong one) plus five
+end-to-end cases on the HTTP surface. Four mutations, each red: removing the
+fallback reds "shared is used" (3 tests); inverting the precedence reds
+"dedicated wins"; dropping the shared step from `status()` alone reds the
+status/resolve agreement suite (4 tests); dropping the blank-key guard reds the
+fall-through and missing-key tests (4 tests). The `openai_key_missing` path is
+covered directly and is unchanged.
+
+## 2026-08-04 — a turn can no longer end on a promise it never keeps (ISSUES #492)
+
+`runtime/adapters/claude-code/persistent/hooks/enforce-reply.ts` already blocked a
+`<channel>` turn that ended without calling `reply()`. It did not catch the other
+half of the same failure: a turn that ends on a PROMISE of work — "re-running
+now", "I'll fix and report back", "one sec". Because a channel turn is
+asynchronous, nothing re-invokes an idle session, so the owner sits in silence
+until they ask for a status. The session looks broken while being perfectly
+healthy. That gate now exists, ported from the upstream harness.
+
+**What actually ported was the false-positive handling, not the regex.** The
+extra logic upstream is almost entirely scar tissue, and a version carrying only
+the pattern would fire on innocent prose, get in the way, and be switched off —
+strictly worse than no gate. Three mitigations came across and each is pinned by
+its own test: double-quoted spans are stripped before matching, so a reply that
+QUOTES the banned phrasings (explaining the gate, citing what not to say) is read
+as meta-discussion rather than a live promise; a negative lookbehind rejects the
+verb-as-noun case, so "the fix", "a check", "your build" do not trip an
+alternation whose modal may sit 50 characters away; and only the reply the owner
+actually receives is evaluated, so a past-tense report of completed work sails
+through.
+
+**Two findings corrected the port rather than following it.** First, the
+delivered-reply rule is INVERTED against upstream. Upstream streams a turn as
+several replies and evaluates the LAST, because that is the message the owner is
+left staring at. This runtime delivers exactly one: `reply` has no
+streaming/append parameter (`dev-channel-impl.ts:129-137`) and the substrate
+settles the turn on the FIRST correlated reply — pushing the completion, closing
+the channel, marking it settled (`repl-session.ts:280-290`) — after which every
+later reply is rejected (`repl-session.ts:269`). Porting "last reply" literally
+would have read a follow-up the substrate already threw away and cleared a turn
+that really did strand the owner: a false NEGATIVE hiding the exact bug. The
+rationale ports; the index does not.
+
+Second, the escape hatches are this tree's real seams, established from the code
+rather than assumed from upstream's names. There is exactly ONE: `reminders_create`
+(`cores/free/reminders/src/tools.ts:104`) is auto-approved
+(`gateway/cores/install-bundled.ts:1098`), picked up by a 30 s tick
+(`reminders/tick.ts:162`), and dispatched onto the SAME warm pooled session
+(`reminders/dispatcher.ts:139-145` → `open/composer.ts:2433-2434` → `pool.ts:490`
+→ `spawn.ts:884`) — a genuine re-entry that can even re-arm itself.
+`dispatch_agent` looks like a continuation mechanism and is NOT one: it runs on a
+separate ephemeral substrate and its completion reporter here is a bare log line
+(`open/composer.ts:999-1004`), so nothing reaches the owner and nothing re-enters
+the session. Accepting it would have waved through the precise stranding the gate
+exists to catch, so it is pinned as a BLOCK. `rituals_*` are approval-gated onto a
+different substrate; cron, idle-nudge and morning-brief are server-side timers
+with no tool surface at all.
+
+A known limit, recorded rather than papered over: because the substrate settles
+the turn on the delivered reply, a block fires AFTER that reply has already
+reached the owner. The gate therefore forces the promised work to actually happen
+in-turn and pushes the agent toward arming a real follow-up, but it cannot
+retroactively deliver a result on a turn whose channel is already closed. The
+durable fix for the delivery half is to not send the promise in the first place,
+which is what the block reason instructs.
+
+**Tests + mutation results.** `runtime/adapters/claude-code/persistent/__tests__/enforce-reply.test.ts`
+grows from 17 to 27 tests. Seven mutations, each red: disabling the promise check
+reds 3; adding a past-tense form to the pattern reds the completed-work regression
+arm; dropping the quote-strip reds the meta-discussion arm; dropping the lookbehind
+reds the verb-as-noun arm; flipping delivered-reply from first to last reds the
+delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; and
+short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
+no-reply gate is untouched. No feature flag — the gate ships on as default
+behaviour.
+
+### Mid-turn message injection (#516)
+
+The web composer keeps Send enabled while the agent is typing. A second message
+for the same topic bypasses the completed-turn chain and is posted immediately to
+the persistent REPL dev-channel as additional context for the active turn. It
+reuses the active turn id without advancing fallback reply-correlation state, so
+the running turn's eventual reply remains correlated normally. If no active turn
+exists at the injection instant, the message falls back to the existing ordered
+turn path instead of being dropped.
+
+Mutation-named tests pin all three boundaries: the gateway test fails if the
+second send is queued until completion, the persistent-REPL test asserts the
+additional `/message` reached the wire before the first reply, and the React test
+fails if the composer is disabled while streaming or IME composition Enter is
+submitted. General chat uses the same `general` route key for registration and
+lookup. A successful dev-channel delivery stays successful if the turn settles
+while its response is returning, preventing a duplicate queued turn; failed
+delivery leaves Retry text and attachment state untouched. Injection is offered
+only while exactly one turn is active: a queued turn, Retry, seed, reconnect, or
+button-prompt answer always follows the normal ordered path. Injected history is
+stamped with the inbound observation time so a racing agent reply cannot render
+before it; attachment-only sends persist their inbound reference while resolved
+local paths remain confined to the REPL payload. Active-turn routes include the
+non-secret credential identity and refuse ambiguous credential-rotation matches.
+Typing refcounts have a fail-safe beyond the turn's forty-five-minute absolute
+ceiling that clears a lost `end`, fans the matching ephemeral end frame, and
+refreshes the rail working state instead of wedging that topic until restart.
+The composer clears the
+submitted text before awaiting the send, then restores it only when delivery
+fails (ahead of any newer draft text). An in-flight send claim prevents two
+Enter presses from reusing the same staged attachment URLs before the first
+upload/send clears them.
+
 ## 2026-08-03 — a credential set inside one project no longer changes every project
 
 Branch `fix/credential-scope-boundary`. Changed:
@@ -3716,6 +8871,112 @@ character class, and fell through to a 404. The route now accepts the encoded
 form and decodes it, re-checking the decoded value against the character class it
 always enforced so nothing new gets in. Mobile was hitting the same 404 and is
 fixed by the same change.
+
+## 2026-08-03 — push: a device registration that fails is no longer invisible
+
+`device_push_tokens` was found holding **zero rows** on a live instance, so every
+proactive surface — rituals, the morning brief, nudges, the lapsed-credential
+notice — reached the app and nothing reached the phone. It was caught by checking
+the first ritual fire, not by a report, and the reason is structural: nothing on
+the registration path logged anything. `gateway/http/app-devices-surface.ts` had
+no logger, `gateway/push/store.ts` has none, and `app/lib/push.ts` is documented
+as never throwing — it turns every failure into a typed result the login screen
+`console.warn`ed and dropped. So "the app never called register" and "the app
+called and was refused" produced byte-identical evidence: none.
+
+**Server (`gateway/http/app-devices-surface.ts`).** EVERY request now emits
+exactly one `@neutronai/logger` line whatever the outcome — `device_registered`
+(with `first_registration`, derived from `registered_at === updated_at`, so a new
+phone is distinguishable from the same phone signing in again),
+`device_register_rejected`, `device_request_unauthorized` (the expired-bearer
+case that used to look like silence), `device_request_rejected`,
+`device_unregistered`, `device_unregister_rejected`. A store failure during
+register no longer throws out of the handler: it logs `device_register_failed`
+and answers **500 `register_failed`**. **The token is never logged** — lines carry
+`token_fp`, the first 12 hex chars of its SHA-256, which correlates a register
+with the unregister or the Expo prune that later removes it and is useless to
+anyone else.
+
+**Client (`app/lib/push-observability.ts`, new).** `enablePushForUser` records
+every outcome into the existing diagnostics ring buffer and, for an ACTIONABLE
+failure, captures a report — a fifth `ReportReason`, `push_registration_failed`,
+because this failure is not an error anything caught. `unsupported_platform` (the
+web build) is recorded but not escalated, or opening the app in a browser would
+bury the real failures. Login calls this before `setUser`, so `DiagnosticsSync`
+flushes the queued report on the same launch. No token is recorded — a success
+carries the platform and the token's LENGTH.
+
+**Test surface.** `gateway/__tests__/app-devices-surface.test.ts` (25/0) drives
+the real surface with the REAL logger behind a capturing sink and asserts on
+rendered lines, including one test that fires every path and proves the raw token
+appears in none of them; logging the token instead of the fingerprint turns 3
+red. `app/__tests__/push-observability.test.ts` (8/0) asserts a failure is
+recorded AND filed, a benign skip is recorded and NOT filed, and the token never
+reaches a report.
+
+**Residual, stated not fixed.** Registration is **login-only**.
+`enablePushForUser` has exactly two call sites, both in `app/app/login.tsx`
+(`:228`, `:352`), and nothing re-registers on foreground — so an OS token
+rotation, a reinstall or an Expo invalidation ends push until the next sign-in.
+`app/lib/devices-client.ts` claimed otherwise in a comment ("and again on app
+foreground when the Expo token rotates"); the comment is corrected to describe
+what the code does. Self-healing re-registration is a separate change.
+
+No schema change, no feature flag. Gateway + app code.
+
+### Wall-clock timing assertions in tests — triaged, mostly removed (ISSUES #438)
+
+**What changed.** A sweep of every test assertion that compares REAL elapsed wall
+time against a threshold. These red when the machine is loaded, which is exactly
+when CI is busiest, and a gate that reddens for a reason unrelated to the change
+under review is a gate people learn to merge past. 16 live assertions were found
+across 10 files (the swept grep also matches a comment in
+`gateway/comments/__tests__/anchor-walker.test.ts:1230`, which documents the
+earlier removal this change generalises).
+
+**The rule applied, in order.** (1) If a deterministic assertion already covered
+the same contract, the timing bound was DELETED. (2) Otherwise, if the contract
+could be restated as an ordering or a discriminant, it was CONVERTED. (3) Only
+where neither applied was a bound KEPT, and then with a comment naming the
+regression it catches and a measured margin. Nothing was bulk-widened; exactly
+one number in the tree changed, and it changed to zero numbers by deletion.
+
+**Outcome: 9 deleted, 4 converted, 3 kept.** The conversions are the interesting
+half. `onboarding/synthesis/__tests__/synthesis-session.test.ts` now asserts
+WHICH wedge detector fired by reading the distinct failure messages off the
+injectable `logFailure` sink, instead of inferring it from a stopwatch — strictly
+stronger, because the old bound would also have passed on the wrong detector
+firing early. `open/__tests__/open-app-ws-durable-chatlog.test.ts` samples the
+agent-reply frame count at the instant the HTTP response lands, so
+"returned before the turn finished" is an ordering that load cannot reorder
+rather than a 500 ms budget. `open/__tests__/onboarding-warm-conversational.test.ts`
+sets the pre-warm cap an hour out so the pre-warm is the only thing that can
+resolve the gate, making the test's own completion the proof.
+
+**Two premises corrected while doing it.** The health-probe test in
+`runtime/adapters/claude-code/persistent/__tests__/repl-supervision.test.ts`
+described a server that "never resolves", but `Bun.serve` defaults to a 10 s
+request idle timeout — so it DID answer, and with the probe deadline stripped the
+test still passed in 12.2 s. It now sets `idleTimeout: 0`, which is what makes
+the deadline's absence observable at all. And the bound in
+`tests/integration/profile-pic-pipeline.test.ts` allowed 60 s while the test runs
+under CI's 15 s per-test timeout — it could never have failed.
+
+**The three kept bounds, and why.** Two in
+`runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts`
+are LOWER bounds that are the only thing distinguishing the inactivity watchdog
+from the absolute ceiling — both deliberately emit the same error
+(`pool.ts:605`) — and load moves a lower bound away from its threshold. The
+`app/__tests__/transcript-warmer.test.ts` bound is the only guard separating a
+gate-driven abandon from the 6 s open deadline, and measured 8 ms against a
+3000 ms budget under 2x CPU oversubscription. The
+`onboarding/profile-pic/__tests__/storage.test.ts` bound discriminates a
+synchronous return from a 5 s fallback wait and measured 0-1 ms against 100 ms
+under the same load.
+
+**Every deletion was mutation-tested**: the guarding behaviour was broken in the
+real source and the surviving assertions were shown to still red. Tests only —
+no source file changed, no schema change, no feature flag.
 
 ## 2026-08-01 — the rest of the tasks block was never switched on
 
@@ -3943,70 +9204,231 @@ only, and nothing in `.github/workflows/` references it. It also prints `E2E SKI
 and exits 0 whenever no server answers, so it can prove nothing indefinitely and
 look fine doing it.
 
-## 2026-07-30 — the idle nudge is switched ON, against a test that proves it does not repeat
+## 2026-08-01 — memory: an auto-merged page can be un-merged
 
-Branch `fix/idle-nudge-user-activity-watermark`. `channels/button-store.ts`,
-`gateway/proactive/idle-topic-enumeration.ts` (new), `open/composer.ts`,
-`gateway/proactive/__tests__/idle-nudge-no-repeat.test.ts` (new).
+The 6h reflect pass clusters near-duplicate entity pages, folds the losers into a
+survivor, and **hard-unlinked** each loser (`runtime/entity-writer.ts:deleteEntity`
+→ `fs.unlink`). Jaccard similarity is a heuristic, so that removal could be wrong
+and there was no way back: no copy, no record, and — because the pass's report is
+a return value nobody reads (`open/wiring/memory.ts` discards it) — not even a log
+line saying a page had gone. `entities/.quarantine/` had been designed and dropped.
 
-**The feature was finished and deliberately withheld.** `open/composer.ts` did not
-supply `listIdleTopics`, so `build-core-modules.ts:1086` never registered the sweep
-cron, and `open/__tests__/open-proactive-activation.test.ts` asserted that absence
-to pin the withholding on purpose. The reason was sound: switching it on would have
-nudged the owner about the same thing every hour, indefinitely. So this change is
-not "wire up a feature" — it is removing the two reasons it had to stay off.
+**`scribe/reflect/merge-archive.ts` (new).** A merged-away loser is copied
+BYTE-EXACT to `<ownerDataDir>/memory-archive/<kind-dir>/<slug>.<stamp>.md` and the
+merge recorded in `memory-archive/merges.jsonl` (when, which page, which survivor
+absorbed it) **before** the unlink. `memory-archive/` is a sibling of `entities/`,
+outside every enumeration path, so an archived copy is inert until restored.
+Content-idempotent (a re-archived loser reuses its existing copy), and
+`pruneMergeArchive` enforces a **90-day** horizon each pass so the safety net stays
+bounded. A `README.md` with plain-English restore instructions is dropped into the
+folder on first use.
 
-**Defect 1 — the watermark polluted itself.** The nudge posts through
-`buildButtonStoreProactiveSink`, which persists a durable row into `button_prompts`
-via `persistInertAgentTurn`. The activity watermark was `MAX(created_at)` over that
-same table with no speaker filter. `evaluateNudgeGate` only skips while activity has
-NOT advanced past the watermark stored at the last nudge — so the nudge's own row
-advanced it, the sweep read its own bubble as "the user came back", and dedupe was
-defeated on the first cycle after every post.
+**`scribe/reflect/reflect-pass.ts`.** `mergeCluster` archives before deleting, and
+**a failed archive BLOCKS the delete** — the loser is retained, not counted as
+merged, and a later pass retries. New `report.archived`; a successful merge now
+logs the removed page, the survivor, the archive path and the restore command.
 
-The table records the speaker (`resolution_speaker_user_id`), and everything the
-system authors stamps a `__system__` sentinel — `persistInertAgentTurn` and
-`sweepExpired`'s synthesized `__timeout__`. So `listTopicsByUser` now returns TWO
-watermarks rather than redefining the one it had:
+**`neutron memory-restore`** (`scribe/reflect/memory-restore-cli.ts`, dispatched
+from `bin/neutron`) lists what was merged away and puts a page back byte-for-byte.
+It refuses to overwrite a live page without `--force`.
 
-- `last_created_at` — unchanged, every row, agent posts included. This is the
-  SIDEBAR's ordering key, and an agent bubble is a message; narrowing it would have
-  traded a nudge bug for a rail-ordering bug.
-- `last_user_activity_at` — the `resolved_at` of turns a real person took. System
-  rows contribute nothing, and neither do unresolved agent prompts (an unanswered
-  question is not the owner showing up).
+**Test surface.** `scribe/__tests__/reflect-merge-archive.test.ts` (12/0) drives
+REAL merges over real on-disk pages and then **recovers the loser, asserting the
+restored bytes equal the pre-merge bytes** — including the case where the loser was
+the better page. Mutation: reverting `mergeCluster` to a hard delete turns 10 of
+the 12 red.
 
-**Defect 2 — enumeration saw one namespace.** The owner speaks under both
-`web:<owner>` (React web) and `app:<owner>` (Expo app-ws), and they are independent:
-a conversation handled on the phone leaves no trace under `web:`. `listTopicsByUser`
-took exactly one root, so the sweep would have nudged about work just dealt with on
-the other device. It now accepts a string OR an array of roots, unioned in one
-grouped scan, with `project_id` attributed by longest-matching root.
+No schema change, no feature flag. Gateway/scribe code — reaches a box on deploy.
 
-**The enumerator emits ONE candidate, not a fan-out.** `buildOwnerIdleTopicEnumerator`
-returns a single candidate — the owner's General app-ws topic, the same target as the
-morning brief — because the P6 ranker writes one `current_focus_pick` per instance per
-day. A candidate per project topic would post the identical pick into every topic. Its
-`last_activity_ms` is the max `last_user_activity_at` across both roots and all their
-project descendants. Enumeration failure yields zero candidates, never a dead cron.
+## 2026-08-01 — the voice-note player copies iMessage (no more box in a box)
 
-**The bar, and how it was met.** `idle-nudge-no-repeat.test.ts` (10/0) runs the REAL
-sweep against a real database with the real sink shape — the nudge's post genuinely
-lands in `button_prompts`, because a stub sink would hide the exact bug this file
-exists to disprove. Four idle cycles after a nudge with no intervening user activity
-produce exactly ONE post. Both mutations were applied and confirmed to fail it:
-reverting `last_user_activity_at` to an unfiltered `MAX(created_at)` breaks 3 tests
-including the headline one; collapsing enumeration to a single root breaks 4. The
-inverse direction is pinned too — a real user turn re-arms the nudge and a second one
-fires — so the fix cannot be a silence bug wearing a spam bug's clothes. The ≥7
-`rateNudge` floor was already supplied by the composer and is confirmed to take effect
-now that enumeration reaches it (6/10 stays silent, 7/7 posts, an abstain skips).
+PR #39 (`a81f4d09`) made a sent voice note playable. It shipped drawing its own filled,
+rounded panel, so the control appeared as a box nested inside the message bubble — which
+already has an edge and a radius of its own. The owner: *"The voice note playback UX is
+kinda ugly. Its a box in a box, the play button is a really small tap target... can you make
+it look like imessage?"*
 
-`open-proactive-activation.test.ts` no longer asserts the feature is off; it asserts
-the wiring, and that the enumerator yields the single expected candidate.
+This is the restyle. **No playback behaviour changed** — the four things PR #39 got right
+(one clip at a time, the session released on unmount and on finish, the bearer reaching the
+player, and `--:--` rather than a fabricated `0:00`) are untouched and their tests are still
+green.
 
-**Deploy note:** this is gateway/composer code. It needs a SERVER-SIDE deploy to take
-effect — there is no over-the-air path for it.
+#### The reference
+
+**Apple's own asset**, pixel-measured — the method the composer rework
+(`2026-07-31-composer-imessage-affordances.md`) used, not a description from memory.
+
+| | |
+|---|---|
+| Primary | `help.apple.com/assets/69F8EBBDF3B89A4F6E0C704C/69F8EBC43862495245036393/en_US/8d5297e97af5bc312625c6e5859061df.png` — Apple's alt text: *"A Messages conversation with an audio message."* Linked from `support.apple.com/guide/iphone/send-and-receive-audio-messages-iph2e42d3117/ios` |
+| Cross-check 1 | Apple's standalone play-button glyph asset from the same guide page (60x60) |
+| Cross-check 2 | An iOS 12-era audio bubble captured at a known 3x on a 375pt screen — a bubble with NO transcript line, which is where the tight vertical padding is readable |
+
+All three agree on the arrangement: **disc at the leading edge, the waveform spanning the
+middle, the length at the trailing edge, and no container between them and the bubble.**
+Apple's prose never states any of this; every number below is off the pixels.
+
+Scale calibration for the primary asset: the screen glass measures 453px for a 393pt
+device = **1.153 px/pt**. Independently validated two ways — the bubble's corner radius
+comes out at 17.3pt against the 18pt this codebase already uses (`BUBBLE_RADIUS_PT`), and
+the disc comes out at 28.7pt against 29.0pt measured on the 3x reference.
+
+#### The measured numbers
+
+Ratios are expressed against the disc DIAMETER so they hold at any size, and the code
+derives from them rather than hardcoding a point size.
+
+| | Measured (Apple) | Implemented |
+|---|---|---|
+| Play disc | 33px = **28.7pt**; 87px/3x = **29.0pt** | `CONTROL_DIAMETER_PT = 30` |
+| Play triangle W | 11px of 33 = **0.333 D** (glyph asset: 0.350) | `GLYPH_WIDTH_RATIO` |
+| Play triangle H | 13px of 33 = **0.394 D** (glyph asset: 0.400) | `GLYPH_HEIGHT_RATIO` |
+| Triangle optical nudge | +1px of 33 = 0.030 D (glyph asset: 0.042) | `GLYPH_NUDGE_RATIO = 0.035` |
+| Disc → waveform gap | 14px = **12.1pt** | `SPACING.md` (12) |
+| Waveform → length gap | 18px = **15.6pt** | `SPACING.lg` (16) |
+| Length type size | 12px digit height ⇒ ≈14pt font | `TYPOGRAPHY.body_small` (13) |
+| Length opacity | **0.70** of the foreground (waveform beside it is 1.0) | `TIME_OPACITY = 0.7` |
+| Bubble padding L/R | 18px / 17px = ~15.5pt | unchanged app value (`BUBBLE_PADDING_H_PT` 12) |
+
+**The gaps are asymmetric and that is deliberate.** 12 on the left, 16 on the right.
+Copying them symmetric is one of the things that makes a clone read as "close, but off".
+
+#### What changed, element by element
+
+| Element | Was (PR #39) | Now |
+|---|---|---|
+| Container | Filled `THEME.surface` panel, `borderRadius: 14`, its own padding | **None.** The row IS the bubble's content |
+| Play control | 32pt `surface_raised` circle — `#1a1a1a` on `#121212`, i.e. invisible | 30pt disc filled in the bubble's FOREGROUND, triangle knocked out in the bubble's own fill |
+| Play/pause mark | A `▶` / `⏸` CHARACTER in a `<Text>` | Drawn from views — a collapsed-box border triangle, two capped bars for pause |
+| Tap target | 32pt paint + 8pt slop | 30pt paint + 7pt slop = **44pt reach** |
+| Track | 4pt, `text_muted` base, `THEME.accent` fill | 6pt, bubble ink at 0.3 behind, bubble ink at full in front |
+| Length readout | 11pt caption, fixed `text_secondary` | 13pt, bubble ink at 0.70, still trailing (the reference confirms trailing) |
+| Colours | Fixed palette entries | The bubble's own `BubbleTone`, threaded from the transcript |
+
+**The disc got SMALLER (32 → 30) and reads much bigger, which is the counter-intuitive part
+of "really small tap target".** The disc was never the problem — its contrast was.
+`surface_raised` on `surface` is invisible, so the only mark the eye could find was the 13pt
+text glyph inside it. Apple's disc is a solid fill in the bubble's foreground with the
+triangle knocked out, and that is what makes a 29pt control read as generous. The REACH was
+then fixed separately and honestly, with `hitSlop` — the paint stays at the reference size
+and the touch box goes to 44pt, because growing the paint to 44 would push the bubble taller
+than iMessage's.
+
+#### `BubbleTone` — why a new concept
+
+With no panel of its own, the player has no background it controls, so it has to be told
+what it is sitting on. iMessage paints every mark in the bubble's foreground and knocks the
+triangle out in the bubble's fill, so **both** colours are needed, not just the foreground.
+
+`BubbleTone` (`app/lib/chat-bubble-metrics.ts`) is that pair, and it lives in the module that
+is already the one home for a bubble's facts. `ChatSyncSurface` now paints `userBubble` /
+`agentBubble` / `userText` FROM those constants, so the player's idea of what it is sitting
+on cannot drift from what was actually drawn.
+
+Also fixed while here: the attachment row's `marginTop: SPACING.sm` separates attachments
+from the words above them, but a voice note has no words (`send('', [url])`), so on that
+message it was dead space at the top of the bubble — the other half of why the player read
+as a panel floating inside a box. It is now applied only when there is a body.
+
+#### The one deliberate departure: the track is not a waveform
+
+Apple draws a **real amplitude envelope** — the silence at the head of the clip and the
+speech in the middle are both visible. We have no amplitude to draw:
+
+- `expo-audio` reports `metering` on a **recording** only. `AudioStatus`, the playback status
+  the component reads, carries no level and no samples
+  (`expo-audio/build/Audio.types.d.ts:137-169`, `:205`).
+- The one PCM channel it does offer, `useAudioSampleListener`, is **real-time only** (nothing
+  exists before the first play), is documented as *"not supported on all platforms"*, and
+  *"requires RECORD_AUDIO permission on Android"*. Requesting the microphone in order to draw
+  a decoration is not a defensible trade.
+
+Bars whose heights came from anywhere else — a hash of the content-addressed URL, a fixed
+pattern — would **look** like an amplitude envelope while carrying nothing about the audio.
+That is a worse lie than an honest bar, and it is the exact failure mode the component's
+original header named ("a painted waveform that ignores playback position is the thing this
+component exists NOT to be"). So the waveform's SLOT, proportion and behaviour are Apple's;
+what fills it is a progress track that means exactly what it shows.
+
+`M:SS` was also kept over the reference's zero-padded `00:04`, on purpose: `formatClipLength`
+is shared with the recorder's `formatElapsed`, and breaking their agreement so a 1.9s clip
+reads `0:01` while recording and `00:01` on playback would cost more than the padding is
+worth.
+
+#### The web client had the identical defect, and it was worse
+
+`<audio controls>` was the right first move — a real player, keyboard-accessible, for free —
+but Chrome draws its own filled rounded panel, so on the blue user bubble it was a light-grey
+slab owning the whole message. It also rendered `0:00 / 0:00` before metadata (the exact
+fabricated zero the mobile side avoids), plus a volume slider and an overflow menu that mean
+nothing in a transcript.
+
+`landing/chat-react/VoiceNotePlayer.tsx` **keeps the `<audio>` element as the transport** and
+replaces only the chrome. So the browser still decodes, `preload="metadata"` still gets a
+real duration up front, and the one-clip-at-a-time registry is still bound to the media
+EVENTS rather than a click handler — which is what keeps the OS media keys covered. What was
+lost with `controls` is given back explicitly: a real `<button>` and a real
+`<input type="range">`, so the play control and the scrubber stay keyboard-operable.
+
+**The two clients share a design, not code** — React Native has no `HTMLAudioElement` and the
+browser has no `expo-audio`. That is the same split `audio-exclusivity.ts` and
+`lib/voice-playback.ts` already have: one rule, two implementations. On web the colours come
+through `currentColor` and a `--bubble-ground` custom property set on the bubble classes, so
+the CSS names no palette entry and cannot drift either.
+
+#### Tests
+
+`app/__tests__/voice-note-playback.test.tsx` — 9 existing cases untouched and green (the four
+failure modes PR #39 pinned), plus 4 new cases pinning the ARRANGEMENT:
+
+- the player root paints **no** fill, radius or border (react-native-web compiles static
+  styles to atomic classes named after the property, so this is directly observable);
+- every mark is painted in the tone it was handed — the disc in the bubble's ink and the
+  triangle in the bubble's ground, and both **swap** between the user and agent tones;
+- the play/pause mark is a drawn view, not a `▶` character;
+- the control's reach arithmetic: 30pt paint + 2 x 7pt slop = 44pt.
+
+`landing/chat-react/__tests__/attachments.test.tsx` — the voice-note case now pins both
+halves: the browser's `controls` is gone AND everything it provided for free is still there
+(a labelled play button, a keyboard scrubber, `--:--` instead of `0:00`).
+
+**Mutation-tested, all seven pins.** Restoring the container, hardcoding the disc colour,
+typing the glyph as text, shrinking the tap target, restoring `controls`, deleting the
+keyboard scrubber, and restoring the fabricated `0:00` each fail exactly their own case and
+leave the rest green. They are not false positives.
+
+#### What was verified, and what was not
+
+**Verified visually.** The real component tree was rendered through react-native-web — the
+same harness the tests use — serialised with its generated CSS and screenshotted in headless
+Chromium at up to 5x, in five states (at rest, playing mid-clip, agent bubble, length not yet
+known, and with body text above). The rendered geometry was then measured back out of the
+PNG: disc 30px, bubble 42px tall, disc inset 11-12px from the bubble edge, track 6px, gap 12px
+— matching the source. The web player was rendered the same way from the real CSS.
+
+**NOT verified on a device or emulator.** A finished Android APK exists on EAS, but there is
+no path to run THIS branch's JS on it without publishing an update to a channel the owner's
+phone could pick up, and no Neutron instance with a voice note in its transcript was
+available to point it at (PR #39 hit the same wall — its chat socket never connected in that
+environment). So the following rest on the geometry in the source and on the harness render,
+not on a phone:
+
+- that React Native honours `hitSlop` at 7pt (well-established, but not observed here —
+  `hitSlop` leaves no trace in the DOM, which the test says explicitly);
+- that the collapsed-box border triangle rasterises cleanly on Android (the canonical RN
+  technique, and it renders correctly under react-native-web);
+- native layout rounding of the fractional glyph sizes (5.91 / 9.99 / 11.82pt).
+
+These are the first things to check on the next device pass.
+
+#### Scope
+
+**JS only** — no `app.json`, no `package.json`, no native module, no new dependency. This
+ships over the air to a build whose fingerprint matches `main`; no reinstall.
+
+**SYSTEM-OVERVIEW.md changes: none.** A visual restyle of an existing component plus a colour
+pair threaded to it — no new module, HTTP surface, lifecycle behaviour, deploy step, Core tier
+mechanic, onboarding phase, or env flag. The doc does not describe attachment rendering.
 
 ## 2026-07-31 — an authenticated caller outside the process can put a message in the owner's chat
 
@@ -4229,6 +9651,1026 @@ Branch `fix/every-project-connects`. Second attempt at the project-switch defect
 
 Verified: `tsc --noEmit` exit 0; `every-project-connects` 8/0, `session-cache` + `mobile-project-switch-spinner` + `mobile-chat-send-on-device` 27/0. NOT device-verified — nothing here is reachable from the harness on real hardware. No surface change, so no `SYSTEM-OVERVIEW.md` edit. NO FEATURE FLAGS.
 
+## 2026-07-31 — mobile: a project switch can no longer end in an unbounded wait
+
+Third pass on the owner's "spinner in the chat area, rail still tappable, and the
+project I tapped never appears on the server's session log". The two previous
+passes both landed in the chat-session layer and neither moved the symptom.
+
+**NOT the root cause, and now ruled out with evidence.** A new device-harness test
+mounts the REAL chain a rail tap travels — `app/projects/[id]/_layout.tsx` →
+`<Slot/>` → `index.tsx` → `chat.tsx` → `ChatSyncSurface` — over a routing stub, and
+every tapped project reaches the wire on unmodified `main`. So the settings gate
+opens, the redirect fires and the socket is attempted; the shell is not the
+blocker. Separately: the tenant's project ids are all `[a-z0-9-]`, so nothing is
+being rejected on id grounds, and a missing last-tab key resolves `null` rather
+than hanging. The device-only cause is still UNIDENTIFIED.
+
+**What DID change — every unbounded wait on that path is now bounded, and a
+failure is now visible instead of being an indefinite spinner.**
+
+- **`app/lib/projects-client.ts`** — `REQUEST_TIMEOUT_MS` (15 s) + an
+  `AbortController` on every request. `fetch` has no device-side timeout, and the
+  shell blocks its whole content pane on `getSettings`, so a request that never
+  answered was a permanent spinner with no error, no retry and nothing on the wire.
+  A hang is now a `timeout` rejection.
+- **`app/lib/project-shell-content.ts`** — new `unavailable` kind. The production
+  settings store SYNTHESISES defaults rather than 404ing
+  (`gateway/http/app-projects-surface.ts` `buildDefaultSettings`), so the shell's
+  failure branch was effectively unreachable and every stall was terminal. A
+  transport/auth failure is now `unavailable`; only a server-stated absence
+  (`not_found`) is `not_found`.
+- **`app/app/projects/[id]/_layout.tsx`** — renders that state as a
+  "Couldn't load this project" pane with a **Try again** that re-runs the scope's
+  fetch in place. It no longer tells the owner a project they are looking at in the
+  rail is missing when the truth is the connection.
+- **`app/app/projects/[id]/index.tsx`** — the default-tab redirect ALWAYS
+  navigates. The last-tab read is raced against `LAST_TAB_READ_TIMEOUT_MS`
+  (1.2 s; `try/catch` cannot save you from a promise that never settles), and a
+  scope that resolves from neither the path nor the param falls through to General
+  instead of leaving its own spinner up forever.
+- **`index.tsx` + `chat.tsx`** — resolve the scope from
+  `projectIdFromPathname(usePathname())` first, param second: the same precedence
+  the shell already adopted after the route param was observed going stale on
+  device. The shell and the screens inside it can no longer disagree about which
+  project they are rendering.
+
+**Test surface.** `app/__tests__/support/stubs/expo-router.tsx` grows an opt-in
+routing mode (path + route table + `<Slot/>`) and a `paramsBlind` fault; inert by
+default so no existing harness file changes behaviour.
+`app/__tests__/project-switch-reaches-the-wire.test.tsx` (7/0) asserts a SOCKET per
+tapped project, not that a spinner stopped. Six mutations, each proven applied by
+file hash, each failing its paired test.
+
+## 2026-07-31 — the Activity Inspector shows the CONVERSATION, not telemetry about it
+
+The panel shipped 2026-07-29 (`2026-07-29-activity-inspector.md`) answered "hung or working?" correctly and was kept. What it could not do was tell you what actually happened. Ryan, reading it on the phone:
+
+> "Inspector is good but can we see the actual detailed messages like would be shown in Claude Code session instead of these terse tool calls or whatever they are?"
+
+and, sharpening it:
+
+> "I like seeing tool calls, but they should be human readable names. And interleaves with the actual messages the model is outputting not just the si[ze]"
+
+So: keep the tool rows, fix their names, and put the model's own words on the same timeline. The unit of the view becomes a **turn transcript**, not an event log.
+
+#### What was actually wrong — measured on the device, not inferred
+
+`uiautomator dump` against the running app, drawer open. The panel's right edge is at x=320. Three separate defects, all visible in one dump:
+
+| Observed | Rows | Diagnosis |
+|---|---|---|
+| a 52-char label starting `mcp__` with x2 **=320** | 3 | clipped flush against the panel edge — running off |
+| a 27-char label starting `mcp__` with x2 **=320** | 2 | same, one namespace shorter |
+| text matching `^\d+ chars$` | 2 | the reply rendered as its own LENGTH |
+
+The 52-char rows are the ones that mattered most, and they were the most misleading thing on the screen.
+
+#### The finding: two of the three were NEVER CAPTURED, one was captured and thrown away
+
+This is the part a rendering-only pass would have got wrong.
+
+**Assistant text — captured, then reduced to a number.** `activity-inspector.ts` mapped `token` to ``detail: `${(ev.text ?? '').length} chars` ``. The text was right there in the event and was replaced by its length. The original rationale ("the reply already renders in chat") does not survive contact with the surface: the inspector is read while a turn is IN FLIGHT, when chat has rendered nothing yet, and on a WEDGED session, where chat will never render it at all. Rendering fix.
+
+**Tool results — never captured at all.** The hook's `HookInput` declared only `session_id` / `tool_name` / `tool_input`, and its POST body carried only `{session_id, phase, tool_name, detail}`. CC's `PostToolUse` payload carries `tool_response` (as `todo-sync.ts` already documented) and the hook never read the field. That is why a finished `tasks_list` row could not say one word about what it returned. **Source change.**
+
+**Tool arguments — captured, but only one field.** `summarizeToolInput` picked the first of `file_path|path|command|pattern|query|url|description|prompt` and returned `''` for anything else, deliberately, because unknown args "are frequently large and occasionally sensitive". Large is what the cap is for; sensitive is not a reason to blank the row, because the only destination is the OWNER's own authenticated panel rendering his own session — the same content chat already shows him. The blank had a real cost, and it produced the single most confusing row on the screen (below). Now falls back to a compact `key=value` render.
+
+#### The unreadable row was the assistant's entire message
+
+`mcp__neutron-<32 hex>__reply` is not a tool name, it is a transport address. `spawn.ts` names the dev-channel MCP server `neutron-${randomBytes(16).toString('hex')}` — a value that is DIFFERENT on every spawn and means nothing to anyone — and `dev-channel-impl.ts` registers `reply` on it with a single `text` argument holding "your COMPLETE response for this turn".
+
+So the mystery row in the screenshot was the agent's whole message, and the previous build discarded its content twice over: `text` was absent from the pick list, so the row carried no detail at all, and the label was the raw address, clipped mid-id with the one informative token (`reply`) at the far end where the truncation ate it.
+
+Two consequences:
+
+1. **`humanizeToolName`** parses `mcp__<server>__<tool>` → the TOOL becomes the label, the server is demoted to a dim `source` qualifier (kept, not discarded — a same-named tool from another server must stay distinguishable), and the random incarnation is stripped so the qualifier is stable across spawns. Matched as `-[0-9a-f]{8,}$`, which covers both the current 16-byte form and the pre-2026-07-20 4-byte one. Anything that does not parse passes through UNCHANGED: showing an odd name truthfully beats inventing a pretty wrong one. Note that `mcp__neutron__memory_search` was never "already readable" — it is the identical form, merely short enough to fit — so one rule fixes both.
+2. **The `reply` call IS the interleave.** The agent's words arrive at the hook at the exact instant it produces them, so a `reply` call now becomes an ASSISTANT MESSAGE row (`kind: 'token'`), peer to the tool rows on one chronological list. No merging of two streams was needed — the ordering was always correct in the ring; only the content was missing.
+
+#### The duplicate that interleaving creates, and why it is collapsed on ADJACENCY
+
+Wiring the `reply` call as an assistant row surfaces the same message twice: once from the hook, and once from the substrate's end-of-turn `token` — because `onReply` is precisely what pushes that token (`repl-session.ts`, "the 1:1 bridge: one reply → one token"). Same string, microseconds apart, and a transcript that prints the owner's message twice looks broken.
+
+Collapsed in `record` on the only shape the artifact can take: an assistant row landing immediately after an assistant row with identical content. Deliberately **not** a time window — the two arrivals are not reliably close (a slow sink POST lags) and adjacency is the precise property. Two genuinely repeated assistant messages in one turn would be separated by whatever prompted the second, so this cannot swallow real content; there is a test for exactly that. A collapsed duplicate also burns no `seq` and re-fans no frame.
+
+The `reply` tool's `post` phase is dropped outright — it returns a bare ack, and "finished replying" is noise beside the reply itself.
+
+#### Nothing runs off the right edge any more
+
+The overflow was the same *symptom* in both clients — a label that would not shrink — but **the operative property differs per engine, and conflating them would mislead the next person to debug this.**
+
+- **Web (CSS)**: `.car-actin-l { flex: 0 0 auto }` — explicitly no shrink. Replaced with a `.car-actin-c` content column at `flex: 1 1 auto; min-width: 0`, holding every text node. Here `min-width: 0` is load-bearing: CSS's default `min-width: auto` gives a flex item a min-content floor, so without the override it refuses to narrow below its longest unbroken word — and a 52-character id is one unbroken word.
+- **Mobile (Yoga)**: Yoga does **not** implement the CSS min-content floor, so `minWidth` was never the problem there. What was: Yoga defaults `flexShrink` to **0** where CSS defaults it to 1, so a `Text` with no explicit shrink simply will not narrow. The fix is `flex: 1` on the new `rowContent` column (which sets `flexShrink: 1` as well as claiming the remaining width) plus `flexShrink: 1` on the label; time+glyph moved into a fixed `rowGutter`. `minWidth: 0` is kept for parity with the web twin, not because Yoga needs it.
+
+Same fix shape, two different reasons. Both engines now wrap instead of overflowing.
+
+Long values truncate-with-expand rather than being cut: a row whose `body` says more than its `detail` is tappable/clickable, and the default collapsed state still shows real content (8 lines of prose, 2 lines of detail). `BODY_MAX` is 2 000 chars — the ring holds 200 rows per scope, so this is what bounds the buffer at ~400 KB/scope worst case and caps the WS frame fanned to every client. That is the honest price of content over counts.
+
+Assistant rows are rendered in the PROPORTIONAL face with a left rule; tool rows stay monospace. That contrast is what makes the model's own words findable at a glance in the stream.
+
+#### Privacy
+
+This feature renders the owner's private conversation in a PUBLIC repo, so every fixture here is synthesised: `a-command`, `a_tool`, `a-server`, `a synthesised assistant sentence`. No real message text, arguments, results, project names or ids appear in any test, fixture or commit. The device evidence above is reported as measurements (lengths, x-coordinates, row counts, `^\d+ chars$` matches) precisely so the finding could be recorded without the content that produced it.
+
+#### Tests
+
+`open/activity-inspector.test.ts` 40 (was 24) — `humanizeToolName` incl. incarnation-stripping and unparseable pass-through; reply-as-assistant; the dropped post-ack; the adjacency dedupe and its three negative cases; body/detail newline handling; `BODY_MAX`. `activity-tap-hook.test.ts` 30 — `tool_response` forwarding, the reply `text` argument, `renderToolArgs`/`renderToolResult` across the five result shapes incl. unknown-shape fallthrough. `activity-inspector-panel.test.tsx` 21 — prose rendering with no `chars` anywhere, human label + demoted source, expand/collapse, no affordance when body would repeat detail, and one chronological list. Plus wire-parse coverage on both clients.
+
+**Two assertions were rewritten rather than deleted, with the reason recorded inline**, because both encoded the contract this change inverts: `detail: '5000 chars'` (the size-not-content bug) and `summarizeToolInput → ''` for unknown args.
+
+`bunx tsc --noEmit` clean on the root and on `app/`.
+
+#### Honest gaps
+
+- **`thinking` rows remain unreachable.** The persistent-REPL adapter emits no `thinking` event, so the intermediate reasoning a real Claude Code transcript shows between tool calls is not on the wire at all. What interleaves today is tool calls + the agent's user-visible messages. Closing that needs an adapter change, not a panel change.
+- **One assistant message per turn on the shipped path.** `reply` is called exactly once per turn by contract, so the transcript reads tools-then-message rather than alternating prose. Multi-part streamed replies would render in order for free if the adapter ever sends them.
+- Device AFTER-evidence limits are recorded in the PR rather than here, since they concern the verification run and not the built artifact.
+
+## 2026-07-31 — the Android keyboard inset was a cross-coordinate-space subtraction
+
+The composer was still behind the keyboard on Android after the 2026-07-29 fix. Owner,
+with a screenshot: *"Text entry window and send button still not visible when keyboard is
+showing"* — "still" being the operative word, because this is the second attempt.
+
+#### What was actually wrong
+
+`2026-07-29-mobile-send-webcrypto-and-keyboard-inset.md` replaced `KeyboardAvoidingView`
+with a window-space subtraction — the container's bottom from `measureInWindow`, minus the
+keyboard's `endCoordinates.screenY` — and asserted in `lib/keyboard-inset.ts` that it
+"degrades correctly on Android". It does not, and the assertion was never checked against
+a device or against RN's source. **The two terms are in different coordinate spaces on
+Android**, read this session out of the installed `react-native@0.81.5`:
+
+| term | value | source |
+| --- | --- | --- |
+| `endCoordinates.screenY` | `mVisibleViewArea.bottom` — a raw SCREEN y | `ReactAndroid/.../ReactRootView.java:891,913` |
+| `measureInWindow().y` | shadow-tree frame + viewport offset, where the Android offset is `locationOnScreen.y - visibleWindowFrame.top` — screen y MINUS THE STATUS BAR | `.../runtime/ReactSurfaceView.kt:93-105`, consumed via `ReactCommon/react/renderer/dom/DOM.cpp:508` |
+
+So the container's bottom was reported one status-bar-height above where the keyboard's
+`screenY` lived, and the subtraction came out short by exactly that.
+
+#### Measured on the device, before any code changed
+
+Android 14 emulator, 320x640 mdpi, status bar 24px. With the keyboard up in a project's
+Chat tab, `adb shell dumpsys window displays` reports the IME frame at `[0,405][320,640]`
+(height 235), and `uiautomator dump` reports `composer-bar` at `[72,332][320,429]`.
+
+- padding applied: `640 - 429 = 211`
+- padding required: `640 - 405 = 235`
+- shortfall: **24px — the status-bar height**, and `composer-bar` ran 24px past the
+  keyboard's top edge with the send control in that strip.
+
+The same measurement in the General project came out at `[72,356][320,453]` — 48px behind
+the keyboard, with the text field itself clipped in half. `getWindowVisibleDisplayFrame()`
+is sampled inside `onGlobalLayout` and is not stable across the IME animation, so the
+shortfall is at least the status bar and sometimes worse. It is never zero.
+
+Why edge-to-edge is what exposed this: `adjustResize` stopped resizing the window once the
+app went edge-to-edge (`app/app.json` android `edgeToEdgeEnabled: true`; targetSdk 36 makes
+it non-optional regardless), so nothing shrinks on the app's behalf any more.
+
+#### The fix
+
+Android stops subtracting and adds inside one coordinate space instead
+(`app/lib/keyboard-inset.ts` `androidKeyboardInset`):
+
+```
+inset = endCoordinates.height + useSafeAreaInsets().bottom
+```
+
+RN reports the Android keyboard NET of the navigation bar it draws over —
+`height = imeInsets.bottom - barInsets.bottom` (`ReactRootView.java:902-904`) — and
+safe-area-context's bottom inset is that same `systemBars().bottom`, deliberately excluding
+the IME (`react-native-safe-area-context/android/.../SafeAreaUtils.kt:13-25`). Adding them
+back together reconstructs `imeInsets.bottom` exactly. Both come from `WindowInsets` on the
+same window, so the mistake above is not available here.
+
+iOS is untouched: the measured window-space overlap is correct there and is what shipped.
+`app/lib/use-keyboard-inset.ts` now picks the strategy by platform, with the platform as an
+injectable seam so both paths are testable off-device.
+
+**Precondition, now stated in the code:** the surface's bottom edge is the window's bottom
+edge. Verified on device — with the keyboard down `chat-keyboard-inset` measures
+`[72,151][320,640]` on a 640px screen. It is structural (the project shell applies a top
+inset only, and chat is its bottom-most child), and if bottom chrome is ever added the
+failure mode is a visible dead band rather than a hidden composer.
+
+#### Also in this change
+
+The composer's duplicate hint is gone. `ChatSyncSurface` rendered
+*"Or type a response to the prompt above."* as a permanent extra line directly above the
+keyboard while the placeholder two lines away already said *"Or type a response…"* — the
+same instruction twice, in the region with the least room. Owner: *"Unnecessary"*. The
+`hint` prop stays for the upload affordance, which says something the placeholder does not.
+
+#### Tests
+
+`app/__tests__/chat-keyboard-avoidance-android.test.tsx` (new, 8 cases) drives the real
+keyboard subscription on `Platform.OS === 'android'`. The discriminating case feeds a
+deliberately absurd `screenY` and asserts the inset does not move — under the old
+implementation that reports 852 instead of 360. Mutation-tested: forcing the window-space
+branch back on fails 4 of the 8. `app/__tests__/keyboard-inset.test.ts` gains 5 pure cases
+for the arithmetic, including the no-navigation-bar device where the two numbers coincide
+(which is why the emulator hides half of the defect).
+
+#### NOT covered
+
+The harness fakes every element's layout rect, so no JS test proves the visual result.
+"The composer is visible above the keyboard" is a DEVICE claim and is settled with
+`uiautomator` bounds, not here.
+
+#### Delivery
+
+JS only — no `app.json`, manifest, or native-module change. Over-the-air deliverable.
+
+## 2026-07-31 — the chat composer spans the viewport instead of the rail's column
+
+Branch `feat/app-full-width-composer`. New `app/lib/composer-dock.tsx`; the project
+shell (`app/app/projects/[id]/_layout.tsx`) grows a full-width bottom band; the chat
+surface (`app/components/ChatSyncSurface.tsx`) publishes its composer into it.
+
+**The ask.** The owner: *"would it be possible to have the text entry box take the full
+width of the screen instead of being shortened by the project rail?"* Every messaging
+app this is measured against runs the composer edge to edge across the bottom. Ours did
+not, and the reason was structural rather than cosmetic.
+
+**Why it was narrow.** The mobile shell is a ROW — a 72pt project rail on the left, a
+column of tab bar + content on the right — and the composer was the last child of the
+chat surface, which lives inside that right-hand column. So the rail took 72pt off the
+input's leading edge while the transcript above it kept the full width.
+
+**Why not just move it left.** A negative margin (or a negative `left`) does escape the
+parent's box in the paint, and then the escaped strip is DEAD on Android: a `ViewGroup`
+does not dispatch touches to a child outside its own bounds. The left third of the field
+would have drawn and refused to focus. A control that is visible and untappable is worse
+than one that is merely narrow, and that failure mode is invisible to a hierarchy dump —
+which is exactly the class of false verification this repo has been burned by.
+
+**So the composer moves in the TREE.** The shell renders a band as the last child of its
+full-width column, under BOTH the mobile rail row and the wide (web) layout — one
+placement, no per-layout branch. The chat surface publishes into it through a small
+context + store (`useComposerDock`). The rail row above stays `flex: 1`, so the band takes
+its natural height OUT of the row rather than covering it: the rail's `ScrollView` simply
+gets shorter and no rail entry can end up underneath the composer.
+
+**A store, not `useState` in the shell.** The chat surface re-renders on every inbound
+token; holding the published element in the shell's own state would re-render the rail
+(animated rows) and the tab bar at that rate. The band subscribes to a mutable store via
+`useSyncExternalStore`, so a republish re-renders exactly one component. Ownership is
+token-keyed, because two chat surfaces can be mounted for a frame during a route
+transition and the departing one must not blank a band the arriving one has claimed.
+
+**No inline fallback.** A surface mounted with no band in scope throws. A second placement
+would be the dual code path this repo bans, and the defect it would hide — a composer
+drawn back inside the column — is the whole thing being fixed. The test harness supplies
+the band the way the shell does (`app/__tests__/support/mount.tsx`), so existing
+mounted-screen tests needed no edits.
+
+#### The keyboard lift moved WITH the composer, deliberately
+
+This is the part that had to be got right rather than assumed: the lift has already
+regressed twice and the owner reported it both times.
+
+`useKeyboardInset` measures a container whose bottom edge IS the window's bottom edge —
+iOS subtracts the keyboard's `screenY` from it, and Android's `androidKeyboardInset`
+documents the same precondition. After this change the chat surface stops at the band's
+top, so it is no longer that container. The measured/padded pair therefore rides along
+INTO the band: an outer view that carries the ref and is never padded, and an inner view
+that carries `paddingBottom`. The band grows by the inset, the `flex: 1` row above gives
+up the space, and the transcript shrinks exactly as it did before. The voice recorder
+overlay moved too — it renders directly above the composer bar and must span the same
+width.
+
+#### Verified on a device
+
+A cloud Genymotion Pixel 9 (Android 14, 1080×2424) — a clean instance, never pointed at
+any production instance. An EAS development client running this branch's JS from Metro,
+writing to a throwaway local Open instance over `adb reverse`. `uiautomator` bounds, with
+a screenshot read at every step (a node in the hierarchy is not a visible, correctly
+positioned control):
+
+| State | `composer-bar` | `project-rail` | `composer-dock` |
+|---|---|---|---|
+| Keyboard down | `[0,2156][1080,2424]` | `[0,271][190,2156]` | `[0,2156][1080,2424]` |
+| Keyboard up | `[0,1380][1080,1521]` | `[0,271][190,1380]` | `[0,1380][1080,2424]` |
+| Keyboard up, 5-line draft | `[0,1155][1080,1521]` | `[0,271][190,1155]` | `[0,1155][1080,2424]` |
+
+- **Full width**: the bar starts at `x=0` in every state — the leading `+` now sits to the
+  LEFT of where the rail ends (`x=190`). Before this change the bar began at `x=190`.
+- **The rail is never covered**: its bounds and the band's are disjoint and adjacent in
+  every state — the rail ends at exactly the y the band begins. Its last entry
+  (`rail-create`) was pressed and opened the create sheet.
+- **The keyboard inset holds**: with the IME up the band grew by the lift and the bar's
+  bottom (`y=1521`) sits clear above it, with the transcript shrinking to match. Screenshot
+  confirms the bar and both its controls fully visible, not merely present.
+- **Multi-line**: a five-line draft grew the field upward, the bar stayed clear of the IME,
+  the send arrow stayed pinned to the last line and the leading `+` stayed bottom-aligned.
+- **Send still works from the band**: the multi-line draft was sent to the local instance
+  and rendered as a delivered user bubble; the control swapped back to the mic.
+- **The usage meter is untouched**: it is the tab band's bottom seam at `y≈403`, ~1750px
+  above the composer. No overlap and no second seam.
+
+#### In the harness
+
+`app/__tests__/composer-full-width-dock.test.tsx` (new, 5 tests) asserts the placement as
+a containment question about real nodes: the bar is NOT a descendant of the
+rail-constrained column, IS a descendant of the band, and the band is a SIBLING of the
+rail row. Plus: send works from the band, the padded keyboard-inset node is the one
+living in the band, and a screen with no composer draws an empty band.
+
+**Mutation-tested.** Rendering `<InputComposer>` inline again (the pre-change placement)
+turns the two placement tests red; the existing
+`chat-keyboard-avoidance{,-android}.test.tsx` (14 tests) pass unchanged through the
+docked path, which is what proves the lift survived the move rather than being re-pinned
+to something that no longer holds the input.
+
+#### Not covered
+
+- **iOS.** The measured-overlap path is unchanged in arithmetic and its container now has
+  a strictly better claim to being window-bottom-anchored, but it has not been run on an
+  iPhone. The harness covers the wiring on both platforms; the visual result is a device
+  claim on iOS.
+- **A rail long enough to SCROLL.** Nine extra projects were created to force it, but the
+  host had become too loaded for Metro to serve a manifest inside the dev client's socket
+  timeout, and the reload could not be completed. What IS settled is the geometry the
+  concern rests on: the rail is a flex child of the row, and its measured bounds end
+  exactly where the band begins in every state above, so the band cannot overlap a rail
+  entry regardless of list length — a longer list scrolls rather than being clipped.
+
+#### Scope
+
+JS only — no `app.json`, manifest, native module or dependency change. Ships over the air;
+no native rebuild.
+
+**SYSTEM-OVERVIEW.md changes: none.** No new HTTP surface, lifecycle behaviour, deploy
+step, Core tier mechanic, onboarding phase or env flag; the doc does not describe the
+project shell's internal layout.
+
+## 2026-07-31 — the composer copies iMessage (replacing the WhatsApp pass)
+
+Yesterday's change (`333ca1d7`, PR #29) rebuilt the composer to copy WhatsApp on Android.
+That was the wrong target. The owner's standing instruction has been *"Copy the iMessage UI
+affordances for text entry and send button exactly"*; WhatsApp was only ever offered as a
+**fallback for affordances Android genuinely cannot do**, and no such blocker was ever
+established. The owner, 2026-07-31: *"the design is supposed to be imessage. Whatsapp was
+ONLY suggested if there's something in the imessage UX that just CANNOT be done on
+android."*
+
+So this converts `333ca1d7` to iMessage rather than layering a third style on top of it.
+**Nothing in the iMessage composer turned out to be blocked on Android.** The only things
+not reproducible are Apple's proprietary assets — SF Pro and the exact `arrow.up` outline —
+which are approximated, as expected, and are not a capability blocker.
+
+#### The reference, and which iMessage
+
+**Target: the iOS 17/18 composer, deliberately — NOT iOS 26's Liquid Glass treatment.**
+The reasoning matters, because picking the newer one would have repeated the mistake this
+change exists to correct:
+
+1. Liquid Glass depends on real-time backdrop blur sampling the content behind it. Android
+   cannot reproduce that faithfully, so targeting it would mean approximating the *defining
+   characteristic* of the look — i.e. substituting a design on a real blocker, at the one
+   place where a blocker actually exists.
+2. The outlined pill with the circular send button is the iMessage composer people picture.
+   It is the recognisable one.
+3. It replicates cleanly with no approximation, so "copy it exactly" can be met rather than
+   gestured at.
+
+Sources: a pixel measurement of primary iOS 17/18 assets (row-scanning the send glyph, which
+is what settled the arrowhead question below), plus Stream's iOS Chat SDK guide to restyling
+its own composer as iMessage
+(<https://getstream.io/chat/docs/sdk/ios/uikit/components/message-composer/>) — a third party
+independently describing the same arrangement: *move the send button from the trailing
+container to the input container*, make it *aligned to bottom* inside that container, set the
+input's *corner radius to 18*, and keep the attachment button in the **leading** container.
+Its `cornerRadius = 18` against a ~36pt field is the same "radius = half the resting height"
+pill implemented here, arrived at independently.
+
+**Not verified on a device** — see "What is not verified" below.
+
+#### What changed, element by element
+
+| Element | Was (WhatsApp pass) | Now (iMessage) |
+|---|---|---|
+| Text field | Filled `surface_raised` capsule, no stroke | **Outlined** pill — transparent fill, `StyleSheet.hairlineWidth` stroke in `THEME.hairline` |
+| Send control | 40pt circle **outside** the field, to its right | Filled circle **inside** the field at the trailing edge, diameter = the field's inner height |
+| Send glyph | Paper plane (filled triangle + notch) | **Upward arrow** — open chevron + equal-width shaft, round caps |
+| Leading side | Nothing | A single **`+`** in a filled circle, outside the field |
+| Attachment | 📎 emoji inside the field's trailing edge | Folded into the leading `+` (same handler) |
+| Mic (empty state) | 40pt filled circle outside the field | A **bare glyph** in the same in-field slot the send arrow uses |
+
+**The send circle's diameter is derived, not chosen** — it is the field's inner height, so
+the circle is concentric with the pill's own rounded cap at rest. That is what iMessage's
+send button looks like tucked into the trailing end, and it means the proportion cannot drift
+if the field's height or padding is ever retuned. There is no arbitrary constant to rot.
+
+**The resting mic is a bare glyph, no circle behind it** — which is how iOS 17/18 renders the
+control in this slot, and it is what makes the swap *read*: a quiet mark while the field is
+empty, a filled accent circle the moment there is something to send. A filled circle in both
+states would say nothing by changing. It still fills while a hold is in progress, so the
+recording state stays unmistakable.
+
+**The arrowhead is an OPEN CHEVRON, not a solid triangle.** Row-scanning the primary asset
+shows three separate ink runs across the head — left arm, shaft, right arm — which is only
+possible if the head is two strokes rather than a filled wedge, and the shaft is the same
+width as the arms. The solid-triangle version is the common wrong one and is exactly what
+makes iMessage clones look cheap.
+
+#### The measured numbers
+
+Scale-calibrated off Apple's own iPhone User Guide screenshots and Send-button asset. The
+glyph ratios are expressed against the button's DIAMETER so they hold at any size, and the
+code derives every value from them rather than hardcoding a point size:
+
+| | Measured (iOS 17/18) | Implemented |
+|---|---|---|
+| Field height | 36–37 pt | 36 |
+| Field radius | 18 pt (= height/2, arc-fitted) | `FIELD_MIN_HEIGHT_PT / 2` |
+| Field border | 1 px hairline, fill = background | `StyleSheet.hairlineWidth`, transparent |
+| `+` circle | Ø 35 pt (≈95% of field height) | `FIELD_MIN_HEIGHT_PT * 0.95` |
+| `+` glyph | 13–14 pt | 13.5 |
+| Gap `+` → field | 12 pt | `SPACING.md` |
+| Text leading inset | ≈15 pt | `SPACING.lg` (16) |
+| Arrow shaft width | 0.069 × D | `ARROW_SHAFT_RATIO` |
+| Arrow glyph height | 0.52 × D | `ARROW_HEIGHT_RATIO` |
+| Arrowhead width | 0.41 × D (≈6× shaft) | `ARROW_HEAD_RATIO` — verifies at 5.9× |
+| Chevron included angle | ≈80° (40° per side) | `ARROW_ANGLE_DEG = 40` |
+
+The 80° head is the detail a naive build gets wrong: rotating the arms a convenient 45°
+gives a 90° head that reads as too pointy. The arm length is solved from the head's
+half-width and the angle, so the tips land exactly on the measured head width and the arms
+meet the shaft exactly at the apex — checked numerically, not by eye.
+
+A rotated bar's layout box extends past its parent, so both the glyph and the send button
+are explicitly `overflow: 'visible'`; without that Android would clip the arms.
+
+**One number is NOT measured: the send circle's diameter.** No Apple iOS 17/18 screenshot
+with text typed could be found, so the on-screen diameter is unconfirmed — the pixel pass
+could only extrapolate (≈28 pt) from iOS 26's uniform 6 pt inset. The value here is instead
+DERIVED from the field's inner height, on instruction, so there is no arbitrary constant to
+rot. If it reads too large on a device, it is a one-line change and the extrapolated ≈28 pt
+is the alternative to try.
+
+**The up-arrow stays.** The owner asked *"Is this up arrow for send how imessage does it? It
+looks kinda ugly."* The honest answer is yes — that is the mark iMessage uses — and "copy it
+exactly" means keeping it. What was actually ugly was the *rendering*: the pre-#29 code drew
+a literal `↑` in a `<Text>`, so its size, weight and vertical position all came from the
+system font's metrics, which is why it sat low in its circle. It is drawn from views now, so
+its geometry is ours: a shaft plus two arms, each bar `borderRadius`-capped to give the round
+caps and round apex join SF Symbols' arrows have. The arms are positioned by their centres,
+derived through `Math.SQRT1_2` from the apex, so the head stays attached to the shaft if the
+box is ever retuned.
+
+There is still no icon set in the dependency tree — re-checked `app/package.json` this
+change; `expo-audio` was the only dependency PR #24 added, and there is still no
+`@expo/vector-icons` and no `react-native-svg`. This ships over the air, so a native font or
+SVG package remains unavailable and every glyph is drawn from views.
+
+**The paperclip became the `+` rather than sitting beside it.** iMessage has exactly one
+control on the leading side, and its job is to open the attachment drawer — which is the job
+the paperclip already did. Wiring the `+` to the existing `handleAttachPress` keeps the real
+file picker behind it; a `+` that opened nothing would be the same no-op-control defect this
+composer refuses to ship elsewhere.
+
+**The tint is the app's own accent** (`THEME.accent`), not Apple's blue — for the send
+circle's fill and for the caret, as before.
+
+#### The one deliberate deviation from Apple
+
+iOS 17/18 puts a **dictation** mic in the field's trailing slot — speech-to-text into the
+field. Ours puts the **voice-message recorder** there instead. Recording and sending audio is
+a hard requirement here, and this is the slot that gesture belongs in. The position, the
+swap and the mark are iMessage's; only what the control *does* differs.
+
+Worth one line of justification: iOS 26 later replaced the dictation mic in this same slot
+with a waveform Record-Audio control. Apple converged on this usage.
+
+#### What was preserved
+
+- **The empty/typing swap.** Mic while empty, send arrow once there is something to send.
+  Both press and long-press still dispatch; the hold still tracks the finger, so releasing
+  over the button commits and sliding away past `VOICE_CANCEL_SLIDE_PT` cancels. The gesture
+  code is untouched — only the button's size and its position in the tree changed.
+- **The keyboard inset.** `styles.wrap`'s `paddingBottom: bottom_inset`, the
+  `COMPOSER_RESTING_BOTTOM_PT` fallback, and `ChatSyncSurface`'s `composerBottomInset` call
+  are all byte-identical — the diff touches none of them. `app/__tests__/imessage-chat-ux.test.tsx`
+  (25 cases, which is where that regression is pinned) is green. The bar also got 4pt
+  **shorter** — its height was previously driven by the 40pt outside button and is now
+  driven by the 36pt field — so there is less of it to clip, not more.
+- **Growth.** One line at rest, six lines maximum, past which the `TextInput` scrolls its own
+  content and the bar stops rising. Both the leading `+` and the in-field action button are
+  bottom-aligned, so they track the LAST line rather than centring against a grown field.
+
+#### Tests
+
+`app/__tests__/composer-action-swap.test.tsx` — rewritten, 8 cases. Three are new and pin
+the ARRANGEMENT, which is the thing this change is actually about and the thing a future
+restyle will break first:
+
+- the send arrow is a DESCENDANT of the field, not a sibling;
+- the mic is too (it shares that slot);
+- the `+` is NOT a descendant of the field.
+
+These are DOM-containment facts under the react-native-web harness, not pixel facts, so they
+are honestly testable. **Mutation-tested**: moving the action slot back outside the field —
+the WhatsApp arrangement — fails exactly the first two and leaves the other six green. They
+are not false positives.
+
+#### What is NOT verified
+
+- **Nothing was verified on a device or emulator.** The Android emulator was taken out of use
+  mid-change at the owner's request (it was loading his laptop), so there is no screenshot and
+  no `uiautomator` bounds behind any of this. Everything visual here — the pill's radius, the
+  stroke's visibility against `THEME.background`, the arrow's optical centring in its circle,
+  the button staying pinned to the last line as the field grows — is an UNVERIFIED claim
+  resting on the geometry in the source. It is the first thing to check on the next device pass.
+- **The stroke's contrast is the specific risk.** `THEME.hairline` is `#1f1f1f` on a
+  `#0a0a0a` background. That is a deliberate token choice (it is the theme's designated
+  border colour, and inventing a new one would have contended with concurrent work in
+  `theme.ts`), but it is a much darker stroke than iMessage's, and an outlined field that
+  cannot be seen is worse than the filled capsule it replaced. If it does not read on device,
+  the fix is a new theme token, not a local hex literal.
+- **No reference screenshot of iMessage was used** — see "The reference" above.
+
+#### Adjacent gap found, NOT fixed here
+
+**The voice recorder from PR #24 (`1bddf3df`) is built but not wired.** This contradicts a
+belief in circulation that the mic is "already wired via `expo-audio`" — it is not, and the
+citations below are from the code as it stands on `main` today, not from memory.
+`ChatSyncSurface`
+renders `<InputComposer>` with no `onVoiceTap` / `onVoiceHoldStart` / `onVoiceHoldMove` /
+`onVoiceHoldEnd` props (`app/components/ChatSyncSurface.tsx:527-537`), and
+`app/components/VoiceMicButton.tsx` — the component PR #24 added to carry those gestures —
+has no call site anywhere outside its own test. So the mic still falls through to
+`VOICE_UNAVAILABLE_NOTICE`. `expo-audio` is also absent from the installed
+`app/node_modules`, so `use-voice-recorder.ts` does not currently typecheck locally.
+
+That is a real "built but never wired" gap, but it is a FEATURE change with permissions,
+capture and upload behind it — not a restyle — and it could not have been exercised here
+anyway (recording against the owner's live instance was out of bounds, and then the emulator was
+withdrawn). It needs its own change and its own verification. Left untouched and reported
+rather than half-wired.
+
+#### Scope
+
+JS only — no `app.json`, manifest, or native-module change, so this ships over the air.
+
+**SYSTEM-OVERVIEW.md changes: none.** This is a visual restyle of an existing component — no
+new module, HTTP surface, lifecycle behaviour, deploy step, Core tier mechanic,
+onboarding phase, or env flag. The doc does not describe the input composer's appearance.
+
+## 2026-07-31 — the composer copies WhatsApp-on-Android's affordances
+
+The owner, on the send control: *"Is this up arrow for send how imessage does it? It looks
+kinda ugly."* Then, after an iMessage pass: *"In that case we copy Whatsapp on Android"* —
+he is on Android and wanted the platform-native pattern rather than an iOS one ported onto
+it. He supplied a real WhatsApp dark-mode screenshot, which is what this was built against.
+
+#### What the reference actually shows
+
+Read off the supplied frame, not from memory — two of these corrected the brief:
+
+1. Capsule field, **filled** a shade lighter than the bar, radius = half height.
+2. An emoji/sticker button inside the field's leading edge.
+3. The caret tinted with the app's accent colour.
+4. **A paperclip only** at the field's trailing edge — no camera.
+5. **Outside** the capsule to its right, a filled circle containing a **paper plane**, not
+   an up-arrow.
+6. The circle vertically centred against a one-line field.
+
+#### What was built
+
+- **The field** is now a capsule (`borderRadius` = half the resting height, so one line is a
+  true pill and extra lines grow it into a rounded box), filled with `surface_raised`
+  against the bar's `background`. The paperclip moved INSIDE it at the trailing edge.
+- **Growth is real**: `minHeight` one line, `maxHeight` six lines
+  (`FIELD_MAX_LINES`), past which the `TextInput` scrolls its own content and the bar stops
+  rising. This is the affordance most often skipped.
+- **The action button sits outside the capsule** and **swaps by content** — microphone while
+  the field is empty, send once there is something to send. The row is bottom-aligned so
+  both the button and the paperclip track the LAST line as the field grows; centring them
+  against a grown field is the tell that a pattern was copied from a one-line screenshot.
+- **The caret is accent-tinted** (`selectionColor` + Android's `cursorColor`).
+- **Touch targets** are ≥44pt via `hitSlop`, without inflating the artwork.
+
+#### The glyphs are drawn, not typed
+
+There is no icon set in the dependency tree — no `@expo/vector-icons`, no
+`react-native-svg` — and this has to ship over the air, so a native font or SVG package was
+not an option. Both marks are built from views:
+
+- **Paper plane**: a right-pointing filled triangle via the zero-size-view border trick,
+  plus a second triangle in the button's fill colour painted over the trailing edge to cut
+  the notch that stops it reading as a "play" arrow. A right-pointing triangle carries its
+  ink centroid a third of the way from base to apex, so it is nudged 2pt right to sit
+  optically centred rather than geometrically.
+- **Microphone**: a capsule head, a U-cradle (a box with a transparent top border and
+  rounded bottom corners), and a stem.
+
+This is also why the old send mark was wrong: it was a `Text` glyph (`↑`), so its position
+came from the system font's ascent/descent and it sat low in its circle with whatever
+weight the font happened to give it.
+
+#### The voice button is a real control with a seam, not a placeholder
+
+Voice messages are being built as a separate module which owns capture, permissions and
+upload. The composer owns only the BUTTON, and reports what the finger did through
+`onVoiceTap` / `onVoiceHoldStart` / `onVoiceHoldMove` / `onVoiceHoldEnd`, covering both
+interactions the recorder needs:
+
+- **Hold**: long-press starts; sliding past `VOICE_CANCEL_SLIDE_PT` flips the control to a
+  cancelling state (it turns `danger`-coloured and its accessibility label changes);
+  releasing reports `'send'` or `'cancel'`.
+- **Tap**: reported through `onVoiceTap` for the tap-to-start/tap-to-stop path.
+
+Travel counts in EITHER direction. The reference slides left, but a one-handed thumb arcs,
+and a gesture that only cancels one way strands whoever arcs the other.
+
+**Until the recorder is wired, pressing the mic says so** — `VOICE_UNAVAILABLE_NOTICE`
+renders under the bar for a few seconds. A control that looks live and silently does
+nothing is exactly the failure this avoids, and there is a test for it.
+
+#### NOT ported, deliberately
+
+The reference's **emoji/sticker button** at the field's leading edge. This app has no emoji
+picker to open (no picker component, no such dependency), and a button that opens nothing is
+the same defect as a microphone that records nothing. The leading edge is plain padding
+until there is a picker behind it.
+
+#### Tests
+
+`app/__tests__/composer-action-swap.test.tsx` (new, 5 cases): the mic is mounted while
+empty, the send plane replaces it on the first character, the mic returns after a send, the
+unwired mic admits it rather than pretending, and the paperclip survived the move inside the
+capsule. The existing composer suites (`imessage-chat-ux`, `mobile-chat-send-on-device`)
+stay green against the restructured tree.
+
+**Honest boundary:** these assert WHICH CONTROL IS MOUNTED. The harness fakes every layout
+rect, so capsule radius, last-line alignment and optical centring are DEVICE claims and are
+settled with screenshots and `uiautomator` bounds, not here.
+
+#### Delivery
+
+JS only — no `app.json`, manifest, or native-module change, so this ships over the air. The
+voice RECORDER will need a native audio dependency and therefore a real build; keeping the
+button and the recorder in separate changes is what lets this half ship ahead of it.
+
+## 2026-07-31 — the chat surface stopped narrating the socket
+
+Branch `fix/quiet-connection-status`. `app/components/ConnectionNotice.tsx` (new),
+`app/components/ChatSyncSurface.tsx`,
+`app/__tests__/connection-notice-quiet.test.tsx` (new).
+
+**What was on screen.** `ChatSyncSurface` carried a `StatusStrip` that mapped the
+`ConnStatus` machine straight to text: `'Connecting…'`, `'Reconnecting…'`,
+`'Disconnected'`, `'Sending N…'`. Opening a project mounts a fresh chat surface,
+which attaches a session and drives `idle → connecting → open`, so the word
+"Connecting…" appeared on **every project switch** — several times a minute. The
+owner's verdict: *"I don't want to see the word 'connecting…' every time I switch
+projects… Otherwise just assume we are connected. Users don't need to see this."*
+Reconnecting a socket is routine mechanics; rendering it as a status turns a
+normal event into something that reads as a fault.
+
+**Two different facts were hiding behind one label.** "A socket is negotiating" is
+plumbing and is now gone with no replacement. "Your message is not going
+anywhere" is real information and still reaches the owner, by three routes, none
+of which is the old label:
+
+- the per-bubble delivery glyph — 🕓 queued → ✓ sent → ✓✓ delivered, and ⚠️ with a
+  retry affordance once the ack times out (`lib/chat-core/chat-render-model.ts`
+  `deliveryState`). This is the iMessage-shaped, per-message channel and it is
+  untouched; it is why the thread-level `'Sending N…'` band could go — that band
+  duplicated the tick and flashed a layout shift on every single send;
+- `sendError`, instant and unthrottled — a send that could not even be queued
+  locally produces no bubble at all, so the strip remains its only channel;
+- the new offline line, once the outage is no longer plausibly a blip.
+
+**The threshold is derived, not chosen by feel.** `OFFLINE_NOTICE_AFTER_MS` is
+**15 000 ms**, matching `ChatWsClient`'s default `maxBackoffMs`
+(`chat-core/ws-client.ts`). Backoff runs 500 → 1000 → 2000 → 4000 → 8000 ms, which
+is 15 500 ms of delay spent across five failed attempts before the ceiling is
+reached — so when the notice fires, the reconnect machine has stopped believing in
+a fast recovery too. A healthy reconnect (project switch, foreground resume,
+wifi→cellular handoff) lands on the first or second round, inside ~2 s, so a
+routine switch misses this by roughly an order of magnitude. Erring long is
+deliberate: a false "Offline" is the exact anxiety being removed, and a late-by-
+ten-seconds true one costs nothing while the 🕓/⚠️ glyphs carry per-send truth
+throughout.
+
+**It cannot latch, and it cannot be defeated by flapping.** The deadline effect
+keys on the BOOLEAN health (`open`/`idle` vs the rest), never on the raw status
+string. A dead connection cycles `connecting → reconnecting → closed →
+reconnecting`, and a timer keyed on the status would be torn down and re-armed on
+every transition — never firing, so a permanent outage would report nothing at
+all. Health only flips when the connection genuinely returns, which is also the
+only moment the notice may clear; the pure decision re-checks health ahead of the
+elapsed flag so a stale `true` cannot survive one render.
+
+**Placement is the existing pattern**, not a new one: the same hairline-separated
+caption band above the transcript that the old strip used. The change is that it
+is now rare. Copy is `Offline`, or `Offline — N message(s) waiting to send` when
+sends are stacked up behind the outage.
+
+**Also in this PR (drive-by, one line):** the composer placeholder is now the
+constant `'Message'` — after the rebase over #40 that prop is passed where the
+surface publishes the composer into the shell's full-width dock
+(`useComposerDock`), not where the composer used to sit. It used to swap to `'Or type a response…'` whenever an agent
+prompt allowed freeform — the same sentence already removed from the hint line
+above the composer, so the complaint stayed on screen in the ghost text. "You may
+type instead of tapping" belongs in the prompt that offers the buttons; a
+placeholder that mutates under the cursor reads as a glitch.
+
+**Proof.** `app/__tests__/connection-notice-quiet.test.tsx`, 13 assertions, real
+timers (the component takes an `offlineAfterMs` seam so the suite need not sit
+through a real 15 s outage; nothing here passes because a clock was mocked).
+Mutation-tested — each of these makes the suite red:
+
+| mutation | tests that fail |
+|---|---|
+| indicator deleted (never speaks) | 5 |
+| deadline keyed on the raw status (flapping re-arms forever) | 1 — the flapping guard |
+| healthy short-circuit removed (the notice latches past recovery) | 1 |
+| old behaviour restored (`'Connecting…'` on connect) | 4 |
+
+**JS-only, therefore OTA-shippable**: two `.tsx` files plus a test, no native
+module, no new dependency, no `app.config`/`eas.json`/manifest change — it ships
+over `expo-updates` without a store build.
+
+## 2026-07-31 — a held voice message no longer loses its opening
+
+Branch `fix/voice-capture-on-press-in`. `app/components/InputComposer.tsx`,
+`app/lib/voice-composer-handlers.ts`, `app/lib/use-voice-recorder.ts` (docs only),
+`app/__tests__/voice-capture-starts-on-touch-down.test.tsx` (new).
+
+**The defect was in the gesture, not the recorder.** PR #34 wired capture to
+`onVoiceHoldStart`, which the composer fires from the mic's `onLongPress`, and the
+mic carries `delayLongPress={250}` (`InputComposer.tsx`). So for the first quarter
+of a second of every hold the recogniser was deciding "tap or hold?" while the
+microphone was still shut. Nobody waits for that verdict before speaking — people
+start talking as they press — so a held message opened mid-syllable. Tap mode was
+unaffected, which is exactly why it read as a recorder bug.
+
+**Measured, not inferred.** The prior "~250 ms" figure came from reading the
+constant. The harness reproduces the real gesture — the real react-native-web
+`Pressable`, the real Pressability classification delay (`in@54 / long@305 /
+out@906` for a held press), a real `Date.now()` clock, the real composer, recorder
+hook and chat surface, with only the microphone stubbed — and the stub now
+timestamps `record()` and `stop()` so the head of a take is arithmetic rather than
+argument:
+
+| | held | captured | lost |
+|---|---|---|---|
+| before (start on `onLongPress`) | 904 ms | 599 ms | **305 ms** |
+| after (start on `onPressIn`) | 905 ms | 853 ms | **52 ms** |
+
+The residual 52 ms is the permission check, the audio-session switch and the
+native prepare — work that has to happen before the microphone can open. It is not
+a gesture delay, and there is nothing left to remove without lying about when
+capture began.
+
+**The fix is a reordering, not a tuning.** Audio capture and gesture recognition
+were serialised for no reason: the recogniser needs 250 ms to decide and the
+microphone does not depend on the decision. `InputComposer` gained a fifth voice
+callback, `onVoicePressIn`, fired from the button's `onPressIn`; the verdict now
+decides what happens TO the recording rather than whether it exists. A hold keeps
+what touch-down already captured. A tap `latch()`es it — the early audio is a head
+start, and latching is what grows the overlay's ■ stop control now that the finger
+is gone. `onVoiceHoldStart` became a no-op in the ordinary case (it still calls the
+idempotent `start()`, so a host that reports a long press without a touch-down is
+not left without a recorder).
+
+**Lowering `delayLongPress` was rejected.** It trades one broken thing for
+another — deliberate taps start reading as holds — and it never reaches zero loss,
+because the delay is only ever an upper bound on how long the recogniser waits.
+The constant is now named `VOICE_LONG_PRESS_MS` with that reasoning attached, so
+the next reader does not reach for it as a latency budget.
+
+**Starting earlier creates a new hot-mic obligation, and it is discharged
+structurally.** More paths now hold a recording nobody asked for. The sharp one:
+`onPress` does NOT fire for a press that left the button, so a short press that
+drifted away and released would have left capture running with nothing on screen
+able to stop it. The release edge therefore resolves a short press itself rather
+than waiting for `onPress` — and swallows the `onPress` that normally follows it,
+via a flag cleared at the start of every press so an edge that never arrives cannot
+leak into the next gesture. The resulting invariant: **every touch-down that opened
+a capture reaches a terminal edge at `onPressOut`** — hold-end, cancel (drifted
+past the composer's existing cancel threshold), or latch, which always comes with a
+visible stop control. None of the three leaves a hot mic. `onPress` survives as the
+screen-reader path, where the button is activated with no touch behind it at all.
+
+**Permission moved earlier in the interaction** — the OS sheet can now appear on
+touch-down rather than 250 ms in. A refusal still lands as a refusal: `start()`
+sets the `error` phase before ever calling `record()`, so the UI shows "Microphone
+access is off" with zero `record` calls and nothing running. Asserted.
+
+**`MIN_RECORDING_MS` (700 ms) is strictly better off.** Every take is now ~250 ms
+longer for the same gesture, so fewer real messages fall under the floor; a
+genuine misfire is still a misfire and still dropped silently.
+
+**Verification.** `app/__tests__/voice-capture-starts-on-touch-down.test.tsx` is
+the new file, and it MUTATION-TESTED: reverting the early start (making
+`onVoicePressIn` a no-op) moves the measured lead-in from 57 ms to 303 ms and
+fails three of its six cases, including the two that report the numbers above. The
+hot-mic race file from PR #24 (`voice-recorder-release-race.test.tsx`) is unchanged
+and green, and the new file extends the guarantee to the early-start paths: an
+abandoned press, and a tap that releases while `start()` is still in flight.
+Also re-run green: `voice-composer-handlers.test.ts` (updated for the new mapping),
+`voice-message-end-to-end.test.tsx`, `composer-action-swap.test.tsx`,
+`input-composer-no-multiple.test.ts`.
+
+**NOT covered.** No physical device and no real audio. The harness proves the
+recorder was running when the syllable was spoken; it cannot prove the syllable is
+audible in the file, and it runs react-native-web's Pressability rather than
+Hermes + the native responder system. The numbers above are harness milliseconds,
+honestly labelled — a device check with real speech is still the only thing that
+closes that gap.
+
+## 2026-07-31 — the voice recorder is WIRED: mic → recorder → upload → message
+
+#### What was actually wrong
+
+Voice messages had shipped as five modules and zero reachable feature. PR #24 landed
+`app/lib/voice-recording.ts`, `app/lib/voice-send.ts`, `app/lib/use-voice-recorder.ts`,
+`app/components/VoiceMicButton.tsx` and `app/components/VoiceRecorderOverlay.tsx`, all with
+passing unit tests. PR #26 landed local Whisper so a keyless self-hoster still gets a
+transcript. The gateway had accepted `audio/mp4` on `/api/app/upload` since M2 task 5.
+
+Nothing called any of it. `ChatSyncSurface` — the one chat screen — rendered
+`<InputComposer>` with none of its four voice callbacks, so `handleVoiceTap` /
+`handleVoiceHoldStart` took the `undefined` branch and put up `VOICE_UNAVAILABLE_NOTICE`
+("Voice messages are not available yet."). `useVoiceRecorder`, `VoiceMicButton` and
+`VoiceRecorderOverlay` appeared nowhere outside their own files and their own tests.
+
+The composer's own honesty test even pinned the gap in place: `composer-action-swap.test.tsx`
+asserted that pressing the mic SHOWS the not-available notice. Every gate in the repo was
+green over a feature the owner could not use. This is the same shape as the persona-gen
+incident — built, tested, never wired — and the reason "done" here means served and
+reachable, not merged.
+
+#### What changed
+
+**`app/lib/voice-composer-handlers.ts` (new).** The join, as a pure function of the recorder
+value. The composer speaks gestures (`onVoiceTap` / `onVoiceHoldStart` / `onVoiceHoldMove` /
+`onVoiceHoldEnd`); the recorder speaks lifecycle (`start` / `latch` / `updateDrag` / `finish` /
+`cancel` / `stopForReview`). Keeping the translation pure is what makes the wiring assertable
+call-for-call without a device.
+
+Three edges are decisions, not plumbing:
+
+- **A tap latches immediately after `start()`, without awaiting it.** The finger is already
+  gone on a tap, so nothing else will ever stop that recording; latching is what grows the
+  overlay's ■ stop control. `latch()` already tolerates arriving mid-start, and awaiting would
+  leave a window with a live mic and no visible way to stop it.
+- **A tap during `review` / `uploading` / `error` does nothing.** Those phases belong to the
+  overlay, which has its own play / discard / send / dismiss controls. Starting a fresh capture
+  from there would silently destroy a clip the owner recorded and had not sent.
+- **The slide verdict is restated in the recorder's units.** The composer applies its own
+  threshold in points and reports a boolean; feeding `CANCEL_SLIDE_DX` itself (rather than an
+  arbitrary large number) makes `resolveDragIntent` reach the same conclusion the button drew,
+  so the overlay's glyph, hint and cancel progress agree with the button's fill.
+
+**`app/components/ChatSyncSurface.tsx`.** Calls `useVoiceRecorder` with the SAME handoff an
+image upload takes (`onSend` → `send('', [url])`), spreads the handlers onto the composer, and
+renders `<VoiceRecorderOverlay>` immediately above the composer bar. The mic button stays
+mounted beneath the overlay deliberately: in long-press mode the finger is still on it and the
+release is the send. `onPermissionBlocked` → `Linking.openSettings()`, because a permanently
+denied microphone has no other route back and the hook stays out of `Linking` by design.
+
+**`app/components/VoiceMicButton.tsx` — DELETED.** It was a second mic control that no screen
+rendered. It could not be the one that ships: it draws a 🎙 emoji inside a filled resting
+circle, and the composer's in-field slot draws `MicGlyph` from views on a bare background,
+which is the iMessage arrangement PR #32 had just landed and the owner had just asked for. Two
+mic buttons is exactly the dual code path this repo forbids, so the losing one went rather than
+sitting there looking available.
+
+#### Verification
+
+**On a device.** A cloud Genymotion Pixel 9 (Android 14) — a clean instance, not the owner's
+phone and not the local emulator, never pointed at any production instance. An EAS development
+client running THIS branch's JS from Metro, writing to a throwaway local Open instance over
+`adb reverse`. Tapping the real controls, in order: the mic prompted for microphone access
+(`RECORD_AUDIO` went `granted=false` → `granted=true`); the recording row appeared with a live
+clock; ■ stop produced the review row (▶ / `1:25` / ✕ / ➤); ➤ uploaded a **354 KB `.m4a`
+recorded on the device** into `chat-attachments/owner/<hash>.m4a`; the transcript showed a user
+bubble with the 🎵 chip marked delivered; and the agent REPLIED to it — "Got the voice note,
+but I can't hear it. Transcription isn't switched on for this machine yet" — which is the
+documented keyless-ASR path and the proof the clip reached the agent's turn rather than just
+reaching disk.
+
+Two incidental findings from that run, neither a defect in this change. A worktree is missing
+`app/google-services.json` (gitignored), and without it Metro cannot parse the Expo config, so
+it serves no manifest and the dev client dies with "Unable to load script" — copy it in.
+And `uiautomator dump` returns "could not get idle state" while recording, because the record
+dot's `Animated.loop` never idles; drive by screenshot coordinates instead.
+
+**In the harness.** `app/__tests__/voice-message-end-to-end.test.tsx` (new) drives the real
+mounted `ChatSyncSurface`, the real composer, the real recorder hook, the real upload client
+and the real send queue, pressing controls by accessibility label. It asserts the whole chain
+ends where it is supposed to: a `user_message` frame on the socket with an empty body and the
+uploaded URL in `attachments` — the identical envelope an image produces. Also pinned: a
+refused microphone SAYS so and leaves no capture running; a 500 on upload is visible rather
+than silent; a sub-`MIN_RECORDING_MS` misfire is dropped without an error banner; unmounting
+mid-recording stops the recorder.
+
+**The gate was mutation-tested.** Removing `{...voiceHandlers}` from the composer turns 8 tests
+red across the two files. A gate that cannot fail is what let this ship unreachable the first
+time, so it was proven to fail before being trusted.
+
+`app/__tests__/voice-composer-handlers.test.ts` (new) asserts the mapping call-for-call,
+including a type-level assertion that the handlers still satisfy `InputComposerProps` — if the
+composer renames a callback, that stops compiling instead of quietly unwiring the mic again.
+
+#### Two things found on the way
+
+**`expo-audio` was never missing — it was never installed.** The earlier note that
+`use-voice-recorder.ts` "does not currently typecheck locally" was an artefact of a stale
+`app/node_modules`. After `bun install`, `tsc --noEmit` is clean. A missing dependency is not a
+broken module.
+
+**The harness had no `expo-audio` stub**, so the moment the chat surface gained a recorder,
+`composer-action-swap.test.tsx` died on an import: the real package pulls `expo`'s side-effect
+entry, which reaches for Metro's `ErrorUtils` global. `app/__tests__/support/stubs/expo-audio.ts`
+(new) stands in. Unlike the inert stubs beside it, it is deliberately OBSERVABLE — counting its
+calls and driveable into a permission refusal — because "did the press reach a recorder at all"
+is the exact question an inert stub cannot answer, and it is the question this whole change
+exists to keep answered.
+
+#### Not covered
+
+- The long-press gesture as a finger performs it. The composer starts hold-mode capture on
+  RN's `onLongPress` (`delayLongPress={250}`), so a hold loses its first ~250ms; a press
+  shorter than `MIN_RECORDING_MS` is discarded anyway, so this shows up as a slightly clipped
+  opening syllable, not a lost message. Restructuring the composer's gesture model to start on
+  press-in was left alone deliberately — it would rework a component that had just landed.
+- iOS. Nothing here is platform-specific, but it has not been run on an iPhone.
+- Real audio content. The harness recorder produces a URI, never bytes, so "the clip contains
+  what was said" is a device claim.
+
+## 2026-07-30 — the idle nudge is switched ON, against a test that proves it does not repeat
+
+Branch `fix/idle-nudge-user-activity-watermark`. `channels/button-store.ts`,
+`gateway/proactive/idle-topic-enumeration.ts` (new), `open/composer.ts`,
+`gateway/proactive/__tests__/idle-nudge-no-repeat.test.ts` (new).
+
+**The feature was finished and deliberately withheld.** `open/composer.ts` did not
+supply `listIdleTopics`, so `build-core-modules.ts:1086` never registered the sweep
+cron, and `open/__tests__/open-proactive-activation.test.ts` asserted that absence
+to pin the withholding on purpose. The reason was sound: switching it on would have
+nudged the owner about the same thing every hour, indefinitely. So this change is
+not "wire up a feature" — it is removing the two reasons it had to stay off.
+
+**Defect 1 — the watermark polluted itself.** The nudge posts through
+`buildButtonStoreProactiveSink`, which persists a durable row into `button_prompts`
+via `persistInertAgentTurn`. The activity watermark was `MAX(created_at)` over that
+same table with no speaker filter. `evaluateNudgeGate` only skips while activity has
+NOT advanced past the watermark stored at the last nudge — so the nudge's own row
+advanced it, the sweep read its own bubble as "the user came back", and dedupe was
+defeated on the first cycle after every post.
+
+The table records the speaker (`resolution_speaker_user_id`), and everything the
+system authors stamps a `__system__` sentinel — `persistInertAgentTurn` and
+`sweepExpired`'s synthesized `__timeout__`. So `listTopicsByUser` now returns TWO
+watermarks rather than redefining the one it had:
+
+- `last_created_at` — unchanged, every row, agent posts included. This is the
+  SIDEBAR's ordering key, and an agent bubble is a message; narrowing it would have
+  traded a nudge bug for a rail-ordering bug.
+- `last_user_activity_at` — the `resolved_at` of turns a real person took. System
+  rows contribute nothing, and neither do unresolved agent prompts (an unanswered
+  question is not the owner showing up).
+
+**Defect 2 — enumeration saw one namespace.** The owner speaks under both
+`web:<owner>` (React web) and `app:<owner>` (Expo app-ws), and they are independent:
+a conversation handled on the phone leaves no trace under `web:`. `listTopicsByUser`
+took exactly one root, so the sweep would have nudged about work just dealt with on
+the other device. It now accepts a string OR an array of roots, unioned in one
+grouped scan, with `project_id` attributed by longest-matching root.
+
+**The enumerator emits ONE candidate, not a fan-out.** `buildOwnerIdleTopicEnumerator`
+returns a single candidate — the owner's General app-ws topic, the same target as the
+morning brief — because the P6 ranker writes one `current_focus_pick` per instance per
+day. A candidate per project topic would post the identical pick into every topic. Its
+`last_activity_ms` is the max `last_user_activity_at` across both roots and all their
+project descendants. Enumeration failure yields zero candidates, never a dead cron.
+
+**The bar, and how it was met.** `idle-nudge-no-repeat.test.ts` (10/0) runs the REAL
+sweep against a real database with the real sink shape — the nudge's post genuinely
+lands in `button_prompts`, because a stub sink would hide the exact bug this file
+exists to disprove. Four idle cycles after a nudge with no intervening user activity
+produce exactly ONE post. Both mutations were applied and confirmed to fail it:
+reverting `last_user_activity_at` to an unfiltered `MAX(created_at)` breaks 3 tests
+including the headline one; collapsing enumeration to a single root breaks 4. The
+inverse direction is pinned too — a real user turn re-arms the nudge and a second one
+fires — so the fix cannot be a silence bug wearing a spam bug's clothes. The ≥7
+`rateNudge` floor was already supplied by the composer and is confirmed to take effect
+now that enumeration reaches it (6/10 stays silent, 7/7 posts, an abstain skips).
+
+`open-proactive-activation.test.ts` no longer asserts the feature is off; it asserts
+the wiring, and that the enumerator yields the single expected candidate.
+
+**Deploy note:** this is gateway/composer code. It needs a SERVER-SIDE deploy to take
+effect — there is no over-the-air path for it.
+
 ## 2026-07-30 — an invite can be WITHDRAWN, and two smaller residuals (ISSUES #421)
 
 Branch `fix/connect-invite-revoke-residuals`. With Connect served from every install and the guest page mounted, a real invite link works end to end — which made three deliberately-unpatched residuals matter for the first time.
@@ -4315,6 +10757,581 @@ Branch `fix/imessage-chat-ux`. Ryan asked three times for the chat screen to mat
 **Tests.** New `app/__tests__/imessage-chat-ux.test.tsx` — 21 tests, one describe per defect. Mutation-tested: 11 mutants, 11 caught (composer always/never adding the safe area; the bar ignoring `bottom_inset`; a uniform bubble gap; the tick back on every bubble; a hard-coded 32pt inspector header; a 24pt close target; 11pt rows; persisting the transient notice; the pill never clearing; flag-only ack detection; no late-ack guard). Verified: `tsc --noEmit` exit 0 (root + app); `bun test app/__tests__` 1257/0; `chat-core/__tests__` 145/0; `landing/chat-react/__tests__` 450/0; lint, depcruise and leak gates all green.
 
 **NOT device-verified.** The harness fakes every layout rect and the safe area, and cannot render an iOS keyboard. Everything above is proven as wiring + arithmetic + render structure; how it LOOKS on Ryan's phone is unverified until he runs a build. No OTA was published.
+
+## 2026-07-29 — the Activity Inspector: the tmux replacement, behind the dot that lied
+
+> **Superseded in part by `2026-07-31-activity-inspector-conversation-detail.md`.** The
+> two-clocks design, the two taps and the dot-as-entry-point below all stand. What
+> changed the next day is the CONTENT of a row: `token` no longer renders as a
+> character count, tool labels are humanised rather than raw `mcp__…` transport ids,
+> the hook now reads `tool_response`, and the `reply` tool call renders as the
+> assistant's message interleaved with the tool rows. Where this entry describes row
+> content (notably the `token`-is-summarised note under the mapping section and the
+> `summarizeToolInput` "returns EMPTY for unknown args" note), read the newer entry.
+
+SPEC § WAVE 3.5's M2-blocking step. The owner could not tell whether a project's agent session was working or hung; in Vajra the escape hatch was attaching to tmux, and Neutron's server-side sessions offered no equivalent whatsoever. Clicking the existing per-project activity dot now opens a panel streaming the raw substrate + tool events for that scope in realtime, on both web and mobile. Live-only: ~200 rows in memory per scope, no persistence, no schema, no retention policy, no scrollback.
+
+Three things about the brief turned out to be wrong in the code, and two of them changed the build materially.
+
+**1. `drainWithHeartbeat` is not the chat seam.** It lives in `onboarding/synthesis/synthesis-session.ts:673` and serves onboarding synthesis only. The real per-turn drain is `drainToOutcome` (`runtime/substrate-text.ts:168`), reached from `build-live-agent-turn.ts:1395` via `collectTokensToString` → `drainToText`. That is where every chat event was being discarded — the informational kinds fall off the bottom of the if-chain — so that is where the tee went (`DrainOptions.onEvent`).
+
+**2. The event kinds are `tool_call` and `tool_result_ack`.** There is no `tool_use` and no `tool_result` in `runtime/events.ts:75-96`.
+
+**3. The one that mattered: the event stream carries almost NOTHING, so teeing it alone would have shipped a panel that cannot answer the question.** The persistent-REPL adapter's 1:1 bridge (`repl-session.ts:281-289`) pushes exactly ONE `token` holding the whole finished reply, then `completion`. It emits **no `thinking`, no `tool_call`, no `tool_result_ack`** for the agent's native tools — `grep "kind: 'token'"` across the adapter returns that single line. So the stream yields: keepalive/notice `status` events, one token, completion, error. That is enough for "is the process alive?" and nothing else. It could never say WHAT the agent is doing, which is the whole of what the owner reads off tmux.
+
+So there are **two taps**, not one. The second is a `Pre`/`PostToolUse` hook (`hooks/activity-tap.ts`, sibling of the shipped `todo-sync.ts`) POSTing to a new `/activity` route on the loopback sink, dispatched through a late-bound `setReplActivityTap` the composer wires — the same three-part pattern as the tool bridge and the todo reconciler, because the hook runs in a different process and shares no memory with the gateway. Both phases with an unscoped matcher: `pre` gives "started Bash: bun test", `post` gives "finished Bash", and **a `pre` with no matching `post` for minutes IS the hang signal** that neither a single-phase tap nor a liveness pulse can express. Gated on `enableToolBridge`, so the disposable Trident build REPLs and the untrusted history-import REPL never report onto the owner's panel. `summarizeToolInput` picks the field that identifies the call (path → command → pattern → query → url → description → prompt) and returns EMPTY for unknown args rather than dumping JSON, which is frequently large and occasionally sensitive.
+
+#### The two clocks — why a naive build would have rebuilt ISSUES #386
+
+`pool.ts:551-568` runs a **synthetic** liveness keepalive: `{kind:'status', message:'working'}` every ~10 s for as long as the `claude` child is alive, *including while it is livelocked or parked on a wedged menu*. It exists to stop the synthesis drain false-wedging a silently-reading pass, and it is byte-identical to a real status notice. So "events are still arriving" does not mean "work is happening", and an inspector that measured liveness from `last_event_at` would report a permanently-stalled session as working forever — which is precisely #386, the dot that pulsed for days on a project where nothing ran, rebuilt in the very panel meant to verify it.
+
+The keepalive push now carries an additive `keepalive?: boolean` (`runtime/events.ts`, exactly the shape `code` on `error` established; nothing in the tree reads `status.message === 'working'`, so this is behaviour-neutral). Every scope keeps `last_event_at` (any event ⇒ the PROCESS is alive) and `last_real_activity_at` (keepalives excluded ⇒ WORK happened). `deriveInspectorState` reads both:
+
+- `idle` — no turn in flight. Checked FIRST, because a resting scope's clocks are stale by definition and reading them as a wedge would make every idle project scream.
+- `working`, `wedged` (breathing, no real activity for 90 s), `dead` (no events at all for 30 s). `dead` before `wedged`: no signal is worse news than no progress.
+
+`turnStarted` records a NON-synthetic `turn_start` row, and that is what floors the wedge window — a turn whose only subsequent traffic is keepalives is still detectable as stalled, with no extra bookkeeping.
+
+An earlier draft carried a separate `turn_started_at` field for that floor. Mutation testing proved it could not change any outcome (the `turn_start` row already moves `last_real_activity_at` to the same instant), so it is DELETED rather than left as untested complexity. Same call on its `turns_in_flight === 0` re-stamp guard and its 1→0 clear: both reddened zero tests because both were unobservable.
+
+#### Wired + served, proven against the real composer
+
+`open/__tests__/activity-inspector-served.test.ts` boots the REAL Open composer and drives the whole chain unmocked: hook-shaped POST → sink `/activity` → the composer's registered tap → the in-memory ring → `GET /api/app/projects/<id>/activity`. Nothing in the middle is stubbed, so the test fails if the composer stops constructing the inspector, stops registering the tap, or stops handing the surface to the graph. `open/__tests__/open-composition-fields-characterization.test.ts` (also a real composer boot) gained `app_activity_surface` to its exact-keys list — that key's presence is the done-means-served evidence. The route reaches the ladder through the `appActivity` slot in `gateway/http/route-slots.ts`, and both `route-slots-transition.test.ts` ratchet lists were extended per the documented "adding a surface" step.
+
+The snapshot endpoint is load-bearing, not a convenience: a wedged session emits nothing, so a purely-live panel would open BLANK on exactly the session the owner is worried about and could not say how long ago the last event was.
+
+#### The dot is the entry point, and it is now always there
+
+Ryan-locked: no new icon. But `railDotClass` (web) / `railDotKind` (mobile) returned `null` for an idle scope **and** for General — so the affordance would have vanished exactly when the owner wants it, and the acceptance ("the dot stays clickable when IDLE — an idle session must be distinguishable from a wedged one") would have been unmeetable. Both are now TOTAL: idle renders a quiet hollow ring. General gets a dot too — it is a real chat scope with its own warm session — while still never showing ATTENTION (no bound runs), which degrades to idle. Four existing assertions encoded the old `null` contract and were rewritten with the reason recorded inline; none were weakened to make something pass.
+
+Web: a `role="button"` span inside the row's existing `<button>` (a nested `<button>` would be invalid HTML) with `stopPropagation` + keyboard handling, so a dot tap inspects and does not also navigate. Mobile: a nested `Pressable` with `hitSlop` (the dot's corner offset moved from the dot onto that wrapper, same rendered geometry). Both clients subscribe BEFORE fetching, so no row is lost in the gap, and dedupe on `seq`, which is what makes that overlap safe; both age their clocks forward against the client clock every second, because a frozen "12s ago" is the same lie as a frozen dot.
+
+Mobile carries a third hazard: General has **three** spellings (rail id `'~general'`, chat scope `''`, server scope key `'general'`). `activityScopeKey` accepts all of them so a caller that forgets `railIdToScope` cannot silently inspect a project literally named `~general`.
+
+#### Mutation results — 30 mutants, 30 killed
+
+| # | Mutation | Reds |
+|---|---|---|
+| G1 | `record` advances the real-activity clock for a synthetic row | 3 |
+| G2 | wedge measured from `last_event_at` instead of `last_real_activity_at` | 5 |
+| G3 | drop the `idle`-first check | 1 |
+| G4 | drop the `dead` check (wedge would win) | 2 |
+| G5 | remove the ring cap (unbounded buffer) | 2 |
+| G6 | `turnStarted` records its row as synthetic | 3 |
+| G7 | `turnFinished` loses its `> 0` floor | 1 |
+| G8 | `pool.ts` keepalive push loses `keepalive: true` | 2 |
+| G9 | remove the drain tee (events discarded again) | 3 |
+| G10 | drain tee throw not swallowed | 1 |
+| G11 | runner stops passing the tee to the drain | 3 |
+| G12 | runner drops `turn_finished` (in-flight leak ⇒ permanent wedge) | 2 |
+| G13 | runner tee throws not swallowed | 1 |
+| G14 | `build-settings` REPLACES the TodoWrite `PostToolUse` group | 1 |
+| G15 | web `railDotClass` returns null for idle again | 1 |
+| G16 | web dot loses `stopPropagation` (tap also navigates) | 1 |
+| G17 | web `liveAge` stops excluding keepalives | 1 |
+| G18 | web `liveAge` freezes instead of ageing forward | 1 |
+| G19 | web `mergeActivityRow` loses seq dedupe | 1 |
+| G20 | panel loses the sibling-scope filter | 1 |
+| G21 | panel fetches BEFORE subscribing | 1 |
+| G22 | mobile stops normalising `'~general'` | 2 |
+| G23 | mobile live decoder loses its scope filter | 1 |
+| G24 | mobile `liveAge` stops excluding keepalives | 1 |
+| G25 | mobile `railDotKind` returns null for idle again | 4 |
+| G26 | surface loses its bearer gate | 1 |
+| G27 | surface loses its read-only 405 | 1 |
+| G28 | sink downgrades the no-tap 503 to 200 | 2 |
+| G29 | sink turns a recorder throw into an HTTP 500 at the agent | 1 |
+| G30 | sink drops phase validation | 1 |
+
+G8 initially killed ZERO. The `pool.ts` keepalive marker is the linchpin of the whole design — drop it and every keepalive counts as work, so wedges become undetectable, silently, because nothing else reads the flag — but exercising it behaviourally means spawning a real `claude` REPL and waiting out a ~10 s interval. Rather than leave the highest-consequence guard untested, it gained a narrow source-level gate (`keepalive-marker-gate.test.ts`, in the spirit of the repo's existing "no `claude -p` in the live path" grep gate) which also pins that the INJECT-time status is NOT marked (that one is real progress) and that exactly one push in the pool is marked at all.
+
+#### Tests
+
+New: 24 (`open/activity-inspector.test.ts`), 5 (drain tee), 11 (hook I/O), 6 (build-settings wiring), 7 (sink route), 3 (keepalive gate), 6 (live-agent-turn tee), 5 (served e2e), 20 (web client), 16 (web panel + dot), 18 (mobile client) = **121 new**. Existing files touched and green: `component.test.tsx` 19, `project-rail-view.test.ts` 9, `route-slots-transition.test.ts` 61, `open-composition-fields-characterization.test.ts` 1, plus `o8-drain-to-text-equivalence` 19, `o3-substrate-error-codes` 13, `persistent-repl-substrate` 18, `build-settings` 12, `todo-sync-hook` 5, `synthesis-session` 23, `build-llm-call-substrate` 32, `open-route-matrix` 54, `controller` 51, `project-shell` 9, `chat-rail-stability` 5, `ws-envelope-parity` 8, `general-rail-scope` 10, `mobile-rail-ux` 6, `projects-rail-live` 10. `bunx tsc --noEmit` clean on both the root and `app/` projects.
+
+#### Honest gaps
+
+- **No live browser/device walk.** Everything above is test-level and composer-level: a real composer serves the route and the whole tap chain runs unmocked, but nobody has watched the panel tick in a browser against a real `claude` REPL. The first real dispatch is its live confirmation.
+- **`thinking` / `tool_call` / `tool_result_ack` rows are mapped but unreachable on the shipped CC path**, since that adapter never emits them. They cost nothing and light up for any adapter that does; today the tool rows all come from the hook.
+- **Trident build REPLs are not inspectable.** They are the longest-running sessions and arguably want this most, but they are disposable and not bound to a rail dot, so they are out of scope here.
+
+## 2026-07-29 — the documents lane threw on the real vault (manifest outcome vocabulary)
+
+`open/legacy-import/documents/manifest.ts` validated the projects-lane manifest against three outcomes — `created`, `existing`, `skipped-deleted` — and threw on anything else.
+
+PR #475 taught the projects lane to import archived projects, adding `created-archived`, `existing-archived`, `skipped-active` and `skipped`. **#475 landed BEFORE the documents lane (#476), and this set was never widened.** So on any vault containing an archived project, the manifest read threw and the documents lane could not run at all. Ryan's vault has 19 archived projects — the lane was broken on his real data from the moment it merged.
+
+**The throw itself is correct and stays.** An unrecognised outcome means the two lanes have drifted, and placing documents against a manifest we do not understand is worse than stopping. What was wrong was the vocabulary, not the strictness.
+
+**Found by the tasks lane, not by us.** It needed the same parser, wrote the complete set from `run-import.ts`, and reported the mismatch. The cross-check existed only because two lanes read one file — nothing in the documents lane's own tests could have caught it, since they all construct their own manifests with the three outcomes it already knew.
+
+Mutation-verified in both directions: reverting to the three-outcome set fails the new test; emptying the set fails 39 tests, proving the guard is still load-bearing rather than decorative. 45 pass / 0 fail.
+
+## 2026-07-29 — the history lane JOINS the projects manifest instead of re-deriving project ids
+
+#### The defect
+
+`open/legacy-import/history/topic-map.ts` derived a topic's destination project id
+as `basename(topic.project_path)`, with a comment asserting that this was
+authoritative "because Lane A keys `projects.id` on that directory's name".
+
+That is true only when the projects lane binds a FRESH id. It resolves its bind
+target through `resolveBindTarget` (`gateway/wiring/project-create.ts`), which
+matches an EXISTING row by name-slug and returns THAT row's id — so
+`bind_id !== source.project_id` is a normal outcome on an already-onboarded home
+(`open/legacy-import/run-import.ts:260-262` logs it explicitly). The manifest
+exists precisely to carry the difference.
+
+Same class as the documents-lane defect fixed earlier, with the opposite and
+worse failure mode. Documents refuses to run without the manifest and stops
+loudly. History would silently bind chat rows to a `projects.id` that may not
+exist and report success — an import that looks clean while messages land
+against a dangling project.
+
+#### The fix
+
+**One manifest reader, shared.** `documents/manifest.ts` moved to
+`open/legacy-import/manifest.ts`, taking the four manifest types with it
+(`documents/types.ts` now re-exports them from there). It was never a
+documents-lane concern: two lanes join the same file on the same key, and a
+second reader would be a second place for the join rule to drift. The only
+behavioural change to the reader is a `lane` label so the failure message names
+the lane the operator typed. `documents/` behaviour is otherwise untouched — its
+45 tests pass unchanged.
+
+**The join is enforced by the type checker, not by a comment.**
+`parseTopicMap(json, transcriptsRoot, bySlug)` takes the manifest index as a
+REQUIRED third argument with no default. A default empty map would have turned
+every project topic into an orphan, and a caller that simply forgot the join
+would still have compiled. As it is, every call site broke at compile time when
+the argument was added — which is how the change was verified to be complete.
+
+`basename(project_path)` survives, but demoted: it is now the JOIN KEY
+(`legacy_slug`, the vault `Projects/<dir>` name that `scan-legacy-tree.ts:128`
+writes into the manifest), never the destination. The destination is
+`record.project_id`.
+
+**`--data-dir` is required on both paths.** A dry run has to read the manifest
+too, so the flag is no longer `--apply`-only. `import-legacy all` already passed
+it (`lanes.ts`), so nothing downstream changed.
+
+#### The orphan decision: EXCLUDE and exit 1, not fatal
+
+A project topic whose `legacy_slug` has no manifest record is reported per-topic
+with the number of messages the drop cost, and the run exits 1 on both the dry
+and the apply path. Three alternatives were rejected:
+
+- **Guess an id** — the defect being removed.
+- **Fall back to `project_id: null`** — WORSE than guessing. Those rows key
+  `app:<user>` and would mix one project's private conversation into the
+  General thread. Mutation test (c) below produced exactly this output, which is
+  what makes the case concrete rather than theoretical.
+- **Refuse to run** — one stale map entry (a project archived or deleted after
+  its topic was created) would block the entire 4,413-message corpus, and
+  `topic-map.json` is a long-lived file that accumulates exactly those.
+
+Excluding matches how this lane already treats every entry it cannot attribute
+(`unattributed`, `unknown-thread`) and how the documents lane treats an orphan
+directory: visible loss, never silent loss. Orphans are seeded from the
+BINDINGS rather than from what the corpus happened to contain, so a
+manifest/topic-map disagreement is reported even when it costs zero messages —
+the disagreement is the thing the operator has to reconcile.
+
+#### Preview/apply rule — unchanged, and now verified from this lane too
+
+`selectManifestPath` still enforces it in one place: an apply reads ONLY the
+applied manifest, a preview prefers the dry-run manifest and falls back to the
+applied one. A second layer (the `dry_run` flag inside the file) catches a
+preview hand-copied onto the applied path. Both layers are now asserted from the
+history CLI, and mutation (d) proves the path-split layer is independently
+load-bearing rather than shadowed by the flag check.
+
+#### Mutation results — all four killed
+
+| # | Mutation | Result |
+|---|---|---|
+| a | restore `project_id: legacy_slug` (re-derive from basename) | **killed** — 2 failures |
+| b | missing manifest returns an empty record set instead of throwing | **killed** — 3 failures |
+| c | orphan falls through the guard | **killed** — 4 failures |
+| d | apply falls back to the preview manifest | **killed** — 1 failure |
+
+Mutation (c)'s report output is the evidence for the orphan decision above: it
+printed `1  app:owner  redwood (no project — user-scoped topic)` — the
+project's conversation demoted into General, exactly the silent corruption the
+guard prevents.
+
+#### Real-vault run (read-only, scratch `--data-dir`)
+
+`projects` (dry) → preview manifest, then `history` (dry):
+
+- 21 transcript directories, 999 session files, 1,927 MiB, 594,833 lines
+- 4,413 owner messages; a naive `type → role` parser misattributes 102,438 of
+  106,851 `type:"user"` entries (95.9%)
+- **53,499 rows to write across 18 topics**; largest `redwood` 17,065,
+  `nimbus-coding` 11,708; General 1,910 rows correctly user-scoped on
+  `app:owner` with a null project id
+- **0 orphan topics** — every project topic joined to a bound id
+- 8,347 excluded as unattributable, 0 unparseable lines
+- Nothing written but the projects lane's own preview manifest; no `project.db`
+  created
+
+`history --apply` against that home correctly REFUSED (exit 2, no database
+created): the preview manifest does not satisfy an apply.
+
+#### Other lanes
+
+`memory` and `entities` do NOT share the pattern — verified, not assumed.
+`entities` is explicitly global/not project-scoped (`entities/types.ts:4`), and
+every `project` string in `memory/` refers to `~/.claude/projects` directories,
+not `projects.id` (`memory/read-files.ts:58-77`). There is no `tasks` lane in
+the registry yet; when it lands it must take the manifest index the same way.
+The only `slugifyProjectId` call sites left in `open/legacy-import/` are in the
+projects lane's own scanners, where deriving the id is the job.
+
+#### Not covered
+
+The history lane's SYNTHESIS step is still unwired — that gap is unchanged.
+
+## 2026-07-29 — Two on-device mobile defects: bubbles capped twice, and the shell chrome unmounting on every project switch
+
+Both reported by Ryan from the phone the same night. Both root causes were correctly identified before the code was read; both were confirmed against source, and one was **worse than diagnosed**.
+
+#### Defect 1 — "arbitrarily narrow, should fill the screen"
+
+`app/components/ChatSyncSurface.tsx` had TWO percentage `maxWidth` declarations in one ancestor chain: `bubbleColumn: { maxWidth: '82%' }` (`:894`) wrapping `bubble: { maxWidth: '82%' }` (`:822`). **Yoga multiplies them.** `calculateAvailableInnerDimension` clamps a node's `availableInnerWidth` by its own resolved `maxWidth` (`app/node_modules/react-native/ReactCommon/yoga/yoga/algorithm/CalculateLayout.cpp:519-527`) and that clamped value is passed down as the child's `ownerWidth` for percentage resolution (`:1397-1404`, then `:595-598`). Effective cap: 0.82 × 0.82 = **67%** of a row that `listContent`'s `paddingHorizontal: SPACING.md` had already narrowed — about 200pt on a 393pt phone, which is the ~5-words-per-line Ryan saw.
+
+The file contained its own proof, unnoticed: the streaming bubble (`:522`) and `TypingIndicator` (`:750`) rendered `styles.bubble` **without** `bubbleColumn`, so they got the full 82% and were visibly WIDER than the settled bubble a streaming row turns into. Two caps that each looked correct in isolation.
+
+**Fix.** One cap, owned by `app/lib/chat-bubble-metrics.ts`, applied to `bubbleColumn` only; the streaming bubble and typing indicator now route through that column like every other row.
+
+**Why 90%, deliberately.** The usual iMessage/Telegram cap (~78%) is a fraction of the FULL screen. This app is not that shape: `ProjectRail` is a **permanent** 72pt column (`components/ProjectRail.tsx` `RAIL_WIDTH`), so a percentage here applies to what is left:
+
+```
+iPhone 15 (393pt):  393 - 72 rail - 24 gutters = 297pt row
+iMessage's ~78% of 393pt                       = 307pt
+```
+
+The row is **narrower than the bubble cap we would be imitating**, so scaling it down again is the wrong move — 82% applied even ONCE is the wrong number for this surface. What has to survive is the speaker asymmetry: a user bubble must visibly not reach the left edge and an agent bubble must visibly not reach the right, or both sides read as full-width blocks. That needs a reliably visible gutter, not a small percentage. 90% leaves ~30pt (≈ `SPACING.xxl`) on a 393pt phone and ~22pt on a 320pt iPhone SE, while giving the bubble 267pt instead of 200pt.
+
+#### Defect 2 — "switching projects flickers and feels laggy"
+
+Confirmed, and the diagnosis understated it. `app/app/projects/[id]/_layout.tsx:327-334` gated the WHOLE shell on the settings fetch, returning only a centred `ActivityIndicator` — tearing down the rail, the header and the tab bar and rebuilding all three on every rail tap. Not slow rendering: a full teardown/rebuild per switch.
+
+**Three distinct failures, not one.** Tracing the states rather than trusting the reported mechanism found that `projectStateReducer` `LOAD_START` **preserves** `project` (`app/lib/project-state-reducer.ts:61-62`, deliberate so a `refresh()` does not blank the UI) and the provider is reused across `project_id` changes. So the spinner branch was only ONE of the paths:
+
+1. **project A → project B**: `fetchedProject` is still A and non-null, so the shell rendered B's workspace under **A's name, A's members, A's Invite eligibility** until the fetch landed. No spinner — wrong data.
+2. **General → a real project**: the provider had already collected a 404 for `getSettings('general')`, so `project` was null and `loading` was false on the switch render — the gate fell straight through to **`ProjectNotFoundFallback`**. A visible "Project not found" flash on a project that exists.
+3. **A slow/cold fetch**: the diagnosed bare-spinner teardown.
+
+A fourth, independent flicker source: `SlotFader` keyed its 1.0 → 0.4 → 1.0 opacity dip on the route leaf, and a rail tap travels `/projects/<id>` → (`index.tsx` last-tab redirect) → `/projects/<id>/chat`, so a switch changed the leaf twice and fired **two** dips.
+
+**Fix — the invariant.** The rail, header and tab bar are persistent chrome and are mounted for the whole life of the layout; only the content pane has a loading state. `ProjectShell` now returns UI from exactly ONE place.
+
+- `app/lib/project-shell-content.ts` — the content-pane decision as a pure function (`ready` / `loading` / `not_found`). **The error, not `loading`, decides `not_found`**: on the render where the route flips, the fetch effect has not run yet, so `loading` is still false while `project` is already null — precisely the gap that produced failure 2. `LOAD_FAIL` always attaches an error and `toStateError` never returns null, so a genuinely absent project still reaches the not-found pane; it cannot hang on a spinner, because the caller only gets here with a signed-in user and a non-empty scope id, which is exactly when `fetchSettings` runs rather than returning early. General short-circuits to `ready` **first**, before any other rule, so a stale error can never 404 the one scope that cannot 404.
+- `scopedProjectState` (`project-state-reducer.ts`), applied in `project-state.tsx` against a `loadedScope` marker stamped in the same tick as each result — kills failures 1 and 2 at the source. Data whose scope is not the requested one reads as "nothing known yet, fetch in flight". **Not** solved by keying the provider on `project_id`: that remounts its whole subtree, which is the exact teardown being fixed.
+- The loading spinner and the not-found pane render INSIDE the chrome, so a missing project leaves the rail available to tap out of the dead end rather than replacing the screen. `ProjectNotFoundFallback` moved from `styles.container` to a new `contentFill` so it fills whichever region it is placed in.
+- `SlotFader` takes a `scopeId` and re-baselines without animating when it changes. The dip is for tab switches within a project.
+- While the doc is in flight the header names the project from the already-loaded rail list (`scopeName`); `''` is the last resort, never a fabricated placeholder (ISSUES #393). The Invite pill is suppressed until the doc loads — `canInviteToProject` reads `billing_mode` + `members` and there is no honest answer without them.
+
+#### Failing-before + mutation results
+
+Both suites were run against the pre-fix tree, and every guard was individually neutralised. Numbers are `fail` counts for the named test file.
+
+| | |
+|---|---|
+| `origin/main` `ChatSyncSurface.tsx` vs the bubble suite | **3 fail** |
+| `origin/main` `_layout.tsx` vs the shell suite | **4 fail** |
+| M1 re-add nested `maxWidth:'82%'` to `styles.bubble` | 2 |
+| M2 shrink the cap back to 82% | 3 |
+| M3 pull `TypingIndicator` out of the capped column | 1 |
+| M4 break the left/right speaker asymmetry | 1 |
+| M5 drift `RAIL_WIDTH_PT` from the rail's real width | 3 |
+| M6 reintroduce the early spinner return (the original bug) | 1 |
+| M7 call an unfetched scope `not_found` instead of `loading` | 2 |
+| M8 drop the General special-case | 1 |
+| M9 neutralise the cross-scope staleness guard | 3 |
+| M10 key the fade on the route leaf again | 1 |
+| M11 stop calling the resolver (exists ≠ wired) | 1 |
+
+No guard reddens zero tests.
+
+**Part of each suite is deliberately STRUCTURAL, reading the component's source.** Both bugs are wrong SHAPES, not wrong values, and this suite has no RN mount harness (`project-card-interactivity.test.ts`). A value assertion cannot catch someone re-adding a second `maxWidth` — the constant would still be 90% and the arithmetic still right — and a snapshot cannot catch the early return, because the broken build's snapshot is a perfectly valid spinner. So the guards are: exactly one percentage `maxWidth` in the chat surface with `bubbleWrap` and `bubbleColumn` occurring in equal numbers, and exactly one UI-returning `return` in `ProjectShell` with the chrome inside it. Same reasoning as `app/lib/entry-route.ts`: hoist the decision somewhere assertable, then pin the wiring.
+
+#### ALSO INVESTIGATED, NOT FIXED — the duplicate "took too long" bubble
+
+Ryan's screenshot showed the same timeout bubble twice, each with its own Retry. **Verdict: two genuinely separate turn failures, so per the brief this is reported, not fixed.** Ruled out by tracing:
+
+- **Duplicate render — impossible.** `rowKey()` is `m:<message_id>` (`app/lib/chat-core/chat-render-model.ts:137-142`) used directly as `keyExtractor` (`ChatSyncSurface.tsx:416`); streaming buffers are suppressed once persisted (`:128`).
+- **Duplicate insert — ruled out.** `upsert` resolves by `messageIdentity()` and deletes the old identity row on change (`app/lib/chat-core/sqlite-store.ts:200-227`); agent messages resolve via indexed `getByMessageId` (`chat-core/sync-engine.ts:250-260`); replayed rows carry the stored `message_id` (`channels/adapters/app-ws/adapter.ts:216-217`) so a resume merges rather than duplicates.
+- **Double fan-out — none found.** One `adapter.send` per reply (`open/composer.ts:3624`), one `chat_log.append` + one registry send (`adapter.ts:215`, `:246`), one frame per device entry (`session-registry.ts:124-133`).
+- **One emit site, once per turn.** `TIMEOUT_BODY` ships only from `sendTimeoutRetry` (`gateway/wiring/build-live-agent-turn.ts:2063`), called once at `:1502` inside the terminal-failure block; the retry loop emits after the loop (`:1411`, `:1471`) so both freezes collapse into one bubble, and the substrate watchdog is settle-guarded (`runtime/adapters/claude-code/persistent/pool.ts:583`).
+
+Two visible bubbles therefore require two server `message_id`s, i.e. two runner invocations. **The unguarded trigger is the Retry tap itself**, and two gaps make a second failure look like a duplicate of the first:
+
+1. `sendTimeoutRetry` builds its prompt with **no `idempotency` key** (`build-live-agent-turn.ts:2069-2075`), unlike `open/wiring/app-ws.ts:470-487` which passes one and gates the live send on `was_new`. With no key, `ButtonStore.emit` unconditionally inserts a new row with a new `prompt_id` (`channels/button-store.ts:157-159`), so N freeze-terminal turns produce N bubbles by construction. `REPLY_ROW_TTL_MS` is 10 years (`:125`), so the Retry buttons never expire.
+2. `on_button_choice` decodes `prompt_id` and **discards it** (`open/wiring/app-ws.ts:1210-1228`) — no resolve, no `was_new`, and by design no user row is written (`gateway/http/app-ws-surface.ts:897-899`), so a tap leaves nothing visible between the two error bubbles. The typed path IS hardened (`app-ws-surface.ts:972`, `:1156`, `gateway/__tests__/app-ws-no-double-dispatch.test.ts`); `button_choice` is absent from that suite. The only guard against a re-tap is the session-scoped `chosenByPrompt` `useState` (`ChatSyncSurface.tsx:163-167`), whose own comment assumes the server marks the prompt answered — false for this bubble, so any remount restores a live Retry.
+
+Cheap fixes exist (an idempotency key on the timeout prompt; resolving `prompt_id` in `on_button_choice`; tightening `build-live-agent-turn-timeout-retry.test.ts:150` from `sent.find` to a length assertion), but they are gateway-side turn-lifecycle changes outside this PR's surface and the seed choice needs care — a per-question seed keeps the row alive for the life of the question, which is intended but wants a deliberate hash of the recovered `lastUserText`.
+
+**Undetermined from code alone:** which trigger fired in Ryan's session. Settling it needs the gateway logs for that topic — `retry_tap` (`build-live-agent-turn.ts:923`) is decisive, with `turn_failed` (`:1462`) and `turn_auto_retry` (`:1472`) counts and the `chat_log` `seq` ordering.
+
+#### Not covered
+
+- **Not verified on a device.** Typecheck, lint and the two suites are green; the bar Ryan set is a real install, and only he can close that.
+- The rail-tap → `/projects/<id>` → async last-tab read → `/projects/<id>/chat` hop remains. It is now honest (a spinner scoped to the content pane, chrome intact) rather than removed; collapsing it would mean resolving the last tab synchronously, which AsyncStorage cannot do.
+- The duplicate-error bubble is untouched, per the brief.
+- No change to `app/assets/images/*`, `app/app.json`, or `app/app/projects/[id]/chat.tsx` (concurrent work). `components/ProjectRail.tsx` is **read but not modified** — `RAIL_WIDTH_PT` is mirrored in `chat-bubble-metrics.ts` with a source-drift guard rather than importing from the rail, which would have pulled `react-native` into the width arithmetic.
+
+## 2026-07-29 — Mobile opens in CHAT; the projects-list screen is deleted (SPEC § Decisions Log 2026-07-27)
+
+**This entry exists because a locked decision sat unimplemented for two days.** Ryan locked it on device on 2026-07-27 — *"I don't want this screen shown. It should just open into the general chat with the rail on the left. Delete this screen completely."* — the SPEC entry was written, no code changed, and he hit the projects list again on 2026-07-29. The failure mode was not disagreement; it was that nothing in the repo could tell the difference between "decided" and "done". So the fix is deliberately shaped to be assertable: the entry decision is a pure function (`app/lib/entry-route.ts` `entryRouteForProjects`), and `app/__tests__/mobile-entry-route.test.ts` fails if the entry ever points at a non-chat route again. All four of its wiring pins fail against the pre-fix tree (verified by running them there).
+
+**Entry.** `app/app/index.tsx` no longer does `router.replace('/projects')`. It awaits `resolveEntryRoute({base_url, token})`: fetch the project list, drop the non-navigable (cross-instance `shared`) ones — entering on a shared id opens an empty or COLLIDING local project, since the detail loader is local-only — take the most-recently-active by `sortProjectsByActivity`, and route to `/projects/<id>/chat`. Empty list, all-shared list, and **every** fetch failure resolve to General (`/projects/~general/chat`). General is the no-project scope: it always exists and needs no network, which is why it is the floor rather than an error state. The renewal path enters with the FRESH bearer when one was minted — the list fetch is authenticated and the old token may already be spent.
+
+**Deleted.** `app/app/projects/index.tsx` and its `<Stack.Screen name="projects/index" />`. Ten call sites navigated to `/projects`; all ten are gone (root redirect ×2 → chat; two project-not-found fallbacks, three Focus hops, Admin's back → General chat; the rail `+` → a sheet; the header back arrow → the app-settings entry). A test enumerates every `router.push/replace('/projects')` in `app/`, `components/`, `lib/` and requires the list to be empty.
+
+**Two capabilities would have silently died with that screen. Both were re-homed, and both were found by looking rather than by the brief:**
+
+1. **Create-project.** "+ Create Project" was that screen's bottom bar, and the rail's `+` merely navigated to it. Deleting the screen naively leaves mobile with no way to create a project and a dead rail button. Create is now `app/components/CreateProjectSheet.tsx`, opened by the rail `+` OVER the chat (no navigation, no second screen — consistent with one entry path), submitting through the existing `createProject` → `/projects/<new-id>/chat`. The name rule + failure copy are pure (`app/lib/create-project-helpers.ts`) so they are asserted behaviourally, not source-pinned.
+2. **`/settings` and `/admin`.** The list header was the ONLY place in the entire app that pushed either — i.e. deleting it recreates ISSUES #385 (a registered route nothing can reach; the on-device server editor and sign-out live behind `/settings`). The project shell header's LEFT slot was a back arrow to the list, which now has nowhere to go, so it became the app-level entry instead: `☰` → `/settings` (testID `project-header-app-settings`), and `/settings` gained an **Admin** row (`settings-admin` → `/admin`). Path: chat header `☰` → Settings → Admin. `app/__tests__/server-editor-reachability.test.ts` was retargeted at that path rather than having its assertion dropped — it is the guard that would have caught this.
+
+**DEVIATION from the brief, stated for the record:** the brief listed the header back arrow (`_layout.tsx:403`) among the nine sites that should point at General chat. It points at `/settings` instead. Sending it to General would have been a second, redundant route to a screen the rail's General tile already opens, while leaving `/settings` + `/admin` unreachable — the more expensive of the two mistakes.
+
+**Not covered.** The `?joined=<project>&by=<owner>` invite toast rendered on the deleted screen (`parseJoinedToast` / `joinedToastCopy` / `components/Toast.tsx`); nothing in the repo produces that redirect yet (grepped: the only mentions were the screen's own comment and the helpers), so no live behaviour regressed, but mobile has no home for that toast until the accept-redirect lands. The helpers keep their unit tests and their consumer is now zero. `app/app/focus.tsx` remains reachable from nowhere — a pre-existing orphan this change did not create and did not fix. Everything here is verified by tests + typecheck + the lint/leak/depcruise gates; **not** yet verified on a device by Ryan, which is the only bar that closes the decision.
+
+## 2026-07-29 — Mobile app icons replaced with the real Neutron mark
+
+Ryan on device: *"Why is the app logo a weird ^ instead of our neutron logo?"*
+
+**It was the stock Expo template icon.** All six files under `app/assets/images/`
+were dated 17 May — the day the app was scaffolded with `create-expo-app` — and
+`android-icon-foreground.png` was the blue `create-expo-app` chevron. Nobody had
+ever replaced them. Not a regression; a scaffold default that shipped.
+
+**No design work was needed** — the real mark already existed as `landing/logo.svg`
+and is the established brand: the same atom is the web favicon (`landing/favicon.svg`)
+and the chat rail header (`ChatApp.tsx AtomMark()`). Dark ground `#0b0e14`, teal
+`#6fe3d4` concentric orbits, centre nucleus, one electron.
+
+All six regenerated from that source (rendered via `qlmanage`, resized with `sips`
+— neither `rsvg-convert` nor ImageMagick is present on this machine):
+
+- `icon.png` 1024² — **full-bleed square, rounded corners deliberately REMOVED.**
+  `landing/logo.svg` carries `rx="96"` for web use, but iOS and Android both apply
+  their own mask; a pre-rounded source leaves dark wedges in the corners.
+- `android-icon-foreground.png` 512² — mark only on transparent, **scaled 0.62** so
+  the outer orbit spans ~58% of the canvas and sits inside Android's inner-66%
+  adaptive-icon safe zone. At the source's own scale the orbit spans ~69% and would
+  be clipped by circular masking.
+- `android-icon-background.png` 512² — flat `#0b0e14`, full bleed.
+- `android-icon-monochrome.png` 432² — themed-icon silhouette. **Opacity variation
+  dropped and strokes thickened**: Android tints this layer flat, so the source's
+  0.55/0.85 orbit opacities would render as muddy banding.
+- `splash-icon.png` 1024² — mark on transparent at 0.78; `app.json` already sets the
+  splash background to `#000000`, so it composites correctly.
+- `favicon.png` 48².
+
+`app.json` needed **no change** — its paths already pointed at these filenames, so
+replacing the bytes was sufficient.
+
+**Not yet verified on-device.** These reach a device via an OTA update on the
+`preview` channel; per the done-means-served bar this closes when Ryan sees the atom
+on his home screen. Note the icon itself is part of the native shell on some
+platforms, so a full rebuild may be required rather than an OTA — flagged rather
+than assumed.
+
+## 2026-07-29 — Mobile chat had NEVER sent a message: `crypto.randomUUID()` on a runtime with no `crypto`; plus the keyboard covering the composer; plus the harness that would have caught it
+
+Ryan, from the phone: *"the mobile keyboard just covers the text entry box. You can't see it at all."* And separately: a sent message never leaves the device. Three OTAs had shipped that evening, all green on unit tests, typecheck and lint. He has been the integration test three times in one night and said plainly that is unacceptable — so the third deliverable here is the test harness, not a fix.
+
+#### Defect 1 — every mobile send was destroyed before it existed
+
+**`chat-core/send-queue.ts:49`** (pre-fix):
+
+```ts
+this.generateId = opts.generateId ?? (() => crypto.randomUUID())
+```
+
+`crypto` IS NOT A GLOBAL ON THE DEVICE. React Native 0.81 installs none, and Expo SDK 54's WinterCG shim installs `TextDecoder`, `TextDecoderStream`, `URL`, `URLSearchParams` and `structuredClone` and stops there (`expo/src/winter/runtime.native.ts` — read it; there is no crypto line). So that expression was a `TypeError`, thrown from `SendQueue.enqueue()` **before** `store.upsert()` wrote the optimistic row.
+
+`app/lib/chat-core/use-mobile-chat.ts:276` (pre-fix) then swallowed it:
+
+```ts
+void sessionRef.current?.send(trimmed, opts);
+```
+
+`void` on a rejecting promise, behind an optional chain. Net effect for the owner: no bubble, no outbound frame, no server row, no log line, no error. An app that looked like it was working.
+
+**The diagnosis was NOT the one the symptoms suggested.** The prior narrowing (healthy websocket, clean `session_open`/`session_close` pairs, zero message frames) pointed at a stale socket captured across a project switch, or a send that was never wired. Both were wrong: the transport, the topic derivation, the session cache and the composer wiring are all correct, and a mounted surface sends fine under Bun. The bug lived entirely in the difference between Bun's runtime and the phone's.
+
+**Production proof, before any code was changed.** `app_chat_receipts.device_id` on the live instance contains two populations:
+
+- `dev-59a129bb-19c5-4772-b001-5f2c9ca23cfe` (UUID) — the browser, where `crypto.randomUUID` exists;
+- `dev-f8dmlj`, `dev-6ml5wl`, `dev-afcfa1`, … ~50 distinct short base-36 ids — the **fallback** branch of `makeDeviceId()`, which is only reached when `crypto?.randomUUID === undefined`.
+
+The device ids are themselves the measurement: the mobile runtime demonstrably has no WebCrypto. And `app_chat_messages` holds 9 `role='user'` rows, every one with a UUID `client_msg_id` — i.e. every user message ever persisted came from the web client. **Mobile had never delivered one, at any point in the life of the surface.** The newest is from 2026-07-23; nothing since.
+
+**Fix.** One generator, `chat-core/ids.ts` `randomId()` / `prefixedRandomId()`: `crypto.randomUUID` → `crypto.getRandomValues` → `Math.random`, never throwing. `SendQueue` uses it as its default.
+
+**Why one shared generator and not a seventh guard.** Six client call sites had already hand-rolled `const c = globalThis.crypto; c?.randomUUID !== undefined ? … : Math.random()` — chat-core's `web-session`, the app's `mobile-session`, `use-mobile-chat`, the project layout's rail id, the workboard's, and the web chat's config. Every one of them knew. `SendQueue` — the one on the send path, and the one shared with the browser where the bug is invisible — did not. A guard copy-pasted six times gets missed at the seventh, so `chat-core/__tests__/no-direct-webcrypto.test.ts` now fails the build on any direct `crypto.randomUUID` / `getRandomValues` / `subtle` in `chat-core/`, `app/lib`, `app/app`, `app/components` or `landing/chat-react`. It asserts its own reach (>50 files scanned) and its own regex (matches a real call, does not match the guarded indirection) so it cannot rot into a permanently-green no-op — the #388 lesson.
+
+**Also fixed: the silence itself.** Even with the id generator correct, ANY enqueue fault used to vanish. `useMobileChat.send` now returns `Promise<boolean>`, catches, and sets `sendError`, which `StatusStrip` renders ABOVE the connection label. Two consequences: a null session reports "Still connecting — message not sent" instead of no-oping, and the composer's `if (ok)` contract — which `ChatSyncSurface.handleSend` satisfied with a hardcoded `return true` — is now truthful, so a send that could not be queued **leaves the owner's text in the box** instead of deleting it along with the message.
+
+#### Defect 2 — `KeyboardAvoidingView` cannot avoid a keyboard from inside nested chrome
+
+`ChatSyncSurface` wrapped itself in `<KeyboardAvoidingView behavior="padding">`. That component measures itself with `onLayout`, whose `nativeEvent.layout.y` is **parent-relative**, and pads by `frame.y + frame.height - keyboardScreenY`. That identity only holds for a full-screen root. This surface is not one: it sits under the project shell's `paddingTop: SPACING.xxl + SPACING.lg`, the `ProjectHeader`, and the `ProjectTabBar`.
+
+With ~150pt of chrome on an 852pt screen and a 336pt keyboard, it computed `(0 + 702) - 516 = 186pt` instead of 336pt — 150pt short, which is more than the composer's own height. Hence "you can't see it at all". Broken since the screen was built; it only became unmissable once the app started opening directly into chat.
+
+**Fix.** `app/lib/keyboard-inset.ts` (`keyboardOverlap`, pure) + `app/lib/use-keyboard-inset.ts` (the RN wiring). The container's bottom is read with `measureInWindow` — **window** coordinates, the same space as the keyboard's `endCoordinates.screenY` — so the subtraction is correct at any nesting depth. The measured view is deliberately the OUTER one and the padding goes on an inner child, or the padding would move the edge that produced it.
+
+Two properties worth recording. It **self-corrects on Android**: with `adjustResize`/edge-to-edge the OS shrinks the window first, so the measured bottom is already above the keyboard, the overlap is ≤ 0, and nothing is added — no platform branch in the arithmetic. And it uses `keyboardWillChangeFrame` on iOS, which covers show, hide, height changes (autocomplete bar, emoji switch) and interactive dismissal in one subscription, and fires before the animation so the lift is in step rather than a frame behind.
+
+The list also follows the newest message when the viewport shrinks (`listRef.scrollToEnd` on a rising inset). `maintainVisibleContentPosition` holds position through CONTENT changes, which is not the same thing.
+
+**No new native dependency**, deliberately: `Keyboard` and `measureInWindow` are already in the shipped binary, so this is OTA-deliverable. `react-native-keyboard-controller` would be the more polished answer and requires a new native build.
+
+#### Defect 3 — the mobile app could not mount a single component, and now can
+
+The convention note at the top of `app/__tests__/comments-side-pane.test.tsx` stated the gap outright: *"the Neutron app's bun:test suite does NOT mount React Native components."* 1,200-odd app tests covered pure helpers and HTTP clients. The entire React wiring layer — where all three of tonight's defects lived, and where the rolled-back `ProjectShell` spinner regression lived — had no coverage at all. That is why "unit tests, typecheck and lint are green" kept coexisting with an unusable app.
+
+`app/__tests__/support/native-harness.ts` mounts the real tree under Bun: `react-native` → `react-native-web` (RN primitives render to queryable DOM), a settable `Platform.OS` so `ios` branches actually execute, inert stubs for the expo modules with no JS implementation, a driveable `Keyboard` event bus (RNW's never emits, which would make every keyboard assertion vacuously green), a faked viewport rect (happy-dom reports 0×0, which would make every layout assertion vacuous), and — the load-bearing one — `withoutWebCrypto()`.
+
+`app/__tests__/support/mount.tsx` gives the interaction vocabulary: `type()` through the prototype value setter so React sees it, `press(accessibilityLabel)` which **throws if the control is absent or disabled**, and `FakeChatSocket` recording every frame. Assertions go through the same affordances a thumb uses, so a control that renders but cannot be reached fails.
+
+**It is not a device.** It cannot see native layout, a real keyboard, a gesture, Hermes semantics, or anything in the native binary. What it caught tonight it caught because the bug was reachable in JS.
+
+- **Would have caught defect 1**: yes, directly, and it is the only thing here that could — the whole assertion is "submit produces an outbound frame AND a local bubble, with `globalThis.crypto` deleted".
+- **Would have caught defect 2**: PARTLY, and this needs stating precisely. It asserts the surface subscribes to keyboard geometry and pads by the measured overlap, and `keyboard-inset.test.ts` pins the nested-chrome arithmetic including the wrong 186pt number. It does NOT prove the composer is visible: the layout rect is fictional. "The keyboard no longer covers the input" is a DEVICE claim and remains unverified until Ryan looks at it.
+- **Would have caught the rolled-back `ProjectShell` spinner**: probably — a mount that asserts the transcript renders after a project switch fails on a permanent spinner. Not claimed as fact; nothing was re-run against that reverted commit.
+
+**The harness is process-hygienic, and that was learned the expensive way.** Bun runs ~100 test FILES per process and chunk composition is not stable, so anything a harness file installs globally lands in whatever runs next. The first CI run of this branch cost **68 failures across three shards in unrelated packages**:
+
+- `GlobalRegistrator.register()` installs happy-dom's `fetch`/`Response`/`Request`/`WebSocket`. A gateway/open test booting a real `Bun.serve` then failed Bun's `Expected a Response object` check, and a loopback `fetch` gave `ECONNREFUSED`. Fixed by capturing Bun's natives before registration and putting them back immediately after — the harness needs the DOM, not the network stack, and react-dom/RNW touch none of them.
+- `FakeChatSocket.install()` and the faked layout rect were still installed when the next file ran, hanging `open/__tests__/open-app-ws-durable-chatlog.test.ts` (real WS against a recorder that never opens) for five 30s timeouts. Fixed with `resetHarnessGlobals()` in each harness suite's `afterAll`, which restores `getBoundingClientRect`, the real `WebSocket`, and `Platform.OS`.
+- The DOM registration itself is deliberately NOT undone: unregistering after react-native-web has captured browser globals would break harness files still to run in the same process, and a merely-present `document` is a condition the suite already tolerates (`landing`'s tests register happy-dom the same way).
+
+Verified by reproducing the mixed chunk locally: `upload-client` + a harness suite + the real-`Bun.serve` WS E2E went from **12 pass / 5 fail** to **17 pass / 0 fail**.
+
+**One more landmine, worth knowing about.** Four existing app tests call `mock.module('react-native', () => ({ View, Text, … }))` with a three-export fake. Bun module mocks are process-global and permanent, and Bun runs many test FILES per process — so whichever loads first owns `react-native` for everything after it, and a real component tree fails to link on the first omitted export (`AppState`). Reproduced deterministically by running `authed-attachment-image-hooks.test.tsx` before `chat-keyboard-avoidance.test.tsx`. A module mock outranks an `onLoad` alias, and re-registering the mock either deadlocks (async factory) or loses (sync). The harness therefore does not contest the specifier: it rewrites `from 'react-native'` inside the app's own sources to the stub path, so its graph never asks the registry and those four tests keep the fake they want. `native-harness-selfcheck.test.tsx` asserts the harness has a DOM, a complete RN surface, a phone platform, a non-zero viewport and removable WebCrypto — so a degraded harness fails loudly instead of turning the device suites into no-ops.
+
+#### Measured
+
+Mutation-tested every guard, because a guard whose removal reddens nothing is not a guard:
+
+| Mutation | Result |
+|---|---|
+| restore `crypto.randomUUID()` in `SendQueue` | `send-queue-no-webcrypto` 3/6 fail; device suite 4/7 fail |
+| restore `KeyboardAvoidingView` on the surface | keyboard suite 3/6 fail |
+| restore `void session?.send(...)` + `return true` | device suite 2/7 fail |
+| `keyboardOverlap` → always `0` | inset suite 3/7 fail; keyboard suite 3/6 fail |
+| reintroduce a direct `crypto.randomUUID` in `app/lib` | WebCrypto guard 1/3 fail, naming the file:line |
+
+Suites: `chat-core` 145 pass, `app/__tests__` 1,237 pass (was 1,218 + 19 new), typecheck matrix 51/51, lint 5/5 gates, leak gate SILENT.
+
+#### NOT covered
+
+- **Nothing here is verified on a phone.** Both fixes are JS-only and OTA-deliverable, but "the keyboard no longer covers the composer" and "a typed message arrives" are device claims. Treat them as unverified until Ryan confirms on the handset.
+- The harness sees no native layout, gestures, Hermes semantics, or native-module behaviour.
+- The `crypto`-absent conclusion is inferred from production device ids + the absence of a polyfill in the Expo/RN source, not from a runtime probe on the handset. It is strongly evidenced, not directly observed.
+- The remaining hand-rolled WebCrypto guards in `app/app/projects/[id]/_layout.tsx`, `workboard.tsx` and `landing/chat-react/` were left alone. They are correct; the new lint gate prevents the unguarded form recurring anywhere. Consolidating them is cleanup, not a fix.
+- The four `mock.module('react-native')` fakes in existing tests are still there. Migrating them onto the harness would delete a real class of order-dependence, but it means rewriting their assertions, which is not a thing to do in the same change as a P0.
+
+## 2026-07-29 — the history lane is now reachable from `import-legacy`
+
+The conversation-history lane merged in #477 with its own `cli.ts` and was never added to `open/legacy-import/lanes.ts` — so no operator could run it through the unified command. The same built-but-never-wired shape the registry exists to prevent, one PR after the registry landed.
+
+Registered at the end of the array (it joins nothing, so it has no dependency constraint). Two details worth recording:
+
+**Its `main` predates the registry's shape.** History exports `main(argv, write)`; the registry expects `main(argv, env?, write?)`. Adapted at the registration site rather than edited in the lane, because the lane's own tests pin the two-arg form and a registry adapter is the smaller, reversible change.
+
+**Its transcript roots come from the vault's `gateway/topic-map.json`, not from the vault tree.** Each topic runs its session in its own working directory, so the transcripts live under `~/.claude/projects/<encoded-cwd>/` across ~21 directories. The lane exits 2 when the map is absent, which is correct — a missing prerequisite must fail loudly rather than silently import nothing. The registry test's synthetic vault therefore gained an empty `topic-map.json` rather than the lane being softened to tolerate its absence.
+
+Mutation-verified: dropping the `history` entry from `IMPORT_LANES` fails 3 tests (registry shape, its reachability fingerprint, and the end-to-end `all` walk). The `all` banner count now derives from `EXPECTED_LANES` so adding a lane updates one place instead of two.
+
+SYSTEM-OVERVIEW's limitations block updated: history is registered, but its **synthesis step remains unwired** — the messages import and are readable, and nothing has been distilled from them yet. 21 pass / 0 fail.
+
+## 2026-07-29 — the tasks lane is reachable, visible, and joins the ONE manifest reader
+
+The tasks lane merged with its own `cli.ts` and no entry in `open/legacy-import/lanes.ts` — the same built-but-never-wired shape the registry exists to prevent, and the second lane in two PRs to arrive that way. Registering it surfaced two further defects that a registry entry alone would have shipped past.
+
+**1. Registration.** One `ImportLane` entry at the end of the array (6th), plus `tasks` in `EXPECTED_LANES` and a `/the legacy harness → Neutron TASKS import/` fingerprint in `open/__tests__/legacy-import-cli-registry.test.ts`. The lane reads `<vault>/tasks.md` and exits 2 without it, so the registry test's synthetic vault gained one rather than the lane being softened — same call as the history lane and its topic map.
+
+**2. Its report was INVISIBLE under `all`.** `main` was `(argv, env)` writing straight to `process.stdout` / `process.stderr`. In a terminal that still prints; to the registry, which composes every lane's output into one captured stream, the `[6/6] tasks` banner was followed by nothing at all. It is now `main(argv, env, out?, writeErr?)` with defaults to the real streams, and the registration site passes its writer for BOTH — a usage error sent only to stderr is exactly as invisible as a report. The error writer is deliberately named `writeErr`, not `err`: `catch (err)` binds the Error and shadows it, so every `err(...)` inside a catch calls the Error as a function. That rename also left one live reference at module scope (`import.meta.main`'s rejection handler, where `writeErr` is not in scope at all) — a ReferenceError that would have swallowed any real rejection. Fixed to `process.stderr.write`.
+
+**3. The real defect: a THIRD manifest reader.** `open/legacy-import/tasks/manifest.ts` was a private, single-argument copy of the projects-lane manifest join. It knew only the applied path. PR #482 taught the shared reader about the projects lane's PREVIEW manifest (`legacy-import-manifest.dry-run.json`, `"dry_run": true`) and #483 moved that reader to `open/legacy-import/manifest.ts` where `documents` and `history` both consume it — the tasks copy predates both. So under `import-legacy all --dry-run`, which is the DEFAULT verb, the tasks lane could not see the manifest the projects lane had written seconds earlier, exited 2, and STOPPED the walk at the last lane. The end-to-end preview — the artifact the owner reads before authorising a one-time, irreversible cutover — could not be produced.
+
+Consolidated: `tasks/manifest.ts` is DELETED and the lane joins `../manifest.ts`. What that required, beyond the import swap:
+
+- `buildImportPlan` gained `apply?: boolean` and passes `{ forApply, lane: 'tasks' }`. The signatures differ — the shared reader is `readManifest(ownerHome, selector)` / `manifestPathFor(ownerHome, kind)` — and `apply` is what carries the one-directional rule down from the CLI verb. Both `cli.ts` call sites now state it explicitly.
+- `plan.manifestPath` is now `manifest.path`, the file ACTUALLY read, not a re-derived path. There are two candidates; a report that names the wrong one is a lie about which ids a run joined.
+- The lane pushes the same PREVIEW warning `documents` and `history` do when it joins a dry-run manifest, so the report says its project ids are predictions.
+- `tasks/types.ts` re-exports `ImportOutcome` / `Manifest` / `ManifestRecord` / `LoadedManifest` from `../manifest.ts` instead of redeclaring them. `BOUND_OUTCOMES` stays local and now also excludes the shared vocabulary's legacy `skipped` spelling, which is correct: every outcome not in that set is excluded as `unbound-project`.
+
+**The one-directional rule is preserved and now pinned for this lane too.** A preview MAY read a real manifest; an `--apply` may NEVER read a preview, because a preview's `project_id`s are predictions about rows that may not exist. Five new tests: a dry run joins the preview and says so; `--apply` against a preview-only home throws and the CLI exits 2 with nothing written; `--apply` refuses a `dry_run: true` file MOVED onto the applied path; `--apply` is satisfied by the applied manifest whether or not a preview sits beside it. The missing-manifest guard and the refusal to re-derive ids from `[project:<slug>]` tags are unchanged — those are correct and stay loud.
+
+**Stale argv fixed.** The tasks lane's missing-manifest error told the operator to run `neutron import-legacy --dry-run` / bare `neutron import-legacy` — the pre-#478 surface, which no longer exists. Deleting the file took the last of it: a repo-wide grep of `open/legacy-import/tasks/` now finds no pre-unification command string. The shared reader's message already names the current argv (`neutron import-legacy projects` / `… projects --apply`).
+
+**`open/__tests__/legacy-import-all-dry-run.test.ts` needed its fixture.** Registering a 6th lane made that file's vault incomplete (no `tasks.md`), which broke 3 of its tests. Fixture gained a `tasks.md` whose `[project:]` tags name the two vault projects, so the walk exercises the real join — and a new test scopes to the tasks lane's own section and asserts it joined the PREVIEW manifest path with 2 writable rows and 0 exclusions. That test is the direct regression guard: a lane with a private applied-only reader cannot pass it.
+
+#### Mutation results — 4 mutants, 4 killed
+
+| # | Mutation | Result |
+|---|---|---|
+| a | drop the `tasks` entry from `IMPORT_LANES` | KILLED — 3 registry tests (contractual lane list, `import-legacy tasks` reachability, the end-to-end `all` walk) |
+| b | `cli.ts --apply` path passes `apply: false` (an apply would accept a preview) | KILLED — 1 test (`the CLI --apply path exits 2 against a preview-only home`) |
+| b2 | `plan.ts` hard-codes `forApply: false` (the same defect one level down) | KILLED — 4 tests |
+| c | remove the missing-manifest guard in the shared reader | KILLED — 2 tasks tests, 1 documents test, 3 `all --dry-run` tests |
+
+No mutant survived; no test needed strengthening after the fact. (b) killing only one test is expected — the plan-level tests set `apply` directly and are blind to a CLI-only mutation, which is why (b2) was run as well.
+
+#### The real vault, end to end
+
+`./bin/neutron import-legacy all --dry-run --legacy-home ~/legacy --data-dir <fresh>` — **exit 1**, all SIX lanes previewed, no `STOPPED`:
+
+| # | Lane | Total |
+|---|---|---|
+| 1 | `projects` | 25 active + 19 archived to import, 0 slug-identity failures |
+| 2 | `entities` | 1310 pages to write, 0 skipped |
+| 3 | `documents` | 808 files to write, 0 identical, 3 dangling symlinks excluded |
+| 4 | `memory` | 875 pages, 0 typed edges (no `--chroma-db` / `--kg-db` snapshot given) |
+| 5 | `history` | 53 520 rows to write out of 595 063 entries; 8350 excluded for no topic in scope, 0 excluded for no manifest record |
+| 6 | `tasks` | 78 bullets parsed → 66 writable, 12 excluded (11 orphan `[project:gateway]`, 1 empty title) |
+
+Exit 1 is the correct real-vault code: `documents` and `tasks` each reported exclusions and the final banner names both. Afterwards the data dir contained EXACTLY one file — `migration/legacy-import-manifest.dry-run.json`. No `project.db`, no doc folders, no pages, no chat rows.
+
+Test totals: registry 24/24, tasks 42/42 (was 37), documents 45/45, history 58/58, `all --dry-run` 17/17. `bunx tsc -p open/tsconfig.json --noEmit` clean.
+
+**The lane count is SIX, not seven** — `projects`, `entities`, `documents`, `memory`, `history`, `tasks`.
+
+## 2026-07-29 — Scrub owner-private data out of the migration lane and its docs
+
+The the legacy harness→Neutron migration code was written directly into this PUBLIC repo, and it carried the reference vault's real contents into it. Not secrets — no keys, no tokens — but personal data: the owner's real portfolio/project slugs used as test fixture names, their home-directory paths, their messaging handle and numeric account id, and comment prose that inventoried which specific projects in their vault had which frontmatter defects. This change replaces all of it with neutral synthetic equivalents. Working tree only; no history rewrite.
+
+#### What was removed, by category
+
+1. **Real project / business slugs used as fixture identifiers.** Test trees, manifest fixtures, expected display names and report assertions were all keyed on the owner's actual portfolio. Replaced with synthetic slugs chosen to preserve the shapes the tests exercise: hyphenation, acronym segments, CamelCase brands, and the prefix-collision pair (`<slug>` vs `<slug>-2`) that the history lane's topic-id check depends on.
+2. **Personal filesystem paths and the account name inside them.** Absolute home paths and the Claude Code `~/.claude/projects/<encoded-cwd>/` directory slugs that embed them, in both comments and fixtures.
+3. **Messaging identity.** The owner's real handle appeared in `<channel>` envelope examples AND as the *production default* of `DEFAULT_OWNER_HANDLE`; a real numeric account id appeared in a verbatim envelope sample. Both are now neutral placeholders — see the behaviour note below.
+4. **Vault-inventory prose.** Several module headers named *which* specific projects were missing frontmatter, used an alternate key set, or carried inline `#` comments. Each was rewritten to state the SHAPE that motivates the parser branch without enumerating the vault. The engineering reasoning is deliberately untouched — the manifest-join-vs-re-derivation argument, the priority polarity inversion, `Dirent.isFile()` being false for symlinks, the timeline-embedding hazard, and the byte-fidelity rationale all survive verbatim.
+5. **A hand-curated display-name override table** that was, in effect, a copy of the owner's project list. Reframed as neutral examples of the two families it actually exists for (acronym segment, CamelCase brand), with a note to extend it per install.
+6. **Third-party personal names** appearing in fixture content and entity-page fixtures.
+7. **A private counterparty name** used as a column-padding demo string, and residual owner-name possessives throughout the lane's comments (now "the owner").
+
+#### One behaviour change, deliberate
+
+`DEFAULT_OWNER_HANDLE` (`open/legacy-import/history/classify.ts`) was a real handle and is now the placeholder `'owner'`. The history lane classifies an entry as the owner's only when the `<channel user="…">` attribute matches, so any install whose transcripts use a different handle must now pass `--owner-handle <handle>` (the flag already existed and is surfaced in `--help`). A mismatch is loud, not silent: the lane classifies zero owner messages and the dry-run report shows that before anything is written.
+
+#### Verification
+
+- Repo-wide grep for the removed identifier set across `open/`, `docs/`, `bin/` returns zero hits.
+- Every affected test file passes with the **same** test and assertion counts as before the rename (311 tests / 1293 assertions across the ten migration-lane files; 336 / 1413 including the substrate-wiring test). No assertion was relaxed, deleted, or made less specific — fixture *names* changed, the properties asserted did not.
+- `bunx tsc -p open/tsconfig.json --noEmit` clean; `scripts/ci/leak-gate.sh --tree .` silent.
+- **Mutation-checked** that the load-bearing assertions still bite after the rename: re-deriving the destination project id from the source directory name instead of reading the manifest → 7 failures; trimming the body in the document write path → 12 failures; trimming the extracted `<channel>` body → 4 failures. All three were reverted after measurement.
+
+#### Known residue (not closed here)
+
+The owner's first name still appears in comments, fixture slugs and test data across roughly fifty files OUTSIDE the migration lane — onboarding, connect, landing, gateway, work-board, reminders, trident, runtime and the mobile app — as does at least one collaborator's first name. That is the same class of leak and wants a follow-up sweep; it was left alone here to keep this change reviewable and to avoid touching subsystems whose tests were out of scope.
 
 ## 2026-07-28 — `neutron import-legacy` imports `<vault>/Archive/` as ARCHIVED projects
 
@@ -4409,17 +11426,18 @@ Mutation-verified: removing `isBareRoot` fails 2 of the 5 new tests. The other t
 
 Gates: 42 pass / 0 fail across `open/__tests__/open-owner-gate.test.ts` + `gateway/http/__tests__/auth-gate-seam-both-modes.test.ts`; the rest runs in CI.
 Gates: 21 pass / 0 fail in `open/__tests__/open-owner-gate.test.ts`; the rest runs in CI.
-> **CLOSED FOR NEW ENTRIES (2026-07-28).** Write new as-built entries as one file
-> per entry under [`docs/as-built/`](as-built/README.md) instead.
+> **REVERSED (2026-08-16) — this file is canonical again, and everything came back into it.**
+> Between 2026-07-28 and 2026-08-16 new entries were written one-file-per-entry under
+> `docs/as-built/`. That directory is gone; its 46 entries are folded back in above, in
+> date order, and this is the one place an as-built entry is ever written.
 >
-> Every PR used to prepend here, at the same offset, so two open PRs conflicted by
-> construction rather than by subject — five rebases in one evening across four
-> unrelated PRs, every resolution being the same mechanical "keep both". That toll
-> scales with concurrency, and the M2 migration fans out across independent lanes
-> on purpose. One file per entry makes the conflict impossible instead of easy.
->
-> This file stays exactly as it is and remains the place to read history through
-> 2026-07-28. Nothing is migrated out of it.
+> The split was not arbitrary and the reason it was tried is worth keeping: every PR
+> prepended here at the same offset, so two open PRs conflicted by construction rather
+> than by subject — five rebases in one evening across four unrelated PRs, every
+> resolution the same mechanical "keep both". What it cost instead was discoverability:
+> the history of a subsystem stopped being readable in one pass, and a doc-drift guard
+> that pinned a filename broke the moment the file moved. The owner weighed both and
+> chose one canonical file. Resolve the append conflicts; they are cheap and local.
 
 ## 2026-07-28 — `neutron import-legacy`: Lane A of the the legacy harness cutover (PROJECTS)
 
@@ -4819,7 +11837,7 @@ Branch `trident/app-login-first-discovery`. The OPEN/app half of the login-first
 - **Error taxonomy read from the SERVER, not assumed.** Mapped on the BODY'S SHAPE first and status second, because two distinct routing failures both answer **404** — status alone cannot distinguish them, but the discriminating field the service attaches does: `409 + slugs[]` → several instances (the list feeds the picker), `404 + userId` → the account owns no active instance, `404 + slug` → that slug isn't an active instance we own, `401` → bad credentials or a rejected session token. Verified by reading the control plane's error serialiser and its routing error classes at the SHA that shipped `/v1/route`, not inferred. The reply also carries a `kind` discriminator that would be more direct, but its values name a hosting-layer concept Open's vocabulary gate (`scripts/ci/leak-gate.sh`) excludes from this public tree, so the shape check — equally determined by the server's own output — is used instead. Anything unrecognised degrades to `server` with the REAL status rather than being mislabelled.
 - **`app/lib/auth.ts` — the DEAD OAuth lane is DELETED, not left beside the live one.** It held a `signInWithGoogle`/`signInWithApple` implementation built against `<auth-base>/oauth/<p>/start` + `/api/v1/install-token/exchange` — paths the control plane does not serve — with ZERO call sites anywhere in `app/`. Two OAuth implementations, one pointing nowhere, is precisely the dual-code-path trap the repo bans, and it was a live trap: the next agent to "wire up OAuth" would have wired the broken one. `lib/auth.ts` now keeps only the self-host dev-token lane plus the shared `AuthUser` shape; `buildStartUrl` went with it (the service composes and returns the `authorizeUrl` now), and `parseOauthCallback` was retargeted from the old install-token redirect to a standard `?code=&state=` authorization-code redirect. A test enumerates app sources and fails if `install-token`, `signInWithOauthProvider` or `buildStartUrl` reappears in code.
 
-### Round 2 — the two blockers Argus raised, and the majors alongside them
+#### Round 2 — the two blockers Argus raised, and the majors alongside them
 
 - **BLOCKER 1 (fixed, and proven end-to-end): the instance-scoped bearer was a credential NO Open gateway accepted.** Every `/api/app/*` surface is gated by one resolver, `appOwnerAuth` (`open/composer.ts`), which accepted only the per-install owner bearer (`constantTimeEqual(token, appWsToken)` — a value a phone cannot know) or a base-resolver result whose `user_id === OWNER_USER_ID`. The base resolver had exactly three modes (`channels/adapters/app-ws/auth.ts`): dev-bypass, HS256, unconfigured. The identity service mints the route token as **RS256**, so it hit dev-bypass and was rejected as `malformed_token` — sign-in succeeded, then everything 401'd. Worse, the flow's own adoption probe is UNAUTHENTICATED `/healthz`, so it reported success and hid the failure. **`channels/adapters/app-ws/auth.ts` gains a real `jwks` mode**: offline RS256 verification against the identity service's published JWKS via jose's `createRemoteJWKSet` (which owns fetch, cache, rotation and cooldown — no cache maintained here), configured by `NEUTRON_IDENTITY_JWKS_URL` and an OPTIONAL `NEUTRON_IDENTITY_AUDIENCE`. The claim contract is all-or-nothing: RS256 signature, `exp`, a non-empty `sub`, and a non-empty `slug` claim that constant-time-equals this gateway's own slug. **A token with NO `slug` is REFUSED** — that is the account-scoped bearer every signed-in account holds, and accepting it would let any account drive any install. `jwks_url` **outranks** `bypass`, deliberately: `bypass` is derived from a loopback bind and a hosted instance binds loopback behind a reverse proxy, so checking `bypass` first would make the production mode unreachable on exactly the deployments that need it. There is no credential CHAIN — a token that fails the configured mode is rejected, not retried against a weaker one. A malformed `NEUTRON_IDENTITY_JWKS_URL` throws at composition rather than degrading to "identity quietly off", because a typo must not reproduce the sign-in-then-401 confusion this removes.
 - **…and `appOwnerAuth` normalises a JWKS-verified identity onto the owner.** The resolver returns the identity service's account id as `user_id`, but Open is single-owner and everything downstream (the WS channel topic, the owner-timezone write, every `/api/app/*` gate) compares against `OWNER_USER_ID`. Returning the remote account id would authenticate the owner and then deny them, and would fork the chat transcript per account id. Since the control plane mints a slug-scoped token only for that slug's owner, and the resolver already checked the slug, that bearer IS the owner: `if (resolved.mode === 'jwks') return { ...resolved, user_id: OWNER_USER_ID }`.
@@ -4835,7 +11853,7 @@ Branch `trident/app-login-first-discovery`. The OPEN/app half of the login-first
 - **NITs (fixed):** the "nothing is hardcoded" test matched only the assignment form `= 'https://…'`, so a returned template literal, an object-literal value or a baked `fetch('https://…')` argument all slipped through a test whose stated guarantee is "anywhere" — it now matches ANY http(s) string literal, carries two NAMED reviewable allowances (the localhost suggestion in the self-host form; a third-party favicon endpoint) instead of a category exemption, and a companion test proves the widened regex catches all four forms the old one missed. The instance-picker button no longer no-ops silently when the session is gone (it says so). Both password inputs gained `autoComplete` / `textContentType` so platform password managers fill AND offer to save on the app's new primary surface. Stale docstrings in `lib/server-url.ts`, `lib/config.ts` and `lib/token-storage.ts` that still described the deleted setup gate were corrected, and `app/README.md` — the first doc a future agent reads, and untouched in round 1 — was updated for the login-first boot path and all three sign-in lanes.
 - **NIT (reverted): the unrelated gbrain test-timeout bump is GONE.** Round 1 raised `gbrain-memory/__tests__/raw-op-seam-ban.test.ts`'s per-test budget to 30s and justified it with a machine-specific measurement a reviewer could not reproduce. `scripts/run-tests.sh` already runs with `--timeout=15000`, so CI was never near the budget. Reverted to `main`; verified that file still passes on a bare `bun test` (1.38s of the 5s default, measured in this worktree).
 - **Round-2 verification, with the environment named.** Run in worktree `/private/tmp/wt-login-first` on macOS (darwin 24.6.0), `bun test v1.3.9 (cf6cdbbb)`: root `bunx tsc --noEmit` clean; `cd app && bunx tsc --noEmit` clean; `scripts/ci/lint.sh` clean; `scripts/ci/depcruise.sh` 8 known violations, 0 new; `scripts/ci/leak-gate.sh` SILENT; `bun test app/` 1037 pass / 0 fail; full `bun test` result recorded in the PR. Round 1 asserted a clean root `tsc` and a green full suite without naming where — reviewers could not reproduce either in a fresh worktree (workspace-symlink resolution), and the root `tsconfig.json` excludes `app/`, which is why the app typecheck is a SEPARATE command above rather than covered by the root one.
-### Round 3 — the rotation bug, the predicate extraction, and the diagnostic for the cross-repo gap
+#### Round 3 — the rotation bug, the predicate extraction, and the diagnostic for the cross-repo gap
 
 - **MAJOR (fixed): a rotated refresh token was DROPPED when the route hop failed, turning one flaky request into a permanent logout.** Refresh tokens are single-use — the moment the service answers a refresh, the token just presented is revoked and the reply carries its replacement. `renewInstanceSession` refreshed, then called `/v1/route`, and on a route failure returned a bare `deferred` that had **nowhere to put** the replacement. So it was discarded, the next launch replayed the revoked token, the service read that as a reuse attack and revoked the whole family, and the owner was thrown back to credentials for good. That exactly inverts this flow's own guarantee that "being on a train at launch cannot log anyone out": a single transient route failure logged them out permanently instead. `RenewalOutcome`'s `deferred` and `sign_in_required` variants now carry `rotated_refresh_token`, threaded through `classifyRenewalFailure` so no exit path past the refresh can silently drop a rotation (`undefined` = the refresh never happened; `null` is a real service value and is preserved as distinct). `app/app/index.tsx` persists it before returning. **The coverage gap that hid this is closed too**: both existing defer tests failed at the REFRESH step, so no test had ever exercised "refresh succeeded, route did not" — there are now four, including the `null`-rotation case.
 - **…and the same function's success path no longer risks a partial write.** `Promise.all([setToken, setIdentitySession])` could land the NEW bearer beside the OLD (revoked) refresh token — unrecoverable, since the next launch replays it. The two writes are now SEQUENTIAL with the refresh token FIRST, so the only possible partial state is a fresh refresh token beside a still-valid older bearer, which the next launch simply renews again. Pinned by a test asserting the ordering and the absence of `Promise.all`.
@@ -5061,6 +12079,423 @@ Branch `trident/dogfood-fixes-jul21` (PR #429). Argus round-2 raised a CONFIRMED
 - **nit — `signalsFingerprint` was array-order-sensitive.** `['a','b']` vs `['b','a']` produced different fingerprints, forcing an avoidable ~45s Opus regeneration of a frozen memo. FIX: sort copies of `primary_projects`/`non_work_interests` before stringify (the fingerprint tracks WHICH signals are known, not their storage order); the caller's arrays are untouched.
 - **nit — stale comment in `onboarding/interview/onboarding-preamble.ts`** claimed the personality option renders "just the name" while the code renders `- name (why)`; comment corrected.
 - **Tests.** `scribe/__tests__/correction-patterns.test.ts` — new discriminating test (majority set shifts while the seed is constant → slug unchanged) + caller-ordering invariance. `scribe/__tests__/reflect-pass.test.ts` — new same-slug-distinct-clusters MERGE test (two clusters, one page, all six occurrences preserved). `onboarding/interview/__tests__/live-personality-suggestions.test.ts` — anchor-history union + malformed-history tolerance + fingerprint order-invariance + history accumulation-across-regeneration. Suites green: `scribe/__tests__/correction-patterns.test.ts` + `scribe/__tests__/reflect-pass.test.ts` 42 pass; `bun test onboarding/interview` 561 pass; `tsc -p scribe` + `tsc -p onboarding` clean.
+
+## 2026-07-22 — Dogfood fix #429 task 3: drop the manual Build/Research picker; server auto-classifies task_type
+
+Removed the web Work Board add-item Build/Research dropdown and moved the build-vs-research
+decision to a single server-side auto-classifier applied on create when the caller omits
+`task_type`. Web-only UI change — mobile (`app/app/projects/[id]/workboard.tsx`) already sent
+`{ title }` only and carries no dropdown, so it needed no change.
+
+- **New `work-board/task-type-classifier.ts`** — the ONE server-side classification module.
+  Exports `classifyWorkBoardTaskType({ title, llm: LlmCallFn | null, timeout_ms? })
+  → Promise<WorkBoardTaskType>` (TOTAL — never rejects), `keywordTaskTypeFallback(title)`
+  (deterministic: research verbs / interrogative openers → `research`, else `build`),
+  `CLASSIFY_SYSTEM_PROMPT`, and `DEFAULT_TASK_TYPE_CLASSIFY_TIMEOUT_MS` (2.5s). LLM-primary:
+  a one-word FAST_MODEL classify races a timeout; a `null` llm / timeout / junk / both-or-
+  neither / reject all degrade to the keyword fallback. No hardcoded model id — `LlmCallFn`
+  carries no model, so the composer injects FAST_MODEL. `work-board/package.json` gains
+  `@neutronai/contracts` (bottom dep-cruiser band — legal from work-board's services band).
+- **`gateway/http/work-board-surface.ts`** — `WorkBoardSurfaceOptions` gains an optional
+  `classify_task_type(title) => Promise<WorkBoardTaskType>`. `handleCreate` classifies ONLY
+  when the request omits `task_type`, BEFORE the create_card / store.create branch, so both
+  the on-disk-spec path and the plain create persist the classified value. An explicit
+  `task_type` from any caller short-circuits (never re-classified); a defensive catch falls to
+  the store default ('build') if a wired classifier ever throws. Absent seam → today's
+  store-default behavior (the #379 back-compat test is unchanged).
+- **`open/composer.ts`** — builds `workBoardClassifyLlm` via
+  `buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })` (null on an
+  LLM-less box → keyword-only) and wires `classify_task_type` into `createWorkBoardSurface`
+  unconditionally (it degrades internally).
+- **`landing/chat-react/WorkBoardTab.tsx`** — deleted the `<select className="cwb-add-kind">`,
+  the `newTaskType` state + reset, the `WorkBoardTaskType` import, and the create's `task_type`
+  arg + deps entry. The add-form is now a plain input + Add; a create omits `task_type`. ▶
+  startBuild/startResearch routing (reads the item's stored `task_type`) is untouched.
+- **Tests** — new `work-board/task-type-classifier.test.ts`; extended
+  `gateway/http/work-board-surface.test.ts` (classify-on-omit across both branches, explicit-
+  wins, reject→default, create_card path) and `landing/chat-react/__tests__/work-board-tab.test.tsx`
+  (no picker in the add-form; create body omits `task_type`). `bun test work-board` 230 pass,
+  `bun test gateway/http/work-board-surface` 38 pass, landing tab+client 37 pass; `tsc` clean
+  for work-board / open / gateway / landing; eslint + the new depcruise edge clean. NO FEATURE FLAGS.
+
+## 2026-07-22 — Dogfood fix #429 task 7: research_deep now actually researches — SONNET_MODEL default + parse-failure retry + tools_available grounding gate
+
+**Symptom (verified live).** A `research_deep` task died with an empty brief: the dispatched
+sub-agent ran ~31s, made ZERO tool calls, and returned non-JSON prose, so `extractJson` threw
+'no JSON object found' and the task failed with no recovery. Two root causes: (1) the sub-agent
+defaulted to a hardcoded Haiku literal (`sub-agent.ts` `DEFAULT_SUB_AGENT_MODEL`) and `deep()`
+passed no `model`, so Haiku was live in production despite a comment claiming FAST_MODEL was
+passed explicitly (false); (2) `deep()` was single-attempt — unlike `start()`'s 2-attempt
+parse-error-fed-back loop — so one malformed response discarded the whole research budget.
+
+**Three-part fix (NO FEATURE FLAGS).**
+- **Model.** `DEFAULT_SUB_AGENT_MODEL` is now `SONNET_MODEL` (env-overridable via
+  `NEUTRON_SONNET_MODEL`), imported from `@neutronai/runtime/models.ts`. Deep research needs
+  real reasoning + sustained tool-use discipline. The second hardcoded Haiku literal in
+  `research-orchestrator.ts`'s error-path run metadata (was `input.tools !== undefined ?
+  'unknown' : 'claude-haiku-...'`) now records `DEFAULT_SUB_AGENT_MODEL` — recording Haiku after
+  the switch would be a lie. No `claude-*` literal remains anywhere in `cores/free/research/src`.
+- **Retry.** `deep()` is now a 2-attempt loop mirroring `start()`. `bumpAttempt` moved inside
+  the loop. A parse / schema / zero-tool failure on attempt 0 feeds specific feedback
+  (`buildParseRetryFeedback` / `buildSchemaRetryFeedback` / `ZERO_TOOL_FEEDBACK`) into the
+  sub-agent's user prompt behind a new `RETRY_FEEDBACK_MARKER` (`[RETRY - PREVIOUS ATTEMPT
+  REJECTED]`, appended AFTER the query so canned-dispatcher `includes(query)` matching keeps
+  working; system prompt stays keyed on the original query so the engineering-rider heuristic
+  is stable) and retries once. The same failure on attempt 1 is terminal ('parse error on
+  retry: …' / 'schema error on retry: …' / 'sub-agent made zero tool calls on retry - ungrounded
+  brief rejected'). Dispatch-level errors (concurrency / timeout / transport) still fail
+  immediately, NOT retried. Claims-insert + sources-cited assertion stay single-shot (explicit
+  non-goal). One `research_sub_agent_runs` row is recorded per attempt.
+- **Grounding gate + production-safety seam.** New dispatcher-reported `tools_available` flag
+  (`RuntimeSubAgentDispatchResult.tools_available?`, surfaced on `ResearchSubAgentResult`). The
+  zero-tool grounding gate rejects a brief made with zero tool calls ONLY when the dispatcher
+  reported `tools_available === true`. The v1 production dispatcher
+  (`buildRuntimeResearchSubAgentDispatcher`) makes a single tool-less Messages-API call and now
+  explicitly reports `tools_available: false`, so the gate is INERT in production and cannot
+  brick a real deep run. It arms automatically when the real agentic tool loop ships —
+  **plan task 10** (tool-call passthrough) is the follow-up that flips it to `true`.
+
+**De-Haiku.** User-visible strings no longer claim Haiku: `chat-commands.ts` (deep-complete +
+kickoff messages), `package.json` `research_deep` tool description ('research sub-agent harness
+(SONNET_MODEL default)'), and doc headers across `sub-agent-prompt.ts` / `index.ts` /
+`manifest.ts` / `substrate-runtime.ts` / `README.md` / `AGENTS.md`. The two remaining Haiku
+mentions (`substrate-runtime.ts` `default_model` doc + `backend.ts` synthesis-fallback doc)
+describe FAST_MODEL fallbacks that stay true.
+
+**Files.** `cores/free/research/src/sub-agent.ts`, `.../research-orchestrator.ts`,
+`.../substrate-runtime.ts`, `.../chat-commands.ts`, `.../sub-agent-prompt.ts`, `.../manifest.ts`,
+`cores/free/research/index.ts`, `cores/free/research/package.json`, `README.md`, `AGENTS.md`.
+**Tests.** `__tests__/orchestrator.test.ts` gains a deep-path retry+grounding suite (T1
+reproduce-then-fix the live incident; T2 both-non-JSON fail; T3 schema-retry; T4 zero-tool retry;
+T5 zero-tool both fail; T6 production-shape do-not-brick guard; T7 concurrency metadata records
+`DEFAULT_SUB_AGENT_MODEL`; T8 grounded happy-path single dispatch); `__tests__/sub-agent.test.ts`
+gains T9 (default === SONNET_MODEL), T10 (retry_feedback threading), T11 (tools_available
+passthrough). `bun test cores/free/research` 193 pass / 2 skip; `tsc -p
+cores/free/research/tsconfig.json` clean; `gateway` research-core production-composer +
+cores-tool-dispatch guards 23 pass; eslint clean.
+
+---
+
+## 2026-07-22 — task 9 — work-board: generic terminal status transitions clear inline_active
+
+**Root cause (verified live in tenant DB).** A work-board item reaching a terminal status
+(`done`/`failed`) via the GENERIC `update()`/`complete()` path left `inline_active=1` — the
+completion ack reached Telegram but the card stayed in "inline active" state. The specialized
+`attachRun()`/`detachRun()` methods already cleared `inline_active=0` as part of their
+run-binding transitions, but the generic path only wrote `inline_active` when the caller's patch
+explicitly included it; `complete()` is `update({ status:'done' })` with no `inline_active` key.
+
+**Fix (`work-board/store.ts` `update()`).** Added a `terminalTransition` boolean (computed
+inside the transaction callback, after the `current === null` guard, so it safely reads
+`current.status`). On any REAL status transition to `'done'` or `'failed'`: (a) suppress the
+caller's explicit `patch.inline_active` push (avoids a duplicate SET column) and (b) push
+`inline_active = 0` unconditionally. Non-terminal transitions and no-status patches preserve
+today's behavior byte-identical. No data backfill for already-corrupt rows (out of scope).
+`attachRun`/`detachRun` are NOT consolidated — they have legitimately different run-binding
+semantics (owner-pinned design).
+
+**Tests (`work-board/store.test.ts`, 4 new reproduce-then-fix tests).** T1 `generic complete()
+clears inline_active` (the live bug path — create, set inline_active=true, complete(), assert
+status='done' + completed_at not null + inline_active=false both returned AND persisted); T2
+`generic update to failed clears inline_active`; T3 `terminal clear wins over explicit
+inline_active:true in the same patch`; T4 `non-terminal status transition preserves
+inline_active`. All 264 work-board tests pass; `tsc -p work-board` clean; consumer tests (38
+gateway/http/work-board-surface + 19 work-board/agent-tool) still pass.
+
+---
+
+## 2026-07-22 — Argus r2 BLOCKER fix — onboarding/interview: patchPhaseState (CAS update-if-present) replaces upsert in live personality suggester
+
+**Root cause (Argus r2 blocker).** `live-personality-suggestions.ts` used
+`stateStore.upsert({..., preservePhaseAndTimer:true})` to persist memo picks from the
+background personality suggester. While `preservePhaseAndTimer` correctly preserved the live
+row's phase and timer when the row existed, it did NOT protect against the race where the row
+was admin-reset (deleted) between the background task's re-read and the upsert write: the
+absent-row branch of `upsert()` fell into the INSERT path, recreating the row with stale
+`phase`/`last_advanced_at` from the stale pre-read snapshot — effectively undoing the admin
+reset.
+
+**Fix.** Added `patchPhaseState(owner_slug, user_id, patch)` to the `OnboardingStateStore`
+interface (`onboarding/interview/state-store.ts`) with update-if-present / CAS semantics:
+always preserves `phase` and `last_advanced_at`; returns **null** and skips the write entirely
+when the row is absent (never inserts). Implemented in both `InMemoryOnboardingStateStore`
+(atomic in-map update) and `SqliteOnboardingStateStore` (transactional SELECT then conditional
+UPDATE, returning null on miss). `live-personality-suggestions.ts` now calls `patchPhaseState`
+directly (with the four memo-patch keys), and `LivePersonalityStateStore` now uses
+`Pick<OnboardingStateStore, 'get' | 'patchPhaseState'>`. Stale comment about the re-INSERT
+fallback replaced with accurate CAS documentation.
+
+**Tests.** Updated `live-personality-suggestions.test.ts` fakeStore to implement
+`patchPhaseState` (update-if-present, null on absent row). Converted existing assertions from
+tracking `upserts[]` to `patches[]` (patch object now passed directly, no `phase`/`advanced_at`
+wrapper). Added new reproduce-then-fix test: "row deleted (admin reset) between re-read and
+write → no insert, no throw (CAS skip)" — simulates the race via `setOnGet` (get sees live row)
++ `row=null` (patchPhaseState sees absent row): asserts `patches.length===1` (write attempted)
+and `current()===null` (row NOT resurrected). Updated partial-store constructions in
+`path1-solicited-upload-starts-job.test.ts` and `build-onboarding-finalize.test.ts` (7 inline
+`OnboardingStateStore` objects) to wire `patchPhaseState` through to the real store. 968
+onboarding tests + 3761 gateway+onboarding tests pass; `tsc -p onboarding/gateway/open` clean.
+
+### M2 P0 parity — input modalities task 1: attachment→agent threading + PDF documents (2026-07-21)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 1. Attachments (including images) never reached
+the agent — `open/wiring/app-ws.ts` read `adapter_metadata.attachments` and dropped
+them (its own comment admitted the deeper wiring was a follow-up); `gateway/wiring/
+build-live-agent-turn.ts` had zero attachment handling. This builds the threading AND
+adds PDF as an accepted chat-upload type. **Images are fixed as a side effect** — they
+now reach the agent for the first time.
+
+- **`gateway/http/app-upload-surface.ts`** — `IMAGE_MIME_WHITELIST` → `CHAT_UPLOAD_MIME_WHITELIST`
+  (+`application/pdf`; SVG still excluded); `EXT_FROM_MIME` (+`pdf`), `URL_PATH_RE`
+  (`…(png|jpg|gif|webp|pdf)`), `mimeFromExt` (+`pdf`). All existing hardening
+  (Content-Length pre-check, 10 MiB cap, declared-vs-sniffed cross-check,
+  content-addressed storage, per-user GET auth) untouched. NEW exported
+  `resolveChatAttachmentLocalPath(owner_home, url)` — pure, syscall-free URL→local-path
+  map using the SAME `URL_PATH_RE` (relative OR absolute URL; null for non-matching).
+- **`gateway/http/chat-sender-registry.ts`** — `LiveAgentTurnRequest` gains
+  `attachments?: ReadonlyArray<string>` (prompt-only; never mutates `user_text`).
+- **`gateway/wiring/build-live-agent-turn.ts`** — `BuildLiveAgentTurnInput` gains
+  `resolveAttachment?`; new exported `buildAttachmentsFragment(...)` formats a
+  `<user_attachments>` block of resolved absolute paths + MIME + a "Read them" line;
+  injected on the WARM splice (before the user message) AND the COLD
+  `composeFirstTurnPrompt` (before the user message). Unresolvable URL → skipped + warn.
+- **`open/wiring/app-ws.ts`** — sanitizes `adapter_metadata.attachments` to non-empty
+  strings and passes `attachments` into the `appWsChatTurn({...})` call.
+- **`open/composer.ts`** — threads `resolveAttachment: (url) => resolveChatAttachmentLocalPath(owner_home, url)`
+  into `buildLiveAgentTurn`.
+- **Clients** — web: `uploads.ts` `ACCEPTED_IMAGE_TYPES` → `ACCEPTED_ATTACHMENT_TYPES`
+  (+pdf); `ChatApp.tsx` file-input `accept` (+`application/pdf,.pdf`), aria-label
+  "Attach file…", `AttachmentImage` non-image → downloadable file chip;
+  `message-adapter.ts` routes every attachment through the authed renderer
+  (`isImageAttachmentUrl` decides img vs chip). Expo: `app/lib/upload-client.ts`
+  `mimeToExt` (+pdf, exported for test).
+- **Tests** — `gateway/__tests__/app-upload-surface.test.ts` (PDF accept/spoof/serve+ETag
+  + `resolveChatAttachmentLocalPath` units); `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts`
+  (NEW: cold+warm embed the resolved path, `user_text` unpolluted, unresolvable skipped,
+  no-attachments/no-resolver → no block); `gateway/__tests__/m2-chat-upload-attach-production-composer.test.ts`
+  (PDF variant threads onto `adapter_metadata.attachments`); web `uploads.test.ts` /
+  `message-adapter.test.ts` updated; `app/__tests__/upload-client.test.ts` `mimeToExt` unit.
+- Suites: scoped gateway + wiring + open + client tests green; `tsc -p tsconfig.json` clean.
+- OUT OF SCOPE (later tasks): voice-note transcription (task 2), `/status` + `/reset`
+  chat commands (task 3), office formats beyond PDF, SVG, the import-ZIP path.
+
+#### Round-2 hardening (Argus review, 2026-07-21)
+
+- **`landing/chat-react/ChatApp.tsx` — `attachmentBasename` no longer throws on a
+  poisoned URL.** It runs during render for every non-image chip; a malformed
+  percent-escape (`report%ZZ.pdf`) made `decodeURIComponent` throw `URIError`,
+  tripping `ChatErrorBoundary` and blanking the whole chat view — and, since the
+  URL persists in history, it recurred on every reload. Now `try/catch` falls back
+  to the raw segment. Exported + unit-tested (`__tests__/attachment-basename.test.ts`).
+- **`gateway/http/app-upload-surface.ts` — `resolveChatAttachmentLocalPath` hardened.**
+  `URL_PATH_RE`'s user_id class matched a dot-only segment (`.` / `..`); now rejected
+  outright (`/^\.+$/`) rather than relying on the hex64-filename bound. Added an
+  `existsSync` gate so a resolvable-but-missing blob path is never injected into the
+  agent prompt. New units cover both.
+- **`gateway/wiring/build-live-agent-turn.ts` — Retry re-injects the ORIGINAL
+  attachments.** A freeze-timeout Retry (`RETRY_TURN_VALUE`) recovered only
+  `lastUserText`, silently dropping the doc/image. New `lastAttachments` map recorded
+  alongside `lastUserText`; the recovered turn re-binds `attachments` too. Tests (f)/(g)
+  in `build-live-agent-turn-attachments.test.ts` prove the retried prompt re-embeds the
+  path (and injects no block when the original had none).
+
+#### Round-3 hardening (Argus review round-2, 2026-07-21)
+
+- **BLOCKER — mobile PDFs no longer paint as broken images.** The Expo bubble
+  routed EVERY attachment URL through `AuthedAttachmentImage` (a pure RN `<Image>`),
+  so a PDF (newly uploadable on mobile in M2) rendered as a broken thumbnail with no
+  open affordance — unlike the web file chip. Now `AuthedAttachmentImage` branches on
+  `isImageAttachmentUrl(url)`: a non-image renders as `AuthedAttachmentFile`, a
+  tappable `📎 <basename>` chip that opens the document (non-authed URLs open
+  directly; our bearer-authed `/api/app/upload/…` URLs are fetched WITH the bearer
+  then opened — RN-web via an object URL in a new tab, native via a base64 data URL
+  handed to `WebBrowser`). Two new plain-TS helpers in `app/lib/attachment-url.ts`
+  (`isImageAttachmentUrl`, `attachmentBasename`, both unit-tested, mirroring the web
+  client's) drive the branch. This is the mobile analogue of the web file chip; it
+  also settles the app side of the "non-image routed as image content-part" semantic
+  (the web `message-adapter` note) — the renderer, not the content-part type, decides.
+- **`gateway/http/app-upload-surface.ts` — served blobs pin their type.** The GET 200
+  now sets `X-Content-Type-Options: nosniff` + `Content-Disposition: inline` so a
+  browser never MIME-sniffs a served document into an executable content-type
+  (defense-in-depth atop the existing bearer + user-id match; matters now that PDFs
+  are served inline). Asserted in the PDF-serve test.
+- **`open/wiring/app-ws.ts` — inbound attachment list is deduped + bounded.** New
+  exported `sanitizeInboundAttachments(raw)` keeps only non-empty strings, DEDUPS, and
+  CAPS at `MAX_INBOUND_ATTACHMENTS` (16) — each survivor drives a downstream
+  `existsSync` + `<user_attachments>` prompt line, so a buggy/hostile client can't
+  fan out unboundedly. Replaces the inline filter at the receiver; unit-tested.
+- **`app/components/ChatSyncSurface.tsx` — native picker mirrors the server whitelist.**
+  `DocumentPicker.getDocumentAsync` moved from `type: '*/*'` to the images+PDF+ZIP
+  whitelist so the OS picker greys out unsupported files up front instead of letting a
+  pick sail through to a raw 415.
+- **Real-resolver integration test** (`build-live-agent-turn-attachments-real-resolver.test.ts`):
+  seeds a real blob on disk, resolves its URL with the SHIPPED
+  `resolveChatAttachmentLocalPath`, and asserts `buildAttachmentsFragment` embeds the
+  on-disk path + MIME (and drops a missing blob) — closing the "stub-only resolver"
+  coverage gap through the production seam.
+- Suites: `app/__tests__/attachment-authed-source.test.ts`, `gateway/__tests__/app-upload-surface.test.ts`,
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments-real-resolver.test.ts`,
+  `open/__tests__/open-wiring-app-ws.test.ts` green; `tsc` clean (root + `app/`).
+- NOT changed (documented-acceptable, single-owner posture): `resolveChatAttachmentLocalPath`
+  cross-`user_id` read (one owner; contained by `existsSync` + per-tenant process
+  isolation) and the web `message-adapter` routing non-images as `type:'image'` content
+  parts (assistant-ui exposes only text|image parts here; the renderer branches on the
+  URL, so it is correct in practice).
+
+#### CI-green hotfix (PR #428, task 2) — de-pollute process-global react/react-native test mocks
+
+- The canonical `test` job went RED across `a235eea3..141d2c1c` (3 consecutive runs). The
+  two new app test files (`app/__tests__/authed-attachment-image-hooks.test.tsx`,
+  `app/__tests__/authed-attachment-file-open.test.tsx`) registered process-global NARROW
+  `mock.module` payloads for `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` /
+  `react-native`. Bun module mocks are process-global and survive across files, so in the
+  shared-process CI chunk (`scripts/run-tests.sh`, 75-file chunks) they poisoned later
+  files — `SyntaxError: Export named 'useReducer' not found` (docs-mutations-race) and
+  `Export named 'Linking' not found` (docs-panes-render), plus `forwardRef is not a
+  function` from react-textarea-autosize in the landing suites.
+- FIRST ATTEMPT (superset + delegate-to-real react mock) fixed the SyntaxErrors but HUNG
+  the CI `test` job (>90 min, never completing). Root cause: a `mock.module('react', …)`
+  is process-global in bun and silently replaces `import * as RealReact from 'react'` in
+  EVERY later file of the same chunk — including `docs-mutations-race` /
+  `diagnostics-pane-render`, which deliberately use REAL react via an injected HookRuntime.
+  Even a faithful superset defeats their design and deadlocked chunk 0 (agent-dispatch +
+  app files together). Every other test file in the repo AVOIDS mocking react for exactly
+  this reason (the "process-global" warnings in `docs-mutations-race.test.ts:52` etc.).
+- FINAL FIX (test hygiene only — zero production or assertion changes): ELIMINATE the
+  `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` module mocks entirely from both
+  files; use REAL react + real jsx. Only `react-native` stays a module mock (bun can't
+  parse its Flow source) — kept as a SUPERSET (`Linking` / `useWindowDimensions` /
+  `ScrollView` / `TextInput` / `ActivityIndicator` / `Modal`) so it never collides with the
+  sibling docs suites' react-native mocks — plus the `expo-*` stubs (so the real expo
+  modules never drag unparseable react-native internals into the process).
+  `AuthedAttachmentImage` is a hook-free dispatcher, so it runs directly against real react
+  (a regression re-adding a hook throws "Invalid hook call" and fails the test loudly).
+  `AuthedAttachmentFile` calls `useState`, so `pressChip` installs a minimal hook
+  dispatcher on react's current-dispatcher slot
+  (`__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.H`) around the
+  SYNCHRONOUS component call only, then restores it — scoped to this file, no module mock,
+  no cross-file pollution.
+- Verified locally with gbrain on PATH: the exact CI chunk 0 (7 agent-dispatch + 68 app
+  files, the set that hung) now runs 861 pass / 0 fail and EXITS in <1s; both target suites
+  green (image 4/0, file 5/0); the 12 branch-changed files in ONE bun process 125/0;
+  `bash scripts/ci/typecheck-all.sh` exit 0 (51 tsconfigs).
+
+#### Round-2 findings fix (Argus review round-1 on PR #428, 2026-07-22)
+
+- **BLOCKER — native non-authed `data:`/`file:`/`content:` attachments no longer open
+  silently-fail.** The file-chip `open()` handler's `bearer === undefined` branch
+  (`app/components/AuthedAttachmentImage.tsx`) handed the raw URI straight to
+  `WebBrowser.openBrowserAsync` on native — but SFSafariViewController / Chrome Custom
+  Tabs reject a non-http(s) INITIAL url, so a `file://`/`content://` (optimistic /
+  failed-send local doc bubble — `attachment-url.ts:141-149`) or `data:` URI opened to
+  nothing, contradicting the file's own r2-BLOCKER invariant. Fixed with a new
+  `openNonAuthedNative(uri, name)` helper: an `http(s)` URL still opens in the in-app
+  browser; a `data:` URL is materialized to a cache file (`materializeDataUrlToCache`)
+  and a local `file:`/`content:` URL is shared as-is — both routed through
+  `Sharing.shareAsync` (the same OS-share path the AUTHED native branch already uses),
+  with the rare `!isAvailableAsync()` emulator fallback. Web behavior unchanged (still
+  navigates the synchronously-opened tab). Four new regression tests in
+  `app/__tests__/authed-attachment-file-open.test.tsx` assert: local `file://` shared
+  as-is (never WebBrowser), `data:` materialized-then-shared (never a data: URL to
+  WebBrowser), and `http(s)` still opens in WebBrowser.
+- **Test hygiene (findings 2 + 3, no production change).** The two attachment test files'
+  `react-native` superset mocks now also export `FlatList` / `KeyboardAvoidingView` /
+  `TouchableOpacity` (per the sibling-superset convention, so they can never collide with
+  a docs-suite RN mock in a shared CI chunk). Removed the vacuous `const useStateCalls = 0;
+  expect(...).toBe(0)` always-pass counters from `authed-attachment-image-hooks.test.tsx`;
+  the real guard was always the element-TYPE assertions plus the real-react "Invalid hook
+  call" throw — the flip test now asserts the exact image/file type sequence across the
+  recycle instead of a tautology.
+- Verified: both target suites 12/0; the full `app/__tests__/` dir in ONE bun process
+  872/0 (the CI-pollution scenario, clean); `tsc --noEmit -p app/tsconfig.json` exit 0.
+
+### M2 P0 parity — input modalities task 3 (partial): `/status` chat command (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 3, the `/status` half of the narrow Neutron
+chat commands (`/status` + `/reset`; NOT the the legacy harness topic-lifecycle vocabulary).
+`/reset` is intentionally NOT shipped this iteration — see the mechanism finding
+below.
+
+- **`/status` — deterministic instance snapshot.** New `buildStatusChatCommandFilter`
+  (`gateway/boot-chat-command-filters.ts`, re-exported through the
+  `gateway/boot-helpers.ts` / `composer-contract.ts` barrel) implements the
+  `ChatCommandFilter` contract. `/status` (exact-command word boundary — `/statusfoo`
+  falls through to the LLM, K8 grammar precedent) replies with a formatted snapshot:
+  active project, current model (`getBestModel()`), pending-reminder count, active
+  work-board items, active Trident builds. Pure READ — no mutation, no LLM dispatch.
+- **Wiring — one command path, both surfaces.** Chained in `open/composer.ts` into the
+  SAME `buildChainedChatCommandFilter([...])` the web onboarding chat AND the app-ws
+  chat share (appended after the cores chain + skill-forge). The snapshot is an
+  injected thunk; because the source stores (projects reader / reminder store /
+  work-board / Trident run store) are constructed LATER in the composer closure, the
+  reader is threaded through a `late<T>` two-phase holder (`statusSnapshotHolder`) and
+  BOUND right after `workBoardStore` exists. Each source read is best-effort (degrades
+  to 0 rather than bricking the command). Filter stays store-free → unit-testable.
+- **Tests.** `gateway/__tests__/status-command-wiring.test.ts` (9/0): reply TEXT carries
+  every snapshot field value (behavior, not a `toHaveBeenCalled` gap-test); `project_id`
+  threaded / omitted correctly; leading-whitespace + trailing-arg tolerance; `/statusfoo`
+  + `/statuses` fall through and NEVER run the snapshot thunk; chain-composition proof
+  that `/status` is reached after earlier filters disclaim (the real composer shape).
+- **`/reset` DEFERRED — verified spec/mechanism mismatch.** The plan named
+  `respawnSupervisedSession` as the `/reset` actuation for "fresh agent context; durable
+  chat history stays". VERIFIED against the code this is WRONG:
+  `runtime/adapters/claude-code/persistent/session-respawn.ts:24` — "respawn ALWAYS
+  resumes — never a fresh spawn"; `respawnSupervisedSession` (`supervision.ts:59`) →
+  `respawnReplSession(..., true)` → `planRespawn` `--resume`s the SAME transcript,
+  PRESERVING context. It cannot deliver a context reset. Shipping `/reset` on that
+  primitive would be a no-op-that-looks-like-it-works (banned pattern). The correct
+  primitive is the `/clear` PTY reset (`CONTEXT_RESET_COMMAND`, `pool.ts:380`, already
+  used for the import warm-session per-turn reset) or a fresh (non-resume) respawn; plus
+  a credential-identity-agnostic way to target the live session key (the pool key folds
+  `cred.id`, unknown to the filter). Re-scoped in `IMPLEMENTATION_PLAN.md` for a
+  follow-up iteration on the corrected mechanism.
+- Verified: `bunx tsc --noEmit` exit 0; `gateway/__tests__/status-command-wiring.test.ts`
+  9/0.
+
+### M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 5. Audio voice notes (MP3/M4A/WAV) upload on
+the SAME chat surface as images + PDF, transcribed at upload-complete by a new
+OpenAI-compatible Whisper client, with the transcript injected into the dispatched
+prompt AND appended to the scribe text (voice → text → gbrain parity). NO FEATURE
+FLAGS — transcription is gated only by `OPENAI_API_KEY` presence (credential config).
+
+- **Whisper client.** New `gateway/transcription/openai-transcription.ts` —
+  `createOpenAiTranscriptionClient` POSTs multipart `{base}/v1/audio/transcriptions`
+  (default base `https://api.openai.com`, model `whisper-1`, injectable `fetch_impl` +
+  `timeout_ms`). Typed `TranscribeResult` with an error taxonomy
+  (`http_error`/`network_error`/`timeout`/`bad_response`); NEVER throws, no logging
+  inside the client, no retries (v1). `audioFilenameFor` maps the canonical MIME to a
+  Whisper-recognized filename extension (`voice.mp3`/`voice.m4a`/`voice.wav`).
+- **Upload surface.** `gateway/http/app-upload-surface.ts` — widened
+  `CHAT_UPLOAD_MIME_WHITELIST` / `EXT_FROM_MIME` / `URL_PATH_RE` ext-group /
+  `mimeFromExt` to audio (`.txt` DELIBERATELY excluded from the GET ext-group so the
+  transcript sidecar is never servable). New optional `transcribeAudio` seam;
+  handleUpload transcribes an audio blob and writes a content-addressed `<hash>.txt`
+  sidecar (atomic tmp+rename, idempotent — sidecar-exists ⇒ the API is NOT re-called;
+  ASR failure NEVER fails the upload). `resolveChatAttachmentLocalPath` widened to
+  return `transcript` for audio (sidecar read; null when absent), field omitted for
+  non-audio.
+- **Turn injection.** `gateway/wiring/build-live-agent-turn.ts` `buildAttachmentsFragment`
+  embeds an audio attachment's transcript inline (capped 4000 chars with a truncation
+  marker); keyless/failed ASR → the graceful "transcription unavailable — set
+  OPENAI_API_KEY" note. Splice sites + `turn.user_text` untouched.
+- **Scribe threading.** `open/wiring/app-ws.ts` — new `attachmentTranscript` deps seam;
+  the receiver appends resolved transcripts to the `scribeOnUserTurn` text only
+  (`user_text` stays unmutated). Composer wires it over `resolveChatAttachmentLocalPath`;
+  `open/composer.ts` builds the `transcribeAudio` seam from `OPENAI_API_KEY` (keyless ⇒
+  no seam, audio still uploads without a transcript).
+- **Clients.** Web accept attr + `ACCEPTED_ATTACHMENT_TYPES` (+ alias forms) + 🎵 chip
+  (`message-adapter.ts` `isAudioAttachmentUrl`); native Expo picker mime array +
+  `mimeToExt` audio cases + 🎵 chip (`attachment-url.ts` predicate).
+- Verified: `bunx tsc --noEmit` exit 0. Tests:
+  `gateway/transcription/__tests__/openai-transcription.test.ts` 7/0;
+  `gateway/__tests__/app-upload-surface.test.ts` 30/0 (incl. artifact-on-disk sidecar +
+  idempotency call-count + keyless-no-sidecar + `.txt`-unreachable);
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts` 11/0;
+  `open/__tests__/open-wiring-app-ws.test.ts` 20/0 (scribe transcript threading);
+  `app/__tests__/upload-client.test.ts` 12/0;
+  `landing/chat-react/__tests__/message-adapter.test.ts` 12/0.
 
 ## 2026-07-21 — Dogfood task 2: wire the REAL Opus personality suggester into the LIVE (Path-1) onboarding
 
@@ -5485,6 +12920,53 @@ durable grants are ordinary `tool_approvals` rows (migration-0004 DDL,
   filtering). `open/__tests__/approval-notifier.test.ts` (3: per-topic broadcast +
   body content, malformed-args fallback, dead-socket resilience). All green;
   `reminders/` + `tools/` suites 275 pass; dep-cruiser + tsc (reminders/tools/open) clean.
+
+## 2026-07-21 — Executor-mode reminders Task 7: bundled generic read-only example rituals (WIRED + SERVED)
+
+Shipped the first two ENGINE ritual defs so a fresh Neutron install has working
+read-only ritual examples out of the box — the ritual plumbing (tasks 2-6, merged
+`63fe4119`) went live with ZERO registered defs; this closes that gap while staying
+UNAPPROVED (task 8 owns the owner's approval act).
+
+- **Templates** — `reminders/rituals/morning-brief.md` + `reminders/rituals/evening-wrap.md`:
+  GENERIC, instance-agnostic read-only prompts that Glob `Projects/*/STATUS.md` from
+  the instance root, read them (+ any docs they point at), and post a short digest.
+  They are the ENGINE default — NOT the owner's the legacy harness ritual content (that is OWNER data
+  via import). No `~/legacy`/`gog`/`gh`/`entities`/Telegram/Bash references (static
+  half of the ported-prompt silent-no-op guard).
+- **`reminders/bundled-rituals.ts`** — `BUNDLED_RITUAL_DEFS` (frozen; exactly
+  `morning-brief` + `evening-wrap`, each `scope:'instance'`, `tool_surface:['Read',
+  'Glob','Grep']`, `egress:'none'`, `silent:false` — zero intersection with
+  `GATED_WRITE_TOOLS`, so the fire-time gate never trips); `BUNDLED_RITUAL_TEMPLATES_DIR`
+  + `bundledTemplatePathFor(id)` (module-dir resolved, the `prompt-path.ts` pattern);
+  `seedBundledRituals({rituals_dir,log?})` — COPY-IF-ABSENT into `<owner_home>/rituals/`
+  (an owner-edited / imported file is NEVER clobbered — from first seed on it is owner
+  data), NEVER throws (mkdir + each copy try/catch → log + continue; a failed seed
+  surfaces later as a durable `missing_prompt` fire-time skip); `registerBundledRituals(
+  registry)` (makes defs KNOWN — does NOT approve them).
+- **`open/composer.ts` `ritual_executor_factory`** (was ~:1885) — the closure now
+  builds the registry rooted at `<owner_home>/rituals`, `seedBundledRituals(...)`,
+  `registerBundledRituals(registry)`, and passes that registry to
+  `createRitualExecutor`. So a fresh boot SEEDS + REGISTERS both rituals — WIRED. They
+  fire only after the owner's task-8 approval; an unapproved fire lands a durable
+  `code_ritual_runs` 'skipped'/'unapproved' row (proven below).
+- **Tests** — `reminders/bundled-rituals.test.ts` (11 fast units): def shape incl. the
+  no-Bash `GATED_WRITE_TOOLS` pin; template grounding + no-the legacy harness-isms; seed
+  copy-if-absent / idempotency / never-clobber; register→2 frozen defs; the
+  UNAPPROVED-by-default fire through the REAL `ApprovalManager` (zero approval rows →
+  'skipped'/'unapproved', turn called 0×, nothing spawned); the approved spec-shape pin
+  (turn once, tools/prompt-bytes/cwd/timeout/model exact). `reminders/bundled-rituals.e2e.test.ts`
+  (`NEUTRON_PTY_E2E=1`-gated, mirrors `dev-channel-pty-bind.e2e.test.ts`): each SHIPPED
+  template, run with the real ritual base prompt + read-only surface against a planted
+  fixture instance, produces output citing fixture markers (RELAY-4471 / CERT-ROTATE-9 /
+  HARBOR-812) — the LLM-behaviour half of the silent-no-op guard. Ran green on this box
+  (`claude` 2.1.215, both rituals, ~46s).
+- Suites: `bun test reminders/` 327 pass / 2 skip (the gated e2e); wiring guards
+  (`build-core-modules-ritual-executor.test.ts`, `open-composition-fields-characterization.test.ts`)
+  green; `tsc -p reminders` + `tsc -p open` clean; eslint + dependency-cruiser clean.
+- OUT OF SCOPE (later RALPH tasks): scheduling/approval UX (task 8), memory-tier work
+  (task 9), SYSTEM-OVERVIEW ritual-executor section (task 10), any writing/Bash ritual
+  (stays gated on the OS-sandbox sprint).
 
 ## 2026-07-20 — Executor-mode reminders task 2: ritual schema + registry module (migration 0106)
 
@@ -6206,6 +13688,39 @@ reproduce the live loop pre-fix** (reconnect emits a second frame: expected 0,
 received 1) and pass after. No unauthenticated HTTP probe could see this — the
 status codes are identical either way; it only exists across a reload.
 
+## 2026-07-19 — favicon: the SVG was invalid XML, so browsers rendered nothing
+
+**Bug (live, on a hosted tenant, reproduced independently).** No favicon on
+`<tenant-host>/chat`. Survived a hard refresh and a fresh
+incognito tab, so it was not a cache artifact.
+
+**Root cause.** `landing/favicon.svg` was NOT well-formed XML. Its explanatory
+comment referenced the CSS custom property `--accent`, and an XML comment may
+not contain a double-hyphen. `xmllint` verdict:
+
+```
+favicon.svg:4: parser error : Comment must not contain '--' (double-hyphen)
+```
+
+Browsers parse SVG strictly as XML, so the asset served **200 with the correct
+`image/svg+xml` content-type and byte-correct contents** and then rendered as
+NOTHING. Every signal short of actually rendering it looked healthy, which is
+why route/allowlist/caching inspection kept coming back clean. Confirmed by
+rendering the served bytes: pre-fix produces an XML parser-error page, post-fix
+produces the atom mark.
+
+**Fix.** Reworded the comment so it contains no `--`. Plus
+`landing/__tests__/svg-assets-wellformed.test.ts`, which asserts every shipped
+SVG has no `--` inside a comment — verified RED against the broken asset and
+GREEN after. The class matters more than the instance: any future SVG with a
+CSS-variable mention in a comment fails the same way, silently.
+
+**Adjacent gaps found while diagnosing, NOT fixed here** (separate PR in flight):
+`/favicon.ico` 404s and is absent from the route allowlist (browsers request it
+by default and cache the 404 negatively), `HEAD /favicon.svg` 404s while GET
+succeeds (the brand-asset handler is GET-only), and the apex host serves no
+brand assets at all.
+
 ## 2026-07-18 — Favicon: the tab icon renders again (root cause = an invisible SVG, not a serving gap)
 
 The owner reported NO favicon on his tenant chat tab (`https://<slug>.<managed-host>/chat`),
@@ -6262,39 +13777,6 @@ links AND every declared href resolving 200, the SVG's 16px stroke/contrast budg
 the apex-shaped `bootSignup` surface over GET+HEAD.
 `landing/__tests__/routes-transition.test.ts` grows an append-only `ADDED_SINCE_C5` list
 rather than rewriting its frozen pre-C5 snapshot, so the routing audit trail survives.
-
-## 2026-07-19 — favicon: the SVG was invalid XML, so browsers rendered nothing
-
-**Bug (live, on a hosted tenant, reproduced independently).** No favicon on
-`<tenant-host>/chat`. Survived a hard refresh and a fresh
-incognito tab, so it was not a cache artifact.
-
-**Root cause.** `landing/favicon.svg` was NOT well-formed XML. Its explanatory
-comment referenced the CSS custom property `--accent`, and an XML comment may
-not contain a double-hyphen. `xmllint` verdict:
-
-```
-favicon.svg:4: parser error : Comment must not contain '--' (double-hyphen)
-```
-
-Browsers parse SVG strictly as XML, so the asset served **200 with the correct
-`image/svg+xml` content-type and byte-correct contents** and then rendered as
-NOTHING. Every signal short of actually rendering it looked healthy, which is
-why route/allowlist/caching inspection kept coming back clean. Confirmed by
-rendering the served bytes: pre-fix produces an XML parser-error page, post-fix
-produces the atom mark.
-
-**Fix.** Reworded the comment so it contains no `--`. Plus
-`landing/__tests__/svg-assets-wellformed.test.ts`, which asserts every shipped
-SVG has no `--` inside a comment — verified RED against the broken asset and
-GREEN after. The class matters more than the instance: any future SVG with a
-CSS-variable mention in a comment fails the same way, silently.
-
-**Adjacent gaps found while diagnosing, NOT fixed here** (separate PR in flight):
-`/favicon.ico` 404s and is absent from the route allowlist (browsers request it
-by default and cache the 404 negatively), `HEAD /favicon.svg` 404s while GET
-succeeds (the brand-asset handler is GET-only), and the apex host serves no
-brand assets at all.
 
 ## 2026-07-18 — `stuck_agent` now means "a dispatched turn stopped progressing", not "a process is quiet"
 
@@ -7724,57 +15206,6 @@ neutron, not an external scratch repo); the outer loop exercises it on deploy.
 update for the trident section — cannot be edited from here; the orchestrator
 syncs it on deploy. Auto-mode (#104) is OUT OF SCOPE (separate).
 
-## 2026-07-01 — Documents tab renders `.html` docs as static styled HTML/CSS pages
-
-**Why.** The owner's M1 live test: saving/opening an `.html` doc errored with
-`invalid_extension: path must end with .md or .markdown (got 'timer.html')`, and
-even once accepted the Documents tab had no way to render it. The owner's revised
-(deliberately small) scope: render HTML/CSS statically; complex interactive JS
-apps belong in a separate app launcher, NOT the doc viewer. No feature flags —
-shipped as the default.
-
-**What shipped.**
-
-- **Docs store/API accepts `.html`/`.htm` end-to-end.** `gateway/http/doc-store.ts`
-  gains `HTML_EXTENSIONS` + `DOC_EXTENSIONS` (= markdown ∪ html) + `isDocLeaf`, the
-  single allowlist behind the `invalid_extension` gate. Both the tree walker
-  (surfaces `.html` leaves) and `validateRelativePath({ requireMd })` (read/list/
-  open/write) now use `isDocLeaf`; the error message is derived from the allowlist.
-  The duplicate history/comments/diff gate in `gateway/http/app-docs-surface.ts`
-  (`assertHistoryPath`) shares `isDocLeaf` so an opened `.html` doc can also load
-  its history/comments. `MARKDOWN_EXTENSIONS`/`isMarkdownLeaf` are retained
-  (markdown-specific callers unaffected); `doc-search/walk.ts` keeps its own
-  markdown-only constant (HTML is not FTS-indexed as markdown — out of scope).
-- **Documents renderer renders `.html` as a static styled page.** New
-  `landing/chat-react/HtmlDoc.tsx`: `isHtmlDoc(path)` selects the branch and
-  `sanitizeHtmlDoc(raw)` parses the doc via `DOMParser` and strips every
-  script-execution vector — `<script>` (incl. SVG script),
-  `<iframe>`/`<object>`/`<embed>`/`<base>`/`<meta>`/`<link>`/`<frame*>`/`<applet>`,
-  all `on*` handler attributes, and `javascript:`/`vbscript:`/`data:text/html`
-  URLs — while PRESERVING HTML structure, `<style>` blocks (head + body), and
-  inline `style`. The sanitized document's **live `<documentElement>` nodes are
-  adopted** into a **Shadow-DOM island** (not an `innerHTML` string — fragment
-  parsing strips `<html>`/`<body>`, which would drop `body{…}`/`html{…}` CSS +
-  body attributes; Codex P2), so document-level CSS renders correctly and the
-  doc's styles stay scoped to their subtree. `importNode`/`appendChild` never
-  run the (already-removed) scripts. `DocumentsTab`
-  Rendered view branches on `isHtmlDoc(file.path)`; `.md` renders via the existing
-  Markdown path unchanged, and Source/Edit still show/edit raw text of either.
-  **Design note:** chose a `DOMParser` DOM-walk sanitizer over DOMPurify because
-  DOMPurify's document-reconstruction path does not run faithfully under the
-  happy-dom test env (verified: it kept `<script>` and dropped `<style>`), which
-  would leave the security path untested; the DOM-walk is faithful in both the
-  browser and CI. Threat model is trusted single-owner content.
-
-**Tests.** `landing/chat-react/__tests__/html-doc.test.tsx` (sanitize keeps
-structure+CSS, strips scripts/handlers/js-URLs incl. an obfuscated `java\tscript:`;
-component mounts into a shadow root and no doc script executes) + `.html`/`.htm`
-read/list/write round-trip and `.txt`-still-rejected in
-`gateway/__tests__/app-docs-surface.test.ts`. tsc (root + gateway +
-`landing/chat-react`) clean; leak-gate silent; fresh `NEUTRON_HOME=/tmp/wfi`
-boot on :7874 serves the bundle with the `HtmlDoc` renderer and the docs routes
-wired.
-
 ## 2026-07-02 — Chat typing dots persist for the WHOLE processing window (incl. background builds)
 
 **Why.** The owner's live-test 2026-07-01: he asked the agent to build a meditation-timer
@@ -7984,6 +15415,57 @@ production wiring (no external `AssistantRuntimeProvider`; `ChatApp` self-owns t
 runtime). Full `landing/chat-react` suite: 231 pass / 0 fail; `tsc -p
 landing/chat-react/tsconfig.json` clean; browser bundle + live iso server
 (`/chat`, lazy `/chat-react.js`) build and serve cleanly.
+
+## 2026-07-01 — Documents tab renders `.html` docs as static styled HTML/CSS pages
+
+**Why.** The owner's M1 live test: saving/opening an `.html` doc errored with
+`invalid_extension: path must end with .md or .markdown (got 'timer.html')`, and
+even once accepted the Documents tab had no way to render it. The owner's revised
+(deliberately small) scope: render HTML/CSS statically; complex interactive JS
+apps belong in a separate app launcher, NOT the doc viewer. No feature flags —
+shipped as the default.
+
+**What shipped.**
+
+- **Docs store/API accepts `.html`/`.htm` end-to-end.** `gateway/http/doc-store.ts`
+  gains `HTML_EXTENSIONS` + `DOC_EXTENSIONS` (= markdown ∪ html) + `isDocLeaf`, the
+  single allowlist behind the `invalid_extension` gate. Both the tree walker
+  (surfaces `.html` leaves) and `validateRelativePath({ requireMd })` (read/list/
+  open/write) now use `isDocLeaf`; the error message is derived from the allowlist.
+  The duplicate history/comments/diff gate in `gateway/http/app-docs-surface.ts`
+  (`assertHistoryPath`) shares `isDocLeaf` so an opened `.html` doc can also load
+  its history/comments. `MARKDOWN_EXTENSIONS`/`isMarkdownLeaf` are retained
+  (markdown-specific callers unaffected); `doc-search/walk.ts` keeps its own
+  markdown-only constant (HTML is not FTS-indexed as markdown — out of scope).
+- **Documents renderer renders `.html` as a static styled page.** New
+  `landing/chat-react/HtmlDoc.tsx`: `isHtmlDoc(path)` selects the branch and
+  `sanitizeHtmlDoc(raw)` parses the doc via `DOMParser` and strips every
+  script-execution vector — `<script>` (incl. SVG script),
+  `<iframe>`/`<object>`/`<embed>`/`<base>`/`<meta>`/`<link>`/`<frame*>`/`<applet>`,
+  all `on*` handler attributes, and `javascript:`/`vbscript:`/`data:text/html`
+  URLs — while PRESERVING HTML structure, `<style>` blocks (head + body), and
+  inline `style`. The sanitized document's **live `<documentElement>` nodes are
+  adopted** into a **Shadow-DOM island** (not an `innerHTML` string — fragment
+  parsing strips `<html>`/`<body>`, which would drop `body{…}`/`html{…}` CSS +
+  body attributes; Codex P2), so document-level CSS renders correctly and the
+  doc's styles stay scoped to their subtree. `importNode`/`appendChild` never
+  run the (already-removed) scripts. `DocumentsTab`
+  Rendered view branches on `isHtmlDoc(file.path)`; `.md` renders via the existing
+  Markdown path unchanged, and Source/Edit still show/edit raw text of either.
+  **Design note:** chose a `DOMParser` DOM-walk sanitizer over DOMPurify because
+  DOMPurify's document-reconstruction path does not run faithfully under the
+  happy-dom test env (verified: it kept `<script>` and dropped `<style>`), which
+  would leave the security path untested; the DOM-walk is faithful in both the
+  browser and CI. Threat model is trusted single-owner content.
+
+**Tests.** `landing/chat-react/__tests__/html-doc.test.tsx` (sanitize keeps
+structure+CSS, strips scripts/handlers/js-URLs incl. an obfuscated `java\tscript:`;
+component mounts into a shadow root and no doc script executes) + `.html`/`.htm`
+read/list/write round-trip and `.txt`-still-rejected in
+`gateway/__tests__/app-docs-surface.test.ts`. tsc (root + gateway +
+`landing/chat-react`) clean; leak-gate silent; fresh `NEUTRON_HOME=/tmp/wfi`
+boot on :7874 serves the bundle with the `HtmlDoc` renderer and the docs routes
+wired.
 
 ## 2026-07-01 — trident-parity Part B: Connect Codex (subscription auth) + agent auto-invokes trident
 
@@ -9319,7 +16801,7 @@ renders clean; normal reconnect preserves; absent `last_seen_seq` never wipes).
 
 ---
 
-## Hobby projects + one-time agentic per-project kickoff (2026-07-01)
+### Hobby projects + one-time agentic per-project kickoff (2026-07-01)
 
 **Problem.** Two gaps in what onboarding produces on a fresh install: (1) the
 interview asks about outside-work interests/hobbies but those answers materialized
@@ -9391,13 +16873,13 @@ deterministic fallback for declined projects).
 
 ---
 
-## M1 UX REDESIGN — backend data contracts (PR-1, 2026-07-02)
+### M1 UX REDESIGN — backend data contracts (PR-1, 2026-07-02)
 
 First redesign PR: the two design-independent backend contracts the redesigned
 Work pane + project rail consume. NO feature flag, one code path, NO visual
 change (PR-2+ build the UI on top of these).
 
-### A. Per-run inner-step (`step_label`) + a live push that retires the 15 s poll
+#### A. Per-run inner-step (`step_label`) + a live push that retires the 15 s poll
 
 **Problem.** The outer `code_trident_runs.phase` sits at `forge-init` the WHOLE
 inner build, and NOTHING pushed the inner workflow's checkpoint advances — the
@@ -9435,7 +16917,7 @@ item's board scope key) + `emitProjectsChangedIfChanged`. `WorkBoardTab.tsx`'s
 15 s poll is retained as a FALLBACK only (dropped-frame resilience + the
 elapsed/stall clock).
 
-### B. Per-project rail fields (`activity` / `preview` / `preview_from` / `live_runs`)
+#### B. Per-project rail fields (`activity` / `preview` / `preview_from` / `live_runs`)
 
 `readProjectRows` (`open/composer.ts`) — feeding both the `projects_changed` frame
 and the page bootstrap — now derives four per-project fields:
@@ -9479,7 +16961,7 @@ stall-crossing fan; `store.latestByProjectScope` scoping).
 
 ---
 
-## Work-Board project-scope fix — agent tools + trident builds scope to the ACTIVE project (P0)
+### Work-Board project-scope fix — agent tools + trident builds scope to the ACTIVE project (P0)
 
 **Symptom (reproduced on the box 2026-07-02).** Chatting inside a NAMED project
 (e.g. "Tabs"), the agent created Work items + kicked trident builds, but BOTH the
@@ -9573,7 +17055,7 @@ owner slug), `agent-dispatch/surface.test.ts` (the tool builds the req with the
 active-project `board_scope`). The dormant `/dispatch` *chat command* is not wired in
 Open (like `/code`); it keeps the owner-slug default, unchanged.
 
-## UX Batch-4 (#347/#348/#349/#350) — mobile/web-mobile chat-react polish (2026-07-03)
+### UX Batch-4 (#347/#348/#349/#350) — mobile/web-mobile chat-react polish (2026-07-03)
 
 Four fixes from the owner's live dogfood, all in the responsive web chat-react client
 (no feature flags, one code path, both light+dark + desktop preserved).
@@ -9672,2883 +17154,3 @@ for a queued plan — so an aggressive sweep is contraindicated here) + the know
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
 
-## 2026-07-21 — Executor-mode reminders Task 7: bundled generic read-only example rituals (WIRED + SERVED)
-
-Shipped the first two ENGINE ritual defs so a fresh Neutron install has working
-read-only ritual examples out of the box — the ritual plumbing (tasks 2-6, merged
-`63fe4119`) went live with ZERO registered defs; this closes that gap while staying
-UNAPPROVED (task 8 owns the owner's approval act).
-
-- **Templates** — `reminders/rituals/morning-brief.md` + `reminders/rituals/evening-wrap.md`:
-  GENERIC, instance-agnostic read-only prompts that Glob `Projects/*/STATUS.md` from
-  the instance root, read them (+ any docs they point at), and post a short digest.
-  They are the ENGINE default — NOT the owner's the legacy harness ritual content (that is OWNER data
-  via import). No `~/legacy`/`gog`/`gh`/`entities`/Telegram/Bash references (static
-  half of the ported-prompt silent-no-op guard).
-- **`reminders/bundled-rituals.ts`** — `BUNDLED_RITUAL_DEFS` (frozen; exactly
-  `morning-brief` + `evening-wrap`, each `scope:'instance'`, `tool_surface:['Read',
-  'Glob','Grep']`, `egress:'none'`, `silent:false` — zero intersection with
-  `GATED_WRITE_TOOLS`, so the fire-time gate never trips); `BUNDLED_RITUAL_TEMPLATES_DIR`
-  + `bundledTemplatePathFor(id)` (module-dir resolved, the `prompt-path.ts` pattern);
-  `seedBundledRituals({rituals_dir,log?})` — COPY-IF-ABSENT into `<owner_home>/rituals/`
-  (an owner-edited / imported file is NEVER clobbered — from first seed on it is owner
-  data), NEVER throws (mkdir + each copy try/catch → log + continue; a failed seed
-  surfaces later as a durable `missing_prompt` fire-time skip); `registerBundledRituals(
-  registry)` (makes defs KNOWN — does NOT approve them).
-- **`open/composer.ts` `ritual_executor_factory`** (was ~:1885) — the closure now
-  builds the registry rooted at `<owner_home>/rituals`, `seedBundledRituals(...)`,
-  `registerBundledRituals(registry)`, and passes that registry to
-  `createRitualExecutor`. So a fresh boot SEEDS + REGISTERS both rituals — WIRED. They
-  fire only after the owner's task-8 approval; an unapproved fire lands a durable
-  `code_ritual_runs` 'skipped'/'unapproved' row (proven below).
-- **Tests** — `reminders/bundled-rituals.test.ts` (11 fast units): def shape incl. the
-  no-Bash `GATED_WRITE_TOOLS` pin; template grounding + no-the legacy harness-isms; seed
-  copy-if-absent / idempotency / never-clobber; register→2 frozen defs; the
-  UNAPPROVED-by-default fire through the REAL `ApprovalManager` (zero approval rows →
-  'skipped'/'unapproved', turn called 0×, nothing spawned); the approved spec-shape pin
-  (turn once, tools/prompt-bytes/cwd/timeout/model exact). `reminders/bundled-rituals.e2e.test.ts`
-  (`NEUTRON_PTY_E2E=1`-gated, mirrors `dev-channel-pty-bind.e2e.test.ts`): each SHIPPED
-  template, run with the real ritual base prompt + read-only surface against a planted
-  fixture instance, produces output citing fixture markers (RELAY-4471 / CERT-ROTATE-9 /
-  HARBOR-812) — the LLM-behaviour half of the silent-no-op guard. Ran green on this box
-  (`claude` 2.1.215, both rituals, ~46s).
-- Suites: `bun test reminders/` 327 pass / 2 skip (the gated e2e); wiring guards
-  (`build-core-modules-ritual-executor.test.ts`, `open-composition-fields-characterization.test.ts`)
-  green; `tsc -p reminders` + `tsc -p open` clean; eslint + dependency-cruiser clean.
-- OUT OF SCOPE (later RALPH tasks): scheduling/approval UX (task 8), memory-tier work
-  (task 9), SYSTEM-OVERVIEW ritual-executor section (task 10), any writing/Bash ritual
-  (stays gated on the OS-sandbox sprint).
-
-## 2026-07-22 — Dogfood fix #429 task 3: drop the manual Build/Research picker; server auto-classifies task_type
-
-Removed the web Work Board add-item Build/Research dropdown and moved the build-vs-research
-decision to a single server-side auto-classifier applied on create when the caller omits
-`task_type`. Web-only UI change — mobile (`app/app/projects/[id]/workboard.tsx`) already sent
-`{ title }` only and carries no dropdown, so it needed no change.
-
-- **New `work-board/task-type-classifier.ts`** — the ONE server-side classification module.
-  Exports `classifyWorkBoardTaskType({ title, llm: LlmCallFn | null, timeout_ms? })
-  → Promise<WorkBoardTaskType>` (TOTAL — never rejects), `keywordTaskTypeFallback(title)`
-  (deterministic: research verbs / interrogative openers → `research`, else `build`),
-  `CLASSIFY_SYSTEM_PROMPT`, and `DEFAULT_TASK_TYPE_CLASSIFY_TIMEOUT_MS` (2.5s). LLM-primary:
-  a one-word FAST_MODEL classify races a timeout; a `null` llm / timeout / junk / both-or-
-  neither / reject all degrade to the keyword fallback. No hardcoded model id — `LlmCallFn`
-  carries no model, so the composer injects FAST_MODEL. `work-board/package.json` gains
-  `@neutronai/contracts` (bottom dep-cruiser band — legal from work-board's services band).
-- **`gateway/http/work-board-surface.ts`** — `WorkBoardSurfaceOptions` gains an optional
-  `classify_task_type(title) => Promise<WorkBoardTaskType>`. `handleCreate` classifies ONLY
-  when the request omits `task_type`, BEFORE the create_card / store.create branch, so both
-  the on-disk-spec path and the plain create persist the classified value. An explicit
-  `task_type` from any caller short-circuits (never re-classified); a defensive catch falls to
-  the store default ('build') if a wired classifier ever throws. Absent seam → today's
-  store-default behavior (the #379 back-compat test is unchanged).
-- **`open/composer.ts`** — builds `workBoardClassifyLlm` via
-  `buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })` (null on an
-  LLM-less box → keyword-only) and wires `classify_task_type` into `createWorkBoardSurface`
-  unconditionally (it degrades internally).
-- **`landing/chat-react/WorkBoardTab.tsx`** — deleted the `<select className="cwb-add-kind">`,
-  the `newTaskType` state + reset, the `WorkBoardTaskType` import, and the create's `task_type`
-  arg + deps entry. The add-form is now a plain input + Add; a create omits `task_type`. ▶
-  startBuild/startResearch routing (reads the item's stored `task_type`) is untouched.
-- **Tests** — new `work-board/task-type-classifier.test.ts`; extended
-  `gateway/http/work-board-surface.test.ts` (classify-on-omit across both branches, explicit-
-  wins, reject→default, create_card path) and `landing/chat-react/__tests__/work-board-tab.test.tsx`
-  (no picker in the add-form; create body omits `task_type`). `bun test work-board` 230 pass,
-  `bun test gateway/http/work-board-surface` 38 pass, landing tab+client 37 pass; `tsc` clean
-  for work-board / open / gateway / landing; eslint + the new depcruise edge clean. NO FEATURE FLAGS.
-
-## 2026-07-22 — Dogfood fix #429 task 7: research_deep now actually researches — SONNET_MODEL default + parse-failure retry + tools_available grounding gate
-
-**Symptom (verified live).** A `research_deep` task died with an empty brief: the dispatched
-sub-agent ran ~31s, made ZERO tool calls, and returned non-JSON prose, so `extractJson` threw
-'no JSON object found' and the task failed with no recovery. Two root causes: (1) the sub-agent
-defaulted to a hardcoded Haiku literal (`sub-agent.ts` `DEFAULT_SUB_AGENT_MODEL`) and `deep()`
-passed no `model`, so Haiku was live in production despite a comment claiming FAST_MODEL was
-passed explicitly (false); (2) `deep()` was single-attempt — unlike `start()`'s 2-attempt
-parse-error-fed-back loop — so one malformed response discarded the whole research budget.
-
-**Three-part fix (NO FEATURE FLAGS).**
-- **Model.** `DEFAULT_SUB_AGENT_MODEL` is now `SONNET_MODEL` (env-overridable via
-  `NEUTRON_SONNET_MODEL`), imported from `@neutronai/runtime/models.ts`. Deep research needs
-  real reasoning + sustained tool-use discipline. The second hardcoded Haiku literal in
-  `research-orchestrator.ts`'s error-path run metadata (was `input.tools !== undefined ?
-  'unknown' : 'claude-haiku-...'`) now records `DEFAULT_SUB_AGENT_MODEL` — recording Haiku after
-  the switch would be a lie. No `claude-*` literal remains anywhere in `cores/free/research/src`.
-- **Retry.** `deep()` is now a 2-attempt loop mirroring `start()`. `bumpAttempt` moved inside
-  the loop. A parse / schema / zero-tool failure on attempt 0 feeds specific feedback
-  (`buildParseRetryFeedback` / `buildSchemaRetryFeedback` / `ZERO_TOOL_FEEDBACK`) into the
-  sub-agent's user prompt behind a new `RETRY_FEEDBACK_MARKER` (`[RETRY - PREVIOUS ATTEMPT
-  REJECTED]`, appended AFTER the query so canned-dispatcher `includes(query)` matching keeps
-  working; system prompt stays keyed on the original query so the engineering-rider heuristic
-  is stable) and retries once. The same failure on attempt 1 is terminal ('parse error on
-  retry: …' / 'schema error on retry: …' / 'sub-agent made zero tool calls on retry - ungrounded
-  brief rejected'). Dispatch-level errors (concurrency / timeout / transport) still fail
-  immediately, NOT retried. Claims-insert + sources-cited assertion stay single-shot (explicit
-  non-goal). One `research_sub_agent_runs` row is recorded per attempt.
-- **Grounding gate + production-safety seam.** New dispatcher-reported `tools_available` flag
-  (`RuntimeSubAgentDispatchResult.tools_available?`, surfaced on `ResearchSubAgentResult`). The
-  zero-tool grounding gate rejects a brief made with zero tool calls ONLY when the dispatcher
-  reported `tools_available === true`. The v1 production dispatcher
-  (`buildRuntimeResearchSubAgentDispatcher`) makes a single tool-less Messages-API call and now
-  explicitly reports `tools_available: false`, so the gate is INERT in production and cannot
-  brick a real deep run. It arms automatically when the real agentic tool loop ships —
-  **plan task 10** (tool-call passthrough) is the follow-up that flips it to `true`.
-
-**De-Haiku.** User-visible strings no longer claim Haiku: `chat-commands.ts` (deep-complete +
-kickoff messages), `package.json` `research_deep` tool description ('research sub-agent harness
-(SONNET_MODEL default)'), and doc headers across `sub-agent-prompt.ts` / `index.ts` /
-`manifest.ts` / `substrate-runtime.ts` / `README.md` / `AGENTS.md`. The two remaining Haiku
-mentions (`substrate-runtime.ts` `default_model` doc + `backend.ts` synthesis-fallback doc)
-describe FAST_MODEL fallbacks that stay true.
-
-**Files.** `cores/free/research/src/sub-agent.ts`, `.../research-orchestrator.ts`,
-`.../substrate-runtime.ts`, `.../chat-commands.ts`, `.../sub-agent-prompt.ts`, `.../manifest.ts`,
-`cores/free/research/index.ts`, `cores/free/research/package.json`, `README.md`, `AGENTS.md`.
-**Tests.** `__tests__/orchestrator.test.ts` gains a deep-path retry+grounding suite (T1
-reproduce-then-fix the live incident; T2 both-non-JSON fail; T3 schema-retry; T4 zero-tool retry;
-T5 zero-tool both fail; T6 production-shape do-not-brick guard; T7 concurrency metadata records
-`DEFAULT_SUB_AGENT_MODEL`; T8 grounded happy-path single dispatch); `__tests__/sub-agent.test.ts`
-gains T9 (default === SONNET_MODEL), T10 (retry_feedback threading), T11 (tools_available
-passthrough). `bun test cores/free/research` 193 pass / 2 skip; `tsc -p
-cores/free/research/tsconfig.json` clean; `gateway` research-core production-composer +
-cores-tool-dispatch guards 23 pass; eslint clean.
-
----
-
-## 2026-07-22 — task 9 — work-board: generic terminal status transitions clear inline_active
-
-**Root cause (verified live in tenant DB).** A work-board item reaching a terminal status
-(`done`/`failed`) via the GENERIC `update()`/`complete()` path left `inline_active=1` — the
-completion ack reached Telegram but the card stayed in "inline active" state. The specialized
-`attachRun()`/`detachRun()` methods already cleared `inline_active=0` as part of their
-run-binding transitions, but the generic path only wrote `inline_active` when the caller's patch
-explicitly included it; `complete()` is `update({ status:'done' })` with no `inline_active` key.
-
-**Fix (`work-board/store.ts` `update()`).** Added a `terminalTransition` boolean (computed
-inside the transaction callback, after the `current === null` guard, so it safely reads
-`current.status`). On any REAL status transition to `'done'` or `'failed'`: (a) suppress the
-caller's explicit `patch.inline_active` push (avoids a duplicate SET column) and (b) push
-`inline_active = 0` unconditionally. Non-terminal transitions and no-status patches preserve
-today's behavior byte-identical. No data backfill for already-corrupt rows (out of scope).
-`attachRun`/`detachRun` are NOT consolidated — they have legitimately different run-binding
-semantics (owner-pinned design).
-
-**Tests (`work-board/store.test.ts`, 4 new reproduce-then-fix tests).** T1 `generic complete()
-clears inline_active` (the live bug path — create, set inline_active=true, complete(), assert
-status='done' + completed_at not null + inline_active=false both returned AND persisted); T2
-`generic update to failed clears inline_active`; T3 `terminal clear wins over explicit
-inline_active:true in the same patch`; T4 `non-terminal status transition preserves
-inline_active`. All 264 work-board tests pass; `tsc -p work-board` clean; consumer tests (38
-gateway/http/work-board-surface + 19 work-board/agent-tool) still pass.
-
----
-
-## 2026-07-22 — Argus r2 BLOCKER fix — onboarding/interview: patchPhaseState (CAS update-if-present) replaces upsert in live personality suggester
-
-**Root cause (Argus r2 blocker).** `live-personality-suggestions.ts` used
-`stateStore.upsert({..., preservePhaseAndTimer:true})` to persist memo picks from the
-background personality suggester. While `preservePhaseAndTimer` correctly preserved the live
-row's phase and timer when the row existed, it did NOT protect against the race where the row
-was admin-reset (deleted) between the background task's re-read and the upsert write: the
-absent-row branch of `upsert()` fell into the INSERT path, recreating the row with stale
-`phase`/`last_advanced_at` from the stale pre-read snapshot — effectively undoing the admin
-reset.
-
-**Fix.** Added `patchPhaseState(owner_slug, user_id, patch)` to the `OnboardingStateStore`
-interface (`onboarding/interview/state-store.ts`) with update-if-present / CAS semantics:
-always preserves `phase` and `last_advanced_at`; returns **null** and skips the write entirely
-when the row is absent (never inserts). Implemented in both `InMemoryOnboardingStateStore`
-(atomic in-map update) and `SqliteOnboardingStateStore` (transactional SELECT then conditional
-UPDATE, returning null on miss). `live-personality-suggestions.ts` now calls `patchPhaseState`
-directly (with the four memo-patch keys), and `LivePersonalityStateStore` now uses
-`Pick<OnboardingStateStore, 'get' | 'patchPhaseState'>`. Stale comment about the re-INSERT
-fallback replaced with accurate CAS documentation.
-
-**Tests.** Updated `live-personality-suggestions.test.ts` fakeStore to implement
-`patchPhaseState` (update-if-present, null on absent row). Converted existing assertions from
-tracking `upserts[]` to `patches[]` (patch object now passed directly, no `phase`/`advanced_at`
-wrapper). Added new reproduce-then-fix test: "row deleted (admin reset) between re-read and
-write → no insert, no throw (CAS skip)" — simulates the race via `setOnGet` (get sees live row)
-+ `row=null` (patchPhaseState sees absent row): asserts `patches.length===1` (write attempted)
-and `current()===null` (row NOT resurrected). Updated partial-store constructions in
-`path1-solicited-upload-starts-job.test.ts` and `build-onboarding-finalize.test.ts` (7 inline
-`OnboardingStateStore` objects) to wire `patchPhaseState` through to the real store. 968
-onboarding tests + 3761 gateway+onboarding tests pass; `tsc -p onboarding/gateway/open` clean.
-
-## M2 P0 parity — input modalities task 1: attachment→agent threading + PDF documents (2026-07-21)
-
-Scope: `IMPLEMENTATION_PLAN.md` task 1. Attachments (including images) never reached
-the agent — `open/wiring/app-ws.ts` read `adapter_metadata.attachments` and dropped
-them (its own comment admitted the deeper wiring was a follow-up); `gateway/wiring/
-build-live-agent-turn.ts` had zero attachment handling. This builds the threading AND
-adds PDF as an accepted chat-upload type. **Images are fixed as a side effect** — they
-now reach the agent for the first time.
-
-- **`gateway/http/app-upload-surface.ts`** — `IMAGE_MIME_WHITELIST` → `CHAT_UPLOAD_MIME_WHITELIST`
-  (+`application/pdf`; SVG still excluded); `EXT_FROM_MIME` (+`pdf`), `URL_PATH_RE`
-  (`…(png|jpg|gif|webp|pdf)`), `mimeFromExt` (+`pdf`). All existing hardening
-  (Content-Length pre-check, 10 MiB cap, declared-vs-sniffed cross-check,
-  content-addressed storage, per-user GET auth) untouched. NEW exported
-  `resolveChatAttachmentLocalPath(owner_home, url)` — pure, syscall-free URL→local-path
-  map using the SAME `URL_PATH_RE` (relative OR absolute URL; null for non-matching).
-- **`gateway/http/chat-sender-registry.ts`** — `LiveAgentTurnRequest` gains
-  `attachments?: ReadonlyArray<string>` (prompt-only; never mutates `user_text`).
-- **`gateway/wiring/build-live-agent-turn.ts`** — `BuildLiveAgentTurnInput` gains
-  `resolveAttachment?`; new exported `buildAttachmentsFragment(...)` formats a
-  `<user_attachments>` block of resolved absolute paths + MIME + a "Read them" line;
-  injected on the WARM splice (before the user message) AND the COLD
-  `composeFirstTurnPrompt` (before the user message). Unresolvable URL → skipped + warn.
-- **`open/wiring/app-ws.ts`** — sanitizes `adapter_metadata.attachments` to non-empty
-  strings and passes `attachments` into the `appWsChatTurn({...})` call.
-- **`open/composer.ts`** — threads `resolveAttachment: (url) => resolveChatAttachmentLocalPath(owner_home, url)`
-  into `buildLiveAgentTurn`.
-- **Clients** — web: `uploads.ts` `ACCEPTED_IMAGE_TYPES` → `ACCEPTED_ATTACHMENT_TYPES`
-  (+pdf); `ChatApp.tsx` file-input `accept` (+`application/pdf,.pdf`), aria-label
-  "Attach file…", `AttachmentImage` non-image → downloadable file chip;
-  `message-adapter.ts` routes every attachment through the authed renderer
-  (`isImageAttachmentUrl` decides img vs chip). Expo: `app/lib/upload-client.ts`
-  `mimeToExt` (+pdf, exported for test).
-- **Tests** — `gateway/__tests__/app-upload-surface.test.ts` (PDF accept/spoof/serve+ETag
-  + `resolveChatAttachmentLocalPath` units); `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts`
-  (NEW: cold+warm embed the resolved path, `user_text` unpolluted, unresolvable skipped,
-  no-attachments/no-resolver → no block); `gateway/__tests__/m2-chat-upload-attach-production-composer.test.ts`
-  (PDF variant threads onto `adapter_metadata.attachments`); web `uploads.test.ts` /
-  `message-adapter.test.ts` updated; `app/__tests__/upload-client.test.ts` `mimeToExt` unit.
-- Suites: scoped gateway + wiring + open + client tests green; `tsc -p tsconfig.json` clean.
-- OUT OF SCOPE (later tasks): voice-note transcription (task 2), `/status` + `/reset`
-  chat commands (task 3), office formats beyond PDF, SVG, the import-ZIP path.
-
-### Round-2 hardening (Argus review, 2026-07-21)
-
-- **`landing/chat-react/ChatApp.tsx` — `attachmentBasename` no longer throws on a
-  poisoned URL.** It runs during render for every non-image chip; a malformed
-  percent-escape (`report%ZZ.pdf`) made `decodeURIComponent` throw `URIError`,
-  tripping `ChatErrorBoundary` and blanking the whole chat view — and, since the
-  URL persists in history, it recurred on every reload. Now `try/catch` falls back
-  to the raw segment. Exported + unit-tested (`__tests__/attachment-basename.test.ts`).
-- **`gateway/http/app-upload-surface.ts` — `resolveChatAttachmentLocalPath` hardened.**
-  `URL_PATH_RE`'s user_id class matched a dot-only segment (`.` / `..`); now rejected
-  outright (`/^\.+$/`) rather than relying on the hex64-filename bound. Added an
-  `existsSync` gate so a resolvable-but-missing blob path is never injected into the
-  agent prompt. New units cover both.
-- **`gateway/wiring/build-live-agent-turn.ts` — Retry re-injects the ORIGINAL
-  attachments.** A freeze-timeout Retry (`RETRY_TURN_VALUE`) recovered only
-  `lastUserText`, silently dropping the doc/image. New `lastAttachments` map recorded
-  alongside `lastUserText`; the recovered turn re-binds `attachments` too. Tests (f)/(g)
-  in `build-live-agent-turn-attachments.test.ts` prove the retried prompt re-embeds the
-  path (and injects no block when the original had none).
-
-### Round-3 hardening (Argus review round-2, 2026-07-21)
-
-- **BLOCKER — mobile PDFs no longer paint as broken images.** The Expo bubble
-  routed EVERY attachment URL through `AuthedAttachmentImage` (a pure RN `<Image>`),
-  so a PDF (newly uploadable on mobile in M2) rendered as a broken thumbnail with no
-  open affordance — unlike the web file chip. Now `AuthedAttachmentImage` branches on
-  `isImageAttachmentUrl(url)`: a non-image renders as `AuthedAttachmentFile`, a
-  tappable `📎 <basename>` chip that opens the document (non-authed URLs open
-  directly; our bearer-authed `/api/app/upload/…` URLs are fetched WITH the bearer
-  then opened — RN-web via an object URL in a new tab, native via a base64 data URL
-  handed to `WebBrowser`). Two new plain-TS helpers in `app/lib/attachment-url.ts`
-  (`isImageAttachmentUrl`, `attachmentBasename`, both unit-tested, mirroring the web
-  client's) drive the branch. This is the mobile analogue of the web file chip; it
-  also settles the app side of the "non-image routed as image content-part" semantic
-  (the web `message-adapter` note) — the renderer, not the content-part type, decides.
-- **`gateway/http/app-upload-surface.ts` — served blobs pin their type.** The GET 200
-  now sets `X-Content-Type-Options: nosniff` + `Content-Disposition: inline` so a
-  browser never MIME-sniffs a served document into an executable content-type
-  (defense-in-depth atop the existing bearer + user-id match; matters now that PDFs
-  are served inline). Asserted in the PDF-serve test.
-- **`open/wiring/app-ws.ts` — inbound attachment list is deduped + bounded.** New
-  exported `sanitizeInboundAttachments(raw)` keeps only non-empty strings, DEDUPS, and
-  CAPS at `MAX_INBOUND_ATTACHMENTS` (16) — each survivor drives a downstream
-  `existsSync` + `<user_attachments>` prompt line, so a buggy/hostile client can't
-  fan out unboundedly. Replaces the inline filter at the receiver; unit-tested.
-- **`app/components/ChatSyncSurface.tsx` — native picker mirrors the server whitelist.**
-  `DocumentPicker.getDocumentAsync` moved from `type: '*/*'` to the images+PDF+ZIP
-  whitelist so the OS picker greys out unsupported files up front instead of letting a
-  pick sail through to a raw 415.
-- **Real-resolver integration test** (`build-live-agent-turn-attachments-real-resolver.test.ts`):
-  seeds a real blob on disk, resolves its URL with the SHIPPED
-  `resolveChatAttachmentLocalPath`, and asserts `buildAttachmentsFragment` embeds the
-  on-disk path + MIME (and drops a missing blob) — closing the "stub-only resolver"
-  coverage gap through the production seam.
-- Suites: `app/__tests__/attachment-authed-source.test.ts`, `gateway/__tests__/app-upload-surface.test.ts`,
-  `gateway/wiring/__tests__/build-live-agent-turn-attachments-real-resolver.test.ts`,
-  `open/__tests__/open-wiring-app-ws.test.ts` green; `tsc` clean (root + `app/`).
-- NOT changed (documented-acceptable, single-owner posture): `resolveChatAttachmentLocalPath`
-  cross-`user_id` read (one owner; contained by `existsSync` + per-tenant process
-  isolation) and the web `message-adapter` routing non-images as `type:'image'` content
-  parts (assistant-ui exposes only text|image parts here; the renderer branches on the
-  URL, so it is correct in practice).
-
-### CI-green hotfix (PR #428, task 2) — de-pollute process-global react/react-native test mocks
-
-- The canonical `test` job went RED across `a235eea3..141d2c1c` (3 consecutive runs). The
-  two new app test files (`app/__tests__/authed-attachment-image-hooks.test.tsx`,
-  `app/__tests__/authed-attachment-file-open.test.tsx`) registered process-global NARROW
-  `mock.module` payloads for `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` /
-  `react-native`. Bun module mocks are process-global and survive across files, so in the
-  shared-process CI chunk (`scripts/run-tests.sh`, 75-file chunks) they poisoned later
-  files — `SyntaxError: Export named 'useReducer' not found` (docs-mutations-race) and
-  `Export named 'Linking' not found` (docs-panes-render), plus `forwardRef is not a
-  function` from react-textarea-autosize in the landing suites.
-- FIRST ATTEMPT (superset + delegate-to-real react mock) fixed the SyntaxErrors but HUNG
-  the CI `test` job (>90 min, never completing). Root cause: a `mock.module('react', …)`
-  is process-global in bun and silently replaces `import * as RealReact from 'react'` in
-  EVERY later file of the same chunk — including `docs-mutations-race` /
-  `diagnostics-pane-render`, which deliberately use REAL react via an injected HookRuntime.
-  Even a faithful superset defeats their design and deadlocked chunk 0 (agent-dispatch +
-  app files together). Every other test file in the repo AVOIDS mocking react for exactly
-  this reason (the "process-global" warnings in `docs-mutations-race.test.ts:52` etc.).
-- FINAL FIX (test hygiene only — zero production or assertion changes): ELIMINATE the
-  `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` module mocks entirely from both
-  files; use REAL react + real jsx. Only `react-native` stays a module mock (bun can't
-  parse its Flow source) — kept as a SUPERSET (`Linking` / `useWindowDimensions` /
-  `ScrollView` / `TextInput` / `ActivityIndicator` / `Modal`) so it never collides with the
-  sibling docs suites' react-native mocks — plus the `expo-*` stubs (so the real expo
-  modules never drag unparseable react-native internals into the process).
-  `AuthedAttachmentImage` is a hook-free dispatcher, so it runs directly against real react
-  (a regression re-adding a hook throws "Invalid hook call" and fails the test loudly).
-  `AuthedAttachmentFile` calls `useState`, so `pressChip` installs a minimal hook
-  dispatcher on react's current-dispatcher slot
-  (`__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.H`) around the
-  SYNCHRONOUS component call only, then restores it — scoped to this file, no module mock,
-  no cross-file pollution.
-- Verified locally with gbrain on PATH: the exact CI chunk 0 (7 agent-dispatch + 68 app
-  files, the set that hung) now runs 861 pass / 0 fail and EXITS in <1s; both target suites
-  green (image 4/0, file 5/0); the 12 branch-changed files in ONE bun process 125/0;
-  `bash scripts/ci/typecheck-all.sh` exit 0 (51 tsconfigs).
-
-### Round-2 findings fix (Argus review round-1 on PR #428, 2026-07-22)
-
-- **BLOCKER — native non-authed `data:`/`file:`/`content:` attachments no longer open
-  silently-fail.** The file-chip `open()` handler's `bearer === undefined` branch
-  (`app/components/AuthedAttachmentImage.tsx`) handed the raw URI straight to
-  `WebBrowser.openBrowserAsync` on native — but SFSafariViewController / Chrome Custom
-  Tabs reject a non-http(s) INITIAL url, so a `file://`/`content://` (optimistic /
-  failed-send local doc bubble — `attachment-url.ts:141-149`) or `data:` URI opened to
-  nothing, contradicting the file's own r2-BLOCKER invariant. Fixed with a new
-  `openNonAuthedNative(uri, name)` helper: an `http(s)` URL still opens in the in-app
-  browser; a `data:` URL is materialized to a cache file (`materializeDataUrlToCache`)
-  and a local `file:`/`content:` URL is shared as-is — both routed through
-  `Sharing.shareAsync` (the same OS-share path the AUTHED native branch already uses),
-  with the rare `!isAvailableAsync()` emulator fallback. Web behavior unchanged (still
-  navigates the synchronously-opened tab). Four new regression tests in
-  `app/__tests__/authed-attachment-file-open.test.tsx` assert: local `file://` shared
-  as-is (never WebBrowser), `data:` materialized-then-shared (never a data: URL to
-  WebBrowser), and `http(s)` still opens in WebBrowser.
-- **Test hygiene (findings 2 + 3, no production change).** The two attachment test files'
-  `react-native` superset mocks now also export `FlatList` / `KeyboardAvoidingView` /
-  `TouchableOpacity` (per the sibling-superset convention, so they can never collide with
-  a docs-suite RN mock in a shared CI chunk). Removed the vacuous `const useStateCalls = 0;
-  expect(...).toBe(0)` always-pass counters from `authed-attachment-image-hooks.test.tsx`;
-  the real guard was always the element-TYPE assertions plus the real-react "Invalid hook
-  call" throw — the flip test now asserts the exact image/file type sequence across the
-  recycle instead of a tautology.
-- Verified: both target suites 12/0; the full `app/__tests__/` dir in ONE bun process
-  872/0 (the CI-pollution scenario, clean); `tsc --noEmit -p app/tsconfig.json` exit 0.
-
-## M2 P0 parity — input modalities task 3 (partial): `/status` chat command (2026-07-22)
-
-Scope: `IMPLEMENTATION_PLAN.md` task 3, the `/status` half of the narrow Neutron
-chat commands (`/status` + `/reset`; NOT the the legacy harness topic-lifecycle vocabulary).
-`/reset` is intentionally NOT shipped this iteration — see the mechanism finding
-below.
-
-- **`/status` — deterministic instance snapshot.** New `buildStatusChatCommandFilter`
-  (`gateway/boot-chat-command-filters.ts`, re-exported through the
-  `gateway/boot-helpers.ts` / `composer-contract.ts` barrel) implements the
-  `ChatCommandFilter` contract. `/status` (exact-command word boundary — `/statusfoo`
-  falls through to the LLM, K8 grammar precedent) replies with a formatted snapshot:
-  active project, current model (`getBestModel()`), pending-reminder count, active
-  work-board items, active Trident builds. Pure READ — no mutation, no LLM dispatch.
-- **Wiring — one command path, both surfaces.** Chained in `open/composer.ts` into the
-  SAME `buildChainedChatCommandFilter([...])` the web onboarding chat AND the app-ws
-  chat share (appended after the cores chain + skill-forge). The snapshot is an
-  injected thunk; because the source stores (projects reader / reminder store /
-  work-board / Trident run store) are constructed LATER in the composer closure, the
-  reader is threaded through a `late<T>` two-phase holder (`statusSnapshotHolder`) and
-  BOUND right after `workBoardStore` exists. Each source read is best-effort (degrades
-  to 0 rather than bricking the command). Filter stays store-free → unit-testable.
-- **Tests.** `gateway/__tests__/status-command-wiring.test.ts` (9/0): reply TEXT carries
-  every snapshot field value (behavior, not a `toHaveBeenCalled` gap-test); `project_id`
-  threaded / omitted correctly; leading-whitespace + trailing-arg tolerance; `/statusfoo`
-  + `/statuses` fall through and NEVER run the snapshot thunk; chain-composition proof
-  that `/status` is reached after earlier filters disclaim (the real composer shape).
-- **`/reset` DEFERRED — verified spec/mechanism mismatch.** The plan named
-  `respawnSupervisedSession` as the `/reset` actuation for "fresh agent context; durable
-  chat history stays". VERIFIED against the code this is WRONG:
-  `runtime/adapters/claude-code/persistent/session-respawn.ts:24` — "respawn ALWAYS
-  resumes — never a fresh spawn"; `respawnSupervisedSession` (`supervision.ts:59`) →
-  `respawnReplSession(..., true)` → `planRespawn` `--resume`s the SAME transcript,
-  PRESERVING context. It cannot deliver a context reset. Shipping `/reset` on that
-  primitive would be a no-op-that-looks-like-it-works (banned pattern). The correct
-  primitive is the `/clear` PTY reset (`CONTEXT_RESET_COMMAND`, `pool.ts:380`, already
-  used for the import warm-session per-turn reset) or a fresh (non-resume) respawn; plus
-  a credential-identity-agnostic way to target the live session key (the pool key folds
-  `cred.id`, unknown to the filter). Re-scoped in `IMPLEMENTATION_PLAN.md` for a
-  follow-up iteration on the corrected mechanism.
-- Verified: `bunx tsc --noEmit` exit 0; `gateway/__tests__/status-command-wiring.test.ts`
-  9/0.
-
-## M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
-
-Scope: `IMPLEMENTATION_PLAN.md` task 5. Audio voice notes (MP3/M4A/WAV) upload on
-the SAME chat surface as images + PDF, transcribed at upload-complete by a new
-OpenAI-compatible Whisper client, with the transcript injected into the dispatched
-prompt AND appended to the scribe text (voice → text → gbrain parity). NO FEATURE
-FLAGS — transcription is gated only by `OPENAI_API_KEY` presence (credential config).
-
-- **Whisper client.** New `gateway/transcription/openai-transcription.ts` —
-  `createOpenAiTranscriptionClient` POSTs multipart `{base}/v1/audio/transcriptions`
-  (default base `https://api.openai.com`, model `whisper-1`, injectable `fetch_impl` +
-  `timeout_ms`). Typed `TranscribeResult` with an error taxonomy
-  (`http_error`/`network_error`/`timeout`/`bad_response`); NEVER throws, no logging
-  inside the client, no retries (v1). `audioFilenameFor` maps the canonical MIME to a
-  Whisper-recognized filename extension (`voice.mp3`/`voice.m4a`/`voice.wav`).
-- **Upload surface.** `gateway/http/app-upload-surface.ts` — widened
-  `CHAT_UPLOAD_MIME_WHITELIST` / `EXT_FROM_MIME` / `URL_PATH_RE` ext-group /
-  `mimeFromExt` to audio (`.txt` DELIBERATELY excluded from the GET ext-group so the
-  transcript sidecar is never servable). New optional `transcribeAudio` seam;
-  handleUpload transcribes an audio blob and writes a content-addressed `<hash>.txt`
-  sidecar (atomic tmp+rename, idempotent — sidecar-exists ⇒ the API is NOT re-called;
-  ASR failure NEVER fails the upload). `resolveChatAttachmentLocalPath` widened to
-  return `transcript` for audio (sidecar read; null when absent), field omitted for
-  non-audio.
-- **Turn injection.** `gateway/wiring/build-live-agent-turn.ts` `buildAttachmentsFragment`
-  embeds an audio attachment's transcript inline (capped 4000 chars with a truncation
-  marker); keyless/failed ASR → the graceful "transcription unavailable — set
-  OPENAI_API_KEY" note. Splice sites + `turn.user_text` untouched.
-- **Scribe threading.** `open/wiring/app-ws.ts` — new `attachmentTranscript` deps seam;
-  the receiver appends resolved transcripts to the `scribeOnUserTurn` text only
-  (`user_text` stays unmutated). Composer wires it over `resolveChatAttachmentLocalPath`;
-  `open/composer.ts` builds the `transcribeAudio` seam from `OPENAI_API_KEY` (keyless ⇒
-  no seam, audio still uploads without a transcript).
-- **Clients.** Web accept attr + `ACCEPTED_ATTACHMENT_TYPES` (+ alias forms) + 🎵 chip
-  (`message-adapter.ts` `isAudioAttachmentUrl`); native Expo picker mime array +
-  `mimeToExt` audio cases + 🎵 chip (`attachment-url.ts` predicate).
-- Verified: `bunx tsc --noEmit` exit 0. Tests:
-  `gateway/transcription/__tests__/openai-transcription.test.ts` 7/0;
-  `gateway/__tests__/app-upload-surface.test.ts` 30/0 (incl. artifact-on-disk sidecar +
-  idempotency call-count + keyless-no-sidecar + `.txt`-unreachable);
-  `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts` 11/0;
-  `open/__tests__/open-wiring-app-ws.test.ts` 20/0 (scribe transcript threading);
-  `app/__tests__/upload-client.test.ts` 12/0;
-  `landing/chat-react/__tests__/message-adapter.test.ts` 12/0.
-
-## 2026-07-31 — mobile: a project switch can no longer end in an unbounded wait
-
-Third pass on the owner's "spinner in the chat area, rail still tappable, and the
-project I tapped never appears on the server's session log". The two previous
-passes both landed in the chat-session layer and neither moved the symptom.
-
-**NOT the root cause, and now ruled out with evidence.** A new device-harness test
-mounts the REAL chain a rail tap travels — `app/projects/[id]/_layout.tsx` →
-`<Slot/>` → `index.tsx` → `chat.tsx` → `ChatSyncSurface` — over a routing stub, and
-every tapped project reaches the wire on unmodified `main`. So the settings gate
-opens, the redirect fires and the socket is attempted; the shell is not the
-blocker. Separately: the tenant's project ids are all `[a-z0-9-]`, so nothing is
-being rejected on id grounds, and a missing last-tab key resolves `null` rather
-than hanging. The device-only cause is still UNIDENTIFIED.
-
-**What DID change — every unbounded wait on that path is now bounded, and a
-failure is now visible instead of being an indefinite spinner.**
-
-- **`app/lib/projects-client.ts`** — `REQUEST_TIMEOUT_MS` (15 s) + an
-  `AbortController` on every request. `fetch` has no device-side timeout, and the
-  shell blocks its whole content pane on `getSettings`, so a request that never
-  answered was a permanent spinner with no error, no retry and nothing on the wire.
-  A hang is now a `timeout` rejection.
-- **`app/lib/project-shell-content.ts`** — new `unavailable` kind. The production
-  settings store SYNTHESISES defaults rather than 404ing
-  (`gateway/http/app-projects-surface.ts` `buildDefaultSettings`), so the shell's
-  failure branch was effectively unreachable and every stall was terminal. A
-  transport/auth failure is now `unavailable`; only a server-stated absence
-  (`not_found`) is `not_found`.
-- **`app/app/projects/[id]/_layout.tsx`** — renders that state as a
-  "Couldn't load this project" pane with a **Try again** that re-runs the scope's
-  fetch in place. It no longer tells the owner a project they are looking at in the
-  rail is missing when the truth is the connection.
-- **`app/app/projects/[id]/index.tsx`** — the default-tab redirect ALWAYS
-  navigates. The last-tab read is raced against `LAST_TAB_READ_TIMEOUT_MS`
-  (1.2 s; `try/catch` cannot save you from a promise that never settles), and a
-  scope that resolves from neither the path nor the param falls through to General
-  instead of leaving its own spinner up forever.
-- **`index.tsx` + `chat.tsx`** — resolve the scope from
-  `projectIdFromPathname(usePathname())` first, param second: the same precedence
-  the shell already adopted after the route param was observed going stale on
-  device. The shell and the screens inside it can no longer disagree about which
-  project they are rendering.
-
-**Test surface.** `app/__tests__/support/stubs/expo-router.tsx` grows an opt-in
-routing mode (path + route table + `<Slot/>`) and a `paramsBlind` fault; inert by
-default so no existing harness file changes behaviour.
-`app/__tests__/project-switch-reaches-the-wire.test.tsx` (7/0) asserts a SOCKET per
-tapped project, not that a spinner stopped. Six mutations, each proven applied by
-file hash, each failing its paired test.
-
-## 2026-08-01 — memory: an auto-merged page can be un-merged
-
-The 6h reflect pass clusters near-duplicate entity pages, folds the losers into a
-survivor, and **hard-unlinked** each loser (`runtime/entity-writer.ts:deleteEntity`
-→ `fs.unlink`). Jaccard similarity is a heuristic, so that removal could be wrong
-and there was no way back: no copy, no record, and — because the pass's report is
-a return value nobody reads (`open/wiring/memory.ts` discards it) — not even a log
-line saying a page had gone. `entities/.quarantine/` had been designed and dropped.
-
-**`scribe/reflect/merge-archive.ts` (new).** A merged-away loser is copied
-BYTE-EXACT to `<ownerDataDir>/memory-archive/<kind-dir>/<slug>.<stamp>.md` and the
-merge recorded in `memory-archive/merges.jsonl` (when, which page, which survivor
-absorbed it) **before** the unlink. `memory-archive/` is a sibling of `entities/`,
-outside every enumeration path, so an archived copy is inert until restored.
-Content-idempotent (a re-archived loser reuses its existing copy), and
-`pruneMergeArchive` enforces a **90-day** horizon each pass so the safety net stays
-bounded. A `README.md` with plain-English restore instructions is dropped into the
-folder on first use.
-
-**`scribe/reflect/reflect-pass.ts`.** `mergeCluster` archives before deleting, and
-**a failed archive BLOCKS the delete** — the loser is retained, not counted as
-merged, and a later pass retries. New `report.archived`; a successful merge now
-logs the removed page, the survivor, the archive path and the restore command.
-
-**`neutron memory-restore`** (`scribe/reflect/memory-restore-cli.ts`, dispatched
-from `bin/neutron`) lists what was merged away and puts a page back byte-for-byte.
-It refuses to overwrite a live page without `--force`.
-
-**Test surface.** `scribe/__tests__/reflect-merge-archive.test.ts` (12/0) drives
-REAL merges over real on-disk pages and then **recovers the loser, asserting the
-restored bytes equal the pre-merge bytes** — including the case where the loser was
-the better page. Mutation: reverting `mergeCluster` to a hard delete turns 10 of
-the 12 red.
-
-No schema change, no feature flag. Gateway/scribe code — reaches a box on deploy.
-
-## 2026-08-03 — push: a device registration that fails is no longer invisible
-
-`device_push_tokens` was found holding **zero rows** on a live instance, so every
-proactive surface — rituals, the morning brief, nudges, the lapsed-credential
-notice — reached the app and nothing reached the phone. It was caught by checking
-the first ritual fire, not by a report, and the reason is structural: nothing on
-the registration path logged anything. `gateway/http/app-devices-surface.ts` had
-no logger, `gateway/push/store.ts` has none, and `app/lib/push.ts` is documented
-as never throwing — it turns every failure into a typed result the login screen
-`console.warn`ed and dropped. So "the app never called register" and "the app
-called and was refused" produced byte-identical evidence: none.
-
-**Server (`gateway/http/app-devices-surface.ts`).** EVERY request now emits
-exactly one `@neutronai/logger` line whatever the outcome — `device_registered`
-(with `first_registration`, derived from `registered_at === updated_at`, so a new
-phone is distinguishable from the same phone signing in again),
-`device_register_rejected`, `device_request_unauthorized` (the expired-bearer
-case that used to look like silence), `device_request_rejected`,
-`device_unregistered`, `device_unregister_rejected`. A store failure during
-register no longer throws out of the handler: it logs `device_register_failed`
-and answers **500 `register_failed`**. **The token is never logged** — lines carry
-`token_fp`, the first 12 hex chars of its SHA-256, which correlates a register
-with the unregister or the Expo prune that later removes it and is useless to
-anyone else.
-
-**Client (`app/lib/push-observability.ts`, new).** `enablePushForUser` records
-every outcome into the existing diagnostics ring buffer and, for an ACTIONABLE
-failure, captures a report — a fifth `ReportReason`, `push_registration_failed`,
-because this failure is not an error anything caught. `unsupported_platform` (the
-web build) is recorded but not escalated, or opening the app in a browser would
-bury the real failures. Login calls this before `setUser`, so `DiagnosticsSync`
-flushes the queued report on the same launch. No token is recorded — a success
-carries the platform and the token's LENGTH.
-
-**Test surface.** `gateway/__tests__/app-devices-surface.test.ts` (25/0) drives
-the real surface with the REAL logger behind a capturing sink and asserts on
-rendered lines, including one test that fires every path and proves the raw token
-appears in none of them; logging the token instead of the fingerprint turns 3
-red. `app/__tests__/push-observability.test.ts` (8/0) asserts a failure is
-recorded AND filed, a benign skip is recorded and NOT filed, and the token never
-reaches a report.
-
-**Residual, stated not fixed.** Registration is **login-only**.
-`enablePushForUser` has exactly two call sites, both in `app/app/login.tsx`
-(`:228`, `:352`), and nothing re-registers on foreground — so an OS token
-rotation, a reinstall or an Expo invalidation ends push until the next sign-in.
-`app/lib/devices-client.ts` claimed otherwise in a comment ("and again on app
-foreground when the Expo token rotates"); the comment is corrected to describe
-what the code does. Self-healing re-registration is a separate change.
-
-No schema change, no feature flag. Gateway + app code.
-
-## Wall-clock timing assertions in tests — triaged, mostly removed (ISSUES #438)
-
-**What changed.** A sweep of every test assertion that compares REAL elapsed wall
-time against a threshold. These red when the machine is loaded, which is exactly
-when CI is busiest, and a gate that reddens for a reason unrelated to the change
-under review is a gate people learn to merge past. 16 live assertions were found
-across 10 files (the swept grep also matches a comment in
-`gateway/comments/__tests__/anchor-walker.test.ts:1230`, which documents the
-earlier removal this change generalises).
-
-**The rule applied, in order.** (1) If a deterministic assertion already covered
-the same contract, the timing bound was DELETED. (2) Otherwise, if the contract
-could be restated as an ordering or a discriminant, it was CONVERTED. (3) Only
-where neither applied was a bound KEPT, and then with a comment naming the
-regression it catches and a measured margin. Nothing was bulk-widened; exactly
-one number in the tree changed, and it changed to zero numbers by deletion.
-
-**Outcome: 9 deleted, 4 converted, 3 kept.** The conversions are the interesting
-half. `onboarding/synthesis/__tests__/synthesis-session.test.ts` now asserts
-WHICH wedge detector fired by reading the distinct failure messages off the
-injectable `logFailure` sink, instead of inferring it from a stopwatch — strictly
-stronger, because the old bound would also have passed on the wrong detector
-firing early. `open/__tests__/open-app-ws-durable-chatlog.test.ts` samples the
-agent-reply frame count at the instant the HTTP response lands, so
-"returned before the turn finished" is an ordering that load cannot reorder
-rather than a 500 ms budget. `open/__tests__/onboarding-warm-conversational.test.ts`
-sets the pre-warm cap an hour out so the pre-warm is the only thing that can
-resolve the gate, making the test's own completion the proof.
-
-**Two premises corrected while doing it.** The health-probe test in
-`runtime/adapters/claude-code/persistent/__tests__/repl-supervision.test.ts`
-described a server that "never resolves", but `Bun.serve` defaults to a 10 s
-request idle timeout — so it DID answer, and with the probe deadline stripped the
-test still passed in 12.2 s. It now sets `idleTimeout: 0`, which is what makes
-the deadline's absence observable at all. And the bound in
-`tests/integration/profile-pic-pipeline.test.ts` allowed 60 s while the test runs
-under CI's 15 s per-test timeout — it could never have failed.
-
-**The three kept bounds, and why.** Two in
-`runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts`
-are LOWER bounds that are the only thing distinguishing the inactivity watchdog
-from the absolute ceiling — both deliberately emit the same error
-(`pool.ts:605`) — and load moves a lower bound away from its threshold. The
-`app/__tests__/transcript-warmer.test.ts` bound is the only guard separating a
-gate-driven abandon from the 6 s open deadline, and measured 8 ms against a
-3000 ms budget under 2x CPU oversubscription. The
-`onboarding/profile-pic/__tests__/storage.test.ts` bound discriminates a
-synchronous return from a 5 s fallback wait and measured 0-1 ms against 100 ms
-under the same load.
-
-**Every deletion was mutation-tested**: the guarding behaviour was broken in the
-real source and the surviving assertions were shown to still red. Tests only —
-no source file changed, no schema change, no feature flag.
-
-## 2026-08-04 — one OpenAI key serves every OpenAI-backed feature (ISSUES #496)
-
-The owner pasted an OpenAI key in Settings to turn on semantic search, then
-found voice transcription still reporting `openai_key_missing`. That was not a
-defect: `gateway/transcription/openai-key-store.ts` reserved its own credential
-name, `openai_transcription`, and the docblock beneath it argued the separation
-was deliberate — a generic OpenAI credential would be read by whatever else
-wanted an OpenAI key, so pasting a key for one purpose would silently switch on
-another.
-
-**That reasoning is now retired** (SPEC § Decisions Log 2026-08-04). It protects
-a user from a metered feature they did not choose to enable, and Neutron is
-single-owner: he pastes his own key and knows what he pays for. Making him paste
-the same secret twice to get voice notes working reads as a bug, not a
-safeguard.
-
-**What shipped — a resolution ORDER, not a branch.** `OpenAiKeyStore.resolve()`
-tries, in order: the dedicated `openai_transcription` credential → the SHARED
-general OpenAI credential → `OPENAI_API_KEY` from the environment. First
-non-empty answer wins. One key works everywhere by default; a dedicated key
-still scopes transcription spend for anyone who wants that, because it outranks
-the shared one. No flag, no mode, no second code path.
-
-**The fallback crosses a store boundary, which is the whole difficulty.** The
-general key is NOT a `project_credentials` row and has no `service` name. It
-lives in `ApiKeyStore` over `SecretsStore` (tables `api_keys` + `secrets`),
-keyed `provider='openai', label='onboarding'` — secrets label `openai:onboarding`
-(`auth/api-key-store.ts:101`, `gateway/cores/integrations.ts:145-146`), written
-by the onboarding optional-key offer and by Settings → Integrations, read by
-`gateway/wiring/resolve-onboarding-openai-key.ts`. A naive "also read service
-`openai`" fix would have compiled, passed a careless test, and done nothing:
-`project_credentials` rows with a hand-typed `openai` service are inert — no
-production reader consults them. So the composer injects
-`resolveOnboardingOpenAiKey` as a REQUIRED lazy thunk (the same thunk the GBrain
-embedder wiring already uses, lazy for the same reason: the composer runs once
-at boot but the key is pasted later, over the running server). Required rather
-than optional so a construction site cannot silently omit it — which the
-typechecker immediately proved by flagging the two test sites that had.
-
-`resolve()` and `status()` became async and walk the SAME order, deliberately:
-if they drift, Settings reports "no key" while voice notes transcribe. A new
-`shared` source label reports the provenance rather than hiding it, and DELETE
-returns 409 `key_from_shared_credential` pointing at Integrations rather than a
-200 that reads as "deleted" over a box that still transcribes.
-
-**Tests + mutation results.** New `gateway/transcription/__tests__/openai-key-store.test.ts`
-(16 tests over a service-AWARE fake store — the sibling surface fake answers to
-any name, which cannot distinguish a correct lookup from a wrong one) plus five
-end-to-end cases on the HTTP surface. Four mutations, each red: removing the
-fallback reds "shared is used" (3 tests); inverting the precedence reds
-"dedicated wins"; dropping the shared step from `status()` alone reds the
-status/resolve agreement suite (4 tests); dropping the blank-key guard reds the
-fall-through and missing-key tests (4 tests). The `openai_key_missing` path is
-covered directly and is unchanged.
-
-## 2026-08-04 — a turn can no longer end on a promise it never keeps (ISSUES #492)
-
-`runtime/adapters/claude-code/persistent/hooks/enforce-reply.ts` already blocked a
-`<channel>` turn that ended without calling `reply()`. It did not catch the other
-half of the same failure: a turn that ends on a PROMISE of work — "re-running
-now", "I'll fix and report back", "one sec". Because a channel turn is
-asynchronous, nothing re-invokes an idle session, so the owner sits in silence
-until they ask for a status. The session looks broken while being perfectly
-healthy. That gate now exists, ported from the upstream harness.
-
-**What actually ported was the false-positive handling, not the regex.** The
-extra logic upstream is almost entirely scar tissue, and a version carrying only
-the pattern would fire on innocent prose, get in the way, and be switched off —
-strictly worse than no gate. Three mitigations came across and each is pinned by
-its own test: double-quoted spans are stripped before matching, so a reply that
-QUOTES the banned phrasings (explaining the gate, citing what not to say) is read
-as meta-discussion rather than a live promise; a negative lookbehind rejects the
-verb-as-noun case, so "the fix", "a check", "your build" do not trip an
-alternation whose modal may sit 50 characters away; and only the reply the owner
-actually receives is evaluated, so a past-tense report of completed work sails
-through.
-
-**Two findings corrected the port rather than following it.** First, the
-delivered-reply rule is INVERTED against upstream. Upstream streams a turn as
-several replies and evaluates the LAST, because that is the message the owner is
-left staring at. This runtime delivers exactly one: `reply` has no
-streaming/append parameter (`dev-channel-impl.ts:129-137`) and the substrate
-settles the turn on the FIRST correlated reply — pushing the completion, closing
-the channel, marking it settled (`repl-session.ts:280-290`) — after which every
-later reply is rejected (`repl-session.ts:269`). Porting "last reply" literally
-would have read a follow-up the substrate already threw away and cleared a turn
-that really did strand the owner: a false NEGATIVE hiding the exact bug. The
-rationale ports; the index does not.
-
-Second, the escape hatches are this tree's real seams, established from the code
-rather than assumed from upstream's names. There is exactly ONE: `reminders_create`
-(`cores/free/reminders/src/tools.ts:104`) is auto-approved
-(`gateway/cores/install-bundled.ts:1098`), picked up by a 30 s tick
-(`reminders/tick.ts:162`), and dispatched onto the SAME warm pooled session
-(`reminders/dispatcher.ts:139-145` → `open/composer.ts:2433-2434` → `pool.ts:490`
-→ `spawn.ts:884`) — a genuine re-entry that can even re-arm itself.
-`dispatch_agent` looks like a continuation mechanism and is NOT one: it runs on a
-separate ephemeral substrate and its completion reporter here is a bare log line
-(`open/composer.ts:999-1004`), so nothing reaches the owner and nothing re-enters
-the session. Accepting it would have waved through the precise stranding the gate
-exists to catch, so it is pinned as a BLOCK. `rituals_*` are approval-gated onto a
-different substrate; cron, idle-nudge and morning-brief are server-side timers
-with no tool surface at all.
-
-A known limit, recorded rather than papered over: because the substrate settles
-the turn on the delivered reply, a block fires AFTER that reply has already
-reached the owner. The gate therefore forces the promised work to actually happen
-in-turn and pushes the agent toward arming a real follow-up, but it cannot
-retroactively deliver a result on a turn whose channel is already closed. The
-durable fix for the delivery half is to not send the promise in the first place,
-which is what the block reason instructs.
-
-**Tests + mutation results.** `runtime/adapters/claude-code/persistent/__tests__/enforce-reply.test.ts`
-grows from 17 to 27 tests. Seven mutations, each red: disabling the promise check
-reds 3; adding a past-tense form to the pattern reds the completed-work regression
-arm; dropping the quote-strip reds the meta-discussion arm; dropping the lookbehind
-reds the verb-as-noun arm; flipping delivered-reply from first to last reds the
-delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; and
-short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
-no-reply gate is untouched. No feature flag — the gate ships on as default
-behaviour.
-
-## Mid-turn message injection (#516)
-
-The web composer keeps Send enabled while the agent is typing. A second message
-for the same topic bypasses the completed-turn chain and is posted immediately to
-the persistent REPL dev-channel as additional context for the active turn. It
-reuses the active turn id without advancing fallback reply-correlation state, so
-the running turn's eventual reply remains correlated normally. If no active turn
-exists at the injection instant, the message falls back to the existing ordered
-turn path instead of being dropped.
-
-Mutation-named tests pin all three boundaries: the gateway test fails if the
-second send is queued until completion, the persistent-REPL test asserts the
-additional `/message` reached the wire before the first reply, and the React test
-fails if the composer is disabled while streaming or IME composition Enter is
-submitted. General chat uses the same `general` route key for registration and
-lookup. A successful dev-channel delivery stays successful if the turn settles
-while its response is returning, preventing a duplicate queued turn; failed
-delivery leaves Retry text and attachment state untouched. Injection is offered
-only while exactly one turn is active: a queued turn, Retry, seed, reconnect, or
-button-prompt answer always follows the normal ordered path. Injected history is
-stamped with the inbound observation time so a racing agent reply cannot render
-before it; attachment-only sends persist their inbound reference while resolved
-local paths remain confined to the REPL payload. Active-turn routes include the
-non-secret credential identity and refuse ambiguous credential-rotation matches.
-Typing refcounts have a fail-safe beyond the turn's forty-five-minute absolute
-ceiling that clears a lost `end`, fans the matching ephemeral end frame, and
-refreshes the rail working state instead of wedging that topic until restart.
-The composer clears the
-submitted text before awaiting the send, then restores it only when delivery
-fails (ahead of any newer draft text). An in-flight send claim prevents two
-Enter presses from reusing the same staged attachment URLs before the first
-upload/send clears them.
-
-## 2026-08-09 — the typing refcount's guard is now killable by a test
-
-PR #145's last open finding was exact: *"Typing-refcount suppression guard and
-46-minute fail-safe have zero killing test coverage, and depth can leak
-permanently."* Both halves were true, and neither was reachable — the logic was a
-closure inside `wireAppWs` keyed on a real `setTimeout(…, 46 * 60_000)`. No test
-waits 46 minutes, and a test that reaches into a closure is not testing the
-production path.
-
-The decision logic moved to `open/wiring/typing-refcount.ts`, pure apart from an
-INJECTED scheduler; `open/wiring/app-ws.ts` is the only caller and passes the real
-one. `open/__tests__/typing-refcount.test.ts` fires the captured timer, so the
-46-minute path runs under test with only the caller changed.
-
-Behaviour is unchanged and now pinned: the outermost `start` and the final `end`
-are the only visible edges (an inner pair emits nothing, so a fast second turn
-cannot clear the first turn's dots); a stray `end` never drives depth negative; the
-window is re-armed on every transition that leaves the count positive; a
-cancelled-but-still-running timer cannot clear an entry a newer start re-armed; and
-a lost `end` expires instead of suppressing every future typing start until
-restart. Mutants killed: removing the fail-safe fails 3, making every transition
-emit fails 2.
-
-
-## 2026-08-09 — `codegen_cancel`'s terminator is a required argument, and the composition path is covered
-
-The review's remaining blocker on the tool-initiated cancel was that the
-production observer composition had no coverage — "both the composer bind and the
-mountOpenCores path".
-
-The reason that mattered was a DEFAULT PARAMETER. `routeCodegenCancel` took
-`terminator: TridentTerminator = buildTridentTerminator({ store: trident })` — a
-terminator with no observer and no `onTransition`. If either hop broke, a cancel
-still flipped the phase and still returned `cancelled: true`, while the Work Board
-never reconciled, the skill-forge hook never ran, and no `projects_changed` reached
-the rail. No unit test could catch it, because each builds its own terminator; only
-the production composition could, and that was the untested part.
-
-The default is GONE. The parameter is required, so a missing thread is a typecheck
-failure — which it immediately was, on nine call sites. The one caller that
-legitimately has no observers to run (`boot-cores-factories.ts`, when no composer
-threaded one) now fabricates it EXPLICITLY via `codegenCancelTerminator` and logs
-`codegen_cancel_terminator_unwired`, the same precedent as the neighbouring
-`codegen_orchestrator_not_wired`. Verified firing, with a control.
-
-`open/__tests__/codegen-cancel-composition.test.ts` covers the pass-through
-behaviourally — a cancel through the MOUNTED backend must reach the terminator the
-caller supplied, and deleting the `mountOpenCores` forward reds it — plus three
-source-scoped assertions for the composer's bind, labelled weaker with the reason
-(the bind is inside the composer's closure; reaching it behaviourally needs the
-whole composition AND the Code-Gen Core installed).
-
-Also fixed: the codegen holder's unbound-deref error read "board terminator is not
-bound" — the SIBLING holder's name — which would send a reader to the wrong bind.
-
-Also on this branch: `TridentRunReferenceAmbiguousError` no longer escapes the
-Code-Gen tool contract. `resolveReference` throws it when a short prefix matches
-more than one run; the MCP guard maps the Core's own error types to structured tool
-failures and lets anything else out as a raw internal error, so an ambiguous prefix
-produced a stack-shaped failure instead of "pass more of the id". It is translated
-at the router boundary to `CodegenInputError` on `task_id`. An existing test had
-pinned the LEAKED message (`'reference is ambiguous'`) — updated to the contract
-error, with its real guarantee (an ambiguous prefix must not select by recency)
-left exactly as it was. Mutant: removing the translation reds three tests.
-
-# Trident child-crash reaping (#514)
-
-## 2026-08-09 — Trident child-crash reaping (#514)
-
-The persistent REPL watchdog now commits a retryable, edge-latched durable-work callback before replacing any dead or alive-but-wedged child. Each spawn receives a unique generation token that is persisted in the REPL registry, returned with launcher completion, and stored on its detached Trident run. The store records that generation's crash before marking only matching live rows `crashed`; a racing launcher completion cannot persist `running`, while a later child reusing the same warm pool slot has a different token and is unaffected. Tombstones older than seven days are pruned on crash writes. A gateway-restart tick can use the registry's persisted generation with the substrate-level callback even before the exact pool entry is rebuilt. The next `trident/tick.ts` sweep performs the normal terminal failure and Work Board reconciliation, so the board indicator clears within one tick interval. Transient store failures retry on the next watchdog tick before respawn, rather than losing the crash edge.
-
-## 2026-08-09 — a crash before the launch save no longer fires a build every tick
-
-A reviewer reproduced this live on the branch, with their own probe: make the
-firer record its crash tombstone BEFORE it returns `{ status: 'fired',
-launcher_session_key }` — the window `trident/store.test.ts` already covers — then
-tick. `fires=3` after three ticks, `phase='forge-init'`,
-`subagent_status='crashed'`, `subagent_run_id=null`. Three real detached builds,
-with no ceiling: one more every tick, forever, burning credentials and able to open
-duplicate PRs.
-
-The chain: `saveIfActive` is vetoed by the tombstone, so the dispatch id the firer
-returned is never written and `subagent_run_id` stays NULL. Harvest, the
-terminal-status guard, the hang watchdog and orphan recovery were ALL gated on
-`subagent_run_id !== null`, so nothing observed the `crashed` status — and control
-reached `if (run.subagent_run_id === null) return launch(run)`, which is
-unconditional.
-
-The fix is one widened gate: `subagent_status === 'crashed'` also opens the
-harvest/terminal block, because a crashed launcher is a dead run whether or not we
-ever learned its subagent id. Harvest still runs FIRST inside it, so a workflow that
-wrote its terminal result and only then lost its launcher still harvests instead of
-being reaped — a fix that reaped those would have traded an infinite loop for
-silently discarded results.
-
-`trident/crash-before-launch-save.test.ts` pins it. The guarantee is that the loop
-is BOUNDED, not instant: the tombstone lands during tick 1's fire and the phase is
-classified at the top of a tick, so the reap happens on tick 2. The test says so
-rather than asserting something the fix does not claim. Mutant: reverting the gate
-reds two of four.
-
-## 2026-08-09 — General's documents became reachable, on both surfaces
-
-The owner reported one symptom (a General work card whose plan link did nothing,
-and no documents in General) that was **four independent gaps**: the web never
-injected a `documents` tab for General; `ProjectShell` deliberately suppressed the
-doc link there *because* of that missing tab; `docs-client.ts` interpolated the
-scope id into nine URLs raw, so General (`''`) would have requested
-`/api/app/projects//docs/…`; and on mobile nothing ever passed `WorkBoardRow`'s
-long-declared `onOpenDoc`, leaving the ▸ chip inert on every phone.
-
-Fixing any ONE changes nothing observable — the shape worth remembering. None was
-a mistake when written; the web guard in particular encoded a fact about another
-module's tab set with no mechanical link back to it, so changing that tab set
-could not fail there.
-
-`landing/chat-react/general-scope.ts` is new — the one place General changes
-spelling on the web, mirroring `app/lib/general-scope.ts`. The work-board client's
-private normaliser now delegates to it instead of keeping a second copy, since
-having one client with the rule and one without is exactly why one surface worked
-and the other 400'd. Routing deliberately keeps two ids: the board client is
-scope-addressed (General ⇒ `''`), the route is rail-addressed (⇒ `~general`), and
-a push built from the scope yields the dead `/projects//docs`.
-
-Detail: `docs/as-built/2026-08-09-general-docs-reachable.md`.
-
-## 2026-08-09 — which model runs which phase became configuration
-
-`trident/phase-models.ts` defines a stable owner-facing phase vocabulary (decomposition ·
-build · build-mechanical · rubric review · adversarial review · synthesis/arbitration ·
-bookkeeping) with per-phase default tier + effort and strict validation; validated
-overrides thread to the workflow as `phaseModels` and its router applies them over its own
-table. Every default is unchanged and the key is OMITTED when nothing is configured, so an
-untouched instance produces byte-identical args.
-
-The settings keys are deliberately NOT the agent labels — several labels are dynamic
-(`forge:fix-round-3`, `head-probe-round-2`), so exposing them would reshape the settings
-surface whenever the workflow's internals changed.
-
-The coverage test found a real defect on its first run: **`head-probe-round-N` had escaped
-the routing table** and was resolving to the fallback — the most expensive tier at high
-effort — for a step that runs one `git` command and reports a sha. A missing entry and a
-deliberate entry are indistinguishable when the fallback is silent, which is the argument
-for the test rather than just the fix.
-
-Also removed a FALSE docblock from `gateway/wiring/resolve-llm-credentials.ts`, which
-asserted the ambient pool had "NO FAILOVER" as a KNOWN LIMITATION. The single
-credential-less entry is the mechanism, not a defect; rotation swaps the credential file
-underneath the child. Retracted in place, with the generalisable lesson kept.
-
-Detail: `docs/as-built/2026-08-09-per-phase-model-config.md`.
-
-## 2026-08-09 — a spoken word is findable in chat search
-
-A voice note was transcribed at upload, written durably beside the audio, and delivered
-to memory — and **search could not see any of it**, because the index mirrors the
-message `body` and a voice note's body is the attachment placeholder.
-
-The transcript now rides back on the UPLOAD RESPONSE. A user's own message is never
-persisted server-side, so the client owns it, and the response is the only point at
-which the client can learn the transcript without a new frame. `transcript` is a field
-of its own rather than appended to `body`: the body is what renders, and appending would
-change how every existing voice note displays. Both search paths were updated through
-one shared `searchableText`, since two independent searches over one model is how a
-field gets indexed on one platform and not the other.
-
-Two details each of which would have produced a search that passes its tests and is
-useless in the hand: `snippet(tbl, -1, …)` (FTS5's "column with the most matches" —
-pinned at `body` a voice hit renders an unhighlighted placeholder), and reading the
-sidecar on the IDEMPOTENT re-upload path (which deliberately skips the ASR seam, so the
-same audio would be searchable once and then silently not).
-
-The FTS DDL was split out of the schema array so column migrations run before the
-triggers that name the new column — otherwise a fresh install works and every upgrade
-fails. Rebuild is detected from `sqlite_master` DDL, not by probing a query.
-
-Detail: `docs/as-built/2026-08-09-voice-transcript-searchable.md`.
-
-## 2026-08-09 — a voice note's words survive the device (correcting the same day's fix)
-
-The earlier half (#158) shipped on a FALSE belief: that a user's own messages are not
-persisted server-side. They are — `app_chat_messages` holds user rows, and `replayAfter`
-is how a fresh or reconnecting device rebuilds its history. So the fix worked only on the
-phone that performed the upload; a reinstall brought voice notes back with their audio and
-none of their words.
-
-Migration 0117 adds a nullable `transcript` column; the store persists it, the replay
-envelope carries it, and the client merges it without ever regressing a known value to
-null. The SERVER resolves it from its own sidecar rather than accepting it from the
-client — the text is already ours, and trusting the client would let any client write into
-a field that is indexed and read by the agent. Deliberately not `meta_json`, whose
-contract says it is never populated for user messages.
-
-Four mutants; the first pass caught only ONE. The three that survived were: the column
-never written, the server never resolving it, and the composer never wiring the seam —
-that last being the repeat defect shape SPEC names, with every other test green while the
-feature was dead.
-
-Also lands two arbiter design docs (multi-substrate build agent; model usage dashboard),
-both awaiting owner decisions rather than implementation.
-
-Detail: `docs/as-built/2026-08-09-voice-transcript-survives-device.md`.
-
-## 2026-08-09 — the per-phase model config gets a producer
-
-The vocabulary, the workflow argument and the router were all built and correct, and
-**nothing ever supplied a value** — the orchestrator never passed one and no surface
-wrote one, so every run used the defaults regardless of configuration and nothing could
-go red. Found by an independent design review hours after the config landed.
-
-Migration 0118 adds `trident_phase_models` to `instance_metadata` (the documented home
-for instance-level settings); read/write helpers; a per-launch `resolve_phase_models`
-resolver threaded orchestrator → composition → composer; and
-`GET`/`PUT /api/app/trident/phase-models` registered across all four required places.
-
-The write fails WHOLE on any invalid entry while the read degrades quietly — the
-asymmetry is deliberate: at the settings boundary the owner can be told, deeper in
-nobody is listening. `PUT` replaces rather than merges so clearing a pin is an omission,
-but an absent `overrides` key is a 400 rather than an accidental wipe.
-
-Three mutants, one per link, each caught by exactly one test. The UI is still missing —
-this is the producer, not the pane.
-
-Detail: `docs/as-built/2026-08-09-phase-model-producer.md`.
-
-## 2026-08-09 — Codex and Kimi are connectable from a phone
-
-The gateway's Codex surface is app-scoped (`/api/app/codex-auth`) and the WEB client has
-used it since it was built. **Mobile had no client and no screen**, so an owner with only
-a phone could not connect the cross-model reviewer at all — the reference deployment
-works only because provisioning wrote the credential to disk directly.
-
-Adds a **Model providers** section to mobile Integrations (above Shared credentials, so
-the free-text form reads as the escape hatch): Codex status + paste `auth.json` +
-disconnect via a new `app/lib/codex-credential-client.ts`, and a named Kimi K3 row.
-
-The Kimi row writes through the SAME global-credential store the free-text form uses and
-DERIVES its status from that list — a named row with its own storage path would mean a
-key entered here behaved differently from one entered there. The service id is a
-repeated literal (the app bundle carries no workspace deps), which makes that string
-load-bearing: a mismatch stores the key where nothing reads it and the reviewer stays
-silent, so the test asserts it.
-
-12 tests that PRESS the real controls; four mutants each caught, including "the Connect
-button is rendered but inert" — the failure a source check cannot see.
-
-Detail: `docs/as-built/2026-08-09-mobile-model-providers.md`.
-
-## 2026-08-09 — the Kimi key comes from the store, and only the store
-
-Owner-directed: the env var *"was a temporary hack, not a production-grade decision."*
-`resolveKimiApiKey` read `KIMI_API_KEY` first and fell back to the store, which made the
-environment a second resolution path — the same settings screen behaving differently on
-two boxes, failing in the direction nobody checks (paste a key, see it saved, every
-review keeps using the shell's).
-
-The env argument is gone from the signature. `ensureKimiKeyExported` still writes the
-resolved key into the CHILD's env — that indirection keeps the key out of prompt text and
-stays. The variable is now purely an output, never an input. Two behaviours flipped: a
-pre-set env value is now OVERWRITTEN, and clearing the key in settings CLEARS the export
-(without which a stale key survives and the reviewer runs on a credential the owner
-believes they removed).
-
-The live key was migrated into the store BEFORE shipping — the box had it only in the unit
-env and `project_credentials` was empty, so store-only would have silenced K3. Migration
-printed only lengths and outcomes, never the value.
-
-Lesson from that migration: it failed twice with an opaque "failed to open SQLite" that
-looked like permissions or locking; the cause was `{ create: false }`, an option
-production never passes. A probe that does not use the production call shape fails in a
-way that sends you debugging the wrong system.
-
-Detail: `docs/as-built/2026-08-09-kimi-store-only.md`.
-
-## 2026-08-09 — the build-phase models are settable from a phone
-
-Completes the per-phase model/effort chain: vocabulary → store + resolver + endpoint →
-**a surface a human can use**. Chat header ☰ → Settings → Code generation, one row per
-phase with model and effort chips.
-
-The phase list is SERVER-SUPPLIED (a phase added to the engine appears without an app
-release, and neither client keeps its own copy of a list they must agree on). Choosing a
-value equal to the default CLEARS the override rather than pinning it — otherwise the
-owner freezes a phase against a future default change they never intended. A rejected
-save KEEPS the local edits and shows the server's message verbatim, since the server
-rejects the whole set and names every fault. Nothing auto-saves.
-
-Reachability is part of the feature: a registered route nothing pushes and a push at an
-unregistered route fail INDEPENDENTLY, so the nav row and the Stack registration each got
-their own assertion in the #385 guard.
-
-12 press-the-control tests + 2 guard tests; three mutants each caught, including "the
-effort chips are rendered but inert".
-
-DEFERRED AND NAMED: the web half (`SettingsTab.tsx`) — same endpoint, no new server work,
-but genuinely not done.
-
-Detail: `docs/as-built/2026-08-09-codegen-settings-mobile.md`.
-
-## 2026-08-09 — the build-phase models are settable on the web too
-
-Closes the half #163 named as deferred: a Code generation section in the web Settings tab
-over the same endpoint, mirroring the three decisions (server-supplied phase list;
-choosing the default CLEARS the override; a rejected save KEEPS the edits and shows the
-server message verbatim).
-
-The interesting part is a PARITY test. `effectiveRow`/`applyRowEdit` now exist twice
-because each client bundle is free of the other's workspace — correct, and also the risk,
-since those two functions encode product DECISIONS. A divergence is the failure nobody
-reports: each surface stays self-consistent and the owner just gets a different answer
-depending on the device. The copies are executed side by side over ten edit shapes and
-seven display shapes.
-
-WHERE it lives was not the first attempt: it began in `landing/` importing the mobile
-client relatively, the lint rule caught it, and the workspace specifier then failed to
-resolve — because `landing` does not depend on `@neutronai/app` and MUST NOT, that
-independence being why the helpers are duplicated. `gateway` declares both, and already
-hosts `doc-links-parity` for the same reason.
-
-Four mutants each caught, two of which SURVIVED the first pass (the web component's error
-behaviour was untested — found by mutation, not by reading). Also fixed a CSS token that
-would have shipped an invisible chip border: `--hairline` is not a token here, `--border`
-is, and it is defined for both themes.
-
-Detail: `docs/as-built/2026-08-09-codegen-settings-web.md`.
-
-## 2026-08-09 — a review panel cannot see a red build, so now something else does
-
-Four reviewers read the DIFF and none runs the tests, so a change that type-errors or reds
-a shard could be unanimously APPROVED and merged. The reference deployment never showed
-this because a GitHub setting blocks it there — which is the problem: the discipline lived
-in repository CONFIGURATION, so every self-hoster and every local-merge run had nothing.
-
-DETERMINISTIC, NEVER INTERPRETED: the agent reports `gh pr checks --json` output verbatim
-and every judgement happens in JS. ONE GATE, PEERS AS DATA: red → code blockers that force
-REQUEST_CHANGES so the fix loop re-Forges; pending/unreadable → a deferred peer on the
-EXISTING list, so the loop exits infra-only rather than editing code to fix a timer;
-green/none → nothing. `none` is distinct from `green` (a repo with no CI has nothing to
-wait for), and local mode short-circuits before spending an agent.
-
-THE HOLE IT NEARLY SHIPPED WITH: `enforceCrossModelGate` returns the synthesis untouched
-when there are no deferred peers, so attaching CI findings without setting the verdict
-would have APPROVED a red build carrying a "CI FAILING" finding. Red now forces the
-verdict. A second near-miss: an unreadable exit-0 reply first classified as `none` — the
-unsafe direction; my own test caught it, not my reading.
-
-22 tests against the REAL functions extracted from the .mjs. FIVE MUTANTS, all fail-open,
-each caught. The new agent label was caught by #157's coverage test and routed to the
-cheap tier — leaving it to the fallback is how head-probe sat on the most expensive tier
-for months.
-
-Detail: `docs/as-built/2026-08-09-trident-ci-gate.md`.
-
-## 2026-08-09 — the usage readings are remembered, and turned into a pace
-
-The monitor has always probed the active credential every 60s, cached ONE reading, and
-aged it out at five minutes — so the product measured utilisation continuously and
-remembered nothing. "Which pool can take this build?" is a question about a TREND, which
-is why the dashboard needed a migration before a chart.
-
-Migration 0119 + `persistence/usage-samples-store.ts` + a fail-soft `onSample` hook wired
-beside the existing `onStanding` observer. Prune rides on the same call (a cleanup job
-that can fall out of step with its writer grows forever or deletes something in use).
-PACE = fraction consumed ÷ fraction of window elapsed, computed at read time and never
-stored.
-
-TWO THINGS THE TESTS FOUND THAT READING DID NOT. The exhaustion projection divided by
-pace TWICE — plausible-looking and wrong; now derived, and pinned by a hand-checkable
-case (5h window, half elapsed, 75% used → pace 1.5 → 50 minutes). And an `at < reset_at`
-guard turned out to be MATHEMATICALLY UNREACHABLE: pace > 1 implies the projection is
-always earlier than the reset. Removed with the proof written down — a dead branch dressed
-as safety cannot be tested, so it reads as protection never exercised.
-
-`account_label` exists and is always NULL today: rotation happens outside this process, so
-the instance cannot name the account. An inferred name shown as a measurement would be
-worse than none.
-
-Six mutants; five caught immediately and the sixth exposed the dead branch. The wiring
-tests had to move from `persistence/` to `open/__tests__/` — `open` depends on
-`persistence`, never the reverse, and the lint refusal was the architecture talking.
-
-Detail: `docs/as-built/2026-08-09-usage-sample-series.md`.
-
-## 2026-08-09 — Usage dashboard: the endpoint and the web card
-
-`GET /api/app/usage/dashboard` + the Model usage card in web Settings. The endpoint
-went into the EXISTING usage surface rather than a new one: same owner gate, same
-subject, and a second near-identical surface is how one stops being wired. The cost
-of that is a prefix hazard — the meter's path is a strict prefix of the dashboard's —
-pinned in both directions.
-
-What the card refuses to say is the substance. An unreachable route draws no bar
-(a 0% bar invents a measurement); a null pace renders as an em dash, never `0.0×`;
-a null projection OMITS its row, because null is the common good case and a
-permanent dash trains the eye to hunt for an absent warning; and a null account
-label reads "active credential" and never guesses.
-
-The wiring test now checks the READ half separately from the write half — the write
-assertion had passed for a whole PR during which nothing read the series.
-
-Detail: `docs/as-built/2026-08-09-usage-dashboard-card.md`.
-
-## 2026-08-09 — The chat agent can search the web
-
-`LIVE_AGENT_TOOL_NAMES` had never contained `WebSearch` or `WebFetch`, and that array
-is the only thing that decides. Reported via a ritual, but it was never ritual-specific:
-ordinary chat could not look anything up either. A missing built-in produces no error,
-only an agent that says it has no such tool, which is why nothing upstream noticed.
-
-The worse half: a ritual declaring a web tool must be approved for `egress: 'web'`
-through a separate grant reading "may reach the public internet". That grant was given
-for `kaizen` over a capability the code could not exercise. An approval prompt that
-overstates what it grants spends the credibility the whole gate rests on.
-
-Guarded by a new test asserting every bundled ritual's declared built-ins are a subset
-of the live surface — the join between two green suites whose union was broken, the same
-shape as the push-kind drift.
-
-Detail: `docs/as-built/2026-08-09-live-agent-web-tools.md`.
-
-## 2026-08-09 — Model usage on the phone
-
-☰ → Settings → Model usage. Same two windows, same pace, same refusals as the web card.
-Both wiring points present (nav row + Stack.Screen — they fail independently) and the
-screen test presses real controls.
-
-A first draft re-declared `usageBand`/`clampFraction` on the phone with a bundle-
-independence justification that `app/components/UsageMeter.tsx:20` disproves — it already
-imports both from `@neutronai/contracts`. Both now come from the contract and the parity
-test asserts neither client exports its own. The formatters stay twinned, correctly:
-production code in `app/lib` never imports `landing`.
-
-Every refusal mutation-tested separately, including one attempt that was NOT faithful and
-proved nothing until rewritten.
-
-Detail: `docs/as-built/2026-08-09-mobile-usage-card.md`.
-
-## 2026-08-10 — the builder gets the spec doc's BODY, not its YAML frontmatter
-
-`WorkBoardSpecDocService.resolveTaskForItem` returned `doc.content.trim()` — the whole
-document. `buildSpecDocMarkdown` prepends a frontmatter block (`type` / `title` /
-`created`), so **the builder's first instruction was YAML metadata** rather than the scope.
-
-Observed live on two separate email-core runs, whose dispatch branches came out
-`trident/type-plan-title-p1-email-pipeline-s`. The slug is derived from the task text, so
-the leak was visible in the BRANCH NAME while the real damage — a builder opening its
-brief on `type: plan` — was invisible.
-
-`stripFrontmatter` is exported and deliberately narrow:
-
-* the fence must **open on line 1** (leading blank lines tolerated). A `---` further down
-  is a horizontal rule, and this repo's plan docs use those constantly — treating one as a
-  closing fence would silently truncate the brief from the top, strictly worse than
-  leaving the header on.
-* the fence is a line that is **exactly** `---` after trimming, not one that merely starts
-  with it.
-* an **unclosed** opener is returned untouched; guessing where it ends would discard content.
-* a doc that is **only** frontmatter strips to empty, and `resolveTaskForItem` already
-  treats empty as "no usable spec" and falls back to the card title — so it degrades to
-  the title rather than dispatching a blank brief.
-
-### The tests were worthless on the first pass, and the mutation run is what caught it
-
-Seven cases passed, and **both mutants survived**:
-
-* **Reverting `resolveTaskForItem` to raw content passed all seven** — every case tested
-  the pure helper and none called the function actually being fixed. **The fix's own call
-  site had zero coverage.** Now covered by a real round-trip: create a card with a spec,
-  read the task back, assert no `type: plan` and no `created:` reach it, and assert it does
-  not merely begin past the header by accident.
-* **The "mid-document `---` is a rule, not a fence" case had ONE `---`** — so a mutant that
-  scans for a fence *anywhere* still finds no closer and returns the input unchanged. The
-  fixture could not distinguish the correct rule from the broken one. It has two rules now.
-
-Each mutant now dies on a **different** test.
-
-📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
-it looks identical to the real thing in a green run.** Second occurrence today. The
-mutation step is the only thing that separates them.
-
-## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
-
-Observed live: the owner cancelled a running email-core build and the row settled at
-`phase='stopped'` with **`subagent_status='running'`**. The child was already dead — the
-column was asserting something false.
-
-> ⚠️ **"The child was already dead" is WRONG too, and is kept only as the record of what
-> was believed.** Cancelling does NOT kill the detached workflow (#177): it keeps running
-> and keeps checkpointing. This incident held by TIMING — the workflow happened not to
-> checkpoint again before the row was read — not by construction, which is exactly why the
-> fix needs the durability half in `trident/checkpoint.sh`. What is true of EVERY cancel is
-> narrower: the column is wrong about the RUN (nothing will advance it again), not
-> necessarily about the process. Corrected in round 3 below; marked here because the
-> ⚠️ block that follows scopes only the paragraph after it, and a reader who stops at the
-> opening would carry away two false claims rather than one.
-
-`subagent_status` is documented (migration 0077) as the CURRENTLY in-flight subagent, and
-gates key on it: #143's fix widened the harvest/terminal block on
-`subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery read it too. A
-terminal row reading `running` is precisely the stale field those readers can act on, so
-this is not tidiness.
-
-> ⚠️ **That paragraph is WRONG and is kept only as the record of what was believed.** All
-> three named readers are unreachable on a terminal row — `step()` no-ops on
-> `isTerminalPhase` before the harvest gate or orphan recovery run, and the hang watchdog
-> keys on `last_advanced_at`. The reader that is actually load-bearing is `update()`'s crash
-> veto. Corrected in "Two corrections to the round-1 text" ~110 lines below; the correction
-> is repeated here because a reader who stops after the opening rationale would otherwise
-> carry away the false one.
-
-`TridentRunStore.terminalTransition` now clears it **in the same atomic UPDATE** that
-writes the terminal phase:
-
-```sql
--- as of round 2 the set is IN ('running', 'pending') — see the round-2 note below
-subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END
-```
-
-**Only `'running'` is cleared, and that restriction is the load-bearing half.** Nulling
-unconditionally would erase a `'crashed'` marker whenever anything terminated an
-already-crashed run as `'failed'` — deleting the signal #143 added a gate for, while
-looking like a cleanup. `completed`/`failed`/`crashed` are OUTCOMES worth keeping;
-`running` is the only value that is a live CLAIM, so it is the only one a terminal
-transition has business touching.
-
-`NULL` rather than a new `'cancelled'` enum value because the column carries a CHECK
-constraint (`migrations/0077_code_trident_runs.sql:107-108`) that SQLite cannot alter
-without a table rebuild — heavier than the defect warrants — and `null` already means
-"nothing in flight" here (`trident/orchestrator.ts` writes it on the no-subagent paths).
-The reason for the stop survives in `failure_reason`, so nothing is lost.
-
-**Verification:** 6 cases in `trident/store.test.ts` against a REAL migrated DB, each with
-a non-empty precondition asserting the row actually carried the status first. Two mutants
-killing DIFFERENT tests — dropping the retraction reds the cancel case; nulling
-unconditionally reds the `crashed` AND `completed` cases — so both halves of the CASE are
-proven necessary. A loser transition (second terminate on an already-terminal row) is
-covered too: it must not clear a status on its way past.
-
-📌 **The first draft of these tests went in the wrong file.** `trident/terminate.test.ts`
-uses a FAKE store, so a SQL-level fix is invisible there — the tests would have passed
-without exercising the change at all. Test the SQL where the SQL lives.
-
-**Review pass (3-lane panel) added two cases and corrected one claim above.**
-
-The blast-radius question resolved clean: the only production path into
-`terminalTransition` is `terminate.ts:143`, its four callers read `.phase`/`.failure_reason`
-only, and no reader of `subagent_status` exists outside
-`trident/{orchestrator,state-machine,store,inner-loop-sim}.ts`. The tick loop is a separate
-terminal writer (`saveIfActive`), so the hang watchdog and orphan recovery — which set the
-column explicitly in their outcome — are untouched.
-
-Two gaps the original 6 cases left:
-
-1. **The SHORT `params` branch was unpinned.** Omitting `failure_reason` makes `params` one
-   element shorter, and the board X-cancel (`work-board-surface.ts:531`) and `/code stop`
-   (`code-command.ts:281`) BOTH terminate without a reason — two of the four callers take
-   the branch no test covered. It binds correctly, but nothing held it there. Now pinned
-   column-by-column, killed by a mutant that pushes the parameter unconditionally.
-
-2. **The stated reason the `'running'`-only restriction is load-bearing is not the real
-   one.** The comment credits #143's harvest gate, but `step()` no-ops on an already-terminal
-   phase (`orchestrator.ts:680-683`), so that gate is unreachable once the row is terminal.
-   The path where preserving `'crashed'` actually bites is `update()` — the ONE writer with
-   no `phase NOT IN (terminal)` guard, whose `subagent_status IS NOT 'crashed'` veto
-   (`store.ts:447-449`) is all that latches a crash on a terminal row. Nulling
-   unconditionally would lift that veto. The restriction is right; the justification was
-   aimed at the wrong mechanism, so a future "simplify to NULL" could have cleared the
-   cited-but-unreachable gate and still broken the real one.
-
-Both `'running'`-clearing guards elsewhere are also gated on `phase NOT IN (terminal)`
-(`store.ts:411`, `:638`), so clearing the claim at terminal time makes no guard unreachable:
-`crashRunningByLauncher` could never sweep a terminal row regardless.
-
-📌 **A placeholder/parameter arity mismatch is LOUD, not silent** — sqlite throws, and the
-mutant that introduced one reddened eleven tests. The dangerous shape is a same-count
-REORDER, which is why the new case asserts each column separately instead of just the status.
-
-**Round 2 — the retraction was not DURABLE. `trident/checkpoint.sh` now refuses a terminal row.**
-
-The panel's blocker: the retraction held by TIMING, not by construction. Cancelling a build
-writes the terminal phase but does not kill the detached inner workflow — nothing in the
-cancel path reaps the child. That workflow keeps going, and every per-phase checkpoint pushes
-`subagent_status running` (`trident/inner-workflow.mjs:567`) through `trident/checkpoint.sh`,
-whose UPDATE was `WHERE id='<run-id>'` with no phase predicate. So the sequence `/code stop`
-mid-Build → row goes terminal with the claim retracted → next inner checkpoint → the claim is
-back, on a terminal row, with `branch` and `last_advanced_at` re-stamped. The exact state this
-work exists to remove, recreated by the only writer that had no terminal guard.
-
-The fix is the matching predicate, so the terminal chokepoint and the out-of-band writer agree:
-
-```sql
-UPDATE code_trident_runs SET <fields> WHERE id='<run-id>'
-  AND phase NOT IN ('done', 'failed', 'stopped')
-```
-
-Nothing useful is dropped, because `step()` returns early on `isTerminalPhase`
-(`trident/orchestrator.ts:679-683`): no reader ever consults a value a post-terminal
-checkpoint would have written, `inner_result` included — a terminal row is never harvested. A
-skipped write stays exit-0 (the checkpoint step must never fail a build) but now reports on
-stderr, because a silently-dropped checkpoint is exactly the kind of absence that costs hours;
-`changes()` is read in the same sqlite3 invocation and `tail -1` drops the busy_timeout
-PRAGMA's own echo.
-
-**Two corrections to the round-1 text above.**
-
-1. The docblock in `trident/store.ts` still justified the retraction via #143's harvest gate,
-   the hang watchdog and orphan recovery — all three unreachable on a terminal row (`step()`
-   no-ops first; the watchdog keys on `last_advanced_at`). Round 1 corrected that in this log
-   and left the comment saying it. Now the comment names what is actually load-bearing: the
-   CRASH VETO on the two write paths (`store.ts` `update()` and `saveIfActive()`), plus the
-   human read of a finished row, which is where the false claim was spotted in the first place.
-   Rule 3a shape — a confidently specific wrong rationale is worse than none, because the next
-   reader trusts it.
-2. The loser-transition test could not prove what it claimed. It set the already-terminal row
-   to `'crashed'`, which the CASE preserves anyway, so the assertion passed whether the loser
-   wrote nothing or wrote the preserving CASE. It now puts back `'running'` — the one value the
-   CASE *would* clear — and asserts row state before `won`, so a leaked write cannot hide
-   behind the `won` assertion. Killed by the mutant that drops the terminal predicate.
-
-`'pending'` is cleared too now. No production path writes it (the orchestrator writes only
-running/completed/failed/crashed/null), but it is in the type and in migration 0077's CHECK,
-and it ASSERTS a child just as `'running'` does. The split that matters is claim vs outcome,
-not one enum value.
-
-**Verification:** 613 trident tests green. Five new cases in `trident/checkpoint-sh.test.ts`
-against a real throwaway sqlite db — a per-phase checkpoint against `stopped`/`failed`/`done`
-writes nothing and re-stamps nothing, the terminal-result write is refused too, a non-terminal
-phase is unaffected (the guard is not a blanket refusal). Mutant: deleting the predicate reds
-four of them. That suite needed a `phase` column added to its fixture table, which is its own
-small lesson — a hand-rolled fixture schema silently omits the column your new guard reads.
-
-📌 **A SQL-level guard on the read side is only half a fix when an unreaped process still holds
-a pen.** The question that found this was not "is the write correct?" but "who else can write
-this row after it is terminal, and what stops them?" — and the answer was a shell script three
-directories away that no one had thought of as part of the state machine.
-
-**Round 3 — the freeze was too WIDE, and two of its tests could not fail.**
-
-Round 2's guard was `AND phase NOT IN (terminal)` on the whole UPDATE, which threw away the
-orphan's `branch`/`pr`/`inner_checkpoint`/`inner_result` along with its liveness claim — and the
-comment asserting "nothing useful is dropped" was false in exactly the case this work is about.
-The cancel does not kill the workflow, so it can push a branch and open a PR **after** the
-cancel; those columns are the only trail from the run row to that PR, and `run-progress.ts:188`
-surfaces `pr` to the board. On a first launch this script is the ONLY writer of either — the
-launch persist carries `branch`/`pr` forward but cannot invent them (a fresh run's `branch` is
-null and `detectExistingPr` probes a branch that does not exist yet). Blanket-refusing them left
-an untraceable orphan PR.
-
-The freeze is now SCOPED to the two liveness columns, and nothing else:
-
-```sql
-subagent_status  = CASE WHEN phase IN ('done','failed','stopped') THEN subagent_status ELSE '<new>' END
-last_advanced_at = CASE WHEN phase IN ('done','failed','stopped') THEN last_advanced_at ELSE '<now>' END
-```
-
-`subagent_status` is the claim; `last_advanced_at` is the hang watchdog's heartbeat. Everything
-else lands: inert on a terminal row (`step()` no-ops, so nothing resumes from a checkpoint or
-harvests a result) but readable, which is the point. A cancelled row carrying a stale parseable
-`inner_result` is an ANTICIPATED state rather than one this change introduces —
-`isTridentHarvestTerminal` keys on the durable `harvested_at` marker that `terminalTransition`
-never sets, explicitly so such a row emits no handoff (RC2, `orchestrator.ts:220-235`). The `inner_result_file` path nests both
-guards — terminal freeze outermost, then the original readfile column-consistency CASE. Because
-the freeze now lives in the SET expressions rather than the WHERE clause, a terminal row still
-matches and `changes()` still reports 1, so the stderr report re-reads the phase in the same
-sqlite3 invocation and distinguishes *frozen* from *run not found*.
-
-The un-reaped workflow itself is now filed as **rjunee/neutron#177** and cited from both halves
-of the fix — this PR makes the record honest, it does not stop the orphan.
-
-**Two blockers in the round-2 TESTS — both were assertions that could not fail.**
-
-1. **`checkpoint-sh.test.ts` seeded `phase='Build'` / `'Review'`** — values migration 0077's
-   `CHECK` rejects. The terminal guard was therefore never once exercised against a legal ACTIVE
-   phase: a mutant guard that froze only `('Build','Review')` passed the entire suite while
-   freezing every phase production can actually hold. The throwaway fixture table now carries
-   0077's real `phase` CHECK (so an illegal seed throws — pinned by its own case), the terminal
-   cases iterate `TERMINAL_PHASES`, and the "not a blanket refusal" control iterates **all five**
-   active phases.
-2. **The `subagent_status` matrix omitted `'failed'`** — the fifth and last value the CHECK
-   admits. A mutant clearing `IN ('running','pending','failed')` survived the whole suite while
-   erasing the subagent-level outcome of every failed build. Covered now; the matrix is complete
-   against the CHECK.
-
-Three mutants killed on the scoped freeze: removing it (4 red), applying it to every phase (7
-red), extending it to `branch`/`inner_checkpoint`/`inner_verdict` — i.e. regressing to round 2's
-blanket refusal (4 red).
-
-Two smaller corrections. The store docblock credited `saveIfActive()`'s crash veto as
-load-bearing alongside `update()`'s; it is not — `saveIfActive` also carries
-`phase NOT IN (terminal)`, so on a terminal row it cannot land whatever the column says, and only
-`update()` (the ONE writer with no phase predicate) actually latches a crash there. And the
-short-params test's rationale claimed a shifted parameter "would be silent": a timestamp bound to
-`phase` is rejected loudly by the CHECK — `failure_reason` is the column that shape would quietly
-hit, which is why the case pins each column separately.
-
-The terminal-set literal in `checkpoint.sh` is a fourth copy of `TERMINAL_PHASES`, so
-`inner-workflow.test.ts` — which already asserts that script's SQL as text — now pins the literal
-against the constant and asserts it appears exactly once.
-
-📌 **A test can be green because the code is right, or because the fixture made the wrong answer
-unreachable.** Both blockers here were the second kind, and both were invisible in review until
-someone compared the fixture's values against the production CHECK constraint. When a guard keys
-on an enum, the fixture must carry that enum's constraint — otherwise the test is asserting over
-a value space production never has.
-
-**Round 3 — the docblock's OPENING claim was false, and the fixture was still laxer than
-production in two more columns.**
-
-1. **"The child is dead" contradicted the same docblock's own DURABILITY paragraph.** The
-   comment above `terminalTransition` opened by asserting that after a cancel the child
-   process is dead, while its DURABILITY paragraph — twelve lines below — correctly stated
-   that cancelling does NOT kill the detached workflow, which keeps checkpointing
-   (#177). Both cannot be true. The observed incident held by TIMING, not by
-   construction: the workflow happened not to checkpoint again before the row was read.
-   The opening now claims only what is actually true of every cancel — the column is wrong
-   about the RUN (nothing will advance it again), and explicitly NOT that the process is
-   gone. The same false sentence was corrected in the PR description.
-
-   The round-2 correction of the *reader* rationale (crash veto, not #143's harvest gate)
-   was already in the code at this round's start; only the opening sentence was outstanding.
-
-2. **`last_advanced_at` was declared nullable and seeded NULL — a state production cannot
-   hold** (`migrations/0077_code_trident_runs.sql:118` is `TEXT NOT NULL`, re-stamped on
-   every transition). The fixture also seeded `subagent_status='pending'` in every single
-   case, never NULL — even though NULL is exactly what `terminalTransition` itself leaves
-   on a cancelled row, so it is the value the very next checkpoint after a cancel sees.
-   The throwaway table now carries the NOT NULL and the `subagent_status` CHECK, seeds a
-   real timestamp, and seeds the claim BOTH ways.
-
-Two mutants that the laxer fixture let live, each **executed** rather than reasoned about:
-
-| mutant (one extra AND-clause on the OLD value in `frozen()`) | old fixture | new fixture |
-| --- | --- | --- |
-| (a) freeze `subagent_status` only when it was `'pending'` | survives, 23 pass / 0 fail | dies, **3** red at `expect(r.subagent_status).toBeNull()` |
-| (b) freeze `last_advanced_at` only when it was NULL | survives, 23 pass / 0 fail | dies, 8 red at `expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT)` |
-
-(a) would have written `'running'` straight back onto a row a cancel had just cleared —
-re-creating the exact reported bug through the one writer with no terminal guard. (b) is
-the sharper one: its condition can NEVER hold in production, so the mutant refreshes the
-heartbeat of every real finished run — and under a NULL-seeded fixture the condition always
-held, so the suite stayed green while the guard did nothing.
-
-📌 **The two failure shapes in this PR are the same shape at different altitudes.** A
-fixture laxer than production puts the wrong answer out of the test's reach; a comment that
-justifies a design via a path that cannot execute puts the wrong reason out of the reader's
-reach. Both survive review by looking like the finished article — a green suite, and prose
-that reads as design documentation. The control that catches the first is running the mutant
-against BOTH fixtures and showing it survives one; the control that catches the second is
-grepping for the code that enters the mode the comment describes.
-
-**Round 4 — the mutation EVIDENCE was itself a claim, and one of the two guards has no
-reachable failure on this platform.** Both findings are about the same thing: prose that
-asserts coverage it does not have.
-
-1. **A comment claimed a test killed a mutant that in fact passes it.** The terminal-result
-   case in `trident/checkpoint-sh.test.ts` was annotated "the value mutant (a) would let
-   through here". It would not: that case passes only `inner_result_file` + `inner_verdict`,
-   so its `subagent_status` comes from the freeze arm built INLINE in
-   `trident/checkpoint.sh` (the `inner_result_file` branch), which is a second,
-   hand-written copy of the terminal predicate and does not route through `frozen()` at
-   all. Executed: mutant (a) takes **3** tests red and this is not one of them.
-
-   Re-measuring it also caught a stale number in the round-3 table above: it recorded
-   mutant (a) as "4 red", and the count on that same commit is **3** (the three terminal
-   phases of the already-retracted case). Corrected in place, and in the PR description.
-   The number was wrong when it was written, not made wrong by a later edit — the suite
-   count is unchanged at 27 either side of this round.
-
-   The second copy does need its own mutants, so the comment now names the ones this case
-   actually kills, both executed:
-
-   | mutant on the INLINE readfile freeze arm | result |
-   | --- | --- |
-   | (c) drop the `WHEN phase IN (terminal) THEN subagent_status` arm | dies, 2 red |
-   | (c2) narrow it with `AND subagent_status = 'pending'` | dies, **1** red — ONLY the already-NULL case |
-
-   (c2) is the one that justifies the case existing: its sibling seeds `'pending'`, which
-   the narrowed arm still freezes, so the sibling stays green and a row whose claim a
-   cancel had ALREADY retracted is the only thing that catches it.
-
-2. **A guard was pinned by a test that could not fail, so the test was deleted.** The
-   stderr diagnostics parse sqlite3's list-mode `N|state` line, and the invocation now
-   carries `-init /dev/null -list -separator '|'` so a host rc file cannot mute them. A
-   fixture pointing `HOME` at a hostile `.sqliterc` was written, and then removed after
-   the negative control: measured on sqlite3 3.43.2 (Apple), an rc file changes the format
-   when passed as `-init <file>` (`'c;s\n0;active\n'`) but is NOT picked up from a `HOME`
-   override — so the fixture passed **identically with the pins removed**. Covering it for
-   real would mean writing into a developer's actual home directory. The pins stay as
-   environment hardening for builds that do read an rc; both files now say so, including
-   that no test covers it.
-
-Doc-accuracy fixes in the same pass: the "`update()` is the ONE writer with no terminal
-predicate" claim was false — `save()` has neither the predicate nor the crash veto, and is
-inert only because it has ZERO production callers (production commits go through
-`saveIfActive`, `trident/tick.ts:263`); the claim now says "the only writer REACHABLE on a
-terminal row that both lacks the predicate and carries the veto" and names why each of the
-other two is excluded. `trident/store.test.ts` had also kept the superseded rationale
-attributing the load-bearing veto to `saveIfActive()`, contradicting the same branch's
-docblock two files over. And the opening line of this entry — "the child was already dead"
-— carries its own ⚠️ retraction above, because the existing marker scoped only the
-paragraph after it.
-
-📌 **Mutation evidence decays into folklore the moment it is written down next to the wrong
-test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the failure mode is
-specific: a guard that exists in TWO independently-built copies gets one copy's evidence
-pasted onto the other's test, and the untested copy is then defended by a citation. The
-control is mechanical — run the named mutant and read WHICH tests go red, not how many.
-
-## 2026-08-09 — Naming the account behind a usage reading
-
-The `account_label` column has been null on every row since it was created. This reads an
-optional `.credentials.meta.json` sidecar beside the credential, written by whatever swaps
-it, and uses the label ONLY when its fingerprint matches the token actually resolved.
-
-A missing label is harmless — it renders "active credential". A STALE one is not: it would
-attach the previous account's name to the current account's reading and send the owner to
-move quota away from an account that was never under load. Mismatch degrades to null.
-
-Token and label come from ONE `resolveActiveCredential` call, so a swap landing between two
-calls cannot pair one account's reading with another's name.
-
-The instructive mutant: dropping the fingerprint check fails immediately, but making the
-MONITOR persist a null label while the resolver stayed correct passed everything — "resolved
-but never carried", one layer along from "built but never wired". Now covered.
-
-Nothing writes a sidecar yet, so every label is still null and behaviour is unchanged.
-
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
-
-## 2026-08-10 — the credential fingerprint is scrypt (CodeQL `js/insufficient-password-hash`)
-
-`credentialFingerprint` hashed the live OAuth token with a bare SHA-256; CodeQL flagged it
-and, being a required check on Open's `main`, blocked the PR. The finding is right in form
-— a bare digest of a credential is one dictionary from reversible — and while it is not
-exploitable here (long random tokens, 0600 sidecar beside the credentials file), that
-rests on three facts a later change could remove. Now `scryptSync` at `N=4096, r=8, p=1`,
-output shape unchanged at 12 hex. The salt is fixed because two processes must derive the
-same value sharing only the token; it buys domain separation and nothing more, and says so.
-
-The header's prose description of the algorithm was deleted: a cross-process contract
-spelled out in prose drifts silently, and a writer trusting the stale line would produce a
-digest the reader rejects with no symptom but missing labels. Writers import the function.
-
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
-
-## 2026-08-10 — the sidecar contract drifted in the DOCS, which are its only interface
-
-The scrypt change corrected the algorithm in `open/credential-label.ts` and left both
-writer-facing docs stating a recipe the reader silently rejects: the as-built detail file's
-§ The sidecar still printed `sha256(token)`, and
-`docs/plans/2026-08-09-model-usage-dashboard.md` Tier 1 still described a bare
-`{"label": "acct-2"}` with no fingerprint at all.
-
-Half of this contract runs in ANOTHER PROCESS and has nothing but the docs, so a stale
-sentence there is a defect in the feature, not a typo. Proven by following each documented
-recipe literally against the real reader: sha256 slice → null, bare label → null,
-`credentialFingerprint` → `"acct-2"`. The symptom of getting it wrong is that labels never
-appear, which is indistinguishable from the ordinary unlabelled case — so nobody would have
-found it from the outside.
-
-Both docs now point at the function instead of restating an algorithm, and a test pins the
-CONTRACT statements — the fenced JSON block and the Tier-1 bullet — rather than the prose,
-because the as-built file legitimately discusses SHA-256 and scrypt in its history section
-and a guard tripping on that would be a false positive on the document it protects. Each
-stale form was restored as a mutant and killed the test.
-
-📌 **The 📌 note recording a lesson is not exempt from the lesson.** This drifted a second
-time inside the very change that wrote "a cross-process contract described in prose will
-drift", and it survived in the MORE load-bearing of the two places: a rotator author reads
-the sidecar doc, not the module header. Fixing the code and leaving the doc is not half a
-fix — where the only consumer is an external writer, the doc IS the interface.
-
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
-
-## 2026-08-10 — the label reached the monitor and stopped there: the PRODUCTION sink was unpinned
-
-Review round on the account-label reader. Three defects, none of them in the refusal itself
-— that part holds: deleting the fingerprint check fails
-`REFUSES a label whose fingerprint describes a different token` immediately.
-
-**The surviving mutant was one layer past the one the feature was proud of catching.** The
-commit message records that "the MONITOR persists a null label" passed the whole suite and
-is now killed. It is. But the tests that prove the label is *carried* supply their OWN
-`onSample`, so they pin the monitor and say nothing about the sink that actually runs.
-Rewriting `open/composer.ts` to name columns one at a time —
-`record({ pool, ts, session, weekly })` instead of `record({ pool, ...reading })` — dropped
-`account_label` on every production row and passed **36/36** tests across all three of the
-feature's files. Repo-wide: only `open/__tests__/usage-sample-persistence.test.ts` covers
-that wiring at all. Its composer guard asserted `usageSamplesStore.record(` was *present*,
-never that the reading rode along whole. Now it asserts the spread, and the mutant dies.
-
-📌 **A test that supplies its own seam proves the layer above the seam, not the seam.** Both
-mutants here are the same "resolved but never carried" shape; killing it at the monitor made
-the next copy of it downstream *look* covered, because the assertion that died was about a
-sink the test wrote itself.
-
-**`slice(at, -1)` is not a failure, it is a silent widening.** The doc-drift guard added to
-stop the sidecar contract rotting a third time scoped itself with
-`doc.slice(at, doc.indexOf(to, …))` and checked only that the START was found. Renaming the
-plan's Tier-2 heading made the terminator unfindable, `indexOf` returned -1, and the
-"Tier 1 bullet" grew from **982 to 11328 characters** — the rest of the document — with all
-three assertions still green. Verified both ways: the mutant passes 15/15 against the
-original helper and fails against the guarded one. Same pattern fixed at both composer-block
-slice sites.
-
-**The scrypt cost docblock described a system that does not exist.** It claimed N=4096 stayed
-"invisible on the tick" and that ~100 ms was what the *default* N would have cost. Measured
-under bun: **~73 ms steady-state, ~280 ms on the first call, synchronous, on the event
-loop**; the default N=16384 is ~534 ms, and N=1024 is the setting that would cost the "few
-milliseconds" the comment implied. What actually bounds the cost is placement, not size —
-the fingerprint is computed only after a sidecar is found and parsed, so no box pays it
-today. Left at N=4096 deliberately rather than changing a security parameter inside a review
-round; the comment now carries the real numbers so whoever ships the writer decides with
-them. Behaviour unchanged: comments and tests only.
-
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
-
-## 2026-08-11 — the account-label reader's REAL path had no positive test (review round 2)
-
-Every positive test for the sidecar injected its own reader. That left the two things which
-can only ever be wrong in production asserted by nothing: WHERE the sidecar is looked for,
-and whether the default reader is wired to look there at all. The one test that used the
-default reader pointed at a directory that does not exist and expected null — an assertion a
-completely wrong path satisfies exactly as well as a correct one.
-
-Two tests now write real files into a temp dir and pass no deps: one proves a good sidecar is
-found and used, one proves a STALE sidecar is refused *through the same wiring that accepts
-the good one*. The refusal is the whole value of the feature, and until now it was only ever
-proven against a stub.
-
-Mutants run, not asserted: renaming the sidecar basename (dies), looking for it inside the
-credentials path instead of beside it (dies), and replacing the fingerprint comparison with a
-check that only rejects an empty string — the refusal replaced by a guess — which now dies at
-BOTH layers instead of only against the injected reader.
-
-**The 0600 sidecar permission was a security argument that asked nothing of anyone.** The case
-for scrypt over a bare digest cites a mode-0600 sidecar as one of three facts making a weak
-digest unexploitable, while the writer-facing contract required no permission at all. The
-reader cannot check the mode, and refusing a loose one would drop the label silently — the one
-failure mode this feature is arranged to avoid — so the requirement now lives in the contract
-where a writer reads it, and a doc guard asserts it stays there. Mutant: softening the
-requirement to prose fails the guard.
-
-**The label limit was 64 with no test at 64.** A 200-character rejection is satisfied by any
-off-by-one version of the check. Boundary covered; the `>` → `>=` mutant now dies.
-
-**Three current-state docs claimed the feature was impossible.** `docs/as-built/…-usage-sample-series.md`
-said the column is "always null today" and the instance "genuinely cannot name the account";
-both dashboard clients' docblocks said nothing on the box can name it. All true before this
-branch and false after it — the aspirational-docblock hazard in reverse. The dated entries keep
-their text with a superseded note (they are a log, not current state); the live docblocks now
-say null means *nothing named it, or the name on disk described a different token*, which is
-what the code does.
-
-Behaviour unchanged in this round: tests, comments and docs only.
-
-Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
-
-Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
-(adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
-failed, so this is not a four-lane APPROVE and should not be read as one.
-
-## 2026-08-12 — a resumed lane no longer re-buys a review it already paid for
-
-**What broke.** When a lane's host process dies mid-loop — the common case is the shared
-account hitting its session limit, which returns a 429 and ends the session — the relaunch
-rebuilt and re-reviewed from zero. The branch and its pushed commits survive, so no code was
-lost; what was lost was every review round already bought. Fifteen lanes died that way in
-three waves on 2026-08-12; several had completed round-1 review and one was at fix round 7.
-
-`resumeCheckpoint` existed (`trident/inner-workflow.mjs`) but the workflow understood exactly
-ONE value, `argus-approved`; every other checkpoint fell through to a full rebuild.
-
-**Why distrusting the checkpoint was CORRECT, and what actually had to change.** A verdict is
-about a COMMIT, not about a branch. Reviewers approved commit A; if anything pushed B into the
-crash window, "the last checkpoint said approved" is a statement about code nobody reviewed —
-so a resume that probed the head and called the answer `reviewedHead` would let the outer merge
-pin to B and SUCCEED, certifying an unreviewed commit (#545). The enabling gap was that
-`checkpoint()` persisted the NAME, the branch and the PR number, and no OID: a resumed run
-genuinely could not tell A from B, which is precisely why failing closed was right.
-
-**The fix, in the order it has to be built.**
-- `checkpoint()` now records the branch head OID the checkpoint APPLIES TO
-  (`code_trident_runs.inner_checkpoint_head`, migration `0122`) in the SAME
-  `trident/checkpoint.sh` UPDATE as the name, so the pair is atomic and can never drift. It is
-  written on EVERY checkpoint — including as an empty string when a phase reported no sha,
-  because a skipped write would leave the PREVIOUS phase's OID sitting next to the new name.
-  An `argus-request-changes-round-N` checkpoint additionally records the findings and spent
-  round it was recorded with
-  (`inner_checkpoint_findings`), through the same temp-file + `readfile()` indirection the
-  terminal result uses.
-- `classifyResume` centralizes the decision. Recorded OID == live head → non-Ralph
-  `forge-done`/`fix-round-N` skip the build and review the recorded commit;
-  `argus-request-changes-round-N` (+ findings) goes straight to the fix round, inheriting the
-  spent
-  round budget so the cap keeps bounding across crashes; `argus-approved` skips build+review.
-  Head moved, head unreadable, an abbreviated/malformed sha, NO recorded OID (a row written
-  before `0122`), an unknown checkpoint name (`ralph-task-built` — its next task is still
-  unbuilt), Ralph `forge-done` (the remaining-task count was not recorded), or a diff that
-  could not be regenerated → REBUILD and RE-REVIEW.
-- The existing `outer-published:<oid>:<remaining>:<round>` handoff composes with
-  this classifier instead of bypassing it. Its encoded OID takes precedence over
-  the companion checkpoint column, is compared with the live head, and only then
-  restores the published diff, round, and Ralph remainder. A matching published
-  handoff skips Forge and planning; a mismatch rebuilds. `ralph-task-built` still
-  rebuilds and re-plans because it denotes unfinished work.
-- The resume diff is regenerated `git diff <base>..<oid>` — BY OID, never by branch name, so a
-  push landing between the comparison and the diff cannot swap the code under review.
-- `reviewedHead` may still only ever be set from a RECORDED value (the checkpoint's OID) or a
-  Forge agent's own reported `commitSha`. NEVER from the live probe: the probe is an input to
-  the comparison and nothing more. `--match-head-commit` re-checks the same equality at merge
-  time, so a push landing after the resume fails the merge LOUDLY rather than shipping.
-- Only then do the launchers pass the checkpoint through (they hardcoded
-  `"resumeCheckpoint": None`, so even the single old path never engaged). They deliberately do
-  NOT accept a head: an operator-typed OID is not a recorded one, and only
-  `trident/checkpoint.sh` may write the value a merge is allowed to pin to.
-
-**Tested in the direction that matters — a FALSE resume.** `trident/inner-workflow-resume.test.ts`
-drives the REAL workflow body and asserts WHICH PHASES DID NOT RUN, because a "resume" that
-silently re-runs everything is the current behaviour wearing a new name and would pass a naive
-"it returned APPROVE" test. Covered: head moved → re-review (and the recorded findings are not
-replayed); no recorded OID → re-review, without even spending the probe; `argus-approved` +
-head moved → NO instant APPROVE, and the only APPROVE the run can emit is pinned to the commit
-THIS run's panel read; a legitimate skip runs no `forge:build` and no `plan:fable`; a resumed
-`fix-round-7` continues at round 8 and can still exhaust the cap.
-
-Mutants run, proven applied by grepping the mutated source before believing a green result:
-disabling the head comparison (4 tests die, including the #545 case), and pinning
-`reviewedHead` to the probe instead of the record (the source-level invariant test dies).
-
-Also fixed while here, because the resume would otherwise have walked into it: the fix-round
-prompt now names the EXACT diff path to re-write (`git diff <base>..HEAD > <diffFile>`). The
-next review reads that path, and a fix agent writing its diff somewhere else left the panel
-reading pre-fix code — latent before, and a resume whose diff file is named after the recorded
-OID would have hit it every time.
-
-## 2026-08-13 — the instance can ASK for a host deploy; it still cannot perform one
-
-Work merged into Open did not reach the box it was for, and the reason was not a lag: **there
-is no automatic deploy**. The host's only timers are a lane sweeper, a credential rotator, a
-CLI update doctor and a backup. A deploy happens when a human runs one. From inside the
-instance that total absence is indistinguishable from "deploys land on their own and just lag",
-which is exactly what the agent on that box believed.
-
-The fix is a request that crosses the privilege boundary while the capability never does.
-`open/host-deploy.ts` gains one thing: the ability to ASK. No deploy rights, no host
-filesystem access, no privileged credential. `host_deploy_request`
-(`gateway/wiring/host-deploy-tool.ts`, registered into the same tools registry
-`create_project` uses at `gateway/composition/build-core-modules.ts:255-266`) resolves what
-WOULD be deployed and raises an approval. It dispatches nothing. Only the owner's tap makes
-the one authenticated call, and only if the sha has not moved.
-
-**This is a second caller, not a new approval mechanism.** It rides `ApprovalManager`
-(`tools/approval.ts`, migration 0004) and the CODE-rendered Approve/Deny prompt shape
-`reminders/ritual-registration.ts:768-806` established, including the opaque-token codec —
-imported, not re-derived, because a strict-inverse token decoder is a bad thing to have two
-copies of. The owner's tap arrives through the SAME live-turn capture seam
-(`gateway/wiring/build-live-agent-turn.ts:1209`); the composer now chains the ritual handler
-and this one, and each returns null for a token that is not its own (`rap:` vs `hdp:`), so no
-new capture path was added either.
-
-**The approval renders the actual commit list, and that is the whole security.** The owner is
-the only gate, so the thing he is gating has to be legible in the message he taps: the sha the
-host runs now, the sha it would run, and every commit between them. An approval whose content
-the approver cannot see is a rubber stamp with extra steps. Rendering is capped at 40 commits
-with the TRUE remainder counted — `rev-list --count` is a second git invocation precisely so
-"40 commits would land" can never be said when 300 would. Commit subjects are stripped of
-bidi/zero-width/C0 characters and fenced with a backtick run longer than any inside them,
-because a commit subject is chosen by whoever lands the commit and the button body is
-Markdown-rendered (`channels/button-primitive.ts:194`). Stripped rather than refused: refusing
-would let one commit subject make the host undeployable.
-
-**The approval binds to ONE sha.** The target is re-resolved at approve time and a moved ref
-is refused as stale, naming the new sha, with the grant killed so it cannot be replayed.
-Without that, "approve" quietly means "deploy whatever is newest when this executes" — a
-different and unbounded permission that reads identically in the transcript.
-
-**No control plane configured → visible and disabled, with the reason.** A self-hoster has no
-endpoint to call. Both tools still register and still answer, naming `NEUTRON_HOST_DEPLOY_URL`
-and `NEUTRON_HOST_DEPLOY_TOKEN` as what would enable it. No default endpoint is fabricated —
-inventing one would point a self-hoster's deploy at somebody else's control plane. The
-endpoint and credential are resolved at CALL time, never captured at composition (a credential
-read at composition time is a credential that is never there — 2026-08-07). The credential
-rides an `Authorization` header and nothing else, and everything the control plane says is
-scrubbed of both the token and the URL before it reaches chat or a log line.
-
-**Mutants run: 15 of 16 killed, and the 16th is recorded as SURVIVING.** stale-sha gate
-removed; owner-only (no-self-approval) gate removed; prior-option eligibility removed;
-pending-status gate removed (kills the timeout and the replay tests); unconfigured
-early-return removed; secret scrub neutered; commit list dropped from the body; ref charset
-guard removed; emit-failure rollback removed; bidi/zero-width strip removed; tools hidden when
-nothing is configured; `request()` made to dispatch before asking; config captured once at
-composition instead of per call; credential moved into the request body; true commit total
-replaced by the rendered count; `rev-parse` stripped of `^{commit}`. Each of those turned a
-named test RED.
-
-> **CORRECTION (round 2).** This paragraph originally read "all 16 killed", and that was
-> false for one of them. Argus applied the `--verify --quiet` removal to
-> `open/host-deploy-runtime.ts` and ran both host-deploy suites: 45 pass / 0 fail. The mutant
-> was behaviour-equivalent because the `/^[0-9a-f]{40}$/` check on stdout rejected git's
-> echoed argument either way, so the flags were decorative rather than load-bearing. **A
-> permanent record that claims a guard was proven when it was not is worse than no record**,
-> because the next person reads it as evidence and stops looking. The claim is corrected here
-> rather than deleted, and the underlying weakness is now fixed: the resolver no longer passes
-> `allowNonZero`, so `--quiet`'s exit status IS the signal it is read for, and re-running that
-> same mutant in round 2 turns two named tests RED.
-
-The secret-absence assertions are constructed so they can fail in BOTH directions: the control
-plane's error body is `boom: upstream <url> rejected Bearer <token>`, and the test asserts the
-owner IS still shown `boom` and `upstream` while the token and URL are gone. An absent scrub
-fails the negative half; an over-eager one fails the positive half.
-
-The production seams are tested through their real wiring, not only through stubs:
-`open/__tests__/host-deploy-runtime.test.ts` builds a real git repo and asserts where the
-resolver looks and what it returns, including a positive control on the same instance that
-returned the null — so "unknown ref → null" is a real answer rather than a resolver that
-always fails.
-
-Known limitation, stated rather than papered over: the current pin is the HEAD of the checkout
-the instance can read (`NEUTRON_REPO_ROOT`). On a box where the running code and that checkout
-are the same tree — which is what a self-hoster and a single-box install both have — that is
-the sha the host runs. Nothing here verifies that claim against the control plane, and a
-deploy whose plumbing lands the code elsewhere would show a pin that is locally true and
-globally wrong.
-
-Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
-
-
-## 2026-08-13 — host deploy, round 2: the gate that two taps could walk through
-
-Argus reviewed the branch above and found the approval was gated by a check, not by a claim.
-`handleOwnerButtonAnswer` read the pending row, then AWAITED `git.revParse` to re-check the
-sha, then dispatched. Two taps that interleaved inside that await both saw `status:'pending'`,
-both passed the stale check, and both dispatched — and `ApprovalManager.respondApproval`
-returned `Promise<void>`, so the loser had no way to discover the row had already been claimed.
-The same window let an Approve deploy something a concurrent Deny had just settled.
-
-**A decision is now a CLAIM, not a read.** `respondApproval` (`tools/approval.ts:145`) runs its
-`UPDATE ... WHERE status='pending'` and reads the affected-row count inside one transaction, and
-returns TRUE only for the call that actually moved the row. `open/host-deploy.ts` gates the
-dispatch on that boolean and nothing else. Everything before it is advisory; the claim is the
-gate. Existing callers that ignore the return value are unaffected. Two concurrent Approves now
-dispatch exactly once, and an Approve parked behind a Deny dispatches nothing.
-
-**Secrets are scrubbed before they are truncated, never after.** The control-plane body was
-sliced to `HOST_DEPLOY_DETAIL_CAP` and only then handed to the scrubber — and the scrubber is a
-`split`/`join` on the FULL secret, so a token straddling the cut left a real prefix of itself
-behind and rode into the owner's chat and the `host-deploy call refused` log line. Two reviewers
-reproduced it independently. The scrub now happens in `createHostDeployDispatch`
-(`open/host-deploy-runtime.ts`), which is the only place holding the url and the token at the
-moment the bytes arrive; the service scrubs again on the way out.
-
-**A credential the scrubber will not hide is no longer accepted as a credential.** The scrubber
-skipped values under a length floor while `resolveHostDeployConfig` accepted any non-empty
-token, so a five-character `NEUTRON_HOST_DEPLOY_TOKEN` was live AND unredactable and printed
-verbatim. One constant (`HOST_DEPLOY_MIN_SECRET_CHARS`) now governs both ends, and the config
-refuses anything shorter — visibly, with a reason, like every other unconfigured state.
-
-**A git failure is a refusal again.** `allowNonZero` routes through `isExecChildError`, which is
-`err instanceof Error` (`gateway/git/git-exec.ts:135`), so a missing binary, a timeout and a
-maxBuffer overrun all collapsed into the same empty stdout an unknown ref produces. The
-"commit list could not be built → refuse" guard was therefore unreachable, and a broken checkout
-showed the owner the SIDEWAYS/BACKWARD warning above an empty fence. `commitsBetween` no longer
-passes the flag at all, and `revParse` translates only the one exit status `--quiet` documents
-(1, empty stdout) into null — everything else propagates.
-
-**The documented approval lifetime is real.** `ApprovalManager.expireStale()` has no production
-caller on this box (both reviewers grepped it independently, and so did this round), so the
-5-minute TTL never fired and a grant tapped the next morning on an unmoved ref still deployed.
-Rather than wire a sweep the rest of the system does not have, the age is enforced on the
-ANSWER against the row's own `requested_at`, so it holds whether or not anything ever sweeps.
-
-**Smaller things, each with a test.** A rollback now itemizes the commits it would take away
-(`target..current`) instead of showing the owner an empty block and asking him to approve the
-removal of N commits sight-unseen. CR and LF are stripped from commit subjects — CR is the
-line-overwrite hiding character the docblock already claimed to defend against, and it was not
-in the range. `HOST_DEPLOY_REF_RE` rejects a leading `-`, so `--parseopt` and friends are
-refused structurally rather than contained incidentally by a check on git's stdout.
-
-**The two composition lines that switch the feature on are now covered.** Argus deleted each in
-turn and the suite stayed identically green: the only tests touching `host_deploy` asserted the
-composer EMITS the key and that the surface registers against a stub registry, so the wire
-between them could be cut with the whole tree passing.
-`gateway/composition/build-core-modules-host-deploy-wiring.test.ts` drives `buildCoreModules`
-itself and asserts the tools are registered AND reachable, that they are absent when the field
-is (the negative control), and that `install` receives the EXACT `ApprovalManager` the graph
-hands out.
-
-**Round-2 mutants, applied to the shipped source. 13 killed, 1 recorded as surviving.**
-
-| # | mutant | result |
-|---|---|---|
-| M1 | approve path ignores the claim result (the original TOCTOU) | RED — 2 tests |
-| M2 | deny path ignores the claim result | **SURVIVES — see below** |
-| M3 | `respondApproval` always reports a claim | RED — 3 tests |
-| M4 | grant-age (TTL) gate removed | RED |
-| M5 | rollback reverse-range read removed | RED |
-| M6 | CR+LF dropped from the subject strip | RED |
-| M7 | leading-dash ref guard removed | RED |
-| M8 | minimum-credential-length gate removed | RED |
-| M9 | truncate-before-scrub restored | RED |
-| M10a | `allowNonZero` restored on `commitsBetween` | RED — 2 tests |
-| M10b | `revParse` swallows every failure as "unknown ref" | RED |
-| M11 | tool-registration line deleted from `buildCoreModules` | RED |
-| M12 | `install()` line deleted from `buildCoreModules` | RED |
-| M13 | `rev-parse` stripped of `--verify --quiet` (the round-1 survivor) | RED — 2 tests |
-| M14 | `rev-parse` stripped of `^{commit}` | RED |
-
-**M2 SURVIVES, and is reported rather than papered over.** Ignoring the claim result on the DENY
-path changes no observable behaviour, because the synchronous `row.status !== 'pending'` check
-dominates every sequential case, and the interleaving that would make a Deny lose its claim
-cannot be constructed through the public seam — the deny path has no `await` between reading the
-row and claiming it. The guard is kept as defence-in-depth against a future edit that adds one,
-but it is NOT proven and this table says so. A test that passes both before and after certifies
-nothing while looking like proof, which is the whole reason the round-1 record needed correcting.
-
-That mutant did surface a real, reachable defect on the way through: a late Deny tap on an
-already-approved row was answered "That deploy request was already approved — **nothing was
-deployed**", which is false, because the deploy went out on the earlier tap. The transcript is
-the only record the owner keeps, so it now says what actually happened. That correction has its
-own test.
-
-Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
-
-## 2026-08-13 — adversarial review can dispatch on Codex
-
-`review_adversarial` now declares `alsoRunsOn: ['codex']` in
-`trident/phase-models.ts:215`, matching its executable route in
-`trident/inner-workflow.mjs:378`. A GPT tier therefore selects CLI transport: the
-thin bridge invokes `trident/codex-review.sh`, carries the resolved model through
-`CODEX_REVIEW_MODEL`, and carries the adversarial instructions separately through
-`NEUTRON_CODEX_REVIEW_RUBRIC`. The wrapper uses that rubric as the beginning of the
-actual stdin prompt, so this seat keeps trying to refute the change instead of
-quietly duplicating the generic second-opinion seat.
-
-The rubric reviewer remains on Anthropic. A Codex selection disables effort because
-the CLI transport does not consume that setting. Core-seat completeness also treats
-a deferred, unavailable, or dead Codex adversarial run as incomplete, so
-`enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
-the panel gate.
-
-## 2026-08-13 — killed Codex builds report themselves and survive the bridge bound
-
-The `typing-on-connect` artifacts establish the failure mechanism. The wrapper's
-stderr was modified from 22:29:26 through 22:40:01 while its trailer remained empty;
-that is the Claude Code Bash tool's 600-second maximum plus launch overhead, not the
-30-minute inactivity or 45-minute absolute fire watchdog. The stderr ends mid-diff,
-and both terminal branches in `trident/codex-build.sh` write the trailer, so the
-wrapper was killed before either branch ran.
-
-`trident/inner-workflow.mjs` now launches the wrapper with `nohup` in the background
-and polls its trailer in 540-second calls, below the Bash bound, for at most the fire
-session's 45-minute absolute ceiling. The trailer is the completion signal. An empty
-or missing trailer hard-DEFERREDs at the single Forge-result reader, naming the
-`.trailer`, `.err`, and preserved worktree; if `git status --porcelain` finds changes,
-the terminal result explicitly says the worktree holds uncommitted work. Existing
-completed `ok` and `CALL_FAILED` trailers keep their prior paths.
-
-`trident/__tests__/cross-model-dispatch.test.ts` contains the scaled real-mechanism
-proof: a foreground caller killed before a slow child completes no longer kills the
-detached child. It also pins the killed-wrapper message and artifact paths, the
-uncommitted-work recovery message, the existing failed-trailer mapping, and the happy
-path reaching review.
-
-## 2026-08-14 — turn state is resynchronised on reconnect
-
-Rebuilt on current `main` 2026-08-14. Two assertions in
-`open/__tests__/open-app-ws-durable-chatlog.test.ts` demanded that a connecting
-socket receive NO `agent_typing` frame at all. That was correct only while
-silence was the sole way to avoid a spurious indicator — and silence is exactly
-what strands a client that missed the real `end` while disconnected, because
-nothing ever contradicts its stale belief. Both now assert the property instead
-of the old spelling: no `start` for a quiet topic, and typing still never
-durable (the row count off `app_chat_messages` is untouched and remains the real
-guard). Mutation-checked: making an idle topic announce `start` fails the first;
-dropping the snapshot send fails both this suite and `typing-refcount`.
-
-The chat transport now sends every newly connected socket an explicit live-turn
-snapshot. `open/wiring/app-ws.ts` reads the same `activeChatProjects` set used by
-the project rail through `open/wiring/typing-catchup.ts`, then sends
-`agent_typing:start` when that topic is live or `agent_typing:end` when it is
-idle. The explicit idle answer is the terminal record for a client that missed a
-failure, completion, or kill while disconnected: the web and mobile clients
-already adopt those frames, so the stale running belief is cleared immediately
-without a timeout. A reconnect during a real turn continues to receive `start`.
-
-Coverage in `open/__tests__/typing-refcount.test.ts` pins both server answers and
-their shared derivation with the rail. The client-level regression in
-`landing/chat-react/__tests__/controller.test.ts` begins with an optimistic
-running belief, reconnects, applies the idle snapshot, and proves another send is
-accepted; its paired test preserves a genuinely running reconnect.
-
-
-## 2026-08-13 — model rows describe dispatch capability, and review seats can be off
-
-`trident/phase-models.ts` now declares the complete executor set on every phase rather
-than deriving it from the default tier and relying on an optional escape hatch. Both
-clients consume that server declaration, keep their older-server fallback, and show an
-actionable constraint for every row that remains Claude-only.
-
-The persisted `review_codex` and `review_kimi` keys render as provider-agnostic review
-slots 1 and 2. Existing values remain attached to their original slot; either slot now
-accepts every non-Claude registry tier. All four review rows accept the first-class
-`none` tier. An off seat dispatches nothing and does not fail completeness, while a
-configured seat that dies or defers still blocks. With all seats off, the terminal
-record explicitly says no review ran and that only build and CI gates supported merge.
-
-Mutation checks: `NONE_DISPATCH_GUARD` (forcing the rubric NONE branch to dispatch)
-failed the no-agent assertion; `CONFIGURED_DEAD_COMPLETENESS` (removing core missing-seat
-collection) produced APPROVE for a dead configured reviewer and failed four gate tests.
-
-## 2026-08-13 — typing catches up on connect and explains the live step
-
-Typing is now level-triggered for a socket opening during a turn and remains
-edge-triggered after that. `open/wiring/app-ws.ts:1153` reads the same
-`activeChatProjects` state as the project rail and directly targets the new socket;
-`open/wiring/typing-catchup.ts:4` does not touch the refcount or its fail-safe.
-Because the socket is registered before the synchronous check-and-send, an end can
-only happen before the check (no start) or afterward (the registered socket receives
-the end). Typing still bypasses the durable adapter and replay.
-
-Mobile now consumes the existing `activity_event` stream in
-`app/lib/chat-core/use-mobile-chat.ts:330`, displays a status row's `detail` instead
-of its generic `label`, and opens the existing inspector when the indicator is
-tapped through `app/lib/activity-inspector-opener.tsx:3`. Shell PreToolUse rows use
-the conservative command reducer in `open/activity-inspector.ts:620`: prefixes and
-control headers are skipped, scripts surface their filename, and command families
-carry their informative verb. Ambiguous input falls back to the tool name.
-
-## 2026-08-14 — web typing opens the scoped activity inspector
-
-`landing/chat-react/ProjectShell.tsx` now threads its existing inspector opener
-through `landing/chat-react/ChatApp.tsx`. The live-turn indicator is a real button;
-tapping it opens the inspector for the mounted conversation's project, matching the
-native gesture. `landing/chat-react/__tests__/component.test.tsx` presses that
-control and asserts the General scope, while
-`app/__tests__/chat-core-render-model.test.ts` proves a five-minute tool-only turn
-with no streamed text remains visibly typing.
-
-The early-clear mechanism was overlapping turn edges, not the fail-safe: a nested
-turn's quick `end` could clear the outer turn. `open/wiring/typing-refcount.ts`
-suppresses nested edges and rejects stale timer callbacks; its fail-safe remains at
-46 minutes, beyond the live turn's 45-minute ceiling, and still synthesises `end`
-when the genuine edge is lost. Connect catch-up stays a direct per-socket send in
-`open/wiring/typing-catchup.ts`, so it is neither durable nor broadcast.
-
-## 2026-08-14 — pr-mode publishing belongs to the durable outer loop
-
-The inner build process now ends at a local commit. `trident/codex-build.sh` has no
-`git push`, `gh pr create`, `git credential fill`, or `gh auth status` execution path;
-it reports the local commit and leaves `REMOTE_HEAD` and the PR number empty.
-`trident/inner-workflow.mjs` persists a `publishRequested` handoff and stops before
-review. `trident/orchestrator.ts` verifies the local branch, pushes the explicit ref,
-re-measures `origin` with `git ls-remote`, creates or reuses the PR, materializes the
-review diff, and re-fires from an `outer-published:<sha>` checkpoint. The credentialed
-runner is composed in `open/composer.ts`; no credential-bearing variable is added to
-the wrapper invocation.
-
-Mode detection now asks whether that publisher can authenticate (`gh auth status`),
-not whether `gh` is merely installed. A GitHub origin with an incapable publisher is a
-loud dispatch error rather than a silent downgrade to local mode. Repositories without
-a GitHub origin retain the existing local behavior.
-
-### Argus round-two hardening
-
-The publish checkpoint now carries the review round and Ralph remaining-task count
-(`trident/inner-workflow.mjs`), so an outer re-fire cannot reset a non-converging fix
-loop to round one or terminate a multi-task run early. Before review resumes,
-`trident/orchestrator.ts` verifies branch provenance, retries push and origin witness
-operations, refuses an empty base-to-head diff, and treats an already-merged PR as
-terminal. The shared host runner bounds each child command to 60 seconds
-(`trident/git-mode.ts`).
-
-The credential-absence proof is live rather than skipped: `trident/codex-build.test.ts`
-injects both GitHub token names, proves the captured child environment is populated
-with positive controls, and asserts neither secret reached the Codex process. Its
-command-absence guard matches wrapped commands as well as line-leading commands. The
-obsolete inner-publisher tests were removed instead of remaining skipped.
-
-## 2026-08-14 — Quiet live turns survive
-
-- Pre-change verification searched the prior
-  `runtime/adapters/claude-code/persistent/repl-agent-base.md` for
-  `full-buffering|output-suffix|tail -20|inactivity timeout` and found no match;
-  `AskUserQuestion` in the same input was the positive control.
-- `runtime/adapters/claude-code/persistent/autocompact-support.ts` probes the
-  configured CLI's help, and `runtime/adapters/claude-code/persistent/spawn.ts`
-  passes `--autocompact 300000` only when the installed CLI advertises the option.
-  This is the upstream token budget; the unchanged 5 MB/10 MB post-compact JSONL
-  watchdog remains the downstream byte backstop that protects `--resume`.
-- `runtime/adapters/claude-code/persistent/repl-agent-base.md`, the prompt appended to
-  chat REPLs, now prohibits full-buffering consumers for turn-launched commands and
-  explains that withheld activity can trip the inactivity timeout. A mechanical shell
-  guard was not added. The unscoped activity `PreToolUse` hook is an interception
-  seam, but parsing arbitrary shell syntax there would risk rejecting legitimate
-  streaming, post-exit inspection, and early-exit pipelines.
-- Regression coverage asserts both the exact token budget and the behavioral prompt
-  rule in `runtime/adapters/claude-code/persistent/__tests__/build-repl-argv.test.ts`,
-  `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`,
-  and `runtime/adapters/claude-code/persistent/__tests__/repl-agent-base.test.ts`.
-- Mutation results: `unconditional-autocompact` failed the unsupported-CLI spawned-
-  argv assertion (5 pass, 1 fail), and `remove-quiet-turn-prompt-rule` failed the
-  behavioral prompt assertion (0 pass, 1 fail). Both guards were restored before
-  the green verification run.
-
-## Integrations surface scope declaration (ISSUES #572)
-
-`gateway/http/cores-integrations-surface.ts` now declares in its response that
-the enumerated credential slots belong to bundled Cores. The web client in
-`landing/chat-react/IntegrationsTab.tsx` renders that server-provided scope.
-`gateway/__tests__/cores-integrations-surface.test.ts` uses a connected GitHub
-credential to prove the partial view is explicit, existing Core slots remain,
-and secret plaintext never enters the response. No credential store or registry
-was added; the change makes the existing view boundary legible.
-
-Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
-tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
-after its expected red run.
-
-## 2026-08-14 — host deploy resolves remote refs against the remote
-
-`open/host-deploy.ts:544` now resolves a deploy target through a distinct
-remote-aware seam while reading the current pin from local `HEAD`. The production
-implementation in `open/host-deploy-runtime.ts:81` recognizes configured
-remote-tracking names, performs a bounded fetch into the matching tracking ref,
-and then resolves the fetched commit. Fetch was chosen over `ls-remote` because
-the approval at `open/host-deploy.ts:573` must render the commits the owner is
-approving; a remote sha without its objects cannot satisfy that contract. Local
-branches, `HEAD`, and raw shas still use local `rev-parse` without a fetch.
-
-The fetch changes Git objects and tracking metadata only. It cannot mutate the
-working tree, `HEAD`, or deployed state, which is the read-only boundary described
-in `docs/SYSTEM-OVERVIEW.md`. A fetch timeout, authentication error, or unreachable
-remote propagates to the existing `refused` result and can never become the benign
-`up_to_date` answer. Request and approval-time resolution both pin a full 40-hex
-commit, and the dispatch continues to send that approved sha.
-
-Positive control, written and run before the production change: a real bare remote
-was advanced after cloning the pinned host checkout. The new request test was RED
-because it received `up_to_date`; the unchanged suite had 49 passes. After the
-change, the focused host-deploy suites pass 66 tests, including the fetched commit
-subject in the approval, local/no-fetch resolution, explicit timeout propagation,
-remote failure from both stale-local states, and full-sha dispatch.
-
-Mutation checks (each production guard was removed independently and restored):
-
-| Mutant | Result |
-| --- | --- |
-| M1 `remote-target-resolution`: target uses local `revParse` | RED — remote-ahead request returned `up_to_date` |
-| M2 `remote-ref-fetch`: skip the fetch | RED — remote-ahead request returned `up_to_date` and fetch-call assertion failed |
-| M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
-| M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
-| M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
-
-## 2026-08-14 — launcher-held build brief segments travel by path
-
-Task and reflection brief segments now travel by path via the `briefParts` manifest
-and `NEUTRON_CODEX_BUILD_BRIEF_PARTS` (defect 2026-08-13, run `000cedc8`). Chunked
-transport remains for workflow-composed segments and as the whole-brief fallback.
-The receipt remains one `<bytes>:<fnv32>` measurement over the assembled whole, while
-args-transit corruption now fails closed with `CODEX_BUILD_BRIEF_ARGS_CORRUPT`.
-Coverage lives in `trident/inner-workflow-assembly.test.ts`; the unchanged fallback
-and wrapper corruption coverage remains in `trident/codex-brief-chunking.test.ts` and
-`trident/codex-build.test.ts`.
-
-## 2026-08-14 — any tier in either cross-model review seat
-
-`trident/phase-models.ts` and `trident/inner-workflow.mjs` now dispatch `none`,
-Claude, Codex, and Kimi tiers from either generic review seat. An explicitly selected
-Claude tier uses the reviewer prompt, verdict schema, chosen model, and effort; an
-unavailable CLI remains `not_connected` and never falls back to Claude. Deferred
-retry and blocker diagnostics follow the selected route family instead of the seat's
-historical name. The single-family warning counts only review seats that can actually
-dispatch and does not count the build route.
-
-`trident/__tests__/cross-model-dispatch.test.ts` executes the production launcher and
-real workflow for every declared group, GPT-build/Opus-review, configured but
-unavailable Codex CLI behavior, Claude retry success and exhaustion, and same-family
-warning semantics. Mutation checks made each corresponding guard red before the
-production behavior was restored.
-
-## 2026-08-15 — an unreadable resume head stops the run before the fire
-
-`launch()` (`trident/orchestrator.ts`) already reads the live branch head in code
-(`resolveResumeLiveHead`, three attempts, tri-state `40-hex` / `absent` / `''`). When
-that read comes back `''` — the launcher itself could not tell — firing the workflow
-bought nothing: `classifyResume` returns the bounded stop
-(`{ mode: 'stop', reason: 'head-unreadable' }`) for every checkpoint except the TWO it
-answers BEFORE it looks at the head — `pr-merged` (resolved to `merged`) and the EMPTY
-name (resolved to `rebuild`, reason `no-checkpoint`; there is nothing recorded to
-preserve). Both are exempt from the fast exit for exactly that reason, and both have
-their own test. The
-launcher now takes that one known outcome at the boundary: no fire, the run is failed
-through `innerTerminalFailureReason` with `block_kind: 'infra-only'` and the inner
-stop's wording verbatim ("could not read the head of `<branch>`; the recorded work is
-at `<oid>`; re-run when the read succeeds"), so the persisted `failure_reason` is
-byte-identical to the one `applyResult` writes for the inner stop and never reads
-"without Argus APPROVE" for a run Argus never reached.
-
-`classifyResume` remains the single semantic decider — this is only the cheap
-fast-exit, and the two names above are exempted for exactly the reason given. `failedRun`
-spreads the row, so `inner_checkpoint` / `inner_checkpoint_head` /
-`inner_checkpoint_findings` survive untouched. Coverage lives in the "the resume live head
-is read in code, never relayed by a model" block of `trident/orchestrator.test.ts`: the
-never-succeeding read now asserts three attempts, zero fires, the persisted reason,
-and the preserved checkpoint columns; `pr-merged` and the local-mode `''` route have
-their own tests; a successful OID read and an `absent` answer still fire unchanged.
-
-**WHAT THE PRESERVED COLUMNS ACTUALLY BUY, AND WHAT THEY DO NOT (corrected at Argus r4 —
-two reviewers reached it independently).** Earlier revisions of this entry said "a re-run
-resumes at exactly this point". THAT IS NOT AS-BUILT, and the claim is withdrawn rather
-than merged. A terminal row is never advanced again (`step()` short-circuits on
-`isTerminalPhase`, and `advanceTridentRun` no-ops the same way), and re-running a card is a
-FRESH DISPATCH — `TridentRunStore.create` inserts `inner_checkpoint`,
-`inner_checkpoint_head` and `inner_checkpoint_findings` as NULL. So the preserved columns
-are read by NOBODY: they are the durable EVIDENCE of what the failed run built and where,
-for a human or a follow-up. A re-run REBUILDS. A real resume-a-terminal-run path is a
-separate card (recorded in `IMPLEMENTATION_PLAN.md`); the stop message's "re-run when the
-read succeeds" stays accurate as written — it says when to try again, and it never
-promised the re-run would skip the build.
-
-**THE RETRIES ARE SPACED, AND THE SPACING IS A SEAM.** The consequence of `''` here is a
-TERMINAL, non-self-healing run failure, and in `pr` mode the read is `git ls-remote` — a
-NETWORK call. Three attempts fired back to back complete inside a few milliseconds, which
-is short enough that a single dropped packet fails all three.
-`resolveResumeLiveHead` waits `RESUME_HEAD_RETRY_DELAYS_MS` (`[250, 1000]`) BETWEEN
-attempts — never before the first, never after the last — through an injected `sleep`
-(`BuildTridentOrchestratorOptions.sleep`) that the suite replaces with a no-op, so the
-delay is real in production and free in the tests.
-
-**WHAT THAT WINDOW ACTUALLY COVERS, STATED HONESTLY** (an earlier revision of this
-paragraph claimed a "momentary GitHub 5xx", which ~1.25 s of total spacing does not
-credibly outlive): it covers a sub-second blip — one dropped packet, a DNS retry, a single
-connection reset — and nothing longer. A sustained outage still fails all three attempts.
-That is a tuning question rather than a correctness one, and the trade is stated honestly
-rather than dressed up (Argus r4): a blip that outlives ~1.25 s now ends the run, where
-before this change it produced a self-healing automatic REBUILD. The regression is
-AVAILABILITY, not work — the branch, its commits and its PR are untouched, and the failed
-row records what was built and where — and it is the trade the card asked for: "could not
-tell" must not silently spend a max-effort rebuild of already-pushed work (measured on the
-neutron-enterprise run: 3,813 → 84,875 → 133,169 output tokens, the third being the
-rebuild). What the operator loses is the automation of that rebuild, not its result; the
-re-run rebuilds, because there is no resume-a-terminal-run path (see above). Widening the
-window trades a longer stall on every genuinely-dead branch for a rarer manual re-run; the
-numbers live in one exported constant so that trade can be made with evidence rather than
-by guess.
-
-## 2026-08-09 — A ritual post is a chat message, and so is its notification
-
-The owner's phone said `ritual:kaizen`, and tapping it opened the app but not the
-conversation. One root cause under both: the push was composed from the reminder ROW
-on the tick's `on_fired` hook, and a ritual row's `message` IS that dispatch token —
-so the notification could never carry the posted text, and its project field was the
-instance slug, which resolves to no project.
-
-Composition moved into the ONE out-of-turn delivery seam — `createDeliver` now takes a
-`notify` sink and fires it for every post that got a durable row
-(`gateway/http/deliver.ts` → `gateway/push/chat-message-push.ts`), never for a
-transient `'none'` pill. So a fired reminder, a ritual, the morning brief, the idle
-nudge and a system notice all notify identically, because they are all one thing.
-Composing it in the reminder outbound instead — the first version of this change —
-cured the reported message and left every other producer silent, which is the
-per-producer mistake `deliver` exists to have ended. `pushReminder`, `onFired`,
-`ReminderTickLoop.on_fired` and the `push_dispatcher` composition field are DELETED —
-the tick can only see the row, so it was never a place this could be built correctly.
-
-`agent_message` joined `PUSH_KINDS` (it was a resolver branch with no sender, kept out
-of the list precisely so the exhaustiveness test could not be padded); `reminder` left
-it, because nothing sends it — but its RESOLVER branch stays, because a store app and
-a self-hosted gateway do not upgrade together and undismissed notifications still
-carry that kind. General names itself with `GENERAL_RAIL_ID`, now defined once in
-`wire-types/topic-id.ts` and pinned to the client's copies: encoding it by ABSENCE
-(the first version) is malformed to every already-installed bundle, which would have
-preserved the exact symptom the change was for.
-
-`?message_id=` is finally consumed. It reached the chat route since 2026-05 with no
-reader. The frozen #505 anchor and a new once-per-target imperative `scrollToIndex`
-now ask ONE function, so a cold open cannot land in two places, and a tap into an
-already-mounted project can be re-anchored at all. With no pushed id, nothing scrolls
-and the anchor is byte-identical — asserted, because this is the #505/#511 blast
-radius.
-
-Detail: `docs/as-built/2026-08-09-notification-is-a-chat-message.md`.
-
-## 2026-08-10 — Two guards in that change were decorative; review found both
-
-Follow-up on the entry above, and the interesting part is not the fixes — it is that
-both defects were guards that READ a value nothing WROTE, and both were covered by
-passing tests.
-
-The re-emit suppression was INERT. `deliver` asked the ButtonStore whether the owner
-had already been shown a row, and the store answers from `delivered_at` — but
-`markDelivered`'s only callers were the onboarding engines, so no row `deliver` created
-was ever stamped, `was_delivered` was structurally false, and the double-buzz the guard
-was added to stop still happened on every idempotent re-emit (the ritual-approval
-prompt, the credential-lapse notice). The test that "proved" the suppression used a fake
-whose `emit` returned `was_delivered: true` from a literal, so it asserted the branch
-and assumed the write. `deliver` now stamps the row after the owner has ACTUALLY been
-reached — a device notification the transport accepted, or a live socket — and the
-suppression is asserted against the REAL `ButtonStore` on a real migrated DB, which is
-the only harness where "the answer was written" is a fact rather than a fixture. Not
-stamping on failure is load-bearing: a row that persisted while every transport failed
-must still buzz on the retry, so `ChatMessagePushSink` now RESOLVES a boolean and reads
-`PushResult.ok` — `pushAll` catches an Expo outage and resolves rather than throwing, so
-a sink watching only for a throw would have called an outage a delivered notification.
-
-A legacy General reminder tap 400ed. `resolvePushRoute` emits the mobile RAIL spelling
-`~general`, and `reminders-client.ts` interpolated it raw into
-`/api/app/projects/<id>/reminders`, which `sanitizeProjectId` rejects — so the tap
-opened `invalid_project_id` where the reminders should be, on the rail's General
-Reminders tab as well as on the push tap. It now maps through `general-scope.ts` like
-`docs-client` and `tabs-client` do; that module exists because the fifth client to talk
-to a project-scoped surface was the fifth to forget. The regression test walks the real
-resolver's output into the real client, because both modules' own suites were green —
-the same sender/resolver seam this whole change was about. It asserts the raw sentinel
-rather than `%7E`: `~` is UNRESERVED, so `encodeURIComponent` leaves it intact, which is
-why every existing "does it encode the segment?" test was blind to it.
-
-Also: the notification can no longer hold a delivery open (`POST
-/api/app/system-notice` awaits `deliver`, and the only bound underneath was Expo's 10 s
-per batch), bounded at 3 s and asserted as an ORDERING rather than elapsed wall-clock
-time; `chatPushExcerpt` clamps a non-positive budget so it cannot return a bare
-ellipsis; and five in-code pointers that sent readers to `reminder-outbound.ts` for the
-notification — contradicted by that file's own header — now name the seam that has it.
-
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
-
-## 2026-08-10 — resolving what review left unverified on the notification lane
-
-`createDeliver` now validates `notify_timeout_ms` at construction, the way
-`ExpoPushClient` validates `timeout_ms` and `batch_size`. `??` defaults `undefined` only,
-so a literal `0` or a `NaN` from a parsed setting reached `withTimeout` intact, and
-`setTimeout(0)` settles the bound on the next macrotask — before the notification can
-answer. Every notification would have reported not-sent, no row would ever have been
-stamped, and the re-emit suppression would have been silently OFF while every other test
-on this path still passed. Unreachable from the sole live call site, which omits the
-field; guarded because that failure mode is invisible at runtime rather than loud.
-
-The stamp condition `notified || delivered` is unchanged, and the seam in it is now named
-where it is decided. A backgrounded phone holding an open socket while Expo is down gives
-`delivered: true, notified: false`, so the row is stamped and the ALERT for that key is
-gone for good — an approval prompt then waits until the app is next opened. Accepted: the
-socket handed the message to the client and it is in the transcript, so this delays an
-alert rather than dropping information, whereas requiring `notified` makes the stamp
-unreachable on any install with no registered device (every fresh one) and the re-emit
-would then re-notify forever with nothing able to buzz.
-
-The zero-width guard and its test were both written with the LITERAL invisible characters
-pasted in, and both are now escape sequences. The guard's own character class was
-unreadable — a reviewer could not tell which codepoints it held or count them, and any
-tool that re-encodes the file could drop one silently. The test was worse, because it could
-be DEFANGED WITHOUT GOING RED: strip the invisibles from its fixtures and every case
-degrades to `chatPushExcerpt('')`, which returns `''` and passes for the wrong reason,
-so the test would stop exercising zero-width handling at all while still reporting green.
-Mutation-tested after the rewrite — dropping U+200B from the class still reds the
-budget-accounting case, so the escapes are load-bearing and not decoration.
-
-The two docblocks about `[id]`-route param staleness contradicted each other, and the
-inaccurate one was the child screen's: it claimed its OWN param had been observed to go
-stale. The recorded incident is the opposite — `useLocalSearchParams` is sticky in a
-component that stays MOUNTED, so the LAYOUT kept reporting the old id while the
-freshly-rendered chat screen already saw the new one. That matters beyond tidiness: the
-child being the fresh side is the reason re-entering a scope without `?message_id=` cannot
-resurrect a previous tap's target and re-anchor an ordinary open onto an old row. The
-screen reads the path for AGREEMENT with the shell, not because its params lag, and the
-comment now says so.
-
-## 2026-08-10 — the fail-closed delivery guard was reading a fail-open number
-
-The previous entry made `gateway/push/chat-message-push.ts` require `delivered >= 1` before
-a durable row is stamped `delivered_at`. Review then found that `delivered` itself was
-computed as `messages.length - errored.length` in `gateway/push/dispatcher.ts`. Those two
-are equal only when Expo returns one ticket per message; on a 200 carrying fewer tickets —
-`{data: []}`, a body with no `data` key at all, anything that parses as JSON — subtraction
-reported EVERY message as delivered on a response that accepted nothing. Measured
-`{attempted: 2, delivered: 2, errored: 0, ok: true}` for an empty ticket array, and the
-sink answered `true`. The zero-delivery stamp the guard exists to prevent was therefore
-reachable again, by a second route, through the guard itself. `delivered` now COUNTS
-`status: 'ok'` tickets, so a short batch reads honestly as `delivered + errored < attempted`.
-
-The invariant `chatPushExcerpt` documents — never a buzz with no words — did not hold for
-bodies that are invisible or punctuation-only. `\s` does not match U+200B/U+2060/U+FEFF, so
-neither does `trim()`: a zero-width body survived normalization at full length, cleared the
-sink's `length === 0` check and pushed a notification with no visible characters. Wordless
-bodies now excerpt to the empty string, checked on the OUTPUT as well as the input because
-a budget landing inside a leading run of punctuation manufactures the same thing from a good
-message. The guard is scoped by `\p{L}`/`\p{N}`/`\p{Extended_Pictographic}` rather than
-`\w`, so CJK-only, Cyrillic-only and emoji-only messages still count as content.
-
-`timeout_ms` is now validated at construction beside `batch_size`. `AbortSignal.timeout`
-rejects a non-finite argument rather than coercing it, and it is reached per batch, so an
-unvalidated deadline would have surfaced a permanent config mistake as a transient Expo
-outage on every fire.
-
-Two things review raised are recorded as deliberate rather than fixed, both in the code that
-decides them. `deliver`'s 3 s notification bound ABANDONS the send instead of cancelling it,
-so a merely-slow notification can land after being reported not-sent and the next re-emit
-buzzes again — chosen over stamping on no evidence, which silences a message forever. And
-there is no atomic claim between `emit` and `markDelivered`, so two deliveries sharing an
-idempotency key that overlap in flight can both notify; the reachable producers do not race
-(the reminder tick claims its row first, and the live keys are per-artifact), and closing it
-would put a claim-on-emit into the ButtonStore contract every caller inherits.
-
-The union hazard `wire-types/push-kind.ts` is named after recurred here and is now covered
-the same way: `gateway/push/dispatcher.test.ts` drives the REAL sink against the REAL
-dispatcher, because a hand-written `{ok, delivered}` fake on either side is exactly what let
-the two halves be independently green and jointly wrong. Every guard is mutation-tested —
-each reverts to red on its own negative cases while the positive controls keep passing.
-
-## 2026-08-10 — `ok: true` is not a delivery; a ritual row must never fall through to a nudge
-
-Two adversarial-review blockers on the notification lane. `gateway/push/chat-message-push.ts`
-treated `PushResult.ok` as proof of delivery, but `ok` is `true` with `delivered: 0` both
-when no device is registered (the state of a fresh install, short-circuited before Expo is
-called) and when every ticket errored — so `gateway/http/deliver.ts` stamped `delivered_at`
-and silenced the idempotent re-emit forever for a message nobody received. The sink now
-requires `delivered >= 1` and fails closed on a result that reports no count.
-
-Separately, `ritual_planner` is null on an LLM-less box, and `reminders/dispatcher.ts` then
-classified every row as a nudge — so a ritual row composed from its stored `message`, which
-is the dispatch token, and the owner's lock screen read `ritual:kaizen` by a second route.
-The dispatcher now refuses a ritual row it cannot plan, keyed on `reminder.ritual_id`.
-
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
-
-## 2026-08-10 — refusing to compose is only half of a refusal
-
-The round-3 refusal above stopped the dispatch token reaching the owner and then returned
-normally with one debug-level line. `reminders/tick.ts` claims an occurrence BEFORE
-dispatch and reverts only in its `catch`, so a normal return RETIRES it: a scheduled
-ritual on an instance whose model credential expired vanished with no post, no ledger
-row, and no journal line at the default level, which `reminders/AGENTS.md` forbids for a
-ritual (a failure is recorded AND noticed). `reminders/dispatcher.ts` now logs at error
-level and posts one plain-language notice (`formatRitualUnplannableNotice`,
-`reminders/ritual-delivery.ts`) — and THROWS if that notice is refused, because consuming
-the occurrence is only defensible when the owner was told. It deliberately does not throw
-on the ordinary path (a missing credential cannot resolve by the next tick, so that would
-re-fire every 30 s) and writes no `code_ritual_runs` row (the ledger writer and run-id
-mint live inside the absent planner, and `skip_reason` is a closed set in
-`migrations/0106_ritual_schema.sql`).
-
-`gateway/push/chat-message-push.ts` `hasVisibleContent` claimed emoji-only posts count,
-but a regional-indicator pair carries no `\p{L}`, `\p{N}` or `\p{Extended_Pictographic}`
-— so a flag-only body sent NO notification while `✅` sent one. `\p{Regional_Indicator}`
-joins the class; bare symbols (`→`, `✓`, `★`) stay deliberately silent.
-
-Four comments that a reader would have been right to trust were corrected rather than
-left: the "untrimmed clip cannot be empty" invariant (it can, at budget 1 behind a
-dropped surrogate), the `ritual_planner` docblock and `ritual-fire.ts` header that still
-described the nudge fall-through as the design, and `gateway/push/expo-push-client.ts`,
-which still documented the retired `{ kind: 'reminder' }` payload and "the reminder's
-stored `message`" as the notification body — the exact sentence the reported defect was.
-`gateway/http/deliver.ts`'s 3 s bound still does not CANCEL the send; that is named in
-place as a possible duplicate buzz, not silently.
-
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`
-(§ Round-4 review fixes).
-
-## 2026-08-10 — the push-tap latch is released when the tap's target goes away
-
-`ChatSyncSurface`'s imperative re-anchor latched the honoured `message_id` and never
-cleared it, which made a per-tap instruction behave as a per-process one.
-
-⚠️ **THE SEQUENCE THIS ENTRY ORIGINALLY GAVE AS THE MOTIVATION IS REFUTED — see the
-2026-08-11 entry below.** It read: *"tap the notification for a message, rail-tap to another
-project (a chat route with no `?message_id=`), then tap the SAME notification again — and the
-transcript did not move: the equality check had already spent the target."* The premise is
-true and the conclusion is not. A real second tap never reaches the equality check, because
-`app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
-`resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
-`?message_id=` — it is
-swallowed one layer up, and that dedupe gap is filed as **#182**. The latch-release fix
-described below is correct by inspection and stands; only this motivating sequence was wrong.
-
-The COMPONENT is not remounted along that path — the shell is a single root-stack screen
-named `projects/[id]` and expo-router only diverges on a route named exactly `[id]`, so a
-rail tap re-renders it and the ref outlives the switch. The LIST is remounted, though:
-`useMobileChat`'s attach effect is keyed on `projectId` and its cleanup drops `ready`
-(`app/lib/chat-core/use-mobile-chat.ts:447`), and the surface renders
-`!ready ? <spinner> : <FlashList/>`, so `isInitialScrollComplete` comes back fresh and the
-frozen anchor can act on the way back if it is populated in time. So: a latch with no exit
-is a defect by inspection and one line to close; whether it was owner-VISIBLE on the
-rail-switch path rests on that repaint race and is not claimed here. The imperative seam is
-the only path when the list is not remounted, which is what the new arm drives.
-
-A render with no target now clears the latch. Mutation-verified: restoring the bare
-early-return reds the new sixth arm of
-`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, and only that arm.
-
-Also caught in the same pass: `scrollToIndex` is typed `(params) => Promise<void>` and its
-executor calls `getLayout` synchronously, which throws before the layout manager exists — a
-rejection the call site was dropping. Now caught. The latch is deliberately NOT re-armed on
-a rejection: the only state that can reject is a pre-layout list, whose position the frozen
-`initialScrollIndex` already owns, and re-arming would let a later commit yank a transcript
-the owner was placed in correctly.
-
-Found by the cross-model (codex) review lane, in this change's own new code.
-
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
-
-## 2026-08-10 — five comments that asserted things the code does not do, and one P1 named not fixed
-
-Comment-only follow-up on the push-notification change, from the rubric review lane.
-
-Two of the five were COPIES of a sentence this branch had already corrected elsewhere:
-`gateway/composition/build-core-modules.ts` and `gateway/composition/input/notifier-input.ts`
-both still said an LLM-less box makes every reminder row compose as an ordinary nudge "which
-is fail-closed", the exact claim `reminders/dispatcher.ts` and `open/composer.ts` were fixed
-for — a ritual row's stored `message` IS the dispatch token, so nudging it is how that token
-reached the owner's lock screen. The same file also opened by describing the push dispatcher
-attached as the tick's `on_fired` hook and then said that hook was gone twenty-five lines
-later. `wire-types/push-kind.ts` said the legacy `reminder` kind was "gone from this list and
-from the resolver" — it is gone from the list, while the resolver keeps a decode-only branch
-deliberately, so a reader could have acted on that sentence by deleting a live compatibility
-path. And `ChatSyncSurface` said its deep-link latch is set after a successful jump when it is
-set when the jump is issued.
-
-Also NAMED AND DELIBERATELY NOT FIXED, at the site a reader hits it: the initial-anchor freeze
-can read the PREVIOUS scope's rows. `projectId` arrives as a prop, so the first render under a
-new scope still holds the old scope's `rows`/`selfDeviceId` — those are cleared in
-`useMobileChat`'s effect cleanup, which runs later (`app/lib/chat-core/use-mobile-chat.ts:447-451`)
-— so the freeze re-computes the OLD project's index under the NEW project's key, and the list
-remount consumes it. Byte-identical to `main` on this path, so this change neither introduces
-nor widens it. The fix is small (refuse to freeze while `ready` is false — verified not to be
-entered on a background/foreground transition) but belongs with a mounted test that drives
-`projectId`, `ready` and a real list remount, in the ISSUES #505/#511 hot path. Raised as a P1
-follow-up.
-
-Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
-
-## 2026-08-10 — the token prune was an index join nobody checked the index of
-
-Review round 2 on the notification lane. The two guards under review held on the tip, and
-re-deriving them found a third thing in the same file that did not.
-
-`PushDispatcher.dispatch` prunes the tokens Expo reports `DeviceNotRegistered`, by INDEX:
-ticket `i` names `messages[i]`. Its comment justified that with "tickets come back in
-submission order". True, and not sufficient — `ExpoPushClient` appends only the tickets Expo
-actually **returned** (`for (const t of data) tickets.push(t)`), so a chunk that comes back
-short shifts every later ticket left by one and the join silently identifies the wrong
-device. A `DeviceNotRegistered` for one token then deletes a **live** one, and push for that
-device stays dark until it next re-registers.
-
-The two comments in the file **contradicted each other**, which is how it surfaced: fifty
-lines up, the `delivered` tally had just been rewritten *because* a short response is real
-("a short batch now shows up honestly as `delivered + errored < attempted`"). One file, one
-mechanism, two opposite beliefs about it — and the prune held the wrong half.
-
-`pruneUnregistered` now checks `tickets.length === messages.length` before it trusts an
-index, prunes nothing on a mismatch, and logs the counts. Fail-closed in the same direction
-as the `delivered >= 1` guard beside it, and for the same asymmetry: a dead token left behind
-costs quota and one warning line per fire; a live token deleted costs the owner his
-notifications.
-
-Mutation-tested. Guard removed → exactly the new test reds (28 pass / 1 fail), and it reds on
-the assertion that BOTH tokens survive, asserted by name rather than by order because
-`listByProject` promises none.
-
-**Pre-existing gaps NAMED but deliberately not fixed here**, each because the honest fix is a
-migration or an API change rather than a rider on a push fix:
-
-* **`httpProjectSegment` maps the General sentinel onto a legal project id.** `~general` is
-  collision-proof on the client (#410); the segment it produces, `general`, is not — and the
-  owner's instance has a project whose id is exactly that. Both rail entries address one
-  server scope. Reads already shared it; this lane made reminders the first MUTATING surface
-  to. Closing it needs a distinct server route or `general` reserved, both migrations.
-* **Two `PUSH_KINDS` entries have a sender but no dispatcher.** `calendar_pre_meeting_brief`
-  and `email_daily_triage` are gated on `pushDispatcher !== null` and the only two assignment
-  sites in the repo pass `null`. They stay listed on purpose — the resolver must remain ready
-  or wiring the dispatcher would re-open the disjoint-lists defect — but the exhaustiveness
-  test proves the resolver is ready, not that anything is sent.
-* **`routedPush` collapses `app-ws:lost:*` and `app-ws:dropped:*` into one `false`**, so a
-  failed chat_log append plus a successful notification stamps `delivered_at` for a message
-  hydration cannot show. Needs the app target widened from `boolean` to the tri-state the
-  markers already carry.
-* **`fireRitual`'s settle-notice loops discard `post`'s boolean**, so a rejected settle notice
-  retires the occurrence with neither output nor notice (#506's shape, in one corner). The
-  unplannable guard added here does check its post; its comment no longer claims the loops do.
-
-📌 **Two comments in one file that contradict each other are a bug report already written
-down.** The reachable defect here was not found by hunting for it — it was found because the
-same file asserted "Expo can return fewer tickets than messages" in one place and "index i
-identifies message i's recipient" in another. When a diff teaches a file something new about
-its own failure mode, the next question is which OTHER paragraph was built on the old belief.
-
-## 2026-08-11 — the no-project scope was addressing a real project, and one comment claimed a tap that never arrives
-
-Landed via PR #171. Two review findings on the ritual-push branch, from a panel where two
-independent lanes converged on the first. Both are about the same failure shape from opposite
-ends: a name that means two things, and a comment that describes a path no code takes.
-
-**A SCOPE IS NOT AN ID, and `general` is a legal project id.** The mobile rail spells the
-no-project General scope `~general`, deliberately outside the gateway's `[A-Za-z0-9_.-]`
-alphabet so the sentinel cannot collide with a real project — that is what #410 bought, and
-`app/lib/project-rail-view.ts` says so at length. `app/lib/general-scope.ts` then mapped it back
-onto the literal HTTP segment `general`, which **is** inside that alphabet. So a rail-tap on
-General and a rail-tap on a project whose id is literally `general` produced a byte-identical
-request, and the reminders surface derived one `app-project:general` topic for both. Collision-proof
-by construction, then mapped onto something that is not.
-
-What made it worth a round rather than a note: **reminders was about to be the first MUTATING
-surface on that mapping.** The four other clients (docs, tabs, work-board, activity) have shared it
-for months. This branch routed `list`, `create`, `snooze`, `cancel` and `convert-to-task` through
-it, so two unrelated rail entries would have shared a pending list *and* its writes — a cancel
-aimed at General destroying a real project's row. Before the branch that path 400'd
-(`sanitizeProjectId` rejects `~`), which is loud and harmless; the branch would have converted it
-into a silent wrong-scope read AND write. **Quieter is worse.**
-
-**Fixed by reserving a segment on the server, not by renaming anything.** There is no value inside
-`[A-Za-z0-9_.-]` that can mean "no project" without also naming a project that might exist, so the
-fix had to come from outside the alphabet. `gateway/http/app-reminders-surface.ts`
-`resolveScopeSegment` accepts `GENERAL_RAIL_ID` — exact match, never a prefix — ahead of
-`sanitizeProjectId`, and the scope lands on `app-project:~general`. Deliberately **not** a new topic
-prefix: that string reuses the one shape every existing topic reader already decodes, and what they
-decode it back to (`~general`) is the rail id, which is the right answer for each of them —
-`push-deep-link-dispatch` builds `/projects/~general/reminders`, which is exactly where a General
-tap belongs. `reminders/dispatcher.ts` `deriveReminderProjectId` needed one addition: the
-sentinel resolves to `owner_slug`, as its `web:<user_id>` General twin already did, or the context
-source would go looking for a `Projects/~general/STATUS.md` that cannot exist.
-
-**TWO readers needed the sentinel, not one — corrected in round 3, and the sentence above said "the
-one addition" until it was.** Reserving a segment does not just create a new topic to decode; it
-creates a value that every consumer of `topic_id` must now recognise, and the second one was missed
-because it is a WRITE on a different substrate. `cores/free/reminders/src/backend.ts`
-`resolveTaskProjectId` — the convert-to-task path — resolved `~general` to itself, so promoting a
-General reminder would have created a task whose `project_id` is the sentinel and made
-`tasks/projection/write.ts` `mkdirSync` a `Projects/~general/` directory for a project that cannot
-exist. `tasks/store.ts` `create` does not re-validate the id, so the Core was the only guard.
-Normalised to `NO_PROJECT` (`''`) at a single exit rather than inline, because THREE paths carry the
-sentinel there: the caller's explicit override, the `app-project:~general` topic this entry's own
-change introduced, and the bare `~general` the Core's create path stores raw. `NO_PROJECT` rather
-than `owner_slug` because the destination differs — General IS the unprojected bucket, which is the
-bucket the General Tasks tab lists, whereas the dispatcher's consumer needs a real directory.
-
-Not reachable from the app today and fixed anyway: `open/composer.ts` leaves `convertReminderToTask`
-unwired so the HTTP route answers 501, but the Core's own `reminders_convert_to_task` tool reaches
-it, and this branch is what put the sentinel on that path. **`gateway/http/app-tasks-surface.ts`
-still gates on `sanitizeProjectId` and therefore still answers 400 for `~general`** — the tasks
-surface has NOT learned the reserved segment the way reminders has. That is the same shape as #183
-and is left to it rather than widened into a push fix.
-
-Client side, `httpScopeSegment` / `httpScopeSegmentEncoded` sit beside `httpProjectSegment` rather
-than replacing it. Two functions, not a flag: a server that has not learned the reservation answers
-`~general` with a 400, so the halves must agree, and different names are how that is enforced.
-`~` is RFC-3986 unreserved so `encodeURIComponent` leaves it alone — the same property that made it
-the right route sentinel after `#general` shipped and broke on-device (#411).
-
-**SCOPE OF THE FIX, STATED RATHER THAN IMPLIED: reminders ONLY.** Docs, tabs, work-board and
-activity still collapse General onto `general` and still alias. They pre-date this module, and
-closing them is a **data migration** — `Projects/general/docs` is a directory with files in it, and
-either way the split goes, one scope stops seeing content it can see today. Filed as **#183** with
-both fix directions, not ridden in on a push fix. Open has no root `ISSUES.md` (the purity gate
-reserves that path); its defect tracker is GitHub Issues.
-
-**AND THE RESIDUAL IS NOT READ-ONLY — corrected in round 2, because the first version of this
-entry, of `general-scope.ts`'s docblock, of the test comment and of #183 itself all called those
-four clients "read-only".** Two of them write: `docs-client.ts` (`writeFile`, `moveFile`,
-`createFolder`, `uploadBinary`, `deleteFile`, `deleteFolder`, `deleteBinary`,
-`deleteBinariesUnderPrefix`) and `work-board-client.ts` (`create`, `update`, `complete`, `reorder`,
-`delete`, `start`). Only `tabs-client.ts` and `activity-client.ts` are reads. So #183 is an **open
-wrong-scope write** on the same terms that made reminders worth closing first — a docs delete from
-one scope removes the other scope's file — and reminders was the surface worth closing FIRST, not
-the only mutating one. The sequencing behind a migration is unchanged; what changed is that it is no
-longer justified by a severity claim that was false.
-
-**THE SECOND FINDING IS A COMMENT, AND THE FIX IS TO CORRECT THE CLAIM.** The latch-release from the
-previous round is correct by inspection and stays. What was wrong is the sequence used to motivate
-it, in this file's own comment and in commit 93245925's message: *"tap the notification for X,
-rail-tap elsewhere, then tap the SAME notification again — it is still sitting in the shade"*. The
-premise is true and the conclusion is not. A real second tap never reaches the equality check,
-because `app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
-`resolvePushRoute` —
-so the re-tap produces no navigation at all and never re-supplies `?message_id=`. It is swallowed one
-layer up. The dedupe TTL is 7 days and warm taps pass `{dismiss:false}`, so the notification really
-does stay in the shade, which is precisely what made the false claim read as plausible.
-
-Corrected in `ChatSyncSurface.tsx` and in the sixth arm of
-`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, which now says what it actually drives:
-two `rerender` calls, proving the latch releases on a targetless visit — real, and still
-mutation-killed — and saying plainly that it proves nothing about tap-twice reachability. The dedupe
-gap itself is filed as **#182** rather than fixed here; a push-notification fix should not grow a
-navigation change on the way past.
-
-**Mutation-tested, each mutant named with the tests it reds:**
-
-* `resolveScopeSegment` → bare `sanitizeProjectId` (drop the reservation): **5 red** in
-  `gateway/__tests__/app-reminders-surface.test.ts` — accepts-the-sentinel, own-topic,
-  create-invisible-in-the-other, cannot-snooze-or-cancel, include_id-no-leak.
-* `resolveScopeSegment` → `startsWith` instead of `===`: **1 red** — the exact-match arm, which
-  is the one that would otherwise hand `~generalize` the General scope with a 200.
-* `reminders-client.ts` → back to `httpProjectSegmentEncoded`: **7 red** across
-  `general-scope.test.ts` + `legacy-reminder-push-tap-reaches-general.test.ts`.
-* `httpScopeSegment` → collapse the empty scope to `general`: **3 red**. Collapse the sentinel too
-  (i.e. make it identical to `httpProjectSegment`): **7 red**.
-* `deriveReminderProjectId` → drop the sentinel line: **1 red** in `reminders/dispatcher.test.ts`.
-* The latch release → back to the bare `if (deepLinkTarget.length === 0) return;`: still reds the
-  sixth arm and nothing else. Re-run rather than cited — the comment around it changed, so the
-  earlier round's evidence was not assumed to carry over.
-
-The comment corrections have **no mutant**, and that is stated rather than papered over: nothing
-executable changed, so there is no test to red. What they buy is that the next reader does not build
-on a reachability that does not hold.
-
-`legacy-reminder-push-tap-reaches-general.test.ts` needed its premise inverted, not just its
-literals: it existed to assert the tilde must NOT reach the wire, and now the tilde reaching the wire
-is the correct outcome. It pins the segment against `wire-types`, the one definition both sides
-import, so a drift in either copy reds here instead of 400ing on a device. `wire-types/topic-id.ts`
-also said the gateway "rejects `~general` … on every `/api/app/projects/<id>/…` route" — true when
-written, and now false of exactly one route, so it names the exception.
-
-📌 **A sentinel is only collision-proof at the layer that spells it.** `~general` was engineered to
-be unmistakable on the client and then translated, one function later, into a string a user can name
-their project. The property was real and it did not survive the mapping — and nothing failed, because
-both halves were individually correct. **When a value exists to be unforgeable, follow it to the last
-layer that reads it and check the guarantee is still true there.** The generalisation of the
-adjacent lesson from the same file: a comment describing a mode is a claim about reachability, and
-the way to check it is to walk the layer ABOVE the one the comment is written in.
-
-### Round 2 — the correction had itself carried the false claim, and one sentinel had escaped to the screen
-
-Same PR **#171**, second review round. Nothing about the reservation changed; four things that
-DESCRIBED it did, plus one user-visible leak the reservation created.
-
-**THE SEVERITY CLAIM WAS WRONG IN SIX PLACES AT ONCE.** "Read-only clients" was written into
-`app/lib/general-scope.ts` (twice), `app/lib/reminders-client.ts`,
-`gateway/http/app-reminders-surface.ts`, `app/__tests__/general-scope.test.ts`, this file, and the
-body of GitHub issue #183 — and it is false of two of the four. It survived a whole round because it
-was *plausible*: reminders genuinely was the surface being made to mutate in this branch, so "the
-mutating one" read as a description of the SET when it was only a description of the DIFF. All six now
-name the writing methods by symbol, and #183's title and table say WRITES. The reason to care is not
-tidiness — a residual filed as read-only gets scheduled like a cosmetic, and this one can delete a
-document.
-
-The count went from five to six *after* the first correction pass, and that is the finding, not a
-footnote: the sixth was in `reminders-client.ts` — the module whose entire purpose is to NOT use the
-aliased mapper — and the first pass missed it because the pass re-read the files it had already
-opened instead of searching for the sentence. 📌 **A claim that is wrong in one file is wrong wherever
-it was copied to. Grep the CLAIM, not the file** — this branch hit that same shape three times
-(`625d29d2`, `a2ab3a0e`, and here), which is twice more than a coincidence.
-
-**THE RESERVATION PUT `~general` ON THE FOCUS SCREEN.** `app-focus-surface.ts`'s
-`extractProjectIdFromTopic` decodes `app-project:<id>` back to whatever id it carries, so the moment
-General's reminders got their own topic, a General row's project chip rendered the literal string
-`~general` — an internal routing token displayed as though the owner had named a project that. It was
-unreachable before this branch (the surface 400'd on `~`), which is why no existing test could have
-caught it: `focus-row-formatters.test.ts` hand-builds its items, so it only ever sees values someone
-thought to type. `projectChipLabel` now maps the sentinel to `General`, and deliberately does NOT
-route it through `isInstanceLevel` — General is a routable scope with its own tabs, and flipping that
-predicate would have silently redirected the tap to the projects list.
-
-**TWO CITATIONS HAD GONE STALE INSIDE THEIR OWN BRANCH.** A prose edit in one commit cited
-`app-reminders-surface.ts:212` and `:247`; a later commit on the same branch added lines above both.
-Rather than repoint them at 271 and 307 — which the next commit would break again — they now name the
-call and the expression. 📌 **A `file:line` citation into a file the same branch is still editing is
-stale before it merges. Cite the symbol.**
-
-**THE BIDIRECTIONAL TEST WAS ONLY UNIDIRECTIONAL.** `"neither scope can snooze or cancel the other's
-row"` created a General row and attacked it through the project's URL — and never built the mirror.
-The two directions are not symmetric by inspection: the reserved segment is matched by an exact-match
-branch that runs *before* `sanitizeProjectId`, so the General-as-attacker path executes different
-code. Split into two named tests over one parameterised helper. Mutation-tested by aliasing the
-sentinel back to `general` **on the snooze/cancel branch only**, leaving list and create reserved: the
-new test reds, the original passes — which is the proof that it covered one half while reading as
-though it covered both.
-
-📌 **A test whose NAME quantifies over both directions ("neither", "either", "any") is asserting
-something its body may not reach.** The name is the claim; the fixtures are the coverage. When they
-disagree, the name is what everyone believes.
