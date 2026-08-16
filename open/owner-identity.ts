@@ -14,8 +14,17 @@
  */
 
 import type { PlatformInstanceInfo } from '@neutronai/runtime/platform-adapter.ts'
-import { resolveOwnerSlugSourceFromConfig } from '@neutronai/gateway/index.ts'
-import { resolveIdentityConfig } from '@neutronai/config/index.ts'
+// FROM THE `config` LEAF, NOT FROM `gateway/index.ts`. This module is reached
+// from `open/composer.ts`, so importing the canonical resolver off the gateway
+// ENTRY module put that entry into the composer's own import graph — the one
+// edge `gateway/composer-contract.ts` forbids by name ("the composer graph must
+// NOT contain the entry module … at all"), because entry↔composer is the
+// top-level-await cycle that can deadlock under a strict reading of the ESM TLA
+// spec. depcruise allows `open → gateway` wholesale, so nothing mechanical
+// caught it. The resolver now lives in `config/index.ts` beside the
+// `IdentityConfig` it consumes; the gateway re-exports it for its own callers,
+// and this file no longer needs the edge at all.
+import { resolveIdentityConfig, resolveOwnerSlugSourceFromConfig } from '@neutronai/config/index.ts'
 
 // `resolveNeutronHome` + `resolveOpenDbPath` moved to `../migrations/db-path.ts`
 // (L3, 2026-07) so the `migrations` leaf no longer imports UP into `open`.
@@ -47,6 +56,13 @@ export const OWNER_USER_ID = 'owner'
  * The two are pinned equal by `open/__tests__/owner-slug-agreement.test.ts`.
  * A second answer to "who am I" is not a second opinion, it is a bug waiting
  * for someone to trust the wrong one.
+ *
+ * THROWS `OwnerSlugUnreadableError` when `.url_slug` exists and cannot be read
+ * (chmod-000, or a directory of that name). It does NOT degrade to the env
+ * slug: on a renamed box the env var still holds the OLD handle, and answering
+ * with it hands the credential direction guard a false "this process knows who
+ * it is". `neutron doctor` catches it and renders its `{ok:false}` contract
+ * (`open/diagnostics-cli-impl.ts`); every other caller wants the throw.
  */
 export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
   // DELEGATES to the one canonical resolver. Trimming here was not enough: this

@@ -578,6 +578,17 @@ export async function migrateOrphanedCredentials(
     // precedent already set by `credential_scope_migrated`, where this path
     // carries a `skipped` key boot's payload does not have. Handles, table
     // names and counts only (acceptance (d)).
+    //
+    // ONE ROW PER CALL, ON PURPOSE — NOT the once-per-boot shape boot uses.
+    // Review asked whether the missing dedupe is a decision or an accident; it
+    // is a decision. Boot's refusal is a property of the PROCESS, so a second
+    // row would say nothing new. This one records an owner-initiated ATTEMPT to
+    // move credential rows, and "the owner tried this eleven times" is the fact
+    // an audit trail exists to preserve — collapsing repeats would erase the
+    // only signal that someone is retrying a refusal they do not understand.
+    // The reachable surfaces are owner-authenticated
+    // (`gateway/http/cores-integrations-surface.ts`) and the agent tool, so the
+    // row count is bounded by owner actions, not by traffic.
     await emitSystemEventSafe(
       input.sink !== undefined ? input.sink : resolveSystemEventSink(),
       {

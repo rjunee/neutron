@@ -80,11 +80,64 @@ previous round closed the ZodError path and opened a filesystem one: the `.url_s
 behind `existsSync` was unguarded, and `existsSync` is true for a chmod-000 file and for
 a DIRECTORY of that name — the read then throws EACCES / EISDIR out of a function
 `open/diagnostics-cli-impl.ts` calls OUTSIDE the try that produces `{ok:false}`. Both
-variants were reproduced against the branch. An unreadable rename file now degrades to
-the env/fallback answer exactly as an absent one already does. The EACCES fixtures assert
-that the mode really denies the read before asserting the deny-path behaviour, because
-`chmod 000` is advisory against root; the EISDIR case denies root too and carries the
-axis unconditionally.
+variants were reproduced against the branch.
+
+**THE FIRST FIX FOR THAT WAS WRONG, AND THE NEXT ROUND MEASURED WHY.** It made the
+resolver SWALLOW the read error and fall through to `NEUTRON_INSTANCE_SLUG`, so `doctor`
+stopped throwing. On the exact configuration `open/owner-identity.ts` documents — a
+renamed instance, `.url_slug` holding the new handle and the env var still holding the
+old one — the fall-through answers `{slug:'old-handle', source:'env'}`. That is a
+CONFIGURED provenance, so `slug_is_fallback` reaches the direction guard as `false` and
+the sweep migrates the owner's credential rows BACKWARD onto the name they were renamed
+away from, with no log line and no journal row. EACCES on `.url_slug` is a recorded real
+deployment failure, not a hypothetical. It also deleted a pinned invariant repo-wide:
+`gateway/__tests__/boot-init-cleanup.test.ts` asserts boot FAILS LOUDLY on an
+unresolvable slug, and the swallow turned that suite red on `main`'s own test.
+
+An unreadable rename file is now an ERROR, not an absence: the resolver throws
+`OwnerSlugUnreadableError` (`config/index.ts`), boot rejects as it always did, and the
+ONE caller that would rather have an answer than the truth — `neutron doctor` — catches
+it and renders its documented `{ok:false}` with the errno, which is what `main` returned
+before this branch existed. A substituted slug was never acceptable there either: the
+slug filters every event and job in the report, so `{ok:true}` with the wrong identity
+renders a healthy instance as empty. A file that reads successfully and is BLANK is still
+the absent case; only a file that could not be read at all is unknown.
+
+The EACCES fixtures prove the mode really denies the read before asserting the deny-path
+behaviour, because `chmod 000` is advisory against root — and where they previously
+bailed with a bare `return` when it did not bite (a test named for the EACCES axis
+passing green on a root runner having asserted nothing), they now assert the correct
+outcome for whichever world they are in: root still reads the file, and then the file
+must WIN. The EISDIR case denies root too and carries the axis unconditionally.
+
+**The canonical resolver moved out of the gateway ENTRY module.** It was defined on
+`gateway/index.ts` and `open/owner-identity.ts` imported it from there, which put the
+entry into `open/composer.ts`'s own static import graph — the one edge
+`gateway/composer-contract.ts` forbids by name, because entry↔composer is the
+top-level-await cycle that completes under Bun's current loader and can deadlock under a
+strict reading of the ESM TLA spec. No mechanical gate saw it: the depcruise rule that
+looks closest exempts `^open` outright, and the no-cycles rule only fires once a cycle
+COMPLETES. The resolver now lives in the `config` leaf beside the `IdentityConfig` it
+consumes and the `effectiveOwnerHome` it calls; `gateway/index.ts` re-exports it for its
+own importers. `open/__tests__/composer-graph-excludes-gateway-entry.test.ts` walks the
+real static graph through `Bun.resolveSync` and names the offending module — it carries
+a positive control (the same walker, seeded at a file that really does import the entry,
+must find it) so a walker that resolved nothing cannot read as a clean graph.
+
+**Whitespace is empty too.** `effectiveOwnerHome` and `resolveNeutronHome` both guarded
+`length > 0`, so `OWNER_HOME='   '` was answered as a home: the `.url_slug` lookup ran
+against a directory named three spaces and a correctly renamed instance resolved
+anonymous again — the identical defect, one space past the fix for it, and through an
+input no empty-string case can reach. Both trim now; both still return the value
+verbatim, because blank means unset and a real path is published back byte-for-byte.
+
+**The fail-closed default in the wiring was dead.** `wire-cores-surfaces.ts` reads
+`input.slug_is_fallback ?? true` at both handoffs and the comment above each says
+forgetting fails closed — but `open/composer.ts` normalises the field and always sets it,
+so no test ever produced the absent case and mutating `?? true` to `?? false` left every
+suite green. The integration test now composes with the DANGEROUS value and deletes the
+field before composing the graph, which is the only way to reach that default; the same
+mutation reds exactly that test and nothing else.
 
 **The refusal is data now, not prose.** `MigrateOrphanedCredentialsResult` carried no
 field for it — `refused_direction` was consumed only to build a sentence and the call
@@ -102,13 +155,22 @@ emits `credential_scope_orphaned` with boot's own
 `reason: 'fallback_boot_handle_refused_direction'` plus a `surface` key, asserted by
 exact payload equality with the no-secret-material sweep.
 
-Five mutations, each with a control proving it landed: reinstating the `??`, deleting the
-read's try/catch, dropping the structural flag, suppressing the audit emit, and disarming
-the direction guard itself — the last one proving the suite still catches rows actually
-MOVING, not merely a missing marker. 67 tests green across the six touched files;
-`lint.sh` clean; `typecheck-all.sh` 50/51 with the one failure (`app/tsconfig.json`,
+Mutations, each performed and reverted with a control proving it landed: reinstating the
+`??`, dropping the structural flag, suppressing the audit emit, and disarming the
+direction guard itself — the last one proving the suite still catches rows actually
+MOVING, not merely a missing marker. Four more in the round that fixed the swallow:
+restoring the swallow reds 6 tests across three files (including the boot invariant it
+had broken); reverting either trim to `length > 0` reds the whitespace case; re-adding the
+`gateway/index.ts` import to `open/owner-identity.ts` reds the graph walker, which names
+the module; mutating `?? true` to `?? false` at both wiring handoffs reds only the new
+absent-field case. Removing the composer's `slug_is_fallback` assignment reds the
+FIELD-SPECIFIC ratchet by name (`composition-field-coverage.test.ts` over `WIRED_FIELDS`),
+not merely the count floor — measured, because a review reported the opposite.
+
+`lint.sh` clean. `typecheck-all.sh` 50/51 with the one failure (`app/tsconfig.json`,
 `TS2688 Cannot find type definition file for 'node'`) reproduced identically on the
-untouched tree — a local install artifact, unchanged by this work.
+stashed, untouched tree — a local install artifact (`app/node_modules/@types` holds only
+`react`), unchanged by this work.
 
 ## 2026-08-16 — two builds can append to this file at once
 

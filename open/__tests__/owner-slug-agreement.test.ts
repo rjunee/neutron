@@ -27,7 +27,13 @@ import {
   resolveOwnerSlug as gatewayResolveOwnerSlug,
   resolveOwnerSlugSourceFromConfig,
 } from '@neutronai/gateway/index.ts'
-import { envShimFromBootConfig, resolveBootConfig } from '@neutronai/config/index.ts'
+import {
+  effectiveOwnerHome,
+  envShimFromBootConfig,
+  resolveBootConfig,
+  OwnerSlugUnreadableError,
+} from '@neutronai/config/index.ts'
+import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 let home: string
 
@@ -245,6 +251,36 @@ describe('the boot resolver and the CLI resolver agree', () => {
       expect(gatewayResolveOwnerSlug(env)).toBe('dev')
     })
 
+    it('a WHITESPACE-ONLY OWNER_HOME is empty too, on both halves of the resolution', () => {
+      // ONE SPACE PAST THE FIX FOR THE EMPTY STRING. The guard was
+      // `length > 0`, so `'   '` was answered as a home: the `.url_slug` lookup
+      // ran against a directory named three spaces, found nothing, and a
+      // correctly renamed instance resolved anonymous again — the identical
+      // defect through an input the empty-string cases cannot reach.
+      // Measured before the fix: `OWNER_HOME='   '` → `{slug:'dev',
+      // source:'fallback'}` with `.url_slug` sitting in `NEUTRON_HOME`.
+      writeFileSync(join(home, '.url_slug'), 'renamed\n', 'utf8')
+      const env = { NEUTRON_HOME: home, OWNER_HOME: '   ' } as NodeJS.ProcessEnv
+
+      expect(resolveOwnerSlugSourceFromConfig(resolveBootConfig(env))).toEqual({
+        slug: 'renamed',
+        source: 'file',
+      })
+      expect(resolveOwnerSlug(env)).toBe('renamed')
+      expect(gatewayResolveOwnerSlug(env)).toBe('renamed')
+      // …AND THE OTHER HALF. `resolveNeutronHome` carried the same `length > 0`
+      // hole, so the DB path and the identity would have disagreed about the
+      // same variable. Both are fixed or neither is.
+      expect(resolveNeutronHome({ OWNER_HOME: '   ', NEUTRON_HOME: home })).toBe(home)
+      expect(resolveNeutronHome({ NEUTRON_HOME: '   ', OWNER_HOME: home })).toBe(home)
+
+      // CONTROL — a home that is genuinely a path is still honoured verbatim,
+      // so "blank means unset" did not become "trim everything".
+      const pinned = { NEUTRON_HOME: '/srv/elsewhere', OWNER_HOME: home } as NodeJS.ProcessEnv
+      expect(resolveOwnerSlug(pinned)).toBe('renamed')
+      expect(effectiveOwnerHome(resolveBootConfig(pinned))).toBe(home)
+    })
+
     it('the env shim publishes a usable OWNER_HOME rather than re-writing the empty one', () => {
       // The SECOND live site of the same `??`. `open/server.ts:130` fills a slot
       // that is `undefined` OR `''`, so the shim wrote the empty string back
@@ -262,46 +298,120 @@ describe('the boot resolver and the CLI resolver agree', () => {
   })
 
   /**
-   * A `.url_slug` THAT EXISTS BUT CANNOT BE READ MUST NOT THROW.
+   * A `.url_slug` THAT EXISTS BUT CANNOT BE READ IS AN ERROR, NOT AN ABSENCE.
    *
    * `existsSync` is true for a chmod-000 file and for a DIRECTORY of that name,
-   * and the read then throws EACCES / EISDIR out of a function
-   * `open/diagnostics-cli-impl.ts:32` calls OUTSIDE the try that produces
-   * `{ok:false}`. The `neutron doctor` end of this is pinned in
-   * `open/__tests__/diagnostics-cli.test.ts`; here it is pinned at the resolver
-   * itself, on all three wrappers, because every caller inherits it.
+   * and the read then throws EACCES / EISDIR. A round of this branch SWALLOWED
+   * that and fell through to `NEUTRON_INSTANCE_SLUG`, to stop `neutron doctor`
+   * emitting a stack trace. Review measured what that costs: on the exact
+   * configuration this module documents — `.url_slug` = the new handle, the env
+   * var still the OLD one — the fall-through answers `{slug:'old', source:'env'}`,
+   * `slug_is_fallback` reaches the credential guard as `false`, and the sweep
+   * migrates the owner's rows BACKWARD onto the name they were renamed away
+   * from, with nothing logged. The unreadable file is the only evidence that
+   * the fall-through answer is wrong.
+   *
+   * So the resolver throws and the ONE caller that would rather have an answer
+   * catches it: `neutron doctor` renders `{ok:false}` (pinned in
+   * `open/__tests__/diagnostics-cli.test.ts`) and `boot()` fails loudly (pinned
+   * in `gateway/__tests__/boot-init-cleanup.test.ts`, which the swallow broke).
    */
-  describe('an unreadable `.url_slug` degrades instead of throwing', () => {
-    it('EACCES falls through to the env answer', () => {
+  describe('an unreadable `.url_slug` throws instead of answering with the stale env handle', () => {
+    it('EACCES throws OwnerSlugUnreadableError rather than falling through', () => {
       const slugFile = join(home, '.url_slug')
       writeFileSync(slugFile, 'renamed\n', 'utf8')
-      // CONTROL — readable first, so a pass below cannot come from the file
+      // CONTROL — readable first, so a throw below cannot come from the file
       // never having been found at all.
       const env = { NEUTRON_HOME: home, NEUTRON_INSTANCE_SLUG: 'from-env' } as NodeJS.ProcessEnv
       expect(resolveOwnerSlug(env)).toBe('renamed')
 
       chmodSync(slugFile, 0o000)
-      // …AND PROVE THE MODE ACTUALLY DENIES THE READ. `chmod 000` does not stop
-      // root, so on a root CI container this fixture would silently become a
-      // readable file and the assertions below would pin the opposite behaviour.
-      // The EISDIR case beside this one denies root too and carries the axis
-      // unconditionally, so bailing here loses no coverage.
-      if (!readDenied(slugFile)) return
+      // …AND PROVE THE MODE ACTUALLY DENIES THE READ. `chmod 000` is advisory
+      // against root. The previous version of this test bailed with a bare
+      // `return` when it did not bite, so under a root CI container a test
+      // NAMED for the EACCES axis passed green having asserted nothing. Assert
+      // the correct answer for whichever world we are actually in instead: root
+      // can still read the file, and then the file must WIN — which is a real
+      // assertion about the same code path, not a skip wearing a green tick.
+      if (!readDenied(slugFile)) {
+        expect(resolveOwnerSlug(env)).toBe('renamed')
+        expect(gatewayResolveOwnerSlug(env)).toBe('renamed')
+        return
+      }
 
-      expect(resolveOwnerSlug(env)).toBe('from-env')
-      expect(gatewayResolveOwnerSlug(env)).toBe('from-env')
-      expect(bootSlug(env)).toBe('from-env')
+      expect(() => resolveOwnerSlug(env)).toThrow(OwnerSlugUnreadableError)
+      expect(() => gatewayResolveOwnerSlug(env)).toThrow(OwnerSlugUnreadableError)
+      expect(() => bootSlug(env)).toThrow(OwnerSlugUnreadableError)
+      // The message names the file, because the operator's next action is to
+      // fix its permissions and an errno alone does not say which file.
+      expect(() => resolveOwnerSlug(env)).toThrow(/\.url_slug/)
     })
 
-    it('EISDIR falls through to the fallback when there is no env either', () => {
+    it('EISDIR throws too, and does NOT quietly become the anonymous fallback', () => {
+      // A directory denies root as well, so this case carries the axis
+      // unconditionally on every runner.
       mkdirSync(join(home, '.url_slug'))
       const env = { NEUTRON_HOME: home } as NodeJS.ProcessEnv
-      expect(resolveOwnerSlug(env)).toBe('dev')
-      expect(gatewayResolveOwnerSlug(env)).toBe('dev')
+      expect(() => resolveOwnerSlug(env)).toThrow(OwnerSlugUnreadableError)
+      expect(() => gatewayResolveOwnerSlug(env)).toThrow(OwnerSlugUnreadableError)
+      expect(() => resolveOwnerSlugSourceFromConfig(resolveBootConfig(env))).toThrow(
+        OwnerSlugUnreadableError,
+      )
+    })
+
+    it('an EMPTY but readable `.url_slug` is still the absent case, not the error case', () => {
+      // The distinction the throw is FOR. A file that was read successfully and
+      // says nothing is a box that has not been renamed; only a file that could
+      // not be read at all is unknown. Collapsing the two would make the throw
+      // fire on an ordinary fresh install.
+      writeFileSync(join(home, '.url_slug'), '   \n', 'utf8')
+      const env = { NEUTRON_HOME: home, NEUTRON_INSTANCE_SLUG: 'from-env' } as NodeJS.ProcessEnv
       expect(resolveOwnerSlugSourceFromConfig(resolveBootConfig(env))).toEqual({
-        slug: 'dev',
-        source: 'fallback',
+        slug: 'from-env',
+        source: 'env',
       })
+      expect(resolveOwnerSlug(env)).toBe('from-env')
+    })
+
+    it('a RENAMED box does not answer with the stale env handle — the defect, stated as data', () => {
+      // The configuration `open/owner-identity.ts` documents: the rename file
+      // holds the new handle and `NEUTRON_INSTANCE_SLUG` still holds the old
+      // one. Under the swallow this resolved to `{slug:'old-handle',
+      // source:'env'}` — a CONFIGURED provenance — so the direction guard
+      // permitted a migration onto `old-handle`. Asserting the provenance and
+      // not only the string is the point: a version that answered
+      // `{slug:'old-handle', source:'fallback'}` would be refused by the guard
+      // and is a materially different (safe) failure.
+      const slugFile = join(home, '.url_slug')
+      writeFileSync(slugFile, 'renamed-handle\n', 'utf8')
+      const env = {
+        NEUTRON_HOME: home,
+        NEUTRON_INSTANCE_SLUG: 'old-handle',
+      } as NodeJS.ProcessEnv
+      // CONTROL — while readable, the file outranks the env var.
+      expect(resolveOwnerSlugSourceFromConfig(resolveBootConfig(env))).toEqual({
+        slug: 'renamed-handle',
+        source: 'file',
+      })
+
+      chmodSync(slugFile, 0o000)
+      if (!readDenied(slugFile)) {
+        expect(resolveOwnerSlugSourceFromConfig(resolveBootConfig(env)).slug).toBe('renamed-handle')
+        return
+      }
+      let resolved: unknown
+      try {
+        resolved = resolveOwnerSlugSourceFromConfig(resolveBootConfig(env))
+      } catch (err) {
+        expect(err).toBeInstanceOf(OwnerSlugUnreadableError)
+        return
+      }
+      // Reached only if the resolver answered instead of throwing — name the
+      // answer in the failure so the next reader sees WHY it is unacceptable.
+      throw new Error(
+        `expected a throw; got ${JSON.stringify(resolved)} — an 'env' provenance here ` +
+          `permits migrating credential rows back onto the pre-rename handle`,
+      )
     })
   })
 

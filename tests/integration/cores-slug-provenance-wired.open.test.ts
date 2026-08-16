@@ -135,7 +135,7 @@ afterEach(async () => {
  * single input under test; it travels composer → composition →
  * `wireCoresSurfaces` → both surfaces, and nothing here short-circuits any leg.
  */
-async function boot(slug_is_fallback: boolean): Promise<Harness> {
+async function boot(slug_is_fallback: boolean | 'absent'): Promise<Harness> {
   home = createIsolatedHome({
     slug: OWNER,
     extraEnvKeys: [
@@ -161,7 +161,27 @@ async function boot(slug_is_fallback: boolean): Promise<Harness> {
     env: process.env,
     substrateFactory: (() => stubSubstrate()) as never,
   })
-  const composition = await composer({ db, project_slug: OWNER, slug_is_fallback })
+  // `'absent'` composes with the DANGEROUS value and then REMOVES the field, so
+  // what reaches `wireCoresSurfaces` is a composition that never said. That is
+  // the only way to reach the `?? true` fail-closed defaults there
+  // (`wire-cores-surfaces.ts`): `open/composer.ts` normalises the field and
+  // always sets it, so no input to the real composer can leave it undefined —
+  // and a review mutated `?? true` to `?? false` and watched every test in this
+  // file stay green. Composing with `false` first is deliberate: it proves the
+  // refusal below comes from the DELETION and not from a `true` surviving
+  // somewhere upstream.
+  const composition = await composer({
+    db,
+    project_slug: OWNER,
+    slug_is_fallback: slug_is_fallback === 'absent' ? false : slug_is_fallback,
+  })
+  if (slug_is_fallback === 'absent') {
+    delete (composition as { slug_is_fallback?: boolean }).slug_is_fallback
+    // The premise of the case, asserted rather than assumed — if a future
+    // composition re-added the field downstream, the test below would pass for
+    // the wrong reason.
+    expect((composition as { slug_is_fallback?: boolean }).slug_is_fallback).toBeUndefined()
+  }
   const graph = await composeProductionGraph(composition)
   if (graph.fetch === undefined || graph.websocket === undefined) {
     throw new Error('composer produced no fetch/websocket')
@@ -300,4 +320,44 @@ test('REGISTERED tool: a configured boot DOES move the rows', async () => {
   const rows = await whereIsTheRow(h)
   expect(rows.stale).toBeNull()
   expect(rows.owner).toBe('tvly-stale')
+}, 120_000)
+
+/**
+ * A COMPOSITION THAT NEVER SAID MUST REFUSE — THE THIRD CASE, WHICH WAS DEAD.
+ *
+ * `wire-cores-surfaces.ts` reads `input.slug_is_fallback ?? true` at BOTH
+ * handoffs, and the comment above each one says forgetting fails closed. Review
+ * mutated `?? true` to `?? false` and every test in this file, plus the three
+ * constructing suites, stayed green — because `open/composer.ts` normalises the
+ * field and always sets it, so the absent case simply never occurred in any
+ * test. A default nothing exercises is a comment, and CLAUDE.md rule 3a is
+ * exactly this shape: a docblock describing a mode no caller can enter.
+ *
+ * The absent case is not hypothetical — `slug_is_fallback` is OPTIONAL on
+ * `CompositionInput` (`gateway/boot-composition-types.ts`,
+ * `gateway/composition/input/misc-input.ts`), so ANY other composer, or a
+ * future edit that drops the normalisation, produces it. Both handoffs are
+ * asserted, because each has its own `??` and one can be changed without the
+ * other.
+ */
+test('a composition that OMITS slug_is_fallback fails CLOSED on both surfaces', async () => {
+  const h = await boot('absent')
+  await seedOrphan(h)
+
+  const res = await authed(h.base, MIGRATE_PATH, { method: 'POST' })
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as MigrateBody
+  expect(body.refused_direction).toBe(true)
+  expect(body.total_moved).toBe(0)
+
+  const tool = h.tools.get(MIGRATE_TOOL)
+  expect(tool).toBeDefined()
+  const out = (await tool!.handler({}, CTX)) as MigrateBody
+  expect(out.refused_direction).toBe(true)
+  expect(out.total_moved).toBe(0)
+
+  // The rows themselves, not the reported counts.
+  const rows = await whereIsTheRow(h)
+  expect(rows.stale).toBe('tvly-stale')
+  expect(rows.owner).toBeNull()
 }, 120_000)

@@ -286,11 +286,11 @@ describe('collectCliDiagnostics', () => {
    * THE SAME CONTRACT, THE OTHER WAY OUT OF THE SAME LINE.
    *
    * The round above closed the ZodError escape and left a filesystem one open
-   * on the very next statement: `gateway/index.ts` did an UNGUARDED
+   * on the very next statement: the resolver does an UNGUARDED
    * `readFileSync(join(ownerHome, '.url_slug'))` behind an `existsSync` check.
    * `existsSync` is true for a chmod-000 file and for a DIRECTORY of that name,
    * and the read then throws EACCES / EISDIR — past the same `{ok:false}`
-   * contract, from the same call site (`diagnostics-cli-impl.ts:32`, outside the
+   * contract, from the same call site (`diagnostics-cli-impl.ts`, outside the
    * try). EACCES on `.url_slug` is a recorded real failure mode, not a
    * hypothetical.
    *
@@ -298,8 +298,19 @@ describe('collectCliDiagnostics', () => {
    * green while the filesystem axis throws. Both variants were reproduced
    * against the unfixed resolver — `EACCES: permission denied, open
    * '<home>/.url_slug'` and `EISDIR: illegal operation on a directory, read`.
+   *
+   * ⚠️ THE CONTRACT IS `{ok:false}`, NOT `{ok:true}` WITH A SUBSTITUTED SLUG.
+   * The first fix made the resolver swallow the read error and answer with
+   * `NEUTRON_INSTANCE_SLUG`, and these tests asserted `ok:true` — which pinned
+   * a doctor that reports an identity it could not actually confirm, and, far
+   * worse, handed the same fabricated `source:'env'` to the credential
+   * direction guard, which then migrated rows onto the stale handle. The slug
+   * filters every event and job in this report, so answering with the wrong one
+   * renders a healthy instance empty. `{ok:false}` carrying the errno is the
+   * honest answer, is what `main` returns, and is what the printed contract
+   * says. Not throwing was always the requirement; `ok:true` never was.
    */
-  it('does NOT throw when `.url_slug` exists but cannot be read (EACCES)', () => {
+  it('returns {ok:false} — not a throw — when `.url_slug` cannot be read (EACCES)', () => {
     const dbPath = join(tmp, 'project.db')
     const db = ProjectDb.open(dbPath)
     applyMigrationsToProjectDb(db)
@@ -315,39 +326,52 @@ describe('collectCliDiagnostics', () => {
     expect(readable.report.project_slug).toBe('renamed')
 
     chmodSync(slugFile, 0o000)
-    // `chmod 000` is advisory against root, so prove the mode really denies the
-    // read before asserting the deny-path behaviour (a root CI container would
-    // otherwise pin the opposite branch). The EISDIR case below denies root too.
+    // `chmod 000` is advisory against root. The previous version of this test
+    // bailed with a bare `return` when the mode did not bite, so a test NAMED
+    // for the EACCES axis passed green on a root runner having asserted
+    // nothing. Assert the correct outcome for whichever world we are in
+    // instead: root still reads the file, and then the file must WIN.
     let denied = false
     try {
       readFileSync(slugFile, 'utf8')
     } catch {
       denied = true
     }
-    if (!denied) return
+    if (!denied) {
+      const asRoot = collectCliDiagnostics(envFor(dbPath))
+      expect(asRoot.ok).toBe(true)
+      if (!asRoot.ok) return
+      expect(asRoot.report.project_slug).toBe('renamed')
+      return
+    }
 
     const result = collectCliDiagnostics(envFor(dbPath))
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    // Degrades to the env answer, exactly as an ABSENT rename file already does.
-    expect(result.report.project_slug).toBe('demo')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    // The operator's next action is a `chmod`, so the error has to name the
+    // file and the reason — not just "something went wrong".
+    expect(result.error).toContain('.url_slug')
+    expect(result.error).toContain('identity')
+    // And it must NOT be the stale env handle wearing the costume of an answer.
+    expect(result.error).not.toContain('project_slug=demo')
   })
 
-  it('does NOT throw when `.url_slug` is a directory (EISDIR)', () => {
+  it('returns {ok:false} — not a throw — when `.url_slug` is a directory (EISDIR)', () => {
     const dbPath = join(tmp, 'project.db')
     const db = ProjectDb.open(dbPath)
     applyMigrationsToProjectDb(db)
     db.close()
 
     // CONTROL — the same env with no `.url_slug` at all already returns ok.
+    // A directory denies root as well, so this case runs everywhere.
     const before = collectCliDiagnostics(envFor(dbPath))
     expect(before.ok).toBe(true)
 
     mkdirSync(join(tmp, '.url_slug'))
     const result = collectCliDiagnostics(envFor(dbPath))
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.report.project_slug).toBe('demo')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error).toContain('.url_slug')
   })
 
   /**

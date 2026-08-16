@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
@@ -24,11 +24,11 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph, type MemoryHealthProvider } from './composition.ts'
 import { LoopRegistry } from '@neutronai/loop'
 import {
-  effectiveOwnerHome,
   resolveBootConfig,
   resolveIdentityConfig,
+  resolveOwnerSlugSourceFromConfig,
   type BootConfig,
-  type IdentityConfig,
+  type OwnerSlugResolution,
 } from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
@@ -197,90 +197,24 @@ export function resolveOwnerSlugFromConfig(config: BootConfig): string {
   return resolveOwnerSlugSourceFromConfig(config).slug
 }
 
-/** Where the boot slug came from — see {@link resolveOwnerSlugSourceFromConfig}. */
-export type OwnerSlugSource = 'file' | 'env' | 'fallback'
-
-/** The boot slug plus its provenance. */
-export interface OwnerSlugResolution {
-  slug: string
-  source: OwnerSlugSource
-}
-
-/**
- * {@link resolveOwnerSlugFromConfig}'s body, plus the one bit that call site
- * throws away: WHERE the slug came from.
- *
- * The scope reconciler needs to tell "explicitly dev" from "nobody told me who
- * I am" (defect 2026-08-14: an `NEUTRON_INSTANCE_SLUG`-unset boot that inherited
- * a live `NEUTRON_HOME` re-keyed every credential row onto the `'dev'` fallback,
- * and the running gateway — frozen on its real handle — read zero secrets). A
- * bare string cannot carry that distinction, and `config.instanceSlug` is
- * `undefined` exactly when the env var was absent (`config/index.ts:428`), so it
- * is recoverable HERE and nowhere later.
- *
- * Precedence: `.url_slug` file > `instanceSlug` > `'dev'`. An EXPLICIT
- * `NEUTRON_INSTANCE_SLUG=dev` is `'env'` — deliberately configuring the same
- * string the fallback happens to use is still configuring it, and the guard
- * must honour that.
- *
- * AN EMPTY OR WHITESPACE VALUE IS `'fallback'`, NOT `'env'`. That sentence used
- * to say the opposite, and the code used to agree with it: a review found that
- * `NEUTRON_INSTANCE_SLUG=''` was classified as a configured identity, which
- * told the credential direction guard this process knows who it is and let an
- * explicit migration move rows onto the empty handle. An empty variable is not
- * an identity; it is the absence of one wearing its shape.
- *
- * TAKES `IdentityConfig`, NOT `BootConfig`. It only ever read those three
- * fields, and demanding the whole config forced every caller to VALIDATE the
- * whole environment first — which is how an unrelated `NEUTRON_PORT=bad` began
- * throwing out of `neutron doctor`. `BootConfig extends IdentityConfig`, so
- * boot still passes its frozen config here unchanged and the three resolvers
- * still share one body.
- */
-export function resolveOwnerSlugSourceFromConfig(config: IdentityConfig): OwnerSlugResolution {
-  // AN EMPTY `OWNER_HOME` IS NOT A HOME, AND IT USED TO COLLAPSE ALL THREE
-  // RESOLVERS AT ONCE. This read `config.ownerHome ?? config.neutronHome`, and
-  // `??` does not fall through on `''` — so `OWNER_HOME=''` resolved the
-  // effective home to `''`, the guard below rejected it, and the `.url_slug`
-  // lookup was skipped instead of falling back to `neutronHome`. A correctly
-  // renamed instance then booted on the bare `'dev'` fallback and refused every
-  // credential migration, telling the owner to set a handle already set.
-  // `effectiveOwnerHome` is the ONE place that decides, and it agrees with
-  // `resolveNeutronHome` (`migrations/db-path.ts:35-41`) about what empty means.
-  const ownerHome = effectiveOwnerHome(config)
-  if (ownerHome.length > 0) {
-    const slugFile = join(ownerHome, '.url_slug')
-    if (existsSync(slugFile)) {
-      // AN UNREADABLE RENAME FILE DEGRADES TO THE ENV ANSWER, IT DOES NOT THROW.
-      // `existsSync` is true for a chmod-000 file and for a DIRECTORY named
-      // `.url_slug`, and the read then throws EACCES / EISDIR. This function is
-      // reached from `neutron doctor` via `open/diagnostics-cli-impl.ts:32`,
-      // which calls it OUTSIDE the try that produces `{ok:false}` — so the throw
-      // escaped the documented contract and the operator got a stack trace
-      // instead of the state of their box. EACCES on `.url_slug` is a recorded
-      // real failure mode, not a hypothetical. An unreadable file is treated
-      // exactly like an absent one, which is already a supported state.
-      let fromFile: string | undefined
-      try {
-        fromFile = readFileSync(slugFile, 'utf8').trim()
-      } catch {
-        fromFile = undefined
-      }
-      if (fromFile !== undefined && fromFile.length > 0) return { slug: fromFile, source: 'file' }
-    }
-  }
-  // TRIMMED AND NON-EMPTY, exactly like the `.url_slug` branch above — the
-  // asymmetry between them WAS the bug. `NEUTRON_INSTANCE_SLUG=''` is not a
-  // configured identity, it is an empty variable wearing the costume of one,
-  // and classifying it as `'env'` told the credential guard this process knows
-  // who it is. Found by review with a repro: resolve with an empty slug, call
-  // the explicit migration, and rows move off the live handle onto `''`.
-  //
-  // A blank value means nobody said, which is what `'fallback'` means.
-  const fromEnv = config.instanceSlug?.trim() ?? ''
-  if (fromEnv.length > 0) return { slug: fromEnv, source: 'env' }
-  return { slug: 'dev', source: 'fallback' }
-}
+// THE SLUG RESOLVER MOVED DOWN TO `config/index.ts` AND IS RE-EXPORTED HERE.
+// It was DEFINED on this entry module, and `open/owner-identity.ts` imported it
+// from here — which put `gateway/index.ts` into the Open composer's own import
+// graph. `gateway/composer-contract.ts` forbids exactly that: "the composer
+// graph must NOT contain the entry module (`gateway/index.ts`) at all",
+// because an entry↔composer edge is the top-level-await cycle that completes
+// under Bun's current loader and can deadlock under a strict reading of the
+// ESM TLA spec (and prod bun is PATH-pinned, not version-pinned). depcruise
+// permits `open → gateway` wholesale, so no mechanical gate catches this; the
+// contract is prose and the fix is to not need the edge. Its inputs are an
+// `IdentityConfig` and the filesystem, so the identity leaf is its real home.
+// `open/composer.ts`'s freedom from this module is pinned by
+// `open/__tests__/composer-graph-excludes-gateway-entry.test.ts`.
+export {
+  resolveOwnerSlugSourceFromConfig,
+  OwnerSlugUnreadableError,
+} from '@neutronai/config/index.ts'
+export type { OwnerSlugSource, OwnerSlugResolution } from '@neutronai/config/index.ts'
 
 
 export interface BootOptions {

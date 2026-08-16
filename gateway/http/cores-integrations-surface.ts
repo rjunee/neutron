@@ -152,7 +152,7 @@ export function createCoresIntegrationsSurface(
           tokens,
           secretsStore,
           project_slug,
-        slug_is_fallback,
+          slug_is_fallback,
           // Threaded so the panel distinguishes "scoped to a previous owner
           // handle" from "not connected" (card 2026-08-14).
           ...(db !== undefined ? { db } : {}),
