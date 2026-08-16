@@ -34,6 +34,25 @@
  * leave a durable `instance_scope_rekey_refused` row. That row is the positive
  * evidence that `currentSlugIsFallback` reached the reconciler from `boot()`.
  *
+ * And a COUNT of those rows is itself fakeable, which is the second thing this
+ * file now pins (2026-08-16). Journalled under the anonymous fallback the row
+ * satisfies any count and is unreadable FOREVER — the refusal deliberately
+ * leaves the ledger on `juno`, so the next explicit boot takes the
+ * ledger-agrees fast path and never sweeps `system_events` back, while the
+ * owner's diagnostics feed is strictly `WHERE project_slug = ?`. So the
+ * assertions below are on the SCOPE, read through the production reader
+ * (`listRecentForScope`), with the anonymous scope asserted EMPTY as the
+ * control. INVARIANTS #116(b).
+ *
+ * SCOPE OF THIS FILE, stated because it is NOT the whole rule: here the live
+ * handle, the ledger's handle and the frozen credential handle are all the
+ * string `juno`, so it cannot tell a row scoped to "the handle the owner reads
+ * under" from one scoped to "the handle the rows are stuck under". That
+ * distinction is what
+ * `gateway/__tests__/boot-refusal-scope.test.ts` exists for (the rename shape,
+ * where they diverge), and `gateway/__tests__/scope-refusal-journal.test.ts`
+ * pins the policy — narrowing, blank handles, and the edge trigger — directly.
+ *
  * MUTATION-TESTED — see the commit body for the stub and the failure it
  * produced.
  */
@@ -48,6 +67,10 @@ import { boot, type BootHandle } from '@neutronai/gateway/index.ts'
 import { readGitHubToken, storeGitHubToken } from '@neutronai/github/credential.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
 import { asOwnerHandle, ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  type PersistedSystemEvent,
+  SystemEventsStore,
+} from '@neutronai/persistence/system-events.ts'
 
 import { createIsolatedHome, type IsolatedHome } from '../../tests/support/test-isolation.ts'
 import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
@@ -121,6 +144,38 @@ function refusalEvents(): number {
             WHERE event_name = 'instance_scope_rekey_refused'`,
         )
         .get()?.n ?? 0,
+  )
+}
+
+/**
+ * The scopes the refusal rows actually landed under — the assertion a COUNT
+ * cannot make. A count is satisfied by a row keyed to the anonymous fallback,
+ * which is a row no owner can ever read (see `refusalIsVisibleToOwner` below).
+ */
+function refusalScopes(): string[] {
+  return withDb((db) =>
+    db
+      .prepare<{ project_slug: string }, []>(
+        `SELECT DISTINCT project_slug FROM system_events
+          WHERE event_name = 'instance_scope_rekey_refused'
+          ORDER BY project_slug`,
+      )
+      .all()
+      .map((r) => r.project_slug),
+  )
+}
+
+/**
+ * The acceptance the whole guard is FOR: does the owner's own instance-scoped
+ * diagnostics feed surface the refusal? Read through the production reader
+ * (`listRecentForScope`, strictly `WHERE project_slug = ?`), not through a
+ * hand-written query that could be laxer than production.
+ */
+function refusalIsVisibleToOwner(scope: string): PersistedSystemEvent[] {
+  return withDb((db) =>
+    new SystemEventsStore({ db })
+      .listRecentForScope(scope, 100)
+      .filter((e) => e.event === 'instance_scope_rekey_refused'),
   )
 }
 
@@ -265,6 +320,56 @@ describe('direction guard at boot — an anonymous process cannot steal the live
     // place means the reconcile was skipped, not refused — the exact silent
     // failure this file exists to catch.
     expect(refusalEvents()).toBeGreaterThanOrEqual(1)
+
+    // ── AND THE SCOPE, WHICH THE COUNT ABOVE CANNOT SEE ────────────────────
+    // A row keyed to `dev` satisfies the count and is unreadable forever: the
+    // refusal deliberately leaves the ledger on `juno`, so the next explicit
+    // boot takes the ledger-agrees fast path and never sweeps `system_events`
+    // back — and the owner's diagnostics feed is strictly `WHERE project_slug
+    // = ?`. The row belongs to the handle whose rows were at stake.
+    expect(refusalScopes()).toEqual([LIVE])
+    // The acceptance in the owner's terms: it is in HIS feed, through the
+    // production reader, naming the anonymous process that tried.
+    const visible = refusalIsVisibleToOwner(LIVE)
+    expect(visible).toHaveLength(1)
+    expect(visible[0]!.payload['attempted_by_slug']).toBe('dev')
+    expect(visible[0]!.payload['targeted_slug']).toBe(LIVE)
+    // Narrowed to this scope: no OTHER handle's name rides along (Argus r1 — a
+    // per-handle fan-out of the full payload is a cross-scope disclosure). Here
+    // there is only one, so the count is zero.
+    expect(visible[0]!.payload['other_targeted_handles']).toBe(0)
+    // And no ROW COUNT rides along either, from any handle (Argus r2 blocker):
+    // a payload field sourced from a `COUNT(*)` over the swept tables moves when
+    // the owner creates a task, which re-arms the edge trigger on every boot and
+    // drains the very window this row is competing to appear in.
+    expect(Object.keys(visible[0]!.payload).sort()).toEqual([
+      'attempted_by_slug',
+      'other_targeted_handles',
+      'targeted_slug',
+    ])
+    // The negative control that makes the assertion above mean something: the
+    // anonymous scope holds nothing, so `toEqual([LIVE])` is a real placement
+    // and not a duplicate written to both.
+    expect(refusalIsVisibleToOwner('dev')).toEqual([])
+
+    // THE SECOND RECONCILER, same rule. `reconcileCredentialScope` sweeps a
+    // DIFFERENT table set, so scoping only the re-key row readably leaves the
+    // credential refusal exactly as invisible as the bug being fixed here.
+    const credRefusal = withDb((db) =>
+      new SystemEventsStore({ db })
+        .listRecentForScope(LIVE, 100)
+        .filter((e) => e.event === 'credential_scope_orphaned'),
+    )
+    expect(credRefusal).toHaveLength(1)
+    expect(credRefusal[0]!.payload['attempted_by_slug']).toBe('dev')
+    expect(credRefusal[0]!.payload['refused_direction']).toBe(true)
+    expect(
+      withDb((db) =>
+        new SystemEventsStore({ db })
+          .listRecentForScope('dev', 100)
+          .filter((e) => e.event === 'credential_scope_orphaned'),
+      ),
+    ).toEqual([])
 
     // ── BOOT 3 — the real gateway again. ───────────────────────────────────
     // The 19:34 boot, which in the outage moved the rows back. Here there is

@@ -118,7 +118,36 @@ export type SystemEventName =
   // migrate, because the boot slug was the bare `'dev'` FALLBACK and the
   // database already carried rows under an explicit handle. Nothing moved; the
   // durable record is that an anonymous process was pointed at a real
-  // instance's database. Emitted at most once per boot.
+  // instance's database.
+  //
+  // SCOPE (decision 2026-08-16, INVARIANTS #116(b)): `project_slug` is a handle
+  // an owner can actually READ this database's feed under — the ledger's
+  // handle, or `onboarding_state`'s when the ledger is absent. NOT the anonymous
+  // fallback that attempted the move, and NOT (for the credential half) the
+  // frozen handle the rows are stuck under, since that handle's divergence from
+  // the live one IS the condition being reported. `listRecentForScope` below is
+  // strictly `WHERE project_slug = ?`, so any other choice is unreadable
+  // forever. One row per readable scope, each NARROWED to that scope — its own
+  // handle named; every other handle is reduced to a count, never a name,
+  // because a foreign key in an instance-scoped feed is exactly the cross-scope
+  // disclosure that predicate exists to prevent. The attempting handle rides in
+  // `attempted_by_slug`. EDGE-TRIGGERED against the VISIBLE window: a repeat the
+  // owner can still see is not re-journalled (`listVisibleForScopeAndName` +
+  // `shouldJournal`), while a repeat that has rotated OUT of it is written
+  // again, because the owner can no longer see it. The same rule applies to
+  // `credential_scope_orphaned` on BOTH its branches.
+  //
+  // AND THE PAYLOADS CARRY NO ACTIVITY-COUPLED COUNTS, WHICH IS WHAT MAKES THE
+  // TRIGGER WORTH ANYTHING (Argus r2 blocker on PR #322, 2026-08-16). The
+  // trigger hashes the payload, so any field that moves with ordinary owner
+  // activity re-arms it every boot and the starvation is back in full — and only
+  // on instances that are in USE, which is why every test that boots against an
+  // idle database passed while it was broken. `instance_scope_rekey_refused`
+  // carried a `COUNT(*)` over ~40 swept tables and did exactly that. The
+  // credential refusal's `orphaned_rows` is the lawful contrast: it counts
+  // credential-table rows only, which move only when the orphaned set itself
+  // changes — a change in the CONDITION, worth a fresh row. Volumes that drift
+  // with use belong in the log lines, which are unbounded.
   | 'instance_scope_rekey_refused'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
@@ -326,6 +355,69 @@ export class SystemEventsStore implements SystemEventSink {
         ORDER BY ts DESC, id DESC
         LIMIT ?`,
       [project_slug, n],
+    )
+    return rows.map((r) => rowToPersisted(r))
+  }
+
+  /**
+   * Read-only: EVERY row for one `(project_slug, event_name)` pair that is still
+   * INSIDE the reader's window — i.e. the ones among the newest `windowSize`
+   * rows {@link listRecentForScope} would return for that scope. Newest first;
+   * `[]` when none are visible.
+   *
+   * This is the RISING-EDGE read for a repeating boot-time condition. A degrade
+   * that re-fires unchanged on every boot (the scope-direction refusal: an
+   * anonymous process pointed at a live database boots as often as someone runs
+   * it) would otherwise write one row per boot into a feed that is 50 rows deep
+   * with no retention sweep, evicting every other degrade event — a warning that
+   * starves the report it is trying to appear in. Emitters ask whether the
+   * payload they are about to write is ALREADY among these rows and skip it if
+   * so (`gateway/scope-refusal-journal.ts` `shouldJournal`).
+   *
+   * IT RETURNS THE SET, NOT THE NEWEST ROW, AND THAT IS THE FIX FOR AN
+   * ALTERNATION HOLE (Argus r1 blocker on PR #322, 2026-08-16). The previous
+   * shape (`latestVisibleForScopeAndName`, `LIMIT 1`) let the caller compare
+   * only against the LAST row, and `credential_scope_orphaned` is written in two
+   * different payload shapes under one `(scope, event_name)` key — the
+   * direction refusal and the ordinary ambiguous census. A box that alternates
+   * between them (an anonymous boot, then an explicit one, then anonymous…)
+   * makes the newest row differ from the payload EVERY time, so every boot
+   * writes and the 50-row window drains anyway. Compared against the whole
+   * visible set, the second occurrence of either shape is already on the page
+   * and is suppressed; the feed settles at one row per distinct shape.
+   *
+   * THE WINDOW IS THE POINT, and it is why this is not an unbounded scan over
+   * the table (which is what it was until Argus r2, 2026-08-16). Suppression is
+   * only ever justified by "the owner is already looking at this row".
+   * `system_events` has NO retention sweep, so a match against unbounded
+   * history keeps matching a row that rotated out of the feed years ago and
+   * suppresses the warning PERMANENTLY — a silent, unrecoverable version of the
+   * invisibility the caller exists to fix. Bounded to the same window the
+   * reader uses, a row the owner can no longer see is new information again.
+   *
+   * `windowSize <= 0` → `[]` (an empty window shows nothing, so nothing is
+   * already visible). Ordering matches {@link listRecentForScope} exactly —
+   * `ts DESC, id DESC`; within one millisecond `id` is a random UUID, so the
+   * tiebreak is arbitrary but CONSISTENT with what the reader displays, which
+   * is the only property the edge trigger needs. Bounded by `windowSize`, so
+   * the caller parses at most one window's worth of payloads.
+   */
+  listVisibleForScopeAndName(
+    project_slug: string,
+    eventName: SystemEventName,
+    windowSize: number,
+  ): PersistedSystemEvent[] {
+    if (!Number.isFinite(windowSize) || windowSize <= 0) return []
+    const rows = this.db.all<SystemEventRow, [string, number, string]>(
+      `SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
+         FROM (SELECT id, ts, level, module, event_name, payload_json, project_slug, duration_ms
+                 FROM system_events
+                WHERE project_slug = ?
+                ORDER BY ts DESC, id DESC
+                LIMIT ?)
+        WHERE event_name = ?
+        ORDER BY ts DESC, id DESC`,
+      [project_slug, Math.floor(windowSize), eventName],
     )
     return rows.map((r) => rowToPersisted(r))
   }

@@ -331,14 +331,39 @@ test('a real FALLBACK boot refuses, says why in the audit row, and leaves the ro
 
     // THE POINT: the reason, by exact equality on the whole payload. A generic
     // orphan row would send the reader to the migration that just refused.
+    //
+    // THE SHAPE CHANGED WITH INVARIANTS #116(b), AND THE CHANGE IS THE FEATURE.
+    // This used to assert `{from: [LIVE], orphan_counts: [...], reason}` — i.e.
+    // the FROZEN credential handle's NAME and its row count, written under the
+    // booting process's own handle. Both halves were the defect:
+    //   - the SCOPE. `listRecentForScope` is strictly `WHERE project_slug = ?`,
+    //     so a row under the anonymous fallback is one no owner ever reads.
+    //     The row now goes to the handles this database records as its own and,
+    //     only when it records none (this fixture seeds a secret and nothing
+    //     else — no ledger, no onboarding row), falls back to the attempting
+    //     handle, which is the documented floor and exactly what shipped before.
+    //   - the CONTENT. `LIVE` is a foreign handle relative to whatever scope the
+    //     row lands in, and a foreign handle's NAME in an instance-scoped feed
+    //     is the cross-scope disclosure the strict predicate exists to prevent.
+    //     It is reduced to counts, and `attempted_by_slug` carries the one name
+    //     the reader needs to act (`gateway/scope-refusal-journal.ts`).
+    // `refused_direction: true` is what now says WHY in the journal — the thing
+    // this test was added to pin — and the operator-facing log line below still
+    // carries the reason string verbatim.
     const payloads = systemEventPayloads('credential_scope_orphaned')
     expect(payloads).toHaveLength(1)
     assertNoSecretMaterial(payloads[0]!, ['live-token'])
     expect(JSON.parse(payloads[0]!)).toEqual({
-      from: [LIVE],
-      orphan_counts: [{ table: 'secrets', handle: LIVE, rows: 1 }],
-      reason: 'fallback_boot_handle_refused_direction',
+      refused_direction: true,
+      orphaned_handles: 1,
+      orphaned_rows: 1,
+      orphaned_tables: ['secrets'],
+      attempted_by_slug: 'dev',
     })
+    // The narrowing, asserted as an ABSENCE and not merely implied by the
+    // equality above: a later field addition that reintroduced the frozen
+    // handle's name would have to delete this line to go green.
+    expect(payloads[0]!).not.toContain(LIVE)
 
     // AND the operator-facing line carries it too.
     const orphanLines = warned.filter((l) => l.includes('credential_scope_orphaned'))

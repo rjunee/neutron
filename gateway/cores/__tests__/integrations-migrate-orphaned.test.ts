@@ -481,6 +481,17 @@ test('a refused explicit migration journals credential_scope_orphaned with the r
   // EXACT equality on the whole payload, matching the boot test's discipline: a
   // `toContain`-style check would let a future edit smuggle a credential VALUE
   // into the audit row unnoticed.
+  //
+  // SCOPE + SHAPE ARE BOOT'S (Argus r1 on PR #322, 2026-08-16 — INVARIANTS
+  // #116(b)). This fixture records no owner identity (no ledger row, no
+  // `onboarding_state` row), so the planner lands on its documented FLOOR: the
+  // attempting handle, `BOOT`. That is the same value the old unconditional
+  // write used, which is exactly why the defect was invisible here — the test
+  // below that seeds a ledger is the one that can tell the two apart. The
+  // PAYLOAD changed regardless: every foreign handle is now a COUNT, because a
+  // frozen handle's NAME in an instance-scoped feed is the cross-scope
+  // disclosure the strict predicate exists to prevent. The owner is told the
+  // volume; the live integrations surface, already scoped to him, names them.
   expect(captured).toHaveLength(1)
   const event = captured[0]!
   expect(event.event).toBe('credential_scope_orphaned')
@@ -488,21 +499,72 @@ test('a refused explicit migration journals credential_scope_orphaned with the r
   expect(event.module).toBe('gateway')
   expect(event.project_slug).toBe(BOOT)
   expect(event.payload).toEqual({
-    from: [STALE],
-    orphan_counts: refused.skipped,
+    refused_direction: true,
+    orphaned_handles: 1,
+    orphaned_rows: refused.skipped.reduce((sum, s) => sum + s.rows, 0),
+    orphaned_tables: [...new Set(refused.skipped.map((s) => s.table))].sort(),
+    attempted_by_slug: BOOT,
     reason: 'fallback_boot_handle_refused_direction',
     surface: 'explicit_migrate',
   })
+  // And the frozen handle's NAME is nowhere in the row.
+  expect(JSON.stringify(event.payload)).not.toContain(STALE)
 
   const journaled = JSON.stringify(event)
   for (const secret of [FRESH, STALE_VAL, OTHER, CREDENTIAL_CIPHERTEXT]) {
     expect(journaled).not.toContain(secret)
   }
   expect(journaled).not.toContain('iv_b64')
+  // The CONTROL for this row — the same fixture with provenance the only
+  // difference journals `credential_scope_migrated` instead — lives in the test
+  // immediately below, which needs the same two calls anyway.
+})
 
-  // CONTROL — the SAME fixture with provenance the only difference journals the
-  // MIGRATED event instead, so the row above is caused by the refusal and not
-  // by the reconciler emitting an orphan row on every call.
+/**
+ * THE BLOCKER (Argus r1 on PR #322, 2026-08-16 — INVARIANTS #116(b)).
+ *
+ * This surface refuses ONLY when the handle it was called with is the anonymous
+ * FALLBACK — that is the guard's entire condition. So writing the audit row
+ * under `input.project_slug` put the record of a security-relevant refusal under
+ * the one handle no owner ever opens a diagnostics page under: the same
+ * invisibility the boot half of this card exists to remove, on the surface
+ * (b) already claimed to cover ("on ANY surface"). It is not exempt for being
+ * owner-initiated — an anonymous process has no owner to have asked it.
+ *
+ * The fixture above cannot see the difference, because a database with no
+ * recorded identity lands on the FLOOR, which IS the attempting handle. This one
+ * records an identity, so the two answers diverge and the assertion has teeth.
+ */
+test('the explicit refusal is journalled where the OWNER reads, not under the fallback that asked', async () => {
+  const b = await makeBench()
+  await seedSecret(b.secrets, STALE, 'tavily', STALE_VAL)
+  const { sink, captured } = fakeSink()
+
+  // This database records who it belongs to — the handle the owner's gateway
+  // boots as and therefore the only one his diagnostics feed queries.
+  const LIVE = 'juno-live'
+  await b.db.run(
+    `INSERT INTO instance_scope_ledger (id, project_slug, updated_at) VALUES (1, ?, 1)`,
+    [LIVE],
+  )
+
+  const refused = await migrateOrphanedCredentials({
+    db: b.db,
+    project_slug: BOOT,
+    slug_is_fallback: true,
+    sink,
+  })
+  expect(refused.refused_direction).toBe(true)
+
+  expect(captured).toHaveLength(1)
+  expect(captured[0]!.project_slug).toBe(LIVE)
+  // The attempting handle is not lost — it rides in the payload, which is where
+  // it is information rather than an unreadable address.
+  expect(captured[0]!.payload!['attempted_by_slug']).toBe(BOOT)
+
+  // CONTROL — the same call with provenance the ONLY difference migrates and
+  // journals under the boot handle, so the scope above is caused by the refusal
+  // path and not by this surface having become ledger-scoped for everything.
   const { sink: sink2, captured: captured2 } = fakeSink()
   const allowed = await migrateOrphanedCredentials({
     db: b.db,
@@ -511,6 +573,9 @@ test('a refused explicit migration journals credential_scope_orphaned with the r
     sink: sink2,
   })
   expect(allowed.total_moved).toBeGreaterThan(0)
+  expect(captured2).toHaveLength(1)
+  expect(captured2[0]!.event).toBe('credential_scope_migrated')
+  expect(captured2[0]!.project_slug).toBe(BOOT)
   expect(captured2.map((e) => e.event)).toEqual(['credential_scope_migrated'])
 })
 

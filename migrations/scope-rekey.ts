@@ -325,7 +325,21 @@ export interface ScopeReconcileResult {
    * fallback and the DB already carries rows under an explicit handle. Nothing
    * was written.
    */
-  refused_direction?: { stranded_keys: string[]; stranded_rows: number }
+  refused_direction?: {
+    stranded_keys: string[]
+    /**
+     * How many rows were at stake, in total. FOR THE LOG LINE ONLY — this must
+     * never reach a `system_events` payload, and there is deliberately no
+     * per-handle breakdown here for one to be built from (Argus r2 blocker,
+     * 2026-08-16). It is a `COUNT(*)` over ~40 swept tables, so it moves every
+     * time the owner creates a task or a reminder; a journal payload containing
+     * it changes on every boot, which re-arms the edge trigger and drains the
+     * owner's 50-row diagnostics window — the exact starvation
+     * `gateway/scope-refusal-journal.ts` exists to prevent. Logs are unbounded
+     * and compete with nothing, so the operator keeps the number there.
+     */
+    stranded_rows: number
+  }
 }
 
 export interface ReconcileInstanceScopeOptions {
@@ -628,7 +642,7 @@ function reconcileOnRawDatabase(
   // must never pull the live instance's rows onto itself. No move, no
   // snapshot, no ledger write; the boot proceeds.
   if (options.currentSlugIsFallback === true && staleKeys.length > 0) {
-    const stranded_rows = countRowsUnderKeys(db, staleKeys)
+    const stranded_rows = countStrandedRows(db, staleKeys)
     log.warn('scope_rekey_refused_fallback_direction', {
       fallback_slug: current_slug,
       stranded_keys: staleKeys.join(','),
@@ -717,16 +731,36 @@ function reconcileOnRawDatabase(
 }
 
 /**
- * How many rows sit under `keys`, across every swept `(table, column)`. Used
- * ONLY by the direction guard, to put a number on the refusal line — a count is
- * what turns "something was stranded" into evidence an owner can act on. Runs
- * on the refusal path alone, so the per-column scan costs nothing on a normal
- * boot.
+ * How many rows sit under `keys` in total, across every swept `(table, column)`.
+ * Used ONLY by the direction guard, to put a number on the refusal LOG LINE — a
+ * count is what turns "something was stranded" into evidence an operator can act
+ * on. Runs on the refusal path alone, so the per-column scan costs nothing on a
+ * normal boot.
+ *
+ * THIS NUMBER IS FOR THE LOG AND NOTHING ELSE (Argus r2 blocker, 2026-08-16).
+ * It briefly fed the owner's `system_events` journal, broken down per handle,
+ * and that was two defects wearing one name. It DRIFTS — `tasks`, `reminders`,
+ * `topics` and `gateway_events` are all swept, so ordinary use changes it
+ * between boots, the edge trigger in `gateway/scope-refusal-journal.ts` reads a
+ * changed payload as new information, and the refusal is re-written every boot
+ * until it has evicted the owner's whole 50-row window. And once the journal row
+ * moved to the LIVE handle it was also WRONG: the reader's "stranded" count was
+ * his own healthy data, which the guard had just successfully protected. Both
+ * disappear the moment the number stops travelling into a bounded feed. See
+ * `planInstanceRefusalRows`.
+ *
+ * `system_events` IS swept (a rename must carry the journal forward) but is
+ * excluded from THIS count, and the exclusion outlived the payload that
+ * motivated it because the number is still reported once per refused boot: the
+ * previous boot's own warning row is not "data at stake", and counting it made
+ * the log line climb 1 → 3 → 4 across three IDENTICAL boots. "Rows at stake"
+ * means the owner's DATA that would have been taken, not the warning about it.
  */
-function countRowsUnderKeys(db: Database, keys: string[]): number {
+function countStrandedRows(db: Database, keys: string[]): number {
   let total = 0
   for (const key of keys) {
     for (const { table, column } of SCOPE_SWEEP_COLUMNS) {
+      if (table === 'system_events') continue
       const t = assertIdent(table, 'table')
       const c = assertIdent(column, 'column')
       const row = db
