@@ -20,25 +20,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { probeLauncherGenerationAlive } from '../persistent-repl-substrate.ts'
-import { defaultIsPidAlive } from '../signatures.ts'
 import type { ReplSession } from '../repl-session.ts'
 import { pool } from '../pool-state.ts'
 import { saveRegistry, type ReplRegistryRecord } from '../repl-registry.ts'
 
 const tmpDirs: string[] = []
 const pooledKeys: string[] = []
-
-describe('defaultIsPidAlive', () => {
-  it('treats EPERM as alive because the process exists under another uid', () => {
-    const kill = () => { throw Object.assign(new Error('not permitted'), { code: 'EPERM' }) }
-    expect(defaultIsPidAlive(123, kill)).toBe(true)
-  })
-
-  it('treats ESRCH as dead because no such process exists', () => {
-    const kill = () => { throw Object.assign(new Error('missing'), { code: 'ESRCH' }) }
-    expect(defaultIsPidAlive(123, kill)).toBe(false)
-  })
-})
 
 afterEach(() => {
   for (const key of pooledKeys.splice(0)) pool.delete(key)

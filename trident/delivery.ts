@@ -175,7 +175,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     return {
       klass: 'infra',
       summary:
-        'The build supervisor was killed repeatedly (gateway restarts), and I stopped relaunching after ' +
+        'The build supervisor died repeatedly, and I stopped relaunching after ' +
         'the recovery budget ran out. The work so far is saved on its branch.',
       input_needed: `${saved} ${retry}`,
     }

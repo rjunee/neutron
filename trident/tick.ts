@@ -373,8 +373,9 @@ export class TridentTickLoop {
     this.latchLauncherDead = options.latch_launcher_dead ?? null
     const livenessIntervalMs = options.liveness_interval_ms ?? LIVENESS_PROBE_INTERVAL_MS
     // BOTH seams or nothing: a probe with nowhere to latch would observe deaths and
-    // discard them, and a latch with no probe has nothing to say. Same NaN-first
-    // guard as the watcher above, for the same reason (`setInterval(fn, NaN)` clamps
+    // discard them, and a latch with no probe has nothing to say. Use the same
+    // NaN-first guard as the watcher above, plus Node's signed 32-bit timer ceiling
+    // (`setInterval(fn, NaN)` clamps
     // to ~1 ms, so a bare `<= 0` check would arm a ~500 Hz probe where the caller
     // asked for none).
     this.livenessLoop =
@@ -569,6 +570,9 @@ export class TridentTickLoop {
       const reason = `inner workflow launcher crashed: generation ${key} is dead (external liveness probe at ${new Date(this.now()).toISOString()})`
       try {
         await latch(key, reason)
+        // The latch changed durable state; wake the expensive sweep directly so
+        // recovery does not depend on the optional change watcher being armed.
+        this.loop.wake()
       } catch (err) {
         // A failed latch is not fatal and needs no bookkeeping: the generation is
         // still dead on the next cadence, so the probe retries naturally.

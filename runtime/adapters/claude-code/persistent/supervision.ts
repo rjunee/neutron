@@ -995,7 +995,16 @@ export function probeLauncherGenerationAlive(
       // malformed pid must not turn process.kill's EINVAL/TypeError into positive
       // death evidence for a potentially healthy launcher.
       if (typeof record.pid !== 'number' || !Number.isInteger(record.pid) || record.pid <= 0) return 'unknown'
-      return defaultIsPidAlive(record.pid) ? 'alive' : 'dead'
+      // EPERM is positive evidence that this PID exists under another uid. Keep
+      // that conservative interpretation scoped to this destructive liveness
+      // decision; changing the shared watchdog primitive would alter unrelated
+      // respawn and shutdown semantics.
+      try {
+        process.kill(record.pid, 0)
+        return 'alive'
+      } catch (err) {
+        return (err as NodeJS.ErrnoException)?.code === 'EPERM' ? 'alive' : 'dead'
+      }
     }
     return 'unknown'
   } catch (err) {

@@ -19,6 +19,22 @@ describe('buildTridentLauncherLivenessProbe', () => {
     expect(seen).toEqual(['/worktree/registry', '/repo/registry'])
   })
 
+  test('derives the production registry path for every run home', async () => {
+    const seen: string[] = []
+    const probe = buildTridentLauncherLivenessProbe({
+      probe: (_key, path) => {
+        seen.push(path)
+        return 'alive'
+      },
+    })
+
+    expect(await probe(run())).toBe('alive')
+    expect(seen).toEqual([
+      '/worktree/.neutron/repl-registry.json',
+      '/repo/.neutron/repl-registry.json',
+    ])
+  })
+
   test('falls back from an unknown worktree registry to a dead repo registry', async () => {
     const seen: string[] = []
     const probe = buildTridentLauncherLivenessProbe({

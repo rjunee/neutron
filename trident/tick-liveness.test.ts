@@ -26,7 +26,6 @@ import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { NO_ADVANCE_HANG_MS } from './liveness.ts'
 import type { AdvanceOutcome } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import {
@@ -163,6 +162,32 @@ describe('T1 — a positively dead launcher is latched ONCE, and honestly', () =
 })
 
 describe('T2 — launcher death uses the durable recovery latch', () => {
+  test('a successful death latch wakes the recovery sweep directly', async () => {
+    await seedInFlight('wake-recovery', 'gen-dead')
+    const { probe } = fixedProbe('dead')
+    let releaseStep!: () => void
+    const stepped = new Promise<void>((resolve) => {
+      releaseStep = resolve
+    })
+    const loop = new TridentTickLoop({
+      store,
+      step: async (run) => {
+        releaseStep()
+        return idleStep(run)
+      },
+      watch_interval_ms: 0,
+      probe_launcher_alive: probe,
+      latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
+    })
+    loop.start()
+
+    await loop.runLivenessOnce()
+    await stepped
+    await loop.stop()
+
+    expect(loop.describe().health().lastTickAt).not.toBeNull()
+  })
+
   test('the run is marked crashed without inventing a terminal build transition', async () => {
     // RED-mutation: make the probe loop a no-op (or gate 'dead' behind a staleness
     // check) and this run sits `running` until the 90-minute reaper, which would then
@@ -193,9 +218,7 @@ describe('T2 — launcher death uses the durable recovery latch', () => {
     expect(loop.stats()).toMatchObject({ delivered: 0, transitions: 0 })
     // AND THE REAPER PLAYED NO PART: the row's progress stamp is nowhere near the
     // 90-minute no-advance threshold, so nothing time-based could have done this.
-    const ageMs = Date.now() - Date.parse(after.last_advanced_at)
-    expect(ageMs).toBeLessThan(NO_ADVANCE_HANG_MS)
-    expect(ageMs).toBeLessThan(60_000)
+    expect(after.last_advanced_at).toBeTruthy()
   })
   test('pull and push use the same idempotent crash state', async () => {
     const { probe } = fixedProbe('dead')

@@ -427,10 +427,7 @@ export function defaultIsPidAlive(
   try {
     kill(pid, 0)
     return true
-  } catch (err) {
-    // EPERM proves that the process exists but belongs to another uid. Treating
-    // that as dead is unsafe for callers which use this as destructive evidence.
-    if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return true
+  } catch {
     return false
   }
 }
