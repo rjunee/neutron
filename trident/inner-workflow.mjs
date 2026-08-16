@@ -3004,15 +3004,46 @@ function probeCause(raw) {
 // and unlabelled. An ABSENT section yields '' — its exit reads as null, i.e.
 // unreadable — so an older transcript degrades to "could not tell" rather than being
 // silently mis-sliced.
+// A REQUIRED CHECK MAY BE NAMED ANYTHING, INCLUDING A MARKER. The probe emits each
+// boundary with its own `echo`, so a real marker always occupies a WHOLE LINE. A
+// payload that merely CONTAINS the text does not — a ruleset requiring a context
+// literally named `___SECTION=BRANCH` arrives as `  "context": "___SECTION=BRANCH",`,
+// indented and quoted, inside the RULES section. Matching the bare substring took that
+// occurrence as the last one and pulled the BRANCH boundary past the real payload, so
+// the branch read came back empty and the whole classification degraded to `unknown`
+// — deferring every round on a repository nobody could see was misconfigured.
+// Requiring the marker to start a line and end one keeps the boundaries in the text the
+// probe itself wrote. (Fails shut either way, which is why it is small; but a stop
+// nobody can diagnose is the expensive kind.)
 const PROBE_SECTION_KEYS = ['BRANCH', 'RULES', 'RUNS', 'STATUSES']
 function probeSections(raw) {
   const text = String(raw)
   const out = { PROT: '', BRANCH: '', RULES: '', RUNS: '', STATUSES: '' }
   const marker = (key) => '___SECTION=' + key
+  // The marker occupies a whole line: nothing before it on that line, nothing after.
+  // (Line comments only in here — the test harness slices this source up to the first
+  // JSDoc opener, so opening one would truncate the slice mid-function. Its anchor
+  // guards in ci-gate.test.ts say so too.)
+  const onOwnLine = (found, key) => {
+    if (found < 0) return false
+    if (found > 0 && text[found - 1] !== '\n') return false
+    const after = text[found + marker(key).length]
+    return after === undefined || after === '\n' || after === '\r'
+  }
+  const lastOwnLine = (key, limit) => {
+    let from = limit
+    while (from > 0) {
+      const found = text.lastIndexOf(marker(key), from - 1)
+      if (found < 0) return -1
+      if (onOwnLine(found, key)) return found
+      from = found
+    }
+    return -1
+  }
   const at = []
   let limit = text.length
   for (let i = PROBE_SECTION_KEYS.length - 1; i >= 0; i -= 1) {
-    const found = limit <= 0 ? -1 : text.lastIndexOf(marker(PROBE_SECTION_KEYS[i]), limit - 1)
+    const found = limit <= 0 ? -1 : lastOwnLine(PROBE_SECTION_KEYS[i], limit)
     at[i] = found
     if (found >= 0) limit = found
   }
@@ -3132,13 +3163,30 @@ function classifyRequiredChecksProbe(probe) {
   // satisfiable by ANY row carrying the name. The binding is carried through to the
   // classifier, which uses it to refuse the one wrong producer it can actually
   // identify — see `classifyReviewReadiness`.
+  //
+  // `-1` IS THE WILDCARD, NOT A PRODUCER, AND READING IT AS ONE DEFERS FOREVER.
+  // GitHub documents the field on the branch-protection `checks` parameter as "The ID
+  // of the GitHub App that must provide this check", and then: "Pass -1 to explicitly
+  // allow any app to set the status" (REST branch-protection reference, verified this
+  // session). So `-1` is the admin saying the opposite of a binding. Treating it as an
+  // app id put the context into `appBound`, which makes the classifier discard every
+  // `StatusContext` row carrying that name — and a repository whose wildcard-required
+  // check is posted through the Commit Status API then reads as never having run, on
+  // every round, with no error to look at. That is the fail-closed hang this gate was
+  // rewritten to stop doing, arriving through a different door.
+  const APP_BINDING_WILDCARD = -1
   const appBound = []
   const bindingOf = (entry) => {
     if (entry === null || typeof entry !== 'object') return undefined
-    if (entry.app_id !== undefined && entry.app_id !== null) return entry.app_id
-    if (entry.appId !== undefined && entry.appId !== null) return entry.appId
-    if (entry.integration_id !== undefined && entry.integration_id !== null) return entry.integration_id
-    return undefined
+    const id =
+      entry.app_id !== undefined && entry.app_id !== null
+        ? entry.app_id
+        : entry.appId !== undefined && entry.appId !== null
+          ? entry.appId
+          : entry.integration_id !== undefined && entry.integration_id !== null
+            ? entry.integration_id
+            : undefined
+    return id === APP_BINDING_WILDCARD ? undefined : id
   }
   const addEntry = (entry) => {
     const context = entry !== null && typeof entry === 'object' ? entry.context : ''
@@ -3239,8 +3287,8 @@ function classifyRequiredChecksProbe(probe) {
   // no workflow emits, which is the single reading that STOPS a build. Nothing in an
   // exit code says which happened. Both endpoints carry GitHub's own `total_count`
   // (measured: check-runs and status both return it), so the probe asks for it and a
-  // count larger than what arrived nulls the list out — evidence of nothing, which can
-  // only ever disable the fast-fail.
+  // count that does not match what arrived nulls the list out — evidence of nothing,
+  // which can only ever disable the fast-fail.
   //
   // SAY WHAT THAT COSTS, BECAUSE IT IS NOT FREE AND IT IS INVISIBLE. On a base head
   // reporting more than 100 checks the fast-fail is OFF for that round: a genuinely
@@ -3269,9 +3317,18 @@ function classifyRequiredChecksProbe(probe) {
     // carry bare name arrays), and anything else present-but-not-an-integer — `null` from
     // a jq path that missed, a float, a string — is an unreadable list. `null` is
     // evidence of nothing, which can only ever disable the fast-fail.
+    //
+    // AND AN INTEGER CAN BE JUST AS IMPOSSIBLE AS A FRACTION. The guard above rejected
+    // `2.5` against three arrived names for being unusable, then let `2` — the same
+    // claim, stated in whole numbers — through as a complete list, along with any
+    // negative. GitHub's `total_count` is how many exist for the ref, so a count BELOW
+    // the arrival describes a response that cannot happen, and a count below zero is
+    // not a count at all. Both are the same evidence as a fraction: the field did not
+    // survive whatever produced this transcript, so nothing may be concluded from the
+    // list's length. Only an exact match is a complete page.
     const total = parsed.n === undefined ? names.length : parsed.n
     if (!Number.isInteger(total)) return null
-    return total > names.length ? null : names
+    return total === names.length ? names : null
   }
   const runNames = listFrom(runsText, 'RUNS')
   const statusNames = listFrom(statusesText, 'STATUSES')
