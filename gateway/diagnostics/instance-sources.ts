@@ -42,6 +42,20 @@ export interface InstanceDiagnosticsSourceInput {
    *  credentials section renders `{ available: false }`. */
   credentialPool?: CredentialPool | null
   now?: () => number
+  /**
+   * Feed depth. NARROWING THIS DECOUPLES THE FEED FROM THE BOOT JOURNAL'S
+   * SUPPRESSION WINDOW, and that is a correctness hazard, not a tuning knob
+   * (INVARIANTS #116(b), Argus r1 on PR #322, 2026-08-16). The scope-refusal
+   * journal skips a write when the identical row is already among the newest
+   * `DEFAULT_MAX_RECENT_EVENTS` rows for that scope (`gateway/index.ts` →
+   * `gateway/scope-refusal-journal.ts` `shouldJournal`). Set this BELOW that and
+   * a refusal the owner can no longer see still counts as one he is already
+   * looking at — silent, invisible suppression of exactly the warning the guard
+   * exists to surface. Neither production caller passes it (`open/composer.ts`,
+   * `open/diagnostics-cli-impl.ts`); it exists so a test can seed fewer rows,
+   * and the consequence of divergence is pinned in
+   * `gateway/__tests__/scope-refusal-journal.test.ts`.
+   */
   maxRecentEvents?: number
 }
 

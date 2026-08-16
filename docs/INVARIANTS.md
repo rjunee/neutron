@@ -147,6 +147,133 @@ with cross-references noted inline.
     red on any swap or short bound array.
     Protects: crash-recovery migration 0123 (`crash_recoveries` column) and every prior column
     addition to the same table.
+116. SCOPE DIRECTION, and the visibility of a refusal. Two halves of one rule, added 2026-08-16
+    (defect 2026-08-14 19:35 — a slug-unset boot that inherited a live `NEUTRON_HOME` re-keyed
+    every credential row onto the `'dev'` fallback and the running gateway read zero secrets).
+    (a) A FALLBACK identity may never pull rows off an EXPLICIT handle, ON ANY SURFACE. The fallback means
+    "nobody told me who I am", and every reconciler that sweeps a scope column has to carry the
+    guard independently — closing the direction on one table set closes nothing, because the next
+    sweep simply takes what the first refused. Both live guards read the same provenance input,
+    `slugResolution.source === 'fallback'`, which is why `resolveOwnerSlugSourceFromConfig`
+    returning the wrong `source` is a scope-integrity defect and not a cosmetic one: `'file'`
+    mis-typed as `'fallback'` REFUSES a real rename and strands the owner's rows, and a BLANK
+    `NEUTRON_INSTANCE_SLUG` read as `'env'` DISARMS the guard entirely (it is a deploy that failed
+    to set the slug, so it resolves to `'fallback'` — `config/index.ts` `resolveOwnerSlugSourceFromConfig`,
+    which is where that resolver LIVES since #320; `gateway/index.ts` only re-exports it, because
+    defining it on the entry module put the entry into the Open composer's own import graph).
+    Guards, all THREE of them: `migrations/scope-rekey.ts` (the boot re-key),
+    `auth/credential-scope-reconcile.ts` `reconcileCredentialScope` (the boot credential sweep),
+    and `migrateOrphanedCredentialScope` (the EXPLICIT repair the integrations surface offers —
+    `gateway/cores/integrations.ts`, `cores-integrations-surface.ts`, `integrations-tools.ts`).
+    THE THIRD ONE IS WHY THIS SAYS "ON ANY SURFACE" AND NOT "ON THE BOOT PATH" (closed by PR #320,
+    2026-08-16; this paragraph previously recorded it as an open gap). "Explicit" is not the
+    property that makes a move safe: the owner asking is only meaningful when the process knows
+    WHO it is, so a fallback handle means there was no owner to have asked. While that surface
+    took `(db, boot_handle)` with no provenance argument the guard was real and bypassable in one
+    step — boot as `'dev'`, call the explicit migration, and every row moves off the live handle.
+    Its provenance argument is REQUIRED rather than optional-defaulting-to-false precisely so the
+    next surface cannot reintroduce the gap by omission: forgetting it is a type error
+    (`auth/credential-scope-reconcile.ts:509-539`).
+    (b) A refusal event is journalled under a handle the OWNER CAN READ, WHENEVER THIS DATABASE
+    RECORDS ONE — never under a FROZEN credential handle whose divergence from the live one is the
+    very thing being reported, and never under the anonymous handle that attempted the move EXCEPT
+    on the one documented floor named below (a database that records no identity at all, which
+    includes a diagnostic read that threw). That exception is stated here, in the first sentence,
+    because the rule previously read as absolute while the code had two lawful paths to the
+    attempting handle — and a claim of coverage the code does not have is worse than no claim, since
+    it is the sentence the next reviewer trusts instead of reading the code (Argus r1 on PR #322,
+    2026-08-16). ON ANY SURFACE, exactly as (a): the boot re-key refusal, the boot credential
+    refusal, AND the EXPLICIT owner-driven migration refusal
+    (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`) all resolve the scope through the
+    same `gateway/scope-refusal-journal.ts` planner. The explicit one is not an exception on the
+    grounds of being owner-initiated: it refuses only when the handle IS the fallback, so writing it
+    under the request's own handle put the audit row for a security-relevant refusal in the same
+    unreadable place. It keeps its own two differences, both deliberate — it is NOT deduped (a
+    repeated owner ATTEMPT is the fact an audit trail exists to preserve, and the reachable surfaces
+    are owner-authenticated, so the row count is bounded by owner actions rather than by traffic),
+    and it adds `surface: 'explicit_migrate'` so one journal query finds both rows and can still
+    tell them apart. `listRecentForScope` is
+    strictly `WHERE project_slug = ?` by design (`persistence/system-events.ts`) and the refusal
+    deliberately does not re-key the ledger, so the next explicit boot takes the ledger-agrees
+    fast path and never sweeps the row back: scoped anywhere else, the guard's only observable
+    signal is invisible to the instance it protects, forever. The readable handles are the
+    ledger's (authoritative — it names a handle THIS database has booted under and committed inside
+    the re-key transaction; NOT "written only by an explicit boot", which is false — a fallback boot
+    with nothing stranded falls past the guard and seeds it, proven by
+    `migrations/__tests__/scope-rekey-direction-guard.test.ts` "a FRESH dev box still seeds", and
+    `gateway/scope-refusal-journal.ts` `resolveOwnerReadableScopes` documents why the weaker
+    property is the one relied on) or, absent that, `onboarding_state`'s; blank handles are dropped. READABILITY IS DECIDED BY THAT EVIDENCE, NOT
+    BY STRING INEQUALITY WITH THE BOOTING PROCESS: an owner whose instance really is called `dev`
+    reads under `dev`, and dropping that scope because the attempting process resolved to the same
+    string moved the row to an unreadable one — worse than the code the rule replaced (Argus r2,
+    2026-08-16). Only when the database records NO identity at all does the row fall back to the
+    attempting handle, which is the floor (exactly what shipped before) and is never the frozen
+    credential handles — there is no parameter for those any more, so the rule cannot be re-broken
+    by a branch nobody exercises. Three further rules, all in
+    `gateway/scope-refusal-journal.ts`: the attempting handle rides in `payload.attempted_by_slug`;
+    each row is NARROWED to its own scope (its own handle and counts — a foreign handle's NAME in
+    an instance-scoped feed is the cross-scope disclosure the strict predicate exists to prevent,
+    and keys are TRIMMED before they are counted or compared so a padded legacy key does not report
+    the reader zero rows of his own); and the journal is EDGE-TRIGGERED AGAINST THE VISIBLE WINDOW
+    (`listVisibleForScopeAndName` + `shouldJournal`), because the owner's window is 50 rows with
+    no retention sweep and an unconditional row per anonymous boot evicts the report it is trying to
+    appear in. FOUR properties of that trigger, each a defect when it was absent: the comparison is
+    bounded to the SAME window the feed returns (measured against unbounded history, a repeat that
+    rotated out of the feed is suppressed permanently and silently — strictly worse than the
+    starvation it prevents), and that window is `DEFAULT_MAX_RECENT_EVENTS`, the diagnostics
+    default, pinned equal by test because suppressing against a window WIDER than the feed's hides a
+    warning the owner cannot see; the dedup READ is best-effort inside a try (one corrupt historical
+    `payload_json` row would otherwise abort the boot, since the reader parses with
+    `onCorrupt: 'throw'` and this runs before the boot's own failure cleanup); BOTH
+    `credential_scope_orphaned` branches trigger, since the ordinary ambiguous orphan writes under
+    the same `(scope, event_name)` key and an unconditional write there writes a row every boot;
+    and THE COMPARISON IS MEMBERSHIP OF THE VISIBLE SET, NOT EQUALITY WITH ITS NEWEST ROW. That last
+    one is what actually closes the alternation hole, and covering both branches did not (Argus r1
+    on PR #322, 2026-08-16): the two shapes share one `(scope, event_name)` key, so a box that
+    alternates between an anonymous and an explicit boot — a unit that intermittently loses its slug
+    env — sees the OTHER shape as the newest row every time, and every boot writes. Asked "is this
+    payload already anywhere on the page", the feed settles at one row per distinct shape, and any
+    future third shape is covered without anyone noticing it exists.
+    AND NO JOURNAL PAYLOAD ON THIS PATH MAY CONTAIN AN ACTIVITY-COUPLED COUNT — no field that moves
+    when the owner merely USES his instance. The trigger hashes the payload, so such a field re-arms
+    it on every boot and the starvation returns in full, on exactly the instances that are in USE
+    and on none of the idle databases the dedup tests boot against (Argus r2 blocker on PR #322,
+    2026-08-16: `instance_scope_rekey_refused` carried `stranded_rows`, a `COUNT(*)` over ~40 swept
+    tables including `tasks`; four anonymous boots with one task between each wrote FOUR rows). That
+    same field was independently FALSE once the row moved to the live handle —
+    `stranded_slug`/`stranded_rows` named the reader's own handle and his own healthy data, which
+    the guard had just protected, and the feed rendered his ordinary growth as a worsening data-loss
+    condition. So the instance-refusal payload is `targeted_slug`, `other_targeted_handles`,
+    `attempted_by_slug`: the CONDITION, never its volume. The RULE IS ACTIVITY-COUPLING, NOT "no
+    number anywhere": the credential refusal's `orphaned_handles`/`orphaned_rows`
+    (`gateway/scope-refusal-journal.ts` `planCredentialRefusalRows`) count rows in the CREDENTIAL
+    tables only, which tasks and reminders never touch — they move only when the orphaned credential
+    set itself changes, and a changed orphan set IS new information the trigger should re-fire on
+    (the drift test pins this: four boots with a task between each hold the credential feed at one
+    row). Unbounded volumes go to the log lines, which compete with nothing — and for the same reason those log
+    counts EXCLUDE `system_events`, since counting the journal's own table reported the previous
+    boot's warning as "rows at stake" and climbed 1 → 3 → 4 across three IDENTICAL boots.
+    AND THE READER MUST RESOLVE THE SAME SCOPE BOOT FROZE: `neutron doctor`
+    (`open/owner-identity.ts` `resolveOwnerSlug` → `open/diagnostics-cli-impl.ts`) follows boot's
+    precedence exactly — `.url_slug` file > trimmed `NEUTRON_INSTANCE_SLUG` > `dev` — because a
+    resolver that disagrees by a space or ignores the rename file queries a scope no row was ever
+    written under, which is this same invisibility one layer out.
+    Protects: `migrations/__tests__/scope-rekey-direction-guard.test.ts` (policy),
+    `gateway/__tests__/owner-slug-provenance.test.ts` (the `source` field itself — including blank
+    and padded env values — plus a file-driven forward re-key through a real `boot()`),
+    `gateway/__tests__/scope-refusal-journal.test.ts` (scope choice including the `dev`-is-my-name
+    coincidence, narrowing, blank + padded handles, the nested-payload comparison, the thrown-read
+    path), `persistence/system-events.test.ts` (the window bound itself, with a wider-window control
+    proving the null is the window and not a broken query),
+    `gateway/__tests__/boot-refusal-scope.test.ts` (through a real `boot()` on the shape where the
+    frozen credential handle DIVERGES from the live one, with both unreadable scopes asserted empty
+    as the control; three identical boots writing one row; a rotated-out repeat written again; an
+    ambiguous non-refused orphan deduped across two boots; and a corrupt row that does not abort the
+    boot), `open/__tests__/diagnostics-cli.test.ts` (the doctor's scope — padded env, blank env, and
+    the rename file, with a no-file control), `open/__tests__/open-scope-rekey-direction-boot.test.ts`
+    (the flag reaching the reconciler from the composition root, and both refusal rows read back
+    through the production `listRecentForScope` with the anonymous scope asserted empty as the
+    control).
 
 ## 4. Duplication / consolidation seams (`critic-duplication.md`)
 
@@ -615,10 +742,10 @@ with cross-references noted inline.
 
 - **111 invariants** extracted from the 11 critic reports' load-bearing-subtleties /
   fail-soft-invariant / must-not-break sections (`critic-security-config.md` has no dedicated
-  section; its "what exists and is fine" items are folded into §11 above). Four further items
-  (#112–#115) were added post-synthesis for the gateway-restart crash-recovery build; they are
-  appended at the end of their sections rather than renumbered in, so numbering is not strictly
-  sequential within §3 and §9.
+  section; its "what exists and is fine" items are folded into §11 above). Five further items
+  (#112–#116) were added post-synthesis — #112–#115 for the gateway-restart crash-recovery build,
+  #116 for the boot scope direction guard (2026-08-16); they are appended at the end of their
+  sections rather than renumbered in, so numbering is not strictly sequential within §3 and §9.
 - The vast majority cross-reference a specific refactor-plan unit (G/K/L/C/D/P/F/O/X/W/N/S/M
   series) that either builds a characterization test protecting the behavior or must
   demonstrably preserve it per the unit's own **Accept** criteria.

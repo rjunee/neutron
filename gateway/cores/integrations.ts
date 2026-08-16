@@ -53,6 +53,10 @@ import {
   type CredentialScopeMove,
   type CredentialScopeOrphanCount,
 } from '@neutronai/auth/credential-scope-reconcile.ts'
+import {
+  planCredentialRefusalRows,
+  readOwnerReadableScopes,
+} from '../scope-refusal-journal.ts'
 import { metaLabel, parseGrantLabel, refreshLabel } from './oauth-token-manager.ts'
 import type {
   OAuthTokenManager,
@@ -589,21 +593,44 @@ export async function migrateOrphanedCredentials(
     // The reachable surfaces are owner-authenticated
     // (`gateway/http/cores-integrations-surface.ts`) and the agent tool, so the
     // row count is bounded by owner actions, not by traffic.
-    await emitSystemEventSafe(
-      input.sink !== undefined ? input.sink : resolveSystemEventSink(),
-      {
+    //
+    // AND IT IS SCOPED THE SAME WAY BOOT'S REFUSAL IS (Argus r1 blocker on
+    // PR #322, 2026-08-16 — INVARIANTS #116(b)). This row used to be written
+    // under `input.project_slug`, and on THIS branch of the function that value
+    // is by construction the anonymous FALLBACK handle: the guard only refuses
+    // when `slug_is_fallback` is true. So the audit row for the one
+    // security-relevant outcome landed under the one handle no owner ever opens
+    // a diagnostics page under — the identical invisibility this card exists to
+    // remove, on the surface the invariant already claimed to cover ("on ANY
+    // surface"). An invariant that overstates its coverage is worse than none,
+    // so the code moved to meet it rather than the sentence being softened.
+    // Same resolution, same narrowing and the same documented FLOOR as boot,
+    // reusing boot's own planner so the two cannot drift:
+    // `readOwnerReadableScopes` is best-effort (a thrown SELECT degrades to the
+    // attempting handle, never to a throw out of an owner-facing action), and
+    // `planCredentialRefusalRows` reduces every foreign handle to a COUNT — the
+    // owner is told the volume here, and the live integrations surface, which is
+    // already scoped to him and is where the repair is offered, names them.
+    // `reason` + `surface` ride on top so one journal query still finds boot's
+    // row and this one, and can still tell them apart.
+    const refusalSink = input.sink !== undefined ? input.sink : resolveSystemEventSink()
+    for (const row of planCredentialRefusalRows({
+      owner_scopes: readOwnerReadableScopes(input.db),
+      orphan_counts: r.skipped,
+      attempted_by_slug: input.project_slug,
+    })) {
+      await emitSystemEventSafe(refusalSink, {
         event: 'credential_scope_orphaned',
         module: 'gateway',
         level: 'warn',
-        project_slug: input.project_slug,
+        project_slug: row.scope,
         payload: {
-          from: r.stale_handles,
-          orphan_counts: r.skipped,
+          ...row.payload,
           reason: 'fallback_boot_handle_refused_direction',
           surface: 'explicit_migrate',
         },
-      },
-    )
+      })
+    }
     // Deliberately NOT phrased as a failure: nothing is broken, the process
     // simply has no name, and the repair is to give it one. Pointing the owner
     // at the migration again would be pointing at the thing that just refused.
