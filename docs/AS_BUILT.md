@@ -397,6 +397,49 @@ It also cannot police the lexical rule it copies — a heading shape the predica
 itself gets wrong increments both counts and passes, which is what both `HEADING`
 defects above did. Those are pinned by fixture tests that name each rejected
 spelling; this one covers the aggregate.
+## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
+
+The launcher now composes reflection guidance ONCE. `trident/inner-loop.ts`
+`buildWorkflowFirer` threads the same string into both `writeBriefParts` (the
+disk write in `trident/brief-parts.ts`) and `buildWorkflowArgs`. The disk
+manifest is therefore the single authority for the brief's middle. Copies in
+the workflow args JSON are ADVISORY only: the fire-launcher bridge model
+retypes them, so those copies can no longer refuse a dispatch.
+
+`trident/inner-workflow.mjs` `codexBriefByPath` no longer has either
+`CODEX_BUILD_BRIEF_ARGS_CORRUPT` throw. Its part list is keyed on the manifest's
+`briefParts.reflectionFile`, not args `reflectionGuidance`; the launcher's
+receipts come from that manifest, while receipts for the workflow-composed
+`.a1` and `.a2` segments are computed locally. Consequently
+`CODEX_BUILD_BRIEF_ARGS_CORRUPT` no longer exists as a failure mode on the
+parts path.
+
+The parts-mode prompt now emits
+`NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY`, a newline list aligned 1:1 with
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS`, INSTEAD of the whole-file
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY`. `trident/codex-build.sh` verifies every
+part file byte-for-byte before assembly and no longer requires a whole-file
+receipt in parts mode: the whole is the host script's own `cat` of verified
+parts. The non-parts fallback is unchanged and retains its whole-file receipt.
+
+The remaining corruption tags now have disjoint jobs:
+
+| tag | corruption class |
+|---|---|
+| `CODEX_BUILD_BRIEF_CORRUPT` | A bridge-retyped whole brief on the non-parts fallback path. |
+| `CODEX_BUILD_BRIEF_PART_CORRUPT` | A disk part file whose bytes do not match its receipt; exits 3 and names the file and both measurements. |
+| `CODEX_BUILD_BRIEF_PART_MISSING` | The unchanged fail-closed guard for a listed part file that is absent. |
+
+Per-part receipts are the only workable decomposition. FNV-1a over a
+concatenation cannot be derived from standalone segment hashes, and
+`inner-workflow.mjs` has no `fs`, so it can never measure the disk copies
+itself.
+
+The existing guard rails remain: reflection guidance reaches Forge builders
+only, never argus or synthesis; the non-parts whole-file receipt is
+unweakened; the TypeScript and JavaScript `briefIntegrity` twins remain
+parity-pinned; and `.a2` coda chunk blocks never have non-redirect-target paths
+rewritten.
 ## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
 
 Landed via PR #331.
@@ -676,6 +719,48 @@ and found two defects in it: the comment's arithmetic was wrong in one clause,
 and the new fixture used a fraction the OLD code already rejected, so it
 discriminated nothing. Both fixed; the mutation test now replays both weaker
 guards, including the one that shipped.
+
+Landed via PR #330.
+
+**One more round, and the three findings it answered all share a shape: a value
+that MEANS "no constraint" was read as a constraint, and the gate then waited for
+something that could never arrive.**
+
+*The wildcard app id.* GitHub documents the branch-protection `checks[].app_id`
+parameter as "The ID of the GitHub App that must provide this check", and then:
+"Pass -1 to explicitly allow any app to set the status" (REST reference, verified
+this round). The binding reader took any non-null value, so `-1` — the admin
+saying ANY producer will do — became a binding to app number minus one. The
+classifier then discarded every commit-status row carrying that name, and a
+repository whose wildcard-required check is posted through the Commit Status API
+read as never having run: no error, no finding, just a deferral on every round
+forever. That is the same fail-closed hang this whole change exists to remove,
+arriving through a different door. `-1` is now a wildcard by name
+(`APP_BINDING_WILDCARD`), in all three spellings the field arrives in, and a real
+app id still binds — the mutation test pins both sides.
+
+*The marker a check name could impersonate.* The transcript is split on markers
+the probe writes with their own `echo`, so a real one owns a whole line. A
+required context literally NAMED `___SECTION=BRANCH` lands inside the branch
+payload — the very list the 404 disambiguation reads — and a bare substring match
+took it as the last boundary, sliced the payload in half, and collapsed the whole
+classification to `unknown`. Boundaries must now start and end a line. The
+ordered backwards walk already prevented the other arrangement, where a hostile
+name in a LATER section pulls an earlier boundary; the new test states which of
+the two actually bites and controls against the unanchored matcher.
+
+*The impossible count that was merely a whole number.* The previous round
+rejected a fraction landing under the arrival and left the comparison asking only
+whether the count EXCEEDED it — so `2` against three arrived names, the identical
+claim in whole numbers, still passed as a COMPLETE list, and so did any negative.
+`total_count` is how many exist for the ref; a count below the arrival describes a
+response GitHub cannot emit. Only an exact match is now a complete page, which
+can still only ever disable the fast-fail.
+
+Recorded because the review lane that raised the first of these had itself timed
+out on the previous round: a mandatory reviewer that did not RUN is not a pass,
+and the finding it was carrying turned out to be real.
+
 ## 2026-08-16 — the guard that proved the gate runs accepted `|| true`
 
 Every fix below closes a route to the SAME outcome — the gate prints ✅, or CI

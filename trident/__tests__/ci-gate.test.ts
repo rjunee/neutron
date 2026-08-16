@@ -1321,7 +1321,12 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
     // The SECOND is the fix that is not enough: `Number.isInteger(n) ? n : names.length`
     // still assumes completeness when the count is unusable, which is the same fail-open
     // relocated. Both are handed a count that lands UNDER the arrival.
-    const CURRENT = 'const total = parsed.n === undefined ? names.length : parsed.n\n    if (!Number.isInteger(total)) return null'
+    // The comparison goes back with them: each mutant is the guard as it stood at the
+    // round that shipped it, not today's comparison wearing an old `total`.
+    const CURRENT =
+      'const total = parsed.n === undefined ? names.length : parsed.n\n' +
+      '    if (!Number.isInteger(total)) return null\n' +
+      '    return total === names.length ? names : null'
     const probe = requiredProbe({
       prot: '{"contexts":["late-check"]}',
       protExit: 0,
@@ -1331,8 +1336,8 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
       statuses: named([]),
     })
     for (const weaker of [
-      "const total = typeof parsed.n === 'number' ? parsed.n : names.length",
-      'const total = Number.isInteger(parsed.n) ? parsed.n : names.length',
+      "const total = typeof parsed.n === 'number' ? parsed.n : names.length\n    return total > names.length ? null : names",
+      'const total = Number.isInteger(parsed.n) ? parsed.n : names.length\n    return total > names.length ? null : names',
     ]) {
       const mutant = SRC.replace(CURRENT, weaker)
       expect(mutant).not.toBe(SRC) // positive control: the replacement matched
@@ -1343,10 +1348,52 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
     }
   })
 
+  test('a WHOLE number can be just as impossible as a fraction — below the arrival, or below zero', () => {
+    // Argus r2, and the same fixture-side lesson one more time: the previous round
+    // rejected `2.5` against three arrived names for being unusable, and then let `2`
+    // — the identical claim in whole numbers — through as a COMPLETE list, because the
+    // guard only ever asked whether the count EXCEEDED the arrival. Negatives passed
+    // too. `total_count` is how many exist for the ref, so a count under the arrival
+    // describes a response GitHub cannot emit: the field did not survive whatever
+    // produced this transcript, and the list's length may not be trusted either way.
+    const { classifyRequiredChecksProbe } = loadReadiness()
+    const cfg = (runs: string) =>
+      classifyRequiredChecksProbe(
+        requiredProbe({ prot: '{"contexts":["late-check"]}', protExit: 0, rules: '[]', rulesExit: 0, runs, statuses: named([]) }),
+      )
+    const ARRIVED = ['check', 'frontend', 'api']
+    expect(cfg(JSON.stringify({ n: 2, names: ARRIVED })).produced).toBeNull() // below the arrival
+    expect(cfg(JSON.stringify({ n: -1, names: ARRIVED })).produced).toBeNull() // below zero
+    expect(cfg(JSON.stringify({ n: 0, names: ARRIVED })).produced).toBeNull()
+    // The controls, both ends: an exact count is complete, and a genuinely EMPTY read
+    // (nothing arrived, nothing claimed) still resolves rather than nulling out — that
+    // shape is a base commit whose CI never ran, and it is read all the time.
+    expect(cfg(named(ARRIVED)).produced).toEqual(ARRIVED)
+    expect(cfg(named([])).produced).toEqual([])
+  })
+
+  test('MUTANT: an above-only comparison lets the below-arrival count through, and goes RED', () => {
+    // The guard exactly as it stood before this round, handed the whole-number twin of
+    // the fraction it already rejected.
+    const mutant = SRC.replace('return total === names.length ? names : null', 'return total > names.length ? null : names')
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    const probe = requiredProbe({
+      prot: '{"contexts":["late-check"]}',
+      protExit: 0,
+      rules: '[]',
+      rulesExit: 0,
+      runs: JSON.stringify({ n: 2, names: ['check', 'frontend', 'api'] }),
+      statuses: named([]),
+    })
+    const out = mutate(mutant).classifyRequiredChecksProbe(probe)
+    goesRed(() => expect(out.produced).toBeNull())
+    expect(out.produced).toEqual(['check', 'frontend', 'api']) // …trusted as complete
+  })
+
   test('MUTANT: trusting a truncated list turns a real check into a config error', () => {
     // What the truncation blindness actually costs, end to end: `late-check` IS produced
     // here, it just fell off page 1 — and the mutant stops the build for it.
-    const mutant = SRC.replace('return total > names.length ? null : names', 'return names')
+    const mutant = SRC.replace('return total === names.length ? names : null', 'return names')
     expect(mutant).not.toBe(SRC) // positive control: the replacement matched
     const loaded = loadReadiness(mutant)
     const cfg = loaded.classifyRequiredChecksProbe(
@@ -2132,6 +2179,84 @@ describe('an app-bound required check is not satisfied by a commit status', () =
     goesRed(() => expect(out.status).toBe('absent'))
     expect(out.status).toBe('passed') // …the wrong producer satisfying the requirement
   })
+
+  /**
+   * `-1` IS THE ADMIN SAYING "ANY APP", AND READING IT AS ONE DEFERS FOREVER.
+   *
+   * GitHub documents the branch-protection `checks[].app_id` parameter as "The ID of
+   * the GitHub App that must provide this check", and then: "Pass -1 to explicitly
+   * allow any app to set the status" (REST branch-protection reference, verified this
+   * session). Raised by codex in r2; the mechanism was code-confirmed there and the
+   * sentinel's meaning is now confirmed against the documentation.
+   *
+   * Read as a producer id, the wildcard puts the context into `appBound`, the
+   * classifier then discards every commit-status row carrying that name, and a
+   * repository posting that check through the Commit Status API reads as never having
+   * run — every round, silently. This gate exists to stop exactly that shape.
+   */
+  test('HEADLINE: app_id -1 is a wildcard, not a producer — a commit status still satisfies it', () => {
+    const { classifyRequiredChecksProbe, classifyReviewReadiness } = loadReadiness()
+    const wildcard = classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["ci"],"checks":[{"context":"ci","app_id":-1}]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: named([]),
+        statuses: named(['ci']),
+      }),
+    )
+    expect(wildcard).toEqual({ mode: 'resolved', required: ['ci'], appBound: [], produced: ['ci'] })
+    // …and end to end: the green commit status satisfies the requirement instead of
+    // being discarded into a permanent `absent`.
+    expect(
+      classifyReviewReadiness(readinessProbe('MERGEABLE', [statusRow('ci', 'SUCCESS')] as never), wildcard).status,
+    ).toBe('passed')
+    // The control, on the OTHER side of the sentinel: a real app id still binds, so
+    // this is a narrowing of the wildcard rather than a hole in the binding.
+    expect(
+      classifyRequiredChecksProbe(
+        requiredProbe({
+          prot: '{"contexts":["ci"],"checks":[{"context":"ci","app_id":15368}]}',
+          protExit: 0,
+          rules: '[]',
+          rulesExit: 0,
+        }),
+      ).appBound,
+    ).toEqual(['ci'])
+    // …and the wildcard reaches through the rulesets spelling of the field too.
+    expect(
+      classifyRequiredChecksProbe(
+        boundProbe(
+          '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci","integration_id":-1}]}}]',
+        ),
+      ).appBound,
+    ).toEqual([])
+  })
+
+  test('MUTANT: taking -1 as a producer id defers the wildcard requirement forever, and goes RED', () => {
+    const mutant = SRC.replace('return id === APP_BINDING_WILDCARD ? undefined : id', 'return id')
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    const loaded = mutate(mutant)
+    const cfg = loaded.classifyRequiredChecksProbe(
+      requiredProbe({
+        prot: '{"contexts":["ci"],"checks":[{"context":"ci","app_id":-1}]}',
+        protExit: 0,
+        rules: '[]',
+        rulesExit: 0,
+        runs: named([]),
+        statuses: named(['ci']),
+      }),
+    )
+    // The HEADLINE guard replayed against the mutant:
+    goesRed(() => expect(cfg.appBound).toEqual([]))
+    expect(cfg.appBound).toEqual(['ci']) // …the wildcard read as a binding
+    const out = loaded.classifyReviewReadiness(
+      readinessProbe('MERGEABLE', [statusRow('ci', 'SUCCESS')] as never),
+      cfg,
+    )
+    expect(out.status).toBe('absent') // …and the green status is invisible to it
+  })
 })
 
 /**
@@ -2345,13 +2470,59 @@ describe('an echoed command line cannot mis-slice the transcript', () => {
 
   test('MUTANT: splitting on the FIRST marker goes RED', () => {
     const mutant = SRC.replace(
-      'const found = limit <= 0 ? -1 : text.lastIndexOf(marker(PROBE_SECTION_KEYS[i]), limit - 1)',
+      'const found = limit <= 0 ? -1 : lastOwnLine(PROBE_SECTION_KEYS[i], limit)',
       'const found = text.indexOf(marker(PROBE_SECTION_KEYS[i]))',
     )
     const out = mutate(mutant).classifyRequiredChecksProbe({ raw: ECHO + CLEAN.raw, exit_code: 0 })
     // The HEADLINE guard replayed against it:
     goesRed(() => expect(out.mode).toBe('resolved'))
     expect(out.mode).toBe('unknown')
+  })
+
+  /**
+   * A REQUIRED CHECK MAY BE NAMED ANYTHING, INCLUDING A MARKER.
+   *
+   * Argus r2 (nit, fails shut). The probe writes each boundary with its own `echo`, so
+   * a real marker owns a whole line. The collapse needs the hostile name to land INSIDE
+   * the section it names — which is exactly where a required context ends up, because
+   * the branch payload carries the required-contexts list. Matching the bare substring
+   * then took the name as the last BRANCH boundary, sliced the payload in half, and
+   * `objectFrom` handed back nothing: rung 1 lost its answer, the 404 stayed ambiguous,
+   * and the round deferred forever on a repository whose only sin was an odd check name.
+   *
+   * The ordered backwards walk already prevents the OTHER arrangement — a hostile name
+   * in a LATER section cannot pull an earlier boundary past its neighbour, because each
+   * key is searched only in the text before the section that follows it.
+   */
+  test('a required check NAMED like a marker cannot collapse the section it names', () => {
+    const { classifyRequiredChecksProbe, probeSections } = loadReadiness()
+    const HOSTILE = '___SECTION=BRANCH'
+    const probe = requiredProbe({
+      prot: NOT_FOUND,
+      protExit: 1,
+      // The live shape, with the hostile context in the list rung 1 reads. `--jq`
+      // emits this compact, so the name sits mid-line where a real marker never does.
+      branch: JSON.stringify({ protected: true, protectionEnabled: false, contexts: [HOSTILE], checks: [] }),
+      rules: '[]',
+      rulesExit: 0,
+      runs: named([HOSTILE]),
+    })
+    // The branch section still holds the whole branch payload, not its tail.
+    expect(probeSections(probe.raw).BRANCH).toContain('"protectionEnabled":false')
+    expect(classifyRequiredChecksProbe(probe)).toEqual({
+      mode: 'resolved',
+      required: [HOSTILE],
+      appBound: [],
+      produced: [HOSTILE],
+    })
+    // The control, proving the fixture is hostile in the way claimed: the same
+    // transcript read by the UNANCHORED matcher defers.
+    const unanchored = SRC.replace(
+      'const found = limit <= 0 ? -1 : lastOwnLine(PROBE_SECTION_KEYS[i], limit)',
+      'const found = limit <= 0 ? -1 : text.lastIndexOf(marker(PROBE_SECTION_KEYS[i]), limit - 1)',
+    )
+    expect(unanchored).not.toBe(SRC) // positive control: the replacement matched
+    expect(mutate(unanchored).classifyRequiredChecksProbe(probe).mode).toBe('unknown')
   })
 })
 

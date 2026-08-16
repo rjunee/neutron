@@ -82,6 +82,8 @@ interface RunOpts {
   brief?: string | null
   /** Raw brief parts written to disk and handed to the wrapper as an ordered manifest. */
   briefParts?: string[]
+  /** Per-part receipts. Undefined → aligned receipts for briefParts; null → unset. */
+  partIntegrity?: string[] | null
   /** Replace this part's manifest entry with a path that does not exist. */
   missingBriefPartIndex?: number
   /** Insert a blank manifest line after this part index. */
@@ -404,6 +406,12 @@ exit 1
     }
     env['NEUTRON_CODEX_BUILD_BRIEF_PARTS'] = partPaths.join('\n')
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = join(dir, 'build.brief')
+    const partIntegrity = opts.partIntegrity === undefined
+      ? opts.briefParts.map(briefIntegrity)
+      : opts.partIntegrity
+    if (partIntegrity !== null) {
+      env['NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY'] = partIntegrity.join('\n')
+    }
   } else if (typeof brief === 'string') {
     // `!== null` let `undefined` through: the caller may omit the brief entirely, and
     // `writeFileSync` would then be handed undefined. Narrowing on the type rather than
@@ -416,7 +424,7 @@ exit 1
   // — so the default path here is the production path, and the wrapper's perl
   // recomputation is checked against the JS one on every single case in this file.
   const integrity = opts.integrity === undefined
-    ? briefIntegrity(opts.briefParts?.join('') ?? brief ?? '')
+    ? (opts.briefParts === undefined ? briefIntegrity(brief ?? '') : null)
     : opts.integrity
   if (integrity !== null) env['NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY'] = integrity
   const diff = opts.diff === undefined ? 'diff --git a/x b/x\n+change\n' : opts.diff
@@ -855,13 +863,14 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexStdin).toBe(parts.join(''))
   })
 
-  test('a corrupted part is refused by the unchanged whole-brief receipt', () => {
+  test('a part altered after its receipt was taken is refused', () => {
     const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
     const corrupted = [...intended]
     corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
-    const res = success(corrupted, { integrity: briefIntegrity(intended.join('')) })
+    const res = success(corrupted, { partIntegrity: intended.map(briefIntegrity) })
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+    expect(res.stderr).toContain('brief-part-1.txt')
     expect(res.codexArgv).toBe('')
   })
 
@@ -879,12 +888,24 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexArgv).toBe('')
   })
 
-  test('part order is enforced by the whole-brief receipt', () => {
+  test('part order is enforced by aligned receipts', () => {
     const intended = ['first\n', 'second\n']
-    const res = success([...intended].reverse(), { integrity: briefIntegrity(intended.join('')) })
+    const res = success([...intended].reverse(), { partIntegrity: intended.map(briefIntegrity) })
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     expect(res.codexArgv).toBe('')
+  })
+
+  test('parts without per-part integrity are refused', () => {
+    const res = success(['head\n', 'middle\n'], { partIntegrity: null })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_NO_BRIEF_INTEGRITY')
+  })
+
+  test('fewer receipts than parts are refused', () => {
+    const res = success(['head\n', 'middle\n'], { partIntegrity: [briefIntegrity('head\n')] })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_NO_BRIEF_INTEGRITY')
   })
 
   test('the legacy pre-written brief path builds exactly as before', () => {

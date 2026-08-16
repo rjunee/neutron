@@ -366,7 +366,7 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       writes.push(opts)
       return parts
     }
-    const reflection_context = '<learned_corrections>use TS</learned_corrections>'
+    const reflection_context = '<learned_corrections>use TS — preserve … and 🚀</learned_corrections>'
     const run = makeRun({ id: 'run-parts', task: 'exact task' })
     const firer = buildWorkflowFirer({ fire, write_brief_parts })
     expect(await firer(input({ run, reflection_context }))).toEqual({ status: 'fired', error: null })
@@ -378,6 +378,8 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       },
     ])
     expect(calls[0]!.prompt).toContain(`"briefParts":${JSON.stringify(parts)}`)
+    const args = JSON.parse(calls[0]!.prompt.match(/^   args = (.+)$/m)?.[1] ?? '{}')
+    expect(args.reflectionGuidance).toBe(writes[0]!.reflectionGuidance)
   })
 
   test('a failed part write never prevents the fire and omits the manifest', async () => {

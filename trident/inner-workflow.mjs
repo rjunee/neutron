@@ -1465,32 +1465,26 @@ function codexBriefByPath(brief) {
     typeof briefParts.taskIntegrity !== 'string' ||
     briefParts.taskIntegrity.length === 0
   ) return null
+  if (
+    typeof briefParts.reflectionFile === 'string' &&
+    briefParts.reflectionFile.length > 0 &&
+    (typeof briefParts.reflectionIntegrity !== 'string' || briefParts.reflectionIntegrity.length === 0)
+  ) return null
 
   const full = `${brief}\n`
   const coda = codexBuildCoda()
   const suffix = task + reflectionGuidance + coda + '\n'
   if (!full.endsWith(suffix)) return null
 
-  const taskActual = briefIntegrity(task)
-  if (taskActual !== briefParts.taskIntegrity) {
-    throw new Error(`CODEX_BUILD_BRIEF_ARGS_CORRUPT: the task text carried in the workflow args measures ${taskActual} but the launcher's receipt over the task it wrote to ${briefParts.taskFile} is ${briefParts.taskIntegrity}. The args crossed an agent and were altered in transit; refusing to compose a build brief from text nobody wrote. No build was attempted.`)
-  }
-  if (reflectionGuidance !== '') {
-    const reflectionActual = briefIntegrity(reflectionGuidance)
-    if (
-      typeof briefParts.reflectionFile !== 'string' ||
-      briefParts.reflectionFile.length === 0 ||
-      reflectionActual !== briefParts.reflectionIntegrity
-    ) {
-      throw new Error(`CODEX_BUILD_BRIEF_ARGS_CORRUPT: the reflection segment carried in the workflow args measures ${reflectionActual} but the launcher's receipt over the reflection segment it wrote to ${briefParts.reflectionFile} is ${briefParts.reflectionIntegrity}. The args crossed an agent and were altered in transit; refusing to compose a build brief from text nobody wrote. No build was attempted.`)
-    }
-  }
+  // Args copies crossed a bridge model and are advisory. The disk manifest is the
+  // authority and the wrapper verifies its bytes per part, so transit-mangled
+  // punctuation cannot refuse a dispatch whose real brief remains intact on disk.
+  const hasReflection = typeof briefParts.reflectionFile === 'string' && briefParts.reflectionFile.length > 0
   return {
     head: full.slice(0, full.length - suffix.length),
     tail: `${coda}\n`,
-    files: reflectionGuidance !== ''
-      ? [briefParts.taskFile, briefParts.reflectionFile]
-      : [briefParts.taskFile],
+    files: hasReflection ? [briefParts.taskFile, briefParts.reflectionFile] : [briefParts.taskFile],
+    integrities: hasReflection ? [briefParts.taskIntegrity, briefParts.reflectionIntegrity] : [briefParts.taskIntegrity],
   }
 }
 
@@ -1556,6 +1550,7 @@ function codexBuildPrompt(slot, brief, route) {
   let runCommandNote = ''
   let corruptInstructions
   let partMissingInstructions = ''
+  let integrityEnv = ` NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)}`
   if (byPath === null) {
     chunkBlocks = renderChunks(briefChunks, briefFile, 0, briefChunks.length)
     writeBriefInstructions = `FIRST write the brief to disk in ${briefChunks.length} SEPARATE Bash call(s), in the order given. Each block below is one call; pass each WHOLE block unchanged. Call 1 uses \`>\` (it truncates any earlier attempt); every later call uses \`>>\` (it appends). Do NOT merge them into one call, do NOT reorder them, do NOT skip one.
@@ -1567,12 +1562,16 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
     const headChunks = chunkTextOnLines(byPath.head, CODEX_BRIEF_CHUNK_BYTES)
     const tailChunks = chunkTextOnLines(byPath.tail, CODEX_BRIEF_CHUNK_BYTES)
     const total = headChunks.length + tailChunks.length
+    const a1Integrity = briefIntegrity(byPath.head)
+    const a2Integrity = briefIntegrity(byPath.tail)
     chunkBlocks = `${renderChunks(headChunks, a1File, 0, total)}\n\n${renderChunks(tailChunks, a2File, headChunks.length, total)}`
-    writeBriefInstructions = `FIRST write the TWO workflow-composed brief SEGMENTS to disk in ${total} SEPARATE Bash call(s), in the order given; the large task text does NOT travel through you — it is already on disk at the part path(s) listed in the run command, written by the host. Do NOT read, rewrite, recreate or "fix" those part files; never write the task yourself. The wrapper assembles the full brief from the listed part files, in order, and REFUSES to build (exit 3) unless the assembled whole matches the byte count and checksum in the run command.`
-    partsEnv = ` NEUTRON_CODEX_BUILD_BRIEF_PARTS=${shSingleQuote([a1File, ...byPath.files, a2File].join('\n'))}`
-    runCommandNote = `\nThis command contains quoted newlines inside the PARTS value — pass the WHOLE block as ONE Bash call, unmodified.`
+    writeBriefInstructions = `FIRST write the TWO workflow-composed brief SEGMENTS to disk in ${total} SEPARATE Bash call(s), in the order given; the large task text does NOT travel through you — it is already on disk at the part path(s) listed in the run command, written by the host. Do NOT read, rewrite, recreate or "fix" those part files; never write the task yourself. The wrapper assembles the full brief from the listed part files, in order, and REFUSES to build (exit 3) unless EVERY listed file matches its own byte count and checksum in the run command.`
+    partsEnv = ` NEUTRON_CODEX_BUILD_BRIEF_PARTS=${shSingleQuote([a1File, ...byPath.files, a2File].join('\n'))} NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=${shSingleQuote([a1Integrity, ...byPath.integrities, a2Integrity].join('\n'))}`
+    integrityEnv = ''
+    runCommandNote = `\nThis command contains quoted newlines inside the PARTS and PART_INTEGRITY values — pass the WHOLE block as ONE Bash call, unmodified.`
     corruptInstructions = `RE-RUN ALL ${total} SEGMENT CALL(S) FROM CALL 1 (each file's first call uses \`>\`, so re-running clears both segment files)`
     partMissingInstructions = `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_MISSING in ${errFile} → a HOST-written part file is missing or empty; no retry by you can fix it and you must NOT create the file yourself — report codexStatus='deferred'.`
+    partMissingInstructions += `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_CORRUPT in ${errFile} → read the named file in the error: if it is one of YOUR two segment files (${a1File} or ${a2File}), re-run ALL segment calls from CALL 1 exactly once; if it is a HOST-written part path, no retry by you can fix it and you must NOT rewrite the file — report codexStatus='deferred'.`
   }
   const diffFile = codexBuildDiffFile()
   // The model assignment, exactly as the review lane does it: the id belongs to the
@@ -1601,7 +1600,7 @@ ${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv} NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -3004,15 +3003,46 @@ function probeCause(raw) {
 // and unlabelled. An ABSENT section yields '' — its exit reads as null, i.e.
 // unreadable — so an older transcript degrades to "could not tell" rather than being
 // silently mis-sliced.
+// A REQUIRED CHECK MAY BE NAMED ANYTHING, INCLUDING A MARKER. The probe emits each
+// boundary with its own `echo`, so a real marker always occupies a WHOLE LINE. A
+// payload that merely CONTAINS the text does not — a ruleset requiring a context
+// literally named `___SECTION=BRANCH` arrives as `  "context": "___SECTION=BRANCH",`,
+// indented and quoted, inside the RULES section. Matching the bare substring took that
+// occurrence as the last one and pulled the BRANCH boundary past the real payload, so
+// the branch read came back empty and the whole classification degraded to `unknown`
+// — deferring every round on a repository nobody could see was misconfigured.
+// Requiring the marker to start a line and end one keeps the boundaries in the text the
+// probe itself wrote. (Fails shut either way, which is why it is small; but a stop
+// nobody can diagnose is the expensive kind.)
 const PROBE_SECTION_KEYS = ['BRANCH', 'RULES', 'RUNS', 'STATUSES']
 function probeSections(raw) {
   const text = String(raw)
   const out = { PROT: '', BRANCH: '', RULES: '', RUNS: '', STATUSES: '' }
   const marker = (key) => '___SECTION=' + key
+  // The marker occupies a whole line: nothing before it on that line, nothing after.
+  // (Line comments only in here — the test harness slices this source up to the first
+  // JSDoc opener, so opening one would truncate the slice mid-function. Its anchor
+  // guards in ci-gate.test.ts say so too.)
+  const onOwnLine = (found, key) => {
+    if (found < 0) return false
+    if (found > 0 && text[found - 1] !== '\n') return false
+    const after = text[found + marker(key).length]
+    return after === undefined || after === '\n' || after === '\r'
+  }
+  const lastOwnLine = (key, limit) => {
+    let from = limit
+    while (from > 0) {
+      const found = text.lastIndexOf(marker(key), from - 1)
+      if (found < 0) return -1
+      if (onOwnLine(found, key)) return found
+      from = found
+    }
+    return -1
+  }
   const at = []
   let limit = text.length
   for (let i = PROBE_SECTION_KEYS.length - 1; i >= 0; i -= 1) {
-    const found = limit <= 0 ? -1 : text.lastIndexOf(marker(PROBE_SECTION_KEYS[i]), limit - 1)
+    const found = limit <= 0 ? -1 : lastOwnLine(PROBE_SECTION_KEYS[i], limit)
     at[i] = found
     if (found >= 0) limit = found
   }
@@ -3132,13 +3162,30 @@ function classifyRequiredChecksProbe(probe) {
   // satisfiable by ANY row carrying the name. The binding is carried through to the
   // classifier, which uses it to refuse the one wrong producer it can actually
   // identify — see `classifyReviewReadiness`.
+  //
+  // `-1` IS THE WILDCARD, NOT A PRODUCER, AND READING IT AS ONE DEFERS FOREVER.
+  // GitHub documents the field on the branch-protection `checks` parameter as "The ID
+  // of the GitHub App that must provide this check", and then: "Pass -1 to explicitly
+  // allow any app to set the status" (REST branch-protection reference, verified this
+  // session). So `-1` is the admin saying the opposite of a binding. Treating it as an
+  // app id put the context into `appBound`, which makes the classifier discard every
+  // `StatusContext` row carrying that name — and a repository whose wildcard-required
+  // check is posted through the Commit Status API then reads as never having run, on
+  // every round, with no error to look at. That is the fail-closed hang this gate was
+  // rewritten to stop doing, arriving through a different door.
+  const APP_BINDING_WILDCARD = -1
   const appBound = []
   const bindingOf = (entry) => {
     if (entry === null || typeof entry !== 'object') return undefined
-    if (entry.app_id !== undefined && entry.app_id !== null) return entry.app_id
-    if (entry.appId !== undefined && entry.appId !== null) return entry.appId
-    if (entry.integration_id !== undefined && entry.integration_id !== null) return entry.integration_id
-    return undefined
+    const id =
+      entry.app_id !== undefined && entry.app_id !== null
+        ? entry.app_id
+        : entry.appId !== undefined && entry.appId !== null
+          ? entry.appId
+          : entry.integration_id !== undefined && entry.integration_id !== null
+            ? entry.integration_id
+            : undefined
+    return id === APP_BINDING_WILDCARD ? undefined : id
   }
   const addEntry = (entry) => {
     const context = entry !== null && typeof entry === 'object' ? entry.context : ''
@@ -3239,8 +3286,8 @@ function classifyRequiredChecksProbe(probe) {
   // no workflow emits, which is the single reading that STOPS a build. Nothing in an
   // exit code says which happened. Both endpoints carry GitHub's own `total_count`
   // (measured: check-runs and status both return it), so the probe asks for it and a
-  // count larger than what arrived nulls the list out — evidence of nothing, which can
-  // only ever disable the fast-fail.
+  // count that does not match what arrived nulls the list out — evidence of nothing,
+  // which can only ever disable the fast-fail.
   //
   // SAY WHAT THAT COSTS, BECAUSE IT IS NOT FREE AND IT IS INVISIBLE. On a base head
   // reporting more than 100 checks the fast-fail is OFF for that round: a genuinely
@@ -3269,9 +3316,18 @@ function classifyRequiredChecksProbe(probe) {
     // carry bare name arrays), and anything else present-but-not-an-integer — `null` from
     // a jq path that missed, a float, a string — is an unreadable list. `null` is
     // evidence of nothing, which can only ever disable the fast-fail.
+    //
+    // AND AN INTEGER CAN BE JUST AS IMPOSSIBLE AS A FRACTION. The guard above rejected
+    // `2.5` against three arrived names for being unusable, then let `2` — the same
+    // claim, stated in whole numbers — through as a complete list, along with any
+    // negative. GitHub's `total_count` is how many exist for the ref, so a count BELOW
+    // the arrival describes a response that cannot happen, and a count below zero is
+    // not a count at all. Both are the same evidence as a fraction: the field did not
+    // survive whatever produced this transcript, so nothing may be concluded from the
+    // list's length. Only an exact match is a complete page.
     const total = parsed.n === undefined ? names.length : parsed.n
     if (!Number.isInteger(total)) return null
-    return total > names.length ? null : names
+    return total === names.length ? names : null
   }
   const runNames = listFrom(runsText, 'RUNS')
   const statusNames = listFrom(statusesText, 'STATUSES')
