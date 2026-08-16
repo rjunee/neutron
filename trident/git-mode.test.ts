@@ -1099,9 +1099,13 @@ describe('multi-line `gh` output survives into the refusal', () => {
     expect(msg).toContain('The token in GH_TOKEN is invalid.')
     // …and the one it kept, which on its own diagnoses nothing.
     expect(msg).toContain('github.com')
-    // The refusal must not TERMINATE at the hostname, which is what the bug
-    // produced: `…missing a scope: github.com`.
-    expect(msg.trimEnd().endsWith('github.com')).toBe(false)
+    // The refusal must RUN THROUGH to `gh`'s last line. The truncation bug
+    // terminated it at the first one — `…missing a scope: github.com` — so
+    // asserting the tail is the direct contradiction of that failure. (Stated
+    // as "ends with the real last line" rather than "does not end with the
+    // hostname": a suffix test against a bare host name is the shape CodeQL
+    // flags as incomplete URL sanitization, and this form is stronger anyway.)
+    expect(msg.trimEnd().endsWith('The token in GH_TOKEN is invalid.')).toBe(true)
   })
 
   test('lines are flattened and trimmed, never dropped', () => {
