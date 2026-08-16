@@ -55,7 +55,22 @@ export class WebDiagnosticsClient {
   constructor(opts: WebDiagnosticsClientOptions) {
     this.base_url = opts.base_url.replace(/\/+$/, '')
     this.token = opts.token
-    this.fetchImpl = opts.fetchImpl ?? globalThis.fetch
+    // BIND IT. `globalThis.fetch` stored on a property and later called as
+    // `this.fetchImpl(...)` is invoked with THIS CLIENT as its receiver, and a
+    // browser rejects that: "Failed to execute 'fetch' on 'Window': Illegal
+    // invocation". The call throws before any request leaves the page.
+    //
+    // THIS IS WHY NO WEB REPORT EVER ARRIVED. The diagnosis had been chasing the
+    // wrong layer all day — bearer, payload, slug — and the answer was that the
+    // request was never made at all. Confirmed from the owner's console once the
+    // send stopped being swallowed: `timing report NOT delivered — Failed to
+    // execute 'fetch' on 'Window': Illegal invocation`. The instrument that made
+    // this visible was itself the fix's precondition.
+    //
+    // `landing/upload-client.ts:165` already binds for exactly this reason; this
+    // client was written without it and nothing caught the difference, because
+    // every test injects `fetchImpl` and so never exercises the default.
+    this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis)
   }
 
   /**
