@@ -329,3 +329,39 @@ describe('scheduled full leak-gate scan', () => {
     expect(nightlyYml()).toContain('scripts/ci/leak-gate.sh --tree .')
   })
 })
+
+/**
+ * The governed-repo attributes gate is only a gate if a job RUNS it.
+ *
+ * `scripts/ci/check-governed-repo-attributes.ts` shipped in #315 with no
+ * workflow step at all — the property it names ("this log union-merges in every
+ * fresh clone") was unguarded for as long as it existed, which is the same
+ * shape of hole the leak-gate wiring tests above exist to close. Its own
+ * subprocess tests prove the script is CORRECT; nothing there can prove it is
+ * REACHED. Deleting the `- run:` line must fail CI, not pass it.
+ */
+describe('governed-repo attributes gate is wired into ci.yml', () => {
+  /** The lines of one top-level job, bounded by the next job key. */
+  function jobBlock(name: string): string {
+    const start = yml.indexOf(`\n  ${name}:\n`)
+    expect(start).toBeGreaterThan(-1)
+    const rest = yml.slice(start + 1)
+    const next = rest.search(/\n {2}[a-z][a-z0-9-]*:\n/)
+    return next === -1 ? rest : rest.slice(0, next)
+  }
+
+  test('a job actually runs the gate', () => {
+    // Job-scoped and anchored to a real `- run:` key rather than a file-wide
+    // `toContain`, so a passing mention of the script in a comment or in another
+    // job cannot satisfy it — the same anchoring the `fail-fast: false` test
+    // above needed after a whole-file match let the setting be flipped while the
+    // explanatory comment kept the test green.
+    // Mutation-proved before landing: deleting the `- run:` line fails this test.
+    expect(jobBlock('layering')).toMatch(/^\s+- run: bun scripts\/ci\/check-governed-repo-attributes\.ts /m)
+  })
+
+  test('the gate script it names exists on disk', () => {
+    // A wired step pointing at a moved file fails only at CI time, on main.
+    expect(existsSync(join(REPO_ROOT, 'scripts/ci/check-governed-repo-attributes.ts'))).toBe(true)
+  })
+})

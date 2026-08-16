@@ -17,11 +17,11 @@
  *
  * THE VERDICT COMES FROM GIT, NOT FROM READING THE FILE. This gate used to
  * decide by parsing `.gitattributes` and taking the first exact-path `merge=`
- * assignment. git takes the LAST matching rule, and a later wildcard beats an
- * earlier exact path — so a tracked file whose union line was overridden two
- * lines below resolved to the override in git and to `union` here, and the gate
- * printed ✅ over exactly the regression it exists to catch. It now asks
- * `git check-attr` (see `resolveTrackedMergeDrivers`).
+ * assignment. git takes the LAST matching rule; a later wildcard beats an
+ * earlier exact path; and a `.gitattributes` in a SUBDIRECTORY beats the root
+ * one entirely. Each of those made the gate print ✅ over exactly the
+ * regression it exists to catch. It now asks `git check-attr`, over every
+ * tracked attributes file that can reach the log (`resolveTrackedMergeDrivers`).
  *
  * WHAT IS BEING GATED IS THE TRACKED FLOOR, NOT THIS CLONE. The entry-aware
  * driver binds itself in the UNTRACKED `$GIT_COMMON_DIR/info/attributes`, which
@@ -29,9 +29,9 @@
  * `scripts/install-merge-drivers.sh`, this clone's effective driver is
  * `as-built-log` and that is CORRECT, an opt-in upgrade over an intact floor.
  * The two questions are asked separately: the verdict comes from an isolated
- * probe carrying only the tracked file (what a fresh clone, and GitHub's own
- * server-side merge, will see), and this clone's local answer is reported
- * underneath as information that never decides anything.
+ * probe carrying only the tracked files (what a fresh clone gets — measured, by
+ * cloning), and this clone's local answer is reported underneath as information
+ * that never decides anything.
  *
  * Exit 0 conformant (including "not a governed repo" and "no log to protect" —
  * both are legitimately nothing to enforce), exit 1 otherwise.
@@ -40,10 +40,13 @@
 import {
   AS_BUILT_CANDIDATES,
   BUILT_IN_MERGE_DRIVERS,
+  collectTrackedAttributesFiles,
   localEffectiveMergeDrivers,
-  mergeRulesFor,
+  MERGE_ATTRIBUTE_STATES,
+  mergeRulesAcross,
   resolveTrackedMergeDrivers,
   unionAttributeLine,
+  untrackedOverlayAttributes,
 } from '@neutronai/trident/as-built-union-attribute.ts'
 
 const root = process.argv[2] ?? process.cwd()
@@ -64,29 +67,53 @@ if (present.length === 0) {
   process.exit(0)
 }
 
-const attributesFile = Bun.file(`${root}/.gitattributes`)
-const attributes = (await attributesFile.exists()) ? await attributesFile.text() : null
-
-const tracked = resolveTrackedMergeDrivers({ attributes, paths: present })
+const attributesFiles = collectTrackedAttributesFiles(root, present)
+const tracked = resolveTrackedMergeDrivers({ attributesFiles, paths: present })
 const failing = present.filter((path) => tracked.get(path) !== 'union')
 
-/** The local clone's view, reported but never decisive. */
+/**
+ * The local clone's view, reported but never decisive — and only ATTRIBUTED to
+ * the untracked overlay when that file exists and actually mentions the path.
+ * Otherwise the divergence is reported as unexplained, because "harmless local
+ * upgrade" is a claim, not a default.
+ */
 function localNote(): string[] {
   const local = localEffectiveMergeDrivers(root, present)
   if (local === null) return []
-  const upgraded = present.filter((p) => local.get(p) !== tracked.get(p))
-  if (upgraded.length === 0) return []
-  return [
-    '',
-    '   (this clone additionally resolves, via an untracked overlay — informational, not gated:',
-    ...upgraded.map((p) => `      ${p} → ${local.get(p) ?? 'unspecified'}`),
-    '    that is what scripts/install-merge-drivers.sh installs, and it does not change the floor)',
-  ]
+  const diverging = present.filter((p) => local.get(p) !== tracked.get(p))
+  if (diverging.length === 0) return []
+
+  // Attribute the divergence with git, not with a substring search: re-ask the
+  // isolated probe with this clone's real overlay layered on top, and credit the
+  // overlay only for the paths whose local answer it actually reproduces. A
+  // wildcard rule in the overlay is then credited correctly, and an overlay that
+  // does not explain the difference is not credited at all.
+  const overlay = untrackedOverlayAttributes(root)
+  const withOverlay =
+    overlay === null
+      ? null
+      : resolveTrackedMergeDrivers({ attributesFiles, paths: present, overlay: overlay.content })
+  const explained = diverging.filter((p) => withOverlay !== null && withOverlay.get(p) === local.get(p))
+  const unexplained = diverging.filter((p) => !explained.includes(p))
+
+  const out: string[] = ['']
+  if (explained.length > 0 && overlay !== null) {
+    out.push(`   (this clone additionally resolves, via ${overlay.path} — informational, not gated:`)
+    for (const p of explained) out.push(`      ${p} → ${local.get(p) ?? 'unspecified'}`)
+    out.push('    that is what scripts/install-merge-drivers.sh installs, and it does not change the floor)')
+  }
+  for (const p of unexplained) {
+    out.push(`   (this clone resolves ${p} → ${local.get(p) ?? 'unspecified'}, which differs from the`)
+    out.push('    tracked floor above and is NOT explained by an untracked overlay — the usual cause is')
+    out.push('    an UNCOMMITTED edit to a .gitattributes, which changes your merges and nobody else\'s.')
+    out.push('    Informational, not gated.)')
+  }
+  return out
 }
 
 if (failing.length === 0) {
   const detail = present.map((p) => `${p} (merge=union)`).join(', ')
-  console.log(`✅ governed-repo attributes OK — git resolves ${detail} from the tracked file`)
+  console.log(`✅ governed-repo attributes OK — git resolves ${detail} from the tracked files`)
   for (const line of localNote()) console.log(line)
   process.exit(0)
 }
@@ -98,7 +125,12 @@ console.error('   conflict by construction rather than by subject, and the resol
 console.error('   always the same mechanical "keep both". git has a built-in driver for')
 console.error('   that shape, and the tracked rule is the floor every fresh clone gets.')
 console.error('')
-console.error('   git check-attr, over the tracked .gitattributes alone, resolves:')
+console.error('   git check-attr, over the tracked attributes files alone, resolves:')
+console.error(
+  attributesFiles.length === 0
+    ? '   (no tracked .gitattributes reaches this log)'
+    : `   (from ${attributesFiles.map((f) => f.path).join(', ')})`,
+)
 
 for (const path of failing) {
   const driver = tracked.get(path) ?? null
@@ -107,6 +139,21 @@ for (const path of failing) {
 
   if (driver === null) {
     console.error(`       No rule reaches this path. Add to .gitattributes:`)
+    console.error(`         ${unionAttributeLine(path)}`)
+  } else if ((MERGE_ATTRIBUTE_STATES as readonly string[]).includes(driver)) {
+    // `set`/`unset` are attribute STATES, not driver names. Saying "no
+    // merge.set.driver config" sends the reader after a config key git has
+    // never had.
+    console.error(`       '${driver}' is not a driver name — it is what git reports for a bare`)
+    if (driver === 'set') {
+      console.error(`       '<path> merge' rule. Measured on git 2.50.1: that is the ordinary text`)
+      console.error(`       merge, so this log still conflicts with markers on every concurrent append.`)
+    } else {
+      console.error(`       '<path> -merge' rule. Measured on git 2.50.1: git then treats the file as`)
+      console.error(`       BINARY — 'Cannot merge binary files', ours kept whole, the other side's`)
+      console.error(`       entries dropped from the working file entirely.`)
+    }
+    console.error(`       Write the driver out in full:`)
     console.error(`         ${unionAttributeLine(path)}`)
   } else if ((BUILT_IN_MERGE_DRIVERS as readonly string[]).includes(driver)) {
     console.error(`       '${driver}' is a built-in driver, but it is not union: this log still`)
@@ -125,16 +172,16 @@ for (const path of failing) {
     console.error(`         ${unionAttributeLine(path)}`)
   }
 
-  // Name the lines that are actually in the file. When the union line IS there
+  // Name the lines that are actually in the files. When the union line IS there
   // and something later beats it, "add this line" is unactionable advice — the
   // line is already there and the reader needs to be shown the override.
-  const rules = attributes === null ? [] : mergeRulesFor(attributes, path)
+  const rules = mergeRulesAcross(attributesFiles, path)
   const only = rules.length === 1 ? rules[0] : undefined
   if (rules.length > 1) {
-    console.error(`       .gitattributes assigns this exact path ${rules.length} times; the LAST wins:`)
-    for (const rule of rules) console.error(`         line ${rule.line}: ${rule.text}`)
+    console.error(`       ${rules.length} tracked rules assign this exact path; the LAST wins:`)
+    for (const rule of rules) console.error(`         ${rule.file} line ${rule.line}: ${rule.text}`)
   } else if (only !== undefined && only.driver !== driver) {
-    console.error(`       .gitattributes line ${only.line} says '${only.text}', but a later`)
+    console.error(`       ${only.file} line ${only.line} says '${only.text}', but a later`)
     console.error(`       or broader pattern overrides it — git's answer above is the one that counts.`)
   }
 }

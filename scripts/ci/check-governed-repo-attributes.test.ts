@@ -3,11 +3,12 @@
  * gate that asserts a governed repo's append-only build log is union-merged.
  *
  * WHY SUBPROCESS AND NOT UNIT. The gate shipped with 17 green unit tests over
- * its pure helpers and an in-memory probe, and NOTHING executed the gate. Two
+ * its pure helpers and an in-memory probe, and NOTHING executed the gate. Three
  * false successes lived underneath that green: a `.gitattributes` whose union
- * line was overridden by a later rule, and one overridden by a later wildcard.
- * Both are covered below, and both fail without the fix — the helper tests
- * cannot see either, because the bug was never in a helper. It was in deciding
+ * line was overridden by a later rule, one overridden by a later wildcard, and
+ * one overridden by a `docs/.gitattributes` the gate never read. All three are
+ * covered below, and all three fail without the fix — the helper tests cannot
+ * see any of them, because the bug was never in a helper. It was in deciding
  * the verdict from a helper at all.
  *
  * Every case runs the REAL gate against a THROWAWAY fixture directory, so no
@@ -16,7 +17,7 @@
  * sends the next reader to the wrong file.
  */
 import { afterAll, describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -32,10 +33,16 @@ afterAll(() => {
 
 /**
  * A throwaway directory shaped like a repo. `governed` writes the root SPEC.md
- * that makes the convention apply; `attributes` is the tracked file, omitted
- * entirely when undefined.
+ * that makes the convention apply; `attributes` is the root tracked file,
+ * omitted entirely when undefined; `subAttributes` maps a directory to its own
+ * `.gitattributes`.
  */
-function fixture(opts: { governed?: boolean; logs?: string[]; attributes?: string }): string {
+function fixture(opts: {
+  governed?: boolean
+  logs?: string[]
+  attributes?: string
+  subAttributes?: Record<string, string>
+}): string {
   const dir = mkdtempSync(join(tmpdir(), 'governed-attrs-'))
   created.push(dir)
   if (opts.governed !== false) writeFileSync(join(dir, 'SPEC.md'), '# spec\n')
@@ -45,12 +52,30 @@ function fixture(opts: { governed?: boolean; logs?: string[]; attributes?: strin
     writeFileSync(path, '# log\n')
   }
   if (opts.attributes !== undefined) writeFileSync(join(dir, '.gitattributes'), opts.attributes)
+  for (const [subdir, content] of Object.entries(opts.subAttributes ?? {})) {
+    mkdirSync(join(dir, subdir), { recursive: true })
+    writeFileSync(join(dir, subdir, '.gitattributes'), content)
+  }
   return dir
 }
 
-/** Make `dir` a real repo carrying the untracked overlay the installer writes. */
+/**
+ * Make `dir` a real repo, COMMIT everything in it, and add the untracked
+ * overlay the installer writes.
+ *
+ * Committing matters: the gate reads attributes from the INDEX in a repo,
+ * because an untracked `.gitattributes` reaches no clone and must not count as
+ * a floor. A fixture that only wrote the file to disk would be asserting the
+ * opposite of the property.
+ */
 function initRepoWithOverlay(dir: string, overlay: string): void {
-  spawnSync('git', ['init', '-q', dir], { encoding: 'utf8' })
+  execFileSync('git', ['init', '-q', dir], { stdio: 'pipe' })
+  execFileSync('git', ['-C', dir, 'add', '-A'], { stdio: 'pipe' })
+  execFileSync(
+    'git',
+    ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'seed'],
+    { stdio: 'pipe' },
+  )
   mkdirSync(join(dir, '.git', 'info'), { recursive: true })
   writeFileSync(join(dir, '.git', 'info', 'attributes'), overlay)
 }
@@ -83,7 +108,7 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     // The remediation must show the override, not tell the reader to add a line
     // that is already on line 1.
     expect(out).toContain('the LAST wins')
-    expect(out).toContain('line 2:')
+    expect(out).toContain('.gitattributes line 2:')
   })
 
   test('FAILS when a LATER WILDCARD overrides the exact-path union line', () => {
@@ -96,6 +121,40 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     expect(status).toBe(1)
     expect(out).toContain('merge=binary')
     expect(out).toContain('overrides it')
+  })
+
+  test('FAILS when a SUBDIRECTORY .gitattributes overrides the root union line', () => {
+    // The root file is perfect. `docs/.gitattributes` outranks it for anything
+    // under docs/, and a gate that reads only the root file reports ✅ over a
+    // floor that is genuinely gone in every clone.
+    const dir = fixture({
+      attributes: 'docs/AS_BUILT.md merge=union\n',
+      subAttributes: { docs: 'AS_BUILT.md merge=binary\n' },
+    })
+    const { status, out } = runGate(dir)
+    expect(status).toBe(1)
+    expect(out).toContain('docs/AS_BUILT.md → merge=binary')
+    // It must NAME the subdirectory file, or the reader edits the root one,
+    // sees the union line already there, and concludes the gate is broken.
+    expect(out).toContain('docs/.gitattributes')
+  })
+
+  test('an UNTRACKED subdirectory override does NOT fail the gate — it reaches no clone', () => {
+    // The mirror of the case above, and the reason the gate reads the index
+    // rather than the working tree. This clone's own git answers `binary`; a
+    // fresh clone answers `union`, and the floor is what travels.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+    initRepoWithOverlay(dir, '')
+    writeFileSync(join(dir, 'docs', '.gitattributes'), 'AS_BUILT.md merge=binary\n')
+
+    // Control: this clone really does resolve to the untracked override.
+    const local = execFileSync('git', ['-C', dir, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'], {
+      encoding: 'utf8',
+    })
+    expect(local.trim()).toBe('docs/AS_BUILT.md: merge: binary')
+
+    const { status } = runGate(dir)
+    expect(status).toBe(0)
   })
 
   test('FAILS when no rule reaches the log at all', () => {
@@ -111,6 +170,7 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     const { status, out } = runGate(dir)
     expect(status).toBe(1)
     expect(out).toContain('unspecified')
+    expect(out).toContain('no tracked .gitattributes reaches this log')
   })
 
   test('FAILS on another BUILT-IN driver, which is not union', () => {
@@ -137,6 +197,34 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     expect(out).not.toContain('breaks every fresh clone')
   })
 
+  test('a bare `merge` rule is reported as the STATE it is, not as a driver', () => {
+    // git check-attr answers `set` here. Calling that "a CUSTOM driver" and
+    // telling the reader there is no `merge.set.*` config names a config key
+    // git has never had, and sends them to invent one.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge\n' })
+    const { status, out } = runGate(dir)
+    expect(status).toBe(1)
+    expect(out).toContain('merge=set')
+    expect(out).toContain('is not a driver name')
+    expect(out).toContain('ordinary text')
+    expect(out).not.toContain('merge.set.')
+    expect(out).not.toContain("'set' is a CUSTOM driver")
+  })
+
+  test('a `-merge` rule is reported as unset, with what git actually does to the file', () => {
+    // Measured on git 2.50.1: `-merge` makes git treat the file as BINARY —
+    // "Cannot merge binary files", ours kept whole, the other side's entries
+    // silently absent. That is a worse outcome than a conflict and the text has
+    // to say so.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md -merge\n' })
+    const { status, out } = runGate(dir)
+    expect(status).toBe(1)
+    expect(out).toContain('merge=unset')
+    expect(out).toContain('is not a driver name')
+    expect(out).toContain('BINARY')
+    expect(out).not.toContain('merge.unset.')
+  })
+
   test('PASSES an UNGOVERNED directory untouched — no SPEC.md, nothing to enforce', () => {
     const dir = fixture({ governed: false, attributes: '# nothing here\n' })
     const { status, out } = runGate(dir)
@@ -151,14 +239,26 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     expect(out).toContain('no append-only build log found')
   })
 
-  test('checks EVERY log a repo keeps, not just the first', () => {
+  test('checks EVERY log a repo keeps — the FIRST one being fine does not end the check', () => {
+    // The candidate order is AS_BUILT.md, AS-BUILT.md, docs/AS_BUILT.md, so the
+    // FIRST log present here is AS-BUILT.md and it is CONFORMANT. Only the
+    // second is broken.
+    //
+    // That arrangement is the whole point. The previous version of this test
+    // made the first present log the broken one, so a gate that checked only
+    // `present[0]` stayed green through it and the "every log" property was
+    // never exercised. Mutation-proved before landing: replacing the failing
+    // filter with a `present[0]`-only check makes THIS test fail (gate exits 0)
+    // and left the old version passing.
     const dir = fixture({
       logs: ['docs/AS_BUILT.md', 'AS-BUILT.md'],
-      attributes: 'docs/AS_BUILT.md merge=union\n',
+      attributes: 'AS-BUILT.md merge=union\n',
     })
     const { status, out } = runGate(dir)
     expect(status).toBe(1)
-    expect(out).toContain('AS-BUILT.md → merge=unspecified')
+    expect(out).toContain('docs/AS_BUILT.md → merge=unspecified')
+    // ...and the conformant first log is NOT reported as failing.
+    expect(out).not.toContain('AS-BUILT.md → merge=')
   })
 
   test('a local overlay upgrade does NOT paper over a broken tracked floor', () => {
@@ -170,17 +270,17 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     const dir = fixture({ attributes: '# the union line was deleted\n' })
     initRepoWithOverlay(dir, 'docs/AS_BUILT.md merge=as-built-log\n')
     // Control: this clone really does resolve to the overlay.
-    const local = spawnSync('git', ['-C', dir, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'], {
+    const local = execFileSync('git', ['-C', dir, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'], {
       encoding: 'utf8',
     })
-    expect(local.stdout.trim()).toBe('docs/AS_BUILT.md: merge: as-built-log')
+    expect(local.trim()).toBe('docs/AS_BUILT.md: merge: as-built-log')
 
     const { status, out } = runGate(dir)
     expect(status).toBe(1)
     expect(out).toContain('unspecified')
   })
 
-  test('an intact floor PLUS a local upgrade passes, and says so without gating on it', () => {
+  test('an intact floor PLUS a local upgrade passes, and names the overlay it came from', () => {
     const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
     initRepoWithOverlay(dir, 'docs/AS_BUILT.md merge=as-built-log\n')
     const { status, out } = runGate(dir)
@@ -188,6 +288,51 @@ describe('check-governed-repo-attributes (subprocess)', () => {
     expect(out).toContain('✅')
     expect(out).toContain('informational, not gated')
     expect(out).toContain('as-built-log')
+    // The note must point at the actual file it read, not at an "untracked
+    // overlay" it assumed was there.
+    expect(out).toContain(join('info', 'attributes'))
+  })
+
+  test('an UNEXPLAINED local divergence is reported as unexplained, not as a harmless upgrade', () => {
+    // The floor is intact IN THE INDEX and this clone answers something else,
+    // with no overlay to account for it — here because .gitattributes has an
+    // uncommitted edit. Blaming the installer for that is a claim the gate
+    // cannot support, and it reads as reassurance at the exact moment something
+    // unaccounted-for is rewriting this developer's merges.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+    initRepoWithOverlay(dir, '')
+    rmSync(join(dir, '.git', 'info', 'attributes'), { force: true })
+    writeFileSync(join(dir, '.gitattributes'), 'docs/AS_BUILT.md merge=binary\n')
+
+    // Control: the committed floor is union, and this working tree is not.
+    expect(
+      execFileSync('git', ['-C', dir, 'show', ':.gitattributes'], { encoding: 'utf8' }).trim(),
+    ).toBe('docs/AS_BUILT.md merge=union')
+    expect(
+      execFileSync('git', ['-C', dir, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'], {
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('docs/AS_BUILT.md: merge: binary')
+
+    const { status, out } = runGate(dir)
+    expect(status).toBe(0)
+    expect(out).toContain('NOT explained by an untracked overlay')
+    expect(out).toContain('UNCOMMITTED edit')
+    expect(out).not.toContain('install-merge-drivers.sh installs')
+  })
+
+  test('an overlay WILDCARD is still credited as the explanation, not called unexplained', () => {
+    // The attribution asks git with the overlay layered on, rather than
+    // searching the overlay text for the path. `docs/*.md` never contains the
+    // string `docs/AS_BUILT.md`, and a substring check would have reported this
+    // as an unaccounted-for divergence on every machine running the installer
+    // with a glob binding.
+    const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+    initRepoWithOverlay(dir, 'docs/*.md merge=as-built-log\n')
+    const { status, out } = runGate(dir)
+    expect(status).toBe(0)
+    expect(out).toContain('informational, not gated')
+    expect(out).not.toContain('NOT explained')
   })
 
   test('this repo — the governed tree the gate ships in — passes its own gate', () => {

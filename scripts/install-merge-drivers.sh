@@ -16,16 +16,28 @@
 #   2. `docs/AS_BUILT.md merge=as-built-log` in `$GIT_COMMON_DIR/info/attributes` — the binding
 #      from the path to that command.
 #
-# Half (2) deliberately does NOT live in a tracked `.gitattributes`. git treats an attribute naming
-# a driver that is not configured as FATAL, not as a fallback:
+# Half (2) deliberately does NOT live in a tracked `.gitattributes`. MEASURED on git 2.50.1
+# (Apple Git-155), a fresh repo with `log.txt merge=as-built-log` and two branches editing the same
+# region:
 #
-#     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+#   - no `merge.as-built-log.*` config at all → NOT fatal. git falls back to the ordinary text
+#     merge: exit 1, `CONFLICT (content)`, conflict markers.
+#   - `merge.as-built-log.name` set with no `.driver` → THAT is the fatal one:
+#         fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+#   - both `.name` and `.driver` set → exit 0, the driver's output.
 #
-# — for `git merge` and for the `git apply --3way` the publisher uses. Committing the attribute
-# would therefore break every fresh clone, every outside contributor and CI on any merge touching
-# this file, until each of them ran this script. Keeping it untracked means the attribute and its
-# driver arrive together or not at all; a clone that never runs this behaves exactly as it does
-# today. Same rule `install-git-hooks.sh` applies to the leak gate and its denylist.
+# An earlier revision of this comment claimed exit 128 for the FIRST case as well. It does not
+# happen, and the true behaviour is the better argument anyway: `docs/AS_BUILT.md merge=union` IS
+# tracked, and it is the floor every clone gets. A committed `merge=as-built-log` line would
+# OVERRIDE that union floor with a driver nobody has configured, so every clone that had not run
+# this script would quietly go back to conflicting on the log — the exact regression
+# `scripts/ci/check-governed-repo-attributes.ts` now gates.
+#
+# The third case is why the two config keys go in together or not at all: half-installed IS the
+# exit-128 state, for `git merge` and for the `git apply --3way` the publisher uses. Keeping the
+# binding untracked means the attribute and its driver arrive together; a clone that never runs
+# this behaves exactly as it does today. Same rule `install-git-hooks.sh` applies to the leak gate
+# and its denylist.
 
 set -uo pipefail
 
