@@ -249,6 +249,124 @@ and found two defects in it: the comment's arithmetic was wrong in one clause,
 and the new fixture used a fraction the OLD code already rejected, so it
 discriminated nothing. Both fixed; the mutation test now replays both weaker
 guards, including the one that shipped.
+## 2026-08-16 — the guard that proved the gate runs accepted `|| true`
+
+Every fix below closes a route to the SAME outcome — the gate prints ✅, or CI
+prints a green check, while the property is violated. Two were reproduced
+independently by two reviewers against the live branch before any of this was
+written.
+
+**The workflow guard was a string search wearing a docblock.**
+`scripts/ci/ci-workflow.test.ts` asserted the gate step "runs, unconditionally,
+with its exit code honoured" and checked only for `if:` and
+`continue-on-error:`. Appending `|| true` to the `- run:` line satisfies both,
+leaves the step present and running, and turns the check green whatever the gate
+decides. Reproduced against the branch: the mutation landed, the suite stayed
+0-fail, and the deleted-step control still went red — so the suite proved a
+string was in a file. `whyNotGating` now requires the gate to be the WHOLE shell
+command (nothing before it, no `|`, `;` or `&` after it), and six shell bypasses
+join the six YAML ones as permanent mutations: `|| true`, `|| :`, `; true`, a
+pipe, a trailing `&`, and a `set +e` prefix.
+
+**The installer could report success over the state it calls fatal.**
+`scripts/install-merge-drivers.sh` runs `set -uo pipefail` with no `-e`, and
+neither `git config` call nor the attributes append was checked, so a failure
+fell through to `echo "merge drivers: installed"` and exit 0. Measured here on
+git 2.50.1 (Apple Git-155), same repo, two branches conflicting on a path bound
+to `merge=as-built-log`: `.name` set with `.driver` unset is
+`fatal: custom merge driver as-built-log lacks command line.` (exit 128), and
+`.driver` set with `.name` unset merges fine at exit 0. That asymmetry is the
+fix, not just the checks — `.driver` is now written FIRST, so an interruption
+between the two leaves a clone that merges rather than one that cannot. Every
+step is checked and a failure rolls the pair back and exits 1. A first draft
+also re-read both halves before printing success; mutating that block away left
+the whole suite green, because every reachable failure is already caught at the
+write, so it is deleted rather than kept — the same call, for the same reason, as
+the empty-`--template=` dance dropped from the attributes probe one round ago.
+A test makes `.git` read-only (the config
+LOCK file is what needs the directory, not the config file's own mode: measured
+`could not lock config file .git/config: Permission denied`, exit 255) and
+asserts the installer fails loudly leaving neither key set.
+
+**A local `refs/replace/*` forged the committed floor.** Object reads honour
+replace refs, so `git show HEAD:.gitattributes` can return a blob the commit does
+not contain. Measured: a repo whose committed attributes file is
+`# broken, no union rule`, with that blob replaced by a healthy one, answers
+`docs/AS_BUILT.md merge=union` to `git show` — while `GIT_NO_REPLACE_OBJECTS=1`
+and a fresh `git clone` both return the broken file. `clone` does not carry
+`refs/replace/*` and neither does `actions/checkout`, so this is a reading that
+travels nowhere, the same class as a machine-global attributes file.
+`GIT_NO_REPLACE_OBJECTS=1` is now part of `CHECK_ATTR_ISOLATION_ENV`, with the
+clone as the control.
+
+**The probe inherited case-insensitivity from `$TMPDIR`.** `git init` probes the
+filesystem and writes `core.ignorecase = true` on macOS, so the throwaway probe
+matched a wrong-case rule that no case-sensitive clone honours. Measured:
+`docs/as_built.md merge=union` resolves `union` for `docs/AS_BUILT.md` by
+default and `unspecified` under `-c core.ignorecase=false`. The pin is applied to
+the PROBE only and deliberately not to `localEffectiveMergeDrivers`, which
+reports what this clone really does and must not describe a repository the
+developer is not using. The test reads `core.ignorecase` rather than asserting
+it, because on a case-sensitive runner there is no poison to defeat and
+demanding one would red CI for the platform being right.
+
+**A committed-but-not-checked-out `SPEC.md` turned the whole gate off.**
+Governedness was a disk read — the previous entry says "`SPEC.md` stays a disk
+read on purpose", and that is now wrong: under a sparse checkout the spec is in
+the tree and not on disk, and the gate exited 0 with "not a governed repo" over a
+floor nothing had looked at. It is now the UNION of disk and the committed tree,
+since each alone fails silently in a different direction (tree alone would drop
+the first commit of a new repo, and every fixture in the gate's own tests).
+
+**`presentAsBuiltLogs` was the module's one fail-OPEN path.** Its
+`catch { return [] }` reached the caller as "no append-only build log found —
+nothing to enforce" and exit 0, so an unreadable governed repo read as a clean
+bill of health. It now throws, and the test proves the read really is broken
+(`git ls-files` exit 128) before asserting the throw.
+
+Three diagnostics said things about git that are not true. `unset` was reported
+as "your `<path> -merge` rule", but the built-in `binary` MACRO expands to
+`-diff -merge -text` and produces the same `unset` from a line with no `merge`
+token in it — measured — so both spellings are now named. Duplicate exact rules
+beaten by a later WILDCARD were listed under "the LAST wins", pointing the reader
+at a line whose edit changes nothing; that heading is now used only when the last
+collected rule is what git actually resolved. And the local-clone note credited
+`scripts/install-merge-drivers.sh` for any overlay naming its driver without
+checking whether the driver is configured at all — i.e. it described a broken
+clone as a sanctioned upgrade. It now reads BOTH `merge.as-built-log.driver` and
+`.name`, because the three config states are three different git outcomes and the
+first draft of this very fix got that wrong: reading only `.driver` cannot tell
+`.name`-without-`.driver` (the exit-128 `lacks command line` abort) from no
+config at all (an ordinary exit-1 content conflict), and it would have printed
+"exit 128" over the second — a new confident wrong sentence about git, inside the
+change whose subject is confident wrong sentences about git. Each state now has
+its own message and its own test.
+
+Two test-quality fixes with no behaviour change: `AS_BUILT_CANDIDATES` was
+asserted only to contain the substring `BUILT`, which is satisfied by any three
+of the four and by names that are not logs, and is now pinned as the exact set;
+and every fixture commit pins `commit.gpgsign=false`, so the suite does not reach
+for a signing key on a maintainer's machine or block on a pinentry prompt in a
+run that is supposed to be unattended.
+
+Eleven mutations were run with the unmutated suite green as the control, each
+reverting exactly one property above: `|| true` on the workflow step, the
+`GIT_NO_REPLACE_OBJECTS` pin, the probe's case pin, `presentAsBuiltLogs` failing
+open, governedness back to disk-only, the installer's `.name`-first ordering with
+unchecked writes, the half-install note reading only `.driver`, the wildcard
+override back to "the LAST wins", a dropped `AS_BUILT_CANDIDATES` entry, and the
+`-merge` diagnostic losing the macro spelling. Ten turn a test red. The eleventh
+is the deleted verification block above, and its deletion is the finding.
+
+The version acceptance test asserted `git version 2.` under a docblock claiming
+it existed "because 'measured on 2.50.1' stops being a true statement the moment
+the runner's git differs" — it accepts every git of the decade, so the promise
+and the assertion were different claims. Pinning the number is the wrong repair:
+it would red this suite on the Linux runner for a reason unrelated to the
+property, and a version string is not a behaviour anyway. The guarantee comes
+from the six real merges in the same file, which re-measure every claim on
+whatever git is present. `2.50.1` in the docblocks is provenance; the merges are
+what keep it true.
 
 ## 2026-08-16 — the guard was on the automatic path only, so the explicit one still moved the rows
 
@@ -548,6 +666,247 @@ are not decorative. The positive control re-appends the first heading NOT alread
 duplicated: the scenario it models is a union merge doubling the newest entry, and
 re-appending an already-doubled heading takes it from two occurrences to three without
 changing the duplicate count at all.
+## 2026-08-16 — the union gate asks git instead of re-deriving it
+
+#315 added a CI gate asserting this log carries `merge=union`, and decided that
+by PARSING `.gitattributes` and taking the FIRST exact-path `merge=` assignment.
+git takes the LAST one, and a later WILDCARD beats an earlier exact path.
+Measured here on git 2.50.1: a file containing `docs/AS_BUILT.md merge=union`
+followed by `docs/AS_BUILT.md merge=as-built-log` resolves in git to
+`as-built-log`, and the shipped gate printed `✅ … (already-union)` and exited 0
+over it. Same with a following `docs/*.md merge=binary`. So the floor this gate
+exists to hold could be removed with the gate reporting green — the regression
+it was written to prevent, wearing its own ✅.
+
+The verdict now comes from `git check-attr`, asked in a THROWAWAY repository
+seeded with EVERY tracked attributes file that can reach the log. The isolation
+is the design, not tidiness: the entry-aware driver binds itself in the untracked
+`$GIT_COMMON_DIR/info/attributes`, which OUTRANKS the tracked file, so a machine
+that ran `scripts/install-merge-drivers.sh` answers `as-built-log` for a repo
+whose tracked line is gone. Asking the local clone would pass that repo. The
+gate now asks two separate questions — is the FLOOR every fresh clone gets
+intact (decides), and does THIS clone additionally carry the opt-in upgrade
+(printed, never decisive).
+
+Seeding the probe with the ROOT `.gitattributes` alone was the same bug one level
+up, and it survived the first fix. git consults a `.gitattributes` in the path's
+own directory and every ancestor, deeper beating shallower. Measured on git
+2.50.1: a root `docs/AS_BUILT.md merge=union` plus a tracked `docs/.gitattributes`
+saying `AS_BUILT.md merge=binary` resolves to `binary` — in the repo AND in a
+fresh clone of it, verified by cloning — while a root-only probe answers `union`
+and the gate prints ✅. The probe now collects `.gitattributes` for the path's
+directory and each ancestor (a bounded, provably complete set), reads them from
+the COMMITTED TREE rather than the working tree so an uncommitted or untracked
+file cannot manufacture a floor that reaches no clone, and reproduces the
+directory layout in the scratch repo so git applies its own precedence.
+
+Reading a tree is right only at the repository TOP LEVEL, and getting that
+wrong reintroduces the same bug the fix was for. A tree path is always spelled
+from the top level, so for a governed tree nested inside a larger repo
+`git show HEAD:docs/.gitattributes` returns the OUTER repo's file — a confident
+answer to a different question. The check compares `rev-parse --show-toplevel`
+against the directory being asked about, through `realpathSync` on both sides,
+because macOS hands out `/var/...` paths that resolve to `/private/var/...` and a
+raw string compare would call the top level "nested" and fall back to disk for
+every temp-dir fixture. Nested trees read from disk.
+
+The isolation itself was asserted rather than real. `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM` and `GIT_ATTR_NOSYSTEM` do not close the door: measured on
+git 2.50.1 against an attributes-free repo whose control answer is `unspecified`,
+each of `GIT_CONFIG_PARAMETERS` (what `git -c` exports to every child, hook and
+alias), `GIT_CONFIG_COUNT`+`GIT_CONFIG_KEY_n`/`VALUE_n`, `GIT_DIR` pointing at
+another repository, and `GIT_ATTR_SOURCE=HEAD` steered the answer straight past
+the pins. The CI step runs from a clean runner env, but this repo already runs
+`scripts/ci` gates from git hooks, where git has exported `GIT_DIR` itself, and
+the failure mode is a silent PASS. Those variables plus the numbered config keys
+are now DELETED from the probe env — deleted, not set to `undefined`, since
+`GIT_DIR=undefined` is a path. Each has a test with an unpinned control proving
+the poison lands without the fix, alongside the pre-existing
+`core.attributesFile` and `init.templateDir` controls.
+
+The gate's stated rationale was also wrong about git and is corrected to what
+was measured. It claimed a custom driver named in a tracked file is fatal in
+every fresh clone (`lacks command line`, exit 128). It is not: with NO
+`merge.<name>.*` config, git falls back to the ordinary text merge — exit 1,
+`CONFLICT (content)`, markers in the file. The exit-128 abort needs
+`merge.<name>.name` defined WITHOUT `.driver`; with both keys set the driver
+runs and exits 0. All three states measured with real two-branch merges. A
+custom driver in the tracked file is still rejected, because it is not union,
+but the remediation text now describes the symptom a reader will actually meet.
+
+The same false claim was load-bearing prose in three more places, all corrected
+to the measurement: `scripts/install-merge-drivers.sh`,
+`scripts/git/as-built-merge-driver.ts` and `CONTRIBUTING.md` each justified
+keeping the driver's binding untracked by saying a tracked one would hard-fail
+every clone. The conclusion is right and the reason was not. The true reason is
+better: `docs/AS_BUILT.md merge=union` IS tracked and is the floor, so a
+committed `merge=as-built-log` would OVERRIDE that floor with a driver nobody
+has configured and quietly return the log to conflicting — precisely the
+regression this gate now catches.
+
+`git check-attr` also answers `set` for a bare `<path> merge` rule and `unset`
+for `<path> -merge`. Neither is a driver name, and both were being reported as
+"a CUSTOM driver" with a remediation naming `merge.set.*` — a config key git has
+never had. Both are now described as the states they are, with what git measurably
+does: `set` is the ordinary text merge (exit 1, markers); `unset` makes git treat
+the file as BINARY (`Cannot merge binary files`, ours kept whole, the other
+side's entries absent from the working file). Both still fail the gate.
+
+The informational local-clone note used to attribute ANY divergence to "an
+untracked overlay", named whether or not that file existed — reassurance at the
+moment something unaccounted-for is rewriting a developer's merges. It now reads
+the real `$GIT_COMMON_DIR/info/attributes` and attributes the divergence by
+ASKING GIT: the probe is re-run with that overlay layered on, and the overlay is
+credited only for paths whose local answer it actually reproduces. A substring
+search would have mis-reported a `docs/*.md` glob binding as unexplained on every
+machine running the installer; that case has a test. Anything the overlay does
+not explain is now reported as unexplained, pointing at the usual cause (an
+uncommitted `.gitattributes` edit) rather than at the installer.
+
+Two more things this turned up. The gate had NO workflow step — it ran nowhere,
+in any repository, since it merged; it is now a step in the `layering` job, with
+a job-scoped test in `scripts/ci/ci-workflow.test.ts` anchored to a real `- run:`
+key so deleting the step fails CI (mutation-proved) rather than passing it.
+And another built-in driver on the log (`binary`, `text`) used to PASS, inherited
+from the fixer's "don't overwrite somebody's choice" rule: correct for a fixer,
+wrong for a gate, since neither one union-merges. A fixer must not overwrite; a
+gate must not bless.
+
+The fixer itself is gone. `planUnionAttribute`/`ensureUnionAttribute` and their
+filesystem probe lost their last production caller when the gate stopped parsing,
+leaving ~150 lines of module and ~90 lines of test that only their own tests
+referenced, under a docblock describing them as live behaviour — the shape of
+thing that reads as a feature for months. The module is now only the question the
+gate asks.
+
+The isolation reached the last step in the chain and not the ones feeding it,
+which isolates nothing. `resolveTrackedMergeDrivers` ran under a scrubbed
+environment; `collectTrackedAttributesFiles` — which decides WHICH
+`.gitattributes` that probe is then shown — ran `git show :<path>` under the
+caller's. Measured end to end on git 2.50.1 against a governed repo whose union
+line had been deleted: with `GIT_DIR` pointed at a healthy repo, the gate exited
+0 and printed `✅ governed-repo attributes OK`; the same with `GIT_INDEX_FILE`
+plus `GIT_OBJECT_DIRECTORY`. The probe was answering correctly about a different
+repository. Every git read in the module now carries the same isolation, and the
+regression tests for it run the gate as a SUBPROCESS under each poisoned
+environment, because an in-process test hands the poison in explicitly and
+therefore cannot see an inherited one — dropping the `env` argument leaves the
+in-process tests green and turns the four subprocess ones red, which is exactly
+how this shipped.
+
+`GIT_CONFIG_GLOBAL=/dev/null` does not disable git's global attributes file,
+because that file has a DEFAULT needing no config at all:
+`$XDG_CONFIG_HOME/git/attributes`, falling back to `~/.config/git/attributes`.
+Measured: with `docs/AS_BUILT.md merge=union` in that file, the gate passed a
+repo tracking no such rule. Every `check-attr` now runs with
+`-c core.attributesFile=/dev/null`, which outranks every config FILE including a
+repo-local one — and that also closes an init TEMPLATE whose `config` sets
+`core.attributesFile`, measured as the same false PASS. A draft carried a second
+mechanism for the template case (an empty `--template=` plus stripping
+`GIT_TEMPLATE_DIR`); mutating both away left the whole suite green, so they were
+removed rather than kept as a defence no test can distinguish from its absence.
+
+Log PRESENCE was read from disk while the RULE reaching it was read from the
+index. An untracked `AS-BUILT.md` in a working tree therefore failed a repo whose
+tracked floor was perfect — loud rather than silent, but still the gate answering
+about a file that reaches no clone. Presence now comes from `git ls-files` at the
+top level, disk only outside a repository. `SPEC.md` stays a disk read on
+purpose: it decides only WHETHER to run.
+
+The workflow guard proved the step's TEXT was present, nothing more. Adding
+`if: false` or `continue-on-error: true` to that same step left it green while
+the gate decided nothing — one-word edits that read as configuration rather than
+as deletion, and the exact edits a red gate tempts someone into. The check is now
+a pure function over the YAML, and the four bypasses (delete the step, disable
+the step, swallow its exit code, disable the whole job) are run against it as
+tests, each asserting its mutation landed before asserting it was caught.
+
+Nothing performed a real merge. Every "measured on git 2.50.1" sentence in this
+subsystem — including the one that had already been WRONG in shipped remediation
+text — was prose checked once by hand. Six real two-branch merges now pin them:
+`union` keeps both entries at exit 0 with no markers; a custom driver with no
+config is an ordinary `CONFLICT (content)` at exit 1 WITH markers and explicitly
+not 128; `merge.<name>.name` without `.driver` is the exit-128
+`lacks command line`; a bare `merge` rule is the ordinary text merge; `-merge`
+and `merge=binary` both make git treat the file as binary, keeping ours whole and
+dropping the other side's entries with no marker to notice them by.
+
+The local-clone note credited ANY overlay rule to `install-merge-drivers.sh`, so
+a hand-written `merge=binary` in someone's `info/attributes` was reported as the
+sanctioned upgrade — a driver that DROPS the other side's entries, described as
+harmless, pointing at a script that never wrote it. The installer's driver name
+is now a single exported constant pinned by a test against the shell script's
+`DRIVER_NAME`, and only that driver earns the installer's name in the note.
+
+Tests went 41 → 108 across the three files. The two that carry the gate went
+17 → 78 (51 module + 27 gate); the workflow-wiring file went 24 → 30. All 17
+originals passed over every false success above, because they only ever
+exercised pure helpers and an in-memory probe — the bug was never in a helper, it
+was in deciding a verdict from one. There are now subprocess tests running the
+real gate against throwaway trees (union present, rule missing, no attributes
+file, another built-in, a custom driver, `merge`/`-merge` states, duplicate
+rules, overriding wildcard, SUBDIRECTORY override, an untracked subdirectory
+override that must NOT fail, an untracked LOG that must NOT fail, two logs,
+governed, ungoverned, an overlay over a broken floor, an overlay over an intact
+one, a glob overlay, a non-installer overlay, an unexplained divergence, and a
+broken floor under each of four poisoned environments with an intact floor as
+the positive control) plus real-`git check-attr` boundary tests and real merges,
+with clone-verified controls.
+
+The "checks EVERY log" test was itself vacuous: the candidate ordering made the
+first present log the broken one, so a gate checking only `present[0]` stayed
+green through it. The fixture now makes the FIRST log conformant and a LATER one
+broken, and that mutation now fails. Every safety property here was mutated with
+the unmutated suite green as the control — root-only attributes collection,
+isolation-strips-nothing, `present[0]`-only, set/unset-as-custom-driver,
+overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo, the
+collector inheriting the ambient environment, the collector reading an unscrubbed
+one, dropping the `core.attributesFile` argv pin, presence read from disk,
+crediting every overlay to the installer, and disabling the step-scope half of
+the workflow guard — and every one turns a test red. The workflow guard's own six
+bypasses live IN the test file as permanent mutations (delete the step, `if:` or
+`continue-on-error:` before the `run:` key and again after it, disable the whole
+job), each asserting its mutation landed before asserting it was caught.
+
+One mutation did NOT fail, and that is why the code it removed is absent from
+this change: deleting the empty-`--template=` dance left the entire suite green,
+the `-c core.attributesFile` pin having already covered it.
+
+Building the guard's pattern by escaping a constant into a `new RegExp` was
+itself a defect — an incomplete escape (`/` and `.` handled, `\` not), which
+CodeQL flags high as `js/incomplete-sanitization` and which had no reason to
+exist, since the thing being matched is a literal. It is a static regex for the
+line SHAPE plus a plain substring for the command.
+
+The last false PASS was one word wide. "Read from the index, because only that
+answers what a fresh clone gets" was written in the gate's own header and is
+false: the index also holds STAGED work, and staged work travels nowhere.
+Measured on git 2.50.1 against a repo whose committed `.gitattributes` reads
+`# the union line was deleted` with `docs/AS_BUILT.md merge=union` staged on top
+— `git clone` of it, then `check-attr` in the clone, answers `unspecified`,
+while the gate printed `✅ governed-repo attributes OK` and exited 0. Every read
+that decides the verdict now names the COMMITTED TREE: `git show HEAD:<path>`
+for the attributes, `git ls-tree -r HEAD` for which logs exist. Presence and rule
+must come from ONE source or they disagree in the other direction too — a
+staged-only `AS-BUILT.md` is listed by `ls-files` and absent from `ls-tree`, so
+reading the index for presence demands a floor for a file no clone has.
+
+The one case with no tree to read is an UNBORN HEAD, and it falls back to the
+index deliberately. `git rev-parse --verify --quiet HEAD` exits 1 in a freshly
+`init`ed repo and `ls-tree -r HEAD` there is `fatal: Not a valid object name
+HEAD`; refusing to answer would print "no append-only build log found" and exit 0
+over a repo whose first commit is about to ship a broken floor, which is a
+silent pass, and silent passes are the thing this gate keeps being fixed for.
+
+Three more mutations, each with its landing proved before the suite was run and
+the unmutated suite green as the control: reverting the attributes read to
+`git show :<path>` reds the staged-only reproduction and its mirror; reverting
+presence to `ls-files` reds the staged-only-log and unborn-HEAD cases; and
+returning `HEAD` for an unborn repo instead of the index reds all three unborn
+cases. The reproduction and its mirror are both there on purpose — a gate that
+also failed a developer mid-edit on a file every clone still resolves correctly
+would be strictness, not correctness, so the committed-floor-intact-with-a-
+staged-deletion case asserts exit 0, with a real `git clone` as its control.
 ## 2026-08-16 — dead Trident launchers are detected externally in seconds
 
 Trident now polls the recorded launcher generation every 15 seconds in the supervised
