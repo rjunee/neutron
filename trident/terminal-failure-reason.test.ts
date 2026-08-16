@@ -36,7 +36,12 @@
  * unchanged; only the supply of measurements changed.
  */
 import { describe, expect, test } from 'bun:test'
-import { innerTerminalFailureReason, publishFailureReason, redactPushError } from './orchestrator.ts'
+import {
+  classifyPublishFailure,
+  innerTerminalFailureReason,
+  publishFailureReason,
+  redactPushError,
+} from './orchestrator.ts'
 import { interpretFailure } from './delivery.ts'
 import { parseInnerResult } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
@@ -535,5 +540,63 @@ describe('publishFailureReason — names the step, quotes the cause, invents not
     const a = publishFailureReason('push', 'feat-x', '')
     const b = publishFailureReason('read the remote state of', 'feat-x', '')
     expect(a).not.toBe(b)
+  })
+})
+
+describe('classifyPublishFailure — credential vs ref rejection, from the stored reason alone', () => {
+  test('classifies a measured credential failure from the stored reason', () => {
+    const reason = publishFailureReason(
+      'push',
+      'trident/work-board-row-state-a-card-must-no',
+      "fatal: could not read Username for 'https://github.com': No such device or address",
+    )
+    expect(classifyPublishFailure(reason)).toBe('publish-credential')
+  })
+
+  test('classifies a measured ref rejection from the stored reason', () => {
+    const reason = publishFailureReason(
+      'push',
+      'trident/x',
+      '! [rejected]        trident/x -> trident/x (non-fast-forward)\nerror: failed to push some refs',
+    )
+    expect(classifyPublishFailure(reason)).toBe('publish-ref-rejected')
+  })
+
+  test('rejection evidence wins over credential evidence', () => {
+    const reason = publishFailureReason('push', 'b', 'Authentication failed; non-fast-forward')
+    // A retry must never fire on a rejection.
+    expect(classifyPublishFailure(reason)).toBe('publish-ref-rejected')
+  })
+
+  test('unrecognised evidence stays unknown', () => {
+    expect(classifyPublishFailure('')).toBe('publish-unknown')
+    expect(
+      classifyPublishFailure(publishFailureReason('push', 'b', 'error: remote hung up unexpectedly')),
+    ).toBe('publish-unknown')
+  })
+
+  test('bare numbers in object ids are not credential evidence', () => {
+    const reason = publishFailureReason(
+      'push',
+      'b',
+      'error: object 9bb31a2e401ffffffffffffffffffffffffffff0 broken',
+    )
+    expect(classifyPublishFailure(reason)).toBe('publish-unknown')
+  })
+
+  test('redaction removes a basic-auth token without removing credential evidence', () => {
+    const raw =
+      "fatal: Authentication failed for 'https://x-access-token:ghp_SECRET123@github.com/o/r/'"
+    expect(raw.includes('ghp_SECRET123')).toBe(true)
+    const stored = publishFailureReason('push', 'b', raw)
+    expect(stored).not.toContain('ghp_SECRET123')
+    expect(classifyPublishFailure(stored)).toBe('publish-credential')
+  })
+
+  test('redacts single-value userinfo without removing credential evidence', () => {
+    const raw = "fatal: could not read Password for 'https://ghp_SECRET456@github.com'"
+    const stored = publishFailureReason('push', 'b', raw)
+    expect(stored).not.toContain('ghp_SECRET456')
+    expect(classifyPublishFailure(stored)).toBe('publish-credential')
   })
 })
