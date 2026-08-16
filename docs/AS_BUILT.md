@@ -223,8 +223,12 @@ emit. It now states the ruleset-governed payload, and the fixture builder REFUSE
 the contradiction outright — a branch reporting `protected:false` alongside a
 ruleset that requires a status check throws, so no future case can smuggle the
 combination back in. The guard is scoped to where the branch section is
-LOAD-BEARING (the classifier reads it only when the protection subresource 404s),
-because pinning an inert field would be noise rather than a guard.
+LOAD-BEARING, which is NARROWER than "the protection read failed": the classifier
+consults the branch payload only when the protection body is a RECOGNISED 404 and
+the branch read itself succeeded. Any other protection failure returns `unknown`
+before the branch or the rulesets are touched, and an unreadable branch body is
+discarded — so guarding those would reject fixtures the classifier never looks at.
+The cross-model reviewer caught that over-scoping; both cases are now controls.
 
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 

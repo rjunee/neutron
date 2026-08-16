@@ -609,12 +609,24 @@ const named = (names: string[], n?: number) => JSON.stringify({ n: n ?? names.le
  * runs against: a branch a ruleset governs reports `protected:true` (with
  * `protection.enabled:false`, no classic protection), never `protected:false`.
  *
- * Only enforced where the branch section is LOAD-BEARING — the classifier reads it
- * solely when the protection subresource 404s. With a readable protection endpoint the
- * branch text is inert, so pinning it there would be noise rather than a guard.
+ * Only enforced where the branch section is LOAD-BEARING, which is NARROWER than "the
+ * protection read failed". The classifier consults the branch payload only when the
+ * protection body is a recognised 404 (`isMissing`); ANY OTHER failure returns `unknown`
+ * before the branch or the rulesets are touched, and an unreadable branch read is
+ * discarded by `objectFrom`. Guarding those would reject fixtures the classifier never
+ * even looks at — e.g. `prot:'gh auth login', protExit:1` with a ruleset, which is a
+ * legitimate case. With a readable protection endpoint the branch text is inert too.
  */
-const assertBranchAgreesWithRules = (s: { prot: string; protExit: number; rules: string; branch?: string }) => {
-  const branchIsRead = s.protExit !== 0
+const assertBranchAgreesWithRules = (s: {
+  prot: string
+  protExit: number
+  rules: string
+  branch?: string
+  branchExit?: number
+}) => {
+  // The same recognition the classifier uses, so the guard's scope tracks the code's.
+  const protIs404 = s.protExit !== 0 && /HTTP 404|Not Found|Branch not protected/i.test(s.prot)
+  const branchIsRead = protIs404 && (s.branchExit ?? 0) === 0
   const rulesRequire = s.rules.includes('required_status_checks')
   const claimsUnprotected = (s.branch ?? '{"protected":false}').includes('"protected":false')
   if (branchIsRead && rulesRequire && claimsUnprotected) {
@@ -955,6 +967,29 @@ describe('classifyRequiredChecksProbe — five reads, one answer, judged in code
         prot: '{"contexts":["check"]}',
         protExit: 0,
         rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"frontend"}]}}]',
+        rulesExit: 0,
+      }),
+    ).not.toThrow()
+    // A NON-404 protection failure. The classifier returns `unknown` from the failure
+    // itself, before it consults the branch OR the rulesets, so this fixture is
+    // legitimate and the guard must not reject it. (A `protExit !== 0` scoping did.)
+    expect(() =>
+      requiredProbe({
+        prot: 'gh auth login required',
+        protExit: 1,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
+        rulesExit: 0,
+      }),
+    ).not.toThrow()
+    // A 404 whose BRANCH read also failed: `objectFrom` discards an unreadable body, so
+    // the branch payload says nothing and cannot contradict anything.
+    expect(() =>
+      requiredProbe({
+        prot: NOT_FOUND,
+        protExit: 1,
+        branch: NOT_FOUND,
+        branchExit: 1,
+        rules: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review-gate"}]}}]',
         rulesExit: 0,
       }),
     ).not.toThrow()
