@@ -756,6 +756,154 @@ describe('the installer under a locked config — the FATAL half-state must be i
       expect(inert.stderr).not.toContain('STALE')
     }, 30_000)
 
+    test('MUTATION — an interpreter that is EXECUTABLE but is not bun is STALE, not installed', () => {
+      // The check used to gate the interpreter on `[ -x ]` alone, which says "some file here can be
+      // executed" — true of nearly everything on a unix box. Each entry below is a real path on the
+      // host, differs from the installed command in the bun word and NOTHING else, and false-passed
+      // as `merge drivers: installed` before this fix.
+      const repo = freshRepo()
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      const hardened = installed(repo)
+      const { bun } = words(hardened)
+
+      const impostors: Array<[string, string]> = [
+        // Executable, a regular file, exits 0 without writing %A — see the end-to-end below.
+        ['an ordinary executable that is not bun', '/usr/bin/true'],
+        // A DIRECTORY passes `-x`, where the bit means "searchable" rather than "runnable".
+        ['a directory', '/usr/bin'],
+        // A real interpreter, just not this one — the name is the only thing separating them.
+        ['a different interpreter', '/bin/sh'],
+      ]
+      for (const [label, impostor] of impostors) {
+        expect(existsSync(impostor)).toBe(true)
+        const mutated = hardened.replace(`'${bun}'`, `'${impostor}'`)
+        expect(mutated).not.toBe(hardened)
+        git(repo, 'config', 'merge.as-built-log.driver', mutated)
+        const checked = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+        expect(`${label}: exit ${checked.code}`).toBe(`${label}: exit 1`)
+        expect(`${label}: ${checked.stderr}`).toContain('STALE')
+      }
+
+      // CONTROL — the interpreter word is what made each of those stale. Put the real one back,
+      // change nothing else, and the same check passes.
+      git(repo, 'config', 'merge.as-built-log.driver', hardened)
+      const restored = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(restored.ok).toBe(true)
+      expect(restored.stdout).toContain('merge drivers: installed')
+    }, 30_000)
+
+    test('WHY that matters — a non-bun interpreter makes git report a SUCCESSFUL merge that lost a side', () => {
+      // The consequence, through real git, because "the check was too loose" understates it. A
+      // driver that exits 0 without writing `%A` is a driver git believes: it takes the merge as
+      // clean, keeps `%A` as it found it, and the other side's entries are gone with no conflict
+      // and no message. `/usr/bin/true` is exactly that driver.
+      // Two identical repositories differing in ONE word of the driver command, so the comparison
+      // below is about the interpreter and about nothing else in the fixture.
+      function twoBranchLog(interpreter: 'bun' | 'impostor'): { merged: Ran; log: string } {
+        const repo = freshRepo()
+        git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+        git(repo, 'config', 'user.name', 'Trident Test')
+        git(repo, 'config', 'commit.gpgsign', 'false')
+        mkdirSync(join(repo, 'docs'), { recursive: true })
+        expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+        const hardened = installed(repo)
+        if (interpreter === 'impostor') {
+          const { bun } = words(hardened)
+          git(repo, 'config', 'merge.as-built-log.driver', hardened.replace(`'${bun}'`, `'/usr/bin/true'`))
+        }
+
+        writeLog(repo, HISTORY)
+        git(repo, 'add', '-A')
+        git(repo, 'commit', '-qm', 'base')
+        git(repo, 'checkout', '-q', '-b', 'side')
+        writeLog(repo, [...entry('2026-08-16', 'the side build', 'Side entry.'), ...HISTORY])
+        git(repo, 'commit', '-qam', 'side')
+        git(repo, 'checkout', '-q', 'main')
+        writeLog(repo, [...entry('2026-08-16', 'the mainline build', 'Mainline entry.'), ...HISTORY])
+        git(repo, 'commit', '-qam', 'mainline')
+
+        const merged = run(repo, ['git', 'merge', 'side', '--no-edit'])
+        return { merged, log: readFileSync(join(repo, 'docs', 'AS_BUILT.md'), 'utf8') }
+      }
+
+      // git is HAPPY, and the side's entry is simply not there. Both halves matter: a conflict
+      // would at least have been visible.
+      const lost = twoBranchLog('impostor')
+      expect(lost.merged.ok).toBe(true)
+      expect(lost.log).toContain('the mainline build')
+      expect(lost.log).not.toContain('the side build')
+
+      // CONTROL — the real interpreter, same scenario, one word apart: both entries survive. So
+      // the silent loss above is the impostor's doing and not something about this fixture.
+      const kept = twoBranchLog('bun')
+      expect(kept.merged.ok).toBe(true)
+      expect(kept.log).toContain('the mainline build')
+      expect(kept.log).toContain('the side build')
+    }, 60_000)
+
+    test('the attribute LINE being present is not the path being BOUND to the driver', () => {
+      // `presence is not authorization`, applied to this script's own check. Attributes are
+      // last-match-wins, so a later line reassigns `merge` while the grep for the installed line
+      // still succeeds — the driver is configured, named, and never runs.
+      const repo = freshRepo()
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+
+      const attrs = join(commonDir(repo), 'info', 'attributes')
+      writeFileSync(attrs, `${readFileSync(attrs, 'utf8')}docs/AS_BUILT.md merge=union\n`)
+
+      // The installed line is still right there — which is precisely why grepping for it is not an
+      // answer — and git nonetheless resolves the path to something else.
+      expect(readFileSync(attrs, 'utf8')).toContain('docs/AS_BUILT.md merge=as-built-log')
+      expect(git(repo, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md').stdout).toContain('merge: union')
+
+      const overridden = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(overridden.ok).toBe(false)
+      expect(overridden.stderr).toContain('OVERRIDDEN')
+      expect(overridden.stderr).toContain('merge=union')
+
+      // CONTROL — the override is what did it. Drop that one line, touch nothing else.
+      writeFileSync(attrs, 'docs/AS_BUILT.md merge=as-built-log\n')
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+    }, 30_000)
+
+    test('the driver at the named path must be THIS checkout\'s driver, not merely a file at that path', () => {
+      // The command deliberately names the MAIN worktree's copy, so the path can be current while
+      // the CODE behind it is an older revision — one predating `MAX_MARKER_SIZE` or the entry-loss
+      // refusal. Every other check passes on that clone: the command rebuilds byte-for-byte, the
+      // path has the right shape, the file exists. The same false pass, one file deeper.
+      const repo = freshRepo()
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+      const hardened = installed(repo)
+      const { driver } = words(hardened)
+
+      const other = mkdtempSync(join(tmpdir(), 'as-built-older-driver-'))
+      created.push(other)
+      mkdirSync(join(other, 'scripts', 'git'), { recursive: true })
+      const otherDriver = join(other, 'scripts', 'git', 'as-built-merge-driver.ts')
+      // A genuinely different revision of the same file, not a differently-named one: the path
+      // shape check must not be what catches this.
+      writeFileSync(otherDriver, readFileSync(driver, 'utf8').replace(/MAX_MARKER_SIZE/g, 'OLD_MARKER_CAP'))
+      expect(readFileSync(otherDriver, 'utf8')).not.toBe(readFileSync(driver, 'utf8'))
+
+      git(repo, 'config', 'merge.as-built-log.driver', hardened.replace(driver, otherDriver))
+      const diverged = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(diverged.ok).toBe(false)
+      expect(diverged.stderr).toContain('STALE')
+      expect(diverged.stderr).toContain('NOT this checkout')
+      // The remedy it prints must not be the one that cannot work: re-running rewrites the same
+      // main-worktree path, so telling the reader to re-run would loop them.
+      expect(diverged.stderr).toContain('RE-RUNNING THIS SCRIPT WILL NOT CHANGE IT')
+
+      // CONTROL — it is the CONTENTS and not the foreign path. Make the other copy byte-identical,
+      // leave the config naming it, and the same check passes: a linked worktree of the same
+      // revision is the ordinary case and must not be called stale.
+      cpSync(driver, otherDriver)
+      const identical = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(identical.ok).toBe(true)
+      expect(identical.stdout).toContain('merge drivers: installed')
+    }, 30_000)
+
     test('a checkout path containing a single quote yields a command the shell can still parse', () => {
       // The command is a string git hands to `/bin/sh -c`, and the wrapping used to be a bare
       // `'$ROOT/...'` — correct for every path without a quote in it and unparseable for any path
@@ -793,6 +941,27 @@ describe('the installer under a locked config — the FATAL half-state must be i
       const naive = `'${join(repo, 'scripts', 'git', 'as-built-merge-driver.ts')}' X X X X X`
       const broken = run(repo, ['sh', '-c', `set -- ${naive}; printf '%s\\n' "$#"`])
       expect(broken.ok).toBe(false)
+
+      // AND THE CHECK HAS TO READ IT BACK. Writing an escaped command and never parsing one is
+      // half the round trip: `--check` splits the configured string and un-escapes both free words
+      // (`unsq`, scripts/install-merge-drivers.sh), and until this ran on a quoted path that
+      // function was exercised by nothing. A regression in it would leave every test above green
+      // while every quoted clone reported STALE.
+      const checked = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(checked.stderr).not.toContain('STALE')
+      expect(checked.ok).toBe(true)
+
+      // MUTATION — the quoted path does not make the check blind. A genuinely wrong command on
+      // this same awkward path is still caught, so the pass above is a verdict and not a shrug.
+      const command2 = installed(repo)
+      git(repo, 'config', 'merge.as-built-log.driver', command2.replace(' --env-file=/dev/null', ''))
+      const caught = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+      expect(caught.ok).toBe(false)
+      expect(caught.stderr).toContain('STALE')
+
+      // …and the escape survives a round trip: put it back and the check passes again.
+      git(repo, 'config', 'merge.as-built-log.driver', command2)
+      expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
     }, 30_000)
 
     /**

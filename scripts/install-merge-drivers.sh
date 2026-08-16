@@ -290,6 +290,24 @@ if [ "${1:-}" = "--check" ]; then
     echo "merge drivers: NOT installed — '$ATTR_LINE' missing from $ATTRS" >&2
     exit 1
   fi
+  # THE LINE BEING PRESENT IS NOT THE PATH BEING BOUND TO IT, which is this script's own title
+  # applied to its own check. Attributes are last-match-wins, so a later line in the same file —
+  # or a tracked `.gitattributes` consulted after it — reassigns `merge` and the driver named
+  # above never runs. Measured on git 2.50.1: with `$ATTR_LINE` present and a subsequent
+  # `docs/AS_BUILT.md merge=union` appended to the same file, `git check-attr` answers `union`,
+  # git performs a union merge, and the grep two lines up still finds its line.
+  #
+  # So the verdict is taken from the resolver git itself uses rather than from the text we wrote.
+  # `--all` is deliberately not used: one attribute is asked for and the answer is the last field.
+  bound="$(git -C "$ROOT" check-attr merge -- "$LOG_PATH" 2>/dev/null)"
+  bound="${bound##*: }"
+  if [ "$bound" != "$DRIVER_NAME" ]; then
+    echo "merge drivers: NOT installed — '$ATTR_LINE' is present but OVERRIDDEN." >&2
+    echo "                       git resolves $LOG_PATH to merge=$bound, so the driver never runs." >&2
+    echo "                       A later attribute line wins; remove it from $ATTRS" >&2
+    echo "                       (or from a tracked .gitattributes) and re-run this script." >&2
+    exit 1
+  fi
   # WHAT is installed, not merely THAT something is — see the header. Without this a clone still
   # holding a previous version's command answers "installed" and never takes the hardening.
   #
@@ -346,7 +364,64 @@ if [ "${1:-}" = "--check" ]; then
     *) stale "it names $driver_path, which is not a $DRIVER_RELPATH" ;;
   esac
   [ -f "$driver_path" ] || stale "the driver it names is not there — $driver_path"
+
+  # THE INTERPRETER HAS TO BE BUN, AND `-x` ALONE DOES NOT SAY THAT — it says "some file here can
+  # be executed", which almost everything on a unix box can. This mattered more than it reads:
+  # with the bun word rewritten to `/usr/bin/true` the command still parses, still rebuilds to
+  # itself, and `--check` still printed `installed`; git then ran `true`, which exits 0 having
+  # written nothing to `%A`, so git took the merge as SUCCESSFUL and one side's entries left the
+  # log with no conflict and no message. Measured on git 2.50.1 in a two-branch fixture: after the
+  # merge the log carried the mainline heading and ZERO of the side's. A silent loss reported as a
+  # clean merge is the worst outcome this file has, and `--check` was blessing the configuration
+  # that produces it.
+  #
+  # THREE CONDITIONS, EACH CLOSING A DIFFERENT COUNTEREXAMPLE THE REVIEWERS BUILT:
+  #   • `-f` — a DIRECTORY passes `-x` (it means "searchable" there). `/usr/bin` false-passed.
+  #   • `-x` — kept, for a real file that cannot be run at all.
+  #   • the name — `/usr/bin/true` and `/bin/sh` are regular executable files, and neither is bun.
+  #
+  # Judged on the FINAL COMPONENT rather than by running it, and that is the deliberate line.
+  # This whole change is named for the rule that a thing found in a checkout is not a thing to
+  # execute, and the string being judged came out of the repo config; asking `$bun_path --revision`
+  # would be this script executing an arbitrary named binary to find out whether it was safe to let
+  # git execute it, which answers the question by doing the thing. The same rule is already the one
+  # the other derivation applies to itself — `asBuiltDriverCommand` (`trident/orchestrator.ts:633`)
+  # gates on `basename(process.execPath) !== 'bun'` — so the two agree on what counts as bun.
+  #
+  # RESIDUAL, STATED RATHER THAN PAPERED OVER: a file that is NAMED `bun` and is not bun passes
+  # this. Catching that means running it, see above. What the name check does cover is every
+  # command this installer can itself produce, because `command -v bun` resolves the NAME `bun` and
+  # so can only ever yield a path whose final component is `bun` — a mismatch here is therefore
+  # always a hand-edit or an older release's spelling, never a clone this script wrote.
+  [ -f "$bun_path" ] || stale "the bun it names is not a file — $bun_path"
   [ -x "$bun_path" ] || stale "the bun it names is not executable — $bun_path"
+  case "${bun_path##*/}" in
+    bun) ;;
+    *) stale "its interpreter is ${bun_path##*/}, not bun — $bun_path" ;;
+  esac
+
+  # …AND THE DRIVER IT NAMES HAS TO BE THIS CHECKOUT'S DRIVER, not merely a file at a plausible
+  # path. The command deliberately names the MAIN worktree's copy (see the DRIVER PATH block
+  # above), so on a clone whose main checkout sits on an older revision git runs an older driver —
+  # one predating `MAX_MARKER_SIZE` or the entry-loss refusal — while every check above passes,
+  # because the command is byte-perfect and the file is present. That is the same false pass one
+  # file deeper: the path is current, the CODE is not.
+  #
+  # Content, not mtime and not a revision id: the driver is read from the working tree at merge
+  # time, so what git will run is exactly these bytes. `cmp` is POSIX and already assumed by this
+  # script's toolchain. Skipped when this checkout has no copy to compare against — the bare-clone
+  # linked worktree the fallback above exists for — because there is nothing there to disagree.
+  if [ "$driver_path" != "$ROOT/$DRIVER_RELPATH" ] && [ -f "$ROOT/$DRIVER_RELPATH" ] &&
+     ! cmp -s "$driver_path" "$ROOT/$DRIVER_RELPATH"; then
+    echo "merge drivers: STALE — the driver git will run is NOT this checkout's driver." >&2
+    echo "                       runs → $driver_path" >&2
+    echo "                       here → $ROOT/$DRIVER_RELPATH" >&2
+    echo "                       Same path shape, different contents, so every other check passes." >&2
+    echo "                       The command names the MAIN worktree's copy on purpose (it outlives" >&2
+    echo "                       every linked one), so RE-RUNNING THIS SCRIPT WILL NOT CHANGE IT —" >&2
+    echo "                       bring the main checkout to this revision instead." >&2
+    exit 1
+  fi
 
   echo "merge drivers: installed"
   exit 0
@@ -363,6 +438,28 @@ if [ -z "$BUN" ]; then
   # a fatal error, which is strictly worse than the conflict this driver exists to prevent.
   echo "install-merge-drivers: NOT INSTALLED — bun is not on PATH, and the driver runs under bun." >&2
   echo "                       Install bun, then re-run this script." >&2
+  exit 2
+fi
+# THE SAME THREE CONDITIONS `--check` APPLIES, APPLIED HERE FIRST — so the check can never reject a
+# command this script wrote, which would be an unfixable STALE with a remedy that is a no-op.
+#
+# `command -v` is not only a PATH search: for a shell function or an alias named `bun` it answers
+# with the NAME, and for a builtin with the name too. The old guard tested only that the answer was
+# non-empty, so either of those wrote a bare relative `bun` into a config git runs with its cwd at
+# the top of whatever tree is being merged — resolved against that tree's PATH, or not resolved at
+# all. Requiring an absolute path to a regular executable file named `bun` rules out every one of
+# those without asking what the file contains.
+case "$BUN" in
+  /*) ;;
+  *) echo "install-merge-drivers: NOT INSTALLED — 'command -v bun' gave '$BUN', which is not an" >&2
+     echo "                       absolute path. A shell function or alias named bun answers that" >&2
+     echo "                       way; the driver needs a real binary. Install bun, then re-run." >&2
+     exit 2 ;;
+esac
+if [ ! -f "$BUN" ] || [ ! -x "$BUN" ] || [ "${BUN##*/}" != bun ]; then
+  echo "install-merge-drivers: NOT INSTALLED — '$BUN' is not an executable file named bun." >&2
+  echo "                       The driver runs under bun; refusing to write a command that names" >&2
+  echo "                       something else. Install bun, then re-run this script." >&2
   exit 2
 fi
 

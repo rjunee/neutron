@@ -521,6 +521,31 @@ whole entry is named for. The comment now says so, and a test pins the two
 derivations in agreement — shape and scrub list — so a flag added to one and not
 the other fails instead of quietly splitting the fleet.
 
+`--check` NOW JUDGES THE INTERPRETER, THE BINDING AND THE DRIVER'S CONTENTS, because
+each of those was a way for a clone to answer "installed" while running something
+else. The interpreter was gated on `[ -x ]` alone, which is true of nearly every
+file on a unix box: with the bun word rewritten to `/usr/bin/true` the command
+still rebuilt to itself and `--check` still printed `installed`, and git then ran
+`true`, which exits 0 having written nothing to `%A` — so git took the merge as
+SUCCESSFUL and one side's entries left the log with no conflict and no message.
+Measured on git 2.50.1 in a two-branch fixture: the mainline heading present, ZERO
+of the side's. A directory (`/usr/bin`) and a different interpreter (`/bin/sh`)
+false-passed the same way. The word must now be a regular executable file whose
+final component is `bun`, judged by name rather than by running it — asking
+`$bun_path --revision` would be this script executing an arbitrary named binary to
+decide whether it was safe to let git execute it. The same three conditions are
+applied at INSTALL time too, so the check can never reject a command this script
+wrote. Separately, the attribute line's PRESENCE was being read as the path being
+BOUND to the driver: attributes are last-match-wins, so a later
+`docs/AS_BUILT.md merge=union` leaves the installed line right where the grep finds
+it while `git check-attr` answers `union` and the driver never runs. The verdict now
+comes from `git check-attr`, the resolver git itself uses. And because the command
+deliberately names the MAIN worktree's copy of the driver, a clone whose main
+checkout sits on an older revision runs older driver CODE behind a byte-perfect
+command at a correctly-shaped path; the contents are compared against the invoking
+checkout's copy and reported with the remedy that actually works, since re-running
+the installer rewrites the same path and would loop the reader.
+
 KNOWN AND DEFERRED, NOT FIXED HERE. Two defects the review panel confirmed in
 this file's merge logic are pre-existing on `main` rather than regressions of
 this change, and are left for follow-up rather than widening a security fix that
