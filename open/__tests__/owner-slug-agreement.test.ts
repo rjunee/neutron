@@ -27,6 +27,7 @@ import {
   resolveOwnerSlug as gatewayResolveOwnerSlug,
   resolveOwnerSlugSourceFromConfig,
 } from '@neutronai/gateway/index.ts'
+import { resolveBootConfig } from '@neutronai/config/index.ts'
 
 let home: string
 
@@ -48,11 +49,11 @@ afterEach(() => {
  * half you just fixed proves the half you just fixed.
  */
 function bootSlug(env: NodeJS.ProcessEnv): string {
-  return resolveOwnerSlugSourceFromConfig({
-    instanceSlug: env['NEUTRON_INSTANCE_SLUG'],
-    neutronHome: env['NEUTRON_HOME'],
-    ownerHome: env['OWNER_HOME'],
-  } as unknown as Parameters<typeof resolveOwnerSlugSourceFromConfig>[0]).slug
+  // Uses the REAL config resolution, not a hand-built partial. The previous
+  // version repeated the wrappers' own raw-env construction, so when both were
+  // wrong in the same way they agreed — a test can only catch a divergence it
+  // does not share.
+  return resolveOwnerSlugSourceFromConfig(resolveBootConfig(env)).slug
 }
 
 describe('the boot resolver and the CLI resolver agree', () => {

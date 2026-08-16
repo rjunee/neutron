@@ -153,16 +153,16 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
   //
   // A duplicated answer is not redundancy, it is a second opinion nobody asked
   // for. There is now ONE implementation and the others call it.
-  return resolveOwnerSlugSourceFromConfig({
-    ownerHome: env['OWNER_HOME'],
-    // NEUTRON_HOME is read too. Hardcoding `undefined` here made this wrapper
-    // "canonical" in name only: boot falls back to NEUTRON_HOME when OWNER_HOME
-    // is unset, so a renamed instance whose `.url_slug` lives under
-    // NEUTRON_HOME resolved the NEW name at boot and the OLD one here. Three
-    // resolvers agreeing on two of three inputs is still three resolvers.
-    neutronHome: env['NEUTRON_HOME'],
-    instanceSlug: env['NEUTRON_INSTANCE_SLUG'],
-  } as unknown as BootConfig).slug
+  // The CONFIG resolver feeds the SLUG resolver. Hand-building a partial config
+  // from raw env kept being not-quite-right in a new way each round: first it
+  // dropped NEUTRON_HOME, then it still skipped the DEFAULT home that
+  // `resolveNeutronHome` materialises when neither variable is set — so with a
+  // renamed instance and no env at all, boot read `~/neutron/.url_slug` and this
+  // returned `dev`.
+  //
+  // There is no version of "copy the inputs correctly" that stays correct. Use
+  // the same function boot uses to decide what the inputs ARE.
+  return resolveOwnerSlugSourceFromConfig(resolveBootConfig(env)).slug
 }
 
 /**

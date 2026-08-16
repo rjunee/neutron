@@ -15,6 +15,7 @@
 
 import type { PlatformInstanceInfo } from '@neutronai/runtime/platform-adapter.ts'
 import { resolveOwnerSlugSourceFromConfig } from '@neutronai/gateway/index.ts'
+import { resolveBootConfig } from '@neutronai/config/index.ts'
 
 // `resolveNeutronHome` + `resolveOpenDbPath` moved to `../migrations/db-path.ts`
 // (L3, 2026-07) so the `migrations` leaf no longer imports UP into `open`.
@@ -53,11 +54,10 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
   // (`.url_slug` = the new name, env still the old one) boot resolved the new
   // name and `neutron doctor` resolved the old — and then filtered events and
   // jobs by an identity nothing had written under.
-  return resolveOwnerSlugSourceFromConfig({
-    ownerHome: env['OWNER_HOME'],
-    neutronHome: env['NEUTRON_HOME'],
-    instanceSlug: env['NEUTRON_INSTANCE_SLUG'],
-  } as unknown as Parameters<typeof resolveOwnerSlugSourceFromConfig>[0]).slug
+  // Same function boot uses to decide what the inputs ARE — see the twin in
+  // `gateway/index.ts`. Copying env vars by hand kept being not-quite-right in
+  // a new way each review round.
+  return resolveOwnerSlugSourceFromConfig(resolveBootConfig(env)).slug
 }
 
 /**
