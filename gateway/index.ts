@@ -197,10 +197,17 @@ export interface OwnerSlugResolution {
  * `undefined` exactly when the env var was absent (`config/index.ts:393`), so it
  * is recoverable HERE and nowhere later.
  *
- * Precedence is byte-for-byte the old one: `.url_slug` file > `instanceSlug` >
- * `'dev'`. Note the `??` semantics that were already there — an EXPLICIT
- * `NEUTRON_INSTANCE_SLUG=dev` (or even an empty string) is `'env'`, not
- * `'fallback'`; only an absent value falls through.
+ * Precedence: `.url_slug` file > `instanceSlug` > `'dev'`. An EXPLICIT
+ * `NEUTRON_INSTANCE_SLUG=dev` is `'env'` — deliberately configuring the same
+ * string the fallback happens to use is still configuring it, and the guard
+ * must honour that.
+ *
+ * AN EMPTY OR WHITESPACE VALUE IS `'fallback'`, NOT `'env'`. That sentence used
+ * to say the opposite, and the code used to agree with it: a review found that
+ * `NEUTRON_INSTANCE_SLUG=''` was classified as a configured identity, which
+ * told the credential direction guard this process knows who it is and let an
+ * explicit migration move rows onto the empty handle. An empty variable is not
+ * an identity; it is the absence of one wearing its shape.
  */
 export function resolveOwnerSlugSourceFromConfig(config: BootConfig): OwnerSlugResolution {
   const ownerHome = config.ownerHome ?? config.neutronHome

@@ -272,6 +272,15 @@ test('(a3) AMBIGUOUS: a real boot changes nothing, the FRESH value survives, and
  */
 test('a real FALLBACK boot refuses, says why in the audit row, and leaves the rows alone', async () => {
   const LIVE = 'live-owner'
+  // The log line and the journal payload compute `reason` INDEPENDENTLY, and
+  // the as-built promises both. Asserting only the journal leaves the log free
+  // to be deleted or mistyped with every test still green — and the log is what
+  // an operator actually reads at 3am.
+  const warned: string[] = []
+  const realWarn = console.warn
+  console.warn = (...args: unknown[]): void => {
+    warned.push(args.map(String).join(' '))
+  }
   // The distinguishing act: no `.url_slug`, so nothing has told this process
   // who it is. (`beforeEach` wrote one; an anonymous boot is its absence.)
   rmSync(join(home, '.url_slug'), { force: true })
@@ -317,7 +326,13 @@ test('a real FALLBACK boot refuses, says why in the audit row, and leaves the ro
       orphan_counts: [{ table: 'secrets', handle: LIVE, rows: 1 }],
       reason: 'fallback_boot_handle_refused_direction',
     })
+
+    // AND the operator-facing line carries it too.
+    const orphanLines = warned.filter((l) => l.includes('credential_scope_orphaned'))
+    expect(orphanLines.length).toBeGreaterThan(0)
+    expect(orphanLines.join('\n')).toContain('fallback_boot_handle_refused_direction')
   } finally {
+    console.warn = realWarn
     await handle.shutdown({ force: true })
   }
 })
@@ -339,13 +354,16 @@ async function bootCapturingProvenance(): Promise<boolean | undefined> {
   let seen: boolean | undefined
   const handle = await boot({
     port: 0,
-    composer: (({ slug_is_fallback }: { slug_is_fallback?: boolean }) => {
+    composer: (({ db, slug_is_fallback }: { db: ProjectDb; slug_is_fallback?: boolean }) => {
       seen = slug_is_fallback
       // Deliberately the narrowest object boot will accept, and cast rather
       // than filled out: this test is about WHAT BOOT HANDS THE COMPOSER, and
       // fabricating a whole composition to satisfy the type would add a large
       // fixture whose every field is irrelevant to the one assertion.
-      return { db: ProjectDb.open(dbPath), project_slug: BOOT_SLUG }
+      //
+      // Hand BACK the db boot gave us rather than opening another: `shutdown`
+      // closes only boot's own connection, so a second one leaks per test.
+      return { db, project_slug: BOOT_SLUG }
     }) as unknown as GraphComposer,
   })
   await handle.shutdown({ force: true })

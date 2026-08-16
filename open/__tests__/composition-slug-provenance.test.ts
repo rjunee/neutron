@@ -43,14 +43,30 @@ afterEach(() => {
 async function composedProvenance(
   input: { db: ProjectDb; project_slug: string; slug_is_fallback?: boolean },
 ): Promise<boolean | undefined> {
-  const composer = buildOpenGraphComposer({ env: {
-      ...process.env,
+  // HERMETIC, and not by politeness. A review round proved this test was
+  // leaking: handed ambient `process.env`, the composer can resolve real
+  // credentials, prewarm a substrate and start loops, and discarding the
+  // composition leaves them running — it emitted `heartbeat_write_failed
+  // ENOENT` AFTER the temp home was deleted, which is background work
+  // outliving the test that started it.
+  //
+  // So: a SCRUBBED env with ambient auth disabled, and every cleanup drained.
+  const composer = buildOpenGraphComposer({
+    env: {
+      PATH: process.env['PATH'] ?? '',
       NEUTRON_HOME: home,
       // Composition refuses to sign owner sessions with a predictable fallback.
       NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET: 'provenance-test-secret-not-a-real-one',
-    } })
+      NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH: '1',
+    },
+  })
   const composition = await composer(input)
-  return (composition as { slug_is_fallback?: boolean }).slug_is_fallback
+  const provenance = (composition as { slug_is_fallback?: boolean }).slug_is_fallback
+  const cleanups =
+    (composition as { realmode_cleanups?: Array<() => void | Promise<void>> }).realmode_cleanups ?? []
+  for (const cleanup of cleanups) await cleanup()
+  ;(composition as { db?: { close?: () => void } }).db?.close?.()
+  return provenance
 }
 
 test('a CONFIGURED boot arrives at the composition as configured', async () => {
