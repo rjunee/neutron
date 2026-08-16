@@ -578,6 +578,19 @@ export function resolveOwnerSlugSourceFromConfig(config: IdentityConfig): OwnerS
       // {@link OwnerSlugUnreadableError}. The doctor's `{ok:false}` contract is
       // honoured by CATCHING at the diagnostics caller, which is the only
       // caller that wants an answer more than it wants the truth.
+      // EVERY errno, INCLUDING `ENOENT` — DELIBERATE, and reviewed. A review
+      // proposed falling through when the read races an unlink (`existsSync`
+      // passed, then the file vanished), on the reasoning that a file which is
+      // no longer there IS the absent case. It is not, and the difference is
+      // the point of this module: the fall-through answers with
+      // `NEUTRON_INSTANCE_SLUG`, which on a renamed box holds the OLD handle,
+      // and hands the credential guard `source: 'env'` — i.e. "this process
+      // knows who it is" — at the exact moment something is rewriting the file
+      // that says who it is. Racing a rename is when to trust the env LEAST.
+      // The window is also tiny in practice, because the writer truncates
+      // rather than unlinks. Throwing costs a loud boot failure on a race that
+      // a retry fixes; falling through costs the owner's credential rows,
+      // silently. Not special-cased, on purpose.
       let fromFile: string
       try {
         fromFile = readFileSync(slugFile, 'utf8').trim()

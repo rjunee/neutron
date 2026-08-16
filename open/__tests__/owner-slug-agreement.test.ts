@@ -19,7 +19,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolveOwnerSlug } from '../owner-identity.ts'
@@ -34,6 +34,11 @@ import {
   OwnerSlugUnreadableError,
 } from '@neutronai/config/index.ts'
 import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
+// The two OTHER readers of `OWNER_HOME`. `config/index.ts` documents that every
+// sibling identity read trims; these are the siblings, and a review measured
+// them not trimming. Imported here so the claim is enforced where it is made.
+import { resolveOwnerHome as listenerResolveOwnerHome } from '@neutronai/gateway/boot-listener-registry.ts'
+import { resolveOwnerHomeFromEnv } from '@neutronai/onboarding/overnight/register.ts'
 
 let home: string
 
@@ -274,11 +279,78 @@ describe('the boot resolver and the CLI resolver agree', () => {
       expect(resolveNeutronHome({ OWNER_HOME: '   ', NEUTRON_HOME: home })).toBe(home)
       expect(resolveNeutronHome({ NEUTRON_HOME: '   ', OWNER_HOME: home })).toBe(home)
 
+      // ⚠️ AND NOW THE LINE THAT ACTUALLY DECIDES. Both assertions above pass
+      // `NEUTRON_HOME`, which wins at `migrations/db-path.ts:46` and RETURNS —
+      // so the sibling `OWNER_HOME` trim at :48 is never the line under test.
+      // A review mutation-proved it: revert :48 to `length > 0` and the whole
+      // suite stayed green (39 pass / 0 fail), while the same mutation on :46
+      // was caught. An assertion that cannot fail for the property it names is
+      // not coverage, it is a green tick shaped like coverage.
+      //
+      // With `NEUTRON_HOME` ABSENT, a blank `OWNER_HOME` has to fall all the
+      // way to the documented `~/neutron` default, and ONLY the trim can take
+      // it there — under `length > 0` this answers `'   '` and the DB path
+      // becomes `'   /project.db'`.
+      expect(resolveNeutronHome({ OWNER_HOME: '   ' })).toBe(join(homedir(), 'neutron'))
+      expect(resolveNeutronHome({ OWNER_HOME: '\t\n' })).toBe(join(homedir(), 'neutron'))
+      expect(resolveNeutronHome({ OWNER_HOME: '' })).toBe(join(homedir(), 'neutron'))
+      // CONTROL, on that same branch — a real path with nothing above it is
+      // still honoured verbatim. Without this the assertions above would also
+      // pass if `OWNER_HOME` had simply stopped being read at all, which is a
+      // different bug wearing the same green.
+      expect(resolveNeutronHome({ OWNER_HOME: home })).toBe(home)
+
       // CONTROL — a home that is genuinely a path is still honoured verbatim,
       // so "blank means unset" did not become "trim everything".
       const pinned = { NEUTRON_HOME: '/srv/elsewhere', OWNER_HOME: home } as NodeJS.ProcessEnv
       expect(resolveOwnerSlug(pinned)).toBe('renamed')
       expect(effectiveOwnerHome(resolveBootConfig(pinned))).toBe(home)
+    })
+
+    it('EVERY reader of OWNER_HOME agrees a blank one is unset — not just the two this branch touched', () => {
+      // THE DOCBLOCK CLAIMED THIS AND IT WAS NOT TRUE. `config/index.ts`
+      // asserts "every sibling identity read in this repo trims", and a review
+      // found two that did not: `resolveOwnerHome`
+      // (`gateway/boot-listener-registry.ts:307`) and `resolveOwnerHomeFromEnv`
+      // (`onboarding/overnight/register.ts:184`), both `length > 0`. Measured
+      // on the pre-fix branch: with `OWNER_HOME='   '`, config and identity
+      // fell back while these two answered `'   '` — one variable, two homes,
+      // and the overnight engine writing projects into a directory named three
+      // spaces. That is a split brain, not a documentation defect, so the fix
+      // is at the two call sites and the claim now holds.
+      //
+      // This is the axis the sibling assertions above cannot reach: they only
+      // ask the two resolvers this branch already changed.
+      for (const blank of ['', '   ', '\t\n']) {
+        const env = { OWNER_HOME: blank, NEUTRON_DB_PATH: '/srv/inst/db/project.db' } as NodeJS.ProcessEnv
+        // Blank ⇒ unset ⇒ each falls through to its OWN documented next step,
+        // which is the DB-path derivation for both of these two.
+        expect(listenerResolveOwnerHome(env)).toBe('/srv/inst')
+        expect(resolveOwnerHomeFromEnv(env)).toBe('/srv/inst')
+      }
+
+      // …AND THE SAME FOR THE SLOT BELOW IT. `dirname(dirname('   '))` is `'.'`,
+      // so a blank `NEUTRON_DB_PATH` resolved owner_home to the process CWD —
+      // the identical defect one line further down, which fixing only the first
+      // line would have left live.
+      expect(listenerResolveOwnerHome({ NEUTRON_DB_PATH: '   ' } as NodeJS.ProcessEnv)).toBe(
+        join(homedir(), '.local', 'share', 'neutron'),
+      )
+      expect(resolveOwnerHomeFromEnv({ NEUTRON_DB_PATH: '   ' } as NodeJS.ProcessEnv)).toBeNull()
+
+      // CONTROLS — a real path is still honoured verbatim by both, so the
+      // assertions above fail for "blank was honoured" and not for "OWNER_HOME
+      // stopped being read".
+      const set = { OWNER_HOME: home, NEUTRON_DB_PATH: '/srv/inst/db/project.db' } as NodeJS.ProcessEnv
+      expect(listenerResolveOwnerHome(set)).toBe(home)
+      expect(resolveOwnerHomeFromEnv(set)).toBe(home)
+      // …and all four readers land on the same home for the same blank input,
+      // which is the property the docblock was actually asserting.
+      const blankEnv = { OWNER_HOME: '   ', NEUTRON_HOME: home } as NodeJS.ProcessEnv
+      expect(effectiveOwnerHome(resolveBootConfig(blankEnv))).toBe(home)
+      expect(resolveNeutronHome(blankEnv)).toBe(home)
+      expect(listenerResolveOwnerHome({ OWNER_HOME: '   ', NEUTRON_DB_PATH: join(home, 'db', 'project.db') } as NodeJS.ProcessEnv)).toBe(home)
+      expect(resolveOwnerHomeFromEnv({ OWNER_HOME: '   ', NEUTRON_DB_PATH: join(home, 'db', 'project.db') } as NodeJS.ProcessEnv)).toBe(home)
     })
 
     it('the env shim publishes a usable OWNER_HOME rather than re-writing the empty one', () => {

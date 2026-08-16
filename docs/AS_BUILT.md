@@ -51,7 +51,9 @@ the agent-facing tool and the status response each driven for real, plus a fallb
 asserting the audit row's `reason` by exact equality, plus the composition chain itself
 (delete the composer's propagation and every configured boot silently refuses, which the
 field-coverage gate cannot see because the safe default and the wrong answer are the same
-literal). `typecheck-all.sh` 51/51.
+literal). Gate results for the whole entry are recorded ONCE, at its end — an earlier
+draft stated `typecheck-all.sh` twice with two different counts, which leaves a reader no
+way to know which run was the real one.
 
 **A LATER ROUND FOUND THE GUARD FAILING THE OTHER WAY, AND IT WAS LIVE.** The refusal is
 silent in both directions — a broken guard silently steals rows, and a guard that
@@ -167,10 +169,65 @@ absent-field case. Removing the composer's `slug_is_fallback` assignment reds th
 FIELD-SPECIFIC ratchet by name (`composition-field-coverage.test.ts` over `WIRED_FIELDS`),
 not merely the count floor — measured, because a review reported the opposite.
 
-`lint.sh` clean. `typecheck-all.sh` 50/51 with the one failure (`app/tsconfig.json`,
-`TS2688 Cannot find type definition file for 'node'`) reproduced identically on the
-stashed, untouched tree — a local install artifact (`app/node_modules/@types` holds only
-`react`), unchanged by this work.
+**A LATER ROUND FOUND THE PIN FOR ONE OF THOSE TRIMS ASSERTING NOTHING.** A review
+mutation-proved it: revert the `OWNER_HOME` trim in `resolveNeutronHome`
+(`migrations/db-path.ts`) and the suite stayed green, because the assertion that named
+that property passed `NEUTRON_HOME` too — which wins at the line above and RETURNS, so
+the line under test never ran. The positive control (the same mutation on the
+`NEUTRON_HOME` branch) WAS caught, which is what made the gap legible rather than
+invisible. The property is now asserted with `NEUTRON_HOME` ABSENT, where only the trim
+can produce the documented `~/neutron` default, plus a control that a real `OWNER_HOME`
+path still resolves verbatim so the case cannot pass by the variable going unread.
+An assertion that cannot fail for the property it names is not coverage.
+
+**AND THE DOCBLOCK'S CLAIM ABOUT ITS SIBLINGS WAS FALSE.** `config/index.ts` stated that
+every sibling identity read in the repo trims; two did not — `resolveOwnerHome`
+(`gateway/boot-listener-registry.ts`) and its inlined twin `resolveOwnerHomeFromEnv`
+(`onboarding/overnight/register.ts`), both `length > 0`. With `OWNER_HOME='   '`, config
+and identity fell back while those two answered a directory named three spaces: one
+variable, two homes, and the overnight engine enumerating projects somewhere nothing had
+ever written. Fixed at the two call sites rather than by narrowing the sentence, because
+the split brain was the defect and the prose was only the evidence. The adjacent
+`NEUTRON_DB_PATH` guards got the same treatment — `dirname(dirname('   '))` is `'.'`, so a
+blank pin resolved owner_home to the process CWD, the identical defect one line down that
+fixing only the first line would have left live.
+
+`ReconcileInstanceScopeOptions.currentSlugIsFallback` is now REQUIRED, matching the
+explicit path's `provenance` argument. It was optional and the guard fires only on an
+explicit `true`, so an omitted flag failed OPEN — and the demonstration of the permissive
+call was sitting in the guard's own test file, where an omission and a deliberate `false`
+were indistinguishable. Optional provenance on a safety decision is a way to forget.
+
+`ENOENT` from the `.url_slug` read is deliberately NOT special-cased, and the reasoning is
+recorded at the call site: a review proposed falling through when the read races an
+unlink, but the fall-through answers with `NEUTRON_INSTANCE_SLUG`, which on a renamed box
+holds the OLD handle — so it would hand the credential guard "this process knows who it
+is" at the exact moment something is rewriting the file that says who it is.
+
+Mutations this round, each applied and reverted with a control proving it landed and a
+baseline proving the suite was green first (23 pass / 0 fail): reverting the
+`OWNER_HOME` trim in `resolveNeutronHome` reds the new absent-`NEUTRON_HOME` case;
+reverting either sibling's `OWNER_HOME` trim reds that sibling's assertion by name;
+reverting either `NEUTRON_DB_PATH` trim reds the CWD case; and dropping
+`currentSlugIsFallback` from one call site is now a TS2345 compile error naming the
+missing property, which is the whole point of making it required.
+
+Suites: `open/__tests__/owner-slug-agreement.test.ts` 23 pass, `migrations/` +
+`onboarding/overnight/` 110 pass across 14 files, gateway boot-credential-scope +
+boot-init-cleanup + `config/` 48 pass across 4 files, and the four direction-guard
+suites together 40 pass. `open/__tests__/` as a whole ran 750 across 98 files; the three
+failures there are load-sensitive and NOT this branch — the identical two
+(`projects_changed` live-refresh, the `#514` watchdog reap) reproduce on the untouched
+base worktree at `81548e81` under the same three-file load, the third
+(`sanitizeInboundAttachments`) does not recur, and the watchdog case passes 30/30 when its
+file runs alone. The failure SET differenced against untouched main is empty; the count
+alone would have read as a regression.
+
+`lint.sh` clean (7 gates). `typecheck-all.sh` 50/51 with the one failure
+(`app/tsconfig.json`, `TS2688 Cannot find type definition file for 'node'`) reproduced
+identically on the untouched base worktree at `81548e81` — a local install artifact
+(`app/node_modules/@types` holds only `react`), unchanged by this work. Differenced as a
+failure SET, not counted.
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
 Landed via PR #325.
