@@ -506,6 +506,8 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
+import { heldReasonsByItem } from '@neutronai/work-board/held-cards.ts'
+import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import { buildNexusReaderSeam } from './wiring/nexus-reader-seam.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
@@ -2037,6 +2039,10 @@ export function buildOpenGraphComposer(
     // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
+    // ONE durable hold queue shared by every dispatch entry and every terminal
+    // path. Declared here so `/code`, board ▶, and the later board surfaces all
+    // close over the same production store.
+    const workBoardDispatchHolds = new DispatchHoldStore(db)
     const tridentHostRunner = makeLazyCredentialedHostRunner(async () =>
       githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
     )
@@ -2063,6 +2069,7 @@ export function buildOpenGraphComposer(
           // use), so a project with no repo yet still builds.
           repo_path: owner_home,
           resolveMergeMode: resolveTridentMergeMode,
+          holds: workBoardDispatchHolds,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -3916,6 +3923,11 @@ export function buildOpenGraphComposer(
         return run !== null && run !== undefined && !isTerminalPhase(run.phase)
       },
     })
+    // 0124 — the READ side of the dispatch hold queue, for the `<work_board>`
+    // fragment. A stateless wrapper over the SAME `ProjectDb` the queue's writer
+    // (`trident/board-dispatch.ts`) and its terminal-observer sweep use, so this
+    // reads the one authoritative `code_trident_dispatch_holds` table; it is
+    // never written from here.
     // M2 task 3 — bind the `/status` snapshot reader now that every source store
     // exists (projects reader / reminder store / work-board / Trident run store).
     // Deterministic READ-only aggregation, scoped to the turn's active project.
@@ -4040,6 +4052,7 @@ export function buildOpenGraphComposer(
                 chat_id: chatId,
                 thread_id: null,
                 resolveMergeMode: resolveTridentMergeMode,
+                holds: workBoardDispatchHolds,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -5122,10 +5135,17 @@ export function buildOpenGraphComposer(
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
-            workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
-              formatWorkBoardFragment(
-                workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
-              ),
+            // 0124 — a card queued behind a declared blocker or a live run's
+            // file claim carries its hold reason into the fragment, so the
+            // orchestrator re-grounds on "this is HELD, and why" instead of
+            // re-dispatching it (the queue re-fires it on its own).
+            workBoardSnapshot: (slug: string, project_id: string | undefined): string => {
+              const scope = workBoardScopeKey(slug, project_id)
+              return formatWorkBoardFragment(
+                workBoardStore.listActive(scope),
+                heldReasonsByItem(workBoardDispatchHolds, scope),
+              )
+            },
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the
             // runner un-marks every topic in that scope warm so its next turn
@@ -5502,6 +5522,22 @@ export function buildOpenGraphComposer(
     })
     for (const cleanup of appWsCleanups) realmodeCleanups.push(cleanup)
 
+    const outOfBandHoldSweep = buildDispatchHoldSweep({
+      holds: workBoardDispatchHolds,
+      board: workBoardStore,
+      makeDispatchDeps: (hold) => ({
+        store: boardRunStore,
+        board: workBoardStore,
+        project_slug: hold.project_slug,
+        repo_path: owner_home,
+        holds: workBoardDispatchHolds,
+        resolveMergeMode: resolveTridentMergeMode,
+        ...(hold.payload?.chat_id !== undefined ? { chat_id: hold.payload.chat_id } : {}),
+        ...(hold.payload?.thread_id !== undefined ? { thread_id: hold.payload.thread_id } : {}),
+        ...(hold.payload?.channel_kind !== undefined ? { channel_kind: hold.payload.channel_kind } : {}),
+      }),
+    })
+
     // §F6a — bind the board X-cancel/delete terminal-write chokepoint now that the
     // durable delivery sink exists. Its observer chain runs the same USER-FACING
     // observers the tick loop's `on_terminal` does — delivery → durable app-ws
@@ -5521,7 +5557,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), outOfBandHoldSweep, skillForgeOnRunTerminal].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5542,7 +5578,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), outOfBandHoldSweep, skillForgeOnRunTerminal].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),

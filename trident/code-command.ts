@@ -28,6 +28,7 @@ import { buildTridentTerminator } from './terminate.ts'
 import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
 import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
+import { buildDispatchHoldSweep, type DispatchHoldStore } from './dispatch-holds.ts'
 
 export type CodeCommand =
   | { kind: 'dispatch'; task: string; board_item_id?: string }
@@ -162,6 +163,12 @@ export interface TridentCodeContext {
   /** Round caps (else the store defaults: 8 / 20). */
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * 0124 — the durable dispatch HOLD QUEUE. When wired, a `/code` dispatch that
+   * collides with a declared blocker or a live run's file claim is QUEUED and
+   * fires itself once the blocker clears. Absent → still held, just no auto-retry.
+   */
+  holds?: DispatchHoldStore
 }
 
 /** Dispatch the parsed command. */
@@ -221,6 +228,7 @@ async function executeDispatch(
     ...(ctx.channel_kind !== undefined ? { channel_kind: ctx.channel_kind } : {}),
     ...(ctx.max_rounds !== undefined ? { max_rounds: ctx.max_rounds } : {}),
     ...(ctx.max_ralph_rounds !== undefined ? { max_ralph_rounds: ctx.max_ralph_rounds } : {}),
+    ...(ctx.holds !== undefined ? { holds: ctx.holds } : {}),
   }
   const result = await dispatchBoardBoundBuild({ task: cmd.task, board_item_id: cmd.board_item_id }, deps)
 
@@ -239,6 +247,12 @@ async function executeDispatch(
     if (result.code === 'underspecified') {
       // The ask-before-acting gate. The dispatch is BLOCKED; the caller asks.
       return { text: `🛠 ${result.message}`, error: { code: 'malformed', message: result.message } }
+    }
+    if (result.code === 'held') {
+      // NOT an error: the build is QUEUED behind a declared blocker or a file
+      // another live run owns, and the hold sweep fires it automatically. Its
+      // own message, distinct from a failure, so nobody hand-serialises lanes.
+      return { text: `⏸ ${result.message}`, data: { held: true } }
     }
     return {
       text: `\`/code\` ${result.message}`,
@@ -276,8 +290,31 @@ async function executeStop(
     typeof ctx.work_board.detachRun === 'function'
       ? buildBoardReconcileObserver(ctx.work_board as TridentBoardReconciler)
       : null
-  const observer =
-    reconcile !== null ? composeTerminalHook({ onTerminal: async (): Promise<void> => {} }, [reconcile]) : null
+  const holdSweep = ctx.holds === undefined
+    ? null
+    : buildDispatchHoldSweep({
+        holds: ctx.holds,
+        board: ctx.work_board,
+        makeDispatchDeps: (hold) => ({
+          store: ctx.store,
+          board: ctx.work_board,
+          project_slug: hold.project_slug,
+          repo_path: ctx.repo_path,
+          holds: ctx.holds!,
+          ...(ctx.resolveBuildRepo !== undefined ? { resolveBuildRepo: ctx.resolveBuildRepo } : {}),
+          ...(ctx.resolveMergeMode !== undefined ? { resolveMergeMode: ctx.resolveMergeMode } : {}),
+          ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
+          ...(hold.payload?.chat_id !== undefined ? { chat_id: hold.payload.chat_id } : {}),
+          ...(hold.payload?.thread_id !== undefined ? { thread_id: hold.payload.thread_id } : {}),
+          ...(hold.payload?.channel_kind !== undefined ? { channel_kind: hold.payload.channel_kind } : {}),
+        }),
+      })
+  const observers = [reconcile, holdSweep].filter(
+    (candidate): candidate is (run: TridentRun) => Promise<void> => candidate !== null,
+  )
+  const observer = observers.length > 0
+    ? composeTerminalHook({ onTerminal: async (): Promise<void> => {} }, observers)
+    : null
   const result = await buildTridentTerminator({ store: ctx.store, observer }).terminate(target.id, 'stopped', {})
   // The `resolveStopTarget` read can go stale in the await gap: the tick loop may
   // finish the run first, so the atomic transition LOSES (`won:false`). Report

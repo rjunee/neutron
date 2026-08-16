@@ -69,6 +69,12 @@ import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import {
+  DispatchHoldStore,
+  buildDispatchHoldSweep,
+  type DispatchHold,
+} from '@neutronai/trident/dispatch-holds.ts'
+import type { BoardBoundBuildDeps } from '@neutronai/trident/board-dispatch.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
@@ -176,6 +182,11 @@ export function buildCoreModules(
   input: CompositionInput,
   loopRegistry: LoopRegistry = new LoopRegistry(),
 ): CoreModules {
+  // 0124 — the ONE dispatch hold queue, shared by both dispatch entries (the
+  // agent-native build tool + `/code`) and by the terminal-observer sweep that
+  // drains it. Over the SAME ProjectDb the run store uses, so a hold written by
+  // a dispatch is the row the sweep reads.
+  const dispatchHolds = new DispatchHoldStore(input.db)
   const toolsModule: GatewayModule<ToolRegistry> = {
     name: 'tools',
     init: () => {
@@ -230,6 +241,10 @@ export function buildCoreModules(
           // #429 task 4 — thread the deterministic chat ack (composer-built,
           // durable+live app-ws seam). Absent → no post (unchanged behaviour).
           ...(input.work_board.chat_ack !== undefined ? { chatAck: input.work_board.chat_ack } : {}),
+          // 0124 — READ-ONLY join so `work_board_list` reports a queued card as
+          // `held: <reason>`. The SAME store the dispatch writes and the sweep
+          // drains, so the list can never disagree with the queue.
+          dispatchHolds,
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
@@ -238,7 +253,10 @@ export function buildCoreModules(
       // trident builds, each bound to a Plan item; the durable loop harvests by
       // runId. Enforces the required-item + ask-before-acting chokepoint.
       if (input.trident_build_dispatch !== undefined) {
-        registerTridentBuildToolSurface(reg, input.trident_build_dispatch)
+        // 0124 — thread the hold queue so a dispatch blocked by a declared
+        // dependency or a live run's file claim is QUEUED (and auto-fired by the
+        // sweep) instead of dropped on the floor.
+        registerTridentBuildToolSurface(reg, { ...input.trident_build_dispatch, holds: dispatchHolds })
       }
       // Codex connect/status (Part B) — register the `codex_connect` +
       // `codex_status` agent tools when the composer wired the service, so the
@@ -515,7 +533,58 @@ export function buildCoreModules(
       // skip delivery nor un-terminate the run (the loop already transitioned
       // it). Composed with any skill-forge observer into one observer fn.
       const boardReconcile = buildBoardReconcileObserver(input.work_board?.store) ?? undefined
-      const observers = [boardReconcile, runTerminalObserver].filter(
+      // 0124 — DRAIN THE DISPATCH HOLD QUEUE. A run going terminal is the one
+      // event that can release either kind of hold: it frees that run's file
+      // claims (release is the liveness predicate — no explicit clear exists),
+      // and the board reconcile ABOVE has just written its bound card's
+      // `status='done'`. So the sweep is composed AFTER `boardReconcile` and the
+      // ORDER IS LOAD-BEARING: composed before it, a dependent card would
+      // re-evaluate against a blocker still marked in_progress and merely
+      // refresh its own hold. Re-dispatch goes back through
+      // `dispatchBoardBoundBuild`, so every gate re-runs on the way out.
+      const boardStore = input.work_board?.store
+      const dispatchBase = input.trident_build_dispatch
+      const holdSweep =
+        boardStore === undefined || dispatchBase === undefined
+          ? undefined
+          : buildDispatchHoldSweep({
+              holds: dispatchHolds,
+              board: boardStore,
+              makeDispatchDeps: (hold: DispatchHold): BoardBoundBuildDeps => ({
+                store,
+                board: boardStore,
+                project_slug: hold.project_slug,
+                repo_path: dispatchBase.repo_path,
+                holds: dispatchHolds,
+                ...(dispatchBase.resolveBuildRepo !== undefined
+                  ? { resolveBuildRepo: dispatchBase.resolveBuildRepo }
+                  : {}),
+                ...(dispatchBase.resolveMergeMode !== undefined
+                  ? { resolveMergeMode: dispatchBase.resolveMergeMode }
+                  : {}),
+                ...(dispatchBase.resolveRalph !== undefined
+                  ? { resolveRalph: dispatchBase.resolveRalph }
+                  : {}),
+                // Replay the ORIGINATING chat/limits context, so an auto-fired
+                // build reports back where the human dispatched it from.
+                ...(hold.payload?.chat_id !== undefined ? { chat_id: hold.payload.chat_id } : {}),
+                ...(hold.payload?.thread_id !== undefined
+                  ? { thread_id: hold.payload.thread_id }
+                  : {}),
+                ...(hold.payload?.channel_kind !== undefined
+                  ? { channel_kind: hold.payload.channel_kind }
+                  : dispatchBase.channel_kind !== undefined
+                    ? { channel_kind: dispatchBase.channel_kind }
+                    : {}),
+                ...(hold.payload?.max_rounds !== undefined
+                  ? { max_rounds: hold.payload.max_rounds }
+                  : {}),
+                ...(hold.payload?.max_ralph_rounds !== undefined
+                  ? { max_ralph_rounds: hold.payload.max_ralph_rounds }
+                  : {}),
+              }),
+            })
+      const observers = [boardReconcile, holdSweep, runTerminalObserver].filter(
         (o): o is (run: TridentRun) => Promise<void> => o !== undefined,
       )
       // §F6a — the SAME assembly the out-of-band `terminate()` chokepoint uses,

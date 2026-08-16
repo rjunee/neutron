@@ -38,6 +38,7 @@ import {
   type WorkBoardStore, WorkBoardRunStillLiveError } from './store.ts'
 import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
 import type { WorkBoardChatAck } from './chat-ack.ts'
+import { heldReasonsByItem, type WorkBoardHoldLookup } from './held-cards.ts'
 
 export const WORK_BOARD_LIST_TOOL = 'work_board_list'
 export const WORK_BOARD_ADD_TOOL = 'work_board_add'
@@ -60,6 +61,14 @@ const designDocRefProp = {
     'in-app docs link; javascript:/data:/file: are rejected.',
 }
 
+const blockersProp = {
+  type: 'array',
+  items: { type: 'string' },
+  description:
+    'card ids this card depends on; the build dispatcher refuses to start this card until every ' +
+    'blocker card is done, and auto-starts it when they are',
+}
+
 const itemSchema: JsonSchemaDocument = {
   type: 'object',
   properties: {
@@ -73,6 +82,13 @@ const itemSchema: JsonSchemaDocument = {
     created_at: { type: 'string' },
     updated_at: { type: 'string' },
     completed_at: { type: ['string', 'null'] },
+    held: {
+      type: 'string',
+      description:
+        'Present ONLY while this card has a standing dispatch hold: why its build has not started ' +
+        '(the blocking card, or the path a live run already claims). It re-fires itself when the ' +
+        'blocker clears — do not re-dispatch it by hand.',
+    },
   },
   required: ['id', 'title', 'status', 'sort_order'],
 }
@@ -98,6 +114,7 @@ interface AddArgs {
   status?: unknown
   design_doc_ref?: unknown
   spec?: unknown
+  blockers?: unknown
 }
 interface UpdateArgs {
   id?: unknown
@@ -105,6 +122,7 @@ interface UpdateArgs {
   status?: unknown
   design_doc_ref?: unknown
   inline_active?: unknown
+  blockers?: unknown
 }
 interface IdArg {
   id?: unknown
@@ -117,6 +135,11 @@ interface ReorderArgs {
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
+}
+
+/** 0124 — the declared blocker set; the store validates the contents. */
+function asStringArray(v: unknown): string[] | undefined {
+  return Array.isArray(v) ? (v as string[]) : undefined
 }
 function asStatus(v: unknown): WorkBoardStatus | undefined {
   return typeof v === 'string' && (STATUS_VALUES as string[]).includes(v)
@@ -160,10 +183,20 @@ export function registerWorkBoardToolSurface(
      * seam. Absent → byte-identical to the pre-task-4 behaviour (no post).
      */
     chatAck?: WorkBoardChatAck
+    /**
+     * 0124 — the dispatch HOLD QUEUE, read-only. When wired, `work_board_list`
+     * joins each card against `code_trident_dispatch_holds` and reports the
+     * hold's stored reason as `held` on that card, so a build that is queued
+     * behind a blocker or a file claim stays legible after the dispatch-time
+     * chat message scrolls away. Absent (or no holds) → output byte-identical
+     * to the pre-0124 payload. `DispatchHoldStore` satisfies it structurally.
+     */
+    dispatchHolds?: WorkBoardHoldLookup
   },
 ): string[] {
   const specDoc = opts?.specDoc
   const chatAck = opts?.chatAck
+  const dispatchHolds = opts?.dispatchHolds
   registry.register({
     name: WORK_BOARD_LIST_TOOL,
     description:
@@ -175,7 +208,19 @@ export function registerWorkBoardToolSurface(
     capability_required: 'read:project_data',
     approval_policy: 'auto',
     handler: async (_args, ctx) => {
-      return { items: store.list(workBoardScopeKey(ctx.project_slug, ctx.project_id)) }
+      const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+      const items = store.list(scope)
+      // 0124 — ONE query for the whole board, then a map lookup per card. A card
+      // with no hold row is returned as the SAME object the store produced, so
+      // the unheld payload is byte-identical to the pre-0124 output.
+      const held = heldReasonsByItem(dispatchHolds, scope)
+      if (held.size === 0) return { items }
+      return {
+        items: items.map((item) => {
+          const reason = held.get(item.id)
+          return reason === undefined ? item : { ...item, held: reason }
+        }),
+      }
     },
   })
 
@@ -194,6 +239,7 @@ export function registerWorkBoardToolSurface(
         title: { type: 'string', description: 'The ONE-line item text.' },
         status: statusProp,
         design_doc_ref: designDocRefProp,
+        blockers: blockersProp,
         spec: {
           type: 'string',
           description:
@@ -214,6 +260,7 @@ export function registerWorkBoardToolSurface(
       const status = asStatus(a.status)
       const ref = asString(a.design_doc_ref)
       const spec = asString(a.spec)
+      const blockers = asStringArray(a.blockers)
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
       try {
         let item: WorkBoardItem
@@ -235,12 +282,14 @@ export function registerWorkBoardToolSurface(
             ...(status !== undefined ? { status } : {}),
             ...(ref !== undefined ? { design_doc_ref: ref } : {}),
             ...(spec !== undefined ? { spec } : {}),
+            ...(blockers !== undefined ? { blockers } : {}),
             },
           )
         } else {
           const createInput: CreateWorkBoardItemInput = { title }
           if (status !== undefined) createInput.status = status
           if (ref !== undefined) createInput.design_doc_ref = ref
+          if (blockers !== undefined) createInput.blockers = blockers
           item = await store.create(scope, createInput)
         }
         // #429 task 4 — a chat-dispatched add posts a deterministic ack now, so
@@ -274,6 +323,7 @@ export function registerWorkBoardToolSurface(
         title: { type: 'string' },
         status: statusProp,
         design_doc_ref: designDocRefProp,
+        blockers: blockersProp,
         inline_active: {
           type: 'boolean',
           description:
@@ -298,6 +348,8 @@ export function registerWorkBoardToolSurface(
       if (title !== undefined) patch.title = title
       if (status !== undefined) patch.status = status
       if (ref !== undefined) patch.design_doc_ref = ref
+      const blockers = asStringArray(a.blockers)
+      if (blockers !== undefined) patch.blockers = blockers
       if (typeof a.inline_active === 'boolean') patch.inline_active = a.inline_active
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
       try {

@@ -649,19 +649,19 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the live table: 31 columns, same names as PRAGMA table_info', () => {
+  test('COLS matches the live table: 32 columns, same names as PRAGMA table_info', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
     // COLS corrupts every insert silently (STRICT only catches affinity, not
-    // arity/order). The literal 31 is deliberate — adding a column must be a
+    // arity/order). The literal 32 is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift.
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(31)
+    expect(cols).toHaveLength(32)
     expect(cols).toHaveLength(pragma.length)
     // Same members, order-independent: a rename or a drop goes red.
     expect([...cols].sort()).toEqual([...pragma.map((c) => c.name)].sort())
@@ -793,5 +793,74 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       // The empty active set is the empty signature, and reads back as no entries.
       expect(changeSignatureEntries('').size).toBe(0)
     })
+  })
+})
+
+describe('claimed_paths — the file-contention claim (0124)', () => {
+  test('round-trips through create/get and defaults to an empty (not null) set', async () => {
+    const store = new TridentRunStore(db)
+    const claimed = await store.create({
+      slug: 'claims-paths',
+      project_slug: 't1',
+      repo_path: '/repo/a',
+      task: 'edit trident/board-dispatch.ts',
+      claimed_paths: ['trident/board-dispatch.ts', 'trident/store.ts'],
+    })
+    expect(store.get(claimed.id)?.claimed_paths).toEqual([
+      'trident/board-dispatch.ts',
+      'trident/store.ts',
+    ])
+
+    const unclaimed = await store.create({
+      slug: 'claims-nothing',
+      project_slug: 't1',
+      repo_path: '/repo/a',
+      task: 'ship the thing',
+    })
+    expect(unclaimed.claimed_paths).toEqual([])
+    expect(store.get(unclaimed.id)?.claimed_paths).toEqual([])
+  })
+
+  test('a legacy row whose column is NULL reads as [] (claims nothing)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'legacy-row',
+      project_slug: 't1',
+      repo_path: '/repo/a',
+      task: 'pre-0124 build',
+      claimed_paths: ['trident/store.ts'],
+    })
+    // Simulate a row written before the column existed.
+    await db.run(`UPDATE code_trident_runs SET claimed_paths = NULL WHERE id = ?`, [run.id])
+    expect(store.get(run.id)?.claimed_paths).toEqual([])
+  })
+
+  test('listNonTerminalByRepo is the claim RELEASE: a terminal run disappears', async () => {
+    const store = new TridentRunStore(db)
+    const live = await store.create({
+      slug: 'live-claim',
+      project_slug: 't1',
+      repo_path: '/repo/a',
+      task: 'edit trident/store.ts',
+      claimed_paths: ['trident/store.ts'],
+    })
+    // A different repo never enters the same contention set.
+    await store.create({
+      slug: 'other-repo',
+      project_slug: 't2',
+      repo_path: '/repo/b',
+      task: 'edit trident/store.ts',
+      claimed_paths: ['trident/store.ts'],
+    })
+
+    const before = store.listNonTerminalByRepo('/repo/a')
+    expect(before.map((r) => r.id)).toEqual([live.id])
+    expect(before[0]?.claimed_paths).toEqual(['trident/store.ts'])
+
+    // Terminal WITHOUT any explicit claim release — release is the predicate.
+    await store.terminalTransition(live.id, { phase: 'done' })
+    expect(store.listNonTerminalByRepo('/repo/a')).toEqual([])
+    // The column is untouched: nothing clears it, and nothing needs to.
+    expect(store.get(live.id)?.claimed_paths).toEqual(['trident/store.ts'])
   })
 })

@@ -63,6 +63,14 @@ export interface WorkBoardItem {
   updated_at: string
   /** ISO-8601 UTC; null until status='done'. */
   completed_at: string | null
+  /**
+   * DEPENDENCY-AWARE DISPATCH (migration 0124) — the ids of sibling cards this
+   * card depends on. `dispatchBoardBoundBuild` HOLDS a build for this card while
+   * any declared blocker card exists with `status !== 'done'`, and the hold
+   * queue's terminal-observer sweep dispatches it automatically once they land.
+   * NULL / unparseable in the column reads as `[]` (no declared dependencies).
+   */
+  blockers: string[]
 }
 
 export interface CreateWorkBoardItemInput {
@@ -73,12 +81,16 @@ export interface CreateWorkBoardItemInput {
   task_type?: WorkBoardTaskType
   /** Test-injectable id; defaults to a fresh ULID. */
   id?: string
+  /** 0124 — card ids this card depends on. See `WorkBoardItem.blockers`. */
+  blockers?: string[]
 }
 
 export interface WorkBoardItemUpdate {
   title?: string
   status?: WorkBoardStatus
   design_doc_ref?: string | null
+  /** 0124 — replace the declared blocker set. See `WorkBoardItem.blockers`. */
+  blockers?: string[]
   /** Phase 2b — the lightweight inline (in-topic) work marker. The agent flags
    *  an item it is working INLINE in the main topic (caret `›`) vs via a bound
    *  sub-agent/trident run (fork `⑂`, derived from `linked_run_id`). */
@@ -208,7 +220,7 @@ export function workBoardProjectIdForKey(
 
 const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
-  'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type'
+  'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, blockers'
 
 interface WorkBoardItemDbRow {
   id: string
@@ -223,6 +235,7 @@ interface WorkBoardItemDbRow {
   updated_at: string
   completed_at: string | null
   task_type: WorkBoardTaskType
+  blockers: string | null
 }
 
 /**
@@ -266,6 +279,73 @@ export function validateDesignDocRef(raw: string | null | undefined): string | n
   )
 }
 
+/** A card may declare at most this many dependencies. */
+export const MAX_BLOCKERS = 20
+/** A card id is a ULID; this is a generous defensive cap. */
+export const MAX_BLOCKER_ID_LEN = 128
+
+/**
+ * Validate a declared blocker set at WRITE time (mirrors
+ * {@link validateDesignDocRef}). Must be an array of non-empty card ids, each at
+ * most {@link MAX_BLOCKER_ID_LEN} chars, at most {@link MAX_BLOCKERS} entries;
+ * duplicates are collapsed. `self_id`, when supplied, rejects a card that names
+ * ITSELF — a self-dependency can never clear, so it would wedge the card (and
+ * everything queued behind it) forever.
+ *
+ * Returns the normalized set, or null for an absent/empty one (stored as NULL).
+ */
+export function validateBlockers(
+  raw: string[] | null | undefined,
+  self_id?: string,
+): string[] | null {
+  if (raw === null || raw === undefined) return null
+  if (!Array.isArray(raw)) {
+    throw new WorkBoardValidationError('invalid_blockers', 'blockers must be an array of card ids')
+  }
+  const out: string[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) {
+      throw new WorkBoardValidationError(
+        'invalid_blockers',
+        'blockers must be an array of non-empty card ids',
+      )
+    }
+    const id = entry.trim()
+    if (id.length > MAX_BLOCKER_ID_LEN) {
+      throw new WorkBoardValidationError(
+        'invalid_blockers',
+        `each blocker id must be at most ${MAX_BLOCKER_ID_LEN} chars`,
+      )
+    }
+    if (self_id !== undefined && id === self_id) {
+      throw new WorkBoardValidationError(
+        'invalid_blockers',
+        'an item cannot block itself — a self-dependency can never clear',
+      )
+    }
+    if (!out.includes(id)) out.push(id)
+  }
+  if (out.length > MAX_BLOCKERS) {
+    throw new WorkBoardValidationError(
+      'invalid_blockers',
+      `an item may declare at most ${MAX_BLOCKERS} blockers`,
+    )
+  }
+  return out.length === 0 ? null : out
+}
+
+/** NULL / unparseable reads as `[]` — an unreadable set declares nothing. */
+function parseBlockers(raw: string | null): string[] {
+  if (raw === null || raw === '') return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((b): b is string => typeof b === 'string' && b.length > 0)
+  } catch {
+    return []
+  }
+}
+
 /**
  * 48-bit timestamp + 80 random bits, Crockford base32 (sortable). Mirrors
  * the `notes` / `comments` stores; there is no `ulid` package in the repo.
@@ -306,6 +386,7 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     updated_at: row.updated_at,
     completed_at: row.completed_at,
     task_type: row.task_type,
+    blockers: parseBlockers(row.blockers),
   }
 }
 
@@ -370,6 +451,7 @@ export class WorkBoardStore {
     const design_doc_ref = validateDesignDocRef(input.design_doc_ref)
     const completed_at = status === 'done' ? ts : null
     const task_type: WorkBoardTaskType = input.task_type ?? 'build'
+    const blockers = validateBlockers(input.blockers, id)
 
     const item: WorkBoardItem = {
       id,
@@ -384,6 +466,7 @@ export class WorkBoardStore {
       updated_at: ts,
       completed_at,
       task_type,
+      blockers: blockers ?? [],
     }
 
     await this.db.transaction(async (tx) => {
@@ -396,7 +479,7 @@ export class WorkBoardStore {
       item.sort_order = max?.next ?? 1
       await tx.run(
         `INSERT INTO work_board_items (${COLS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.project_slug,
@@ -410,6 +493,8 @@ export class WorkBoardStore {
           item.updated_at,
           item.completed_at,
           item.task_type,
+          // Compact JSON; NULL when the card declares no dependencies.
+          blockers === null ? null : JSON.stringify(blockers),
         ],
       )
     })
@@ -508,6 +593,12 @@ export class WorkBoardStore {
     if (patch.design_doc_ref !== undefined) {
       designDocRef = validateDesignDocRef(patch.design_doc_ref)
     }
+    // A card naming ITSELF as a blocker could never clear — rejected here, at
+    // the same eager point a bad design_doc_ref is.
+    let blockers: string[] | null | undefined
+    if (patch.blockers !== undefined) {
+      blockers = validateBlockers(patch.blockers, id)
+    }
 
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.get(project_slug, id)
@@ -520,6 +611,7 @@ export class WorkBoardStore {
       }
       if (title !== undefined) push('title', title)
       if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
+      if (blockers !== undefined) push('blockers', blockers === null ? null : JSON.stringify(blockers))
       // A REAL transition into a terminal lane ('done'/'failed') UNCONDITIONALLY
       // clears the inline marker — a finished card can never still claim live
       // inline work (generic-path parity with attachRun/detachRun, which already
