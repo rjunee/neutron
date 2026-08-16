@@ -43,10 +43,16 @@ GATE="$ROOT/scripts/ci/leak-gate.sh"
 ZERO='0000000000000000000000000000000000000000'
 STATUS=0
 CHECKED=0
+# The ref lines are consumed by the loop below, so they are kept verbatim for the
+# trident advisory at the end — which must name the PUSHED branch, not whatever
+# happens to be checked out.
+REFLINES=''
 
 # git feeds one line per ref being pushed: <local_ref> <local_sha> <remote_ref> <remote_sha>
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
+  REFLINES="${REFLINES}${local_ref:-} ${local_sha} ${remote_ref:-} ${remote_sha:-}
+"
   # A deletion pushes no commits and no messages.
   [ "$local_sha" = "$ZERO" ] && continue
   CHECKED=1
@@ -117,6 +123,34 @@ Then push again. If the finding is a false positive, the fix is the reviewable
 allowlist in scripts/ci/leak-gate-allowlist.txt — not skipping the hook.
 EOF
   exit 1
+fi
+
+# ── trident-verdict advisory — WARNS, NEVER BLOCKS ────────────────────────────
+#
+# A push is fine. Only the MERGE is gated: `trident-verdict` in ci.yml fails a PR
+# whose head commit carries no review verdict. Saying so here, at push time,
+# turns "your PR is red for a reason you have to go read" into "here is the one
+# command that fixes it", roughly ten minutes earlier.
+#
+# It must never block, for the reason the leak-gate comment above already
+# records: a gate that cannot be satisfied at the moment it fires is one people
+# learn to bypass with --no-verify, which is strictly worse than no gate. There
+# is nothing to satisfy at push time — a verdict is posted against a pushed SHA,
+# so it cannot exist before the push. Hence: advisory only, and every command
+# below is `|| true`.
+#
+# It names the PUSHED refs, which is why the ref lines were kept above rather than
+# `git rev-parse HEAD` being consulted: `git push origin some-other-branch`, a
+# multi-ref push and a tag push all have a checked-out branch that is not the thing
+# being pushed, and naming the wrong branch in a redemption command is worse than
+# naming none.
+#
+# The command text is fetched FROM THE GATE (`--redeem-command`, via the advisory
+# script) rather than copied. A second spelling would drift from the one CI prints,
+# and a drifted redemption path is a gate that only rejects.
+_tv_advisory="$ROOT/scripts/ci/trident-redeem-advisory.sh"
+if [ -f "$_tv_advisory" ]; then
+  printf '%s' "$REFLINES" | bash "$_tv_advisory" || true
 fi
 
 exit 0

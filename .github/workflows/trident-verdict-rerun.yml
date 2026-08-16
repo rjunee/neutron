@@ -1,0 +1,171 @@
+name: trident-verdict-rerun
+
+# Re-run a PR's failed `ci` run when a review verdict is posted for it.
+#
+# WHY THIS EXISTS. The `trident-verdict` gate in ci.yml reads the PR's comments at
+# the moment it runs, so the ordinary sequence is fatal on its own: the branch is
+# pushed, ci runs, the gate finds no verdict and goes red, and the review lane then
+# posts the verdict — thirty seconds or thirty minutes later. Nothing in GitHub
+# re-triggers a `pull_request` workflow on a comment. The verdict is correct, the
+# check stays red, and the merge cannot proceed.
+#
+# Without this file the gate would be self-defeating on every single reviewed PR:
+# the only way to green it would be a manual re-run, which turns a mechanism into a
+# chore and a chore into a bypass habit. The gate's own failure output used to say
+# "nothing re-triggers on a comment" as a caveat the author had to absorb. This
+# turns that caveat into a step the repository performs.
+#
+# IT IS ADVISORY MACHINERY, NOT A GATE. It is not in the `test` aggregator and it
+# grants nothing: it only asks GitHub to run ci.yml again, and ci.yml re-reads the
+# comments and reaches its own verdict. A failure here delays a green check; it can
+# never mint one. It can also WITHDRAW one — a re-read of an edited or deleted
+# verdict may legitimately end red, and that direction is the reason the trigger
+# covers more than `created`.
+#
+# `issue_comment` workflows run from the DEFAULT BRANCH, always — so this file has
+# no effect at all until it is merged to main, including on the PR that adds it.
+# That is a property of the event, not a gap in the wiring.
+# A VERDICT CAN CHANGE AFTER IT IS POSTED, so `created` alone is not enough. A
+# comment is editable and deletable by its author for as long as the PR exists, and
+# the gate's rule is that the NEWEST verdict wins — a rule that is only true if the
+# repository looks again when the newest one changes. On `created` alone, a clean
+# verdict that greened the check could afterwards be edited into blocking evidence,
+# or deleted outright, and the required check would stay green over a review that no
+# longer says what it said. `edited` and `deleted` close that: either way CI re-reads
+# the comments and reaches its own conclusion, which may be red.
+on:
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  contents: read
+  # `actions: write` is what `gh run rerun` needs, and it is the reason this lives
+  # in its own workflow instead of inside ci.yml: ci.yml declares `contents: read`
+  # and nothing else, and it should stay that way.
+  actions: write
+  pull-requests: read
+
+concurrency:
+  # One re-run at a time per PR. Two verdict comments in quick succession would
+  # otherwise race to re-run the same workflow run.
+  #
+  # The newer one CANCELS the older, because this job may be waiting out an
+  # in-progress ci run (below) and the newest verdict is the one the gate reads. An
+  # older waiter finishing later would only ask for a re-run the newer one has
+  # already asked for.
+  group: trident-verdict-rerun-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    # Three conditions, all necessary:
+    #   • the comment is on a PULL REQUEST (issue_comment fires for issues too);
+    #   • a verdict fence is involved, so ordinary discussion does not re-run CI —
+    #     and that is checked against the body BEFORE the edit as well as after it,
+    #     because editing a verdict INTO prose is the exact case where the check
+    #     must be re-read. Matching only the new body would leave a green check
+    #     standing over a verdict that has been written away;
+    #   • its author holds write access. This mirrors the gate's own author filter,
+    #     value for value — MEMBER is absent from BOTH, because on an org-owned
+    #     repository it describes org membership rather than access here, and on this
+    #     user-owned one it cannot occur. Without an author filter at all, any
+    #     account on the internet could spend this repository's runner minutes by
+    #     pasting the fence into a comment.
+    if: >-
+      github.event.issue.pull_request != null &&
+      (contains(github.event.comment.body, '```review-evidence') ||
+       contains(github.event.changes.body.from, '```review-evidence')) &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    steps:
+      - name: Re-run the ci run for this PR's head commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          # An in-progress ci run cannot be re-run, so this job waits for it rather
+          # than giving up (see WHY IT WAITS below). Bounded, because an unbounded
+          # wait is a hung job.
+          WAIT_SECONDS: '1200'
+          POLL_SECONDS: '30'
+        run: |
+          set -euo pipefail
+
+          pr_json=$(gh api "repos/$REPO/pulls/$PR")
+          head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha')
+          head_ref=$(printf '%s' "$pr_json" | jq -r '.head.ref')
+          echo "PR #$PR head: $head_sha on $head_ref"
+
+          # The most recent ci.yml run for THIS head sha, and of those, the one that
+          # belongs to THIS pull request. Keyed on the sha first, never on the branch
+          # alone: a verdict is bound to a commit, and re-running the run of an older
+          # commit would re-read comments against a tree nobody is merging.
+          #
+          # Then three tiers, most specific first, because the sha alone does not
+          # identify the run: two open PRs can share a head commit (a branch reopened
+          # against a second base; a fork branch and its upstream), and re-running the
+          # other PR's run leaves THIS check red while spending minutes elsewhere.
+          #   1. the run whose `pull_requests[]` contains this PR number — the run's
+          #      own record of which PR it was for, and the only exact answer;
+          #   2. failing that, a run on this PR's head REF. `pull_requests` is empty
+          #      on runs triggered by `push` rather than `pull_request`, so tier 1 can
+          #      legitimately find nothing; the branch name is the next best signal,
+          #      and it was the whole selector before this tier existed;
+          #   3. failing that, the newest run for the sha.
+          find_run() {
+            gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$head_sha&per_page=20" 2>/dev/null \
+              | jq -r --arg ref "$head_ref" --argjson pr "$PR" '
+                  ([.workflow_runs[] | select(any(.pull_requests[]?; .number == $pr))]
+                   + [.workflow_runs[] | select(.head_branch == $ref)]
+                   + .workflow_runs)[0]
+                  | if . == null then "none none none" else "\(.id) \(.status) \(.conclusion // "none")" end
+                ' 2>/dev/null || echo "none none none"
+          }
+
+          # WHY IT WAITS. The verdict job is short and the rest of the suite is not,
+          # so by the time a reviewer comments the run is usually finished — but not
+          # always. When it is still going, the verdict job inside it has very likely
+          # ALREADY failed (it ran first, before this comment existed), and that run
+          # will complete as a failure with nothing left to re-trigger it. Exiting
+          # here left a correct branch red until somebody re-ran it by hand, which is
+          # the chore this whole file exists to remove.
+          deadline=$(( $(date +%s) + WAIT_SECONDS ))
+          while : ; do
+            read -r run_id status conclusion <<<"$(find_run)"
+
+            if [ "$run_id" = "none" ] || [ -z "$run_id" ]; then
+              echo "No ci run recorded for $head_sha yet — the run that reads this verdict has"
+              echo "not started. Nothing to re-run; ci will read the comment on its first pass."
+              exit 0
+            fi
+
+            echo "ci run $run_id: status=$status conclusion=$conclusion"
+            if [ "$status" = "completed" ]; then break; fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "Run $run_id is still $status after ${WAIT_SECONDS}s. Not waiting longer. Re-run it"
+              echo "by hand once it finishes, so the gate re-reads this comment:"
+              echo "  gh run rerun $run_id --repo $REPO"
+              exit 0
+            fi
+            sleep "$POLL_SECONDS"
+          done
+
+          # THE WHOLE RUN, unconditionally — including a run that SUCCEEDED.
+          #
+          # `--failed` re-runs only the jobs that failed, which is cheaper and was
+          # wrong in both directions. A verdict job that previously PASSED is not in
+          # the failed set, so an edited or deleted verdict, or a newer BLOCKING one,
+          # could never turn the green check red — "the newest verdict wins" was
+          # false the moment the check went green, which is precisely when it
+          # matters. And exiting early on `success` for the same reason made that
+          # one-way door explicit. A cancelled run, meanwhile, has no failed jobs at
+          # all (ci.yml cancels superseded runs per PR), so `--failed` had a third
+          # hole beside those two.
+          #
+          # One path, at the cost of runner minutes on a rare event: this fires only
+          # on a verdict-fenced comment from an account with write access. A required
+          # check that cannot be withdrawn is not worth the saving.
+          echo "Re-running run $run_id whole so trident-verdict re-reads this PR's comments."
+          gh run rerun "$run_id" --repo "$REPO"

@@ -2389,6 +2389,198 @@ prover still vetoes a bad APPROVE today" written in the swallowed region passed
 at 17 pass / 0 fail. An exemption that widens on its own is a gate that stops
 firing with nobody watching, so an edit to either end now throws instead.
 
+## 2026-08-10 — a merge needs a review verdict, and the refusal hands the branch back (#179)
+
+`trident-verdict`, a job in `.github/workflows/ci.yml`, fails any pull request
+whose HEAD COMMIT carries no recorded review verdict. The rule that code here goes
+through the build-and-review loop was already written down, and hand-rolled PRs
+went around it twice — so this is a mechanism rather than a third wording. The
+verdict is a fenced `review-evidence` comment on the PR, posted by an account with
+write access, naming the full 40-hex commit it examined: keyed to the SHA, so a
+later fix commit invalidates an earlier approval and forces a fresh round. The
+record deliberately lives outside the PR's own diff, because a committed file would
+let the author of a change author its approval. The gate rides the existing
+required `test` aggregator, which demands `success` from it on pull-request events,
+so a skipped verdict job fails the required context instead of satisfying it — no
+branch-protection change needed.
+
+The failure is the feature: every failure path prints two routes that both keep the
+branch, ordered by what this tree can guarantee. First, record the verdict — a
+template naming this head SHA, which is the actual bar and is read by the gate
+itself. Second, hand the branch to a review lane as an explicit instruction to ADOPT
+this branch and this PR, with the failure to watch for stated rather than promised
+away: a lane that answers by opening a fresh branch has not redeemed this one. An
+earlier version instead asserted that the harness re-enters and reuses by itself,
+which is true only when it is handed a branch and a PR number — not on the typed
+path a reader takes — so following it produced a duplicate PR. `.githooks/pre-push`
+prints the same command, from the same single definition, and never blocks: a push
+is fine, only the merge is gated.
+
+Posting a verdict re-runs CI, via `.github/workflows/trident-verdict-rerun.yml`.
+Without it the gate was self-defeating on every reviewed PR — it reads the comments
+at the moment it runs, the verdict arrives after that, and no `pull_request`
+workflow re-triggers on a comment. That workflow grants nothing and is not in the
+aggregator; it only asks CI to look again at the head SHA, and it is inert until it
+reaches the default branch, as `issue_comment` always is.
+
+`TRIDENT_BYPASS=<reason>` at column 0 in the head commit message passes the gate and
+records why. It is not satisfiable by an empty, placeholder, or unreadable reason,
+**and it requires write access** — the PR's `author_association` must be OWNER or
+COLLABORATOR (MEMBER means org membership, not permission, and was removed for that
+reason — see round 6 below). Without that check the hatch was one every fork author
+held, since authors write their own commit messages. A verdict may also not carry a
+home-directory absolute path: the leak gate covers files and commit messages, a PR
+comment is outside both, and a comment cannot be un-published.
+
+Before believing any absence the gate runs its whole lookup against known inputs —
+a good verdict must pass, an absent one and a stale one must fail — and reports
+`THE LOOKUP IS BROKEN` distinctly from "no verdict recorded". A parser-only version
+of that control passed a mutant which reported "no verdict" for every PR in the
+repository.
+
+The mutation battery is committed code, not a paragraph:
+`scripts/ci/trident-verdict-mutation-battery.ts` applies each named mutant, runs the
+suite, restores the source, and exits non-zero if anything survived — **42 applied,
+42 caught, 0 survived**, and a mutant whose pattern goes stale counts as not caught
+so the battery cannot quietly shrink. This is the third statement of that number and
+the first reproducible one: the previous two claimed "17, each caught" and "16
+caught, 0 survived" from prose, and adversarial passes reproduced three and then six
+survivors respectively — including `codex.blocking: 1` passing a `> 0` comparison
+mutated to `> 1`, and an EMPTY count reading as zero. The battery covers the SHA
+keying, both review lanes, the parser's strictness, the author-trust filters on both
+the verdict and the hatch, pagination termination, the file-list truncation check,
+the positive control, and the redemption itself. The hosted overlay repository needs
+the same gate, as a separate change made there — one repository per change.
+
+One limit is now written down rather than left to be discovered (#179, round 4). The
+route-2 command is only safe to paste because every flag in it is a flag the review
+lane's dispatcher parses — and that dispatcher is not in this repository, so no test
+here can read its grammar. `DISPATCHER_PARSED_FLAGS` was read off its parse step by
+hand; the covering test checks the printed command against that declared set and
+cannot check the declared set against the dispatcher. So a change on the dispatcher's
+side rots the constant silently, and catching it is a review duty, not a CI one. The
+docblock had cited a test symbol (`assertOnlyParsedFlags`) that exists nowhere; it now
+names the real test. Named in `docs/trident-verdict-gate.md` § What it does not do.
+
+A green check can now be WITHDRAWN, which is what makes "the newest verdict wins"
+true (#179, round 5). It was false in the direction that matters: the re-run workflow
+returned early on a run whose conclusion was `success`, and otherwise re-ran only the
+jobs that had failed — which never includes a verdict job that passed. So once the
+check went green, no later verdict could turn it red, and the trigger was
+`created`-only, leaving a clean verdict free to be edited into blocking evidence or
+deleted outright with nothing looking again. It now fires on `created`, `edited` and
+`deleted` (matching the pre-edit body too, since editing a verdict into prose leaves
+no fence in the new one), re-runs the whole run unconditionally, and WAITS for a run
+still in progress instead of abandoning it — that run's verdict job has usually
+already failed against a comment that did not yet exist, so exiting there left a
+correct branch red until someone re-ran it by hand. The workflow's script is now
+EXECUTED by the suite against a stub `gh`, not read for strings: the old text
+assertion checked that the file mentioned `gh run rerun --failed` and was green over
+both defects.
+
+Two claims that were structurally unprovable are now proved. The battery ran the
+unmutated suite for the first time before believing any mutant — without that
+control, a suite that was already red, a missing `bun`, or a signal kill certified
+every mutant as CAUGHT, which is the same false-evidence shape the battery exists to
+remove; a CAUGHT verdict now requires the runner to report failing tests, and a
+measurement that did not happen is BROKEN rather than caught. And "every failure path
+prints the redeeming command" was a universal claim standing on an enumerated table
+that had already missed four paths; it is now checked against the gate's own source,
+walking the enclosing block of every red exit. Both were mutation-tested: with the
+suite pre-broken the battery prints `BASELINE BROKEN` and exits 1 instead of reporting
+42 caught, and a red exit added with no redemption reds the structural test.
+
+Re-verified at this head rather than carried forward: the suite is 108 pass / 0 fail,
+and the battery reports 42 applied, 42 caught, 0 survived. The pagination terminator —
+the mutant that survived a green 51-test suite two rounds ago — reds four tests when
+mutated to `return items`: "an executable file on page 2 still requires mutation
+evidence", "a verdict on page 2 of the comments is found, not read as absent",
+"newest-wins still holds ACROSS pages", and "an endpoint that always returns a full
+page is reported as unreadable". Re-adding the unparsed `branch=`/`prNumber=` pairs to
+the printed command reds "the printed command contains NO argument spelling the
+dispatcher would silently swallow".
+
+An association is not a permission, and the gate had been reading one as the other
+(#179, round 6). `author_association` was filtered on `OWNER`, `MEMBER` and
+`COLLABORATOR` under a docblock claiming those "mean write access" — false for
+`MEMBER`, which means org membership and is reported by a read-only or triage-only
+member of an org-owned repository. The trusted set is now `OWNER` and `COLLABORATOR`,
+exact on a user-owned repository, and the re-run workflow's trigger list matches it
+value for value; the org-owned answer (the collaborator-permission endpoint requiring
+`write`/`maintain`/`admin`) is documented rather than implemented, because it needs a
+token with push access that a fork's `pull_request` run does not get and would fail
+closed on every fork PR. Two more leaks of the same shape closed with it: an
+UNPARSEABLE verdict line was quoted into the public check log before the home-path
+check could reach it — the ordering, not a missing rule — so every refusal that
+echoes a value now redacts the account segment first; and mutation evidence could be
+one sentence pasted across `mutant`, `red` and `control`, which names no observation
+at all, so a self-identical entry is refused and the gate's own control fixture was
+rewritten to clear its own bar. Three latent classifier bugs went with them: `docs`
+exempted at any depth (so `open/docs/handler.ts` owed no evidence — now anchored to
+the root prose tree, while `__tests__` keeps its any-depth exemption), the re-run
+workflow selecting a run by branch name rather than by the PR its own
+`pull_requests` records, and the universal red-exit scan seeing only literal
+`return 1`. Two limits are stated rather than closed, because both lie outside what
+this repository can observe: branch adoption is an instruction to a dispatcher that
+lives elsewhere, and a verdict is testimony by a trusted author — this gate cannot
+re-run a mutant that ran on a reviewer's machine, so it refuses the shapes "nothing
+was run" reaches for and names the boundary past that. Re-verified at this head: 118
+pass / 0 fail, and the battery reports 48 applied, 48 caught, 0 survived — and now
+prints WHICH tests each mutant reds, so the per-guard rows in the detail entry are
+read off the run instead of recalled.
+
+The prose that documents a guard was standing in for the guard (#179, round 7). The
+CI-wiring tests asserted against `ci.yml`'s RAW TEXT, and that file's own comments
+contain the strings they looked for — the header above the job names
+`scripts/ci/trident-verdict.ts`, and the permissions block's comment quotes
+`issues: read` and `pull-requests: read` while explaining why both are needed. So a job
+gutted to `run: echo skipped`, or one with its `permissions` deleted, left the suite
+green, and the aggregator read the gutted job as a satisfied verdict. `ci.yml` carried
+no mutation coverage at all, which is how it stayed hidden: the battery mutated the gate
+script and the re-run workflow, never the file that invokes them. Those tests now read
+comment-stripped YAML, the stripper carries its own control in both directions (a
+sentence that exists only in a comment must be gone; a `#` inside a quoted scalar must
+survive), and four `ci.yml` mutants are in the battery. Two holes of the same shape
+closed with it: `DISPATCHER_PARSED_FLAGS` is what the redemption command is checked
+against and was itself checked against nothing, so WIDENING it re-opened the round-2
+duplicate-PR defect with a green suite — the set is pinned exactly now, with its own
+mutant; and the red-exit scan's `>= 8` count floor restated a number that nothing in the
+design fixes, so a legitimate consolidation to seven red exits would have redded a test
+whose guards all still held — it now asserts what it actually needs, that the scan
+matched something. One stale line went with them: this entry claimed the bypass hatch
+trusts OWNER, MEMBER or COLLABORATOR, which the round-6 paragraph above had already
+contradicted.
+
+And the codex cross-model lane ran for the first time on this branch, having been owed
+since round 2 and failed on round 3 — five more fail-open holes, four of them the same
+shape as the one above. The CLI's `process.exit(code)` had no coverage at all, because
+every test reads what `runGate` RETURNS: forcing that exit to 0 would have greened every
+failure in the suite. `run: bun scripts/ci/trident-verdict.ts || true` satisfied the
+substring assertion written earlier in this very round, so the assertion is anchored to
+the whole line now. The re-run trigger's `if:` could be killed with a leading `false &&`,
+which every substring assertion about it tolerated, leaving a green check standing over a
+verdict edited away. The bypass hatch was still honoured on a FORK head, where write
+access to the head branch belongs to the fork rather than to the PR's author — closed by
+refusing a marker unless `head.repo.full_name` is this repository, with an unreadable head
+repo resolving against the bypass. And a verdict wrapped in `<!-- -->` parsed while
+rendering as nothing, so the audit record could be invisible; HTML comments are now
+stripped at both fence call sites, since stripping at one would turn a hidden block into a
+false red instead of a false green. A sixth finding was vetoed with a citation
+(`if: always()` is pinned at `scripts/ci/ci-workflow.test.ts:186`).
+
+An adoption round rebased this onto main and re-ran the two load-bearing mutants by
+hand rather than on the previous round's word: neutering the verdict step to
+`echo "skipped"` reds it (1 fail), and stopping the paginator after page 1 reds it
+(4 fail). One NEW survivor turned up, the last instance of the substring shape this
+round kept finding: the verdict JOB's own `if:` tolerated `&& false`, satisfying the
+only assertion on it while the job could never run. It is fail-CLOSED — a job that
+never runs is `skipped`, which the aggregator reds — so this was a branch stuck red,
+not a gate stuck open; closed anyway, because a predicate no test can see is one a
+later edit can quietly widen. Re-verified at this head: 128 pass / 0 fail, and the
+battery reports 59 applied, 59 caught, 0 survived.
+
+Detail: `docs/as-built/2026-08-10-trident-verdict-gate.md`.
+
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
 
 The `codegen_status`, `codegen_fetch`, and `codegen_cancel` tools now keep their
