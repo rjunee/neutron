@@ -81,6 +81,9 @@ async function seedWorld(opts: { shipsInstaller: boolean }): Promise<World> {
     ]) {
       cpSync(join(REPO_ROOT, ...rel), join(checkout, ...rel))
     }
+    // The path→driver binding is TRACKED, so a repo that ships the installer ships this too. The
+    // `bare` variant deliberately gets neither: it stands for every other repo trident builds.
+    writeFileSync(join(checkout, '.gitattributes'), 'docs/AS_BUILT.md merge=as-built-log\n')
   }
 
   writeFileSync(join(checkout, 'docs', 'AS_BUILT.md'), HEADER + HISTORY)

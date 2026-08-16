@@ -3,82 +3,111 @@
 # scripts/install-merge-drivers.sh — teach this clone how to merge `docs/AS_BUILT.md`.
 #
 #   bash scripts/install-merge-drivers.sh              # install
-#   bash scripts/install-merge-drivers.sh --check      # exit 0 iff already installed
+#   bash scripts/install-merge-drivers.sh --check      # exit 0 iff installed AND usable
 #   bash scripts/install-merge-drivers.sh --uninstall  # remove
 #
-# Idempotent, and safe to run from any working tree of the repo (including a linked worktree —
-# both the config and the attributes file live in the COMMON git dir, so installing once serves
-# every worktree, which is what the publisher's throwaway rebase worktree depends on).
+# Idempotent, and safe to run from any working tree of the repo (including a linked worktree — the
+# config lives in the COMMON git dir, so installing once serves every worktree, which is what the
+# publisher's throwaway rebase worktree depends on).
 #
-# WHAT IT INSTALLS, AND WHY BOTH HALVES GO IN TOGETHER
-# ---------------------------------------------------
-#   1. `merge.as-built-log.driver` in the repo config — the command git runs.
-#   2. `docs/AS_BUILT.md merge=as-built-log` in `$GIT_COMMON_DIR/info/attributes` — the binding
-#      from the path to that command.
+# WHAT IT INSTALLS: exactly one config key, `merge.as-built-log.driver` — the command git runs.
 #
-# Half (2) deliberately does NOT live in a tracked `.gitattributes`. git treats an attribute naming
-# a driver that is not configured as FATAL, not as a fallback:
+# WHAT IT DELIBERATELY DOES NOT INSTALL: the attribute binding the path to that driver. That lives
+# in the TRACKED `.gitattributes`, because git treats an attribute naming an unconfigured driver as
+# a FALLBACK, not an error. Measured on git 2.50.1, fresh repo, attribute present, no config:
 #
-#     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+#     git merge  → CONFLICT (content) ... Automatic merge failed        exit 1
+#     git apply --3way --index                                          exit 0
 #
-# — for `git merge` and for the `git apply --3way` the publisher uses. Committing the attribute
-# would therefore break every fresh clone, every outside contributor and CI on any merge touching
-# this file, until each of them ran this script. Keeping it untracked means the attribute and its
-# driver arrive together or not at all; a clone that never runs this behaves exactly as it does
-# today. Same rule `install-git-hooks.sh` applies to the leak gate and its denylist.
+# So a clone that never runs this script behaves exactly as it does today; a clone that has run it
+# gets the clean entry-aware merge. Tracking the attribute is also the only way GitHub's own
+# server-side merge and an outside contributor see any rule at all — neither can run this script.
+#
+# WHY `.name` IS NEVER WRITTEN — THIS IS A SAFETY PROPERTY, NOT A STYLE CHOICE.
+# There is exactly one config state that git treats as fatal:
+#
+#     merge.as-built-log.name set, merge.as-built-log.driver unset
+#     → fatal: custom merge driver as-built-log lacks command line.     exit 128
+#
+# An earlier cut of this script wrote `.name` first and `.driver` second, with no `set -e` and no
+# check on either write, so an interrupted or failed install left precisely that state — and then
+# every merge and every `git apply --3way` of the log died at exit 128 while the script printed
+# "installed" and exited 0. Writing ONLY `.driver` makes that state unreachable by construction
+# rather than guarded against: `.name` is a human-readable label git never requires (measured —
+# `.driver` alone merges at exit 0). `--uninstall` still clears a `.name` left by an older install,
+# and clears it BEFORE `.driver` so the removal never transits the fatal state either.
 
-set -uo pipefail
+set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIVER_NAME="as-built-log"
 LOG_PATH="docs/AS_BUILT.md"
-ATTR_LINE="$LOG_PATH merge=$DRIVER_NAME"
-DRIVER_SCRIPT="$ROOT/scripts/git/as-built-merge-driver.ts"
 
-if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "install-merge-drivers: $ROOT is not a git repository" >&2
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "install-merge-drivers: $HERE is not a git repository" >&2
   exit 2
 fi
 
 # The COMMON git dir, not the per-worktree one: a linked worktree has its own $GIT_DIR but reads
-# attributes and config from the common one, so installing there serves every worktree at once.
-COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+# config from the common one, so installing there serves every worktree at once.
+COMMON="$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 if [ -z "$COMMON" ]; then
-  COMMON="$(git -C "$ROOT" rev-parse --git-common-dir)"
-  case "$COMMON" in /*) ;; *) COMMON="$ROOT/$COMMON" ;; esac
+  COMMON="$(git -C "$HERE" rev-parse --git-common-dir)"
+  case "$COMMON" in /*) ;; *) COMMON="$HERE/$COMMON" ;; esac
 fi
-ATTRS="$COMMON/info/attributes"
 
-# The scratch file is PER-PROCESS and the replacement is an atomic rename.
+# THE DRIVER PATH MUST OUTLIVE THE WORKTREE THAT INSTALLED IT.
 #
-# Two build lanes sharing a checkout can run this at the same moment — which is the exact situation
-# this whole change exists to serve, so a shared `$ATTRS.tmp` here would be its own concurrency bug:
-# both would write the same scratch path and one could rename a half-written file over the
-# attributes. `$$` makes the scratch private and `mv` within the directory is atomic, so a racing
-# reader sees either the old file or the new one and never a partial one.
-remove_attr_line() {
+# The config we write is COMMON to every worktree, so an absolute path into whichever worktree
+# happened to run the install is a time bomb: trident installs from a throwaway linked worktree,
+# that worktree is removed at the end of the build, and every other worktree is then pointed at a
+# script that no longer exists. Observed in this repo — the config read
+# `.../.worktrees/concurrent-plan-conflict/scripts/git/as-built-merge-driver.ts`, and a later rebase
+# in a different tree failed with "Module not found" and fell back to a conflict.
+#
+# The MAIN worktree is the stable one: `$COMMON` is its `.git`, so its parent is the checkout that
+# lives as long as the clone does. `git rev-parse --git-common-dir` in a bare repo has no parent
+# worktree, but a bare repo has no working tree to merge in either, so it never reaches here.
+MAIN_WORKTREE="$(dirname "$COMMON")"
+DRIVER_SCRIPT="$MAIN_WORKTREE/scripts/git/as-built-merge-driver.ts"
+
+# LEGACY CLEANUP. An earlier cut of this script wrote the binding into `$COMMON/info/attributes`
+# instead of tracking it. That file OVERRIDES the tracked `.gitattributes`, so a clone that ran the
+# old installer would keep honouring its stale copy and never see a change to the tracked line.
+# Removing it is safe in both directions: with the line gone the tracked attribute applies, and the
+# tracked attribute names the same driver.
+ATTRS="$COMMON/info/attributes"
+drop_legacy_attr_line() {
   [ -f "$ATTRS" ] || return 0
   local tmp="$ATTRS.tmp.$$"
-  grep -v -x -F "$ATTR_LINE" "$ATTRS" > "$tmp" 2>/dev/null || : > "$tmp"
+  # `$$` keeps the scratch private — two build lanes sharing a checkout can run this at the same
+  # moment, which is the exact situation this change exists to serve. `mv` within the directory is
+  # atomic, so a racing reader sees the old file or the new one and never a partial one.
+  grep -v -x -F "$LOG_PATH merge=$DRIVER_NAME" "$ATTRS" > "$tmp" 2>/dev/null || : > "$tmp"
   mv "$tmp" "$ATTRS"
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
-  git -C "$ROOT" config --unset "merge.$DRIVER_NAME.driver" 2>/dev/null
-  git -C "$ROOT" config --unset "merge.$DRIVER_NAME.name" 2>/dev/null
-  remove_attr_line
-  echo "merge drivers: uninstalled — $LOG_PATH merges with git's default again"
+  # `.name` first: the reverse order would transit the fatal name-without-driver state.
+  git -C "$HERE" config --unset "merge.$DRIVER_NAME.name" 2>/dev/null || true
+  git -C "$HERE" config --unset "merge.$DRIVER_NAME.driver" 2>/dev/null || true
+  drop_legacy_attr_line
+  echo "merge drivers: uninstalled — $LOG_PATH falls back to git's ordinary conflict markers"
   exit 0
 fi
 
 if [ "${1:-}" = "--check" ]; then
-  configured="$(git -C "$ROOT" config --get "merge.$DRIVER_NAME.driver" 2>/dev/null)"
+  configured="$(git -C "$HERE" config --get "merge.$DRIVER_NAME.driver" 2>/dev/null || true)"
   if [ -z "$configured" ]; then
     echo "merge drivers: NOT installed — merge.$DRIVER_NAME.driver is unset" >&2
     exit 1
   fi
-  if ! grep -q -x -F "$ATTR_LINE" "$ATTRS" 2>/dev/null; then
-    echo "merge drivers: NOT installed — '$ATTR_LINE' missing from $ATTRS" >&2
+  # A NONEMPTY VALUE IS NOT A WORKING ONE. The config outlives the worktree that wrote it, so the
+  # script it names can be gone while the key is still set — the exact state that produced "Module
+  # not found" mid-rebase here. Check the file, not just the string.
+  if [ ! -f "$DRIVER_SCRIPT" ]; then
+    echo "merge drivers: NOT usable — configured, but no driver script at $DRIVER_SCRIPT" >&2
     exit 1
   fi
   echo "merge drivers: installed"
@@ -90,23 +119,28 @@ if [ ! -f "$DRIVER_SCRIPT" ]; then
   exit 2
 fi
 
-BUN="$(command -v bun 2>/dev/null)"
+BUN="$(command -v bun 2>/dev/null || true)"
 if [ -z "$BUN" ]; then
-  # Refuse rather than write a config whose command does not exist: git would abort the merge with
-  # a fatal error, which is strictly worse than the conflict this driver exists to prevent.
+  # Refuse rather than write a config whose command does not exist: a driver that fails to launch
+  # turns every merge of this file into a conflict, which is worse than the tracked attribute's
+  # own fallback (an ordinary conflict) only in that it is noisier — but it is also silent about
+  # WHY, so it is better to say so here.
   echo "install-merge-drivers: NOT INSTALLED — bun is not on PATH, and the driver runs under bun." >&2
   echo "                       Install bun, then re-run this script." >&2
   exit 2
 fi
 
-git -C "$ROOT" config "merge.$DRIVER_NAME.name" "entry-aware merge for the AS_BUILT log"
-git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$BUN $DRIVER_SCRIPT %O %A %B %L %P"
+# QUOTED, BECAUSE GIT RUNS THIS VALUE THROUGH A SHELL.
+# `merge.<driver>.driver` is expanded by /bin/sh, so an unquoted path containing a space — a
+# checkout under "Application Support", a macOS volume with a space, a user directory with one —
+# word-splits and the driver dies on every merge. `%O %A %B` are substituted by git BEFORE the
+# shell sees the string, so they are quoted here too: git substitutes the temp-file paths it chose,
+# and those live under $TMPDIR, which is itself a path this repo does not control.
+printf -v DRIVER_CMD '%q %q "%%O" "%%A" "%%B" "%%L" "%%P"' "$BUN" "$DRIVER_SCRIPT"
 
-mkdir -p "$(dirname "$ATTRS")"
-remove_attr_line
-printf '%s\n' "$ATTR_LINE" >> "$ATTRS"
+git -C "$HERE" config "merge.$DRIVER_NAME.driver" "$DRIVER_CMD"
+drop_legacy_attr_line
 
 echo "merge drivers: installed"
-echo "       driver → $BUN $DRIVER_SCRIPT %O %A %B %L %P"
-echo "       path   → $ATTR_LINE"
-echo "                ($ATTRS)"
+echo "       driver → $DRIVER_CMD"
+echo "       path   → $LOG_PATH merge=$DRIVER_NAME (tracked, in .gitattributes)"

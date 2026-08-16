@@ -5,24 +5,28 @@
  * and the path being merged. The merged result must be written back over `%A`; exit 0 means
  * "merged cleanly", any non-zero exit means "conflicted, I left markers".
  *
- * INSTALLED, NEVER DECLARED IN A TRACKED FILE. The attribute that binds this driver to the path
- * lives in `.git/info/attributes`, written by `scripts/install-merge-drivers.sh` in the SAME step
- * that writes the `merge.as-built-log.driver` config. That pairing is deliberate and it is the
- * reason a tracked `.gitattributes` is NOT used here: a `merge=as-built-log` line committed to the
- * repo would reach every clone, and git treats a declared-but-unconfigured driver as FATAL rather
- * than falling back —
+ * DECLARED IN THE TRACKED `.gitattributes`; ONLY THE COMMAND IS INSTALLED.
+ * `docs/AS_BUILT.md merge=as-built-log` is committed, and `scripts/install-merge-drivers.sh` writes
+ * only the `merge.as-built-log.driver` config that says how to run this file.
  *
- *     $ git merge --no-edit other        # attribute present, driver not configured
- *     fatal: custom merge driver probe lacks command line.
- *     MERGE_EXIT=128
+ * An earlier cut of this docblock asserted the opposite — that the attribute had to stay untracked
+ * because git treats a declared-but-unconfigured driver as FATAL. That is measurably wrong, and it
+ * was the load-bearing justification for the whole design, so here is the measurement (git 2.50.1,
+ * fresh repo, attribute tracked, two divergent branches):
  *
- * — for `git merge` AND for the `git apply --3way` the publisher uses. So a fresh clone, an
- * outside contributor, or CI would hard-fail on any merge touching this file until somebody ran an
- * install step they had no reason to know about. Keeping the attribute untracked means the
- * attribute and its driver are installed together or neither is, which is the same rule
- * `scripts/install-git-hooks.sh` already applies to the leak gate and its denylist: "a control and
- * its pattern source have to be installed together or neither is real." Without the install the
- * repo behaves exactly as it does today; with it, concurrent appends merge.
+ *     no merge.as-built-log.* config at all
+ *       git merge --no-edit other  → CONFLICT (content) ...            exit 1
+ *       git apply --3way --index   →                                   exit 0
+ *
+ *     merge.as-built-log.name set, merge.as-built-log.driver UNSET
+ *       git merge --no-edit other  → fatal: ... lacks command line.     exit 128
+ *
+ * Exit 128 is real, but it is reachable ONLY from a half-written config — a state the installer
+ * used to be able to create and now cannot, because it never writes `.name` at all. The
+ * unconfigured case, which is what a fresh clone, an outside contributor, CI and GitHub's own
+ * server-side merge actually get, is an ORDINARY CONFLICT. So tracking the attribute costs those
+ * consumers nothing and is the only way any of them see the rule; a checkout that has run the
+ * installer gets the clean entry-aware merge on top.
  *
  * THE FALLBACK IS TODAY'S BEHAVIOUR. Anything this driver will not merge — both sides editing one
  * entry, a diverged header, a file that does not parse as a log, an unexpected throw — is handed

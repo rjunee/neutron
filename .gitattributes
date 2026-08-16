@@ -4,13 +4,32 @@
 # four unrelated PRs at the worst of it, which is what motivated the (now
 # reversed) one-file-per-entry split.
 #
-# `union` is git's built-in driver for exactly this shape: it takes both sides of
-# a conflicting hunk instead of raising. Verified with a control before landing —
-# the same two-branch merge conflicts without this line and resolves with it,
-# both entries intact.
+# THIS LINE USED TO SAY `merge=union` (#308), AND UNION IS NOT SAFE HERE.
+# Union resolves a conflicting hunk by taking both sides' UNIQUE lines around the
+# lines they SHARE. Two entries written by the same generator share plenty — a
+# "What changed:" lead-in, a "Verified with a control." sign-off, a blank line —
+# and the shared lines are emitted ONCE, at the end. Measured on git 2.50.1 with
+# the exact attribute #308 shipped: two entries appended concurrently merged at
+# exit 0, with the first entry's closing line absorbed into the second. No
+# conflict, no marker, nothing to review, one line of history quietly relocated.
+# Union also emits ours-then-theirs regardless of date, so it produced 2026-08-15
+# above 2026-08-17 in a file whose first line promises newest-first.
 #
-# It is correct here ONLY because the file is append-only. Union NEVER reports a
-# conflict, so a change that genuinely rewrites existing lines gets silently
-# doubled rather than flagged. A restructuring pass over this file wants a real
-# review, not a merge driver.
-docs/AS_BUILT.md merge=union
+# `as-built-log` is the entry-aware driver in scripts/git/as-built-log-merge.ts.
+# Its unit is a WHOLE ENTRY (a `## ` heading and everything under it), so two
+# entries are never spliced together and the result stays newest-first. What it
+# will not merge — both sides editing one entry, both reordering differently, a
+# side truncated to nothing — it REFUSES, and refusing means git's ordinary
+# conflict markers.
+#
+# THE UNCONFIGURED CASE IS SAFE, AND THAT IS WHY THIS BINDING IS TRACKED.
+# git treats an attribute naming an unconfigured driver as a fallback, not an
+# error. Measured on git 2.50.1, fresh repo, this line present and no
+# merge.as-built-log.* config at all: `git merge` → ordinary CONFLICT, exit 1,
+# and `git apply --3way` succeeds. So a fresh clone, an outside contributor and
+# GitHub's own server-side merge get exactly today's behaviour, and a checkout
+# that has run scripts/install-merge-drivers.sh gets the clean entry-aware merge.
+# (Exit 128, "custom merge driver ... lacks command line", is reachable ONLY from
+# a half-written config that sets merge.as-built-log.name without .driver — which
+# the installer now cannot produce, because it never writes .name at all.)
+docs/AS_BUILT.md merge=as-built-log

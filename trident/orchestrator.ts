@@ -498,10 +498,14 @@ export class TridentRebaseConflict extends Error {
  * repo to adopt a layout only this one has.)
  *
  * BEST EFFORT, NEVER FATAL. A failure to install leaves the checkout merging exactly as it does
- * today — a conflict on the log — which is the same outcome as not calling this at all. Publishing
- * must not be blocked by an optimisation to publishing.
+ * today — an ordinary conflict on the log, because the tracked `.gitattributes` binding falls back
+ * to git's default merge when the driver is not configured (measured; see the driver's docblock).
+ * That is the same outcome as not calling this at all, so publishing must not be blocked by an
+ * optimisation to publishing.
  *
- * Returns whether the driver is installed and usable afterwards.
+ * Returns whether the driver is installed and usable afterwards. The caller LOGS this rather than
+ * discarding it: a silent false here means every subsequent conflict on the log has a cause that is
+ * already known and would otherwise be re-diagnosed from scratch.
  */
 export async function ensureAsBuiltMergeDriver(
   run_host: RunHostCommand,
@@ -720,11 +724,22 @@ export async function rebaseOntoObservedBase(
   //      The log is newest-first and every build prepends at the same offset under the same three
   //      header lines, so two concurrent builds conflict on it by construction — three publishes
   //      died on that file and nothing else on 2026-08-15T23:20Z. The entry-aware driver in
-  //      `scripts/git/as-built-merge-driver.ts` unions whole entries instead, and `git apply
-  //      --3way` below DOES consult it (verified against real git, not assumed). Installed here
-  //      rather than assumed present because the binding lives in `.git/info/attributes`, which is
-  //      untracked by design — see the driver's docblock for why committing it would be fatal.
-  await ensureAsBuiltMergeDriver(run_host, repoPath)
+  //      `scripts/git/as-built-merge-driver.ts` unions whole ENTRIES instead, and `git apply
+  //      --3way` below DOES consult it (verified against real git, not assumed).
+  //
+  //      The path→driver binding is TRACKED, in `.gitattributes`; this installs only the command
+  //      that runs it. Without the command the binding falls back to an ordinary conflict, which is
+  //      exactly today's behaviour — so this is an optimisation and never a precondition.
+  //
+  //      THE RESULT IS ANNOUNCED, NOT DISCARDED. A silent false here is the difference between "the
+  //      log conflicted because two builds genuinely disagree" and "the log conflicted because the
+  //      driver never installed", and those get diagnosed very differently. It cost a round to
+  //      learn that once.
+  if (!(await ensureAsBuiltMergeDriver(run_host, repoPath))) {
+    process.stderr.write(
+      `publish: entry-aware docs/AS_BUILT.md merge driver NOT installed in ${repoPath} — the log falls back to git's ordinary conflict markers for this replay\n`,
+    )
+  }
 
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
   //     poison every other lane's build.
