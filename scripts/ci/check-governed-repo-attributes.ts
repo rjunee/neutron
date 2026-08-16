@@ -72,10 +72,10 @@ const tracked = resolveTrackedMergeDrivers({ attributesFiles, paths: present })
 const failing = present.filter((path) => tracked.get(path) !== 'union')
 
 /**
- * The local clone's view, reported but never decisive — and only ATTRIBUTED to
- * the untracked overlay when that file exists and actually mentions the path.
- * Otherwise the divergence is reported as unexplained, because "harmless local
- * upgrade" is a claim, not a default.
+ * The local clone's view, reported but never decisive — and credited to the
+ * untracked overlay only when that overlay demonstrably PRODUCES this clone's
+ * answer. Otherwise the divergence is reported as unexplained, because
+ * "harmless local upgrade" is a claim, not a default.
  */
 function localNote(): string[] {
   const local = localEffectiveMergeDrivers(root, present)
