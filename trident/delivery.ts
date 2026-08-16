@@ -37,6 +37,7 @@
  */
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
+import { deriveInfraBlock } from './infra-block.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -88,6 +89,13 @@ export type FailureClass =
   | 'review-unresolved'
   | 'hang'
   | 'infra'
+  /**
+   * THE BUILD WAS DEFERRED, NOT REJECTED — a required check never ran, the PR is
+   * conflicting with base, a credential blinked. No reviewer read the code. The ONLY
+   * class derived from the STRUCTURED harvested result (`deriveInfraBlock`) rather than
+   * from the `failure_reason` string, and the only one composed with 🚧 instead of ❌.
+   */
+  | 'infra-blocked'
   | 'underspecified'
   | 'unknown'
 
@@ -144,12 +152,48 @@ function isToolsNotEnabled(reasonLower: string): boolean {
  * Forge conflict-resolver, so a run that reaches HERE is genuinely unrecoverable and
  * needs a human. Raw git stderr (a `TridentMergeError`-wrapped `merge failed: git …`
  * message) is DISCARDED — the operator sees only what happened + what to do.
+ *
+ * ONE CLASS IS NOT READ FROM THE REASON STRING. `'infra-blocked'` is derived from the
+ * STRUCTURED harvested result (`deriveInfraBlock` → the workflow's own
+ * `blockKind: 'infra-only'`), because a keyword classifier cannot safely be handed the
+ * MEASURED cause: that text is model/CI prose. Measured on this repo — a cause reading
+ * "PR is conflicting with base" hits `isAuthoredConflictQuestion`'s bare `conflict` token
+ * and produces the FALSE sentence "two changes edited the same code in ways I could not
+ * reconcile automatically", about a build whose code nobody read. So the structured check
+ * runs FIRST, ahead of every string branch including `isToolsNotEnabled`: a fact beats a
+ * keyword, and a deferral must never be told as a rejection.
  */
 export function interpretFailure(run: TridentRun): FailureInterpretation {
   const reason = (run.failure_reason ?? '').trim()
   const r = reason.toLowerCase()
   const retry = 'Reply to retry the build, or take it from here manually.'
   const saved = 'Your progress is saved.'
+
+  // THE MACHINE WAS BROKEN, NOT THE CODE. Checked FIRST — see the docblock: this is the
+  // one MEASURED class, and the measured cause is prose that a keyword branch below
+  // would misroute (a "conflicting with base" cause → the merge-conflict class).
+  const infra = deriveInfraBlock(run)
+  if (infra !== null) {
+    const cause = infra.cause
+    const notRejected = 'Nothing about the code was rejected — it was never reviewed.'
+    // A small BOUNDED mapping over the measured cause — deterministic and unit-testable
+    // like the rest of this function, and it only ever changes the ADVICE, never the
+    // class. An unrecognised cause gets the honest generic retry line.
+    const c = (cause ?? '').toLowerCase()
+    const input_needed = c.includes('conflicting with base')
+      ? `Rebase or merge the base branch into the PR branch, then retry. ${notRejected}`
+      : /required check .* has not run/.test(c)
+        ? `Trigger the required check (or re-run CI on the PR), then retry. ${notRejected}`
+        : `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
+    return {
+      klass: 'infra-blocked',
+      summary:
+        cause !== null
+          ? `The build was blocked by infrastructure before any reviewer judged the code: ${cause}.`
+          : 'The build was blocked by infrastructure before any reviewer judged the code.',
+      input_needed,
+    }
+  }
 
   // #361 — a toolless CC subprocess (empty `--tools` grant) is a PURELY INTERNAL
   // misconfiguration; classify it clearly-internal and NEVER leak the raw
@@ -344,6 +388,14 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
         run.merge_mode === 'pr' && run.pr !== null
           ? `\nPR #${run.pr} left open for review.`
           : ''
+      // A DEFERRAL IS NOT A REJECTION. An infra-only block never reached a reviewer, so
+      // it must not wear ❌ + rejection language: it leads with 🚧 and says "deferred".
+      // Every other class keeps the ❌ line byte-identical.
+      if (interp.klass === 'infra-blocked') {
+        return {
+          text: `🚧 ${title} — build deferred (infrastructure), not rejected.\n${interp.summary}\n${interp.input_needed}${trail}`,
+        }
+      }
       return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }
     }
     case 'stopped':

@@ -2,6 +2,45 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — a deferral and a rejection no longer share a label
+
+A run blocked for an INFRASTRUCTURE reason — a required check that never ran, a PR
+conflicting with base, a credential that blinked — terminated wearing the same clothes as
+a genuine code rejection: `REQUEST_CHANGES`, ❌, "the reviewer still had blocking
+findings". No reviewer had read the diff. The board filled with `[failed]` cards whose
+builds were fine and whose infrastructure was not, and reading it you could not tell "the
+machine was broken" from "the code was wrong" without opening a findings file.
+
+The signal already existed and was already durable: the inner workflow writes
+`blockKind: 'infra-only'` plus the measured `terminalCause` into
+`code_trident_runs.inner_result`, and `parseInnerResult` decodes both fail-closed. Nothing
+downstream read it. `trident/infra-block.ts` `deriveInfraBlock` is now the ONE place that
+does — delivery reads it today and the board payload reads the same function next, because
+two copies of the gate would let the two surfaces disagree.
+
+The gate is `phase === 'failed' && harvested_at !== null && block_kind === 'infra-only'`.
+`harvested_at` is load-bearing, not belt-and-braces: a force-terminated or cancelled row
+keeps a stale but perfectly parseable `inner_result` from an earlier iteration
+(`saveIfActive` never overwrites it), so the column alone cannot say how the run actually
+ended — and `harvested_at` is written EXCLUSIVELY by `orchestrator.applyResult`, i.e. by
+the outer loop deciding on that exact result.
+
+`interpretFailure` gains the class `'infra-blocked'` and checks it FIRST, ahead of every
+string branch. That order is the fix, not a preference: the measured cause is model/CI
+prose, and a cause reading "PR is conflicting with base" hit `isAuthoredConflictQuestion`'s
+bare `conflict` token and produced the confident false sentence "two changes edited the
+same code in ways I could not reconcile automatically" about a build nobody reviewed. Such
+a run now composes with 🚧 "build deferred (infrastructure), not rejected", quotes the
+measured cause, and says what would clear it (rebase the base branch; re-run the required
+check; retry when the infrastructure is healthy) — with "Nothing about the code was
+rejected — it was never reviewed" said out loud. No migration: the signal was already in
+`inner_result`.
+
+Genuine rejections are byte-identical to before — the test asserts equality against the
+composition of a row carrying no structured result at all — and a run with no findings and
+no infra signal keeps its existing generic ❌ handling rather than being relabelled in
+either direction.
+
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
 The gate carried `['test', 'lint', 'typecheck']` — THIS repository's job names — frozen

@@ -15,6 +15,7 @@ import {
   topicForRun,
   type OutboundSink,
 } from './delivery.ts'
+import { deriveInfraBlock } from './infra-block.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentPhase, TridentRun } from './store.ts'
 
@@ -310,6 +311,206 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     expect(interp.klass).toBe('unknown')
     expect(interp.summary.length).toBeGreaterThan(0)
     assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+})
+
+/**
+ * AN INFRA-ONLY BLOCK IS INFRASTRUCTURE, NEVER THE AGENT'S WORK BEING REJECTED.
+ *
+ * The board was full of `[failed]` cards whose builds were fine and whose infrastructure
+ * was not: a required check that never ran, a PR conflicting with base, a credential that
+ * blinked — all terminating wearing REQUEST_CHANGES clothes over code no reviewer read.
+ * These pin the three-way matrix: an infra block renders as infrastructure; a GENUINE
+ * rejection is byte-identical to before; a run with no findings and no infra signal is
+ * not silently relabelled either way. Plus the stale-`inner_result` gate.
+ */
+describe('infra-only block delivers as infrastructure', () => {
+  /** A harvested, failed row carrying the workflow's own infra-only terminal result. */
+  function infraRun(cause: string | null, overrides: Partial<TridentRun> = {}): TridentRun {
+    const result: Record<string, unknown> = {
+      ok: false,
+      verdict: 'REQUEST_CHANGES',
+      round: 1,
+      checkpoint: null,
+      blockKind: 'infra-only',
+    }
+    if (cause !== null) result['terminalCause'] = cause
+    return runWith({
+      phase: 'failed',
+      inner_result: JSON.stringify(result),
+      harvested_at: 1755300000000,
+      failure_reason:
+        cause !== null
+          ? `review never ran (infra-only) at round 1 of 10: ${cause}`
+          : 'review never ran (infra-only) at round 1 of 10',
+      ...overrides,
+    })
+  }
+
+  test('a required check that never ran → an infrastructure deferral naming the check', () => {
+    const run = infraRun('required check test has not run')
+    const interp = interpretFailure(run)
+    expect(interp.klass).toBe('infra-blocked')
+    // The measured cause rides the summary VERBATIM — the owner learns which machine broke.
+    expect(interp.summary).toContain('required check test has not run')
+
+    const out = composeTerminalDelivery(run)
+    expect(out!.text.startsWith('🚧')).toBe(true)
+    expect(out!.text).toContain('deferred')
+    expect(out!.text).toContain('required check test has not run')
+    // ...and what would clear it.
+    expect(out!.text.toLowerCase()).toContain('re-run ci')
+    // NEVER a rejection.
+    expect(out!.text).not.toContain('❌')
+    expect(out!.text.toLowerCase()).not.toContain('changes requested')
+    expect(out!.text.toLowerCase()).not.toContain('blocking findings')
+  })
+
+  test('a "conflicting with base" cause is infrastructure, NOT the merge-conflict class', () => {
+    // THE MISROUTE THIS PINS. The measured cause is CI prose containing the bare token
+    // `conflict`, which `isAuthoredConflictQuestion` matches — so before the structured
+    // check ran first, this produced the confident FALSE sentence "two changes edited the
+    // same code…" about a build nobody had reviewed.
+    const run = infraRun('PR is conflicting with base')
+    const interp = interpretFailure(run)
+    expect(interp.klass).toBe('infra-blocked')
+    expect(interp.klass).not.toBe('merge-conflict')
+
+    const out = composeTerminalDelivery(run)
+    expect(out!.text).not.toContain('two changes edited the same code')
+    expect(out!.text).not.toContain('❌')
+    expect(out!.text).toContain('PR is conflicting with base')
+    expect(interp.input_needed.toLowerCase()).toMatch(/rebase|merge the base branch/)
+  })
+
+  test('an infra-only stop with NO measured cause stays infra-blocked and generic', () => {
+    const run = infraRun(null)
+    const interp = interpretFailure(run)
+    // The block KIND was measured even though the cause was not.
+    expect(interp.klass).toBe('infra-blocked')
+    expect(interp.summary).toBe(
+      'The build was blocked by infrastructure before any reviewer judged the code.',
+    )
+    // No dangling colon where a cause would have been quoted.
+    expect(interp.summary).not.toContain(':')
+    expect(interp.input_needed.toLowerCase()).toContain('retry')
+    const out = composeTerminalDelivery(run)
+    expect(out!.text.startsWith('🚧')).toBe(true)
+    expect(out!.text).not.toContain('❌')
+  })
+
+  test('a GENUINE review rejection is unchanged — still ❌ and still a review outcome', () => {
+    const run = runWith({
+      phase: 'failed',
+      harvested_at: 1755300000000,
+      inner_result: JSON.stringify({
+        ok: false,
+        verdict: 'REQUEST_CHANGES',
+        round: 8,
+        checkpoint: 'argus-request-changes',
+        blockKind: 'code',
+        terminalCause: 'the reviewer left 3 blocking findings',
+      }),
+      failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE',
+    })
+    const interp = interpretFailure(run)
+    expect(interp.klass).toBe('review-unresolved')
+    expect(interp.summary.toLowerCase()).toContain('blocking findings')
+    const out = composeTerminalDelivery(run)
+    expect(out!.text.startsWith('❌')).toBe(true)
+    // Byte-identical to the composition with no structured result at all.
+    const bare = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE',
+      }),
+    )
+    expect(out!.text).toBe(bare!.text)
+  })
+
+  test('no findings and no infra signal is not silently relabelled either way', () => {
+    // (a) nothing structured at all → the existing generic handling, ❌ kept.
+    const noSignal = runWith({
+      phase: 'failed',
+      harvested_at: 1755300000000,
+      inner_result: null,
+      failure_reason: 'inner workflow ended at round 1 of 10 without Argus APPROVE',
+    })
+    expect(interpretFailure(noSignal).klass).toBe('unknown')
+    expect(composeTerminalDelivery(noSignal)!.text.startsWith('❌')).toBe(true)
+
+    // (b) a GARBLED block kind decodes fail-closed to null and must never be read as
+    // infra-only — the decoder's rule, not a second opinion here.
+    const garbled = runWith({
+      phase: 'failed',
+      harvested_at: 1755300000000,
+      inner_result: JSON.stringify({
+        ok: false,
+        verdict: 'REQUEST_CHANGES',
+        round: 1,
+        checkpoint: null,
+        blockKind: 'infra_only',
+        terminalCause: 'required check test has not run',
+      }),
+      failure_reason: 'inner workflow ended at round 1 of 10 without Argus APPROVE',
+    })
+    expect(interpretFailure(garbled).klass).not.toBe('infra-blocked')
+    expect(composeTerminalDelivery(garbled)!.text).not.toContain('🚧')
+  })
+
+  test('a STALE infra-only result on an unharvested or non-failed row changes nothing', () => {
+    // (a) never harvested — the row was force-terminated while an older parseable result
+    // sat in the column, so it says nothing about how this run ended.
+    const unharvested = infraRun('required check test has not run', {
+      harvested_at: null,
+      failure_reason: 'no progress for 25 min — suspected agent hang (inner workflow stopped advancing)',
+    })
+    expect(interpretFailure(unharvested).klass).toBe('hang')
+    expect(composeTerminalDelivery(unharvested)!.text).not.toContain('🚧')
+
+    // (b) a stopped row still composes the stopped line.
+    const stopped = infraRun('required check test has not run', { phase: 'stopped' })
+    expect(composeTerminalDelivery(stopped)!.text).toContain('🛑')
+  })
+
+  describe('deriveInfraBlock — the three-condition gate, each condition falsified alone', () => {
+    const inner = JSON.stringify({
+      ok: false,
+      verdict: 'REQUEST_CHANGES',
+      round: 1,
+      checkpoint: null,
+      blockKind: 'infra-only',
+      terminalCause: 'PR is conflicting with base',
+    })
+    const gated = { phase: 'failed' as const, harvested_at: 1755300000000, inner_result: inner }
+
+    test('all three hold → the measured cause', () => {
+      expect(deriveInfraBlock(gated)).toEqual({ cause: 'PR is conflicting with base' })
+    })
+
+    test('phase is not failed → null', () => {
+      for (const phase of ['done', 'stopped', 'argus'] as TridentPhase[]) {
+        expect(deriveInfraBlock({ ...gated, phase })).toBeNull()
+      }
+    })
+
+    test('never harvested → null (the stale-result hazard)', () => {
+      expect(deriveInfraBlock({ ...gated, harvested_at: null })).toBeNull()
+    })
+
+    test('the block kind is not exactly infra-only → null', () => {
+      for (const kind of ['code', 'none', 'round-lost', 'infra_only', 'INFRA-ONLY']) {
+        const raw = JSON.stringify({ round: 1, blockKind: kind, terminalCause: 'x' })
+        expect(deriveInfraBlock({ ...gated, inner_result: raw })).toBeNull()
+      }
+      expect(deriveInfraBlock({ ...gated, inner_result: null })).toBeNull()
+      expect(deriveInfraBlock({ ...gated, inner_result: 'not json' })).toBeNull()
+    })
+
+    test('infra-only with no measured cause → a block with a null cause, not null', () => {
+      const raw = JSON.stringify({ round: 1, blockKind: 'infra-only' })
+      expect(deriveInfraBlock({ ...gated, inner_result: raw })).toEqual({ cause: null })
+    })
   })
 })
 
