@@ -22,18 +22,22 @@
 #                                       cannot drift into building different things.
 #   in  NEUTRON_CODEX_BUILD_BRIEF_PARTS optional newline-separated ORDERED list of
 #                                       absolute part-file paths. When set, this script
-#                                       concatenates them (part 1 first) into the brief
-#                                       file before checking integrity. When unset, the
+#                                       verifies and concatenates them (part 1 first)
+#                                       into the brief file. When unset, the
 #                                       brief file must already exist (the chunked
 #                                       bridge-agent fallback).
+#   in  NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY newline-separated `<bytes>:<fnv32>`
+#                                       receipts aligned 1:1 with BRIEF_PARTS. Required
+#                                       in parts mode; every file is verified before
+#                                       assembly.
 #   in  NEUTRON_CODEX_BUILD_DIFF_FILE   where the brief told the build to write the
 #                                       branch diff, so this script can report whether
 #                                       it actually appeared.
 #   in  NEUTRON_CODEX_BUILD_TRAILER_FILE where to WRITE the measured trailer. Required
 #                                       — see below for why it is not stdout.
-#   in  NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY `<bytes>:<fnv32>` for the brief AS THE
-#                                       WORKFLOW COMPOSED IT. Required — see THE
-#                                       BRIEF TRANSPORT IS RECEIPT-CHECKED below.
+#   in  NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY `<bytes>:<fnv32>` for a non-parts brief AS
+#                                       THE WORKFLOW COMPOSED IT. Required only on the
+#                                       chunked bridge-agent fallback path.
 #   in  CODEX_HOME                      the per-project subscription credential dir.
 #   in  CODEX_BUILD_MODEL               which GPT tier to build on. A DIFFERENT knob
 #                                       from the reviewer's `CODEX_REVIEW_MODEL` on
@@ -650,6 +654,9 @@ fi
 # real worktree with full write access. Refuse, loudly.
 BRIEF_FILE="${NEUTRON_CODEX_BUILD_BRIEF_FILE:-}"
 BRIEF_PARTS="${NEUTRON_CODEX_BUILD_BRIEF_PARTS:-}"
+fnv_receipt() {
+  perl -e 'use integer; open my $f, "<:raw", $ARGV[0] or exit 1; local $/; my $d = <$f>; my $h = 0x811c9dc5; for my $b (unpack "C*", $d) { $h = ($h ^ $b) & 0xffffffff; $h = ($h * 0x01000193) & 0xffffffff; } printf "%d:%08x", length($d), $h' "$1"
+}
 if [ -n "$BRIEF_PARTS" ]; then
   if [ -z "$BRIEF_FILE" ]; then
     echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_PARTS is set but NEUTRON_CODEX_BUILD_BRIEF_FILE is unset — there is nowhere to assemble the brief. DEFERRED." >&2
@@ -659,14 +666,36 @@ if [ -n "$BRIEF_PARTS" ]; then
     echo "CODEX_BUILD_BRIEF_UNWRITABLE: cannot write NEUTRON_CODEX_BUILD_BRIEF_FILE=$BRIEF_FILE to assemble the brief parts. DEFERRED." >&2
     exit 3
   fi
+  PART_INTEGRITY="${NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY:-}"
+  if [ -z "$PART_INTEGRITY" ]; then
+    echo "CODEX_BUILD_NO_BRIEF_INTEGRITY: NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY is unset — the parts travelled by path but nothing here can tell an intact part from a stale or truncated one. DEFERRED." >&2
+    exit 3
+  fi
+  n=0
   while IFS= read -r part; do
     [ -z "$part" ] && continue
+    n=$((n + 1))
     if [ ! -s "$part" ]; then
       echo "CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED." >&2
       exit 3
     fi
+    receipt="$(printf '%s\n' "$PART_INTEGRITY" | sed -n "${n}p")"
+    if [ -z "$receipt" ]; then
+      echo "CODEX_BUILD_NO_BRIEF_INTEGRITY: NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY has fewer receipts than listed parts (missing receipt $n for $part). DEFERRED." >&2
+      exit 3
+    fi
+    measured="$(fnv_receipt "$part" 2>/dev/null || true)"
+    if [ "$measured" != "$receipt" ]; then
+      echo "CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+      exit 3
+    fi
     cat "$part" >> "$BRIEF_FILE"
   done <<< "$BRIEF_PARTS"
+  receipt_count="$(printf '%s\n' "$PART_INTEGRITY" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [ "$receipt_count" != "$n" ]; then
+    echo "CODEX_BUILD_NO_BRIEF_INTEGRITY: NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY count mismatch: $receipt_count receipts for $n listed parts. DEFERRED." >&2
+    exit 3
+  fi
 fi
 if [ -z "$BRIEF_FILE" ] || [ ! -s "$BRIEF_FILE" ]; then
   echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_FILE is unset, missing or empty — there is no build brief to run. DEFERRED." >&2
@@ -683,17 +712,19 @@ fi
 # recomputes both from the file. Required, not optional-with-a-skip: an unset value
 # would make the check disappear on exactly the call path that lost the bytes.
 BRIEF_INTEGRITY="${NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY:-}"
-if [ -z "$BRIEF_INTEGRITY" ]; then
-  echo "CODEX_BUILD_NO_BRIEF_INTEGRITY: NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY is unset — the brief travelled through a bridge agent and nothing here can tell an intact one from a truncated one. DEFERRED." >&2
-  exit 3
-fi
-# FNV-1a/32 over the raw bytes, and the byte count, in one token. `use integer` keeps
-# the multiply in 64-bit C arithmetic (the intermediate exceeds 2**53, so a float
-# would round and every checksum after the first byte would be wrong).
-BRIEF_MEASURED="$(perl -e 'use integer; open my $f, "<:raw", $ARGV[0] or exit 1; local $/; my $d = <$f>; my $h = 0x811c9dc5; for my $b (unpack "C*", $d) { $h = ($h ^ $b) & 0xffffffff; $h = ($h * 0x01000193) & 0xffffffff; } printf "%d:%08x", length($d), $h' "$BRIEF_FILE" 2>/dev/null || true)"
-if [ "$BRIEF_MEASURED" != "$BRIEF_INTEGRITY" ]; then
-  echo "CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
-  exit 3
+if [ -z "$BRIEF_PARTS" ]; then
+  if [ -z "$BRIEF_INTEGRITY" ]; then
+    echo "CODEX_BUILD_NO_BRIEF_INTEGRITY: NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY is unset — the brief travelled through a bridge agent and nothing here can tell an intact one from a truncated one. DEFERRED." >&2
+    exit 3
+  fi
+  # FNV-1a/32 over the raw bytes, and the byte count, in one token. `use integer` keeps
+  # the multiply in 64-bit C arithmetic (the intermediate exceeds 2**53, so a float
+  # would round and every checksum after the first byte would be wrong).
+  BRIEF_MEASURED="$(fnv_receipt "$BRIEF_FILE" 2>/dev/null || true)"
+  if [ "$BRIEF_MEASURED" != "$BRIEF_INTEGRITY" ]; then
+    echo "CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+    exit 3
+  fi
 fi
 
 # ── DEFERRED: nowhere to put the trailer ──────────────────────────────────────
