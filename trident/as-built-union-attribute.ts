@@ -29,7 +29,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 
@@ -222,10 +222,16 @@ export function relevantAttributesPaths(paths: readonly string[]): string[] {
  * fixtures the gate's own tests build — it falls back to reading the same paths
  * from disk, because there is no index to prefer and "what is on disk" is the
  * only available reading of "what would travel".
+ *
+ * The index is used ONLY when `repoRoot` is the repository's TOP LEVEL. An
+ * index path is always spelled from the top level, so for a governed tree
+ * nested inside a larger repo `git show :docs/.gitattributes` would return some
+ * OTHER directory's file — a confident answer to a different question, which is
+ * the failure this whole module exists to stop. Nested trees read from disk.
  */
 export function collectTrackedAttributesFiles(repoRoot: string, paths: readonly string[]): AttributesFile[] {
   const candidates = relevantAttributesPaths(paths)
-  const fromIndex = isGitRepository(repoRoot)
+  const fromIndex = isRepositoryTopLevel(repoRoot)
   const found: AttributesFile[] = []
 
   for (const path of candidates) {
@@ -248,10 +254,17 @@ export function collectTrackedAttributesFiles(repoRoot: string, paths: readonly 
   return found
 }
 
-function isGitRepository(dir: string): boolean {
+/** Is `dir` the TOP LEVEL of a git repository (not merely inside one)? */
+function isRepositoryTopLevel(dir: string): boolean {
   try {
-    execFileSync('git', ['-C', dir, 'rev-parse', '--git-dir'], { stdio: 'ignore' })
-    return true
+    const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (top.length === 0) return false
+    // realpath both sides: macOS hands out /var/... paths that resolve to
+    // /private/var/..., so a raw string compare calls the top level "nested".
+    return realpathSync(top) === realpathSync(dir)
   } catch {
     return false
   }

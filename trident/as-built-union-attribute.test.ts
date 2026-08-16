@@ -488,6 +488,31 @@ describe('collectTrackedAttributesFiles (real git)', () => {
   it('returns nothing when there is no attributes file at all', () => {
     expect(collectTrackedAttributesFiles(scratch('union-attr-empty'), [LOG])).toEqual([])
   })
+
+  it('reads from DISK for a governed tree NESTED inside a larger repo', () => {
+    // An index path is always spelled from the repository top level, so
+    // `git show :docs/.gitattributes` here would return the OUTER repo's file —
+    // a confident answer to a different question. The nested tree's own files
+    // are the ones being asked about.
+    const outer = scratchRepo()
+    commitFiles(outer, {
+      'docs/.gitattributes': 'AS_BUILT.md merge=from-the-OUTER-repo\n',
+      '.gitattributes': `${LOG} merge=from-the-OUTER-repo\n`,
+    })
+    const inner = join(outer, 'nested')
+    mkdirSync(join(inner, 'docs'), { recursive: true })
+    writeFileSync(join(inner, '.gitattributes'), `${LOG} merge=union\n`)
+
+    // Control: git really does resolve an index path from the OUTER top level,
+    // even with -C pointed at the nested directory.
+    expect(
+      execFileSync('git', ['-C', inner, 'show', ':.gitattributes'], { encoding: 'utf8' }),
+    ).toContain('from-the-OUTER-repo')
+
+    const files = collectTrackedAttributesFiles(inner, [LOG])
+    expect(files).toEqual([{ path: '.gitattributes', content: `${LOG} merge=union\n` }])
+    expect(resolveTrackedMergeDrivers({ attributesFiles: files, paths: [LOG] }).get(LOG)).toBe('union')
+  })
 })
 
 describe('localEffectiveMergeDrivers (real git)', () => {
