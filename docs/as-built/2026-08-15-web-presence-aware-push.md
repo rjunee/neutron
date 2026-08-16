@@ -65,3 +65,53 @@ already written down and it re-armed itself**: the fix is not durable, because a
 depth re-shallows the clone. Treat a `git` answer that disagrees with the forge API as a clone problem
 until proven otherwise — asking the API for the commit's parents showed the parent the local object
 store simply did not have.
+
+**AND THE ONE THAT ACTUALLY COST THE TIME: A GREEN LOCAL SUITE, A GREEN THREE-OF-FOUR CI, AND A BUNDLE
+THAT WOULD NOT BUILD.** CI's `shard 3/4` failed with `GET /chat-react.js → 404` — the web chat client
+serving nothing at all — while the identical build PASSED in shard 4 of the same run, on the same
+commit. Everything about that reads as a flake, and it was not one.
+
+**A 404 IS NOT A DIAGNOSIS, AND THE CODE MADE SURE IT COULD NEVER BE ONE.** `landing/server.ts`
+`resolveChatReactJs` returns null when `Bun.build` fails and routes the bundler's own logs to the
+system-event journal — which no CI log shows. So the only evidence a broken web client leaves in CI is
+a status code. The first real step was a test that runs the same build and PRINTS `result.logs`
+(`landing/__tests__/chat-react-bundle-builds.test.ts`); it named the file in one run.
+
+📌 **When a failure's only symptom is a status code, the first fix is not to the code — it is to make
+the failure say its own name.** The journal is the right home for a production degrade row and the
+wrong home for a CI diagnostic, and nothing had noticed because the build had never failed before.
+
+**THE MEASUREMENT, once it could be reproduced** (`NEUTRON_TEST_SHARD=3/4 … bash scripts/run-tests.sh`
+reproduces it locally; the isolated file never does):
+
+| tree | 100-file chunk | browser bundle |
+|---|---|---|
+| this branch, value import of the shared leaf from `chat-core/web-session.ts` | same 100 files | **FAILS** — `No matching export in "wire-types/web-presence.ts"` for exports that are plainly in the file |
+| this branch, that import removed | same 100 files | passes |
+| this branch, the SAME leaf value-imported from `landing/chat-react/config.ts` instead | same 100 files | passes |
+| untouched base commit | same 100 files | passes |
+
+`chat-core` had imported `@neutronai/wire-types` only as a TYPE — erased, no runtime edge. Making it a
+VALUE import put the leaf into the browser graph through `chat-core`'s own
+`node_modules/@neutronai/wire-types` link, and under a loaded `bun test` process `Bun.build`
+intermittently reported the module as having no exports. Not a resolution failure (the file reads fine
+through that symlink), not file content (the same bytes bundle in another shard), and not a file-descriptor
+limit (reproduced at `ulimit -n 48` without failing).
+
+**THE FIX KEEPS THE INVARIANT THE PACKAGE ALREADY HAD** rather than working around the symptom:
+`chat-core` stays free of runtime dependencies on `wire-types`. The frame is written as a literal under a
+TYPE-ONLY `AppWsInboundPresence` annotation — so the compiler still enforces ONE wire shape with no
+runtime edge — and the refresh cadence is a local `DEFAULT_PRESENCE_REFRESH_MS` pinned equal to
+`WEB_PRESENCE_REFRESH_MS` by a test. A test may import both freely; a test is not bundled for a browser.
+
+📌 **A duplicated constant is acceptable exactly when an assertion makes the duplication impossible to
+drift — and unacceptable when the argument for sharing it is "one source of truth" alone.** This file
+argued that case for the TTL two hours earlier and it was right there; it is still right, and the
+mechanism that enforces it is now an equality test instead of an import, because the import had a cost
+the argument had not priced.
+
+📌 **THREE SHARDS GREEN AND ONE RED IS A SIGNAL, NOT NOISE — and the sharding itself is what made it
+look like noise.** Adding four test files shifted every file's index, which moved the bundle-building
+test between shards run to run; that is why the same failure looked like it "moved around" and why it
+was tempting to call it flaky. The discriminator was never the shard: it was whether the bundle got
+built inside a loaded chunk at all.

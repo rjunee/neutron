@@ -41,10 +41,10 @@ import {
   type ReactionAction,
 } from './types.ts'
 import { ChatWsClient, type ConnStatus, type SocketLike } from './ws-client.ts'
-import {
-  WEB_PRESENCE_REFRESH_MS,
-  webPresenceFrame,
-} from '@neutronai/wire-types/web-presence.ts'
+// TYPE-ONLY, and that is a hard constraint on this file rather than a style
+// choice — see {@link DEFAULT_PRESENCE_REFRESH_MS}. A type import is erased, so
+// it adds no edge to the browser bundle's module graph.
+import type { AppWsInboundPresence } from '@neutronai/wire-types'
 
 /**
  * GAP-4 — default ack-timeout (ms). A `sent` message whose server echo hasn't
@@ -67,6 +67,46 @@ export const DEFAULT_ACK_TIMEOUT_MS = 15_000
  * double-resumes.
  */
 export const DEFAULT_RESUME_FALLBACK_MS = 2_000
+
+/**
+ * Web presence (2026-08-15) — how often a FOREGROUNDED web session re-declares
+ * itself, in ms. Must equal `WEB_PRESENCE_REFRESH_MS`
+ * (`@neutronai/wire-types/web-presence.ts`), from which the server derives the
+ * window it believes a `foreground` claim for.
+ *
+ * SO WHY IS IT A SECOND LITERAL RATHER THAN AN IMPORT? Because `chat-core` must
+ * not take a RUNTIME dependency on `@neutronai/wire-types`, and that is a
+ * measured constraint, not a preference. It had only ever imported that package
+ * as a TYPE (erased at build time); making the import a VALUE one put the leaf
+ * into the browser bundle's graph through `chat-core`'s own
+ * `node_modules/@neutronai/wire-types` link, and `Bun.build` then intermittently
+ * failed the whole `/chat-react.js` bundle with `No matching export in
+ * "wire-types/web-presence.ts"` for exports that are plainly there — but ONLY
+ * inside a loaded 100-file `bun test` process, never in isolation. Measured
+ * both ways on one machine and one commit: with the value import the bundle
+ * fails; with it removed, and with the SAME leaf imported as a value from
+ * `landing/chat-react/config.ts` instead, it succeeds. The web chat client
+ * 404s when that build fails, so this is not a test-only concern.
+ *
+ * THE DUPLICATION IS THEREFORE DELIBERATE AND MECHANICALLY GUARDED: the two
+ * numbers must agree or the client stops refreshing before the server expires
+ * it, so `chat-core/__tests__/web-presence-reporting.test.ts` asserts equality.
+ * A test can import both freely — a test is not bundled for the browser. Do not
+ * "fix" this by importing the constant here.
+ */
+export const DEFAULT_PRESENCE_REFRESH_MS = 20_000
+
+/**
+ * Build the presence control frame.
+ *
+ * Typed as {@link AppWsInboundPresence} — a TYPE-ONLY import, so the wire shape
+ * is enforced by the compiler with no runtime edge to `@neutronai/wire-types`.
+ * Drift the literal and the build reds; import the package's runtime builder and
+ * the browser bundle breaks (see {@link DEFAULT_PRESENCE_REFRESH_MS}).
+ */
+function presenceFrame(state: 'foreground' | 'background'): AppWsInboundPresence {
+  return { v: 1, type: 'presence', state }
+}
 
 /** Default single-shot timer that never keeps the host process alive (Node/Bun
  *  `unref`), so a pending ack/resume timer can't block a test run or a clean
@@ -120,7 +160,7 @@ export interface WebChatSessionOptions {
   resumeFallbackMs?: number
   /**
    * Web presence (2026-08-15) — how often a FOREGROUNDED session re-declares
-   * itself to the server (ms). Default {@link WEB_PRESENCE_REFRESH_MS}; 0
+   * itself to the server (ms). Default {@link DEFAULT_PRESENCE_REFRESH_MS}; 0
    * disables the repeat, which makes the server forget this client one
    * `WEB_PRESENCE_TTL_MS` later and start notifying the owner's phone again.
    *
@@ -192,7 +232,7 @@ export class WebChatSession {
     this.onFrame = opts.onFrame
     this.ackTimeoutMs = opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS
     this.resumeFallbackMs = opts.resumeFallbackMs ?? DEFAULT_RESUME_FALLBACK_MS
-    this.presenceRefreshMs = opts.presenceRefreshMs ?? WEB_PRESENCE_REFRESH_MS
+    this.presenceRefreshMs = opts.presenceRefreshMs ?? DEFAULT_PRESENCE_REFRESH_MS
     this.setTimeoutFn = opts.setTimeoutFn ?? defaultSetTimeout
     this.clearTimeoutFn = opts.clearTimeoutFn ?? ((h) => clearTimeout(h as never))
 
@@ -645,7 +685,7 @@ export class WebChatSession {
    */
   private reportPresence(): void {
     this.clearPresenceRefresh()
-    this.ws.send(webPresenceFrame(this.active ? 'foreground' : 'background'))
+    this.ws.send(presenceFrame(this.active ? 'foreground' : 'background'))
     if (this.active) this.armPresenceRefresh()
   }
 
@@ -668,7 +708,7 @@ export class WebChatSession {
       this.presenceHandle = null
       if (!this.active) return
       if (this.ws.getStatus() !== 'open') return
-      this.ws.send(webPresenceFrame('foreground'))
+      this.ws.send(presenceFrame('foreground'))
       this.armPresenceRefresh()
     }, this.presenceRefreshMs)
   }

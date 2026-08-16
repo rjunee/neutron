@@ -19,7 +19,11 @@ import { describe, expect, it } from 'bun:test'
 import { InMemoryStore } from '../store.ts'
 import { WebChatSession } from '../web-session.ts'
 import type { SocketLike } from '../ws-client.ts'
-import { WEB_PRESENCE_REFRESH_MS } from '@neutronai/wire-types/web-presence.ts'
+import { DEFAULT_PRESENCE_REFRESH_MS } from '../web-session.ts'
+import {
+  WEB_PRESENCE_REFRESH_MS,
+  WEB_PRESENCE_TTL_MS,
+} from '@neutronai/wire-types/web-presence.ts'
 
 const TOPIC = 'app:sam'
 
@@ -113,6 +117,21 @@ function setup(): {
   return { session, sockets, advance: timers.advance }
 }
 
+describe('the client cadence and the server window', () => {
+  it('the client refreshes on exactly the interval the server derives its TTL from', () => {
+    // The two numbers live in two files ON PURPOSE — `chat-core` must not take a
+    // RUNTIME dependency on `@neutronai/wire-types` or the browser bundle
+    // intermittently fails to build (see `DEFAULT_PRESENCE_REFRESH_MS` in
+    // `web-session.ts` for the measurement). This assertion is what makes that
+    // duplication safe: drift them and the refresh stops landing inside the
+    // window the server believes, which ends in the owner's phone going quiet.
+    expect(DEFAULT_PRESENCE_REFRESH_MS).toBe(WEB_PRESENCE_REFRESH_MS)
+    // And the window must be strictly wider than one refresh, or a single
+    // late tick would look like a departed browser.
+    expect(WEB_PRESENCE_TTL_MS).toBeGreaterThan(WEB_PRESENCE_REFRESH_MS)
+  })
+})
+
 describe('web presence reporting', () => {
   it('declares foreground as soon as the socket opens', () => {
     const { session, sockets } = setup()
@@ -127,7 +146,7 @@ describe('web presence reporting', () => {
     sockets[0]!.open()
     expect(sockets[0]!.presenceStates()).toHaveLength(1) // control: the open declaration
 
-    advance(WEB_PRESENCE_REFRESH_MS * 3 + 1)
+    advance(DEFAULT_PRESENCE_REFRESH_MS * 3 + 1)
     expect(sockets[0]!.presenceStates()).toEqual([
       'foreground',
       'foreground',
@@ -146,7 +165,7 @@ describe('web presence reporting', () => {
 
     // Nothing further, ever — the server would expire us anyway, but a client
     // that kept asserting `foreground` from a hidden tab would be the bug.
-    advance(WEB_PRESENCE_REFRESH_MS * 10)
+    advance(DEFAULT_PRESENCE_REFRESH_MS * 10)
     expect(sockets[0]!.presenceStates()).toEqual(['foreground', 'background'])
   })
 
@@ -156,7 +175,7 @@ describe('web presence reporting', () => {
     sockets[0]!.open()
     session.setActive(false)
     session.setActive(true)
-    advance(WEB_PRESENCE_REFRESH_MS + 1)
+    advance(DEFAULT_PRESENCE_REFRESH_MS + 1)
     expect(sockets[0]!.presenceStates()).toEqual([
       'foreground',
       'background',
@@ -190,7 +209,7 @@ describe('web presence reporting', () => {
     sockets[0]!.open()
     const before = sockets[0]!.presenceStates().length
     sockets[0]!.fireClose()
-    advance(WEB_PRESENCE_REFRESH_MS * 5)
+    advance(DEFAULT_PRESENCE_REFRESH_MS * 5)
     expect(sockets[0]!.presenceStates()).toHaveLength(before)
   })
 
@@ -200,7 +219,7 @@ describe('web presence reporting', () => {
     sockets[0]!.open()
     session.stop()
     const after = sockets[0]!.presenceStates().length
-    advance(WEB_PRESENCE_REFRESH_MS * 5)
+    advance(DEFAULT_PRESENCE_REFRESH_MS * 5)
     expect(sockets[0]!.presenceStates()).toHaveLength(after)
   })
 })

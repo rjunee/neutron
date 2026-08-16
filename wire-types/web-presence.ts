@@ -29,6 +29,10 @@ import type { AppWsInboundPresence } from './app-ws-envelope.ts'
 /**
  * How often a FOREGROUNDED web client re-declares its presence (ms).
  *
+ * MIRRORED (not imported) by `chat-core`'s `DEFAULT_PRESENCE_REFRESH_MS`, which
+ * documents why and is pinned equal to this by
+ * `chat-core/__tests__/web-presence-reporting.test.ts`.
+ *
  * DELIBERATELY NOT THE HEARTBEAT. `chat-core/ws-client.ts`'s ping is
  * IDLE-driven — every inbound frame reschedules it, so a socket carrying a
  * streaming agent reply never pings at all. Presence riding on it would go
@@ -45,7 +49,17 @@ export const WEB_PRESENCE_REFRESH_MS = 20_000
  */
 export const WEB_PRESENCE_TTL_MS = WEB_PRESENCE_REFRESH_MS * 3
 
-/** Build the presence frame. One spelling of the wire shape, shared by both sides. */
+/**
+ * Build the presence frame.
+ *
+ * NOT used by the web client, and that is deliberate: `chat-core/web-session.ts`
+ * writes the literal itself under a TYPE-ONLY annotation of
+ * {@link AppWsInboundPresence}, because a RUNTIME import of this package from
+ * `chat-core` intermittently breaks the `/chat-react.js` browser bundle (the
+ * measurement is recorded on `DEFAULT_PRESENCE_REFRESH_MS` in that file). The
+ * compiler still enforces one shape across both sides; only the runtime edge is
+ * avoided. This builder is for the server side and for tests.
+ */
 export function webPresenceFrame(state: 'foreground' | 'background'): AppWsInboundPresence {
   return { v: 1, type: 'presence', state }
 }
