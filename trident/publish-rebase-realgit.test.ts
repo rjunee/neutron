@@ -448,46 +448,44 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     expect(existsSync(scratchDir)).toBe(false)
   }, 60_000)
 
-  test('a LONGER marker under `conflict-marker-size` is still caught — the gate matches seven OR MORE', async () => {
-    // `.gitattributes` can widen the markers git writes for a path. The staged-byte scan is the
+  test('narrower and wider outer markers under `conflict-marker-size` are caught independently', async () => {
+    // `.gitattributes` can narrow or widen the markers git writes for a path. The staged-byte
+    // scan is the
     // ONLY thing standing between a half-resolved file and a force-push to the shared branch, so a
-    // marker length it cannot see is a marker it waves through. An exact-seven pattern rejects a
-    // 32-character marker because the eighth character is another `<`, not the space it demands.
-    //
-    // git is asked to produce the long marker itself, via the attribute — hand-writing one would
-    // only prove the fixture. The resolver then stages the file with that marker still inside,
-    // which is the case the index cannot catch.
-    const world = await seedWorld({ conflicting: true, markerSize: 32 })
-    const scratchDir = scratch(world.checkout, 't7b')
-    const run = resolverRun('realgit-long-marker', world)
+    // marker length it cannot see is a marker it waves through. Git produces both fixtures; the
+    // resolver removes the separator so this pins CONFLICT_MARKER_ADDED rather than passing via
+    // the separator rule.
+    for (const markerSize of [4, 32]) {
+      const world = await seedWorld({ conflicting: true, markerSize })
+      const scratchDir = scratch(world.checkout, `t7b-${markerSize}`)
+      const run = resolverRun(`realgit-marker-${markerSize}`, world)
 
-    let seen = ''
-    const resolve_conflict: MergeConflictResolver = async (input) => {
-      seen = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
-      // Stage git's generated wide OUTER markers unchanged. This test pins
-      // CONFLICT_MARKER_ADDED independently of the separator-width test.
-      await git(input.repo_path, 'add', 'lib.txt')
-      return { resolved: true }
+      let seen = ''
+      const resolve_conflict: MergeConflictResolver = async (input) => {
+        seen = readFileSync(join(input.repo_path, 'lib.txt'), 'utf8')
+        expect(seen).toContain(`${'<'.repeat(markerSize)} `)
+        const withoutSeparator = seen.split('\n').filter((line) => line !== '='.repeat(markerSize)).join('\n')
+        writeFileSync(join(input.repo_path, 'lib.txt'), withoutSeparator)
+        await git(input.repo_path, 'add', 'lib.txt')
+        return { resolved: true }
+      }
+
+      let caught: unknown = null
+      try {
+        await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
+          run,
+          resolve_conflict,
+        })
+      } catch (err) {
+        caught = err
+      }
+
+      expect(caught).toBeInstanceOf(TridentRebaseConflict)
+      expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
+      expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
+      expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<'.repeat(markerSize))
+      expect(existsSync(scratchDir)).toBe(false)
     }
-
-    let caught: unknown = null
-    try {
-      await rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null, scratchDir, {
-        run,
-        resolve_conflict,
-      })
-    } catch (err) {
-      caught = err
-    }
-
-    expect(seen).toContain(`${'<'.repeat(32)} `)
-    expect(seen).toContain(`\n${'='.repeat(32)}\n`)
-    expect(caught).toBeInstanceOf(TridentRebaseConflict)
-    expect((caught as TridentRebaseConflict).paths).toContain('lib.txt')
-    // THE BRANCH NEVER MOVED and no marker of ANY width reached it.
-    expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(world.branchTip)
-    expect(await gitOut(world.checkout, 'show', `refs/heads/${world.branch}:lib.txt`)).not.toContain('<'.repeat(32))
-    expect(existsSync(scratchDir)).toBe(false)
   }, 60_000)
 
   test('a resolver that DECLINES leaves a REAL conflict an attention state — branch unmoved, scratch worktree gone', async () => {

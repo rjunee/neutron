@@ -1206,9 +1206,10 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
               'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md',
               '--- a/docs/AS_BUILT.md',
               '+++ b/docs/AS_BUILT.md',
-              '@@ -1,0 +2,3 @@',
+              '@@ -1,0 +2,4 @@',
               '+publishHead: oidClaim(branchHead)',
               '+============\r',
+              '+',
               '+publishHead: oidClaim(forgeSha)',
             ].join('\n'),
           )
@@ -1231,8 +1232,8 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
   test('a markdown setext H1 underline in a resolved doc file is NOT residue — the publish proceeds', async () => {
     // A SETEXT H1 UNDERLINE IS BYTE-IDENTICAL TO GIT'S SEPARATOR. One context line lets the gate
-    // require its prose shape: nonblank title before, blank line after. Outer markers and a
-    // separator between two conflict sides still refuse in markdown.
+    // require a nonblank title and that the underline be the hunk's sole added line. Text around
+    // the separator cannot distinguish Setext from two conflict sides, so multi-add hunks fail closed.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const newHead = '7777777777777777777777777777777777777777'
     const newBaseSha = '6666666666666666666666666666666666666666'
@@ -1276,11 +1277,11 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
               'diff --git "a/docs/notes\\t.md" "b/docs/notes\\t.md"',
               '--- "a/docs/notes\\t.md"',
               '+++ "b/docs/notes\\t.md"',
-              '@@ -1,0 +2,4 @@',
-              '+Release notes',
+              '@@ -1,3 +1,3 @@',
+              ' Release notes',
+              '-=====',
               '+=======',
-              '+',
-              '+both intents kept',
+              ' ',
             ].join('\n'),
           )
         if (joined.includes('diff --name-only')) return ok('docs/notes\t.md')

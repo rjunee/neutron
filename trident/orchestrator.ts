@@ -502,26 +502,26 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
  * review. The boundary test uses real git with `conflict-marker-size` set, not a hand-written
  * long marker, so it proves git's behaviour rather than the fixture's.
  */
-const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|\r?$)/
+const CONFLICT_MARKER_ADDED = /^\+(?:<{4,}|>{4,})(?: |\t|\r?$)/
 
 /**
  * A `git diff --cached -U1` line that ADDS git's bare conflict SEPARATOR. Unlike `<<<<<<<` and
  * `>>>>>>>`, the separator line git writes carries NO label — it is exactly a run of `=` and
  * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
- * indented docstring underline) never matches. `{7,}` and not `{7}` for the same reason as
- * CONFLICT_MARKER_ADDED: `conflict-marker-size` widens the separator too. `\r?` covers a CRLF
+ * indented docstring underline) never matches. Git permits `conflict-marker-size` to narrow the
+ * marker as well as widen it, so four or more is the tested boundary. `\r?` covers a CRLF
  * file. This is the residue MOST likely to survive a sloppy hand-resolution: the outer markers
  * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
  * gate entirely.
  */
-const CONFLICT_SEPARATOR_ADDED = /^\+={7,}\r?$/
+const CONFLICT_SEPARATOR_ADDED = /^\+={4,}\r?$/
 
 /**
- * Markdown permits an all-`=` Setext H1 underline, but it has corroborating structure: a nonblank
- * title immediately before the underline and a blank line (or EOF) immediately after it. We ask
- * git for one context line and exempt only that shape. A separator between two conflict sides is
- * still refused, including in docs/AS_BUILT.md. Scanning each candidate separately also avoids
- * having to decode git-quoted `+++` path headers before applying the extension rule.
+ * Markdown permits an all-`=` Setext H1 underline. Text around it cannot safely corroborate that
+ * interpretation: conflict sides can have the identical title/blank/paragraph shape. Exempt only
+ * a nonblank title followed by an underline that is the hunk's SOLE added line. That admits the
+ * common underline-only add/edit while a separator introduced together with either conflict side
+ * fails closed. Scanning each candidate separately avoids decoding git-quoted path headers.
  */
 const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
 
@@ -533,11 +533,16 @@ function stagedDiffAddsConflictMarker(diff: string, path: string): boolean {
     if (!CONFLICT_SEPARATOR_ADDED.test(line)) continue
     if (!SETEXT_UNDERLINE_PATHS.test(path)) return true
 
-    const before = lines[i - 1] ?? ''
-    const after = lines[i + 1]
-    const title = /^[ +](.*)\r?$/.exec(before)?.[1] ?? ''
-    const followedByBlankOrEof = after === undefined || after === '' || /^[ +]\r?$/.test(after) || after.startsWith('@@')
-    if (title.trim() === '' || !followedByBlankOrEof) return true
+    let hunkStart = i
+    while (hunkStart >= 0 && !lines[hunkStart]?.startsWith('@@')) hunkStart -= 1
+    let hunkEnd = i + 1
+    while (hunkEnd < lines.length && !lines[hunkEnd]?.startsWith('@@')) hunkEnd += 1
+    const addedInHunk = lines.slice(hunkStart + 1, hunkEnd).filter((candidate) => candidate.startsWith('+')).length
+
+    let titleLine = i - 1
+    while (titleLine > hunkStart && lines[titleLine]?.startsWith('-')) titleLine -= 1
+    const title = /^[ +](.*)\r?$/.exec(lines[titleLine] ?? '')?.[1] ?? ''
+    if (title.trim() === '' || addedInHunk !== 1) return true
   }
   return false
 }
@@ -847,7 +852,7 @@ export async function rebaseOntoObservedBase(
       // in the costume of another.
       //
       // `-z` + `core.quotePath=false` BECAUSE THIS LIST IS MACHINE-CONSUMED. It becomes the
-      // resolver's `CONFLICTED FILES` and the pathspec of the staged-marker scan below, and git's
+      // resolver's `CONFLICTED FILES` and the literal pathspec of the staged-marker scan below; git's
       // default C-quoting renders `ünicode file.txt` as `"\303\274nicode file.txt"` — a name that
       // opens nothing and matches no pathspec. `-z` emits the raw bytes, NUL-separated.
       const unreadableConflictState = (detail: string): Error =>
@@ -895,7 +900,7 @@ export async function rebaseOntoObservedBase(
           let res
           try {
             res = await run_host(
-              ['git', '-C', scratchDir, 'diff', '--cached', '-U1', '--', candidate],
+              ['git', '-C', scratchDir, 'diff', '--cached', '-U1', '--', `:(literal)${candidate}`],
               scratchDir,
             )
           } catch (err) {

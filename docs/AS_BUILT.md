@@ -1122,15 +1122,16 @@ conflict text reaching a shared branch was blind to the one form of conflict tex
 most likely to leave.
 
 The rule now: an ADDED line that is EXACTLY a run of `=` — `CONFLICT_SEPARATOR_ADDED =
-/^\+={7,}\r?$/` — is residue. Exact, because git's separator never carries a label, unlike the
+/^\+={4,}\r?$/` — is residue. Exact, because git's separator never carries a label, unlike the
 outer markers which are followed by a branch name; anything suffixed (`=======trailing`,
 `const banner = "======="`) or indented is legitimate content and does not match. `{7,}` rather
-than `{7}` for the same reason as `CONFLICT_MARKER_ADDED`: `conflict-marker-size` widens the
-separator too. `\r?` covers a CRLF file. For `.md`/`.markdown`, the scan uses one context line and
-exempts only a corroborated Setext shape: a nonblank title immediately before the underline and a
-blank line or EOF immediately after it. A separator between two conflict sides is therefore still
-refused in markdown, including this canonical AS_BUILT log. Each genuinely-unmerged candidate is
-scanned separately, so quoted patch headers cannot make a markdown path lose its extension.
+than an exact width because `conflict-marker-size` can narrow markers to four or widen them beyond
+seven. `\r?` covers a CRLF file. For `.md`/`.markdown`, surrounding prose is not treated as proof:
+two conflict sides can have exactly the same title/blank/paragraph shape as Setext. The exemption
+therefore requires a nonblank title and that the underline be the hunk's sole added line. This
+admits an underline-only add or edit; a separator added with either conflict side is refused,
+including when the second side starts blank. Each genuinely-unmerged candidate is scanned
+separately with a literal pathspec, so path quoting and glob characters cannot misattribute it.
 
 The diff3 base marker `|||||||` remains unmatched; a repo with
 `merge.conflictStyle=diff3` can leave the same class of residue, and catching it (same exact-line
