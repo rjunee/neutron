@@ -16,12 +16,13 @@ import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { parseLog } from './as-built-log-merge.ts'
 import {
   explainDuplicateEntryHeadings,
   findDuplicateEntryHeadings,
 } from './as-built-heading-uniqueness.ts'
 
-const LOG_PATH = join(import.meta.dir, '..', 'docs', 'AS_BUILT.md')
+const LOG_PATH = join(import.meta.dir, '..', '..', 'docs', 'AS_BUILT.md')
 
 describe('findDuplicateEntryHeadings', () => {
   it('reports nothing when every entry heading is distinct', () => {
@@ -49,6 +50,39 @@ describe('findDuplicateEntryHeadings', () => {
   it('ignores a `## ` line inside a fenced block — quoted markdown is prose', () => {
     const log = '## a — one\n\n```md\n## a — one\n```\n\n## b — two\n\ny\n'
     expect(findDuplicateEntryHeadings(log)).toEqual([])
+  })
+
+  it('agrees with the merge driver on `~~~` fences', () => {
+    // The gate's first shape matched only ``` , so a heading quoted inside a
+    // tilde fence read as a real entry and the gate reported a duplicate the
+    // driver does not see. Blocking a merge over prose is the expensive
+    // direction of that disagreement.
+    const log = '## a — one\n\n~~~md\n## a — one\n~~~\n\n## b — two\n\ny\n'
+    expect(findDuplicateEntryHeadings(log)).toEqual([])
+  })
+
+  it('agrees with the merge driver on an indented fence closer', () => {
+    // Opener at column 0, closer indented — the shape a nested list or a quoted
+    // block produces. `startsWith('```')` matched the opener and missed the
+    // closer, so `fenced` stayed stuck open and EVERY heading below went
+    // uncounted: a real collision reported clean, which is the direction of
+    // disagreement nobody ever finds out about.
+    const log = '## a — one\n\n```\nsample\n  ```\n\n## b — two\n\ny\n\n## b — two\n\nz\n'
+    expect(findDuplicateEntryHeadings(log).map((d) => d.heading)).toEqual(['## b — two'])
+  })
+
+  it('agrees with the merge driver on a tab-separated heading', () => {
+    // `startsWith('## ')` requires a space; the driver's `/^##[^#]/` does not.
+    // The driver would merge these as one entry twice over; the gate saw none.
+    const log = '##\ta — one\n\nx\n\n##\ta — one\n\ny\n'
+    expect(findDuplicateEntryHeadings(log)).toEqual([{ heading: '##\ta — one', lines: [1, 5] }])
+  })
+
+  it('reports the line number the driver would land on, per entry length', () => {
+    // Line numbers are reconstructed from the parse rather than re-scanned, so
+    // this pins the arithmetic — preamble length, then each entry's own length.
+    const log = '# AS_BUILT\n\nintro\n\n## a — one\n\n~~~\n## a — one\n~~~\n\n## b\n\nz\n\n## a — one\n\nq\n'
+    expect(findDuplicateEntryHeadings(log)).toEqual([{ heading: '## a — one', lines: [5, 15] }])
   })
 
   it('distinguishes headings that differ only in a trailing suffix', () => {
@@ -96,12 +130,28 @@ describe('docs/AS_BUILT.md conforms to its own contract', () => {
     // Stated as a DELTA against the file's own baseline so this control keeps
     // testing only what it claims — that appending a collision adds one — even
     // on a day the log is not clean.
+    //
+    // The heading it re-appends must be one that is not ALREADY duplicated,
+    // which is not a hypothetical: the scenario this whole gate exists for is a
+    // union merge doubling an entry, and the entry it doubles is the newest —
+    // i.e. the first `## ` in a newest-first log. Re-appending an already-doubled
+    // heading takes it from two occurrences to three, so the duplicate COUNT is
+    // unchanged and this control reds with a confusing message on a day the log
+    // is dirty in exactly the way it is warning about.
+    //
+    // Headings come from the driver's parser, not a line scan, so the one picked
+    // is one the gate genuinely counts — a `## ` lifted out of a fenced block
+    // would be a brand-new heading when appended at top level, and the delta
+    // would be zero.
     const before = findDuplicateEntryHeadings(log)
-    const first = log.split('\n').find((l) => l.startsWith('## '))
-    expect(first).toBeDefined()
-    const collided = `${log}\n${first}\n\nre-appended by a union merge that kept both sides.\n`
+    const alreadyDuplicated = new Set(before.map((d) => d.heading))
+    const target = parseLog(log)
+      .entries.map((e) => e.lines[0]!.trimEnd())
+      .find((h) => !alreadyDuplicated.has(h))
+    expect(target).toBeDefined()
+    const collided = `${log}\n${target}\n\nre-appended by a union merge that kept both sides.\n`
     const after = findDuplicateEntryHeadings(collided)
     expect(after).toHaveLength(before.length + 1)
-    expect(after.find((d) => d.heading === first)?.lines).toHaveLength(2)
+    expect(after.find((d) => d.heading === target)?.lines).toHaveLength(2)
   })
 })

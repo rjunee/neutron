@@ -4,43 +4,74 @@ Running log of what shipped, newest first. One entry per merged change.
 
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
-"One entry per merged change" (line 3) had never been checked, and folding the 46
-per-entry files back into this file (bb90794b, #304) produced four colliding `##`
-headings. #304 verified that every original heading was still PRESENT; nothing asked
-whether any had become a twin. Measured at f99d6d49: 307 headings, 303 distinct.
+"One entry per merged change" (line 3) had never been checked. Measured at f99d6d49:
+307 headings, 303 distinct — four collisions, arriving by two unrelated routes, which
+is why this ends in a standing gate rather than a tidy-up. No single review would have
+caught both.
 
-Only ONE was a real duplicate. `## 2026-08-14 — the by-path build brief is proven in
-lockstep, prompt to receipt` was written by a84d6cbb (#261) and then re-appended
-VERBATIM by 6da6ddb9 (#275) — a different change, which also added its own entry, so
-the copy was a merge artefact rather than a second record. The two bodies were
-byte-identical apart from the blank separator the copy dropped, which is why the copy
-sat flush against the next heading. Asserted equal before removing it, and the removal
-is 26 lines of prose that still exist 26 lines above.
+THREE were minted by folding the 46 per-entry files back into this file (bb90794b,
+#304). Each reads 1 at `bb90794b^` and 2 at `bb90794b`. #304 verified that every
+original heading was still PRESENT; nothing asked whether any had become a twin.
 
-The other three were NOT duplicates and deleting either side would have destroyed
-history. `Codex and Kimi are connectable from a phone` (1281 vs 4275 chars), `The chat
-agent can search the web` (942 vs 2582) and `Model usage on the phone` (784 vs 2464)
-are each a SUMMARY entry written straight into this log by its original change
+The FOURTH has nothing to do with the fold and already read 2 at `bb90794b^`.
+`## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt`
+was written by a84d6cbb (#261) and then re-appended VERBATIM by 6da6ddb9 (#275) — a
+different change, which added its own entry in the same commit, so the copy was a
+merge artefact rather than a second record. It is the one real duplicate and it is
+removed. The two bodies were byte-identical apart from the blank separator the copy
+dropped, which is why the copy sat flush against the next heading. Asserted equal
+before removing it, and the removal is 26 lines of prose that still exist 26 lines
+above.
+
+The three the fold minted were NOT duplicates and deleting either side would have
+destroyed history. `Codex and Kimi are connectable from a phone` (1281 vs 4275 chars),
+`The chat agent can search the web` (942 vs 2582) and `Model usage on the phone` (784
+vs 2464) are each a SUMMARY entry written straight into this log by its original change
 (0e56be5b #161, 4df45217 #168, 68a9a930 #169) plus the long-form companion that the
-same commits wrote to a separate file. Those files were titled `# Title` with the date
-in the FILENAME; #304 normalised that shape to `## YYYY-MM-DD — title` and thereby
-minted a heading identical to the summary's. Both sides are kept and the FOLDED one is
-suffixed ` (detail)`, because it is the synthesised heading — no author typed it — and
-the summary's own `Detail: §` pointer, which until now resolved ambiguously to two
-sections including itself, is repointed to match. No prose changed on either side.
-Containment was checked rather than assumed before ruling deletion out: 0 of 23
-sentences in the three short bodies appear verbatim in their long counterpart.
+same commits wrote to a separate file. Those files were titled `# Title`; one of the
+three carried its date only in the filename
+(`docs/as-built/2026-08-09-mobile-model-providers.md`) and the other two repeated it
+in the title as `(2026-08-09)`. #304 normalised all three to `## YYYY-MM-DD — title`,
+thereby minting a heading identical to the summary's. Both sides are kept and the
+FOLDED one is suffixed
+` (detail)`, because it is the synthesised heading — no author typed it — and the
+summary's own `Detail: §` pointer, which until now resolved ambiguously to two sections
+including itself, is repointed to match. No prose changed on either side. Containment
+was checked rather than assumed before ruling deletion out: 0 of 23 sentences in the
+three short bodies appear verbatim in their long counterpart.
 
-The contract is now mechanical. `trident/as-built-heading-uniqueness.ts` reports every
-repeated `## ` heading and `trident/as-built-heading-uniqueness.test.ts` runs it
+The contract is now mechanical. `scripts/git/as-built-heading-uniqueness.ts` reports every
+repeated `## ` heading and `scripts/git/as-built-heading-uniqueness.test.ts` runs it
 against this file on every PR. Keyed on the WHOLE heading line, never the date — this
 log carries more than twenty entries dated 2026-08-09 alone, and a gate that cries wolf
-gets waved through. It matters because the file is `merge=union` (cb39016f), so a
-conflicting hunk keeps BOTH sides instead of raising: duplication here compounds
-silently rather than failing loudly, and nothing else looks. Mutation-tested both ways
-— re-appending a collision to the real log reds exactly the conformance case, and
-blinding the checker's `## ` match reds the positive control while the conformance case
-still passes, which is the false negative a lone conformance assertion cannot see.
+gets waved through.
+
+It does not decide for itself what an entry IS: it calls `parseLog` from
+`scripts/git/as-built-log-merge.ts`, the merge driver's own parser, so a gate and a
+merge can never disagree about where an entry begins. Its first shape re-derived that
+parsing and had already drifted three ways — `~~~` fences unrecognised, an indented
+fence closer leaving the scanner stuck open, and `##\ttitle` counted by the driver but
+missed by the gate. Each is a case where a merge folds two entries the gate swears are
+one. All three are now regression cases.
+
+It matters because NEITHER merge driver this path can carry reports a collision.
+Tracked `.gitattributes` binds `merge=union` (cb39016f), which keeps both sides of a
+conflicting hunk rather than raising. A clone that has run
+`scripts/install-merge-drivers.sh` instead gets `merge=as-built-log` from
+`$GIT_COMMON_DIR/info/attributes`, which outranks `.gitattributes` (verified with
+`git check-attr merge -- docs/AS_BUILT.md` in a throwaway repo: `union` before the
+line is added, `as-built-log` after) — and that driver names this exact case as its
+one known limit, where occurrence indices shift and entries come back in an odd order.
+Duplication here compounds or scrambles silently rather than failing loudly, and
+nothing else looks.
+
+Mutation-tested both ways — re-appending a collision to the real log reds exactly the
+conformance case, and blinding the checker's heading match reds the positive control
+while the conformance case still passes, which is the false negative a lone conformance
+assertion cannot see. That control re-appends the first heading NOT already duplicated,
+because the scenario it models is a union merge doubling the newest entry, and
+re-appending an already-doubled heading takes it from two to three without changing the
+duplicate count.
 
 ## 2026-08-16 — two builds can append to this file at once
 
