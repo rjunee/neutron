@@ -1124,14 +1124,16 @@ most likely to leave.
 The rule now: an ADDED line that is EXACTLY a run of `=` — `CONFLICT_SEPARATOR_ADDED =
 /^\+={4,}\r?$/` — is residue. Exact, because git's separator never carries a label, unlike the
 outer markers which are followed by a branch name; anything suffixed (`=======trailing`,
-`const banner = "======="`) or indented is legitimate content and does not match. `{7,}` rather
-than an exact width because `conflict-marker-size` can narrow markers to four or widen them beyond
-seven. `\r?` covers a CRLF file. For `.md`/`.markdown`, surrounding prose is not treated as proof:
-two conflict sides can have exactly the same title/blank/paragraph shape as Setext. The exemption
-therefore requires a nonblank title and that the underline be the hunk's sole added line. This
-admits an underline-only add or edit; a separator added with either conflict side is refused,
-including when the second side starts blank. Each genuinely-unmerged candidate is scanned
-separately with a literal pathspec, so path quoting and glob characters cannot misattribute it.
+`const banner = "======="`) or indented is legitimate content and does not match. Four is a
+fail-closed false-positive boundary, not git's minimum: smaller configured markers remain a known
+tradeoff, while wider markers are caught. `\r?` covers a CRLF file. For `.md`/`.markdown`, the
+exemption requires the actual Setext shape in the resulting file: a nonblank title immediately
+before the underline and a blank line or EOF immediately after it. This admits both an underline
+edit and a newly added heading, while a separator followed directly by surviving conflict-side
+content is refused. A conflict that happens to form that exact Markdown shape is inherently
+indistinguishable from legitimate Setext using staged bytes alone. Each genuinely-unmerged
+candidate is scanned separately with a literal pathspec, so path quoting and glob characters
+cannot misattribute it.
 
 The diff3 base marker `|||||||` remains unmatched; a repo with
 `merge.conflictStyle=diff3` can leave the same class of residue, and catching it (same exact-line

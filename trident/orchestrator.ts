@@ -494,8 +494,8 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
  * (exact-line, and exempt in markdown, where it is a setext underline). `|||||||` remains
  * unmatched: it only appears under `merge.conflictStyle=diff3`, and catching it is a follow-up.
  *
- * SEVEN OR MORE, not exactly seven. `.gitattributes` can set `conflict-marker-size=32` for a
- * path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
+ * FOUR OR MORE is a deliberate fail-closed boundary, not git's minimum. `.gitattributes` can set
+ * `conflict-marker-size=32` for a path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
  * eighth character is another `<` rather than the space the pattern demands. This regex is the
  * ONLY gate standing between a half-resolved staged file and a force-push to the shared branch,
  * so a marker length it cannot see is a marker it waves through. Found by codex cross-model
@@ -510,7 +510,9 @@ const CONFLICT_MARKER_ADDED = /^\+(?:<{4,}|>{4,})(?: |\t|\r?$)/
  * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
  * indented docstring underline) never matches. Git permits `conflict-marker-size` to narrow the
  * marker as well as widen it, so four or more is the tested boundary. `\r?` covers a CRLF
- * file. This is the residue MOST likely to survive a sloppy hand-resolution: the outer markers
+ * file. Sizes below four remain a known tradeoff: accepting ordinary one-to-three-character
+ * punctuation avoids a much broader false-positive class. This is the residue MOST likely to
+ * survive a sloppy hand-resolution: the outer markers
  * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
  * gate entirely.
  */
@@ -519,9 +521,10 @@ const CONFLICT_SEPARATOR_ADDED = /^\+={4,}\r?$/
 /**
  * Markdown permits an all-`=` Setext H1 underline. Text around it cannot safely corroborate that
  * interpretation: conflict sides can have the identical title/blank/paragraph shape. Exempt only
- * a nonblank title followed by an underline that is the hunk's SOLE added line. That admits the
- * common underline-only add/edit while a separator introduced together with either conflict side
- * fails closed. Scanning each candidate separately avoids decoding git-quoted path headers.
+ * a nonblank title followed immediately by a blank line or EOF in the resulting file. This admits
+ * both an underline-only edit and a newly added Setext section, while refusing a separator whose
+ * next surviving line is conflict-side content. Scanning each candidate separately avoids decoding
+ * git-quoted path headers.
  */
 const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
 
@@ -537,12 +540,14 @@ function stagedDiffAddsConflictMarker(diff: string, path: string): boolean {
     while (hunkStart >= 0 && !lines[hunkStart]?.startsWith('@@')) hunkStart -= 1
     let hunkEnd = i + 1
     while (hunkEnd < lines.length && !lines[hunkEnd]?.startsWith('@@')) hunkEnd += 1
-    const addedInHunk = lines.slice(hunkStart + 1, hunkEnd).filter((candidate) => candidate.startsWith('+')).length
-
     let titleLine = i - 1
     while (titleLine > hunkStart && lines[titleLine]?.startsWith('-')) titleLine -= 1
     const title = /^[ +](.*)\r?$/.exec(lines[titleLine] ?? '')?.[1] ?? ''
-    if (title.trim() === '' || addedInHunk !== 1) return true
+    let followingLine = i + 1
+    while (followingLine < hunkEnd && lines[followingLine]?.startsWith('-')) followingLine += 1
+    const following = lines[followingLine]
+    const followedByBlankOrEof = followingLine === hunkEnd || /^[ +]\r?$/.test(following ?? '')
+    if (title.trim() === '' || !followedByBlankOrEof) return true
   }
   return false
 }

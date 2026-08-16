@@ -1173,7 +1173,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes('worktree remove --force') && c.includes('.trident-worktrees/rebase-'))).toBe(true)
   })
 
-  test('a resolver that left a wide CRLF separator between conflict sides in markdown is REFUSED', async () => {
+  test('a resolver that left a wide CRLF separator before surviving markdown content is REFUSED', async () => {
     // THE SEPARATOR IS THE RESIDUE MOST LIKELY TO SURVIVE. `<<<<<<< ours` and `>>>>>>> theirs`
     // are the visually obvious lines; a hand-resolution that keeps both sides and strips the
     // outer markers leaves a bare `=======` sitting between them, and that line used to pass this
@@ -1206,11 +1206,10 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
               'diff --git a/docs/AS_BUILT.md b/docs/AS_BUILT.md',
               '--- a/docs/AS_BUILT.md',
               '+++ b/docs/AS_BUILT.md',
-              '@@ -1,0 +2,4 @@',
-              '+publishHead: oidClaim(branchHead)',
+              '@@ -1,2 +1,3 @@',
+              ' publishHead: oidClaim(branchHead)',
               '+============\r',
-              '+',
-              '+publishHead: oidClaim(forgeSha)',
+              ' publishHead: oidClaim(forgeSha)',
             ].join('\n'),
           )
         return ok()
@@ -1231,9 +1230,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   })
 
   test('a markdown setext H1 underline in a resolved doc file is NOT residue — the publish proceeds', async () => {
-    // A SETEXT H1 UNDERLINE IS BYTE-IDENTICAL TO GIT'S SEPARATOR. One context line lets the gate
-    // require a nonblank title and that the underline be the hunk's sole added line. Text around
-    // the separator cannot distinguish Setext from two conflict sides, so multi-add hunks fail closed.
+    // A SETEXT H1 UNDERLINE IS BYTE-IDENTICAL TO GIT'S SEPARATOR. The gate requires the markdown
+    // shape itself: a nonblank title immediately before it and a blank line or EOF immediately
+    // after it. The title may be new in the same hunk; adding a legitimate section must publish.
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const newHead = '7777777777777777777777777777777777777777'
     const newBaseSha = '6666666666666666666666666666666666666666'
@@ -1277,11 +1276,11 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
               'diff --git "a/docs/notes\\t.md" "b/docs/notes\\t.md"',
               '--- "a/docs/notes\\t.md"',
               '+++ "b/docs/notes\\t.md"',
-              '@@ -1,3 +1,3 @@',
-              ' Release notes',
-              '-=====',
+              '@@ -1,1 +2,4 @@',
+              '+Release notes',
               '+=======',
-              ' ',
+              '+',
+              '+Details',
             ].join('\n'),
           )
         if (joined.includes('diff --name-only')) return ok('docs/notes\t.md')
