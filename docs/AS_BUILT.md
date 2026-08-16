@@ -260,8 +260,10 @@ secrets store and not the unwired placeholder. Mutation-tested against a green c
 42/42 on `trident/git-mode.test.ts` + `trident/git-mode-credential-seam.test.ts`:
 restoring the ambient probe reddens 7, stripping the cause from the refusal reddens 8,
 collapsing `could_not_reach_github` into `credential_rejected` reddens 3, and re-adding
-the empty-store short-circuit reddens 7. The board seam's credentialing needs no mutation
-test: handing it anything but a `GitModeProbe` no longer compiles.
+the empty-store short-circuit reddens 7. Separately, wiring the board seam to
+`defaultGitModeProbe(unwiredPublisherCredential())` reddens the boot-wiring test — which
+the round-1 `typeof … === 'function'` assertion could not do, because the pre-fix
+composition satisfied it too.
 
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
