@@ -6389,6 +6389,57 @@ Threading the production gateway credential closure into a live
 `TridentDispatch` so boot drives the loop (and the run-creation call site that
 calls `detectRalphMode`) is PR-5.
 
+## Concurrent publishes and the AS_BUILT log — the entry-aware merge driver (`scripts/git/`)
+
+Concurrent builds used to conflict on two shared documents. One is closed: each
+build writes its plan to `.trident/plans/<branch>.md` (#302), so there is no
+shared plan file left to fight over. The other is `docs/AS_BUILT.md`, which is
+**canonical and single by owner lock** (#304) — the split into one file per
+entry was tried and reversed.
+
+That file is newest-first, so every build prepends its entry at the SAME OFFSET
+under the SAME header lines. Two builds therefore write different bytes against
+identical context, which conflicts by construction, not by bad luck: three
+concurrent publishes died on that file and nothing else on 2026-08-15T23:20Z.
+
+The fix is a git merge driver that works on **whole entries**:
+
+- `scripts/git/as-built-log-merge.ts` — the pure three-way merge. It splits each
+  side into a preamble plus `## ` entries, treats an entry present on one side
+  and absent from the base as an ADDITION, and UNIONS the additions. Retained
+  entries keep their existing order (the log is only loosely ordered
+  historically, and re-sorting 300 entries would bury a one-entry change);
+  additions are placed newest-first among them. It is entry-aware and never
+  line-aware on purpose — a `union` driver would interleave two entries, and
+  interleaving inside one entry is what produced broken TypeScript in an earlier
+  incident.
+- `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls.
+  Anything it will not merge (both sides editing one entry, a diverged header, a
+  file that does not parse as a log, an unexpected throw) is handed to
+  `git merge-file`, so the floor of the mechanism is exactly today's behaviour:
+  conflict markers a human reads, never a plausible file nobody diffed.
+- `scripts/install-merge-drivers.sh` — installs the driver config AND the
+  binding. **The binding lives in `.git/info/attributes`, not in a tracked
+  `.gitattributes`**, because git treats an attribute naming an unconfigured
+  driver as `fatal: … lacks command line` (exit 128) rather than falling back —
+  for `git merge` and for the `git apply --3way` the publisher uses. A committed
+  attribute would break every fresh clone, outside contributor and CI until each
+  ran an install step they had no reason to know about. Untracked, the attribute
+  and its driver arrive together or neither does — the same rule
+  `install-git-hooks.sh` applies to the leak gate and its denylist.
+
+`rebaseOntoObservedBase` (`trident/orchestrator.ts`) runs the installer before
+it replays a branch, so build lanes get this without anyone remembering. That
+call is **conditional on the checkout shipping the installer**, so the other
+repositories trident builds are left completely untouched.
+
+Proven against real git, not stubs: `scripts/git/as-built-merge-realgit.test.ts`
+replays two branches onto a moved base and asserts the conflict WITHOUT the
+driver before asserting the clean merge with it, then uninstalls to bring the
+conflict back. `trident/as-built-publish-wiring-realgit.test.ts` drives the real
+publish step and installs nothing itself, so deleting the production call turns
+it red.
+
 ## Agent-dispatch reliability — double-spawn guard + agent-aware watchdog (`runtime/subagent/`)
 
 The substrate-agnostic dispatch layer (`runtime/subagent/`) owns the
