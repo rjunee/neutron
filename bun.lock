@@ -231,6 +231,7 @@
         "@neutronai/persistence": "workspace:*",
         "@neutronai/reminders": "workspace:*",
         "@neutronai/tasks": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
       },
     },
     "cores/free/research": {
@@ -481,6 +482,7 @@
         "@neutronai/scribe": "workspace:*",
         "@neutronai/skill-forge": "workspace:*",
         "@neutronai/tasks": "workspace:*",
+        "@neutronai/tools": "workspace:*",
         "@neutronai/trident": "workspace:*",
         "@neutronai/watchdog": "workspace:*",
         "@neutronai/wire-types": "workspace:*",
@@ -525,6 +527,7 @@
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
         "@neutronai/tools": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
       },
     },
     "runtime": {
@@ -604,6 +607,7 @@
         "@neutronai/auth": "workspace:*",
         "@neutronai/channels": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/github": "workspace:*",
         "@neutronai/logger": "workspace:*",
         "@neutronai/loop": "workspace:*",
         "@neutronai/migrations": "workspace:*",

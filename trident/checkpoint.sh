@@ -38,10 +38,12 @@
 # Every value above is wrapped in `frozen()` when it targets one of the two
 # LIVENESS columns — see the block above the field loop for what that means.
 #
-# `last_advanced_at='<now UTC, %FT%TZ>'` is ALWAYS appended — both legacy
+# `last_advanced_at='<now UTC, %FT%T.%3NZ>'` is ALWAYS appended — both legacy
 # inline call sites unconditionally stamped it via `$(date -u +%FT%TZ)`; the
-# script computes it so the prompt carries no command substitution either. It
-# and `subagent_status` are the LIVENESS pair, frozen on a terminal row.
+# script computes it so the prompt carries no command substitution either, and
+# stamps MILLISECONDS (see the stamp block below for why, and for the
+# whole-second fallback on a `date` without `%3N`). It and `subagent_status` are
+# the LIVENESS pair, frozen on a terminal row.
 #
 # SEMANTICS ARE UNCHANGED from the inline SQL this replaces
 # (trident/inner-workflow.mjs checkpoint()/writeTerminalResult()), EXCEPT that
@@ -174,7 +176,24 @@ done
 
 # Both legacy inline UPDATEs unconditionally re-stamped last_advanced_at. It is
 # the hang watchdog's heartbeat, so it is LIVENESS — frozen on a terminal row.
-sets+=("last_advanced_at=$(frozen last_advanced_at "'$(date -u +%FT%TZ)'")")
+#
+# MILLISECONDS, NOT WHOLE SECONDS, and the reason is the wake-on-change watcher.
+# `TridentRunStore.changeSignature()` builds a PER-RUN signature — one
+# `id:last_advanced_at` entry per active run — so an out-of-process checkpoint is
+# detected as a change to ITS OWN row's stamp. Two checkpoints on the same row
+# inside the SAME second still collapse into one signature, and the second one
+# would wait out the 90 s backstop — the exact latency the watcher exists to
+# remove. The store's own
+# writes have always been `toISOString()` (millisecond) precision; this makes the
+# two writers agree. `%3N` is a GNU `date` extension: BSD/macOS `date` echoes it
+# literally, so the result is validated and falls back to the original
+# whole-second stamp, which is still a correct (if coarser) ISO-8601 UTC instant.
+now_iso="$(date -u +%FT%T.%3NZ 2>/dev/null || true)"
+case "$now_iso" in
+  *[0-9].[0-9][0-9][0-9]Z) : ;;
+  *) now_iso="$(date -u +%FT%TZ)" ;;
+esac
+sets+=("last_advanced_at=$(frozen last_advanced_at "'${now_iso}'")")
 
 set_clause="$(printf '%s, ' "${sets[@]}")"
 set_clause="${set_clause%, }"

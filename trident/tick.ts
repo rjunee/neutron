@@ -17,13 +17,17 @@
  *     each run up exactly where it left off (the in-flight sub-agent's
  *     id + status are persisted on the row, not in memory).
  *
- * Default interval is 90 s — matches the skill's ScheduleWakeup cadence.
+ * Default interval is 90 s — matches the skill's ScheduleWakeup cadence. A
+ * second, much cheaper internal loop ('trident-watch', 2 s) polls one
+ * `changeSignature()` query and `wake()`s the sweep only when a run actually
+ * advanced, so an out-of-process checkpoint is picked up in seconds; the 90 s
+ * interval stays armed unchanged as the backstop.
  */
 
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
-import type { TridentRun, TridentRunStore } from './store.ts'
+import { changeSignatureEntries, type TridentRun, type TridentRunStore } from './store.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
 import { createLogger } from '@neutronai/logger'
 
@@ -122,6 +126,57 @@ function progressSignature(run: TridentRun, nowMs: number): string {
   return `${run.phase}|${run.inner_checkpoint ?? ''}|${run.round}|${run.pr ?? ''}|${run.last_advanced_at}|${stalled ? 'stalled' : ''}`
 }
 
+/**
+ * Did anything move between two `changeSignature()` samples that the sweep did NOT
+ * write itself?
+ *
+ * `own` is the sweep's own ledger: run id → the `last_advanced_at` its commit left
+ * on that row (or `null` when the row could not be re-read). A difference is the
+ * sweep's own iff the run is in that ledger AND the row still carries exactly the
+ * stamp the sweep wrote — a run re-stamped AGAIN after the sweep committed it is an
+ * out-of-process writer, not us, and must still wake the next sweep.
+ *
+ * Both directions are checked: a row that appeared or was re-stamped (`after`), and
+ * a row that LEFT the active set (`swept`) — a terminal transition someone else won
+ * is change the rail needs a sweep for. Removals of rows the sweep itself committed
+ * are ours (that is what a terminal transition by this sweep looks like).
+ *
+ * THE RESIDUALS, stated so they are not rediscovered. Both are bounded by the 90 s
+ * backstop and both need a monotonic row version to close, which the schema does not
+ * have:
+ *
+ *   1. an external write that lands on a run this sweep committed, inside the SAME
+ *      MILLISECOND as the sweep's own write, leaves the identical stamp and reads as
+ *      ours. That is the column's resolution, not the rule — and a strictly smaller
+ *      window than the one this replaced (which absorbed EVERY external write, on any
+ *      run, for the whole duration of an advancing sweep — seconds of git/gh work);
+ *   2. a run the sweep wrote that ALSO left the active set is assumed to have left on
+ *      the sweep's own terminal transition (the `!own.has(id)` in the removal loop).
+ *      An out-of-process force-terminate that races a sweep-advanced run therefore
+ *      does not wake the next sweep. Same class and same bound as (1): the only
+ *      evidence that would separate the two is a version the row does not carry.
+ */
+function changedOutsideSweepWrites(
+  sweptSig: string,
+  afterSig: string,
+  own: Map<string, string | null>,
+): boolean {
+  if (sweptSig === afterSig) return false
+  const before = changeSignatureEntries(sweptSig)
+  const after = changeSignatureEntries(afterSig)
+  for (const [id, at] of after) {
+    if (own.has(id)) {
+      if (own.get(id) !== at) return true
+      continue
+    }
+    if (before.get(id) !== at) return true
+  }
+  for (const id of before.keys()) {
+    if (!after.has(id) && !own.has(id)) return true
+  }
+  return false
+}
+
 export interface TridentTickOptions {
   store: TridentRunStore
   /**
@@ -139,6 +194,18 @@ export interface TridentTickOptions {
   step?: TridentStepFn
   /** Default 90 s — matches the skill's ScheduleWakeup cadence. */
   tick_interval_ms?: number
+  /**
+   * Wake-on-change watcher cadence (Part 2 of the wall-clock card). Every
+   * `watch_interval_ms` the loop runs ONE cheap store query
+   * (`changeSignature()`) and fires `wake()` on the main loop ONLY when the
+   * signature differs from the last observation — so an out-of-process
+   * checkpoint (checkpoint.sh stamping `last_advanced_at`) triggers a full
+   * tick within seconds instead of waiting out the 90 s interval. The 90 s
+   * interval stays armed unchanged as the backstop: if the watcher fails or
+   * is disabled, behaviour is exactly today's. `<= 0` — or any non-finite
+   * value — disables the watcher. Default 2_000.
+   */
+  watch_interval_ms?: number
   /** Per-tick max runs to advance. Default 50. */
   per_tick_limit?: number
   /**
@@ -177,6 +244,22 @@ export class TridentTickLoop {
   private readonly lastSig = new Map<string, string>()
   /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
   private readonly loop: SupervisedLoop
+  /** null when disabled (`watch_interval_ms <= 0`). */
+  private readonly watchLoop: SupervisedLoop | null
+  /** Last observed change signature; null = nothing observed yet (first observation records, never wakes). */
+  private lastChangeSig: string | null = null
+  /**
+   * A SWEEP IS STILL OWED for change already folded into `lastChangeSig`.
+   *
+   * The watcher records what it sampled the moment it wakes, so the wake and the
+   * baseline move together — which is right when the sweep then runs, and wrong when
+   * that sweep dies on its row read (locked DB, closed handle): the change is marked
+   * observed, nothing observed it, and the handoff waits out the 90 s backstop
+   * (Argus r3). This flag remembers the debt, so the next cadence re-fires even
+   * though the signature has not moved again. Cleared by the first sweep that
+   * actually reads its rows.
+   */
+  private sweepOwed = false
   private advancedCount = 0
   private deliveredCount = 0
   private transitionCount = 0
@@ -201,11 +284,50 @@ export class TridentTickLoop {
       intervalMs: this.interval_ms,
       tick: () => this.tickBody(),
     })
+    const watchIntervalMs = options.watch_interval_ms ?? 2_000
+    // `Number.isFinite` FIRST, because `NaN <= 0` is false: a NaN cadence would slip
+    // past a bare `<= 0` disable check and `setInterval(fn, NaN)` clamps to ~1 ms —
+    // a ~500 Hz signature query where the caller asked for "no watcher".
+    this.watchLoop =
+      !Number.isFinite(watchIntervalMs) || watchIntervalMs <= 0
+        ? null
+        : new SupervisedLoop({
+            name: 'trident-watch',
+            intervalMs: watchIntervalMs,
+            tick: async () => this.watchBody(),
+            onError: (name, err) => {
+              log.error('watch_failed', {
+                loop: name,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
+            },
+          })
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
   start(): void {
     this.loop.start()
+    this.watchLoop?.start()
+  }
+
+  /**
+   * Fire one full tick now instead of waiting out the 90 s interval — the
+   * wake-on-change accelerator (the interval stays armed as the backstop).
+   * Delegates to {@link SupervisedLoop.wake}: not-lost when a tick is in
+   * flight, and a no-op unless the loop is started.
+   *
+   * WHICH GUARANTEE ACTUALLY CARRIES THE MID-FLIGHT CASE HERE (Argus r3). `wake()`'s
+   * own `pendingWake` re-fire is what a caller waking DURING a sweep relies on — but
+   * this class's only production caller is {@link watchBody}, which returns early
+   * while a tick is running and therefore (outside a narrow interval race) never
+   * wakes mid-flight at all. What keeps an out-of-process checkpoint that lands
+   * mid-sweep from being lost is {@link settleChangeBaseline}: it refuses to adopt a
+   * post-sweep sample containing change the sweep did not write, so the difference is
+   * still there on the next 2 s cadence. `pendingWake` remains correct and covered
+   * (`loop/index.test.ts`) for any other caller — belt to that braces.
+   */
+  wake(): void {
+    this.loop.wake()
   }
 
   /** §F2 — live LoopRegistry descriptor (name `trident`, cadence
@@ -214,10 +336,38 @@ export class TridentTickLoop {
     return this.loop.describe()
   }
 
+  /**
+   * §F2 — EVERY timer this object owns, for the LoopRegistry inventory.
+   *
+   * `describe()` returns only the 90 s sweep, which is what the composer used to
+   * register — so the 2 s 'trident-watch' loop was a live, self-restarting timer
+   * that the loop inventory could not see at all. A persistently failing watcher
+   * then showed up only as `watch_failed` log lines while the inventory reported
+   * one healthy loop: the accelerator can be dead for hours and every handoff back
+   * on the 90 s path, with nothing in the inventory saying so. Both descriptors are
+   * LIVE (the `SupervisedLoop` getters read current state), so registering them
+   * before `start()` is still correct. Single-loop callers keep `describe()`.
+   */
+  describeAll(): LoopDescriptor[] {
+    if (this.watchLoop === null) return [this.loop.describe()]
+    return [this.loop.describe(), this.watchLoop.describe()]
+  }
+
   /** Stop + quiesce: awaits the in-flight tick so the composer can
    *  `await loop.stop()` (then `drain()`) before `db.close()`. */
   async stop(): Promise<void> {
+    if (this.watchLoop !== null) await this.watchLoop.stop()
     await this.loop.stop()
+    // DROP THE OBSERVED SIGNATURE WITH THE TIMERS. It is a comparison against a
+    // moment that ended at shutdown: a `stop()` → `start()` re-arm that kept it
+    // would compare the new process's first sample against pre-shutdown state and
+    // fire a wake for change some other lifetime already swept. Null re-arms the
+    // "first observation records, never wakes" rule, which is the right boot
+    // behaviour — the interval's own first pass covers whatever moved meanwhile.
+    this.lastChangeSig = null
+    // …and the debt dies with it, for the same reason: a re-armed loop's first
+    // interval pass sweeps whatever the failed tick never read.
+    this.sweepOwed = false
   }
 
   /**
@@ -237,6 +387,89 @@ export class TridentTickLoop {
   }
 
   /**
+   * The change-watcher tick: ONE store query, compare, maybe wake. It never
+   * calls `step`, never touches git/gh/network — it is a cheap detector
+   * gating the expensive sweep, not a faster sweep. The FIRST observation
+   * only records the signature (no wake): waking on boot would duplicate the
+   * interval's own first pass for no information. A throw (locked DB, closed
+   * handle) is contained by the watcher SupervisedLoop's guardedFire and
+   * routed to `watch_failed`; the 90 s backstop is untouched either way.
+   */
+  private async watchBody(): Promise<void> {
+    // A SAMPLE TAKEN MID-SWEEP MEANS NOTHING, so do not take one.
+    //
+    // The sweep's own `saveIfActive` re-stamps `last_advanced_at` on every run it
+    // advances, so a mid-sweep sample is a half-applied mixture of the tick's own
+    // writes and whatever else arrived — and `settleChangeBaseline` overwrites the
+    // baseline at the tick's tail anyway. Skipping here costs nothing: the settle
+    // records EXACTLY the rows the sweep wrote, so an out-of-process checkpoint
+    // that landed while the sweep was blind is still a difference on the very next
+    // cadence (see `changedOutsideSweepWrites`). The baseline is only ever moved at
+    // a point where it means something: here (no tick running) or at the settled
+    // end of `tickBody`.
+    if (this.loop.stats().running) return
+    const sig = this.store.changeSignature()
+    // A DEBT IS AS GOOD A REASON TO WAKE AS A DIFFERENCE. Recording `sig` below is
+    // what consumes the change, so a sweep that died before reading a single row
+    // (`sweepOwed`) must re-fire on an UNCHANGED signature — otherwise the wake is
+    // spent on a tick that saw nothing and the handoff waits for the 90 s backstop.
+    if ((this.lastChangeSig !== null && sig !== this.lastChangeSig) || this.sweepOwed) {
+      this.loop.wake()
+    }
+    this.lastChangeSig = sig
+  }
+
+  /**
+   * Adopt the signature a SETTLED tick leaves behind, so the tick's own writes are
+   * never mistaken for change the tick has not yet seen — and, just as important,
+   * so change that is NOT the tick's own writes survives the settle. Called from the
+   * tail of every tick body that GOT ITS ROW LIST — interval-fired, wake-fired, or
+   * manually driven; a sweep that threw before reading anything settles nothing (see
+   * `sweepOwed`). Never allowed to fail a tick either: a throwing `changeSignature()`
+   * (closed handle, locked DB) leaves the baseline where it was, which at worst costs
+   * one extra sweep, and is routed to the 90 s backstop like any other watcher
+   * outage.
+   *
+   * `sweptSig` is the signature sampled BEFORE the sweep read its rows; `own` is
+   * every row the sweep COMMITTED, mapped to the `last_advanced_at` its own write
+   * left behind. The rule is per-run, not aggregate:
+   *
+   *   • the sweep wrote nothing → `sweptSig` is still the truth, keep it;
+   *   • every difference between `sweptSig` and the post-sweep sample is explained
+   *     by `own` → adopt the post-sweep sample (the tick has seen all of it, so no
+   *     wake is owed);
+   *   • ANY difference outside `own` — a run the sweep never wrote carrying a new
+   *     stamp (the out-of-process checkpoint), a run that appeared, a run that left
+   *     the set on someone else's write, or a run the sweep wrote that was
+   *     re-stamped again afterwards — → keep `sweptSig`, so the very next watcher
+   *     cadence sees the difference and wakes the sweep.
+   *
+   * THE MIDDLE CASE IS THE ARGUS r2 FINDING. The previous version re-sampled the
+   * aggregate whenever the tick had written anything, which absorbed every external
+   * checkpoint that landed after `sweptSig` — precisely the handoff this card
+   * exists to accelerate, sent back to the 90 s backstop under exactly the
+   * multi-lane workload it targets.
+   */
+  private settleChangeBaseline(sweptSig: string | null, own: Map<string, string | null>): void {
+    if (this.watchLoop === null) return
+    try {
+      if (own.size === 0) {
+        // An unreadable signature is not a baseline — never overwrite a good one with
+        // `null`, which would silently re-arm the "first observation never wakes" rule.
+        if (sweptSig !== null) this.lastChangeSig = sweptSig
+        return
+      }
+      // Nothing to compare against: leave the baseline alone rather than adopt a
+      // sample whose provenance we cannot check.
+      if (sweptSig === null) return
+      const after = this.store.changeSignature()
+      this.lastChangeSig = changedOutsideSweepWrites(sweptSig, after, own) ? sweptSig : after
+    } catch {
+      /* a signature we cannot read is not a baseline; the backstop still ticks */
+    }
+  }
+
+  /**
    * The domain tick body. Everything below — the `listNonTerminal`-only sweep,
    * the save-before-hook ordering (P0-1 exactly-once terminal delivery), the
    * transition fan, and the per-run try/catch — is UNCHANGED from the original
@@ -245,10 +478,45 @@ export class TridentTickLoop {
    */
   private async tickBody(): Promise<void> {
     let advanced = 0
+    // The change signature AS OF THIS SWEEP'S OWN OBSERVATION POINT — sampled here,
+    // before a single row is read, and handed to `settleChangeBaseline` at the tail.
+    // Its only job is to keep the watcher's baseline honest across a tick (see
+    // `watchBody`). Read defensively: the watcher is an accelerator and must never
+    // be the reason a tick fails.
+    let sweptSig: string | null = null
+    if (this.watchLoop !== null) {
+      try {
+        sweptSig = this.store.changeSignature()
+      } catch {
+        sweptSig = null
+      }
+    }
+    // THE SWEEP'S OWN LEDGER: every row this tick committed → the stamp its write
+    // left there. `settleChangeBaseline` subtracts exactly these from the post-sweep
+    // sample, so the tick absorbs its own writes and NOTHING else. Populated only
+    // when the watcher exists (it is the only reader) and only from rows that
+    // actually committed.
+    const ownWrites = new Map<string, string | null>()
+    // DID THIS SWEEP ACTUALLY READ THE ROWS? Only a sweep that got its row list may
+    // move the watcher's baseline (Argus r3). `listNonTerminal` is the one statement
+    // outside the per-run try/catch, so a throw here means the tick saw NOTHING —
+    // and settling `sweptSig` in that case would adopt the very change the wake was
+    // fired for, silently: `sweptSig` is sampled AFTER that change landed, so the
+    // watcher's next sample matches it and the wake is lost until the 90 s backstop.
+    // Leaving the baseline untouched instead keeps the difference visible, so the
+    // next watcher cadence re-fires the tick. Each failed attempt is cheap (it dies
+    // on the same failing read, before any git/gh work) and the retry stops the
+    // moment the read succeeds.
+    let swept = false
     // Scoped block: the body below is lifted verbatim from the old `runOnce`
-    // (its `try` block); the brace keeps it byte-identical for review.
-    {
+    // (its `try` block); the brace keeps it byte-identical for review. The
+    // `finally` is the only addition — it settles the watcher's baseline for every
+    // sweep that read its rows, whether the rest of the body completed or threw, so
+    // a failed tick cannot leave the detector comparing against a signature nothing
+    // will ever match again.
+    try {
       const runs = this.store.listNonTerminal(this.per_tick_limit)
+      swept = true
       for (const run of runs) {
         try {
           const outcome = await this.step(run)
@@ -266,6 +534,14 @@ export class TridentTickLoop {
               continue
             }
             advanced++
+            // Record the stamp OUR write left, read back from the row (`saveIfActive`
+            // stamps the store's clock, so the in-memory `outcome.run` does not carry
+            // it). Only the watcher reads this, so it costs nothing when disabled; a
+            // row we cannot re-read records `null`, which no real stamp equals — the
+            // conservative direction (one extra sweep, never a lost wake).
+            if (this.watchLoop !== null) {
+              ownWrites.set(run.id, this.store.get(run.id)?.last_advanced_at ?? null)
+            }
           }
           // M1 UX REDESIGN — live-progress fan. `outcome.run` always carries the
           // latest observable state: the transitioned row when the step changed
@@ -336,6 +612,11 @@ export class TridentTickLoop {
         }
       }
       this.advancedCount += advanced
+    } finally {
+      // A sweep that read its rows settles the baseline and clears the debt; one that
+      // did not leaves the baseline alone and OWES the watcher a re-fire.
+      if (swept) this.settleChangeBaseline(sweptSig, ownWrites)
+      this.sweepOwed = !swept
     }
   }
 

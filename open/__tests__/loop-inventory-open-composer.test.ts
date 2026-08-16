@@ -55,6 +55,10 @@ const EXPECTED_RUNNING_LOOPS = [
   'reflect-consolidation',
   'reminders',
   'trident',
+  // Trident's 2 s wake-on-change detector — a second timer on the same
+  // TridentTickLoop, registered so a dead accelerator is visible in the
+  // inventory rather than only in `watch_failed` log lines.
+  'trident-watch',
   'watchdog',
 ] as const
 /** The D-7 dormant loops (built, never started). */
@@ -193,9 +197,9 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all nine running loops + the dormant set', () => {
+test('the ONE boot line names all ten running loops + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('9 loop(s) running')
+  expect(line).toContain('10 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

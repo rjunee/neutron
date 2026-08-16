@@ -131,6 +131,7 @@ import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { buildAppWsApprovalNotifier } from './wiring/approval-notifier.ts'
+import { buildAppWsReminderTopicResolver } from './wiring/reminder-topic.ts'
 import { buildWatchdogAlertEnvelope, wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
@@ -395,7 +396,9 @@ import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-tel
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
+import { parseAppWsSendMarker, shouldNotifyForSend } from './wiring/app-ws-marker.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
+import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
 import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
@@ -467,6 +470,7 @@ import {
 } from '@neutronai/trident/codex-credential.ts'
 import { defaultGitModeProbe, detectMergeMode, makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
+import { setGithubSpawnEnvResolver } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
 import {
@@ -978,6 +982,21 @@ export function buildOpenGraphComposer(
             store: recoveredReplyStore,
           })
         : undefined
+    // THE INSTANCE'S GITHUB CREDENTIAL, REGISTERED ONCE. Which substrates get it
+    // is decided on the PROFILES (`substrate-profiles.ts` `github_credential`),
+    // not here and not at the nine construction sites — so a new substrate
+    // inherits the trust decision of the profile it picks instead of silently
+    // getting nothing, which is how an agent came to answer a live GitHub
+    // question out of documentation (`ISSUES.md` #576) and how a private-repo
+    // trident build came to die at `fatal: could not read Username`.
+    //
+    // Resolved PER SPAWN: a credential connected after boot works, and a rotated
+    // one is never stale. ⚠️ `secretsStore` is constructed further down this same
+    // scope — safe only because this closure runs at spawn time, long after
+    // composition returns. Pinned by a test.
+    setGithubSpawnEnvResolver(async () =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
+    )
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,
@@ -1588,8 +1607,17 @@ export function buildOpenGraphComposer(
     // exist when the reminder DISPATCHER is built below. The dispatcher is handed a
     // stable seam that DEREFS this binding per fire, so a ritual and a nudge share
     // one dispatcher rather than one dispatcher plus one executor. `null` until
-    // `init_ritual_planner` runs (LLM-less box ⇒ never runs ⇒ every row composes as
-    // an ordinary nudge, which is fail-closed: nothing reads a ritual's prompt).
+    // `init_ritual_planner` runs (LLM-less box ⇒ never runs).
+    //
+    // ⚠️ WHAT THAT NULL MEANS WAS WRITTEN DOWN WRONG HERE. It said the fall-through
+    // was "fail-closed: nothing reads a ritual's prompt" — true about the prompt, and
+    // it made a null planner sound harmless. It was not: with no planner the
+    // dispatcher classified EVERY row as a nudge, so a ritual row composed from its
+    // stored `message`, which is the dispatch token `ritual:<id>`, and the owner's
+    // lock screen read `ritual:kaizen`. The dispatcher now refuses a ritual row
+    // outright when it cannot plan one (`reminders/dispatcher.ts`, keyed on
+    // `reminder.ritual_id`) — THAT is what makes this null fail-closed, not the
+    // absence of a prompt read.
     let ritualPlanner: RitualFirePlanner | null = null
     // ── THE canonical TaskStore — ONE instance for the whole box ────────────
     // Every task surface must be the SAME object, not merely the same table.
@@ -2342,6 +2370,30 @@ export function buildOpenGraphComposer(
         return []
       }
     }
+    /**
+     * JUST the live project ids — the question "does this id name a project?".
+     *
+     * NOT `readProjectRows().map(r => r.id)` (Argus round 1, confirmed x2, on two
+     * counts). First, that drags the WHOLE rail computation per call —
+     * `readProjectUnread` + `readProjectRailExtras` (a `boardRunStore.get` per
+     * linked work-board item, a latest-message preview query, a live-run count) —
+     * O(projects x board items) of DB work to answer a membership test that is one
+     * indexed SELECT. Second, and worse, `readProjectRows` catches and returns `[]`:
+     * a transient DB failure would make EVERY project unknown and reroute EVERY
+     * project reminder to General, silently — the precise failure mode this card
+     * exists to eliminate, reintroduced fail-open.
+     *
+     * So this one DOES NOT CATCH. The reminder-topic resolver owns the failure and
+     * reports it as `project_list_unavailable` instead of pretending the box has no
+     * projects.
+     */
+    const listProjectIds = (): string[] =>
+      db
+        .prepare<{ id: string }, []>(
+          `SELECT id FROM projects WHERE deleted_at IS NULL ORDER BY id ASC`,
+        )
+        .all()
+        .map((r) => r.id)
     // ── The owner gate (C3c: carved to open/wiring/owner-gate.ts) ──────────
     // `coldStartRedirect` / `hasResumableState` / the React-shell bootstrap HTML
     // injection (`projectsBootstrapScript` / `onboardingBootstrapScript` /
@@ -2456,8 +2508,101 @@ export function buildOpenGraphComposer(
     // `buildAppWsSendReply` / `landing.registry`, touched only at FIRE time (tick
     // loop / brief cron / notice edge), long after boot wires the adapter — never
     // during composition. NO feature flag.
+    // NATIVE PUSH — the transport. `/api/app/devices/{register,unregister}`
+    // (mounted further down over this SAME store) records the owner's device
+    // tokens; this is the half that sends to them.
+    //
+    // ALWAYS ON, and safe to be: every send reads the token table first and
+    // returns before any fetch when the list is empty, so the zero-device state a
+    // fresh install starts in makes no network call at all.
+    //
+    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
+    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
+    const devicePushTokens = new DevicePushTokenStore(db)
+    const pushTransport = createPushDispatcher({
+      store: devicePushTokens,
+      client: createExpoPushClient(
+        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
+          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
+          : {},
+      ),
+    })
+    // THE NOTIFICATION FOR A CHAT MESSAGE, composed from the chat message, and
+    // handed to `deliver` below so every out-of-turn post THAT GOES THROUGH
+    // `deliver` carries it — the fired reminder, the ritual, the morning brief, the
+    // idle nudge, the overnight report. Built here (above `deliver`) rather than
+    // beside the reminder dispatcher because it is no longer a reminder's concern.
+    //
+    // WHAT IS NOT COVERED, NAMED RATHER THAN LEFT TO BE DISCOVERED. `deliver` is not
+    // the only path a durable agent message reaches the app-ws topic by, so "every
+    // out-of-turn post" is a claim about this seam and not about the surface:
+    //
+    //   * a TRIDENT TERMINAL posts through the ChannelRouter
+    //     (`buildTridentDelivery({ sink: channelRouter })` below → `trident/delivery.ts`
+    //     `opts.sink.send`), so a build that finishes while the owner is elsewhere lands
+    //     in his chat with no buzz. This is genuinely out-of-turn and genuinely
+    //     uncovered — it is PRE-EXISTING, not a regression here (before this change the
+    //     push was composed in the reminder tick, so nothing but a fired reminder ever
+    //     notified at all), and routing it through `deliver` is a change to the Trident
+    //     delivery seam rather than a line here.
+    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, and
+    //     it NOW NOTIFIES TOO — see the push block in that function. This line
+    //     used to read "which is deliberate: the owner sent the message that
+    //     caused it, so it is in-turn", and that was true until 2026-08-15, when
+    //     the owner overruled it: "Everything should be a chat message, and I get
+    //     notified for any and all chat messages if I'm not actively in the app."
+    //     Kept as a correction rather than deleted, because the ORIGINAL reasoning
+    //     was sound and its replacement depends on a condition that did not exist
+    //     when it was written: "in-turn" was standing in for "he is looking at
+    //     this", and the device now answers that question directly
+    //     (`app/lib/push-foreground-policy.ts`). Remove that device policy and
+    //     this exclusion becomes right again.
+    //
+    // Written down because the previous wording here said "EVERY out-of-turn post",
+    // which is the confidently-specific kind of comment that gets believed instead of
+    // checked — and a reader would have concluded a completed build notifies.
+    //
+    // 2026-08-09, owner-reported: his phone said `ritual:kaizen`. The push was
+    // composed in the reminder TICK from the reminder ROW, and a ritual row's
+    // `message` IS that dispatch token — so the notification could never contain
+    // the text that got posted, and the payload carried the owner slug where the
+    // tap needed a project id. Both halves of his complaint were that one mistake.
+    //
+    // `project_slug` is the key `/api/app/devices/register` writes its rows under
+    // (`gateway/http/app-devices-surface.ts:206` — the resolved owner bearer's
+    // slug). Reading and writing under one key is what makes "a registered device
+    // is a notified device" true rather than aspirational.
+    const chatMessagePush = buildChatMessagePushSink({
+      fanOut: pushTransport,
+      project_slug,
+    })
+    /**
+     * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign
+     * topic) → undefined.
+     *
+     * WHY THE DELIVER SEAM NEEDS THIS (Argus round 1). Routing the fire to the
+     * project topic is only half of "the owner sees it". `buildAppWsSendReplyResult`
+     * takes the project id as a SEPARATE argument and uses it to stamp
+     * `projects.last_activity_at` and re-fan `projects_changed` — the rail pop and
+     * the unread badge. Called with the topic alone, a fired project reminder wrote
+     * a durable row into the project topic and changed NOTHING in the rail: invisible
+     * unless the owner already happened to be sitting inside that project. Deriving
+     * the id back off the topic here makes an out-of-turn post behave exactly like a
+     * steady-state agent reply on the same topic, which is the one path already
+     * proven to light the rail. (A transient system notice is still exempt — that
+     * check lives inside `buildAppWsSendReplyResult`.)
+     */
+    const appWsProjectIdOfTopic = (topic_id: string): string | undefined => {
+      const prefix = `${appWsTopicId(OWNER_USER_ID)}:`
+      if (!topic_id.startsWith(prefix)) return undefined
+      const project_id = topic_id.slice(prefix.length)
+      return project_id.length > 0 ? project_id : undefined
+    }
     const deliver: Deliver = createDeliver({
       buttonStore: landing.buttonStore,
+      // Every durably-posted out-of-turn message notifies the owner's devices;
+      // a transient `durability: 'none'` pill does not (no row, nothing to tap).
+      notify: chatMessagePush,
       push: {
         // `buildAppWsSendReply` now AWAITS the app-ws adapter and classifies its real
         // result marker, so `delivered_live` reflects the TRUE fan-out (an offline
@@ -2465,7 +2610,7 @@ export function buildOpenGraphComposer(
         // NOT a hardcoded true or a stale pre-send registry snapshot (Codex/O6). The
         // persist + fan still happen inside the awaited send.
         app: (topic_id: string, event: ChatOutbound): Promise<boolean> =>
-          buildAppWsSendReplyResult(topic_id)(event),
+          buildAppWsSendReplyResult(topic_id, appWsProjectIdOfTopic(topic_id))(event),
         web: (topic_id: string, event: ChatOutbound): boolean =>
           landing.registry.send(topic_id, event),
       },
@@ -2480,36 +2625,51 @@ export function buildOpenGraphComposer(
     // notifier resolves the same holder (durability 'inert' — a proposal must
     // survive until he opens the app, unlike a transient notice pill).
     noticeDeliverHolder.deliver = deliver
-    // Resolve every fired reminder/brief to the app-ws topic the client binds:
-    // the owner's BARE `app:<user>`.
+    // Resolve every fired reminder/brief to the app-ws topic that OWNS the work.
     //
-    // THE BUG (M1 E2E Round 2, 2026-06-29 — the residual #105 missed): the app-ws
-    // client opens ONE `/ws/app/chat` socket and registers its live sender +
-    // replays history on the BARE `app:<user>` topic only (`app-ws-surface.ts`
-    // registers `appWsTopicId(user_id)`; `config.topicId = appWsTopicId(userId)`);
-    // project context is a per-FRAME field, NOT a topic suffix. This differs from
-    // the LEGACY web path, which bound a per-socket sender on
-    // `web:<user>:<project>` — and #105 ported that suffixing pattern here,
-    // mapping a project reminder (`app-project:<id>`) to `app:<user>:<id>`. But
-    // NO sender is ever registered on that suffixed topic, so the live push
-    // matches nothing (`registry.send` → false, dropped), AND the durable
-    // `button_prompts` row lands under a topic the client NEVER replays (it only
-    // ever hydrates the bare `app:<user>`) — so a project-scoped reminder VANISHES
-    // entirely, live and on reload. (General reminders — `explicit_topic` null →
-    // bare topic — are the only case #105's test exercised, which is why this
-    // slipped through.)
+    // THE BUG (measured 2026-08-15): 24 reminder fires landed on the bare
+    // `app:<owner>` topic across one night while the owner was reading — and
+    // writing in — `app:owner:neutron-open`. Every fire resolved to General
+    // because this closure discarded its `explicit_topic` argument. That was the
+    // CORRECT behaviour when written (the residual #105 fix, 2026-06-29): back
+    // then the app-ws client bound its live sender and replayed history on the
+    // bare `app:<user>` topic ONLY, so a project-suffixed delivery topic matched
+    // no sender and persisted under a topic nothing hydrated — the reminder
+    // vanished, live and on reload. It has been false since app-ws topic scoping
+    // (`gateway/http/app-ws-surface.ts` `resolveChannelTopicId`, ISSUES #399):
+    // each project chat now BINDS and HYDRATES its own `app:<user>:<project>`
+    // topic — which is exactly where the trident build cards the owner WAS seeing
+    // land.
     //
-    // THE FIX: deliver ALL fired reminders/briefs to the owner's bare
-    // `app:<user>` topic — exactly the general-reminder path #105 made work and
-    // the one topic the client actually binds + hydrates. Project GROUPING is
-    // unaffected: it lives on the reminder row's stored `topic_id`
-    // (`app-project:<id>`) which the reminders tab filters on (`store.listBy*`)
-    // and `deriveReminderProjectId` keys context/metering off — neither reads
-    // this delivery topic. The fired message simply surfaces in the owner's chat,
-    // the single surface the app reads, instead of silently disappearing.
+    // THE FIX: a fire resolves to the project topic when its stored destination
+    // names an EXISTING project (raw `project_id` from the Reminders Core,
+    // `app-project:<id>` from the app surface, or legacy `web:<user>:<id>`), and
+    // to General otherwise. An unknown destination deliberately falls back to
+    // General — the #105 lesson, kept: a fire must NEVER persist into a topic no
+    // client reads. `resolveAppWsReminderTopic(null)` (ritual approvals, executor
+    // ritual posts, briefs) still means General. Project GROUPING in the
+    // reminders tab is unaffected either way: it reads the reminder row's stored
+    // `topic_id` (`store.listBy*` / `deriveReminderProjectId`), not this
+    // delivery topic.
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
-    const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
-      reminderGeneralTopic
+    //
+    // EVERY downgrade to General is SAID OUT LOUD (`onDowngrade`). A fire that
+    // names a destination and lands somewhere else is precisely the defect —
+    // going quiet about it is how it survived a night unnoticed. The resolver's
+    // lister is the cheap `listProjectIds` SELECT, which does NOT swallow read
+    // errors: a DB failure reports `project_list_unavailable` rather than
+    // masquerading as "this box has no projects".
+    const resolveAppWsReminderTopic = buildAppWsReminderTopicResolver({
+      owner_user_id: OWNER_USER_ID,
+      listProjectIds,
+      onDowngrade: (event) =>
+        log.warn('reminder_topic_downgraded_to_general', {
+          explicit_topic: event.explicit_topic,
+          reason: event.reason,
+          candidate: event.candidate,
+          ...(event.error !== undefined ? { error: event.error } : {}),
+        }),
+    })
     // ONE outbound + ONE runs store hoisted so the nudge dispatcher, the ritual
     // executor, and the boot reap all post through / write to the SAME instances
     // (one deliver seam, one `code_ritual_runs` writer).
@@ -2534,8 +2694,15 @@ export function buildOpenGraphComposer(
       tool_names: LIVE_AGENT_TOOL_NAMES,
       // ISSUES #504 — the ritual fire planner, DEREFERENCED PER FIRE so the
       // late-bound `ritualPlanner` (installed once the graph's ApprovalManager
-      // exists) reaches the dispatcher that was built before it. Null planner ⇒
-      // 'nudge' ⇒ the row composes from its own stored message.
+      // exists) reaches the dispatcher that was built before it.
+      //
+      // A null planner answers 'nudge', and the dispatcher applies that answer ONLY
+      // to a row with no `ritual_id`. A RITUAL row is refused there instead: it
+      // composes nothing and the owner gets one plain-language notice saying the
+      // occurrence was skipped. This comment used to stop at "⇒ the row composes
+      // from its own stored message", which was the defect stated as if it were the
+      // design — a ritual row's stored message IS `ritual:<id>`, so that is exactly
+      // how the token reached his lock screen. See `reminders/dispatcher.ts`.
       ritual_planner: {
         plan: async (reminder) =>
           ritualPlanner !== null ? ritualPlanner.plan(reminder) : { kind: 'nudge' as const },
@@ -2577,6 +2744,12 @@ export function buildOpenGraphComposer(
     // the one authenticated control-plane call, and only if the target sha has
     // not moved since he was asked.
     //
+    // WHERE THE PROMPT LANDS (this card, 2026-08-15): the topic that REQUESTED
+    // the deploy. `approval_topic_id` below is the FALLBACK, used only when the
+    // request carries no calling topic (cron/system). It used to be the sole
+    // destination, so every prompt went to the owner's General topic and the
+    // owner was told to tap a button in a conversation he was not in.
+    //
     // LATE-BOUND for the same reason `ritualRegistration` is: the service needs
     // the graph's ApprovalManager, which does not exist here. `install` is
     // called from the approval module's init. NOT gated on `llmPool` — the tools
@@ -2614,9 +2787,12 @@ export function buildOpenGraphComposer(
         dispatch: createHostDeployDispatch(),
         project_slug,
         owner_user_id: OWNER_USER_ID,
+        // FALLBACK ONLY (2026-08-15). The prompt is raised on the topic that
+        // requested the deploy; this owner General topic is used only when a
+        // request carries no calling topic (cron/system).
         approval_topic_id: resolveAppWsReminderTopic(null),
         emit: async (p) => {
-          const result = await deliver(resolveAppWsReminderTopic(null), {
+          const result = await deliver(p.topic_id, {
             body: p.body,
             durability: 'reply',
             options: p.options,
@@ -2782,6 +2958,15 @@ export function buildOpenGraphComposer(
     // contain a current-boot 'running' row (`code_ritual_runs` has no boot_id;
     // ordering IS the current-boot safety). The prune chains after the reap.
     // fireAndForget precedent: the boot dispatch sweep just above (composer:888).
+    //
+    // 2026-08-09 — this NOW NOTIFIES, and that is intended rather than incidental.
+    // The reap posts one chat message per run it found orphaned, through the same
+    // `reminderOutbound` → `deliver` path everything else uses, so those posts pick
+    // up the device notification like any other. A ritual that died mid-flight is
+    // exactly the kind of thing the owner should learn about without opening the
+    // app. It is bounded by design: the reap only speaks for runs left 'running' by
+    // a PRIOR boot, so the steady state is zero messages and a restart storm cannot
+    // manufacture new ones (a reaped row is settled, not re-reaped).
     fireAndForget(
       'composer.reapOrphanRitualRuns',
       reapOrphanRitualRuns({
@@ -3202,41 +3387,12 @@ export function buildOpenGraphComposer(
     // while this was unmounted NO device could ever register and the
     // `device_push_tokens` table stayed empty on every install.
     //
-    // ONE store instance, shared with the delivery half below, so the rows the
-    // register route writes are literally the rows the reminder push reads.
-    const devicePushTokens = new DevicePushTokenStore(db)
+    // ONE store instance, shared with the delivery half (the push transport is
+    // built earlier, above the reminder outbound that feeds it), so the rows the
+    // register route writes are literally the rows a notification is sent to.
     const appDevicesSurface = createAppDevicesSurface({
       store: devicePushTokens,
       auth: appOwnerAuth,
-    })
-    // The OTHER half of push. Registration on its own delivers nothing: the
-    // fan-out lives behind the `push_dispatcher` composition field, which
-    // `build-core-modules.ts:396-398` attaches to the reminder tick's `on_fired`
-    // hook — and until now NO composer set it, so `createPushDispatcher`
-    // (`gateway/push/dispatcher.ts:133`) had no non-test call site and the
-    // reminder deep link (`app/lib/push-deep-link-dispatch.ts:93-108`) could
-    // never be reached. It is not a route slot, so the route-slot coverage gate
-    // cannot see the gap; `tests/integration/reminders-tab-and-push.open.test.ts`
-    // is what holds this wiring down.
-    //
-    // ALWAYS ON, and safe to be: `pushReminder` reads the token table first and
-    // `dispatch` returns before any fetch when the message list is empty
-    // (`gateway/push/dispatcher.ts:145-147`), so the zero-device state every
-    // fresh install starts in makes no network call at all. Downstream of a
-    // SUCCESSFUL nudge dispatch only (`reminders/tick.ts:314-323`), so push
-    // never adds a notification for a reminder the owner was not already being
-    // told about, and its own failures are caught and logged without touching
-    // the fired row.
-    //
-    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
-    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
-    const push_dispatcher = createPushDispatcher({
-      store: devicePushTokens,
-      client: createExpoPushClient(
-        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
-          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
-          : {},
-      ),
     })
     // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
     // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
@@ -5083,8 +5239,22 @@ export function buildOpenGraphComposer(
     // `(out) => void` wiring contract (app-ws.ts) — a rejection must not escape into
     // sendSafe's SYNC-only guard.
     const buildAppWsSendReplyResult =
-      (channel_topic_id: string, project_id?: string) =>
+      (channel_topic_id: string, project_id?: string, opts?: { notify?: boolean }) =>
       async (out: ChatOutbound): Promise<boolean> => {
+        // WHO OWNS THE NOTIFICATION FOR THIS SEND, stated at the call site.
+        //
+        // This function has exactly two callers and they are NOT peers: a live
+        // agent turn calls it DIRECTLY, and `deliver` calls it as its live
+        // fan-out (`push.app`). So a delivered post passes through here too —
+        // and `deliver` already notifies from its own seam, with the dedup and
+        // the delivered_at stamp that belong to it.
+        //
+        // Notifying unconditionally here therefore BUZZED HIM TWICE for every
+        // out-of-turn post, which is exactly what the push E2E caught: expected
+        // 1 push, received 2. Defaulting to false and letting the live-turn call
+        // site opt IN keeps one notification per message with the ownership
+        // written down, rather than inferred from which stack frame you are in.
+        const ownsNotify = opts?.notify === true
         if (out.type !== 'agent_message') return false
         const msg: OutgoingMessage = {
           topic: {
@@ -5124,10 +5294,50 @@ export function buildOpenGraphComposer(
         // is written before this resolves. The delivered_live boolean is returned at
         // the END (after the best-effort last_activity stamp below).
         const marker = await appWs.deref((adapter) => adapter.send(msg))
-        const deliveredLive =
-          typeof marker === 'string' &&
-          !marker.startsWith('app-ws:dropped:') &&
-          !marker.startsWith('app-ws:lost:')
+        const sent = parseAppWsSendMarker(marker)
+        const deliveredLive = sent.delivered_live
+        // NOTIFY HIS DEVICES FOR AN ORDINARY REPLY TOO (owner, 2026-08-15:
+        // "Everything should be a chat message, and I get notified for any and
+        // all chat messages if I'm not actively in the app").
+        //
+        // This path was excluded ON PURPOSE until now, and the reasoning was
+        // sound at the time: he sent the message that caused this reply, so it
+        // is in-turn, and buzzing someone about the answer to what they just
+        // typed is noise. What changed is the OTHER half — the device now
+        // declines to interrupt the conversation on screen
+        // (`app/lib/push-foreground-policy.ts`). With that in place, "in-turn"
+        // stops being a proxy for "he is looking": he can send a message, put
+        // the phone down, and the reply is news exactly the way it is in every
+        // other chat app.
+        //
+        // ⚠️ SO THE TWO HALVES ARE COUPLED. If that device policy is ever
+        // weakened, this notify has to be revisited in the SAME change, or his
+        // phone buzzes while he types into it.
+        //
+        // Gated on `durable`, not on `!delivered_live`: the id has to point at a
+        // row that exists. `app-ws:dropped:<id>` — persisted, nobody listening —
+        // is precisely the case worth notifying, while `app-ws:lost:<id>` has no
+        // row for the tap to open. The old `!startsWith` predicate could not tell
+        // those apart. A `system_notice` is live-only by construction and carries
+        // no row at all.
+        if (
+          shouldNotifyForSend({
+            owns_notify: ownsNotify,
+            system_notice: out.system_notice === true,
+            sent,
+          }) &&
+          chatMessagePush !== undefined
+        ) {
+          // Fire-and-forget: a push failure must never cost the reply. The sink
+          // already records its own outcome.
+          fireAndForget('composer.chat-message-push', (async (): Promise<void> => {
+            await chatMessagePush({
+              project_id: project_id ?? null,
+              message_id: sent.message_id as string,
+              body: out.body,
+            })
+          })())
+        }
         // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
         // stamp the project's `last_activity_at` and re-fan `projects_changed`
         // so every connected rail reorders (this project pops to the top) and
@@ -5162,7 +5372,13 @@ export function buildOpenGraphComposer(
     const buildAppWsSendReply =
       (channel_topic_id: string, project_id?: string) =>
       (out: ChatOutbound): void => {
-        fireAndForget('composer.deref', buildAppWsSendReplyResult(channel_topic_id, project_id)(out))
+        // The LIVE-TURN send owns its notification: nothing else will send one
+        // for an ordinary reply. `deliver`'s call site (above) deliberately does
+        // not, because `deliver` notifies from its own seam.
+        fireAndForget(
+          'composer.deref',
+          buildAppWsSendReplyResult(channel_topic_id, project_id, { notify: true })(out),
+        )
       }
     // ── app-ws receiver + delivery cluster (C3d: carved to open/wiring/app-ws.ts) ─
     // The Path-1 closing/opening delivery (`onboardingMsg` bind), the ephemeral
@@ -5665,10 +5881,6 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
-      // The reminder-fired PUSH hook. `build-core-modules.ts:396-398` attaches
-      // it to `ReminderTickLoop.on_fired`, so a fired reminder reaches the
-      // owner's registered devices instead of only the in-app chat topic.
-      push_dispatcher,
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.
@@ -5685,7 +5897,7 @@ export function buildOpenGraphComposer(
       //     owner's BARE `app:<user>` topic: the exact topic discipline the
       //     PR #105 deliver-to-nobody incident produced. Chat is the GUARANTEED
       //     surface.
-      //   - `push_dispatcher` (:3092) — best-effort mobile push ALONGSIDE chat,
+      //   - `pushTransport` (:2496) — best-effort mobile push ALONGSIDE chat,
       //     never instead of it. A zero-device box still gets the chat post.
       //   - the substrate one-shot LLM — the ONLY model seam (no provider dep,
       //     no new secret). Null on an LLM-less box, where the cascade
@@ -5698,7 +5910,11 @@ export function buildOpenGraphComposer(
         project_slug,
         deliver,
         escalation_topic_id: reminderGeneralTopic,
-        push: push_dispatcher,
+        // RENAMED, not rewired: #171 deleted the `push_dispatcher` composition
+        // field and renamed the local to `pushTransport` (:2496). The email
+        // pipeline's consumer was added on main AFTER that branch was cut, so the
+        // merge left a reference to a name that no longer exists. Same object.
+        push: pushTransport,
         llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
         resolveTimezone: (slug: string): string | undefined =>
           readOwnerTimezone(db, slug) ?? undefined,

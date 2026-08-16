@@ -8,30 +8,65 @@
  * has to load RN, matching the split used by
  * `chat-deep-link-dispatch.ts`.
  *
- * Payload shape (as written by `gateway/push/dispatcher.ts` +
- * `gateway/wow-push-emitter.ts`):
+ * Payload shape (as written by `gateway/push/chat-message-push.ts` +
+ * the Core emitters):
  *
- *   - `{kind: 'reminder', topic_id, project_slug, reminder_id, project_id?}`
+ *   - `{kind: 'agent_message', message_id, project_id}`
+ *       → `/projects/<pid>/chat?message_id=<mid>`
+ *
+ *     THE ONE SHAPE A CHAT MESSAGE TAKES — a fired reminder, a ritual post, an
+ *     agent post, a brief, a nudge. `project_id` is always present; for the
+ *     no-project General scope it is the shared `GENERAL_RAIL_ID` sentinel
+ *     (`wire-types/topic-id.ts`), which is the one definition both sides import.
+ *     A missing one is still tolerated and read as General, because a payload
+ *     already sitting in the notification shade was built by whatever gateway
+ *     version delivered it.
+ *
+ *   - `{kind: 'reminder', reminder_id, project_id?}`
  *       → `/projects/<pid>/reminders?reminder_id=<rid>`
  *
- *     The existing reminder payload only carries
- *     `topic_id = 'app-project:<project_id>'` (per
- *     `gateway/http/app-reminders-surface.ts:appProjectTopicId`).
- *     Stripping that prefix recovers the route param so the existing
- *     reminder push tokens just start working when the listener lands
- *     — no gateway-side payload change required.
+ *     LEGACY, DECODE-ONLY — no sender remains (grep-verified: no `PUSH_KIND_REMINDER`
+ *     and no `kind: 'reminder'` producer anywhere in the gateway). Until 2026-08-09
+ *     this was how a fired reminder notified, composed from the reminder ROW, which
+ *     is why a ritual fire put the literal dispatch token `ritual:<id>` on the
+ *     owner's lock screen and why the tap opened the Reminders TAB instead of the
+ *     chat the message was in. Both are fixed by `agent_message` above.
+ *
+ *     THIS BRANCH STAYS ANYWAY, and it is not a dual code path — there is exactly
+ *     one SENDER. It is the DECODER for payloads that already exist: notifications
+ *     sitting undismissed in the shade right now, and any gateway a self-hoster has
+ *     not upgraded yet. A store-published app and a self-hosted gateway do not
+ *     upgrade atomically, so deleting the decoder would turn those taps into the
+ *     "opens the app and nothing routes" the change exists to end. It also keeps the
+ *     reminders deep-link surface (ISSUE #38 — `app/app/projects/[id]/reminders.tsx`
+ *     + `ReminderList`'s highlight/scroll) reachable rather than orphaned.
+ *
+ *     One thing DID change: an UNRESOLVABLE project no longer refuses outright. A
+ *     project-scoped legacy reminder carries its project as `topic_id =
+ *     'app-project:<id>'` and resolves fine; a GENERAL one carried no project field
+ *     at all (only `project_slug`, the owner slug), so this branch used to return
+ *     null for every General reminder notification ever sent — the owner's *"it
+ *     opens the app but not the right project"*, in the code. It now falls back to
+ *     General, so a legacy tap lands on a real, working surface instead of nowhere.
+ *
+ *     AND THAT IS THE WHOLE OF THE CLAIM — the tapped row itself may well not be in
+ *     the list. General's Reminders tab is not an "everything" view: the surface
+ *     lists `listPendingByTopic(project_slug, 'app-project:~general')`
+ *     (`gateway/http/app-reminders-surface.ts`, the list route) and the
+ *     `include_id` widening that exists for exactly this deep-link case re-checks
+ *     `extra.topic_id === topic_id` before admitting a row. A legacy General
+ *     reminder was written by an engine path with `topic_id` NULL, so it matches
+ *     neither test and cannot be highlighted. The tap lands on the right TAB, not on
+ *     the row. That is still strictly better than the `null` it used to return (the
+ *     app opened and nothing routed at all), and it is not worth chasing further: no
+ *     sender has emitted this kind since 2026-08-09, so the population is finite and
+ *     shrinking. Stated plainly because the earlier wording here claimed the tab
+ *     "lists every reminder", which is the kind of confident, specific, WRONG
+ *     docblock that gets believed instead of checked.
  *
  *   - `{kind: 'wow_fired', project_id}` → `/projects/<pid>/chat` (no sender today)
  *   - `{kind: 'calendar_pre_meeting_brief', project_id, event_id}` → `/projects/<pid>/chat`
  *   - `{kind: 'email_daily_triage', project_id}` → `/projects/<pid>/chat`
- *
- *   - `{kind: 'agent_message', project_id, message_id?}`
- *       → `/projects/<pid>/chat[?message_id=<mid>]`
- *
- *     Forward-compat: no gateway emitter fires this kind this sprint
- *     (per the brief's "out of scope"); the router accepts it so a
- *     future per-message push doesn't need a coordinated client +
- *     server release.
  *
  *   - Anything else → null + structured warn. Caller routes to the
  *     default surface (i.e. no-op; the OS already opened the app at
@@ -39,12 +74,9 @@
  */
 
 import type { PushKind } from '@neutronai/wire-types/push-kind.ts';
+import { GENERAL_PROJECT_ID } from './project-rail-view';
 
-export type PushPayloadKind =
-  | PushKind
-  /** No sender today; kept as the shape a chat push will take. */
-  | 'agent_message'
-  | string;
+export type PushPayloadKind = PushKind | string;
 
 /**
  * The raw `request.content.data` Expo hands the listener. Typed as
@@ -55,9 +87,16 @@ export type PushPayloadKind =
 export interface PushPayload {
   kind?: unknown;
   project_id?: unknown;
-  topic_id?: unknown;
-  reminder_id?: unknown;
   message_id?: unknown;
+  /**
+   * LEGACY decode-only fields. Declared rather than left to the index signature
+   * below because `resolvePushRoute` and `resolveProjectId` actually read them, and
+   * this tsconfig has no `noPropertyAccessFromIndexSignature` — so an undeclared
+   * read compiles, and renaming one in the decoder would compile too. Naming them
+   * here is what makes the interface a description of what is read.
+   */
+  reminder_id?: unknown;
+  topic_id?: unknown;
   // Open-ended: a future kind may carry additional fields the helper
   // doesn't need to interpret. The `Record` index keeps TS from
   // complaining when tests pass extra keys.
@@ -72,8 +111,6 @@ export interface ResolvePushRouteOptions {
    */
   warn?: (message: string, meta?: Record<string, unknown>) => void;
 }
-
-const APP_PROJECT_PREFIX = 'app-project:';
 
 /**
  * Resolve a parsed push payload to a router path string. Returns null
@@ -98,30 +135,78 @@ export function resolvePushRoute(
   const kind = typeof payload.kind === 'string' ? payload.kind : null;
   const project_id = resolveProjectId(payload);
 
+  // A CHAT MESSAGE — the one shape a reminder, a ritual and an agent post share.
+  //
+  // A missing `project_id` is read as General rather than refused. The live sender
+  // always writes one, so this only forgives an older gateway's payload — and
+  // refusing it would mean "the app opened and nothing routed", which is the exact
+  // complaint. A missing `message_id` still opens the right chat: the transcript
+  // then lands wherever its own unread anchor puts it, which is strictly better
+  // than not routing.
+  if (kind === 'agent_message') {
+    const target = project_id ?? GENERAL_PROJECT_ID;
+    const message_id =
+      typeof payload.message_id === 'string' && payload.message_id.length > 0
+        ? payload.message_id
+        : null;
+    if (message_id === null) {
+      warn('agent_message payload has no message_id — opening the chat unanchored', {
+        project_id: target,
+      });
+      return `/projects/${encodeURIComponent(target)}/chat`;
+    }
+    return (
+      `/projects/${encodeURIComponent(target)}/chat` +
+      `?message_id=${encodeURIComponent(message_id)}`
+    );
+  }
+
+  // LEGACY, DECODE-ONLY — see the module docblock. No sender remains; this keeps
+  // taps working on notifications that were already delivered and on gateways a
+  // self-hoster has not upgraded. Kept OUT of `PUSH_KINDS` for the same reason
+  // `wow_fired` is: that list is what the system SENDS, and padding it with a kind
+  // nothing emits is what let the two lists drift into being disjoint.
   if (kind === 'reminder') {
     const reminder_id =
       typeof payload.reminder_id === 'string' && payload.reminder_id.length > 0
         ? payload.reminder_id
         : null;
-    if (project_id === null || reminder_id === null) {
-      warn('reminder payload missing project_id or reminder_id', {
-        project_id,
-        reminder_id,
-      });
+    if (reminder_id === null) {
+      warn('legacy reminder payload has no reminder_id', { project_id });
       return null;
     }
+    // GENERAL IS THE FALLBACK, AND THE ROW MAY NOT BE IN THE LIST THAT OPENS.
+    // Settled rather than left as a question, because it looks like a mis-anchor:
+    // the tab lists `app-project:<segment>` rows and admits the tapped
+    // `include_id` only when its `topic_id` matches EXACTLY
+    // (`gateway/http/app-reminders-surface.ts` `handleList`). A General reminder
+    // the APP created carries `app-project:~general` — the reserved no-project
+    // segment, NOT the literal `general`, which is a legal project id and used to
+    // collide with a real project of that name — and lands correctly. One created
+    // through the Reminders Core or Telegram carries that channel's topic, so it
+    // is filtered out and the tab opens without the row.
+    //
+    // NOT CHANGED, because the alternative is worse and this kind is decode-only:
+    // the only other option is `return null`, i.e. the app opens and nothing
+    // routes — the exact complaint (#520) this resolver exists to end. Landing on
+    // the owner's reminders with the target unhighlighted still puts him one screen
+    // from it. And nothing SENDS this kind any more (a fired reminder is an
+    // `agent_message` now, anchored on the durable chat row), so the population is
+    // notifications already on a device plus un-upgraded gateways — finite and
+    // shrinking, never growing.
+    const target = project_id ?? GENERAL_PROJECT_ID;
     return (
-      `/projects/${encodeURIComponent(project_id)}/reminders` +
+      `/projects/${encodeURIComponent(target)}/reminders` +
       `?reminder_id=${encodeURIComponent(reminder_id)}`
     );
   }
 
-  // NOTE: nothing sends `wow_fired` today either (grep-verified). The branch and
-  // its tests are LEFT IN PLACE rather than deleted — removing tested behaviour is
-  // a separate cleanup, not something to slip into a routing bugfix. Like
-  // `agent_message`, it is deliberately absent from `PUSH_KINDS`, so the
-  // exhaustiveness test covers only what is genuinely sent and cannot be padded by
-  // a kind no gateway emits.
+  // NOTE: nothing sends `wow_fired` (grep-verified 2026-08-09 — no `wow_fired`
+  // string exists outside this file and its tests). The branch and its tests are
+  // LEFT IN PLACE rather than deleted; removing tested behaviour is a separate
+  // cleanup, not something to slip into a routing fix. It is deliberately absent
+  // from `PUSH_KINDS`, so the exhaustiveness test covers only what is genuinely
+  // sent and cannot be padded by a kind no gateway emits.
   if (kind === 'wow_fired') {
     if (project_id === null) {
       warn('wow_fired payload missing project_id', { project_id });
@@ -142,40 +227,26 @@ export function resolvePushRoute(
     return `/projects/${encodeURIComponent(project_id)}/chat`;
   }
 
-  // NOTE: nothing sends `agent_message` today. The branch is kept because it is
-  // the shape a chat push will take, and `PUSH_KINDS` deliberately does NOT list
-  // it — the exhaustiveness test walks what is SENT, so an unsent kind here is
-  // dead-but-harmless rather than a false claim of coverage.
-  if (kind === 'agent_message') {
-    if (project_id === null) {
-      warn('agent_message payload missing project_id', { project_id });
-      return null;
-    }
-    const message_id =
-      typeof payload.message_id === 'string' && payload.message_id.length > 0
-        ? payload.message_id
-        : null;
-    if (message_id === null) {
-      return `/projects/${encodeURIComponent(project_id)}/chat`;
-    }
-    return (
-      `/projects/${encodeURIComponent(project_id)}/chat` +
-      `?message_id=${encodeURIComponent(message_id)}`
-    );
-  }
-
   // Unknown / missing kind. Surface a warn so a misconfigured gateway
   // payload is visible in prod logs without crashing the listener.
   warn('unknown push payload kind', { kind });
   return null;
 }
 
+/** The topic prefix a project-scoped reminder row wears (`reminders/store.ts:474`). */
+const APP_PROJECT_PREFIX = 'app-project:';
+
 /**
- * Recover a project_id from either the explicit `project_id` field OR
- * the existing reminder payload shape, where the gateway encodes it as
- * `topic_id = 'app-project:<project_id>'` (see
- * `gateway/http/app-reminders-surface.ts:appProjectTopicId`). Returns
- * null when neither yields a non-empty string.
+ * The project a payload names, or null.
+ *
+ * TWO SOURCES, and the second one is not dead code. The live sender writes
+ * `project_id` outright. The retired `reminder` sender wrote the OWNER slug into
+ * `project_slug` and — only when the reminder row had one — the row's own
+ * `topic_id`, which for a project-scoped reminder is `app-project:<project_id>`
+ * (`git show main:gateway/push/dispatcher.ts:277`, read before writing this).
+ * So a legacy notification for a project reminder carries its project ONLY here,
+ * and dropping this decode would land those taps on the General tab instead of
+ * the project they belong to.
  */
 function resolveProjectId(payload: PushPayload): string | null {
   if (typeof payload.project_id === 'string' && payload.project_id.length > 0) {
@@ -185,8 +256,8 @@ function resolveProjectId(payload: PushPayload): string | null {
     typeof payload.topic_id === 'string' &&
     payload.topic_id.startsWith(APP_PROJECT_PREFIX)
   ) {
-    const candidate = payload.topic_id.slice(APP_PROJECT_PREFIX.length);
-    if (candidate.length > 0) return candidate;
+    const id = payload.topic_id.slice(APP_PROJECT_PREFIX.length);
+    return id.length > 0 ? id : null;
   }
   return null;
 }

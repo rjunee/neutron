@@ -76,6 +76,10 @@ async function runWorkflow(
     // A DEAD SEAT: dispatched, returned nothing. Checked FIRST so it can kill any
     // label, including a retry lane ('argus:codex-retry').
     if (dead.has(String(label))) return null
+    // The build-completion head, read from git the moment a Forge round exits. Without
+    // it every local-mode run stops boundedly at forge-done and none of the review
+    // seats this harness exists to measure are ever dispatched.
+    if (String(label).startsWith('head-probe-round-built-')) return { head: 'a'.repeat(40) }
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       if (opts.codexBuild) {
         return { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, branch: 'trident/test-run', commitSha: 'a'.repeat(40), prNumber: null, diffFile: '/tmp/x.diff', worktreePath: '/wt', testsPassed: true }

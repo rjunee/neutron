@@ -2,6 +2,822 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-15 — the fired reminder lands on the topic that asked, and never posts its own raw intent
+
+Measured over one night: 24 reminder fires landed on the bare `app:owner` topic while
+the owner was reading — and writing in — `app:owner:neutron-open`, and two of them
+posted 3,413 and 3,336 characters of private operational `message` text straight into
+his chat. Session replies were never broken and were not touched.
+
+**Routing.** `open/composer.ts`'s `resolveAppWsReminderTopic` discarded its
+`explicit_topic` argument and returned General for every fire. That was CORRECT when
+written (the residual #105 fix, 2026-06-29): the app-ws client bound its live sender and
+replayed history on the bare `app:<user>` topic only, so a project-suffixed delivery
+topic matched no sender and persisted where nothing hydrated — the reminder vanished,
+live and on reload. It has been false since app-ws topic scoping (ISSUES #399): each
+project chat now binds AND hydrates its own `app:<user>:<project>`, which is exactly
+where the trident build cards the owner WAS seeing land. The routing table is now the
+unit-testable `open/wiring/reminder-topic.ts`: a destination naming an EXISTING project
+(raw `project_id` — the production-dominant shape at 94 of 97 live rows —
+`app-project:<id>`, or legacy `web:<owner>:<id>`) resolves to the project topic;
+everything else resolves to General, keeping the #105 lesson. **Both** the `app:` and
+`web:` branches validate the user segment: a foreign-scoped destination never acquires
+this owner's project topic.
+
+**No silent downgrades.** The whole defect was a quiet reroute, so every fall back to
+General is reported (`reminder_topic_downgraded_to_general`) with one of four reasons.
+The project lister is a dedicated `SELECT id FROM projects WHERE deleted_at IS NULL` that
+does NOT swallow read errors — the rail reader's `catch { return [] }` would have turned
+a transient DB failure into "this box has no projects" and rerouted every project
+reminder to General, fail-open, which is the same defect in new clothes. A lister throw
+is caught and reported as `project_list_unavailable`; the resolver never throws, because
+`topicFor` runs before the post and the dispatcher reads a throw as "the post did not
+happen" — which would re-fire the reminder every tick, forever.
+
+**The rail learns about it.** Routing the fire is only half of "the owner sees it". The
+deliver seam now derives the project id back off an `app:<owner>:<project>` topic and
+passes it to `buildAppWsSendReplyResult`, so a fire stamps `projects.last_activity_at`
+and re-fans `projects_changed` exactly like a steady-state reply. Without it the durable
+row existed and nothing in the rail moved.
+
+**Reminders are created with a home.** `reminders_create` stores `project_id` as the
+engine `topic_id`, i.e. as the fire-time destination — but it discarded the registry's
+`ToolCallContext`, so an agent that did not pass `project_id` (and nothing in the tool's
+shape suggests a reminder has a home) created a General reminder while talking inside a
+project. `CapabilityGuard.wrapToolHandler` now forwards the context it was already being
+handed, and `reminders_create` defaults `project_id` to the calling topic's project. An
+explicit value still wins.
+
+**The raw intent is unpostable.** On any compose failure the dispatcher returned
+`literalFallback(shape)`, which for a `literal`-shape row IS `row.message`; a 3.4k
+operational payload classifies as `literal`, so the whole private intent posted. There
+are now TWO bounds, because they answer different questions. `MAX_NUDGE_BODY_CHARS`
+(2000) bounds a COMPOSED body — text the model wrote — and an over-long "nudge" is
+treated as a composition failure, never posted and never truncated-and-posted (a
+truncated intent is still the intent). `MAX_DEGRADED_INTENT_CHARS` (300) bounds how much
+STORED INTENT may be posted verbatim when nothing rendered it. One 2000-char bound was
+not enough: 29% of live reminder rows sit in the 1001–2000 bucket and would all still
+have leaked. Over the bound, a generic line posts instead — zero bytes of the message,
+but it NAMES the reminder id, so a recurring over-bound reminder is actionable rather
+than an identical unattributable sentence every fire. "take out the trash" still degrades
+byte-identically; that was always designed behaviour, not the leak.
+
+**One security fix on the way through.** Exporting `literalFallbackResult` made the
+`Original reminder:` extraction reachable from library input and CodeQL flagged its
+`js/polynomial-redos` shape (HIGH): `\s*([\s\S]+?)\s*$` after a literal marker backtracks
+over every split of a trailing run of spaces, and a stored `message` is caller-authored
+text run on the tick loop. It is a single forward `indexOf` scan now, semantics preserved
+exactly.
+
+The 24 misrouted rows were left alone. This is a forward fix, not a migration.
+
+## 2026-08-15 — a publish-path rebase conflict is resolved, not escalated
+
+`rebaseOntoObservedBase` (`trident/orchestrator.ts`) threw `TridentRebaseConflict`
+unconditionally whenever `git apply --3way --index` failed, while the bounded Forge
+conflict resolver (`trident/conflict-resolver.ts`) was wired only to the LOCAL merge
+path (`trident/merge.ts`) — the path where a human is present and could resolve it
+themselves. The autonomous publish path, where no human is present, escalated every
+conflict to the owner instead. Three builds died this way on 2026-08-15, all
+`publish failed: REBASE CONFLICT`: runs `25b2327d` (#290, 13:26Z), `5a17ec86` (#290,
+13:56Z), `9e813276` (#289, 14:07Z); a human resolved all three by hand. Root cause of
+the conflicts themselves: #291 merged at 13:07Z and rewrote `trident/inner-workflow.mjs`,
+the file all three branches were editing.
+
+What shipped: the same `resolve_conflict` resolver the composer already builds
+(`open/composer.ts`, gated on the live-credential predicate) is now threaded through
+`publishBuiltCommit` into `rebaseOntoObservedBase` and invoked at the throw site, IN
+the scratch worktree the failed apply left the conflict markers in — never the shared
+checkout. It is handed `mode: 'replay'`, which swaps the resolver's prompt for one that
+describes THAT tree: no rebase to `--continue`, no `node_modules` to test against (a
+test run there resolves its imports out of whatever checkout sits above the worktree —
+a tree other lanes are building in, so "green" would measure code the resolver never
+touched), the outer publisher commits, and every path it touches stays under its cwd.
+
+THE RESOLVER'S WORD IS NEVER THE EVIDENCE. A claimed RESOLVED is checked against git
+twice. First the unmerged set (`git diff -z --name-only --diff-filter=U`, read with
+`core.quotePath=false` so a non-ASCII filename arrives as a name the resolver can
+actually open). Then the STAGED BYTES (`git diff --cached -U0` over the paths that ever
+conflicted, scanned for added `<<<<<<<` / `>>>>>>>` lines) — because `git add` clears
+the unmerged bit for a whole path regardless of what is still inside the file, so the
+realistic failure (fix hunk 1 of 2, stage, report RESOLVED — precisely what the
+resolver's contract tells it to do) would otherwise commit and force-push marker text
+to the shared branch. Proven against real git in
+`trident/publish-rebase-realgit.test.ts`, not just against a stub.
+
+Bounded twice over: `MAX_CONFLICT_ROUNDS` (12, now exported from `trident/merge.ts`) is
+the ceiling, but EVERY ROUND MUST SHRINK the unresolved set or the loop bails at once.
+`rebaseBranchOntoBase` can afford 12 rounds because each one is a different commit that
+`git rebase --continue` advanced onto; here there is exactly one apply, so a round that
+changes nothing will change nothing twelve times — and each round is a real Forge turn
+bounded at 8 minutes, awaited inside the SERIAL tick sweep, so the bound ported
+unmodified would have blocked every other run in the process for ~96 minutes.
+
+Invariants kept: a conflict is still an ATTENTION state, never a `REQUEST_CHANGES`
+verdict — no reviewer read the code. `TridentRebaseConflict` keeps its exact message
+and remains the outcome when no resolver is configured, when the resolver declines,
+when a round makes no progress, when the bound is exhausted, and when a "resolution"
+empties the branch's delta (taking the base's side of every hunk leaves nothing to
+commit — git says so on STDOUT, which the failure reason now forwards alongside stderr
+instead of dropping). A resolved rebase is NOT an approved one: the
+replayed head still faces the full review gate (resolution is a mergeability
+operation, not a verdict — asserted by a stub-host test in
+`trident/orchestrator.test.ts` in which the run only reaches `done` through a second
+workflow fire's `outer-published:<head>` checkpoint plus APPROVE). The
+`update-ref <new> <old>` compare-and-swap and the pinned
+`--force-with-lease=<ref>:<sha>` lease are untouched.
+
+Proof: the stub-host suite (`trident/orchestrator.test.ts`) covers all six acceptance
+criteria; the real-git suite (`trident/publish-rebase-realgit.test.ts`) proves a
+resolver reading genuine `<<<<<<<` markers in the scratch worktree can stage a
+resolution that commits, lands in the CAS-moved head's tree (neither side's text
+verbatim), and leaves the checkout clean; that a declining resolver leaves the branch
+ref unmoved with the scratch worktree removed; and that a resolver which `git add`s a
+file with the markers STILL IN IT moves nothing at all.
+
+The hand-resolution of #290 is the worked example and the bar: five of six hunks were
+mechanical, one was subtle — main's `publishHead: oidClaim(branchHead)` and the
+branch's `oidClaim(forgeSha)` were identical on main but diverge once the branch's
+git-truth fix lands. Taking main's text verbatim would have silently converted a
+cross-check into a tautology. The resolver must reach that conclusion or correctly
+decline (declining is the escalation path, unchanged).
+
+**Fail-closed verification (codex Blocker, hand-fixed before merge).** Both post-resolution
+reads — `git diff --diff-filter=U` and the staged-marker scan — used to swallow a failed
+command and return an empty list, which the loop reads as "nothing unmerged, no markers
+staged". A `git diff` that never ran would have been accepted as git's own evidence that the
+tree is clean, and the run would have gone on to commit and force-push whatever the resolver
+left behind. The resolver's claim is the one thing here that is never evidence, so with no
+git to check it against the only safe answer is to refuse. Both now throw, naming git's own
+stderr, and both are mutation-proven: restoring the empty-list fallback turns the two new
+boundary tests RED.
+
+## 2026-08-15 — the device stops interrupting the conversation he is reading
+
+`app/lib/push-foreground-policy.ts` (new) + `app/lib/push.ts` + `ChatSyncSurface`.
+
+**Owner:** *"Everything should be a chat message, and I get notified for any and
+all chat messages if I'm not actively in the app. Same way notifications work
+for every single other chat app in existence."*
+
+The handler had been showing every foreground notification ON PURPOSE — its
+comment said so, *"so the user sees the notification even when the app is
+open"*, overriding Expo's default. That is now wrong, but the fix is NOT Expo's
+default either: "is the app open" is the wrong question. Foregrounded in project
+A while a message lands in project B should still tell him. The question is
+whether he is looking at THE CONVERSATION THAT PRODUCED IT, which is what
+`decideForegroundPresentation` answers.
+
+**This is the half that makes the server half safe.** The server-side change —
+notifying for in-turn replies, which `open/composer.ts` currently excludes
+deliberately — only stops being an interruption because the device now declines
+to interrupt. If this policy is ever weakened, that server rule has to be
+revisited in the same change.
+
+Suppression is of the INTERRUPTION only: `shouldShowList` and `shouldSetBadge`
+stay true, so a message that arrives while he scrolls past still leaves a trace
+outside the transcript. An unregistered screen FAILS OPEN — he gets a banner he
+did not need, never silence, because silence is the failure nobody notices.
+
+📌 **A REPRESENTATION BUG LIVED FOR THE LENGTH OF ONE DRAFT.** The policy modelled
+General as `null`; the push payload always sends `GENERAL_RAIL_ID` (`~general`).
+Those compare unequal, so a General message would have buzzed him while he read
+it — the exact interruption the module exists to prevent, in the one scope that
+has three names. Normalised through a `scopeKey`, with tests pinning all three
+spellings. `app/lib/general-scope.ts` already warned this is how #410/#411
+happened; this was that hazard one layer out.
+
+⚠️ **AND THE TEST HARNESS HID A FIFTH OF ITSELF.** `ChatSyncSurface` began
+importing `useFocusEffect`, the expo-router STUB did not export it, and every
+file mounting that surface stopped LOADING — so the local suite ran **122 fewer
+tests and reported FEWER failures than before the change**. A falling failure
+count read as an improvement while a fifth of the suite silently stopped
+running. Stub extended; suite back to 1916 tests with a failure set IDENTICAL to
+untouched main. ⇒ **count the tests that RAN, not just the ones that failed.**
+
+Mutation-verified three ways with a control on each: dropping scope
+normalisation fails the General-spelling tests, silencing an unreadable payload
+fails the fail-open tests, and making SILENT drop the list/badge fails the
+record test.
+
+## 2026-08-15 — deployed to the owner's instance
+
+Vendor `cbcfb655` → `d08555e1` (#294 diagnostics instrument + chat CSS, and
+#296). `juno` restarted healthy in one wave, `uptime_ms: 12230`. Control plane
+needed no restart and that was CHECKED (`git diff --name-only HEAD origin/main
+-- src/` empty), not assumed. Verified SERVED against the specific changes with
+controls in both directions: the served tree carries `min(72ch, 88%)`,
+`font-size: 0.95em` and the last-child margin fix, with the old `min(60ch, 80%)`
+GONE; the served JS bundle carries the new diagnostics failure path against a
+control string proving the grep works.
+
+⚠️ The first verification attempt returned ZERO for everything **including the
+control**, because `/chat` 302s to auth — a tool that cannot read its input
+returning a negative that looks like an answer. Without the control it would
+have been reported as a broken deploy.
+
+## 2026-08-15 — #294: a rejected diagnostics report was invisible on both sides
+
+The owner asked for switch timings to reach the diagnostics queue so he would
+stop pasting console output. Measured on his instance: four reports on disk, all
+mobile `push_registration_failed`, **not one web switch timing**, while he spent
+the day hand-pasting exactly those. Three stacked silencers — the client
+discarded its Response, the emitter wrapped the send in `.catch(() =>
+undefined)`, and the server's only operator-visible artefact is a file that stays
+EMPTY on refusal, which reads exactly like "nothing to report". Writing the test
+found a fourth: a wrong-slug bearer takes a different branch, so instrumenting
+only the first would have left the most likely real refusal just as silent.
+
+
+
+Measured on PR #284's card (the #283 build), 2026-08-15, one inner workflow, fully
+serial — the sum of agent time equals wall clock exactly: head probe 5 s, `plan:fable`
+287 s (4.8 min), `forge:build` 619 s (10.3 min, 54 Bash / 20 Edit / 5 Read), checkpoint
+9 s, terminal result 21 s, cleanup 7 s — 15.8 min total. PR #284 ran EIGHT such
+workflows in ~70 minutes, and every one re-ran `plan:fable` from scratch. Measured
+inter-cycle dead air (workflow-exit → next-workflow-start): 3.0, 3.0, 3.7, 3.8 min.
+Across eight cycles: ~25 min re-planning + ~25 min idle — roughly half the wall clock
+was neither planning something new nor building.
+
+**Part 1 — the planner re-derived an unchanged plan every task.** `planFablePrompt`'s
+steps 1-2 ("read SPEC.md … survey the CURRENT code … regenerate the full checklist")
+ARE the 287 s, yet `ralphExecuteNote` already makes Forge commit the regenerated
+`IMPLEMENTATION_PLAN.md` to the branch every task — iteration N+1 was paying five
+minutes to re-derive a document iteration N had already committed. The fix is a
+`plan:probe` Bash agent (`git show` of the committed plan on the forge branch; returns
+the body plus the unchecked-task count, interprets nothing) gating a `plan:next`
+planner that returns the SAME `PLAN_SCHEMA` — the committed body VERBATIM as
+`implementationPlan`, the first unchecked `- [ ]` as `topTask` — and is FORBIDDEN from
+reading SPEC.md or surveying the codebase. Selection is plain code over args + probe
+output: `plan:next` fires only when `resumeCheckpoint === 'ralph-task-built'` and
+`resumePlan.reason === 'unknown-checkpoint'` (the recorded head matched the live head
+— any head-moved / unreadable / absent resume is a genuine crash-resume and gets the
+full planner), `ralphRound >= 1`, and `ralphRound % PLAN_REFRESH_EVERY !== 0` with
+`PLAN_REFRESH_EVERY = 5`. **`ralph_round` is ZERO-BASED** and the gate is written
+against that: `createRun` writes `ralph_round: 0` and `refireNextRalphTask` bumps it
+once per handoff, so iteration N arrives as `ralphRound` N-1 — iteration 1 → 0,
+iteration 2 → 1, iteration 6 → 5. `>= 1` is therefore "every continuation from the
+second iteration onward", and `% 5 !== 0` lands the periodic full re-plan on iteration
+6, 11, …. (The first cut of this gate said `>= 2`, which reads correctly and silently
+made iteration 2 — the first iteration that has a committed plan at all — pay the full
+survey anyway; the round matrix in the tests now covers 0-5 and 10 instead of skipping
+exactly the rounds where it mattered.) Fail-safes: a dead, unreadable, or
+zero-unchecked probe falls through to full `plan:fable` (zero-unchecked escalates so
+the full planner — not `plan:next` — decides whether the card is done); a probe whose
+DISPATCH THROWS is contained by `seatAttempt`, exactly like `head-probe`/`ci-probe`,
+because a pure-optimisation seat that dies must not end the lane; `plan:next` returning
+null is fatal exactly as a null `plan:fable` is — Forge never runs planless.
+`run.ralph_round` was threaded through `buildWorkflowArgs`; a missing round defaults to
+the full planner, the fail-safe for legacy callers.
+
+**The relayed plan is verified, not trusted.** `plan:next` is asked to do two
+mechanical things the probe ALREADY MEASURED, so neither is taken on the model's word:
+the echoed `implementationPlan` is compared against the probe's verbatim `git show`
+body (mismatch → the COMMITTED body is what Forge is told to persist, because
+`ralphExecuteNote` commits that body back over `IMPLEMENTATION_PLAN.md` and a shortened
+echo would delete tasks nobody decided to drop), and `remainingTasks` is compared
+against the probe's `grep -c` count minus one (mismatch → the measured count wins,
+because `remainingTasks` is the re-fire gate and a hallucinated `0` declares a
+half-built card finished), and `topTask` is compared against the FIRST literal
+unchecked `- [ ]` line of that same body (mismatch → the committed line wins, because
+`ralphExecuteNote` tells Forge to mark "the task above" as `- [x]` and a paraphrased
+task leaves Forge nothing to check off: the same plan comes back, the next iteration
+picks the same task, and the checklist cannot converge until the periodic re-plan or
+`max_ralph_rounds` stops it). The probe carries its own integrity guard, which is what
+lets it stay on the cheapest tier: it reports `cksum` — the POSIX CRC-32 and the byte
+count of the FILE — alongside the body, the workflow RECOMPUTES that checksum over the
+relayed body, and a body that does not hash to it abandons the cheap path entirely.
+COUNTING was not enough, in either shape it was tried: the body is relayed THROUGH a
+model and then forced authoritative, and a silently flipped `- [ ]` → `- [x]`, a
+re-ordered checklist, and a one-byte truncation riding the ±1 window `wc -c` needed for
+the trailing newline are all invisible to line and byte counts (Argus r2 found the
+first, r3 the rest — the class is "same size, different bytes", which no counter can
+close). A checksum closes it for one number from the same pipeline. `cksumOf()` is
+CRC-32/CKSUM hand-rolled over the body's UTF-8 bytes, because a Workflow script has no
+imports and no filesystem — `agent()` Bash steps are its only other instrument — and it
+is cross-checked against the real `cksum` binary in the tests over ASCII, multi-byte,
+astral-plane and empty fixtures, because a CRC that quietly disagreed with the tool
+would reject every honest relay and silently delete the card's saving. The trailing
+newline is a SECOND CANDIDATE (`body` or `body + '\n'`), not a tolerance; a probe that
+omits the checksum fails the guard, since "an absent measurement is not evidence of
+tampering" is exactly how a relay escapes one. The probe's TWO answers are also checked
+against EACH OTHER: the body's own `- [ ]` lines must equal the `grep -c` count the
+probe measured on the file (Argus r3, two reviewers). Each answer overrides something
+expensive — the count overrides `remainingTasks`, which is the re-fire gate, and the
+body overwrites the committed `IMPLEMENTATION_PLAN.md` — so an honest body with a count
+one too low silently drops the last task, and believing either half of a
+self-contradicting answer is worse than paying for the full planner. It also reads
+`origin/<branch>` in `pr` mode and the
+local ref in `local` mode — the same authority split as `readBranchHead` and
+`resolveResumeLiveHead` — so it can never plan from an unpublished local commit the
+resume gate never cleared.
+
+One deliberate gap, recorded rather than hidden: on the **codex forge route** the agent
+filling the schema is the codex BRIDGE, which launches a subprocess and copies the
+wrapper's measured trailer. It never sees the build's own reasoning, so it is not asked
+for `deviatedFromSpec` and the field stays absent → false. A deviated codex build
+therefore writes the clean `ralph-task-built` checkpoint and the next iteration takes
+`plan:next`; the periodic full re-plan is what bounds the drift on that route. Carrying
+the signal out needs a seventh trailer line from `trident/codex-build.sh` — its own
+card.
+
+The tradeoff, stated so no review round rediscovers it: re-planning every task is not
+pure waste — building task N can legitimately change task N+1. That is why the full
+re-derivation survives at iteration 1, on every genuine crash-resume, every K = 5
+tasks, AND whenever the previous Forge reported `deviatedFromSpec: true` (the flag
+rides `FORGE_SCHEMA` optionally, becomes checkpoint `ralph-task-built-deviated`
+locally or a suffix on the `outer-published:` checkpoint in PR mode, and that name
+fails `plan:next`'s exact-name check, forcing the full planner). The claim is not
+"planning is unnecessary" but "re-deriving the whole checklist from the whole
+codebase, every task, is the wrong default."
+
+**One acceptance criterion is implemented differently than written, deliberately.**
+The card says "a resume (`resuming === true`) always runs the full `plan:fable`", but
+`resuming` is TRUE on EVERY Ralph continuation — the handoff always carries
+`resumeCheckpoint = 'ralph-task-built'` and a PR — so the literal criterion disables
+the whole feature. What is implemented is the criterion's intent: the cheap path
+requires `classifyResume`'s reason to be `unknown-checkpoint` AND the checkpoint name
+to be exactly `ralph-task-built`, i.e. "the branch did not move under this handoff and
+the last thing that happened was a clean task completion". Every OTHER resume shape —
+`forge-done`, `fix-round-N`, `argus-*`, an outer-published resume, a deviated
+checkpoint, no checkpoint at all — is a genuine crash-resume and keeps the full
+planner and its verbatim `resumeNote` path, unchanged. That is a deviation from the
+words and a match to the reason they were written; it is recorded here rather than
+left for a reviewer to find.
+
+**A second acceptance criterion is recorded as a deviation, not implemented.** The
+card lists, among the escalations to the full planner, a committed plan with "no
+unchecked tasks left that match the recorded remaining count". The zero-unchecked half
+IS implemented (it escalates). The MATCH half is not: nothing durable carries the
+previous iteration's remaining count into the next one — `code_trident_runs` has
+`ralph_round` and no remaining-tasks column, `inner_result` is nulled by the re-fire
+reset, and the only other channel is the checkpoint NAME, which is a flag, not a data
+bus. Implementing it honestly means a migration and a new column written by the
+orchestrator's re-fire and read back through `buildWorkflowArgs`. What it would buy:
+detecting a Forge that built its task but failed to tick `- [x]`, which today makes the
+next iteration pick the SAME first unchecked task again. That is bounded — the periodic
+full re-plan caps the repeat at `PLAN_REFRESH_EVERY - 1 = 4` iterations and
+`max_ralph_rounds` (20) caps the card — and it is visible on the transcript (the same
+`topTask` twice). The other case this criterion was reached for, a truncated relay, is
+now closed properly by the checksum. So the column is deferred to its own card rather
+than added here, and the gap is written down instead of left for a reviewer to find.
+
+**Part 2 — the outer loop slept up to 90 s between handoffs.** The inner workflow runs
+detached, so a finished handoff waited one to two ticks of `tick_interval_ms ?? 90_000`
+— the measured 3.0-3.8 min. The fix is `SupervisedLoop.wake()`: idle → `void
+runOnce()`; mid-tick → a pending flag consumed after the in-flight tick settles,
+re-firing exactly once (because `runOnce` is single-flight, and an unguarded wake
+landing mid-tick would come back `skipped` and the change would be missed for a full
+interval); not-started → dropped, so no tick can outlive `stop()`. Exposed as
+`TridentTickLoop.wake()`, plus an internal `'trident-watch'` `SupervisedLoop` (2 s
+default; `<= 0` — or any non-finite value, because `NaN <= 0` is false and
+`setInterval(fn, NaN)` clamps to ~1 ms — disables it) whose entire body is ONE query,
+`TridentRunStore.changeSignature()`: one `<last_advanced_at>\t<id>` line per
+non-terminal run, ordered by id — waking the sweep only when that signature changed
+(the first observation records without waking). It never calls `step`, never
+touches git/gh/network; a throw is contained and the 90 s interval stays armed
+unchanged as the backstop. The interval itself was NOT lowered — a full tick does
+per-run git/gh work for up to 50 runs; the point is a cheap detector gating an
+expensive sweep. An out-of-process checkpoint now triggers a full tick within roughly
+one watcher cadence instead of 90-180 s. Both timers are registered with the
+`LoopRegistry` (`describeAll()`), so a persistently failing watcher shows up in the
+loop inventory instead of only as `watch_failed` log lines while the inventory reports
+one contented 90 s loop.
+
+**The detector must not count its own sweep as change — and must not swallow anyone
+else's.** The tick's `saveIfActive` re-stamps `last_advanced_at` on every run it
+advances. Left alone, one run reporting `changed` re-fired the whole
+`listNonTerminal(50)` × per-run git/gh sweep on EVERY 2 s cadence: burst
+amplification, converging only when the change stopped, and exactly the shape the card
+forbade. The first fix damped that by re-sampling the signature at the tick's tail
+whenever the tick had written anything — which ALSO absorbed every out-of-process
+checkpoint that landed after the sweep took its own sample, sending precisely the
+handoff this card exists to accelerate back to the 90 s backstop under the multi-lane
+workload it targets (Argus r2, two independent repros).
+
+Both are fixed by making the question decidable instead of choosing which way to be
+wrong: the signature is PER-RUN, not aggregate, and the sweep keeps a LEDGER of every
+row it committed → the stamp its own write left there (read back from the row, since
+`saveIfActive` stamps the store's clock). At the tail of every tick body the settle
+compares the pre-sweep signature with a fresh one: differences explained by the ledger
+are absorbed; ANY difference outside it — a run the sweep never wrote carrying a new
+stamp, a run that appeared, a run that left the set on someone else's write, a run the
+sweep wrote that was re-stamped AGAIN afterwards — keeps the pre-sweep signature, so
+the very next watcher cadence sees it and wakes. The watcher still takes no sample
+while a tick is in flight (a half-applied sample means nothing and the settle
+overwrites it anyway). One external change produces exactly one sweep; an external
+checkpoint landing DURING an advancing sweep still wakes the next one; `stop()` drops
+the observed signature with the timers, so a `stop()` → `start()` re-arm does not
+compare against a dead lifetime. The one residual, stated so it is not rediscovered: an
+external write landing on a run the sweep committed, inside the SAME MILLISECOND as the
+sweep's own write, leaves an identical stamp and reads as ours — a column-resolution
+limit, and a strictly smaller window than the seconds-long one it replaced. Narrowing
+it further needs a monotonic row version the schema does not have.
+
+**A sweep that never read a row does not get to consume the wake.** The watcher
+records what it sampled the moment it wakes, so the wake and the baseline move
+together — right when the sweep then runs, wrong when that sweep dies on
+`listNonTerminal` (locked DB, closed handle): the change was marked observed, nothing
+observed it, and the handoff waited out the 90 s backstop with the watcher firing zero
+tick bodies until some NEW change landed (Argus r3). A tick that did not get its row
+list now leaves the baseline alone AND owes the watcher a re-fire, so the next cadence
+wakes on an unchanged signature. The retry is cheap (it dies on the same failing read,
+before any git/gh work) and self-clearing — the first sweep that reads its rows settles
+the baseline and clears the debt.
+
+The watcher's cadence is also plumbed through production wiring
+(`trident.watch_interval_ms` on the composition input → `TridentTickLoop`), because
+"2 s default, configurable" is only true if a composition can actually set it; a knob
+that exists on the options type and nowhere on the wiring is a knob no operator has.
+
+Per-run equality also retired a mixed-precision hazard rather than patching it:
+`store.now()` writes milliseconds (`…T03:15:45.900Z`) while `trident/checkpoint.sh`
+wrote whole seconds (`…T03:15:45Z`), SQLite compares them as TEXT, and `'Z'` (0x5A)
+sorts above `'.'` (0x2E) — so under the old aggregate a whole-second stamp could pin
+`MAX` above a LATER millisecond one inside the same second and a checkpoint could miss
+its wake. There is no ordering left in the comparison, so the case is structurally
+impossible; checkpoint.sh still stamps milliseconds where the platform's `date`
+supports `%3N` (BSD `date` echoes it literally, so the result is validated and falls
+back to the whole-second stamp), which keeps same-second writes distinct.
+
+**The honest after.** Do not read the projection below as a measured result — it is
+not. What each fix mechanically removes on a 5-task card, which runs iterations 1-5 at
+`ralphRound` 0-4: iteration 1 pays the full survey, and all four continuation
+iterations skip it — ~4.8 min each — because the periodic full re-plan first lands at
+iteration 6 (`ralphRound` 5), which a 5-task card never reaches. A deviated-from-spec
+iteration full-plans regardless, on any card length. Plus ~1.5-3.8 min of tick latency
+per handoff. The card's own projection (~70 min → ~30-35 min) is a projection made at
+planning time; the after-numbers are to be measured on the next multi-task Ralph card
+and recorded here once they exist. This is an OPEN acceptance criterion ("report the
+measured before/after in AS_BUILT.md rather than asserting it"), not a closed one: the
+before-numbers above are measured from real runs, the after-numbers do not exist yet
+because no multi-task Ralph card has run on this code, and inventing them would be
+worse than owing them. The follow-up is a one-paragraph edit here, not a code change.
+
+Test coverage: selection is asserted over the REAL `inner-workflow.mjs` body via the
+assembly harness (which planner LABEL fires per scenario), across `ralphRound` 0-5 and
+10 so neither the first continuation nor the refresh boundary can regress unseen, plus
+a throwing probe dispatch, a truncated probe relay, a one-byte truncation, a
+byte-neutral `- [ ]` → `- [x]` flip, a re-ordered checklist, a probe that omits the
+checksum, a relay that dropped only the trailing newline (which must still pass), an
+unchecked count that contradicts the relayed body, a paraphrased `topTask`, an edited
+plan body and a contradicted `remainingTasks` — and the guard's own `cksumOf` is
+cross-checked against the real `cksum` binary, so a CRC that drifted from the tool
+cannot pass the selection tests while silently disabling the feature. The watcher/wake behaviour is asserted over
+real timers in `tick.test.ts` / `loop/index.test.ts`: wake-mid-tick re-runs exactly
+once; a quiet interval fires zero extra tick bodies; a tick that WRITES produces
+exactly one sweep per external change (the amplification guard — the older test used a
+`changed: false` step and could not see it); an out-of-process checkpoint that lands
+DURING an advancing sweep still wakes the next one, and a run re-stamped after the
+sweep committed it is not mistaken for the sweep's own write; a second external change
+still wakes promptly; a `NaN` cadence disables the watcher instead of arming a ~1 ms
+timer; a watcher throw leaves the backstop ticking; a sweep whose row read
+THROWS still gets re-fired promptly and then stops retrying; the composed production
+graph honours a configured watcher cadence; `stop()` leaves no live timer and no stale
+signature.
+
+Two hygiene follow-ups are recorded rather than folded in, because neither is this
+card's code: `trident/gh-authed.test.ts` fails on any host with `GH_TOKEN` exported and
+prints the live token in the failure diff (pre-existing — it landed at the merge-base
+and reproduces on `main` with no diff applied; the fix is to assert on
+`githubProcessEnv` instead of the merged env), and the codex forge route still cannot
+report `deviatedFromSpec` until `trident/codex-build.sh` grows a seventh trailer line.
+
+## 2026-08-15 — the review diff is taken from the base tip git observed
+
+`publishBuiltCommit` took the review diff from `<base>..<head>` where `<base>` was the
+LOCAL ref name. On the shared build checkout that ref is whatever the last fetch left
+behind — measured 8 merges behind `origin/main` — so the published artifact presented
+every commit merged in between as part of the card: 15,154 lines across ~100 files for a
+branch whose own work is 20 files / 1,738 lines. A reviewer diffed that stale base, vetoed
+the branch over bugs in files it does not touch, and the round was lost.
+
+`rebaseOntoObservedBase` already `ls-remote`s the true base tip — the same observation the
+push lease is pinned to — and the head it returns is replayed directly onto it. It now
+returns that sha, and the publisher takes the diff from `<baseSha>..<headToPublish>`. The
+sha is a local object on both paths that return one (the replay fetches it; the
+already-contains path could only have been answered by reading it), and an empty one — the
+remote has no such base branch — still falls back to the base name. This moves WHICH commit
+the diff is taken FROM and touches neither the published head nor `reviewedHead`.
+
+**Two smaller corrections shipped with it.** The FIX-ROUND unreadable-head stop is now
+gated on the round having produced a diff, exactly as round 1 is: ungated it told the
+operator to "re-run when the read succeeds" for a round that produced nothing, whose work
+died with its throwaway worktree — advice that cannot recover anything. And `roundLanded`
+lowercases both heads: one side arrives from `readBuiltHead` (lowercased) and the other
+from `readBranchHead` (not), so an uppercase relay of the SAME commit would have read as a
+landed round — the one direction of that comparison that certifies work nobody did.
+
+## 2026-08-15 — build-completion heads are read from git
+
+Both Forge completion sites now read the local branch ref with a retried, single-command
+`git rev-parse --verify` probe. That git-read OID is the source for checkpoints and
+`reviewedHead`; a Forge-reported OID is only an independent prefix cross-check. A
+disagreement stops as a typed infra-only result naming both values; a permanently
+unreadable local head — at round one OR at any fix round — stops boundedly without
+rebuilding, publishing or reviewing anything. The fix round is not the weaker half:
+without its own empty-head stop it approved with an empty `reviewedHead` and checkpointed
+`head: ''`, which `classifyResume` reads as no-recorded-head and REBUILDS — the exact path
+Part 2 exists to remove.
+
+**The probe is still relayed by a model seat, and that is a stated limitation, not an
+omission.** `inner-workflow.mjs` runs inside the Workflow runtime, whose only injected
+capability is `agent()`; there is no in-process exec at THIS point in the run, so the
+command is dispatched to a one-command probe seat that is told to copy one token. What
+changed is the SOURCE — the value is produced by `git rev-parse`, not composed by the
+builder. The seat itself can die (a 529 on the shared account), and `seatAttempt` returns
+null for that exactly as it does for a garbled answer, so a transient seat death is
+indistinguishable here from a genuinely unreadable head. Three things follow, all
+deliberate: the ATTEMPT COUNT is `BUILT_HEAD_READ_ATTEMPTS = 3` — the same count
+`resolveResumeLiveHead` spends on the same question at the launcher boundary, though NOT
+the same budget, and this paragraph used to imply otherwise: the launcher waits
+`RESUME_HEAD_RETRY_DELAYS_MS` between its attempts and this runtime has no sleep at all, so
+these three fire back to back, separated only by whatever a fresh agent dispatch costs
+(real time, but an unmeasured amount of it, so no claim is made about which outages it
+covers); every failed attempt is logged with its tag, so the
+transcript distinguishes a one-attempt blip from a three-attempt outage; and the
+consequence of giving up is fail-closed and bounded. The outer publisher independently
+`rev-parse`s in real code at the credentialed boundary (Part 1), and `--match-head-commit`
+refuses a mismatched pin at merge. A mangled read can refuse finished work — it can never
+certify or publish the wrong commit.
+
+**A `pr`-mode run whose head read failed still records what it built.** The `&& !isPr`
+carve-out keeps that run going (the publisher is the authority), but it used to checkpoint
+`head: ''`, which `classifyResume` reads as `no-recorded-head` → REBUILD — so one failed
+probe plus one failed publish still rebuilt already-committed work, the very defect this
+card removes, one run deeper. The checkpoint now falls back to the builder's claim when
+the read failed and the claim is a FULL 40-hex OID. That is safe because it remains a
+CLAIM: no fast path opens unless the recorded OID equals the live head the launcher reads
+from git, so a wrong claim degrades to `head-moved` → rebuild — exactly what `''` did —
+while a right one preserves the work. `absent` still records `''`, and so does an
+abbreviated claim (it cannot be compared for equality); a claim about a branch git says
+does not exist is not evidence of anything.
+
+**A bounded stop reports only the checkpoint it wrote — `checkpoint: null`.**
+`writeTerminalResult` does not touch `inner_checkpoint`; the outer loop copies
+`result.checkpoint` into the row on the REQUEST_CHANGES path and leaves
+`inner_checkpoint_head` alone. Naming a phase the stop never recorded would land the new
+name beside the previous phase's OID — precisely the drift the checkpoint invariant ("a
+checkpoint records which commit it applied to") exists to make impossible. The phase is
+not lost: `terminalCause` names it verbatim ("after `forge:fix-round-2`"). Both bounded
+stops also shape that text through one `infraCause` helper (redact + cap) instead of one
+redacting and the other passing its sentence through raw.
+
+**The stop wording promises nothing about a checkout the read never saw.** In a directory
+that is not a git repo the compound probe prints nothing and lands on the same `''`, so
+"the branch is preserved — re-run when the read succeeds" was an assertion about something
+unobserved. The message now says what the run DID: "re-run when the read succeeds; this
+run rebuilt, published and reviewed nothing". The "nothing was built" throw likewise
+says when a commit's absence was inferred from the sentence's shape rather than measured.
+And a MISMATCH names the two OIDs and nothing else — it used to end "wrong branch or wrong
+worktree", a deduction, and not even the likeliest one: an amending commit hook, or a
+second commit landing between the builder's own `rev-parse` and the probe, produce exactly
+the same signal.
+
+**The advice comes BEFORE the detail, because the text is capped.** Measured: with the
+longest branch name `slugify-task` can produce (`trident/` + 35 chars = 43), a 40-hex claim
+and a `/tmp/trident-<slug>.diff` path, the round-1 unreadable-head cause composes to 331
+characters — and the cap it was written through was 300, so the trailing "re-run when the
+read succeeds" was deleted on its way to the operator. The earlier guard test passed only
+because its fixture branch was short, which is how a length bug hides. Two defences now,
+because the diff path is model-supplied and has no length bound at all: `TERMINAL_CAUSE_MAX`
+is 500 (mirrored in `trident/inner-loop.ts`, which clamps again on the way into the DB — the
+SMALLER of the two is what actually decides, so both had to move), and every composed cause
+puts its re-run advice near the front so truncation can only ever cost detail.
+
+**A THROW carries the sentence it threw.** Every "nothing was built" exit is a throw, and
+the catch used to persist `{checkpoint: 'inner-error'}` with no cause at all — so the
+measured sentence died in the log and the row read "inner workflow ended at round N of M …
+without Argus APPROVE" for a build Argus never saw. That was run `3d2696c3` verbatim, and
+it is the acceptance criterion this card states in its own words ("the reason recorded for
+THIS class of failure must not read 'without Argus APPROVE'. Argus never ran."). The catch
+now carries `terminalCause` through the same redact+cap helper as the two bounded stops,
+and carries NO `blockKind`, because a throw is not a review verdict.
+`innerTerminalFailureReason` widens by exactly one value — `block_kind === null` — and
+reports "inner workflow failed at round N of M: `<cause>`". `null` is NOT only the catch
+path, and an earlier revision of this paragraph said it was: `parseInnerResult` decodes the
+kind FAIL-CLOSED, so a garbled/truncated/future value lands there too. That is precisely
+why the widening is safe — the sentence `null` selects quotes the measurement and claims
+nothing about the review panel — and a garbled kind is pinned by its own test. `'code'` / `'round-lost'` / `'none'` keep
+the generic sentence (a finding title describes the DIFF, not a terminal cause), and
+`'infra-only'` remains the only kind licensed to say "review never ran".
+
+**The legacy `readBranchHead` probe learned the same tri-state.** It ran a bare
+`git rev-parse <branch>` in local mode — which PRINTS THE BRANCH NAME and exits 128 for a
+missing branch — and a plain `ls-remote` in pr mode, which prints nothing. Both reached
+`classifyResume` as `''` = "could not read", and since Part 2b gives `''` a bounded STOP, a
+genuinely DELETED branch became a permanent stop no re-run could clear, on exactly the
+launchers with no `resume_live_head` to rescue them. It now uses `rev-parse --verify --quiet`
+plus the `--git-dir` health check (local) and `ls-remote --exit-code`'s documented exit 2
+(pr). `'absent'` is collapsed back to `''` at ONE call site — the fix round's did-it-land
+question — because `roundLanded` compares strings and a literal `'absent'` would differ from
+the round-1 head and read as progress.
+
+The probe is TRI-STATE, mirroring the launcher's `resolveResumeLiveHead`, because "not
+there" and "could not tell" earn opposite consequences. `absent` is git ANSWERING that the
+branch was never created (`rev-parse --verify` failed but `rev-parse --git-dir` succeeded)
+— a real outcome that keeps the honest "forge:build completed but produced no commit on
+`<branch>` — nothing was built" throw. `''` is a failed READ, and only that earns the
+infra-only stop whose advice is "re-run when the read succeeds". Collapsing them would
+emit re-run advice for a build that produced nothing, which can never succeed; for the
+same reason an unreadable head with NO diff is reported as "nothing was built" too — at
+round 1 AND, since Argus r4, at a fix round, whose twin of that stop was ungated and told
+the operator to re-run a read that could not recover a round which produced nothing. A fix
+round with no diff now falls through to its own honest reporting (round-lost / left-no-diff),
+which names the round to recover instead of the probe.
+
+Reading the head ONCE IN CODE AT BUILD COMPLETION is not the same operation as re-probing
+it at publish time. `reviewedHead` keeps its meaning — read once, at build completion,
+never re-probed — so a later push cannot be certified as reviewed. `publishBuiltCommit`'s
+refusal remains correct and was not loosened; PR-mode handoffs still let that outer,
+in-code read remain the publishing authority, which is why the empty-head stop carries an
+explicit `&& !isPr` carve-out (covered directly in
+`trident/inner-workflow-built-head.test.ts`).
+
+**The MISMATCH check has that carve-out too, and for the sharper version of the same
+reason.** In `pr` mode `publishBuiltCommit` makes the identical comparison, in real code,
+against a `rev-parse` the host ran itself, moments after the handoff. Inside the workflow
+BOTH sides of it arrive through a model seat, so the inner check is a strictly less
+trustworthy copy of one that is about to happen anyway — and a garbled relay of either
+value would veto a build the publisher would have validated. Acceptance criterion 3 is
+untouched by this: the claim travels out verbatim as `publishHead`, and the publisher still
+fails loudly naming both values. In `local` mode there is no publisher, so the check stands
+there.
+
+**THE BOUNDED STOP DOES NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN (Argus r5).**
+Two `classifyResume` dispositions are `rebuild` on EVERY head — matching, moved, absent or
+unreadable: `forge-done` in ralph mode (`ralph-progress-unknown`) and any checkpoint name it
+does not recognise, `ralph-task-built` above all (`unknown-checkpoint`). Ordering the
+unreadable-head check in FRONT of those made a transient read failure convert a rebuild that
+was going to happen anyway into a TERMINAL stop, so one dropped `ls-remote` packet would kill
+every resuming ralph re-fire — strictly worse than the behaviour Part 2b set out to remove,
+and the exact inverse of its intent. The head-unreadable branch now asks
+`resumeOnUnchangedHead` — the same function the head-MATCHED path calls — what this
+checkpoint would do on the best possible head, and defers to it when the answer is already
+`rebuild`. Consulting one function rather than keeping a second list of names is what stops
+the two drifting. `orchestrator.ts`'s launcher fast-exit mirrors the same exemptions through
+`resumeHeadDecides` (it cannot import a `.mjs` Workflow script), and
+`inner-workflow-resume.test.ts` executes BOTH and asserts they agree on every checkpoint
+name, so the mirror cannot rot silently. The exit also resolves the PR link BEFORE it fires:
+"re-run when the read succeeds" is advice a human follows by opening the PR the recorded
+commit is on, and the terminal row used to be written with `pr: null`.
+
+## 2026-08-15 — the host-deploy approval body prints the typed fallback that actually works
+
+`renderHostDeployApprovalBody`'s last line said "Tap Approve or Deny. Typing anything
+else will NOT approve this deploy" — true, but the one string that DOES work when the
+buttons are unreachable (`hdp:<token>:a` / `:d`) was visible only inside
+`button_prompts.options_json`, which no surface renders. An owner locked out of the
+buttons had no recoverable path; the message told him only what would fail.
+
+`request()` now computes `approve_value`/`deny_value` ONCE, before building either the
+`ButtonOption[]` or the rendered body, and passes the same two strings into both — the
+render function's input type makes them required, so no future caller can ship a body
+without the fallback. The body prints each as inline code (the token alphabet is
+`[A-Za-z0-9_-]`, so a single backtick can never be escaped) with a one-line explanation
+of which approves and which denies.
+
+Three tests prove it end-to-end rather than by shape: the body contains the exact
+strings the emitted `options[]` carry (no separately-typed literal to drift); a token
+extracted with a regex FROM THE RENDERED BODY (not from the options array) drives a
+real approval through `handleOwnerButtonAnswer`; and the fallback lines render after
+the "bound to `<sha>`" sentence with the commit fence still intact.
+
+## 2026-08-15 — the review gate waits as long as GitHub actually takes
+
+`REVIEW_READINESS_ATTEMPTS = 3` x `REVIEW_READINESS_RETRY_MS = 15000` gave the
+review-readiness gate THIRTY SECONDS of patience. Measured on PR #275 commit
+`6ba7500`: pushed 00:55:56Z, required check `test` STARTED 01:01:24Z (+328 s of
+GitHub Actions queue time) and finished four seconds later. Essentially the whole
+delay is queueing, and until the workflow exists the check is ABSENT from
+`statusCheckRollup` — the gate was asking about a row that had not been created yet.
+
+That budget could not win, and it did not. Four consecutive builds of one card
+(`051bcf1f`, `b122ce3d`, `45400961`, `0d54d2a3`) died with `REVIEW DEFERRED —
+required check test has not run`. Each threw away a COMPLETE build — Forge, plan,
+publish — to avoid a wait of a few minutes, and each was reported to the owner as
+REQUEST_CHANGES on work no reviewer had read. It was deterministic rather than
+unlucky: a build's last act before this gate is pushing its closing commit, so it
+invalidates the CI it was green on and then asks about the new head seconds later.
+Any budget shorter than the queue time fails EVERY time, on EVERY build.
+
+The budget is now a duration — `REVIEW_READINESS_BUDGET_MS = 900000` at a 30 s
+cadence — and the attempt COUNT is derived from it, so the doc comment cannot
+describe a budget the loop does not have. Fifteen minutes is ~3x the measurement,
+deliberately generous rather than finely tuned; `trident/liveness.ts` records what a
+tuned threshold cost when a 25-minute reaper killed a healthy build. `conflicting`
+and `unknown` still break out immediately — only "not yet" waits.
+
+The deferral sentence now names the duration ("waited 15 minutes and the check never
+appeared"), because without it a real never-started workflow is indistinguishable
+from the 30-second version that gave up early, and only the first is the owner's to
+act on. `trident/__tests__/ci-gate.test.ts` keeps the measurement: one test replays
+the 328 s queue and requires a review to happen, its twin replays the same timeline
+under the old 3 x 15 s numbers and requires zero, and a third asserts the derived
+count really spends the budget. Shrinking it again turns those red first.
+
+One incident while writing it, worth recording: that file's tests reconstruct the
+`classifyCi` closure by slicing source from `const CI_FAILED_STATES` to the next
+JSDoc opener, so merely writing that character sequence in a nearby comment
+truncated the slice and four unrelated tests failed with a bare `ReferenceError`.
+Both extraction helpers now assert what they captured and name the cause.
+
+## 2026-08-15 — a gateway restart no longer kills an in-flight build
+
+`onChildCrash` latched every launcher-owned run `crashed`, and the tick reaped
+any `crashed` row straight to `failed` — a dead launcher was treated as a dead
+build. Measured evidence said otherwise: three gateway boots on 2026-08-14
+(06:19:56, 06:26:51, 07:13:00) each killed a healthy build about 90 seconds
+later, one watchdog tick. Run `8ddca917` had pushed PR #261 (+434/−17) nine
+minutes before its launcher died — the build was progressing; only its
+supervisor's process died with the gateway.
+
+The fix routes a launcher crash into a continuation instead of a reap. §1a-crash
+in `trident/orchestrator.ts` claims the crashed row atomically via
+`TridentRunStore.beginCrashRecovery` and relaunches it as a CONTINUATION from
+its persisted `branch`/`pr`/`inner_checkpoint` — the round and `ralph_round`
+counters are untouched, because a launcher dying mid-build is not the agent's
+failure to spend a round on.
+
+Recovery is bounded, and the bound is durable: a new `crash_recoveries` column
+(migration 0123) is spent only by the atomic `beginCrashRecovery` claim, capped
+at `DEFAULT_MAX_CRASH_RECOVERIES = 3`. Past the cap the run fails with a reason
+that names the crash-recovery budget and embeds the latched crash reason —
+deliberately never the token "exhausted", which `trident/delivery.ts` would
+otherwise misclassify as an agent-side budget exhaustion rather than an infra
+event.
+
+`onChildCrash` now stamps the latched reason with both the observation time and
+the gateway process's own boot time (`Date.now() - process.uptime() * 1000`),
+phrased strictly as measurements rather than an asserted cause, per #240. And
+harvest-before-reap is preserved: a crashed row that already carries a terminal
+`inner_result` still harvests on the next tick, with zero relaunches spent.
+
+## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
+
+`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
+build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
+>30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
+the host-held part files into a temp dir, the real workflow composes the forge:build
+prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
+by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
+then concatenated in the listed order and measured against the prompt's
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
+recomputes before it spends a token. Chained with the by-path suite in
+`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
+reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
+agent retyping anywhere in the path. Test-only; no production file changed.
+
+Two findings from building it. First, the chunk blocks may NOT have their paths
+rewritten wholesale: the coda forming the `.a2` segment names
+`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
+bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
+the assembled brief is asserted to mention neither segment path. Second, dropping the
+trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
+`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
+newline; the sensitivity check therefore uses mutations that move a real byte. Under a
+one-character head-slice shift and under a one-character tail edit, both new tests go
+RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
+gap this task existed to close.
+
+## 2026-08-15 — a pr-mode build rebases onto observed main before review
+
+`trident/orchestrator.ts` `publishBuiltCommit` now rebases the built branch onto
+the observed tip of its base branch before the lease push, so the readiness probe
+reads `MERGEABLE` instead of deferring on staleness. The rebase sits in the OUTER
+publisher — between the local-tip verification and the `ls-remote` lease
+observation — because only the outer loop holds a push credential; and because the
+publisher runs after every build/fix round, every post-round-1 fix is written
+against the tree it will merge into.
+
+The shared build checkout is shallow (`.git/shallow`, governance #574/#571), so a
+naive `git rebase` there replays the whole history and reports false conflicts.
+The implementation never rebases in place: `rebaseOntoObservedBase` replays the
+branch's own diff (`gh pr diff <n>` when a PR exists — server-side merge-base,
+shallow-immune; two-dot `git diff <base>..<branch>` on first publish) onto the
+observed base tip in a throwaway detached worktree with `git apply --3way`,
+commits, and moves `refs/heads/<branch>` by compare-and-swap (`update-ref new
+old`). The replay squashes the branch to one commit, which the `--squash` PR
+merge already does.
+
+A failed 3-way apply is an attention state, never a review verdict:
+`TridentRebaseConflict` fails the run with `REBASE CONFLICT — needs attention:`
+naming the branch, base, and conflicting paths, states that no reviewer judged
+the code, and never invokes the local-mode `resolve_conflict` Forge resolver. The
+re-push keeps the existing lease discipline —
+`--force-with-lease=refs/heads/<branch>:<sha>` pinned to an `ls-remote`-observed
+sha — so a remote advanced by a third party refuses the push.
+
+Verified by 59 tests: fake-host units in `trident/orchestrator.test.ts` (behind →
+rebased publish; up-to-date → no-op; conflict → attention; lease ordering
+preserved) and real-git integration in `trident/publish-rebase-realgit.test.ts`,
+which asserts `.git/shallow` exists in the build checkout before exercising
+anything, seeds a branch genuinely behind a moved main, proves the pushed head
+contains both sides and is an ancestor-descendant of main's tip in a full clone,
+proves a conflicting seed throws the attention error naming the path without
+moving the ref, and proves a third-party advance makes the pinned lease push
+refuse against a real remote.
+
 ## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
 
 `trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
@@ -165,6 +981,7 @@ coda's stand-down paragraph removed. Ten mutants, ten reds.
 whether it can, first" (the 2026-08-13 BUILD-on-codex entry) described the interim state:
 the wrapper refusing honestly because the fix was a change to the workflow's shape. This is
 that change. The dated entry keeps its text — it is a log, not current state.
+
 ## 2026-08-13 — a successful merge is TERMINAL: the run lifecycle ends where the change ships
 
 ISSUES #563. A lane approved its PR and merged it; the merge deleted the head branch;
@@ -224,6 +1041,7 @@ as "done". The step is routed to the cheap tier (`merge-probe-round-*` → `book
 for the reason `head-probe` earned that rule: it runs once per round, and a silent
 fallback to the most expensive tier would be a per-round tax on the step that exists to
 remove a per-lane tax.
+
 ## 2026-08-13 — the Sonnet tier was a generation behind, and the test written to prove it found a second, worse hole (ISSUES #564)
 
 **What the owner saw.** First look at the shipped model-selector pane: *"Minor bug -
@@ -1201,6 +2019,7 @@ guard is green again.
 **Out of scope, deliberately:** the twice-daily brief/digest, the
 `email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
 fan-out migration. Those are P2/P3.
+
 ## 2026-08-12 — the GitHub-connect test that could not fail, and four dead ends behind it (#204 review)
 
 Review of the entry below found its mobile "a failed status read" test **fail
@@ -1522,6 +2341,7 @@ Tested against the production composer's output rather than a hand-built config
 literal, so it fails if `substrates.ts` stops passing the profile.
 Mutation-verified: removing the window from the profile fails four tests, and
 keeping it while the factory silently stops threading it fails two.
+
 ## 2026-08-11 — a nit may not cost a round (#184)
 
 `enforceSeverityGate` in `trident/inner-workflow.mjs` now enforces
@@ -1819,6 +2639,7 @@ write (3), break the nudge post path (14), restore #506's tautological reason (1
 drop the composer's `tool_names` (1). Suites green: `reminders/` 377 pass / 3 skip,
 plus the affected gateway/open/runtime files; `bunx tsc -p tsconfig.json` and
 `bash scripts/ci/typecheck-all.sh` clean.
+
 ## 2026-08-05 — mobile chat opens at the bottom, and only anchors a message top when it is unread
 
 Branch `fix/issue-505-chat-initial-anchor` (ISSUES #505). Changed:
@@ -2522,6 +3343,7 @@ echoes the token it was handed back under the bare MANIFEST label
 un-keyed grant is that grant's own access row — so it transiently holds the
 just-connected account's token until that token expires and the row's own
 refresh_token takes over. Worth an ISSUES entry.
+
 ## 2026-08-04 — bounded transient recovery for the ritual background path (ISSUES #489)
 
 Branch `fix/ritual-transient-recovery`. New: `reminders/ritual-retry.ts`,
@@ -3475,6 +4297,7 @@ Manifest records gained `source_kind: 'active' | 'archived'` and `archive_contai
 **All three mutations were killed.** (1) Archive BEFORE writing content → 6 failures, led by the content-landed test. (2) Remove the non-project exclusion (every dir is a project) → 10 failures including `EXCLUDES a non-project dir`. (3) Remove the `skipped-active` guard → exactly the 2 live-row tests, and nothing else.
 
 59 pass / 0 fail across `open/__tests__/legacy-import-archived.test.ts` (24 new) + the two pre-existing `legacy-import*` files. Verified beyond unit tests with a dry run against the real vault into a throwaway `NEUTRON_HOME`: 25 active CREATE + 19 CREATE-ARCHIVED, 5 exclusions each printed with its evidence, 18 degraded archive sources named, 0 assertion failures.
+
 ## 2026-07-28 — the legacy harness cutover, MEMORY lane (`open/legacy-import/memory/`)
 
 Branch `feat/legacy-memory-importer`. The memory replay: MemoryStore drawers + the MemoryStore knowledge graph + Claude auto-memory + `~/legacy/Memory/` notes → GBrain pages and typed edges. Dry-run by default, `--apply` to write, resumable, converging on re-run, and it refuses to write rather than fuse two records into one slug. No CLI subcommand is wired yet — the lane is a library with injected seams (see "wiring" below).
@@ -3531,6 +4354,7 @@ So the import splits the page the way the codec will read it back: rows become r
 Verified end to end against the real tree into a temp data dir (read-only on `~/legacy`): 1309 written, 0 fidelity failures, 0 collisions; re-run wrote 0 and converged 1309 byte-identically. An audit written independently of the importer confirms **0 source content lines missing** from the 1309 written pages.
 
 **A mutation SURVIVED and it was the important one.** Neutering `verifyBodyFidelity` to always pass killed nothing — because the tests proved the SPLIT (so no realistic page reaches the verifier in a failing state) and left the safety net itself unasserted. Fixed with three tests that make it fire: a page carrying a SECOND embedded separator that survives the split, plus direct tests that tamper with a written page and pass a row that was never written. Six mutations now all die: collision detection removed (3 fail), per-line body re-trim (1), body verification neutered (2), trailing block dropped (2), timeline rows dropped (3), timeline verification neutered (1). 29 pass / 0 fail, `open/legacy-import/entities/entities-import.test.ts`, all fixtures synthetic and in a temp dir.
+
 ## 2026-07-28 — ISSUES #367: an instance's ROOT URL 404'd, because the gate never routed `/` to the handler that could serve it
 
 Branch `fix/367-root-url-404`. Typing your own instance URL returned "Not Found"; only `/chat` worked. Verified live before touching anything — a bare `GET /` returned 404 both through the reverse proxy (`https://owner.example.com/`) and directly against the instance's own port, so it was current code rather than a stale deploy.
@@ -3558,6 +4382,7 @@ Gates: 21 pass / 0 fail in `open/__tests__/open-owner-gate.test.ts`; the rest ru
 >
 > This file stays exactly as it is and remains the place to read history through
 > 2026-07-28. Nothing is migrated out of it.
+
 ## 2026-07-28 — `neutron import-legacy`: Lane A of the the legacy harness cutover (PROJECTS)
 
 Branch `feat/legacy-projects-importer`. `neutron import-legacy [--dry-run] [--legacy-home <path>]` — a new `bin/neutron` subcommand execing `open/import-legacy-cli.ts` via bun, the same bootstrap shape as `doctor`/diagnostics (thin loader arms the process safety net, then dynamically imports the impl).
@@ -3599,6 +4424,7 @@ Deliberately NOT on the `ProjectSettingsStore` interface: no HTTP route writes t
 Two smaller mutations also verified: an empty string must write SQL NULL (or a never-set persona and one explicitly set to `""` read back differently), and an empty patch must not stamp `updated_at` (a no-op write would float a project up the owner's rail during an import that changed nothing).
 
 8 pass / 0 fail, `gateway/projects/__tests__/sqlite-store-set-content.test.ts`.
+
 ## 2026-07-28 — the scribe captures the owner's reflective passages VERBATIM again (M2 cutover blocker)
 
 Branch `feat/scribe-verbatim-originals`. Found while auditing what M2 actually requires, not from a bug report — which is why it is worth recording carefully: it would have degraded the owner's data silently, starting the day he cut over.
@@ -3636,6 +4462,7 @@ Three existing tests encoded the old contract and were updated rather than delet
 Gates: root tsc 0, lint 0, leak 0, depcruise 0. Suites run locally: the four projects suites, the unified surface suite, the app project-tabs suites, route-matrix, launcher-seed — 7 + 31 + 84 + 7 pass, 0 fail. The FULL suite runs in CI (it is not run on the owner's machine).
 
 **Does NOT clean up the existing row.** The stray `general` project still sits in the owner's tenant DB; deleting it is his call. This stops the next one being created.
+
 ## 2026-07-28 — CI parallelised: independent gate jobs + a 4-way sharded suite
 
 The owner asked whether we could lean on CI instead of his laptop. Open's CI was ONE job with seven sequential steps on a 2-core/7GB runner, so a 2-minute typecheck error surfaced only after a 12-minute test run — which is why running gates locally had become the fast-feedback path by default.
@@ -3720,6 +4547,7 @@ Branch `test/406-io-bound-gate-timeouts`. Three tests inherit bun's 5s default w
 **Why raising a timeout is the right fix here and was NOT the right fix for the anchor race.** In the anchor race the ASSERTION itself was nondeterministic — it compared `Date.now()` against a filesystem timestamp, so no timeout could make it reliable and that test is now skipped under #408. These three are the opposite: the assertions are fully deterministic and only the wall-clock allowance was wrong. A gate that walks every `tsconfig.json` on disk, or boots a real composition, is not a unit test and 5s was never the right budget for it.
 
 These have never failed in CI, whose runner is not competing with an emulator and two builds. The cost being removed is local: a false-positive generator trains you to skim past red, which is the habit the green-CI rule exists to break — and it did briefly bury two genuine anchor-walker failures in noise.
+
 ## 2026-07-28 — ISSUES #411: the General sentinel must be URL-PATH-safe, not just validator-illegal
 
 Branch `fix/411-general-sentinel-url-safe`. Fixes a regression **I shipped in #460**, caught by driving the app on a device.
@@ -3751,6 +4579,7 @@ Branch `fix/404-work-tab-key-collision`. The owner's device showed `Chat | Work 
 The constant is now split: `WORK_TAB_KEY = 'work_board'` (registry identity, what badges key on, what the gateway sends) and `WORK_TAB_ROUTE_LEAF = 'workboard'` (the `workboard.tsx` file route, mirroring the registry's `mount.target`). Web already had this right — `landing/chat-react/tabs-client.ts:110` uses `work_board`.
 
 Mutation-verified both halves: restoring the conflated key fails 3 tests; building the route from the key instead of the leaf fails 3. The new test uses the VERBATIM live payload, so it fails the moment the client stops recognising what the server actually sends. Gates: app tsc 0, root tsc 0, lint 0, depcruise 0, leak gate silent, 1134 app tests pass.
+
 ## 2026-07-28 — ISSUES #410: the General sentinel is collision-proof, matching web
 
 Branch `fix/410-general-sentinel-collision`. `GENERAL_PROJECT_ID` moves from the bare string `'general'` to **`'#general'`**, mirroring the web client exactly.
@@ -3788,6 +4617,7 @@ Branch `revert/anchor-race-deflake`. `main` went red twice in one night from my 
 **What a real fix needs, recorded in #408 so the guard can be rebuilt rather than lost:** a production seam — an injectable clock in `DocStore` — so both stamps can be FORCED into a known order instead of raced. That is a deliberate change to shipping code and did not belong in an unsupervised test repair at 07:40.
 
 The regression it guarded is real: pre-fix, `delete_time` was sampled at the hook site instead of before the slow `recordCommit()`, so the deleter's event out-stamped a concurrent writer's and the anchor flipped dead while the file still existed. Verified after the skip: 12/12 green locally, 30 pass / 1 skip / 0 fail.
+
 ## 2026-07-28 — The project shell's chrome follows the rail selection (found on-device)
 
 Branch `fix/shell-follows-rail-selection`. Third defect in this rail sequence found by driving a real build rather than reading a diff.
@@ -3812,6 +4642,7 @@ That 42% is also why #452's own CI passed and the post-merge `main` run failed �
 **The fix makes both guarantees explicit and keyed on observable conditions rather than on a guessed interval:** the handshake now runs BOTH ways (the writer waits for the deleter to be inside `commit()`; the deleter waits for the writer to land, so neither can run first), and the writer additionally waits for the wall clock to strictly advance past the instant `delete_time` was sampled — one tick, not 50ms. Both waits are bounded and reject loudly rather than hanging.
 
 Verified: 8/8 green, plus 5/5 green under 10× CPU saturation. Mutation-verified two ways — re-sampling `delete_time` at the hook site (the original regression) still fails; removing the clock-advance reproduces the red at 5/12.
+
 ## 2026-07-27 — The owner session cookie's `Secure` flag now FAILS CLOSED
 
 Branch `fix/392-owner-cookie-fail-closed`. Closes ISSUES #392, the hardening follow-up to #303 (which is fixed, deployed and verified — this is not a reopen).
@@ -3827,6 +4658,7 @@ The loopback exemption has to stay: browsers drop a `Secure` cookie over plain h
 **Two `#303` tests had to change, and the distinction matters.** `an unrecognised X-Forwarded-Proto falls back to the socket scheme` was asserting `.not.toContain('Secure')` — it encoded the exact behaviour #392 removes, so it was PINNING the weakness and its assertion is now inverted with a comment saying why. The other, `direct plain-http self-host (no header) keeps the cookie NON-Secure`, was describing a REQUIREMENT and exposed a real gap: a constructed `Request` (and a client that omits `Host`) carries no `Host` header, so host resolution now falls back to the request URL's own host. That cannot re-open the hole, because a proxied request is already forced Secure by the header-presence check.
 
 Mutation-verified three ways: restoring the header-derived polarity fails 5 tests; keying the proxy check on header VALUE instead of presence fails 2; a naive substring loopback match fails 2. Gates: root tsc 0, lint 0, leak gate silent, 26 owner-gate + cookie-policy tests pass.
+
 ## 2026-07-27 — The app is declared NATIVE-ONLY, so an OTA no longer needs `--platform android`
 
 Branch `fix/400-app-native-only`. Closes ISSUES #400. The owner: *"App is native only."*
@@ -3856,6 +4688,7 @@ Because a session now OUTLIVES the view that created it, `MobileChatSession`'s c
 **What this is NOT.** The optimal design is one multiplexed socket subscribing to many topics, which makes warmth free. That needs a server-side subscription frame — app-ws binds exactly one topic per connection from its query string — so it is a protocol change, not a client change. This is the correct client-only increment, and the multiplexing work is tracked rather than pretended away.
 
 Mutation-verified: making release stop the session fails 3 tests, removing eviction fails 1, and making sign-out skip `stop()` fails 1. Gates: app tsc 0, root tsc 0, lint 0, depcruise 0, leak gate silent, 1030 app tests pass.
+
 ## 2026-07-27 — General's rail entry opens General's transcript (found on a running emulator)
 
 Branch `fix/general-rail-scope`. Follow-up to #450, which put General back in the mobile rail. Tapping it opened a permanently empty chat — caught by installing the build on an emulator and driving it, not by reading the diff.
@@ -3867,6 +4700,7 @@ Branch `fix/general-rail-scope`. Follow-up to #450, which put General back in th
 **Second half: the shell.** `getSettings('general')` 404s, so the project shell rendered "project not found" for the scope holding the largest transcript. General now renders from a synthetic scope identity (name, glyph, no members) — explicitly NOT the ISSUES #393 placeholder pattern: every field is either literally true of General or inert, and the chrome that would misrepresent it stays suppressed. The three project-null early returns collapsed into one gate that narrows properly.
 
 Mutation-verified: letting the sentinel pass through (the original bug) fails 2 tests. Gates: app tsc 0, root tsc 0, lint 0, depcruise 0, leak gate silent, 1026 app tests pass.
+
 ## 2026-07-27 — De-flake the anchor-walker delete-vs-write race test
 
 Branch `fix/deflake-anchor-walker-race`. `anchor-walker.test.ts`'s "a writer recreating the doc during the deleter's post-unlink awaits keeps the anchor live" opened its race window with a flat 50ms sleep inside the stubbed `VersionStore.commit()`, betting the concurrent writer would land its rename + fstat + hook inside that window. On the loaded partitioned CI runner it does not, and the test went red for scheduling reasons rather than for the regression it guards — blocking an unrelated PR.
@@ -3931,6 +4765,7 @@ Branch `feat/app-remote-diagnostics`. The Android app failed on the owner's devi
 **Mutation-verified** (a test that cannot fail is not a test): neutralising `buildClientReport`'s scrub turns the app redaction invariant red (3 of 6 cases); neutralising `redactString` in the gateway redactor turns the ingest redaction cases red (2 of 15); pruning on any 2xx instead of the `accepted` count, removing the queue lock, disabling `fitReport`, and removing the `origin` filter each turn distinct persisted-queue cases red (1, 1, 3 and 3 of 21). Each was restored and re-run green.
 
 **Codex cross-model review (r1 + r2)** found four real defects in the queue, all fixed above and each now pinned by a mutation-verified test: the batch-limit over-prune (r1 P1), the concurrent-append race (r1 P1), the oversized-report wedge (r1 P2), and — the one with privacy consequences — **cross-server delivery** (r2 P1): the queue survives a server change by design, so a report captured against one gateway would have been flushed to the next gateway the owner configured. `DiagnosticsClient` also now reports `accepted: 0` rather than `reports.length` when a 2xx body does not carry the gateway's count — a stalled queue is recoverable (capped, oldest-evicted) while a wrongly pruned crash report is gone for good.
+
 ## 2026-07-25 — mobile app: LOGIN-FIRST — the app opens on login and DISCOVERS its own instance URL
 
 Branch `trident/app-login-first-discovery`. The OPEN/app half of the login-first flow; the control-plane half (`POST /v1/route` returning the instance's PUBLIC base url) already shipped and is live. The owner: *"why does it have to ask? it should just open with a login screen, and once you login it should know the url."* PR #439 (#385 part 1) gave the app a runtime server URL but made TYPING it the FIRST-RUN surface — `app/app/_layout.tsx` rendered the "Connect to your Neutron" form INSTEAD of the `<Stack>` while unconfigured, so a new owner's first task was to know and type a hostname. Now the app opens on LOGIN and learns its own address after authenticating. **NO FEATURE FLAGS** — login-first IS the behaviour, one code path; the typed-URL form is DEMOTED, not duplicated.
@@ -4802,6 +5637,7 @@ live + replay paths.
   `onboarding_completed` frames (failed on prior main: the null stamp let the replay
   re-fire once). Scope: the live-emit stamp only; the Managed claim flow (Defect 1
   start-token + 2b auto-redirect) is a separate PR.
+
 ## 2026-07-20 — Per-project isolated onboarding compose (#377 + #378, Approach A)
 
 Closed the two trust-critical onboarding-opening defects (SPEC Decisions Log
@@ -6279,6 +7115,7 @@ App `tsc` clean, root `tsc` clean, leak-gate SILENT.
 
 **Out of scope.** Desktop web (PR-1..5), docs drill-down (PR-5), a rail preview
 line, any activity/live_runs derivation outside the composer.
+
 ## 2026-07-03 — TRIDENT parallel builds + build lifecycle (#342/#340/#339/#334/#337)
 
 **Why.** The owner's live test 2026-07-03 (SPEC.md Decisions Log, owner-locked). the legacy harness runs
@@ -6687,6 +7524,7 @@ migration (the `design_doc_ref` column already existed, unused for docs).
   path" instruction, the bidirectional write-back is left for a follow-up. No
   parallel user-facing plan doc is created; the worktree `IMPLEMENTATION_PLAN.md`
   is an existing build-internal artifact (not user-surfaced).
+
 ## 2026-07-02 — Trident: per-project git build workspace (brand-new projects are buildable)
 
 **Why.** A trident build for a BRAND-NEW project (no code repo) died ~2 min in —
@@ -6898,6 +7736,7 @@ read/list/write round-trip and `.txt`-still-rejected in
 `landing/chat-react`) clean; leak-gate silent; fresh `NEUTRON_HOME=/tmp/wfi`
 boot on :7874 serves the bundle with the `HtmlDoc` renderer and the docs routes
 wired.
+
 ## 2026-07-02 — Chat typing dots persist for the WHOLE processing window (incl. background builds)
 
 **Why.** The owner's live-test 2026-07-01: he asked the agent to build a meditation-timer
@@ -7044,6 +7883,7 @@ project-scoped (a separate change: thread the originating project id onto the ru
 that for trident specifically it is a stored preference, not yet a per-run switch.
 Codex cross-model review re-raised this as the remaining item; it is an
 acknowledged trident-architecture constraint, not a defect in this diff.
+
 ## 2026-07-02 — SEV1 chat project-switch: fresh per-conversation assistant-ui runtime (seamless switch, no error card, no flicker)
 
 **Why.** M1 top-priority (the owner, frustrated): switching projects (or cold-loading
@@ -7202,6 +8042,7 @@ persist personality; gate off with no import); minimal-vs-full STATUS.md +
 ProjectOpening` copy; `stripLeadingFrontmatter` (fence removed, body kept, bare
 rule + no-frontmatter untouched, CRLF). tsc clean, leak-gate silent, server boots
 clean on a fresh QUIET install (port 7869).
+
 ## 2026-07-01 — Chat turn timeout is ACTIVITY-BASED; freezes auto-retry + get a Retry button
 
 **Why.** The owner's live-test 2026-07-01 (frustrated): a chat turn running a long-but-active
@@ -7524,6 +8365,7 @@ tool. The HTTP PATCH surface + mobile client already accept `emoji`; adding a 10
 tool to that Core's manifest/capability-guard/test contract is deferred to a
 follow-up so this sprint stays focused on the rail. Per-project unread on the
 General scope is also not badged (onboarding lives there; low value).
+
 ## 2026-07-01 — Reminders: faithful cron cadence (the legacy harness parity)
 
 **Why.** Neutron's reminder store only understood COARSE recurrence
@@ -7763,6 +8605,7 @@ project. No flags.
 that opens both a project-scoped socket and a General socket, drives the real
 `POST /api/app/projects`, and asserts the new project reaches both live.
 Confirmed red before the fix, green after; leak-gate silent; `tsc` clean.
+
 ## 2026-06-30 — Onboarding live-path: deterministic name/personality capture (no double-ask) + single closing
 
 **P1 — two live-path bugs from the owner's deployed-onboarding test.** Both fixed inside
@@ -7988,6 +8831,7 @@ consistent with the dispatch.)
 NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
 timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
 regression from this change.
+
 ## 2026-06-30 — Web-client rework: per-project chat + rail/tab layout + Plan rename + remove Tasks + markdown (P0)
 
 The linchpin fix for the onboarding→project UX. Five linked changes, all in the
@@ -8013,9 +8857,12 @@ users opening the same project can never share a transcript — mirrors the prov
 `landing/server.ts` `web:<user>:<project>` model. The 0→N `projects_changed`
 auto-select was DROPPED: a mid-onboarding project appears in the rail but does NOT
 yank the chat off General (which would drop still-arriving onboarding messages);
-the user enters a project by tapping it. **Known behavior:** reminders/briefs still
-fan to the bare `app:<user>` (General inbox) topic, so they surface in General, not
-the per-project chats (durable rows always under `app:<user>`).
+the user enters a project by tapping it. **SUPERSEDED by #293 (2026-08-15):** this
+used to read "reminders/briefs still fan to the bare `app:<user>` (General inbox)
+topic". They no longer do. A fired reminder resolves to the topic that OWNS the
+work — `app:<user>:<project>` when its stored destination names an EXISTING project
+(`open/wiring/reminder-topic.ts`) — and to General otherwise. See
+"2026-08-15 — the fired reminder lands on the topic that asked" below.
 
 **(2) Persistent rail + tab layout.** `TopicRail` was nested INSIDE the Chat tab
 body, so it vanished on other tabs, and the `TabBar` floated above everything only
@@ -8050,6 +8897,7 @@ green; leak-gate SILENT. Files: `gateway/http/app-ws-surface.ts`,
 `tabs/registry.ts`, `landing/chat-react/{ProjectShell,ChatApp,DocumentsTab,
 controller,config,main,Markdown}.tsx?`, `landing/chat-react.html`,
 `landing/package.json`.
+
 ## 2026-06-30 — Onboarding live-path: archetypes + option buttons + custom-name + closing + per-project openings
 
 Five Path-1 onboarding content/flow regressions the owner hit live-testing, all wired
@@ -8218,6 +9066,7 @@ Claude export → job started). Added two engine-level repros in
 (no-state solicited → seeds row + starts; no-state affordance-off / managed →
 no-op, no row manufactured). Negative control: reverting the engine fix fails
 exactly these no-state tests.
+
 ## 2026-06-29 — Create Project affordance (project rail + create-project capability + agent tool)
 
 A skip-import owner had no user-initiated way to create a project (projects only
@@ -9563,6 +10412,7 @@ delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; a
 short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
 no-reply gate is untouched. No feature flag — the gate ships on as default
 behaviour.
+
 ## Mid-turn message injection (#516)
 
 The web composer keeps Send enabled while the agent is typing. A second message
@@ -10075,6 +10925,7 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+
 ## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
 
 Observed live: the owner cancelled a running email-core build and the row settled at
@@ -10818,6 +11669,7 @@ the only record the owner keeps, so it now says what actually happened. That cor
 own test.
 
 Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
+
 ## 2026-08-13 — adversarial review can dispatch on Codex
 
 `review_adversarial` now declares `alsoRunsOn: ['codex']` in
@@ -10834,6 +11686,7 @@ the CLI transport does not consume that setting. Core-seat completeness also tre
 a deferred, unavailable, or dead Codex adversarial run as incomplete, so
 `enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
 the panel gate.
+
 ## 2026-08-13 — killed Codex builds report themselves and survive the bridge bound
 
 The `typing-on-connect` artifacts establish the failure mechanism. The wrapper's
@@ -10903,6 +11756,7 @@ record explicitly says no review ran and that only build and CI gates supported 
 Mutation checks: `NONE_DISPATCH_GUARD` (forcing the rubric NONE branch to dispatch)
 failed the no-agent assertion; `CONFIGURED_DEAD_COMPLETENESS` (removing core missing-seat
 collection) produced APPROVE for a dead configured reviewer and failed four gate tests.
+
 ## 2026-08-13 — typing catches up on connect and explains the live step
 
 Typing is now level-triggered for a socket opening during a turn and remains
@@ -10937,6 +11791,7 @@ suppresses nested edges and rejects stale timer callbacks; its fail-safe remains
 46 minutes, beyond the live turn's 45-minute ceiling, and still synthesises `end`
 when the genuine edge is lost. Connect catch-up stays a direct per-socket send in
 `open/wiring/typing-catchup.ts`, so it is neither durable nor broadcast.
+
 ## 2026-08-14 — pr-mode publishing belongs to the durable outer loop
 
 The inner build process now ends at a local commit. `trident/codex-build.sh` has no
@@ -10969,6 +11824,7 @@ injects both GitHub token names, proves the captured child environment is popula
 with positive controls, and asserts neither secret reached the Codex process. Its
 command-absence guard matches wrapped commands as well as line-leading commands. The
 obsolete inner-publisher tests were removed instead of remaining skipped.
+
 ## 2026-08-14 — Quiet live turns survive
 
 - Pre-change verification searched the prior
@@ -11008,6 +11864,7 @@ was added; the change makes the existing view boundary legible.
 Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
 tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
 after its expected red run.
+
 ## 2026-08-14 — host deploy resolves remote refs against the remote
 
 `open/host-deploy.ts:544` now resolves a deploy target through a distinct
@@ -11042,6 +11899,7 @@ Mutation checks (each production guard was removed independently and restored):
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
 ## 2026-08-14 — launcher-held build brief segments travel by path
 
 Task and reflection brief segments now travel by path via the `briefParts` manifest
@@ -11052,3 +11910,607 @@ args-transit corruption now fails closed with `CODEX_BUILD_BRIEF_ARGS_CORRUPT`.
 Coverage lives in `trident/inner-workflow-assembly.test.ts`; the unchanged fallback
 and wrapper corruption coverage remains in `trident/codex-brief-chunking.test.ts` and
 `trident/codex-build.test.ts`.
+
+## 2026-08-14 — any tier in either cross-model review seat
+
+`trident/phase-models.ts` and `trident/inner-workflow.mjs` now dispatch `none`,
+Claude, Codex, and Kimi tiers from either generic review seat. An explicitly selected
+Claude tier uses the reviewer prompt, verdict schema, chosen model, and effort; an
+unavailable CLI remains `not_connected` and never falls back to Claude. Deferred
+retry and blocker diagnostics follow the selected route family instead of the seat's
+historical name. The single-family warning counts only review seats that can actually
+dispatch and does not count the build route.
+
+`trident/__tests__/cross-model-dispatch.test.ts` executes the production launcher and
+real workflow for every declared group, GPT-build/Opus-review, configured but
+unavailable Codex CLI behavior, Claude retry success and exhaustion, and same-family
+warning semantics. Mutation checks made each corresponding guard red before the
+production behavior was restored.
+
+## 2026-08-15 — an unreadable resume head stops the run before the fire
+
+`launch()` (`trident/orchestrator.ts`) already reads the live branch head in code
+(`resolveResumeLiveHead`, three attempts, tri-state `40-hex` / `absent` / `''`). When
+that read comes back `''` — the launcher itself could not tell — firing the workflow
+bought nothing: `classifyResume` returns the bounded stop
+(`{ mode: 'stop', reason: 'head-unreadable' }`) for every checkpoint except the TWO it
+answers BEFORE it looks at the head — `pr-merged` (resolved to `merged`) and the EMPTY
+name (resolved to `rebuild`, reason `no-checkpoint`; there is nothing recorded to
+preserve). Both are exempt from the fast exit for exactly that reason, and both have
+their own test. The
+launcher now takes that one known outcome at the boundary: no fire, the run is failed
+through `innerTerminalFailureReason` with `block_kind: 'infra-only'` and the inner
+stop's wording verbatim ("could not read the head of `<branch>`; the recorded work is
+at `<oid>`; re-run when the read succeeds"), so the persisted `failure_reason` is
+byte-identical to the one `applyResult` writes for the inner stop and never reads
+"without Argus APPROVE" for a run Argus never reached.
+
+`classifyResume` remains the single semantic decider — this is only the cheap
+fast-exit, and the two names above are exempted for exactly the reason given. `failedRun`
+spreads the row, so `inner_checkpoint` / `inner_checkpoint_head` /
+`inner_checkpoint_findings` survive untouched. Coverage lives in the "the resume live head
+is read in code, never relayed by a model" block of `trident/orchestrator.test.ts`: the
+never-succeeding read now asserts three attempts, zero fires, the persisted reason,
+and the preserved checkpoint columns; `pr-merged` and the local-mode `''` route have
+their own tests; a successful OID read and an `absent` answer still fire unchanged.
+
+**WHAT THE PRESERVED COLUMNS ACTUALLY BUY, AND WHAT THEY DO NOT (corrected at Argus r4 —
+two reviewers reached it independently).** Earlier revisions of this entry said "a re-run
+resumes at exactly this point". THAT IS NOT AS-BUILT, and the claim is withdrawn rather
+than merged. A terminal row is never advanced again (`step()` short-circuits on
+`isTerminalPhase`, and `advanceTridentRun` no-ops the same way), and re-running a card is a
+FRESH DISPATCH — `TridentRunStore.create` inserts `inner_checkpoint`,
+`inner_checkpoint_head` and `inner_checkpoint_findings` as NULL. So the preserved columns
+are read by NOBODY: they are the durable EVIDENCE of what the failed run built and where,
+for a human or a follow-up. A re-run REBUILDS. A real resume-a-terminal-run path is a
+separate card (recorded in `IMPLEMENTATION_PLAN.md`); the stop message's "re-run when the
+read succeeds" stays accurate as written — it says when to try again, and it never
+promised the re-run would skip the build.
+
+**THE RETRIES ARE SPACED, AND THE SPACING IS A SEAM.** The consequence of `''` here is a
+TERMINAL, non-self-healing run failure, and in `pr` mode the read is `git ls-remote` — a
+NETWORK call. Three attempts fired back to back complete inside a few milliseconds, which
+is short enough that a single dropped packet fails all three.
+`resolveResumeLiveHead` waits `RESUME_HEAD_RETRY_DELAYS_MS` (`[250, 1000]`) BETWEEN
+attempts — never before the first, never after the last — through an injected `sleep`
+(`BuildTridentOrchestratorOptions.sleep`) that the suite replaces with a no-op, so the
+delay is real in production and free in the tests.
+
+**WHAT THAT WINDOW ACTUALLY COVERS, STATED HONESTLY** (an earlier revision of this
+paragraph claimed a "momentary GitHub 5xx", which ~1.25 s of total spacing does not
+credibly outlive): it covers a sub-second blip — one dropped packet, a DNS retry, a single
+connection reset — and nothing longer. A sustained outage still fails all three attempts.
+That is a tuning question rather than a correctness one, and the trade is stated honestly
+rather than dressed up (Argus r4): a blip that outlives ~1.25 s now ends the run, where
+before this change it produced a self-healing automatic REBUILD. The regression is
+AVAILABILITY, not work — the branch, its commits and its PR are untouched, and the failed
+row records what was built and where — and it is the trade the card asked for: "could not
+tell" must not silently spend a max-effort rebuild of already-pushed work (measured on the
+neutron-enterprise run: 3,813 → 84,875 → 133,169 output tokens, the third being the
+rebuild). What the operator loses is the automation of that rebuild, not its result; the
+re-run rebuilds, because there is no resume-a-terminal-run path (see above). Widening the
+window trades a longer stall on every genuinely-dead branch for a rarer manual re-run; the
+numbers live in one exported constant so that trade can be made with evidence rather than
+by guess.
+
+## 2026-08-09 — A ritual post is a chat message, and so is its notification
+
+The owner's phone said `ritual:kaizen`, and tapping it opened the app but not the
+conversation. One root cause under both: the push was composed from the reminder ROW
+on the tick's `on_fired` hook, and a ritual row's `message` IS that dispatch token —
+so the notification could never carry the posted text, and its project field was the
+instance slug, which resolves to no project.
+
+Composition moved into the ONE out-of-turn delivery seam — `createDeliver` now takes a
+`notify` sink and fires it for every post that got a durable row
+(`gateway/http/deliver.ts` → `gateway/push/chat-message-push.ts`), never for a
+transient `'none'` pill. So a fired reminder, a ritual, the morning brief, the idle
+nudge and a system notice all notify identically, because they are all one thing.
+Composing it in the reminder outbound instead — the first version of this change —
+cured the reported message and left every other producer silent, which is the
+per-producer mistake `deliver` exists to have ended. `pushReminder`, `onFired`,
+`ReminderTickLoop.on_fired` and the `push_dispatcher` composition field are DELETED —
+the tick can only see the row, so it was never a place this could be built correctly.
+
+`agent_message` joined `PUSH_KINDS` (it was a resolver branch with no sender, kept out
+of the list precisely so the exhaustiveness test could not be padded); `reminder` left
+it, because nothing sends it — but its RESOLVER branch stays, because a store app and
+a self-hosted gateway do not upgrade together and undismissed notifications still
+carry that kind. General names itself with `GENERAL_RAIL_ID`, now defined once in
+`wire-types/topic-id.ts` and pinned to the client's copies: encoding it by ABSENCE
+(the first version) is malformed to every already-installed bundle, which would have
+preserved the exact symptom the change was for.
+
+`?message_id=` is finally consumed. It reached the chat route since 2026-05 with no
+reader. The frozen #505 anchor and a new once-per-target imperative `scrollToIndex`
+now ask ONE function, so a cold open cannot land in two places, and a tap into an
+already-mounted project can be re-anchored at all. With no pushed id, nothing scrolls
+and the anchor is byte-identical — asserted, because this is the #505/#511 blast
+radius.
+
+Detail: `docs/as-built/2026-08-09-notification-is-a-chat-message.md`.
+
+## 2026-08-10 — Two guards in that change were decorative; review found both
+
+Follow-up on the entry above, and the interesting part is not the fixes — it is that
+both defects were guards that READ a value nothing WROTE, and both were covered by
+passing tests.
+
+The re-emit suppression was INERT. `deliver` asked the ButtonStore whether the owner
+had already been shown a row, and the store answers from `delivered_at` — but
+`markDelivered`'s only callers were the onboarding engines, so no row `deliver` created
+was ever stamped, `was_delivered` was structurally false, and the double-buzz the guard
+was added to stop still happened on every idempotent re-emit (the ritual-approval
+prompt, the credential-lapse notice). The test that "proved" the suppression used a fake
+whose `emit` returned `was_delivered: true` from a literal, so it asserted the branch
+and assumed the write. `deliver` now stamps the row after the owner has ACTUALLY been
+reached — a device notification the transport accepted, or a live socket — and the
+suppression is asserted against the REAL `ButtonStore` on a real migrated DB, which is
+the only harness where "the answer was written" is a fact rather than a fixture. Not
+stamping on failure is load-bearing: a row that persisted while every transport failed
+must still buzz on the retry, so `ChatMessagePushSink` now RESOLVES a boolean and reads
+`PushResult.ok` — `pushAll` catches an Expo outage and resolves rather than throwing, so
+a sink watching only for a throw would have called an outage a delivered notification.
+
+A legacy General reminder tap 400ed. `resolvePushRoute` emits the mobile RAIL spelling
+`~general`, and `reminders-client.ts` interpolated it raw into
+`/api/app/projects/<id>/reminders`, which `sanitizeProjectId` rejects — so the tap
+opened `invalid_project_id` where the reminders should be, on the rail's General
+Reminders tab as well as on the push tap. It now maps through `general-scope.ts` like
+`docs-client` and `tabs-client` do; that module exists because the fifth client to talk
+to a project-scoped surface was the fifth to forget. The regression test walks the real
+resolver's output into the real client, because both modules' own suites were green —
+the same sender/resolver seam this whole change was about. It asserts the raw sentinel
+rather than `%7E`: `~` is UNRESERVED, so `encodeURIComponent` leaves it intact, which is
+why every existing "does it encode the segment?" test was blind to it.
+
+Also: the notification can no longer hold a delivery open (`POST
+/api/app/system-notice` awaits `deliver`, and the only bound underneath was Expo's 10 s
+per batch), bounded at 3 s and asserted as an ORDERING rather than elapsed wall-clock
+time; `chatPushExcerpt` clamps a non-positive budget so it cannot return a bare
+ellipsis; and five in-code pointers that sent readers to `reminder-outbound.ts` for the
+notification — contradicted by that file's own header — now name the seam that has it.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — resolving what review left unverified on the notification lane
+
+`createDeliver` now validates `notify_timeout_ms` at construction, the way
+`ExpoPushClient` validates `timeout_ms` and `batch_size`. `??` defaults `undefined` only,
+so a literal `0` or a `NaN` from a parsed setting reached `withTimeout` intact, and
+`setTimeout(0)` settles the bound on the next macrotask — before the notification can
+answer. Every notification would have reported not-sent, no row would ever have been
+stamped, and the re-emit suppression would have been silently OFF while every other test
+on this path still passed. Unreachable from the sole live call site, which omits the
+field; guarded because that failure mode is invisible at runtime rather than loud.
+
+The stamp condition `notified || delivered` is unchanged, and the seam in it is now named
+where it is decided. A backgrounded phone holding an open socket while Expo is down gives
+`delivered: true, notified: false`, so the row is stamped and the ALERT for that key is
+gone for good — an approval prompt then waits until the app is next opened. Accepted: the
+socket handed the message to the client and it is in the transcript, so this delays an
+alert rather than dropping information, whereas requiring `notified` makes the stamp
+unreachable on any install with no registered device (every fresh one) and the re-emit
+would then re-notify forever with nothing able to buzz.
+
+The zero-width guard and its test were both written with the LITERAL invisible characters
+pasted in, and both are now escape sequences. The guard's own character class was
+unreadable — a reviewer could not tell which codepoints it held or count them, and any
+tool that re-encodes the file could drop one silently. The test was worse, because it could
+be DEFANGED WITHOUT GOING RED: strip the invisibles from its fixtures and every case
+degrades to `chatPushExcerpt('')`, which returns `''` and passes for the wrong reason,
+so the test would stop exercising zero-width handling at all while still reporting green.
+Mutation-tested after the rewrite — dropping U+200B from the class still reds the
+budget-accounting case, so the escapes are load-bearing and not decoration.
+
+The two docblocks about `[id]`-route param staleness contradicted each other, and the
+inaccurate one was the child screen's: it claimed its OWN param had been observed to go
+stale. The recorded incident is the opposite — `useLocalSearchParams` is sticky in a
+component that stays MOUNTED, so the LAYOUT kept reporting the old id while the
+freshly-rendered chat screen already saw the new one. That matters beyond tidiness: the
+child being the fresh side is the reason re-entering a scope without `?message_id=` cannot
+resurrect a previous tap's target and re-anchor an ordinary open onto an old row. The
+screen reads the path for AGREEMENT with the shell, not because its params lag, and the
+comment now says so.
+
+## 2026-08-10 — the fail-closed delivery guard was reading a fail-open number
+
+The previous entry made `gateway/push/chat-message-push.ts` require `delivered >= 1` before
+a durable row is stamped `delivered_at`. Review then found that `delivered` itself was
+computed as `messages.length - errored.length` in `gateway/push/dispatcher.ts`. Those two
+are equal only when Expo returns one ticket per message; on a 200 carrying fewer tickets —
+`{data: []}`, a body with no `data` key at all, anything that parses as JSON — subtraction
+reported EVERY message as delivered on a response that accepted nothing. Measured
+`{attempted: 2, delivered: 2, errored: 0, ok: true}` for an empty ticket array, and the
+sink answered `true`. The zero-delivery stamp the guard exists to prevent was therefore
+reachable again, by a second route, through the guard itself. `delivered` now COUNTS
+`status: 'ok'` tickets, so a short batch reads honestly as `delivered + errored < attempted`.
+
+The invariant `chatPushExcerpt` documents — never a buzz with no words — did not hold for
+bodies that are invisible or punctuation-only. `\s` does not match U+200B/U+2060/U+FEFF, so
+neither does `trim()`: a zero-width body survived normalization at full length, cleared the
+sink's `length === 0` check and pushed a notification with no visible characters. Wordless
+bodies now excerpt to the empty string, checked on the OUTPUT as well as the input because
+a budget landing inside a leading run of punctuation manufactures the same thing from a good
+message. The guard is scoped by `\p{L}`/`\p{N}`/`\p{Extended_Pictographic}` rather than
+`\w`, so CJK-only, Cyrillic-only and emoji-only messages still count as content.
+
+`timeout_ms` is now validated at construction beside `batch_size`. `AbortSignal.timeout`
+rejects a non-finite argument rather than coercing it, and it is reached per batch, so an
+unvalidated deadline would have surfaced a permanent config mistake as a transient Expo
+outage on every fire.
+
+Two things review raised are recorded as deliberate rather than fixed, both in the code that
+decides them. `deliver`'s 3 s notification bound ABANDONS the send instead of cancelling it,
+so a merely-slow notification can land after being reported not-sent and the next re-emit
+buzzes again — chosen over stamping on no evidence, which silences a message forever. And
+there is no atomic claim between `emit` and `markDelivered`, so two deliveries sharing an
+idempotency key that overlap in flight can both notify; the reachable producers do not race
+(the reminder tick claims its row first, and the live keys are per-artifact), and closing it
+would put a claim-on-emit into the ButtonStore contract every caller inherits.
+
+The union hazard `wire-types/push-kind.ts` is named after recurred here and is now covered
+the same way: `gateway/push/dispatcher.test.ts` drives the REAL sink against the REAL
+dispatcher, because a hand-written `{ok, delivered}` fake on either side is exactly what let
+the two halves be independently green and jointly wrong. Every guard is mutation-tested —
+each reverts to red on its own negative cases while the positive controls keep passing.
+
+## 2026-08-10 — `ok: true` is not a delivery; a ritual row must never fall through to a nudge
+
+Two adversarial-review blockers on the notification lane. `gateway/push/chat-message-push.ts`
+treated `PushResult.ok` as proof of delivery, but `ok` is `true` with `delivered: 0` both
+when no device is registered (the state of a fresh install, short-circuited before Expo is
+called) and when every ticket errored — so `gateway/http/deliver.ts` stamped `delivered_at`
+and silenced the idempotent re-emit forever for a message nobody received. The sink now
+requires `delivered >= 1` and fails closed on a result that reports no count.
+
+Separately, `ritual_planner` is null on an LLM-less box, and `reminders/dispatcher.ts` then
+classified every row as a nudge — so a ritual row composed from its stored `message`, which
+is the dispatch token, and the owner's lock screen read `ritual:kaizen` by a second route.
+The dispatcher now refuses a ritual row it cannot plan, keyed on `reminder.ritual_id`.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — refusing to compose is only half of a refusal
+
+The round-3 refusal above stopped the dispatch token reaching the owner and then returned
+normally with one debug-level line. `reminders/tick.ts` claims an occurrence BEFORE
+dispatch and reverts only in its `catch`, so a normal return RETIRES it: a scheduled
+ritual on an instance whose model credential expired vanished with no post, no ledger
+row, and no journal line at the default level, which `reminders/AGENTS.md` forbids for a
+ritual (a failure is recorded AND noticed). `reminders/dispatcher.ts` now logs at error
+level and posts one plain-language notice (`formatRitualUnplannableNotice`,
+`reminders/ritual-delivery.ts`) — and THROWS if that notice is refused, because consuming
+the occurrence is only defensible when the owner was told. It deliberately does not throw
+on the ordinary path (a missing credential cannot resolve by the next tick, so that would
+re-fire every 30 s) and writes no `code_ritual_runs` row (the ledger writer and run-id
+mint live inside the absent planner, and `skip_reason` is a closed set in
+`migrations/0106_ritual_schema.sql`).
+
+`gateway/push/chat-message-push.ts` `hasVisibleContent` claimed emoji-only posts count,
+but a regional-indicator pair carries no `\p{L}`, `\p{N}` or `\p{Extended_Pictographic}`
+— so a flag-only body sent NO notification while `✅` sent one. `\p{Regional_Indicator}`
+joins the class; bare symbols (`→`, `✓`, `★`) stay deliberately silent.
+
+Four comments that a reader would have been right to trust were corrected rather than
+left: the "untrimmed clip cannot be empty" invariant (it can, at budget 1 behind a
+dropped surrogate), the `ritual_planner` docblock and `ritual-fire.ts` header that still
+described the nudge fall-through as the design, and `gateway/push/expo-push-client.ts`,
+which still documented the retired `{ kind: 'reminder' }` payload and "the reminder's
+stored `message`" as the notification body — the exact sentence the reported defect was.
+`gateway/http/deliver.ts`'s 3 s bound still does not CANCEL the send; that is named in
+place as a possible duplicate buzz, not silently.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`
+(§ Round-4 review fixes).
+
+## 2026-08-10 — the push-tap latch is released when the tap's target goes away
+
+`ChatSyncSurface`'s imperative re-anchor latched the honoured `message_id` and never
+cleared it, which made a per-tap instruction behave as a per-process one.
+
+⚠️ **THE SEQUENCE THIS ENTRY ORIGINALLY GAVE AS THE MOTIVATION IS REFUTED — see the
+2026-08-11 entry below.** It read: *"tap the notification for a message, rail-tap to another
+project (a chat route with no `?message_id=`), then tap the SAME notification again — and the
+transcript did not move: the equality check had already spent the target."* The premise is
+true and the conclusion is not. A real second tap never reaches the equality check, because
+`app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
+`?message_id=` — it is
+swallowed one layer up, and that dedupe gap is filed as **#182**. The latch-release fix
+described below is correct by inspection and stands; only this motivating sequence was wrong.
+
+The COMPONENT is not remounted along that path — the shell is a single root-stack screen
+named `projects/[id]` and expo-router only diverges on a route named exactly `[id]`, so a
+rail tap re-renders it and the ref outlives the switch. The LIST is remounted, though:
+`useMobileChat`'s attach effect is keyed on `projectId` and its cleanup drops `ready`
+(`app/lib/chat-core/use-mobile-chat.ts:447`), and the surface renders
+`!ready ? <spinner> : <FlashList/>`, so `isInitialScrollComplete` comes back fresh and the
+frozen anchor can act on the way back if it is populated in time. So: a latch with no exit
+is a defect by inspection and one line to close; whether it was owner-VISIBLE on the
+rail-switch path rests on that repaint race and is not claimed here. The imperative seam is
+the only path when the list is not remounted, which is what the new arm drives.
+
+A render with no target now clears the latch. Mutation-verified: restoring the bare
+early-return reds the new sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, and only that arm.
+
+Also caught in the same pass: `scrollToIndex` is typed `(params) => Promise<void>` and its
+executor calls `getLayout` synchronously, which throws before the layout manager exists — a
+rejection the call site was dropping. Now caught. The latch is deliberately NOT re-armed on
+a rejection: the only state that can reject is a pre-layout list, whose position the frozen
+`initialScrollIndex` already owns, and re-arming would let a later commit yank a transcript
+the owner was placed in correctly.
+
+Found by the cross-model (codex) review lane, in this change's own new code.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — five comments that asserted things the code does not do, and one P1 named not fixed
+
+Comment-only follow-up on the push-notification change, from the rubric review lane.
+
+Two of the five were COPIES of a sentence this branch had already corrected elsewhere:
+`gateway/composition/build-core-modules.ts` and `gateway/composition/input/notifier-input.ts`
+both still said an LLM-less box makes every reminder row compose as an ordinary nudge "which
+is fail-closed", the exact claim `reminders/dispatcher.ts` and `open/composer.ts` were fixed
+for — a ritual row's stored `message` IS the dispatch token, so nudging it is how that token
+reached the owner's lock screen. The same file also opened by describing the push dispatcher
+attached as the tick's `on_fired` hook and then said that hook was gone twenty-five lines
+later. `wire-types/push-kind.ts` said the legacy `reminder` kind was "gone from this list and
+from the resolver" — it is gone from the list, while the resolver keeps a decode-only branch
+deliberately, so a reader could have acted on that sentence by deleting a live compatibility
+path. And `ChatSyncSurface` said its deep-link latch is set after a successful jump when it is
+set when the jump is issued.
+
+Also NAMED AND DELIBERATELY NOT FIXED, at the site a reader hits it: the initial-anchor freeze
+can read the PREVIOUS scope's rows. `projectId` arrives as a prop, so the first render under a
+new scope still holds the old scope's `rows`/`selfDeviceId` — those are cleared in
+`useMobileChat`'s effect cleanup, which runs later (`app/lib/chat-core/use-mobile-chat.ts:447-451`)
+— so the freeze re-computes the OLD project's index under the NEW project's key, and the list
+remount consumes it. Byte-identical to `main` on this path, so this change neither introduces
+nor widens it. The fix is small (refuse to freeze while `ready` is false — verified not to be
+entered on a background/foreground transition) but belongs with a mounted test that drives
+`projectId`, `ready` and a real list remount, in the ISSUES #505/#511 hot path. Raised as a P1
+follow-up.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — the token prune was an index join nobody checked the index of
+
+Review round 2 on the notification lane. The two guards under review held on the tip, and
+re-deriving them found a third thing in the same file that did not.
+
+`PushDispatcher.dispatch` prunes the tokens Expo reports `DeviceNotRegistered`, by INDEX:
+ticket `i` names `messages[i]`. Its comment justified that with "tickets come back in
+submission order". True, and not sufficient — `ExpoPushClient` appends only the tickets Expo
+actually **returned** (`for (const t of data) tickets.push(t)`), so a chunk that comes back
+short shifts every later ticket left by one and the join silently identifies the wrong
+device. A `DeviceNotRegistered` for one token then deletes a **live** one, and push for that
+device stays dark until it next re-registers.
+
+The two comments in the file **contradicted each other**, which is how it surfaced: fifty
+lines up, the `delivered` tally had just been rewritten *because* a short response is real
+("a short batch now shows up honestly as `delivered + errored < attempted`"). One file, one
+mechanism, two opposite beliefs about it — and the prune held the wrong half.
+
+`pruneUnregistered` now checks `tickets.length === messages.length` before it trusts an
+index, prunes nothing on a mismatch, and logs the counts. Fail-closed in the same direction
+as the `delivered >= 1` guard beside it, and for the same asymmetry: a dead token left behind
+costs quota and one warning line per fire; a live token deleted costs the owner his
+notifications.
+
+Mutation-tested. Guard removed → exactly the new test reds (28 pass / 1 fail), and it reds on
+the assertion that BOTH tokens survive, asserted by name rather than by order because
+`listByProject` promises none.
+
+**Pre-existing gaps NAMED but deliberately not fixed here**, each because the honest fix is a
+migration or an API change rather than a rider on a push fix:
+
+* **`httpProjectSegment` maps the General sentinel onto a legal project id.** `~general` is
+  collision-proof on the client (#410); the segment it produces, `general`, is not — and the
+  owner's instance has a project whose id is exactly that. Both rail entries address one
+  server scope. Reads already shared it; this lane made reminders the first MUTATING surface
+  to. Closing it needs a distinct server route or `general` reserved, both migrations.
+* **Two `PUSH_KINDS` entries have a sender but no dispatcher.** `calendar_pre_meeting_brief`
+  and `email_daily_triage` are gated on `pushDispatcher !== null` and the only two assignment
+  sites in the repo pass `null`. They stay listed on purpose — the resolver must remain ready
+  or wiring the dispatcher would re-open the disjoint-lists defect — but the exhaustiveness
+  test proves the resolver is ready, not that anything is sent.
+* **`routedPush` collapses `app-ws:lost:*` and `app-ws:dropped:*` into one `false`**, so a
+  failed chat_log append plus a successful notification stamps `delivered_at` for a message
+  hydration cannot show. Needs the app target widened from `boolean` to the tri-state the
+  markers already carry.
+* **`fireRitual`'s settle-notice loops discard `post`'s boolean**, so a rejected settle notice
+  retires the occurrence with neither output nor notice (#506's shape, in one corner). The
+  unplannable guard added here does check its post; its comment no longer claims the loops do.
+
+📌 **Two comments in one file that contradict each other are a bug report already written
+down.** The reachable defect here was not found by hunting for it — it was found because the
+same file asserted "Expo can return fewer tickets than messages" in one place and "index i
+identifies message i's recipient" in another. When a diff teaches a file something new about
+its own failure mode, the next question is which OTHER paragraph was built on the old belief.
+
+## 2026-08-11 — the no-project scope was addressing a real project, and one comment claimed a tap that never arrives
+
+Landed via PR #171. Two review findings on the ritual-push branch, from a panel where two
+independent lanes converged on the first. Both are about the same failure shape from opposite
+ends: a name that means two things, and a comment that describes a path no code takes.
+
+**A SCOPE IS NOT AN ID, and `general` is a legal project id.** The mobile rail spells the
+no-project General scope `~general`, deliberately outside the gateway's `[A-Za-z0-9_.-]`
+alphabet so the sentinel cannot collide with a real project — that is what #410 bought, and
+`app/lib/project-rail-view.ts` says so at length. `app/lib/general-scope.ts` then mapped it back
+onto the literal HTTP segment `general`, which **is** inside that alphabet. So a rail-tap on
+General and a rail-tap on a project whose id is literally `general` produced a byte-identical
+request, and the reminders surface derived one `app-project:general` topic for both. Collision-proof
+by construction, then mapped onto something that is not.
+
+What made it worth a round rather than a note: **reminders was about to be the first MUTATING
+surface on that mapping.** The four other clients (docs, tabs, work-board, activity) have shared it
+for months. This branch routed `list`, `create`, `snooze`, `cancel` and `convert-to-task` through
+it, so two unrelated rail entries would have shared a pending list *and* its writes — a cancel
+aimed at General destroying a real project's row. Before the branch that path 400'd
+(`sanitizeProjectId` rejects `~`), which is loud and harmless; the branch would have converted it
+into a silent wrong-scope read AND write. **Quieter is worse.**
+
+**Fixed by reserving a segment on the server, not by renaming anything.** There is no value inside
+`[A-Za-z0-9_.-]` that can mean "no project" without also naming a project that might exist, so the
+fix had to come from outside the alphabet. `gateway/http/app-reminders-surface.ts`
+`resolveScopeSegment` accepts `GENERAL_RAIL_ID` — exact match, never a prefix — ahead of
+`sanitizeProjectId`, and the scope lands on `app-project:~general`. Deliberately **not** a new topic
+prefix: that string reuses the one shape every existing topic reader already decodes, and what they
+decode it back to (`~general`) is the rail id, which is the right answer for each of them —
+`push-deep-link-dispatch` builds `/projects/~general/reminders`, which is exactly where a General
+tap belongs. `reminders/dispatcher.ts` `deriveReminderProjectId` needed one addition: the
+sentinel resolves to `owner_slug`, as its `web:<user_id>` General twin already did, or the context
+source would go looking for a `Projects/~general/STATUS.md` that cannot exist.
+
+**TWO readers needed the sentinel, not one — corrected in round 3, and the sentence above said "the
+one addition" until it was.** Reserving a segment does not just create a new topic to decode; it
+creates a value that every consumer of `topic_id` must now recognise, and the second one was missed
+because it is a WRITE on a different substrate. `cores/free/reminders/src/backend.ts`
+`resolveTaskProjectId` — the convert-to-task path — resolved `~general` to itself, so promoting a
+General reminder would have created a task whose `project_id` is the sentinel and made
+`tasks/projection/write.ts` `mkdirSync` a `Projects/~general/` directory for a project that cannot
+exist. `tasks/store.ts` `create` does not re-validate the id, so the Core was the only guard.
+Normalised to `NO_PROJECT` (`''`) at a single exit rather than inline, because THREE paths carry the
+sentinel there: the caller's explicit override, the `app-project:~general` topic this entry's own
+change introduced, and the bare `~general` the Core's create path stores raw. `NO_PROJECT` rather
+than `owner_slug` because the destination differs — General IS the unprojected bucket, which is the
+bucket the General Tasks tab lists, whereas the dispatcher's consumer needs a real directory.
+
+Not reachable from the app today and fixed anyway: `open/composer.ts` leaves `convertReminderToTask`
+unwired so the HTTP route answers 501, but the Core's own `reminders_convert_to_task` tool reaches
+it, and this branch is what put the sentinel on that path. **`gateway/http/app-tasks-surface.ts`
+still gates on `sanitizeProjectId` and therefore still answers 400 for `~general`** — the tasks
+surface has NOT learned the reserved segment the way reminders has. That is the same shape as #183
+and is left to it rather than widened into a push fix.
+
+Client side, `httpScopeSegment` / `httpScopeSegmentEncoded` sit beside `httpProjectSegment` rather
+than replacing it. Two functions, not a flag: a server that has not learned the reservation answers
+`~general` with a 400, so the halves must agree, and different names are how that is enforced.
+`~` is RFC-3986 unreserved so `encodeURIComponent` leaves it alone — the same property that made it
+the right route sentinel after `#general` shipped and broke on-device (#411).
+
+**SCOPE OF THE FIX, STATED RATHER THAN IMPLIED: reminders ONLY.** Docs, tabs, work-board and
+activity still collapse General onto `general` and still alias. They pre-date this module, and
+closing them is a **data migration** — `Projects/general/docs` is a directory with files in it, and
+either way the split goes, one scope stops seeing content it can see today. Filed as **#183** with
+both fix directions, not ridden in on a push fix. Open has no root `ISSUES.md` (the purity gate
+reserves that path); its defect tracker is GitHub Issues.
+
+**AND THE RESIDUAL IS NOT READ-ONLY — corrected in round 2, because the first version of this
+entry, of `general-scope.ts`'s docblock, of the test comment and of #183 itself all called those
+four clients "read-only".** Two of them write: `docs-client.ts` (`writeFile`, `moveFile`,
+`createFolder`, `uploadBinary`, `deleteFile`, `deleteFolder`, `deleteBinary`,
+`deleteBinariesUnderPrefix`) and `work-board-client.ts` (`create`, `update`, `complete`, `reorder`,
+`delete`, `start`). Only `tabs-client.ts` and `activity-client.ts` are reads. So #183 is an **open
+wrong-scope write** on the same terms that made reminders worth closing first — a docs delete from
+one scope removes the other scope's file — and reminders was the surface worth closing FIRST, not
+the only mutating one. The sequencing behind a migration is unchanged; what changed is that it is no
+longer justified by a severity claim that was false.
+
+**THE SECOND FINDING IS A COMMENT, AND THE FIX IS TO CORRECT THE CLAIM.** The latch-release from the
+previous round is correct by inspection and stays. What was wrong is the sequence used to motivate
+it, in this file's own comment and in commit 93245925's message: *"tap the notification for X,
+rail-tap elsewhere, then tap the SAME notification again — it is still sitting in the shade"*. The
+premise is true and the conclusion is not. A real second tap never reaches the equality check,
+because `app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute` —
+so the re-tap produces no navigation at all and never re-supplies `?message_id=`. It is swallowed one
+layer up. The dedupe TTL is 7 days and warm taps pass `{dismiss:false}`, so the notification really
+does stay in the shade, which is precisely what made the false claim read as plausible.
+
+Corrected in `ChatSyncSurface.tsx` and in the sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, which now says what it actually drives:
+two `rerender` calls, proving the latch releases on a targetless visit — real, and still
+mutation-killed — and saying plainly that it proves nothing about tap-twice reachability. The dedupe
+gap itself is filed as **#182** rather than fixed here; a push-notification fix should not grow a
+navigation change on the way past.
+
+**Mutation-tested, each mutant named with the tests it reds:**
+
+* `resolveScopeSegment` → bare `sanitizeProjectId` (drop the reservation): **5 red** in
+  `gateway/__tests__/app-reminders-surface.test.ts` — accepts-the-sentinel, own-topic,
+  create-invisible-in-the-other, cannot-snooze-or-cancel, include_id-no-leak.
+* `resolveScopeSegment` → `startsWith` instead of `===`: **1 red** — the exact-match arm, which
+  is the one that would otherwise hand `~generalize` the General scope with a 200.
+* `reminders-client.ts` → back to `httpProjectSegmentEncoded`: **7 red** across
+  `general-scope.test.ts` + `legacy-reminder-push-tap-reaches-general.test.ts`.
+* `httpScopeSegment` → collapse the empty scope to `general`: **3 red**. Collapse the sentinel too
+  (i.e. make it identical to `httpProjectSegment`): **7 red**.
+* `deriveReminderProjectId` → drop the sentinel line: **1 red** in `reminders/dispatcher.test.ts`.
+* The latch release → back to the bare `if (deepLinkTarget.length === 0) return;`: still reds the
+  sixth arm and nothing else. Re-run rather than cited — the comment around it changed, so the
+  earlier round's evidence was not assumed to carry over.
+
+The comment corrections have **no mutant**, and that is stated rather than papered over: nothing
+executable changed, so there is no test to red. What they buy is that the next reader does not build
+on a reachability that does not hold.
+
+`legacy-reminder-push-tap-reaches-general.test.ts` needed its premise inverted, not just its
+literals: it existed to assert the tilde must NOT reach the wire, and now the tilde reaching the wire
+is the correct outcome. It pins the segment against `wire-types`, the one definition both sides
+import, so a drift in either copy reds here instead of 400ing on a device. `wire-types/topic-id.ts`
+also said the gateway "rejects `~general` … on every `/api/app/projects/<id>/…` route" — true when
+written, and now false of exactly one route, so it names the exception.
+
+📌 **A sentinel is only collision-proof at the layer that spells it.** `~general` was engineered to
+be unmistakable on the client and then translated, one function later, into a string a user can name
+their project. The property was real and it did not survive the mapping — and nothing failed, because
+both halves were individually correct. **When a value exists to be unforgeable, follow it to the last
+layer that reads it and check the guarantee is still true there.** The generalisation of the
+adjacent lesson from the same file: a comment describing a mode is a claim about reachability, and
+the way to check it is to walk the layer ABOVE the one the comment is written in.
+
+### Round 2 — the correction had itself carried the false claim, and one sentinel had escaped to the screen
+
+Same PR **#171**, second review round. Nothing about the reservation changed; four things that
+DESCRIBED it did, plus one user-visible leak the reservation created.
+
+**THE SEVERITY CLAIM WAS WRONG IN SIX PLACES AT ONCE.** "Read-only clients" was written into
+`app/lib/general-scope.ts` (twice), `app/lib/reminders-client.ts`,
+`gateway/http/app-reminders-surface.ts`, `app/__tests__/general-scope.test.ts`, this file, and the
+body of GitHub issue #183 — and it is false of two of the four. It survived a whole round because it
+was *plausible*: reminders genuinely was the surface being made to mutate in this branch, so "the
+mutating one" read as a description of the SET when it was only a description of the DIFF. All six now
+name the writing methods by symbol, and #183's title and table say WRITES. The reason to care is not
+tidiness — a residual filed as read-only gets scheduled like a cosmetic, and this one can delete a
+document.
+
+The count went from five to six *after* the first correction pass, and that is the finding, not a
+footnote: the sixth was in `reminders-client.ts` — the module whose entire purpose is to NOT use the
+aliased mapper — and the first pass missed it because the pass re-read the files it had already
+opened instead of searching for the sentence. 📌 **A claim that is wrong in one file is wrong wherever
+it was copied to. Grep the CLAIM, not the file** — this branch hit that same shape three times
+(`625d29d2`, `a2ab3a0e`, and here), which is twice more than a coincidence.
+
+**THE RESERVATION PUT `~general` ON THE FOCUS SCREEN.** `app-focus-surface.ts`'s
+`extractProjectIdFromTopic` decodes `app-project:<id>` back to whatever id it carries, so the moment
+General's reminders got their own topic, a General row's project chip rendered the literal string
+`~general` — an internal routing token displayed as though the owner had named a project that. It was
+unreachable before this branch (the surface 400'd on `~`), which is why no existing test could have
+caught it: `focus-row-formatters.test.ts` hand-builds its items, so it only ever sees values someone
+thought to type. `projectChipLabel` now maps the sentinel to `General`, and deliberately does NOT
+route it through `isInstanceLevel` — General is a routable scope with its own tabs, and flipping that
+predicate would have silently redirected the tap to the projects list.
+
+**TWO CITATIONS HAD GONE STALE INSIDE THEIR OWN BRANCH.** A prose edit in one commit cited
+`app-reminders-surface.ts:212` and `:247`; a later commit on the same branch added lines above both.
+Rather than repoint them at 271 and 307 — which the next commit would break again — they now name the
+call and the expression. 📌 **A `file:line` citation into a file the same branch is still editing is
+stale before it merges. Cite the symbol.**
+
+**THE BIDIRECTIONAL TEST WAS ONLY UNIDIRECTIONAL.** `"neither scope can snooze or cancel the other's
+row"` created a General row and attacked it through the project's URL — and never built the mirror.
+The two directions are not symmetric by inspection: the reserved segment is matched by an exact-match
+branch that runs *before* `sanitizeProjectId`, so the General-as-attacker path executes different
+code. Split into two named tests over one parameterised helper. Mutation-tested by aliasing the
+sentinel back to `general` **on the snooze/cancel branch only**, leaving list and create reserved: the
+new test reds, the original passes — which is the proof that it covered one half while reading as
+though it covered both.
+
+📌 **A test whose NAME quantifies over both directions ("neither", "either", "any") is asserting
+something its body may not reach.** The name is the claim; the fixtures are the coverage. When they
+disagree, the name is what everyone believes.

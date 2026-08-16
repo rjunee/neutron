@@ -80,6 +80,19 @@ export interface InnerLoopInput {
    */
   resume_checkpoint_head?: string | null
   /**
+   * MID-LOOP RESUME — the LIVE head of `run.branch`, read IN CODE by the launcher at
+   * fire time (`resolveResumeLiveHead`), never relayed by a model. Tri-state, and the
+   * three values are NOT interchangeable:
+   *   - a full 40-hex lowercase OID → the authority's answer for the branch head.
+   *   - `'absent'` → the authority answered SUCCESSFULLY that the branch does not
+   *     exist; the recorded work is gone from it, so a rebuild is correct.
+   *   - `''` → the launcher tried 3 times and COULD NOT READ the head. Exclusively
+   *     "could not tell", never "not there".
+   * FIELD ABSENT → an old launcher, or not a resume with a recorded head: the workflow
+   * falls back to its own `head-probe-round-resume` agent probe, exactly as before.
+   */
+  resume_live_head?: string
+  /**
    * MID-LOOP RESUME — the persisted `inner_checkpoint_findings` (raw JSON as
    * stored). Decoded by `parseCheckpointFindings` before it reaches the workflow,
    * where it seeds a resumed fix round. Null/unparseable → the workflow re-reviews
@@ -183,15 +196,35 @@ export interface InnerResult {
    */
   block_kind: 'none' | 'code' | 'infra-only' | 'round-lost' | null
   /**
-   * The MEASURED cause of an infra-only stop — the probe's/lane's own words, already
-   * redacted by the workflow. null when absent/empty/not a string; the reason then stays
-   * generic, which is the whole point (never assert a cause that was not measured).
+   * The MEASURED cause of a terminal stop — the probe's/lane's/thrown error's own words,
+   * already redacted by the workflow. null when absent/empty/not a string; the reason then
+   * stays generic, which is the whole point (never assert a cause that was not measured).
+   *
+   * NOT limited to infra-only stops any more: the workflow also carries the message it
+   * composed at the point a THROW was raised, and `innerTerminalFailureReason` uses
+   * `block_kind` only to choose which sentence frames it.
    */
   terminal_cause: string | null
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
   publish_requested?: boolean
-  /** Local commit measured by the inner build; the outer publisher verifies it independently. */
+  /**
+   * The build's CLAIMED commit — possibly ABBREVIATED. It is NOT the value that gets
+   * published: the outer publisher resolves the head itself with `rev-parse` on the
+   * branch the inner loop names, and uses this claim only as a CHECK against it (a
+   * disagreement fails loudly, naming both values). Git, not the model, is the source
+   * of truth for an OID. `null` = no plausible claim arrived — still publishable.
+   */
   publish_head?: string | null
+  /**
+   * Forge reported that it MATERIALLY deviated from the Ralph exec spec it was given,
+   * so the IMPLEMENTATION_PLAN.md it committed may no longer describe the code. In pr
+   * mode the orchestrator suffixes the `outer-published:` checkpoint with `:deviated`,
+   * the resumed invocation writes the `ralph-task-built-deviated` checkpoint variant,
+   * and the NEXT iteration pays for the full `plan:fable` survey instead of the cheap
+   * continuation planner. The EXACT boolean only — absent/garbled → false, because a
+   * false positive here costs ~5 minutes of re-planning per iteration.
+   */
+  deviated_from_spec: boolean
 }
 
 /** The terminal outcome of FIRING the workflow (NOT the build result). */
@@ -324,6 +357,12 @@ export function buildWorkflowArgs(
     slug: run.slug,
     maxRounds: input.max_rounds,
     ralph: run.ralph,
+    // WHICH Ralph iteration this is (0 on the first, bumped per re-fire). The
+    // workflow gates its cheap `plan:next` continuation planner on it, along with
+    // the every-Kth full re-plan cadence; a missing value reads there as "always
+    // run the full planner", so a launcher that does not thread it is slower,
+    // never wrong.
+    ralphRound: run.ralph_round,
     // Thread the run's git-mode so the workflow's Forge prompt matches it: a
     // `local` run (no GitHub origin / no `gh`) must NOT be told to push to
     // origin + `gh pr create` (that would fail Forge); it commits on the branch
@@ -359,6 +398,10 @@ export function buildWorkflowArgs(
     // about different code (re-review), and it is the ONLY value a resumed run may
     // take a `reviewedHead` from (#545). Null/empty → the workflow rebuilds.
     resumeCheckpointHead: input.resume_checkpoint_head ?? null,
+    // The live head the LAUNCHER read from git. Key present (even as '' or 'absent') →
+    // the workflow uses it and dispatches no head-probe agent; key ABSENT (never null,
+    // which would be indistinguishable from an unreadable head) → it probes as before.
+    ...(typeof input.resume_live_head === 'string' ? { resumeLiveHead: input.resume_live_head } : {}),
     resumeFindings: parseCheckpointFindings(input.resume_findings),
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
@@ -495,6 +538,16 @@ Settle your turn the instant the Workflow tool returns. The build continues in t
 }
 
 /**
+ * How much of a terminal cause is persisted. THE SAME NUMBER AS `TERMINAL_CAUSE_MAX` in
+ * `trident/inner-workflow.mjs` — that file cannot import TS, so the constant is mirrored
+ * rather than shared, and the two MUST agree: the workflow caps the sentence it composes,
+ * this caps whatever arrives, and the smaller of the two is the one that actually decides.
+ * At 300 the round-1 unreadable-head cause (331 chars with a real 43-character branch name)
+ * lost its trailing "re-run when the read succeeds" — the only actionable clause in it.
+ */
+export const TERMINAL_CAUSE_MAX = 500
+
+/**
  * Decode the workflow's TYPED terminal result from the `inner_result` column.
  * Returns null when the column is null/empty or not a parseable object — i.e.
  * the workflow has NOT yet written a terminal result (still in flight). This is
@@ -523,9 +576,17 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // workflow writes, and this flag SKIPS the merge — so an accidental true would
     // silently strand an unmerged PR as "done".
     pr_merged: p.prMerged === true,
+    // Same exact-boolean rule, for the same reason in the opposite direction: a
+    // truthy stand-in read as a deviation forces the next Ralph iteration back onto
+    // the whole-repo survey this card exists to stop paying for.
+    deviated_from_spec: p.deviatedFromSpec === true,
     publish_requested: p.publishRequested === true,
-    publish_head: typeof p.publishHead === 'string' && /^[0-9a-f]{40}$/.test(p.publishHead)
-      ? p.publishHead
+    // A CLAIM, NOT THE SOURCE. Anything that could plausibly be an OID — 7 to 40 hex
+    // chars, either case — is kept VERBATIM for the outer publisher to CHECK against
+    // `rev-parse`. Requiring full 40-hex here silently dropped abbreviated shas, which
+    // then read as "no commit at all"; the publisher resolves the real head from git.
+    publish_head: typeof p.publishHead === 'string' && /^[0-9a-fA-F]{7,40}$/.test(p.publishHead.trim())
+      ? p.publishHead.trim()
       : null,
     // WHY IT STOPPED — parsed FAIL-CLOSED: only the four strings the workflow writes
     // decode, anything else is null. The orchestrator keys a specific failure reason off
@@ -541,7 +602,7 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // to the generic sentence rather than to an empty quotation.
     terminal_cause:
       typeof p.terminalCause === 'string' && p.terminalCause.trim() !== ''
-        ? p.terminalCause.trim().slice(0, 300)
+        ? p.terminalCause.trim().slice(0, TERMINAL_CAUSE_MAX)
         : null,
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:

@@ -60,6 +60,7 @@
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -70,6 +71,7 @@ import {
 import {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  MAX_CONFLICT_ROUNDS,
   runWorktreePath,
   TridentMergeConflictEscalation,
   type MergeConflictResolver,
@@ -95,6 +97,10 @@ export interface BuildTridentOrchestratorOptions {
   run_host: RunHostCommand
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
+  /** Injectable wait, used to SPACE the resume head-read retries
+   *  (`resolveResumeLiveHead`). Production leaves it unset and really sleeps; the
+   *  suite passes a no-op so a retried read still costs nothing. */
+  sleep?: SleepMs
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
   /** Static Codex credential dir (CODEX_HOME) threaded into the inner workflow —
@@ -179,12 +185,15 @@ export interface BuildTridentOrchestratorOptions {
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /**
-   * Bounded Forge merge-conflict resolver (#342). Threaded into the default
-   * `buildMergeCleanupDeps` so a LOCAL-mode merge that hits a rebase conflict
-   * (a 2nd/3rd same-project build replaying onto a sibling's merge) is
-   * auto-resolved rather than hard-failing. Ignored when `merge_deps` is
-   * supplied (the override owns its own resolver). Absent → a conflict
-   * escalates to chat immediately (no auto-resolve).
+   * Bounded Forge merge-conflict resolver (#342). Serves BOTH conflict paths:
+   *   - LOCAL mode — threaded into the default `buildMergeCleanupDeps`, so a merge
+   *     that hits a rebase conflict (a 2nd/3rd same-project build replaying onto a
+   *     sibling's merge) is auto-resolved rather than hard-failing. Ignored when
+   *     `merge_deps` is supplied (the override owns its own resolver).
+   *   - PR mode — threaded into `rebaseOntoObservedBase` (the AUTONOMOUS publish
+   *     path), where a conflicting replay is resolved in the scratch worktree
+   *     before it can become a `TridentRebaseConflict`.
+   * Absent → a conflict escalates immediately on both paths (no auto-resolve).
    */
   resolve_conflict?: MergeConflictResolver
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
@@ -207,6 +216,39 @@ export interface BuildTridentOrchestratorOptions {
    * unaffected. MUST be wired wherever Ralph builds run.
    */
   persist_refire_reset?: (run_id: string, patch: TridentRunUpdate) => Promise<void>
+  /**
+   * CRASH RECOVERY CLAIM — atomically take ownership of a run whose LAUNCHER died
+   * (`subagent_status='crashed'`) so `step()` can RELAUNCH it as a continuation
+   * instead of reaping it. Wired to `TridentRunStore.beginCrashRecovery`: one
+   * conditional UPDATE that clears the crash latch, releases the sub-agent slot,
+   * nulls the tombstoned launcher generation, and spends one unit of the durable
+   * `crash_recoveries` budget. Returns the reloaded run, or null when the claim
+   * LOST (the row went terminal / was already claimed) — in which case this tick
+   * must do nothing and re-read next tick.
+   *
+   * WHY IT EXISTS. Measured 2026-08-14: three gateway boots (06:19:56, 06:26:51,
+   * 07:13:00) each killed a HEALTHY build ~90 s later, because the detached inner
+   * workflow lives in a warm `cc-trident-fire-*` REPL that dies with the gateway.
+   * Run `8ddca917` had already pushed its branch and opened PR #261 nine minutes
+   * before its launcher died, and was reaped `failed` anyway. A dead launcher is
+   * NOT a dead build.
+   *
+   * ABSENT → today's reap behaviour EXACTLY (byte-stable for existing callers and
+   * tests): a crashed row with no harvestable result still goes terminal.
+   */
+  begin_crash_recovery?: (run_id: string) => Promise<TridentRun | null>
+  /**
+   * How many launcher crashes on ONE run may be recovered by relaunching before
+   * the run is failed terminally. Default {@link DEFAULT_MAX_CRASH_RECOVERIES}.
+   *
+   * DELIBERATELY SEPARATE from `max_rounds`/`max_ralph_rounds`: a launcher crash is
+   * not the agent's failure and must not consume its fix rounds. The counter it
+   * bounds (`crash_recoveries`) is a DURABLE column rather than in-process state,
+   * because the cause being bounded is a gateway deploy loop (three restarts in
+   * 53 min) — every boot resets in-memory counters, so only a persisted budget can
+   * stop a restart loop from spinning builds forever.
+   */
+  max_crash_recoveries?: number
   /**
    * How long a FIRED workflow may run with no terminal `inner_result` AND no
    * fresh checkpoint before it is reaped as stalled (the build runs detached, so
@@ -245,6 +287,16 @@ export interface BuildTridentOrchestratorOptions {
    */
   on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
 }
+
+/**
+ * Default crash-recovery budget: how many launcher crashes ONE run may recover
+ * from by relaunching as a continuation. 3 is sized off the measured cause — a
+ * deploy loop of three gateway restarts inside 53 minutes on 2026-08-14 — so a
+ * build survives an ordinary deploy burst, while a machine that cannot keep a
+ * launcher alive fails the run loudly instead of re-firing detached builds
+ * forever. Tune via `max_crash_recoveries` (exists chiefly for tests).
+ */
+export const DEFAULT_MAX_CRASH_RECOVERIES = 3
 
 /**
  * RC2 — did the OUTER loop genuinely HARVEST a result into this committed
@@ -382,6 +434,625 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
     : `outer publisher could not ${step} branch ${branch}: ${said}`
 }
 
+/**
+ * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
+ * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
+ * so matching those would fail closed on ordinary prose. Seven of either, then a space or EOL.
+ *
+ * SEVEN OR MORE, not exactly seven. `.gitattributes` can set `conflict-marker-size=32` for a
+ * path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
+ * eighth character is another `<` rather than the space the pattern demands. This regex is the
+ * ONLY gate standing between a half-resolved staged file and a force-push to the shared branch,
+ * so a marker length it cannot see is a marker it waves through. Found by codex cross-model
+ * review. The boundary test uses real git with `conflict-marker-size` set, not a hand-written
+ * long marker, so it proves git's behaviour rather than the fixture's.
+ */
+const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|$)/
+
+/**
+ * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
+ *
+ * A branch conflicting with its base is a MERGEABILITY fact about the branch's relationship to
+ * `main` — not a judgement about the code. Recording it as `REQUEST_CHANGES` tells the owner his
+ * build was rejected when no reviewer read a line of it. So this is a typed failure carrying the
+ * conflicting paths.
+ *
+ * AND THIS IS THE PATH THAT RESOLVES FIRST. A configured `resolve_conflict` resolver is invoked
+ * here, in the scratch worktree `git apply --3way` just left the markers in, bounded by
+ * `MAX_CONFLICT_ROUNDS` AND by a per-round progress requirement. The local-mode merge path has a
+ * human present who could reconcile the branch by hand; this one is autonomous and has nobody, so
+ * it is exactly where auto-resolution earns its keep. `TridentRebaseConflict` remains the outcome
+ * when no resolver is configured, when the resolver declines/escalates, when a round makes no
+ * progress, when the round bound is exhausted, and when a "resolution" empties the branch's delta.
+ *
+ * THE RESOLVER'S WORD IS NEVER THE EVIDENCE. A claimed RESOLVED is checked against git twice —
+ * the unmerged set (`--diff-filter=U`) AND the staged bytes (`--cached`, scanned for added
+ * conflict markers), because `git add` clears the unmerged bit for a path whose markers are still
+ * inside it.
+ *
+ * A RESOLVED REBASE IS NOT AN APPROVED ONE. Resolution is a MERGEABILITY operation, not a
+ * verdict — the branch still faces the full review gate afterwards, exactly as an unconflicted
+ * replay does.
+ */
+export class TridentRebaseConflict extends Error {
+  constructor(
+    public branch: string,
+    public base: string,
+    public paths: string[],
+  ) {
+    super(
+      `REBASE CONFLICT — needs attention: branch ${branch} conflicts with ${base} in: ${paths.length > 0 ? paths.join(', ') : '(paths unreadable)'}. Nothing was auto-resolved and no reviewer judged this code — the branch needs a human (or a fresh build) to reconcile it with ${base}.`,
+    )
+  }
+}
+
+/**
+ * Replay `branch` onto the ls-remote-OBSERVED tip of `base`, shallow-safely.
+ *
+ * ⚠️ THE SHARED BUILD CHECKOUT IS SHALLOW (governance #574/#571). `.git/shallow` is present, so
+ * `merge-base` LIES there: a naive `git rebase` replays the entire history and conflicts on every
+ * file. Hence NO `git rebase` here, ever, and never in the shared working tree (other lanes share
+ * it). Instead: take the branch's own diff from a source that knows the true merge-base — the
+ * FORGE (`gh pr diff <n>`, computed server-side against a full history) when a PR exists, or the
+ * two-dot `git diff <base>..<branch>` for a first publish — and `git apply --3way` it onto the
+ * observed base tip in a THROWAWAY detached worktree. The branch ref then moves by
+ * compare-and-swap (`update-ref <new> <old>`): if anything moved the branch underneath us we
+ * refuse rather than force.
+ *
+ * The replay SQUASHES the branch into one commit. Deliberate — the PR merge is `--squash` anyway.
+ *
+ * RETURNS THE OBSERVED BASE TIP as well as the head, because the caller needs BOTH to describe
+ * what was built: the review diff is `<baseSha>..<head>`, and `baseSha` is the only value in the
+ * process that is guaranteed to be the tip the head sits on. `''` means the remote has no such
+ * base branch at all. See the review-diff comment in `publishBuiltCommit` for what taking the
+ * LOCAL `<base>` ref instead cost.
+ */
+export async function rebaseOntoObservedBase(
+  run_host: RunHostCommand,
+  repoPath: string,
+  branch: string,
+  base: string,
+  pr: number | null,
+  scratchDir: string,
+  /** Optional bounded auto-resolution for a conflicting replay. Absent → a conflict throws. */
+  resolve?: { run: TridentRun; resolve_conflict: MergeConflictResolver },
+): Promise<{ head: string; rebased: boolean; baseSha: string }> {
+  // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
+  //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
+  //
+  //     THIS OBSERVATION AGES. Auto-resolution can now sit between here and the commit for minutes
+  //     (a Forge turn is bounded at 8 of them), so the published head can be based on a `main` that
+  //     has since moved. That is SAFE but not free: the branch move is still a compare-and-swap and
+  //     the lease push re-observes the branch, so nothing is overwritten — the branch simply
+  //     arrives at review stale and gets replayed again on the next publish, which is the ordinary
+  //     behaviour for any branch cut before a sibling landed. It is the reason the resolution loop
+  //     below bails on the FIRST round that makes no progress instead of spending the full bound.
+  const observedBase = await run_host(
+    ['git', '-C', repoPath, 'ls-remote', '--heads', 'origin', `refs/heads/${base}`],
+    repoPath,
+  )
+  if (!observedBase.ok) {
+    throw new Error(publishFailureReason('read the remote base of', branch, observedBase.stderr))
+  }
+  const readHead = async (): Promise<string> => {
+    const head = await run_host(['git', '-C', repoPath, 'rev-parse', `refs/heads/${branch}`], repoPath)
+    if (!head.ok) throw new Error(publishFailureReason('read the local tip of', branch, head.stderr))
+    return head.stdout.trim()
+  }
+  let baseSha = observedBase.stdout.trim().split(/\s+/)[0] ?? ''
+  // No remote base at all → there is nothing to rebase ONTO. Not an error (a brand-new origin).
+  if (baseSha === '') return { head: await readHead(), rebased: false, baseSha: '' }
+
+  // (b) The branch tip we are about to move, captured BEFORE anything touches it — it is the
+  //     compare-and-swap expectation in (h).
+  const oldHead = await readHead()
+
+  // (c) Already contains the base tip → nothing to do. On a SHALLOW checkout this check may ERROR
+  //     rather than answer (the commit is beyond the shallow boundary); any non-ok is read as
+  //     "behind". A redundant replay is safe; a skipped one strands the branch as CONFLICTING.
+  const contains = await run_host(
+    ['git', '-C', repoPath, 'merge-base', '--is-ancestor', baseSha, `refs/heads/${branch}`],
+    repoPath,
+  )
+  //     `contains.ok` also PROVES `baseSha` is a local object — git could only answer the
+  //     ancestry question by reading it — which is what makes it safe to hand back as a
+  //     diff base on a shallow checkout that never reaches the fetch below.
+  if (contains.ok) return { head: oldHead, rebased: false, baseSha }
+
+  // (d) Make the base tip a real local object. `--no-tags` and NOT `--unshallow`: deepening the
+  //     shared checkout is minutes of network for every lane on this box.
+  const fetchBase = async () => run_host(['git', '-C', repoPath, 'fetch', '--no-tags', 'origin', base], repoPath)
+  let fetched = await fetchBase()
+  let present = await run_host(['git', '-C', repoPath, 'rev-parse', '--verify', `${baseSha}^{commit}`], repoPath)
+  if (!present.ok) {
+    // The base moved between the observation and the fetch — re-observe ONCE and adopt it.
+    const reObserved = await run_host(
+      ['git', '-C', repoPath, 'ls-remote', '--heads', 'origin', `refs/heads/${base}`],
+      repoPath,
+    )
+    const reSha = reObserved.ok ? (reObserved.stdout.trim().split(/\s+/)[0] ?? '') : ''
+    if (reSha !== '') baseSha = reSha
+    fetched = await fetchBase()
+    present = await run_host(['git', '-C', repoPath, 'rev-parse', '--verify', `${baseSha}^{commit}`], repoPath)
+    if (!present.ok) {
+      throw new Error(publishFailureReason('fetch the base tip for', branch, present.stderr || fetched.stderr))
+    }
+  }
+
+  // (e) The branch's own changes, from a source with an HONEST merge-base. Never a local
+  //     three-dot diff — that is exactly the computation the shallow boundary corrupts.
+  const diffFile = `/tmp/trident-rebase-${branch.replace(/[^A-Za-z0-9._-]/g, '-')}.diff`
+  // THE BRANCH'S OWN WORK IS `<fork point>..<branch>`, AND THE FORK POINT IS THE MERGE-BASE —
+  // not either ref's tip. Both tips are wrong, in opposite directions:
+  //
+  //   `refs/heads/<base>..<branch>`  — the local ref, which step (d) NEVER moves (it fetches into
+  //       `refs/remotes/origin/<base>`). MEASURED 2026-08-15: `refs/heads/main` sat at d8324cc
+  //       while the observed tip was d5ba62b, so the diff carried 103 files instead of the
+  //       branch's own 22 — 236 commits of already-merged work. Applied onto the observed tip,
+  //       every already-present hunk fails, `git apply` stages NOTHING as conflicted, and the
+  //       caller reports `conflicts with main in: (paths unreadable)` — naming a conflict that
+  //       does not exist. Five builds died on this in one day, across two projects.
+  //
+  //   `<baseSha>..<branch>`  — the observed tip. A two-dot diff is "how to turn A into B", so
+  //       this also REVERSES everything the base gained since the fork: replaying it DELETES
+  //       main's own new files, and a genuine conflict applies cleanly as a revert instead of
+  //       raising. `publish-rebase-realgit.test.ts` catches both (a lost `docs.txt`, and a
+  //       conflict that returned null). Do not "simplify" back to it.
+  //
+  // The merge-base is what `gh pr diff` computes server-side, which is why the PR path above has
+  // never had this bug.
+  //
+  // NO FALLBACK TO `refs/heads/<base>` — IT FAILS CLOSED. CODEX REVIEW [Blocker]: the first cut
+  // fell back to the local ref when merge-base could not answer, which is EXACTLY the shallow
+  // checkout this function expects. That reinstated the defective base in precisely the condition
+  // that produced it, and would have shipped a fix that silently does the broken thing whenever it
+  // matters most. A fork point that cannot be established is an INFRASTRUCTURE fault about the
+  // checkout — deepen it (see the shallow-provisioning card) — not a licence to replay a diff we
+  // know to be wrong. Better a named refusal than a false conflict nobody can read.
+  //
+  // COMPUTED ONLY ON THE PATH THAT NEEDS IT. `gh pr diff` already resolves the fork point
+  // server-side against a full history, so a PR-mode replay must not be made to depend on — or be
+  // refused by — the local checkout's depth.
+  const localForkPoint = async (): Promise<string> => {
+    const read = async () =>
+      run_host(['git', '-C', repoPath, 'merge-base', baseSha, `refs/heads/${branch}`], repoPath)
+    let forkPoint = await read()
+    if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
+      // One bounded deepen, then re-ask. `--unshallow` on an already-complete repo is a cheap
+      // no-op; on a shallow one it is the only thing that can make the fork point exist locally.
+      await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
+      forkPoint = await read()
+    }
+    if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
+      throw new Error(
+        publishFailureReason(
+          'establish the fork point of',
+          branch,
+          `no merge-base between ${baseSha} and refs/heads/${branch} even after deepening — the build checkout cannot describe this branch's own changes, so replaying it would send already-merged work through review`,
+        ),
+      )
+    }
+    return forkPoint.stdout.trim()
+  }
+  // PATCH BYTES ARE NOT TEXT TO BE TIDIED — `--output` WRITES THEM, NOTHING ROUND-TRIPS A STRING.
+  //
+  // `spawnCapture` returns `stdout.trim()`. That is harmless for every other reader and FATAL for
+  // a patch: a unified diff whose final line is a context line for a BLANK line ends `" \n"` —
+  // space, newline. `.trim()` removes BOTH, and restoring only the newline cannot put the space
+  // back. The last hunk is then one line short of its `@@` count, `git apply` exits 128 with
+  // `corrupt patch at line N`, and — because nothing was ever staged — `--diff-filter=U` names no
+  // files, so the caller reported `REBASE CONFLICT … (paths unreadable)`.
+  //
+  // MEASURED by neutron-enterprise on run 578fa30e against deployed trident d5ba62b7: the real
+  // patch was 19,222 bytes ending `…each other.\n \n`; trimmed it was 19,220 ending
+  // `…each other.\n`. Untrimmed it applied cleanly against four separate bases; trimmed it gave
+  // `corrupt patch at line 42, rc=128, unmerged=[]`. A plain `git rebase` of the same branch
+  // succeeded with no intervention — the patch was never in conflict at all.
+  //
+  // The previous comment here believed the trailing-newline restore had closed this. It had not:
+  // it addressed a missing `\n` and could never address a stripped `" "`. The existing real-git
+  // fixture's last line is non-blank, which is exactly why the half-fix looked complete.
+  // AND THE FIX ABOVE LANDED ON ONLY ONE BRANCH OF THIS `if`. #292 converted the `pr === null`
+  // path to `--output` and left the PR path — the COMMON one, taken on every round after the first
+  // — still doing `writeFileSync(diffFile, patch.stdout…)` over a TRIMMED capture. It failed
+  // exactly as the comment above predicts, six hours later: run 63b16fb1 (PR #295, 2026-08-15
+  // 20:36Z) died with `corrupt patch at line 746`, and its replay patch cbcfb65..26c19dd is 746
+  // lines whose final line is `" \n"`. Regenerated through `--output` the same patch applies
+  // CLEANLY onto both its fork point and the observed tip. The comment was right and the code
+  // under it was still wrong; the reason it read as fixed is that the diff of #292 showed the
+  // comment and the `else` together.
+  //
+  // So there is NO STRING PATH LEFT ON EITHER BRANCH. The PR path keeps `gh pr diff` — it resolves
+  // the fork point server-side against a full history, which is deliberately independent of this
+  // checkout's depth — but REDIRECTS it to the file instead of capturing it. `spawnCapture` never
+  // sees the bytes, so it cannot trim them. Nothing here may pass patch bytes through a JS string
+  // again; if a future reader needs the diff's content, read it back off disk.
+  if (pr !== null) {
+    const written = await run_host(
+      ['sh', '-c', `gh pr diff ${Number(pr)} > ${JSON.stringify(diffFile)}`],
+      repoPath,
+    )
+    if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
+  } else {
+    // `--output` hands the bytes to git, which writes them verbatim. No capture, no trim, no
+    // reconstruction. Do not "simplify" this back to reading stdout.
+    const written = await run_host(
+      ['git', '-C', repoPath, 'diff', `--output=${diffFile}`, `${await localForkPoint()}..refs/heads/${branch}`],
+      repoPath,
+    )
+    if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
+  }
+  if (!existsSync(diffFile) || readFileSync(diffFile, 'utf8').trim() === '')
+    throw new Error('outer publisher refused to rebase an empty diff')
+
+  // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
+  //     poison every other lane's build.
+  const added = await run_host(
+    ['git', '-C', repoPath, 'worktree', 'add', '--detach', '--force', scratchDir, baseSha],
+    repoPath,
+  )
+  if (!added.ok) throw new Error(publishFailureReason('provision a rebase worktree for', branch, added.stderr))
+  // The scratch worktree is OURS and disposable, so this `--force` removal is safe on every exit.
+  const dropScratch = async () => {
+    await run_host(['git', '-C', repoPath, 'worktree', 'remove', '--force', scratchDir], repoPath)
+  }
+  try {
+    /** Non-null once auto-resolution landed, carrying every path it ever touched (for diagnosis). */
+    let autoResolved: string[] | null = null
+    const applied = await run_host(['git', '-C', scratchDir, 'apply', '--3way', '--index', diffFile], scratchDir)
+    if (!applied.ok) {
+      // Name the files a human has to look at. Read in a LOOP now: this is also how a claimed
+      // resolution is VERIFIED, and that second role is why it must not fail open.
+      //
+      // AN UNREADABLE CONFLICT STATE IS NOT AN EMPTY ONE. This used to swallow the command's
+      // failure and return `[]`, which the post-resolution check at the bottom of the loop reads
+      // as "nothing unmerged — the resolver succeeded". A `git diff` that never ran would have
+      // been accepted as git's own evidence that the tree is clean, and the loop would go on to
+      // commit and force-push whatever the resolver left behind. The resolver's word is never the
+      // evidence; if git cannot be asked, there IS no evidence, and the only safe answer is to
+      // refuse. Same reasoning as the wholesale-apply carve-out below: never report one condition
+      // in the costume of another.
+      //
+      // `-z` + `core.quotePath=false` BECAUSE THIS LIST IS MACHINE-CONSUMED. It becomes the
+      // resolver's `CONFLICTED FILES` and the pathspec of the staged-marker scan below, and git's
+      // default C-quoting renders `ünicode file.txt` as `"\303\274nicode file.txt"` — a name that
+      // opens nothing and matches no pathspec. `-z` emits the raw bytes, NUL-separated.
+      const unreadableConflictState = (detail: string): Error =>
+        new Error(
+          publishFailureReason(
+            'read the conflict state of',
+            branch,
+            `${detail} — git could not be asked which paths are unmerged, so a claimed resolution CANNOT be verified; refusing rather than treating an unreadable index as a clean one`,
+          ),
+        )
+      const readUnmerged = async (): Promise<string[]> => {
+        let unmerged
+        try {
+          unmerged = await run_host(
+            ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '-z', '--name-only', '--diff-filter=U'],
+            scratchDir,
+          )
+        } catch (err) {
+          throw unreadableConflictState(err instanceof Error ? err.message : String(err))
+        }
+        if (!unmerged.ok) throw unreadableConflictState(unmerged.stderr || 'git diff --diff-filter=U failed with no output')
+        return unmerged.stdout.split('\0').filter((l) => l !== '')
+      }
+      /**
+       * THE UNMERGED BIT IS NOT PROOF OF RESOLUTION. `git add <path>` clears the unmerged bit for
+       * the WHOLE path regardless of what is still inside the file, so a resolver that fixes hunk
+       * 1 of 2 and stages reads as RESOLVED to `--diff-filter=U` — and the orchestrator would then
+       * commit `<<<<<<<` and force-push it to the shared branch. Realistic, not theoretical: the
+       * resolver's own contract tells it to `git add` every conflicted file.
+       *
+       * So the STAGED CONTENT is scanned too: any candidate path whose staged delta ADDS a
+       * conflict-marker line is still unresolved and goes back into the loop. Only ADDED lines
+       * count (a marker that was already in the base is the base's problem, not this replay's),
+       * and only the paths that ever conflicted are scanned (a fixture elsewhere in the repo that
+       * legitimately contains marker text is none of our business).
+       *
+       * AND IT FAILS CLOSED, for the same reason `readUnmerged` does: a scan that could not run
+       * found no markers in exactly the way a clean tree does, and the difference is a `<<<<<<<`
+       * on the shared branch.
+       */
+      const stagedMarkerFiles = async (candidates: string[]): Promise<string[]> => {
+        if (candidates.length === 0) return []
+        let res
+        try {
+          res = await run_host(
+            ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--', ...candidates],
+            scratchDir,
+          )
+        } catch (err) {
+          throw unreadableConflictState(err instanceof Error ? err.message : String(err))
+        }
+        if (!res.ok) throw unreadableConflictState(res.stderr || 'git diff --cached failed with no output')
+        const marked: string[] = []
+        let current: string | null = null
+        for (const line of res.stdout.split('\n')) {
+          const header = /^\+\+\+ (?:b\/)?(.+)$/.exec(line)
+          if (header !== null) {
+            const named = header[1]
+            current = named === undefined || named === '/dev/null' ? null : named
+            continue
+          }
+          if (current !== null && CONFLICT_MARKER_ADDED.test(line) && !marked.includes(current)) marked.push(current)
+        }
+        return marked
+      }
+      let paths = await readUnmerged()
+      // A FAILED APPLY WITH NOTHING UNMERGED IS NOT A CONFLICT. `git apply` refuses a malformed or
+      // unappliable patch WHOLESALE (`corrupt patch at line N`, exit 128) without staging anything,
+      // so `--diff-filter=U` legitimately names no files. Reporting that as a conflict produced the
+      // single most expensive message of 2026-08-15: `conflicts with main in: (paths unreadable)`,
+      // which sent two projects hunting for a merge conflict that did not exist while the actual
+      // cause — a truncated patch, and separately a stale diff base — sat in git's own stderr,
+      // discarded. The empty path list WAS the diagnosis and it read like a footnote.
+      //
+      // So: `TridentRebaseConflict` is reserved for the case where at least one file is genuinely
+      // unmerged. Anything else surfaces git's own words. THE RESOLVER IS NEVER INVOKED HERE either
+      // — there is nothing unmerged for it to reconcile, so handing it this failure would only
+      // relabel a wrong patch as a conflict, which is the exact defect this carve-out fixed.
+      if (paths.length === 0) {
+        throw new Error(
+          publishFailureReason(
+            'apply the replay patch for',
+            branch,
+            `${applied.stderr || 'git apply failed with no output'} — the apply failed WHOLESALE and left nothing unmerged, so this is NOT a merge conflict; the patch or its base is wrong`,
+          ),
+        )
+      }
+      // No resolver configured → the attention state, byte-identical to the behaviour before
+      // auto-resolution existed.
+      if (resolve === undefined) throw new TridentRebaseConflict(branch, base, paths)
+      // Bounded auto-resolution, mirroring `rebaseBranchOntoBase`. `repo_path` is the SCRATCH
+      // worktree — the tree holding the markers — never the shared checkout other lanes build in.
+      // Re-reading the unresolved set after a claimed RESOLVED is the lie-detector: the resolver's
+      // word is never the evidence, git's index and git's staged bytes are.
+      const everConflicted = new Set(paths)
+      let rounds = 0
+      while (paths.length > 0) {
+        if (rounds >= MAX_CONFLICT_ROUNDS) throw new TridentRebaseConflict(branch, base, paths)
+        rounds++
+        const outcome = await resolve.resolve_conflict({
+          repo_path: scratchDir,
+          branch,
+          base_branch: base,
+          run: resolve.run,
+          conflicted_files: paths,
+          // The tree is a detached replay worktree, NOT a rebase in progress, and it has no
+          // installed dependencies. The resolver's contract differs on both counts.
+          mode: 'replay',
+        })
+        if (!outcome.resolved) throw new TridentRebaseConflict(branch, base, paths)
+        const remaining = [
+          ...new Set([...(await readUnmerged()), ...(await stagedMarkerFiles([...everConflicted]))]),
+        ]
+        // EVERY ROUND MUST SHRINK THE SET. `rebaseBranchOntoBase` can afford 12 rounds because
+        // each one is a DIFFERENT commit that `git rebase --continue` advanced onto; here there is
+        // exactly one apply, so a round that leaves the same work undone will leave it undone
+        // twelve times. Each round is a real Forge turn bounded at 8 minutes, awaited inside the
+        // serial tick sweep — so 12 no-progress rounds is ~96 minutes during which no other run in
+        // the process makes any progress at all. Zero progress once is the answer.
+        if (remaining.length > 0 && remaining.length >= paths.length)
+          throw new TridentRebaseConflict(branch, base, remaining)
+        for (const p of remaining) everConflicted.add(p)
+        paths = remaining
+      }
+      // Resolved: fall through to the ordinary commit + compare-and-swap below. The resolver's
+      // contract has it `git add` its resolutions and forbids committing, so the replay commits
+      // exactly as an unconflicted apply would — and still faces the full review gate.
+      autoResolved = [...everConflicted]
+    }
+    const committed = await run_host(
+      [
+        'git',
+        '-C',
+        scratchDir,
+        '-c',
+        'user.name=trident',
+        '-c',
+        'user.email=trident@neutron.local',
+        'commit',
+        '-m',
+        `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`,
+      ],
+      scratchDir,
+    )
+    if (!committed.ok) {
+      // GIT'S DIAGNOSIS, WHEREVER GIT PUT IT. `git commit` writes "nothing to commit" to STDOUT,
+      // and forwarding only stderr collapsed the single most informative failure on this path into
+      // a bare `outer publisher could not commit the rebase of branch X` — no cause, and the
+      // `finally` below has already deleted the tree that held it. Same defect class as the
+      // wholesale-apply carve-out above: never discard what git actually said.
+      const said = [committed.stderr, committed.stdout]
+        .map((s) => s.trim())
+        .filter((s) => s !== '')
+        .join(' — ')
+      // A RESOLUTION THAT LEFT NOTHING TO COMMIT IS AN ATTENTION STATE, NOT A GIT FAILURE. It means
+      // the resolver took the base's side of every hunk verbatim, so the branch now contributes
+      // nothing — exactly the silent-tautology outcome the #290 hand-resolution shows is the
+      // dangerous one. It is a mergeability fact about the branch, so it gets the same non-verdict
+      // typed failure the conflict it came from would have got.
+      if (autoResolved !== null && /nothing (?:added )?to commit|no changes added/i.test(said))
+        throw new TridentRebaseConflict(branch, base, autoResolved)
+      throw new Error(
+        publishFailureReason('commit the rebase of', branch, said || `git commit exited ${committed.exit_code}`),
+      )
+    }
+    const replayed = await run_host(['git', '-C', scratchDir, 'rev-parse', 'HEAD'], scratchDir)
+    if (!replayed.ok) throw new Error(publishFailureReason('read the replayed tip of', branch, replayed.stderr))
+    const newHead = replayed.stdout.trim()
+
+    // (h) COMPARE-AND-SWAP. `update-ref <ref> <new> <old>` fails if the branch is no longer at
+    //     `<old>` — something else moved it, so we refuse instead of overwriting it.
+    const swapped = await run_host(
+      ['git', '-C', repoPath, 'update-ref', `refs/heads/${branch}`, newHead, oldHead],
+      repoPath,
+    )
+    if (!swapped.ok) throw new Error(publishFailureReason('advance', branch, swapped.stderr))
+    return { head: newHead, rebased: true, baseSha }
+  } finally {
+    await dropScratch()
+  }
+}
+
+/**
+ * MID-LOOP RESUME — read the LIVE head of `run.branch` IN CODE, at the credentialed
+ * host boundary, so the fact the resume decision turns on is never relayed by a model.
+ * Same rule as the publisher's `rev-parse` (Part 1 of this card): a commit OID is not
+ * something to be *reported*, it is something to be *read*. Before this, the live head
+ * came from a haiku probe agent (`head-probe-round-resume`) whose failed read was
+ * classified `head-unreadable` → a full rebuild of already-committed work.
+ *
+ * TRI-STATE RETURN — each value means exactly one thing, and they are NOT
+ * interchangeable (the workflow's `classifyResume` gives them different consequences):
+ *   - a 40-hex lowercase OID → the authority answered; this IS the live head.
+ *   - `'absent'`             → the authority answered SUCCESSFULLY that the branch does
+ *                              not exist. A real fact, not a failure: the recorded work
+ *                              is gone from the authority, so a rebuild is correct and
+ *                              can be named truthfully (`head-branch-absent`).
+ *   - `''`                   → the read FAILED after 3 attempts. Reserved exclusively
+ *                              for "could not read", never for "not there" — and
+ *                              `classifyResume` now GIVES it a bounded STOP
+ *                              (`{ mode: 'stop', reason: 'head-unreadable' }`): the run
+ *                              ends naming the branch and the recorded OID instead of
+ *                              rebuilding work that is already committed.
+ *
+ * The authority split mirrors the workflow's own `readBranchHead`: in `pr` mode the
+ * REMOTE is the authority (an unpushed local branch is not the shared truth); in
+ * `local` mode the local ref is.
+ *
+ * THE RETRIES ARE SPACED, AND THE SPACING IS AN INJECTED SEAM. In `pr` mode the read is
+ * `git ls-remote` — a NETWORK call — and the consequence of `''` is a terminal, non-
+ * self-healing run failure at the fast-exit in `launch()`. Three attempts fired back to
+ * back complete inside a few milliseconds, which is short enough that one dropped packet
+ * fails all three and kills a run whose work is intact. So the attempts are separated by
+ * `RESUME_HEAD_RETRY_DELAYS_MS`, through an injected `sleep` the tests replace with a
+ * no-op — the delay is real in production and free in the suite. `run_host` remains the
+ * seam for the READ; this is the seam for the WAIT.
+ *
+ * THE WINDOW IS ~1.25 s IN TOTAL, AND IT IS NOT CLAIMED TO BE MORE. It covers a sub-second
+ * blip; it does not outlive a sustained outage, and this docblock previously said otherwise.
+ *
+ * IT IS SPENT ON THE TICK THREAD, AND THAT COST IS SERIAL (Argus r5). `tick.ts` steps runs
+ * ONE AT A TIME (`per_tick_limit` 50) and this wait is awaited from `launch()`, so an origin
+ * blip that hits N resuming runs at once adds ~1.25 s × N to that tick. The constant is left
+ * small partly for this reason: it bounds a SHARED thread, not just one run. Making the tick
+ * concurrent is a change to `tick.ts`, not to this function — recorded here so the next
+ * person tempted to raise the constant knows what else it multiplies.
+ *
+ * WHAT THE FAILURE IT LEAVES BEHIND ACTUALLY COSTS, STATED WITHOUT THE CLAIM THIS COMMENT USED
+ * TO MAKE (Argus r4): the run is terminal, and re-running the card is a FRESH DISPATCH — a new
+ * row with NULL checkpoint columns (`store.ts` `create`), because a terminal row is never
+ * advanced again (`step()` short-circuits on `isTerminalPhase`). So the re-run REBUILDS. The
+ * checkpoint columns preserved on the failed row are evidence for a human, not an input to
+ * anything. There is no resume-a-terminal-run path today; adding one is a separate card
+ * (IMPLEMENTATION_PLAN.md, follow-ups).
+ *
+ * THAT IS STILL THE TRADE THIS CARD ASKED FOR, and it is deliberate rather than free: before
+ * this change the same blip rebuilt AUTOMATICALLY, so the regression is availability, not work
+ * lost — the branch and its commits are untouched. "Could not tell" must not silently spend a
+ * max-effort rebuild of already-pushed work (measured: 3,813 → 84,875 → 133,169 output tokens on
+ * the neutron-enterprise run), so the rebuild now needs a human to ask for it. The number here
+ * is left small rather than grown by guess: every second is also a second a genuinely-dead
+ * branch stalls, and the constant is exported so the trade can be made with evidence.
+ */
+export const RESUME_HEAD_RETRY_DELAYS_MS = [250, 1000] as const
+
+/** Injectable wait. Production sleeps; the suite passes a no-op so 3 attempts still
+ *  cost nothing. */
+export type SleepMs = (ms: number) => Promise<void>
+
+const realSleep: SleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+export async function resolveResumeLiveHead(
+  run_host: RunHostCommand,
+  run: { repo_path: string; branch: string; merge_mode: 'local' | 'pr' },
+  sleep: SleepMs = realSleep,
+): Promise<string> {
+  const ref = `refs/heads/${run.branch}`
+  const attempts = RESUME_HEAD_RETRY_DELAYS_MS.length + 1
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    // Between attempts only — never before the first read, and never after the last
+    // (a run that is about to be failed must not also be made to wait for it).
+    if (attempt > 0) await sleep(RESUME_HEAD_RETRY_DELAYS_MS[attempt - 1] ?? 0)
+    if (run.merge_mode === 'pr') {
+      const res = await run_host(
+        ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', ref],
+        run.repo_path,
+      )
+      if (res.ok) {
+        // An OK ls-remote with no output is the remote SAYING the branch is gone.
+        if (res.stdout.trim() === '') return 'absent'
+        const token = res.stdout.trim().split('\n')[0]?.trim().split(/\s+/)[0] ?? ''
+        if (/^[0-9a-f]{40}$/i.test(token)) return token.toLowerCase()
+        // Malformed output is not an answer — retry rather than believe it.
+      }
+    } else {
+      const res = await run_host(
+        ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${ref}^{commit}`],
+        run.repo_path,
+      )
+      if (res.ok) {
+        const oid = res.stdout.trim()
+        if (/^[0-9a-f]{40}$/i.test(oid)) return oid.toLowerCase()
+      } else {
+        // A failed rev-parse is ambiguous: a missing branch and a broken/absent repo
+        // both fail. Ask git whether it is healthy — if it is, the branch is genuinely
+        // gone (a real answer); if it is not, this was a failed READ.
+        const health = await run_host(
+          ['git', '-C', run.repo_path, 'rev-parse', '--git-dir'],
+          run.repo_path,
+        )
+        if (health.ok) return 'absent'
+      }
+    }
+  }
+  return ''
+}
+
+/**
+ * Does the LIVE HEAD decide what this resume checkpoint means?
+ *
+ * The launcher's fast-exit (in `launch()`) exists only to avoid spending a fire whose
+ * outcome is already known: `classifyResume` would return the bounded
+ * `{ mode: 'stop', reason: 'head-unreadable' }`. It must therefore fire — not exit —
+ * for every checkpoint `classifyResume` answers WITHOUT consulting the head, or it
+ * pre-empts a decision it does not share. Those are:
+ *
+ *   • `''` — no checkpoint at all → `rebuild`, and nothing recorded to preserve.
+ *   • `pr-merged` → `merged`; the head branch may already be deleted.
+ *   • `forge-done` in RALPH mode → `rebuild` ('ralph-progress-unknown'), and
+ *     any name `classifyResume` does not recognise — `ralph-task-built` above all —
+ *     → `rebuild` ('unknown-checkpoint'). Both are the answer on EVERY head, so a
+ *     read failure changed nothing (Argus r5). Stopping these terminally would let
+ *     one transient `ls-remote` blip kill every resuming ralph re-fire.
+ *
+ * MIRRORS `classifyResume`/`resumeOnUnchangedHead` in `inner-workflow.mjs`, which is
+ * a `.mjs` Workflow script this module cannot import; `inner-workflow-resume.test.ts`
+ * executes BOTH and asserts they agree on every name, so the pair cannot drift
+ * silently.
+ */
+export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
+  const name = checkpoint.trim()
+  if (name === '' || name === 'pr-merged') return false
+  if (name === 'forge-done' && ralph) return false
+  return (
+    name === 'argus-approved' ||
+    name === 'argus-request-changes' ||
+    name === 'forge-done' ||
+    /^argus-request-changes-round-\d+$/.test(name) ||
+    /^fix-round-\d+$/.test(name) ||
+    // The `:deviated` suffix (#291's taskDeviated carry) is part of the PRODUCTION
+    // checkpoint vocabulary — `classifyResume` accepts it at inner-workflow.mjs:2472.
+    // Rejecting it here made the launcher spend a whole workflow fire on a checkpoint
+    // it should have fast-exited on. The suffix says nothing about whether THIS
+    // invocation may skip its rebuild, so a deviated publish decides exactly as a clean one.
+    /^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)
+  )
+}
+
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
   result: Pick<InnerResult, 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause'>,
@@ -419,11 +1090,45 @@ export function innerTerminalFailureReason(
   // unauthenticated `gh` made the readiness probe say `gh auth login`, no review seat ever
   // ran, and this function reported ten rounds' worth of review that never happened. So the
   // specific message ships WITH that measured signal, and ONLY with it: the branch below is
-  // the one permitted specific message, gated on BOTH the block kind and a non-null cause.
+  // the one permitted specific message, gated on a non-null cause.
   // Everything else — every inferred cause, every result carrying no measurement — still
   // gets the generic sentence above, for all the reasons R1/R2 record.
-  if (result.block_kind === 'infra-only' && result.terminal_cause !== null) {
-    return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${redactPushError(result.terminal_cause)}`
+  // …and ONLY when the cause survives redaction with something left to read. An
+  // over-redacted (or whitespace-only) cause is not a measurement, and appending a
+  // dangling colon to the sentence would report one where none exists.
+  //
+  // 2026-08-15 — A THROWN WORKFLOW ALSO MEASURES A CAUSE, and it was being discarded.
+  // `block_kind: 'infra-only'` is emitted only by the review-stop paths, so requiring it
+  // meant every exit that THREW — including the one this card was raised for — fell through
+  // to the sentence below. Run 3d2696c3 threw "forge:build completed without a full local
+  // commit OID for the outer publisher" and the operator was told "…without Argus APPROVE"
+  // about a run Argus never saw. The catch path now carries the sentence the workflow
+  // composed where the fact was known, with NO block kind (a throw is not a review verdict).
+  //
+  // THE GATE WIDENS BY EXACTLY THAT ONE VALUE — `null` — and no further. 'code',
+  // 'round-lost' and 'none' are REVIEW verdicts, whose findings describe the DIFF; quoting
+  // one as a terminal cause would re-invent the inference this function refuses to make, so
+  // they keep the generic sentence (see the test that pins each of them).
+  //
+  // `null` IS NOT ONLY "THE CATCH PATH" — and an earlier revision of this comment said it
+  // was (Argus r4). `parseInnerResult` decodes `block_kind` FAIL-CLOSED: the four strings the
+  // workflow writes decode, and ANY other value — garbled, truncated, from a future writer —
+  // becomes `null` too. Which is precisely why this branch is safe to widen to it: the
+  // sentence `null` selects states the failure and quotes the measured cause, and claims
+  // NOTHING about the review panel. Only 'infra-only' licenses "review never ran", and only
+  // an exact-match decode produces it. A garbled kind therefore lands in the honest sentence,
+  // never the specific one (pinned by the garbled-kind test).
+  //
+  // The kind also decides WHICH sentence, because it is the only thing that licenses the
+  // claim "review never ran". Without it the reason states the failure and quotes the
+  // measurement, and says nothing at all about the review panel.
+  if (result.terminal_cause !== null && (result.block_kind === 'infra-only' || result.block_kind === null)) {
+    const cause = redactPushError(result.terminal_cause).trim()
+    if (cause !== '') {
+      return result.block_kind === 'infra-only'
+        ? `review never ran (infra-only) at round ${reported} of ${ceiling}: ${cause}`
+        : `inner workflow failed at round ${reported} of ${ceiling}: ${cause}`
+    }
   }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
@@ -452,6 +1157,8 @@ export function buildTridentOrchestrator(
   const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
+  const beginCrashRecovery = opts.begin_crash_recovery
+  const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
 
   // This-process liveness: run ids whose workflow THIS process fired (and whose
   // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
@@ -490,12 +1197,34 @@ export function buildTridentOrchestrator(
     return null
   }
 
-  async function publishBuiltCommit(run: TridentRun, requestedHead: string): Promise<{ pr: number; head: string }> {
+  /**
+   * A COMMIT OID IS READ, NOT REPORTED. `claimedHead` is whatever the build SAID it
+   * committed — possibly abbreviated, possibly absent. The head that actually gets
+   * published is the one git resolves for the branch the inner loop named (a name a
+   * model cannot plausibly mangle). A claim is only ever a CHECK against that.
+   */
+  async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
     const branch = run.branch ?? `trident/${run.slug}`
-    const local = await opts.run_host(['git', '-C', run.repo_path, 'rev-parse', `refs/heads/${branch}`], run.repo_path)
-    if (!local.ok || local.stdout.trim() !== requestedHead) {
-      throw new Error(`outer publisher refused: branch ${branch} no longer points at the commit produced by the build`)
+    // `--verify` so a missing/ambiguous ref is an ERROR rather than an echoed argument.
+    const local = await opts.run_host(
+      ['git', '-C', run.repo_path, 'rev-parse', '--verify', `refs/heads/${branch}`],
+      run.repo_path,
+    )
+    const resolvedHead = local.stdout.trim()
+    if (!local.ok || !/^[0-9a-f]{40}$/.test(resolvedHead)) {
+      const detail = local.stderr.trim()
+      throw new Error(
+        `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
+      )
+    }
+    // THE CLAIM IS A CHECK, NEVER THE SOURCE. `startsWith` makes a full 40-char claim an
+    // equality test and a 7-char one a prefix test. A disagreement is a real signal (wrong
+    // branch, wrong worktree) and names BOTH values — neither is silently preferred.
+    if (claimedHead !== null && !resolvedHead.startsWith(claimedHead.toLowerCase())) {
+      throw new Error(
+        `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
+      )
     }
     const runWithRetries = async (command: string[], attempts = 3) => {
       let result = await opts.run_host(command, run.repo_path)
@@ -504,6 +1233,42 @@ export function buildTridentOrchestrator(
       }
       return result
     }
+    // THE REBASE ONTO CURRENT `main` HAPPENS HERE, BEFORE THE REVIEW IS RE-FIRED.
+    //
+    // WHEN. In the OUTER publisher, between the local-tip verification above and the lease
+    // observation below. Only the outer loop holds a push credential (the Forge sandbox strips
+    // `*TOKEN*`), so "rebase and re-push before the readiness probe" can only happen here. And
+    // because this publisher fires after EVERY build/fix round and before EVERY review re-fire,
+    // every fix round re-enters a branch already based on current `main` — post-round-1 code IS
+    // written against the tree it merges into. That is the closest to "before build" the
+    // credential boundary allows.
+    //
+    // ON CONFLICT. A configured `resolve_conflict` resolver is tried FIRST, in the scratch
+    // worktree, bounded by `MAX_CONFLICT_ROUNDS` — this is the autonomous path, so there is no
+    // human here to reconcile the branch by hand. Absent, declining, or exhausted → an ATTENTION
+    // state (`TridentRebaseConflict`) exactly as before: never `REQUEST_CHANGES`, naming the
+    // conflicting paths and saying plainly that no reviewer judged the code. And a RESOLVED
+    // conflict shortcuts nothing — the replay is published and review is re-fired as usual.
+    //
+    // SHALLOW (governance #574). The shared build checkout has a `.git/shallow` boundary, where
+    // `merge-base` lies and a naive `git rebase` conflicts on every file. So this is a diff-replay
+    // in a throwaway worktree — never `git rebase`, never the shared working tree.
+    //
+    // The PR probe moves UP so the replay can use `gh pr diff` (a server-side, shallow-immune
+    // merge-base); its result is reused by the "open a PR if none" step below, unchanged.
+    const prBefore = await detectExistingPr({ ...run, branch })
+    const rebased = await rebaseOntoObservedBase(
+      opts.run_host,
+      run.repo_path,
+      branch,
+      await resolveBase(run),
+      prBefore,
+      `${run.repo_path}/.trident-worktrees/rebase-${run.id}`,
+      opts.resolve_conflict !== undefined ? { run, resolve_conflict: opts.resolve_conflict } : undefined,
+    )
+    // Everything downstream publishes the REBASED head: the post-push confirm, the review diff,
+    // and the `outer-published:<head>` checkpoint the re-fired workflow reads back.
+    const headToPublish = rebased.head
     // THE BUILD REBASES ONTO CURRENT `main`, SO THE PUSH IS NOT A FAST-FORWARD.
     //
     // Measured on run `2aacf419` (2026-08-14): the build SUCCEEDED and the plain push here was
@@ -531,6 +1296,17 @@ export function buildTridentOrchestrator(
     // not exist, so a first push of a new card stays correct — and is still refused if the branch
     // appeared underneath us between this read and the push.
     const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
+    // NOTHING BUILT IS A REAL OUTCOME. With the head read from git rather than relayed by a
+    // model, a run that committed nothing would otherwise publish its own remote back to
+    // itself and read as a success. `resolvedHead` is the PRE-rebase local tip, read before
+    // the replay above could move the branch ref, so this compares exactly "commits ahead of
+    // the remote". Zero ahead fails; an EMPTY `expected` means the remote branch does not
+    // exist yet (first push) and stays publishable.
+    if (expected === resolvedHead) {
+      throw new Error(
+        `outer publisher refused: branch ${branch} is already at ${resolvedHead} on origin — the build left no new commits to publish`,
+      )
+    }
     const pushed = await runWithRetries([
       'git',
       '-C',
@@ -548,11 +1324,11 @@ export function buildTridentOrchestrator(
       ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
     )
     const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
-    if (remoteHead !== requestedHead) {
-      throw new Error(`outer publisher could not confirm commit ${requestedHead} on origin`)
+    if (remoteHead !== headToPublish) {
+      throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
     }
 
-    let pr = await detectExistingPr({ ...run, branch })
+    let pr = prBefore
     if (pr === null) {
       const base = await resolveBase(run)
       const created = await runWithRetries(
@@ -564,20 +1340,35 @@ export function buildTridentOrchestrator(
     if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
 
     const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
-    const base = await resolveBase(run)
+    // THE REVIEW DIFF IS TAKEN AGAINST THE OBSERVED BASE TIP, NOT AGAINST THE LOCAL `main` REF.
+    //
+    // MEASURED (Argus r4, run 25b2327d): the published artifact was 15,154 lines across ~100
+    // files while the branch's own work was 20 files / 1,738 lines. The shared build checkout's
+    // local `main` was 8 merges behind `origin/main`, and `git diff main..<head>` on a branch
+    // built from CURRENT origin therefore shows every commit merged in between as part of this
+    // card. ~87% of that artifact was already-merged unrelated code — one reviewer diffed the
+    // stale base, vetoed the branch over bugs in files it does not touch, and the round was lost.
+    //
+    // `rebaseOntoObservedBase` already `ls-remote`s the base tip (the same observation the push
+    // lease uses) and the head it returns is replayed directly onto it, so that sha is the exact
+    // left-hand side of this branch's own diff. It is a local object on BOTH paths that return a
+    // non-empty one: the replay fetches it, and the already-contains path could only have been
+    // answered by reading it. An empty one means there is no remote base at all (a brand-new
+    // origin), which is the one case the base NAME is still the best available answer.
+    const base = rebased.baseSha !== '' ? rebased.baseSha : await resolveBase(run)
     const changed = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${requestedHead}`],
+      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${headToPublish}`],
       run.repo_path,
     )
     if (!changed.ok || changed.stdout.trim() === '') {
       throw new Error('outer publisher refused to dispatch reviewers for an empty diff')
     }
     const diff = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${requestedHead}`],
+      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${headToPublish}`],
       run.repo_path,
     )
     if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
-    return { pr, head: requestedHead }
+    return { pr, head: headToPublish }
   }
 
   function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {
@@ -605,8 +1396,82 @@ export function buildTridentOrchestrator(
     // whether the branch still holds the code that verdict was about.
     const resume_checkpoint_head = run.inner_checkpoint_head
     const resume_findings = run.inner_checkpoint_findings
+    // MID-LOOP RESUME — READ the live branch head HERE, in the outer loop, because
+    // THIS is the credentialed host boundary: `opts.run_host` already runs every other
+    // git command for this run. The workflow's `head-probe-round-resume` agent seat
+    // survives only as a fallback for launchers that predate this arg. Derive the
+    // recorded OID EXACTLY as the workflow does (inner-workflow.mjs, resume site): the
+    // `outer-published:<oid>:r:t` capture takes precedence over the checkpoint column.
+    const published =
+      typeof resume_checkpoint === 'string'
+        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)(:deviated)?$/)
+        : null
+    const recorded = (published?.[1] ?? resume_checkpoint_head ?? '').trim().toLowerCase()
+    // Only read when the answer can change a decision: no checkpoint, no recorded OID
+    // to compare against, or no branch → the workflow rebuilds regardless, and a fresh
+    // launch must stay byte-identical (no extra git command, no extra arg).
+    const resume_live_head =
+      resume_checkpoint !== null &&
+      /^[0-9a-f]{40}$/.test(recorded) &&
+      typeof run.branch === 'string' &&
+      run.branch.length > 0
+        ? await resolveResumeLiveHead(
+            opts.run_host,
+            {
+              repo_path: run.repo_path,
+              branch: run.branch,
+              merge_mode: run.merge_mode,
+            },
+            // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
+            // network call and the consequence of `''` is terminal, so the attempts are
+            // spread over real time in production and collapsed to nothing in the suite.
+            opts.sleep,
+          )
+        : undefined
+    // PART 2b, OUTER FAST-EXIT — the launcher itself just failed 3 code reads of the
+    // head. Firing the workflow now would spend a fire only to have `classifyResume`
+    // return the bounded stop ({ mode: 'stop', reason: 'head-unreadable' }) for every
+    // checkpoint except 'pr-merged' (resolved to `merged` BEFORE the head check —
+    // exempted here for exactly that reason). classifyResume stays the single semantic
+    // decider; this is only the cheap exit for the one case whose outcome is already
+    // known at this boundary. `failedRun` spreads `run`, so inner_checkpoint /
+    // inner_checkpoint_head / inner_checkpoint_findings survive untouched — which
+    // preserves the EVIDENCE (what was built, and where), and nothing more: a re-run is
+    // a fresh dispatch with null checkpoints, so it rebuilds. See `resolveResumeLiveHead`
+    // for why that is the trade, and IMPLEMENTATION_PLAN.md for the resume follow-up.
+    //
+    // SOME CHECKPOINT NAMES ARE EXEMPT, each because classifyResume does not consult
+    // the head for them, so this exit would pre-empt a decision it does not share:
+    // 'pr-merged' (resolved to `merged`) and the empty name (resolved to `rebuild`,
+    // reason 'no-checkpoint' — there is nothing recorded to preserve) are answered
+    // before the head check; the head-INDEPENDENT names rebuild on every head. See
+    // `resumeHeadDecides`.
+    const resume_checkpoint_name = (resume_checkpoint ?? '').trim()
+    // THE PR LINK IS RESOLVED BEFORE THE EXIT, NOT AFTER IT (Argus r5). This used to sit
+    // below, so the one path that ends a run WITHOUT ever firing recorded a terminal row
+    // with `pr: null` — and "re-run when the read succeeds" is advice a human follows by
+    // opening the PR the recorded work is on. The exit is rare and already terminal; one
+    // `gh pr view` to make the record point at the work is worth more than the call saved.
     const existingPr = run.pr ?? (await detectExistingPr(run))
     const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
+    if (resume_live_head === '' && resumeHeadDecides(resume_checkpoint_name, run.ralph)) {
+      const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
+      return {
+        run: failedRun(
+          launchRun,
+          innerTerminalFailureReason(launchRun, {
+            round: launchRun.round,
+            checkpoint: resume_checkpoint,
+            block_kind: 'infra-only',
+            terminal_cause: cause,
+          }),
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${launchRun.phase} → failed (resume head unreadable — bounded stop, no fire)`,
+      }
+    }
 
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
@@ -645,6 +1510,9 @@ export function buildTridentOrchestrator(
       max_rounds: run.max_rounds,
       resume_checkpoint,
       resume_checkpoint_head,
+      // OMITTED entirely on a non-resume launch — the workflow then probes exactly as
+      // it always did, so nothing about a fresh run changes.
+      ...(resume_live_head !== undefined ? { resume_live_head } : {}),
       resume_findings,
       // Prefer the per-run resolver (store-backed, self-healing), and FALL BACK to
       // the static dir when it has no answer — null from the resolver is "nothing
@@ -840,17 +1708,17 @@ export function buildTridentOrchestrator(
     }
 
     if (result.publish_requested) {
-      if (result.publish_head === null || result.publish_head === undefined) {
-        return {
-          run: failedRun(run, 'inner workflow requested outer publishing without a full commit OID', true),
-          changed: true,
-          waiting: false,
-          note: 'publish handoff → failed (missing commit OID)',
-        }
-      }
       try {
-        const published = await publishBuiltCommit(run, result.publish_head)
-        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}`
+        // The handoff is the BRANCH NAME; a relayed sha is only a check. A build that
+        // reported no OID is still published — `publishBuiltCommit` reads the head from git.
+        const published = await publishBuiltCommit(run, result.publish_head ?? null)
+        // FORMAT OWNED IN LOCKSTEP by this builder and three readers — the
+        // resume-launch regex below, `inner-workflow.mjs`'s resume parse, and its
+        // `classifyResume`. The optional `:deviated` suffix carries the previous
+        // Forge's deviation across the process boundary so the resumed invocation
+        // writes the `ralph-task-built-deviated` checkpoint and the NEXT iteration
+        // full-plans; without it the string is byte-identical to the old format.
+        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}${result.deviated_from_spec ? ':deviated' : ''}`
         const resetPatch: TridentRunUpdate = {
           inner_result: null,
           subagent_run_id: null,
@@ -1052,14 +1920,77 @@ export function buildTridentOrchestrator(
     // a fresh detached build. Every tick. Forever. Measured on this branch by a
     // reviewer's live probe: `fires=1..6`, `subagent_run_id` still null at the end.
     //
-    // A crashed launcher is a DEAD RUN whether or not we ever learned its subagent
-    // id, so it belongs on this side of the gate. Ordering is deliberately
-    // unchanged: the harvest still runs FIRST, so a workflow that wrote its terminal
-    // result and only then lost its launcher still harvests rather than being reaped.
+    // A crashed launcher belongs on this side of the gate whether or not we ever
+    // learned its subagent id. Ordering is deliberately unchanged: the harvest still
+    // runs FIRST, so a workflow that wrote its terminal result and only then lost its
+    // launcher still harvests rather than being reaped.
+    //
+    // A DEAD LAUNCHER IS NOT A DEAD BUILD — the position this code used to state
+    // ("a crashed launcher is a DEAD RUN") is the defect, not the fix. The build runs
+    // DETACHED; what died is the warm REPL supervising it, and the only thing that
+    // makes that fatal is this routing. Measured 2026-08-14: three gateway boots
+    // (a deploy loop — 06:19:56, 06:26:51, 07:13:00, three restarts in 53 min) each
+    // reaped a healthy build ~90 s later, one of them (`8ddca917`) NINE MINUTES after
+    // it had pushed its branch and opened PR #261 (+434/−17). The PUSHED BRANCH, the
+    // PR and `inner_checkpoint` are the durable truth and they all survived; so with
+    // `begin_crash_recovery` wired, a crashed launcher with nothing harvestable is
+    // RELAUNCHED as a continuation from that state (§1a-crash below) rather than
+    // reaped. Recovery is budget-bounded precisely BECAUSE the live cause is a deploy
+    // loop: it must not spin fresh detached builds forever.
     if (run.subagent_run_id !== null || run.subagent_status === 'crashed') {
       const result = parseInnerResult(run.inner_result)
       if (result !== null) {
         return applyResult(run, result)
+      }
+      // (1a-crash) RECOVER, DON'T REAP. The launcher died with no harvestable result,
+      //     but the run's continuation state (`branch`, `pr`, `inner_checkpoint`) is on
+      //     the row and `launch()` already folds all three, so the build can simply be
+      //     re-supervised. CLAIM it atomically first (`beginCrashRecovery` clears the
+      //     crash latch, releases the sub-agent slot, nulls the tombstoned launcher
+      //     generation and spends one unit of the DURABLE budget) — going through
+      //     `update()`/`saveIfActive` is impossible here by design: their crash veto
+      //     refuses non-crashed writes onto a latched row, and that veto stays.
+      //
+      //     `round`/`ralph_round` are untouched: a launcher crash is not the agent's
+      //     failure. `harvested_at` is never stamped on any recovery path — nothing was
+      //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
+      //     unchanged reap below, byte-stable for legacy callers.
+      if (run.subagent_status === 'crashed' && beginCrashRecovery !== undefined) {
+        if (run.crash_recoveries >= maxCrashRecoveries) {
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          // NOTE THE WORDING: this reason must NOT contain "exhausted" — `delivery.ts`
+          // pattern-matches that token into the review-unresolved class ("the reviewer
+          // still had blocking findings"), which would be a confident lie about a run
+          // whose reviewer may never have run. It carries the LATCHED crash reason too,
+          // so the measured cause (T2's gateway boot timestamps) survives onto the row.
+          const reaped = failedRun(
+            run,
+            `launcher crashed ${run.crash_recoveries + 1} time(s); crash-recovery budget ` +
+              `(${maxCrashRecoveries}) used up — not relaunching. Last crash: ` +
+              `${run.failure_reason ?? 'inner workflow child crashed'}`,
+            false,
+          )
+          reaped.subagent_status = 'crashed'
+          reaped.subagent_run_id = run.subagent_run_id
+          return {
+            run: reaped,
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (crash-recovery budget)`,
+          }
+        }
+        const claimed = await beginCrashRecovery(run.id)
+        if (claimed === null) {
+          // The claim LOST — the row went terminal (a cancel) or another tick took it.
+          // Do nothing: whoever won owns the row now.
+          return { run, changed: false, waiting: true, note: 'crash-recovery claim lost — re-read next tick' }
+        }
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        // CONTINUATION, not a restart: `launch()` folds `inner_checkpoint`/`pr`/`branch`
+        // so the workflow resumes on the pushed branch and reuses the PR.
+        return launch(claimed)
       }
       // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
       //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes

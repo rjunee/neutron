@@ -50,6 +50,7 @@ async function runWorkflow(script: Script): Promise<RunOut> {
   const agent = async (prompt: string, opts?: { label?: string }): Promise<unknown> => {
     const label = String(opts?.label ?? '')
     captured.push({ label, prompt })
+    if (label.startsWith('head-probe-round-built-')) return { head: 'a'.repeat(40) }
     if (label === 'forge:build' || label.startsWith('forge:fix-round-')) {
       return {
         prNumber: null,

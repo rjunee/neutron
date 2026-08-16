@@ -111,6 +111,7 @@ function localRun(repo: string, id: string, branch: string): TridentRun {
     started_at: '2026-01-01T00:00:00.000Z',
     last_advanced_at: '2026-01-01T00:00:00.000Z',
     harvested_at: null,
+    crash_recoveries: 0,
   }
 }
 

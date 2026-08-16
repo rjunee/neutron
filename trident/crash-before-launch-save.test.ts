@@ -17,12 +17,21 @@
  * nothing ever observed the `crashed` status. Control then reached
  * `if (run.subagent_run_id === null) return launch(run)`, which is unconditional.
  *
- * THE FIX is one widened gate: a crashed launcher is a dead run whether or not we
- * ever learned its subagent id, so `subagent_status === 'crashed'` now also opens
- * the harvest/terminal block. Harvest still runs FIRST inside it, so a workflow
- * that wrote its terminal result and only then lost its launcher still harvests
- * rather than being reaped — that ordering is asserted below too, because a fix
- * that reaped those would trade an infinite loop for silently discarded results.
+ * THE FIX is one widened gate: `subagent_status === 'crashed'` also opens the
+ * harvest/terminal block, whether or not we ever learned the subagent id. Harvest
+ * still runs FIRST inside it, so a workflow that wrote its terminal result and only
+ * then lost its launcher still harvests rather than being reaped — that ordering is
+ * asserted below too, because a fix that reaped those would trade an infinite loop
+ * for silently discarded results.
+ *
+ * WHAT THE REAL INVARIANT IS. This file used to pin the REAP as the fix. The reap is
+ * not the invariant; BOUNDEDNESS is. Since "a gateway restart must not kill an
+ * in-flight build", a crashed launcher with recovery wired is RELAUNCHED as a
+ * continuation instead — so the cases below are split: the first describe pins the
+ * UNWIRED behaviour (no `begin_crash_recovery` → the original reap, byte-stable), and
+ * the second pins the wired one, where an always-crashing launcher still TERMINATES
+ * after a BOUNDED number of fires. Both still go red on the runaway this file exists
+ * to stop; neither is weakened.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -64,17 +73,21 @@ function crashingFirer(counter: { fires: number }) {
   }
 }
 
-function orchestrator(fire: ReturnType<typeof crashingFirer>) {
+function orchestrator(
+  fire: ReturnType<typeof crashingFirer>,
+  over: Partial<Parameters<typeof buildTridentOrchestrator>[0]> = {},
+) {
   return buildTridentOrchestrator({
     fire_workflow: fire as never,
     db_path: join(tmp, 'project.db'),
     run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
+    ...over,
   })
 }
 
-describe('a crash landing before the launch save', () => {
+describe('a crash landing before the launch save (recovery UNWIRED — the reap)', () => {
   test('does NOT fire a fresh build on every tick', async () => {
     const counter = { fires: 0 }
     const orch = orchestrator(crashingFirer(counter))
@@ -134,6 +147,69 @@ describe('a crash landing before the launch save', () => {
     await loop.runOnce()
 
     expect(store.get(run.id)?.failure_reason ?? '').not.toBe('')
+  })
+})
+
+describe('a crash landing before the launch save (recovery WIRED — the production shape)', () => {
+  test('the runaway is still bounded: fires stop at 1 + the recovery budget, and the run TERMINATES', async () => {
+    // THE ORIGINAL CONCERN, UNCHANGED IN SUBSTANCE: a launcher that dies every time
+    // must not fire a fresh detached build forever. Recovery re-supervises the build
+    // instead of reaping it, but the budget is what keeps the loop finite — this is
+    // the reviewer's `fires=1..6, forever` probe, re-pointed at the new routing.
+    // RED-mutation: remove the `crash_recoveries >= max` check → fires run away and
+    // the run never reaches a terminal phase.
+    const counter = { fires: 0 }
+    const orch = orchestrator(crashingFirer(counter), {
+      begin_crash_recovery: (id) => store.beginCrashRecovery(id),
+      max_crash_recoveries: 2,
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    const run = await store.create({
+      id: 'bounded-after-crash', slug: 'bac', project_slug: 'p', repo_path: '/repo', task: 'build',
+    })
+
+    for (let i = 0; i < 6; i++) await loop.runOnce()
+
+    expect(counter.fires).toBe(3)
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(store.listNonTerminal().map((r) => r.id)).not.toContain(run.id)
+    // The operator is still told it was the LAUNCHER (the reason is never genericised).
+    expect(after.failure_reason ?? '').toContain('pooled child exited')
+  })
+
+  test('HARVEST STILL WINS — a crashed row with a written result is never relaunched', async () => {
+    // (c) The ordering guarantee, asserted against the RECOVERY path this time: a
+    // workflow that wrote its terminal result and only then lost its launcher must be
+    // harvested, not re-supervised. RED-mutation: put the crash branch above the
+    // `parseInnerResult` harvest → this fires a build for a finished workflow and
+    // spends budget doing it.
+    const counter = { fires: 0 }
+    const orch = orchestrator(crashingFirer(counter), {
+      begin_crash_recovery: (id) => store.beginCrashRecovery(id),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    const run = await store.create({
+      id: 'harvest-beats-recovery', slug: 'hbr', project_slug: 'p', repo_path: '/repo', task: 'build',
+    })
+    await store.update(run.id, {
+      subagent_status: 'running', subagent_run_id: 'wf-1', workflow_run_id: 'gen-dead',
+    })
+    await store.crashRunningByLauncher('gen-dead', 'pooled child exited')
+    await store.update(run.id, {
+      inner_result: JSON.stringify({ ok: false, verdict: 'REQUEST_CHANGES', round: 3 }),
+    })
+
+    await loop.runOnce()
+
+    expect(counter.fires).toBe(0)
+    expect(store.get(run.id)?.crash_recoveries).toBe(0)
+    // The harvest DECIDED the run (the terminal commit of a crash-latched row is
+    // separately gated by `saveIfActive`'s crash veto — pre-existing, untouched here).
+    const outcome = await orch.step(store.get(run.id)!)
+    expect(outcome.run.phase).toBe('failed')
+    expect(outcome.run.failure_reason ?? '').toContain('inner workflow ended at round 3')
+    expect(counter.fires).toBe(0)
   })
 })
 
