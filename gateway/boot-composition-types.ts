@@ -33,7 +33,23 @@ import type { CompositionInput } from './composition.ts'
  * wired. The shape lets the test harness (and S5+ production) compose a
  * graph without changing the boot shell.
  */
-export type GraphComposer = (input: { db: ProjectDb; project_slug: string }) =>
+export type GraphComposer = (input: {
+  db: ProjectDb
+  project_slug: string
+  /**
+   * True when `project_slug` is the bare FALLBACK — nothing configured it. Only
+   * the boot resolver can know this (a fallback `'dev'` and a configured `'dev'`
+   * are the same string), so it is handed to the composer rather than
+   * re-derived, and the credential surfaces refuse to move rows onto a process
+   * that cannot say who it is.
+   *
+   * OPTIONAL, and ABSENT MEANS FALLBACK: a caller that did not say where the
+   * handle came from has told us exactly as much as a process that does not
+   * know who it is, so it is read as anonymous and the credential surfaces
+   * refuse. Forgetting fails CLOSED.
+   */
+  slug_is_fallback?: boolean
+}) =>
   | CompositionInput
   | Promise<CompositionInput>
 

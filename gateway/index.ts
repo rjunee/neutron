@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
@@ -23,7 +23,13 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (signup/, provisioning/, identity/, proxy/).
 import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph, type MemoryHealthProvider } from './composition.ts'
 import { LoopRegistry } from '@neutronai/loop'
-import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
+import {
+  resolveBootConfig,
+  resolveIdentityConfig,
+  resolveOwnerSlugSourceFromConfig,
+  type BootConfig,
+  type OwnerSlugResolution,
+} from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
 
@@ -144,15 +150,28 @@ export interface BootServer {
  * returns the new value on the next boot.
  */
 export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
-  const ownerHome = env['OWNER_HOME']
-  if (ownerHome !== undefined && ownerHome !== '') {
-    const slugFile = join(ownerHome, '.url_slug')
-    if (existsSync(slugFile)) {
-      const fromFile = readFileSync(slugFile, 'utf8').trim()
-      if (fromFile.length > 0) return fromFile
-    }
-  }
-  return env['NEUTRON_INSTANCE_SLUG'] ?? 'dev'
+  // DELEGATES. This used to be a hand-copied duplicate of the resolver below,
+  // and its docblock claimed "identical precedence" — which held right up until
+  // one of them learned to trim an empty slug and the other did not. Three
+  // copies of "who am I" existed at once; a review found two of them disagreeing
+  // with boot, and `neutron doctor` reading one of the wrong ones would report
+  // an empty instance for a system running perfectly well.
+  //
+  // A duplicated answer is not redundancy, it is a second opinion nobody asked
+  // for. There is now ONE implementation and the others call it.
+  // The CONFIG resolver feeds the SLUG resolver. Hand-building a partial config
+  // from raw env kept being not-quite-right in a new way each round: first it
+  // dropped NEUTRON_HOME, then it still skipped the DEFAULT home that
+  // `resolveNeutronHome` materialises when neither variable is set — so with a
+  // renamed instance and no env at all, boot read `~/neutron/.url_slug` and this
+  // returned `dev`.
+  //
+  // There is no version of "copy the inputs correctly" that stays correct. Use
+  // the same function boot uses to decide what the inputs ARE — but only the
+  // IDENTITY slice of it. Delegating to the full `resolveBootConfig` also
+  // inherited its validation of every unrelated numeric knob, which turned
+  // `NEUTRON_PORT=bad` into a throw out of `neutron doctor`.
+  return resolveOwnerSlugSourceFromConfig(resolveIdentityConfig(env)).slug
 }
 
 /**
@@ -164,9 +183,11 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
  * independent `process.env` read. This keeps the composer + boot from
  * desyncing on the resolved slug (the hazard the C1 brief flags).
  *
- * The `.url_slug` lookup uses the EFFECTIVE owner home — `config.ownerHome ??
- * config.neutronHome` — i.e. the exact value {@link envShimFromBootConfig}
- * publishes to `OWNER_HOME`. This preserves the old Open flow bit-for-bit: the
+ * The `.url_slug` lookup uses the EFFECTIVE owner home — `effectiveOwnerHome`
+ * (`config/index.ts`), i.e. the exact value {@link envShimFromBootConfig}
+ * publishes to `OWNER_HOME`; they call the SAME function, because the sentence
+ * "the exact value" was written while each computed its own `??` expression and
+ * they disagreed on `OWNER_HOME=''`. This preserves the old Open flow: the
  * legacy `open/server.ts` mutated `process.env.OWNER_HOME ||= neutronHome`
  * BEFORE `boot()` read it, so an `OWNER_HOME`-unset box with `<NEUTRON_HOME>/
  * .url_slug` resolved the slug from that file. Reading raw `config.ownerHome`
@@ -176,46 +197,24 @@ export function resolveOwnerSlugFromConfig(config: BootConfig): string {
   return resolveOwnerSlugSourceFromConfig(config).slug
 }
 
-/** Where the boot slug came from — see {@link resolveOwnerSlugSourceFromConfig}. */
-export type OwnerSlugSource = 'file' | 'env' | 'fallback'
-
-/** The boot slug plus its provenance. */
-export interface OwnerSlugResolution {
-  slug: string
-  source: OwnerSlugSource
-}
-
-/**
- * {@link resolveOwnerSlugFromConfig}'s body, plus the one bit that call site
- * throws away: WHERE the slug came from.
- *
- * The scope reconciler needs to tell "explicitly dev" from "nobody told me who
- * I am" (defect 2026-08-14: an `NEUTRON_INSTANCE_SLUG`-unset boot that inherited
- * a live `NEUTRON_HOME` re-keyed every credential row onto the `'dev'` fallback,
- * and the running gateway — frozen on its real handle — read zero secrets). A
- * bare string cannot carry that distinction, and `config.instanceSlug` is
- * `undefined` exactly when the env var was absent (`config/index.ts:393`), so it
- * is recoverable HERE and nowhere later.
- *
- * Precedence is byte-for-byte the old one: `.url_slug` file > `instanceSlug` >
- * `'dev'`. Note the `??` semantics that were already there — an EXPLICIT
- * `NEUTRON_INSTANCE_SLUG=dev` (or even an empty string) is `'env'`, not
- * `'fallback'`; only an absent value falls through.
- */
-export function resolveOwnerSlugSourceFromConfig(config: BootConfig): OwnerSlugResolution {
-  const ownerHome = config.ownerHome ?? config.neutronHome
-  if (ownerHome !== undefined && ownerHome !== '') {
-    const slugFile = join(ownerHome, '.url_slug')
-    if (existsSync(slugFile)) {
-      const fromFile = readFileSync(slugFile, 'utf8').trim()
-      if (fromFile.length > 0) return { slug: fromFile, source: 'file' }
-    }
-  }
-  if (config.instanceSlug !== undefined && config.instanceSlug !== null) {
-    return { slug: config.instanceSlug, source: 'env' }
-  }
-  return { slug: 'dev', source: 'fallback' }
-}
+// THE SLUG RESOLVER MOVED DOWN TO `config/index.ts` AND IS RE-EXPORTED HERE.
+// It was DEFINED on this entry module, and `open/owner-identity.ts` imported it
+// from here — which put `gateway/index.ts` into the Open composer's own import
+// graph. `gateway/composer-contract.ts` forbids exactly that: "the composer
+// graph must NOT contain the entry module (`gateway/index.ts`) at all",
+// because an entry↔composer edge is the top-level-await cycle that completes
+// under Bun's current loader and can deadlock under a strict reading of the
+// ESM TLA spec (and prod bun is PATH-pinned, not version-pinned). depcruise
+// permits `open → gateway` wholesale, so no mechanical gate catches this; the
+// contract is prose and the fix is to not need the edge. Its inputs are an
+// `IdentityConfig` and the filesystem, so the identity leaf is its real home.
+// `open/composer.ts`'s freedom from this module is pinned by
+// `open/__tests__/composer-graph-excludes-gateway-entry.test.ts`.
+export {
+  resolveOwnerSlugSourceFromConfig,
+  OwnerSlugUnreadableError,
+} from '@neutronai/config/index.ts'
+export type { OwnerSlugSource, OwnerSlugResolution } from '@neutronai/config/index.ts'
 
 
 export interface BootOptions {
@@ -430,7 +429,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // has to be given to both or the anonymous boot simply takes the rows the
     // other one refused.
     const credentialScope = await reconcileCredentialScope(db, project_slug, {
-      currentSlugIsFallback: slugResolution.source === 'fallback',
+      slug_is_fallback: slugResolution.source === 'fallback',
     })
     if (credentialScope.action === 'migrated') {
       log.warn('credential_scope_migrated', {
@@ -452,12 +451,22 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         }),
       )
     } else if (credentialScope.action === 'orphaned') {
+      // WHY the reason is on the line and not just in the return value: these
+      // two situations need opposite responses and were rendering identically.
+      // AMBIGUOUS data says "look at your credential rows"; a REFUSED direction
+      // says "this process has no configured handle — set it and restart", and
+      // an operator handed the generic sentence was being pointed at the
+      // migration, which is the one action that must not be taken here.
       log.warn('credential_scope_orphaned', {
         boot_handle: credentialScope.boot_handle,
         handles: credentialScope.stale_handles.join(','),
         tables: credentialScope.orphan_counts
           .map((o) => `${o.table}@${o.handle}:${o.rows}`)
           .join(' '),
+        reason:
+          credentialScope.refused_direction === true
+            ? 'fallback_boot_handle_refused_direction'
+            : 'ambiguous_census',
       })
       fireAndForget(
         'gateway.credential_scope_journal',
@@ -469,6 +478,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
           payload: {
             from: credentialScope.stale_handles,
             orphan_counts: credentialScope.orphan_counts,
+            reason:
+              credentialScope.refused_direction === true
+                ? 'fallback_boot_handle_refused_direction'
+                : 'ambiguous_census',
           },
         }),
       )
@@ -551,7 +564,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   }
   if (options.composer !== undefined) {
     try {
-      const composition = await options.composer({ db, project_slug })
+      const composition = await options.composer({
+        db,
+        project_slug,
+        slug_is_fallback: slugResolution.source === 'fallback',
+      })
       if (composition.realmode_cleanups !== undefined) {
         realmode_cleanups = composition.realmode_cleanups
       }

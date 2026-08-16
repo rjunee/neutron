@@ -2,6 +2,232 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the guard was on the automatic path only, so the explicit one still moved the rows
+
+A review of the merged #266 found it and the repro is two lines: seed a credential row
+under an explicit handle, boot on the `'dev'` fallback, dispatch the explicit migration.
+`total_moved:1`, and the row now belongs to a process that cannot say who it is. The
+automatic reconciler refused exactly this; `migrateOrphanedCredentialScope` took a handle
+and no provenance at all, so it could not have refused anything. **Closing the direction
+on one sweep closed nothing** — the same sentence that entry was written to record, one
+level up, inside the patch that recorded it. Worse, the integrations status screen
+ADVERTISED the migration as the repair.
+
+**Provenance is a REQUIRED argument, not an option with a safe default.** A
+`CredentialScopeProvenance` is threaded from the boot resolver (`gateway/index.ts`, the
+same `slugResolution` the automatic guard reads) through the composer, the composition
+input, the cores wiring, and both explicit surfaces — the `integrations_migrate_orphaned`
+tool and `POST /api/cores/integrations/migrate-orphaned` — into the brain and the scope
+function. Required, because the failure is silent: a new surface that forgot would
+compile, pass, and quietly do the unguarded thing. Now forgetting is a type error, and
+the compiler enumerated every site rather than a human guessing at them.
+
+**Absent means fallback.** Making it required all the way up touched 89 files, most of
+them composition tests asserting a provenance they have no opinion about, so at the
+composition boundary it is optional and `undefined` reads as anonymous. "This caller did
+not say where its handle came from" and "this process does not know who it is" are the
+same statement, so a composer that forgets is refused rather than trusted — fail-closed,
+and 89 files became 6.
+
+**A surface no longer offers an action the brain will refuse.** On a fallback boot the
+orphan summary carries `migrate_action: null` and a sentence naming the real repair (set
+the handle and restart) instead of pointing at the migration that would take someone
+else's rows.
+
+**And the boot log now says WHY nothing moved.** `credential_scope_orphaned` carried no
+reason, so `ambiguous_census` and `fallback_boot_handle_refused_direction` — which need
+opposite responses — rendered identically, and the operator reading the generic sentence
+was being steered toward the unsafe action. Both the log line and the journal payload
+carry it; the payload assertion is exact equality, because an audit row that grows a
+field silently is how one starts carrying something it should not.
+
+Regression asserted THROUGH THE SHARED BRAIN, not by calling a tool handler — every
+surface funnels there, and a test that reaches past it proves nothing about what a caller
+gets, which is how the gap survived its first suite. It carries the positive control the
+file requires: the same fixture, provenance the only difference, migrates. Mutation-tested
+both directions — disabling the guard fails the new test, refusing unconditionally fails
+five. A later review round added the boundary the first pass missed — the HTTP route,
+the agent-facing tool and the status response each driven for real, plus a fallback boot
+asserting the audit row's `reason` by exact equality, plus the composition chain itself
+(delete the composer's propagation and every configured boot silently refuses, which the
+field-coverage gate cannot see because the safe default and the wrong answer are the same
+literal). Gate results for the whole entry are recorded ONCE, at its end — an earlier
+draft stated `typecheck-all.sh` twice with two different counts, which leaves a reader no
+way to know which run was the real one.
+
+**A LATER ROUND FOUND THE GUARD FAILING THE OTHER WAY, AND IT WAS LIVE.** The refusal is
+silent in both directions — a broken guard silently steals rows, and a guard that
+misreads its own configuration silently refuses every migration on a correct machine.
+`resolveOwnerSlugSourceFromConfig` read the effective owner home as `config.ownerHome ??
+config.neutronHome`, and `??` falls through on `undefined` but NOT on `''`. So
+`OWNER_HOME=''` resolved the home to the empty string, the guard on the next line
+rejected that as unusable, and the `.url_slug` lookup was SKIPPED rather than falling
+back to `NEUTRON_HOME` — collapsing all three slug resolvers onto the bare `'dev'`
+fallback at once. A correctly renamed instance then journalled its own handle as
+orphaned and answered `Refused` to every explicit migration, telling the owner to set a
+handle that was already set. `resolveNeutronHome` (`migrations/db-path.ts`) has always
+treated an empty value as unset, so the two halves of one identity resolution disagreed
+about what empty means, ten lines apart. There is now ONE `effectiveOwnerHome` in
+`config/index.ts` that both the slug resolver and the env shim call — the shim was the
+second live site, and because `open/server.ts` fills a slot that is `undefined` OR `''`
+it re-wrote the empty string over itself, leaving every below-seam reader of
+`process.env.OWNER_HOME` holding `''`. Fixing only the resolver would have left the
+running server's owner home empty. The agreement suite could not see this axis by
+construction: it varies `NEUTRON_INSTANCE_SLUG` and never passes an empty `OWNER_HOME`,
+and all three resolvers were wrong the SAME way, so they agreed perfectly on the wrong
+answer.
+
+**`neutron doctor` escaped its `{ok:false}` contract again, on the same line.** The
+previous round closed the ZodError path and opened a filesystem one: the `.url_slug` read
+behind `existsSync` was unguarded, and `existsSync` is true for a chmod-000 file and for
+a DIRECTORY of that name — the read then throws EACCES / EISDIR out of a function
+`open/diagnostics-cli-impl.ts` calls OUTSIDE the try that produces `{ok:false}`. Both
+variants were reproduced against the branch.
+
+**THE FIRST FIX FOR THAT WAS WRONG, AND THE NEXT ROUND MEASURED WHY.** It made the
+resolver SWALLOW the read error and fall through to `NEUTRON_INSTANCE_SLUG`, so `doctor`
+stopped throwing. On the exact configuration `open/owner-identity.ts` documents — a
+renamed instance, `.url_slug` holding the new handle and the env var still holding the
+old one — the fall-through answers `{slug:'old-handle', source:'env'}`. That is a
+CONFIGURED provenance, so `slug_is_fallback` reaches the direction guard as `false` and
+the sweep migrates the owner's credential rows BACKWARD onto the name they were renamed
+away from, with no log line and no journal row. EACCES on `.url_slug` is a recorded real
+deployment failure, not a hypothetical. It also deleted a pinned invariant repo-wide:
+`gateway/__tests__/boot-init-cleanup.test.ts` asserts boot FAILS LOUDLY on an
+unresolvable slug, and the swallow turned that suite red on `main`'s own test.
+
+An unreadable rename file is now an ERROR, not an absence: the resolver throws
+`OwnerSlugUnreadableError` (`config/index.ts`), boot rejects as it always did, and the
+ONE caller that would rather have an answer than the truth — `neutron doctor` — catches
+it and renders its documented `{ok:false}` with the errno, which is what `main` returned
+before this branch existed. A substituted slug was never acceptable there either: the
+slug filters every event and job in the report, so `{ok:true}` with the wrong identity
+renders a healthy instance as empty. A file that reads successfully and is BLANK is still
+the absent case; only a file that could not be read at all is unknown.
+
+The EACCES fixtures prove the mode really denies the read before asserting the deny-path
+behaviour, because `chmod 000` is advisory against root — and where they previously
+bailed with a bare `return` when it did not bite (a test named for the EACCES axis
+passing green on a root runner having asserted nothing), they now assert the correct
+outcome for whichever world they are in: root still reads the file, and then the file
+must WIN. The EISDIR case denies root too and carries the axis unconditionally.
+
+**The canonical resolver moved out of the gateway ENTRY module.** It was defined on
+`gateway/index.ts` and `open/owner-identity.ts` imported it from there, which put the
+entry into `open/composer.ts`'s own static import graph — the one edge
+`gateway/composer-contract.ts` forbids by name, because entry↔composer is the
+top-level-await cycle that completes under Bun's current loader and can deadlock under a
+strict reading of the ESM TLA spec. No mechanical gate saw it: the depcruise rule that
+looks closest exempts `^open` outright, and the no-cycles rule only fires once a cycle
+COMPLETES. The resolver now lives in the `config` leaf beside the `IdentityConfig` it
+consumes and the `effectiveOwnerHome` it calls; `gateway/index.ts` re-exports it for its
+own importers. `open/__tests__/composer-graph-excludes-gateway-entry.test.ts` walks the
+real static graph through `Bun.resolveSync` and names the offending module — it carries
+a positive control (the same walker, seeded at a file that really does import the entry,
+must find it) so a walker that resolved nothing cannot read as a clean graph.
+
+**Whitespace is empty too.** `effectiveOwnerHome` and `resolveNeutronHome` both guarded
+`length > 0`, so `OWNER_HOME='   '` was answered as a home: the `.url_slug` lookup ran
+against a directory named three spaces and a correctly renamed instance resolved
+anonymous again — the identical defect, one space past the fix for it, and through an
+input no empty-string case can reach. Both trim now; both still return the value
+verbatim, because blank means unset and a real path is published back byte-for-byte.
+
+**The fail-closed default in the wiring was dead.** `wire-cores-surfaces.ts` reads
+`input.slug_is_fallback ?? true` at both handoffs and the comment above each says
+forgetting fails closed — but `open/composer.ts` normalises the field and always sets it,
+so no test ever produced the absent case and mutating `?? true` to `?? false` left every
+suite green. The integration test now composes with the DANGEROUS value and deletes the
+field before composing the graph, which is the only way to reach that default; the same
+mutation reds exactly that test and nothing else.
+
+**The refusal is data now, not prose.** `MigrateOrphanedCredentialsResult` carried no
+field for it — `refused_direction` was consumed only to build a sentence and the call
+still returned `ok:true`, so `POST /api/cores/integrations/migrate-orphaned` answered a
+refusal with `200 {ok:true,total_moved:0}`, structurally identical to a collision skip
+and to a clean no-op. Five assertions guarding a security-relevant refusal were
+`message).toContain('Refused')`, so editing one English sentence disarmed all five while
+leaving the guard untested. The flag now propagates to the result and out over the wire,
+and those assertions are structural; the operator-facing sentence stays pinned once,
+deliberately, rather than being the sole evidence in five places. **And the refusal
+leaves an audit row.** The journal emit was gated on `total_moved > 0` and a refusal
+moves nothing, so the one security-relevant outcome reachable from HTTP and from an agent
+tool wrote nothing at all while the automatic path journalled a reasoned row. It now
+emits `credential_scope_orphaned` with boot's own
+`reason: 'fallback_boot_handle_refused_direction'` plus a `surface` key, asserted by
+exact payload equality with the no-secret-material sweep.
+
+Mutations, each performed and reverted with a control proving it landed: reinstating the
+`??`, dropping the structural flag, suppressing the audit emit, and disarming the
+direction guard itself — the last one proving the suite still catches rows actually
+MOVING, not merely a missing marker. Four more in the round that fixed the swallow:
+restoring the swallow reds 6 tests across three files (including the boot invariant it
+had broken); reverting either trim to `length > 0` reds the whitespace case; re-adding the
+`gateway/index.ts` import to `open/owner-identity.ts` reds the graph walker, which names
+the module; mutating `?? true` to `?? false` at both wiring handoffs reds only the new
+absent-field case. Removing the composer's `slug_is_fallback` assignment reds the
+FIELD-SPECIFIC ratchet by name (`composition-field-coverage.test.ts` over `WIRED_FIELDS`),
+not merely the count floor — measured, because a review reported the opposite.
+
+**A LATER ROUND FOUND THE PIN FOR ONE OF THOSE TRIMS ASSERTING NOTHING.** A review
+mutation-proved it: revert the `OWNER_HOME` trim in `resolveNeutronHome`
+(`migrations/db-path.ts`) and the suite stayed green, because the assertion that named
+that property passed `NEUTRON_HOME` too — which wins at the line above and RETURNS, so
+the line under test never ran. The positive control (the same mutation on the
+`NEUTRON_HOME` branch) WAS caught, which is what made the gap legible rather than
+invisible. The property is now asserted with `NEUTRON_HOME` ABSENT, where only the trim
+can produce the documented `~/neutron` default, plus a control that a real `OWNER_HOME`
+path still resolves verbatim so the case cannot pass by the variable going unread.
+An assertion that cannot fail for the property it names is not coverage.
+
+**AND THE DOCBLOCK'S CLAIM ABOUT ITS SIBLINGS WAS FALSE.** `config/index.ts` stated that
+every sibling identity read in the repo trims; two did not — `resolveOwnerHome`
+(`gateway/boot-listener-registry.ts`) and its inlined twin `resolveOwnerHomeFromEnv`
+(`onboarding/overnight/register.ts`), both `length > 0`. With `OWNER_HOME='   '`, config
+and identity fell back while those two answered a directory named three spaces: one
+variable, two homes, and the overnight engine enumerating projects somewhere nothing had
+ever written. Fixed at the two call sites rather than by narrowing the sentence, because
+the split brain was the defect and the prose was only the evidence. The adjacent
+`NEUTRON_DB_PATH` guards got the same treatment — `dirname(dirname('   '))` is `'.'`, so a
+blank pin resolved owner_home to the process CWD, the identical defect one line down that
+fixing only the first line would have left live.
+
+`ReconcileInstanceScopeOptions.currentSlugIsFallback` is now REQUIRED, matching the
+explicit path's `provenance` argument. It was optional and the guard fires only on an
+explicit `true`, so an omitted flag failed OPEN — and the demonstration of the permissive
+call was sitting in the guard's own test file, where an omission and a deliberate `false`
+were indistinguishable. Optional provenance on a safety decision is a way to forget.
+
+`ENOENT` from the `.url_slug` read is deliberately NOT special-cased, and the reasoning is
+recorded at the call site: a review proposed falling through when the read races an
+unlink, but the fall-through answers with `NEUTRON_INSTANCE_SLUG`, which on a renamed box
+holds the OLD handle — so it would hand the credential guard "this process knows who it
+is" at the exact moment something is rewriting the file that says who it is.
+
+Mutations this round, each applied and reverted with a control proving it landed and a
+baseline proving the suite was green first (23 pass / 0 fail): reverting the
+`OWNER_HOME` trim in `resolveNeutronHome` reds the new absent-`NEUTRON_HOME` case;
+reverting either sibling's `OWNER_HOME` trim reds that sibling's assertion by name;
+reverting either `NEUTRON_DB_PATH` trim reds the CWD case; and dropping
+`currentSlugIsFallback` from one call site is now a TS2345 compile error naming the
+missing property, which is the whole point of making it required.
+
+Suites: `open/__tests__/owner-slug-agreement.test.ts` 23 pass, `migrations/` +
+`onboarding/overnight/` 110 pass across 14 files, gateway boot-credential-scope +
+boot-init-cleanup + `config/` 48 pass across 4 files, and the four direction-guard
+suites together 40 pass. `open/__tests__/` as a whole ran 750 across 98 files; the three
+failures there are load-sensitive and NOT this branch — the identical two
+(`projects_changed` live-refresh, the `#514` watchdog reap) reproduce on the untouched
+base worktree at `81548e81` under the same three-file load, the third
+(`sanitizeInboundAttachments`) does not recur, and the watchdog case passes 30/30 when its
+file runs alone. The failure SET differenced against untouched main is empty; the count
+alone would have read as a regression.
+
+`lint.sh` clean (7 gates). `typecheck-all.sh` 50/51 with the one failure
+(`app/tsconfig.json`, `TS2688 Cannot find type definition file for 'node'`) reproduced
+identically on the untouched base worktree at `81548e81` — a local install artifact
+(`app/node_modules/@types` holds only `react`), unchanged by this work. Differenced as a
+failure SET, not counted.
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
 Landed via PR #325.
@@ -2031,7 +2257,7 @@ gap this task existed to close.
 
 Rows in `secrets` and `project_credentials` are keyed by the frozen owner handle; rows written before provisioning froze a different handle were invisible to the instance and reported as "not connected". Boot now runs `auth/credential-scope-reconcile.ts` (wired in `gateway/index.ts` inside a never-fail-boot guard): when every credential row sits under exactly one non-boot handle and ZERO rows exist under the boot handle, the scope columns are rewritten in one transaction — a pure metadata move, ciphertext bytes untouched — and a `credential_scope_migrated` audit row records handles, tables, and counts only. Any ambiguity (rows under more than one handle, or any row already under the boot handle) migrates NOTHING: a stale row must never overwrite a freshly connected credential. The sweep covers both `SHARED_KEY_ENCRYPTED_TABLES` members plus the `api_keys` metadata twin, and boot never refuses either way.
 
-The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately.
+The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately. **Superseded in one respect by the 2026-08-16 entry: this description omits the fallback exception, and did so because the exception did not exist yet — an explicit migration onto a FALLBACK boot handle is now refused outright, on every surface.**
 
 Tests in `auth/__tests__/credential-scope-reconcile.test.ts`, `gateway/__tests__/boot-credential-scope.test.ts`, `gateway/cores/__tests__/integrations-orphaned.test.ts`, and `gateway/cores/__tests__/integrations-migrate-orphaned.test.ts` pin the acceptance: the unambiguous move reads the token back with unchanged ciphertext bytes plus an audit row; the rotation-hazard case asserts on the decrypted value that the fresh credential survives; a real `boot()` never exits non-zero; a positive control succeeds under the correct handle so deleting the migration turns the suite red; and no secret material reaches logs, status output, or the audit payload. `reminders.project_slug` carries the same stale slug but is a read-filter, not a crypto scope, with no slug-bearing UNIQUE key and hence no rotation hazard; its drop-or-sweep is recorded as a follow-up decision, rows untouched.
 

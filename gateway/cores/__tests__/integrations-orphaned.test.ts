@@ -189,6 +189,7 @@ test('rows scoped to a previous owner handle report orphaned, not "not connected
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
     db: b.db,
   })
 
@@ -236,6 +237,7 @@ test('the SAME rows under the boot handle read connected, with no orphan summary
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
     db: b.db,
   })
 
@@ -256,6 +258,7 @@ test('a genuinely unconnected slot still reads plain connected:false, orphaned:f
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
     db: b.db,
   })
 
@@ -281,6 +284,7 @@ test('a fresh boot-handle credential wins the slot; the stale twin stays in the 
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
     db: b.db,
   })
 
@@ -306,6 +310,7 @@ test('without a db the status degrades to presence-only (no orphan detection)', 
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
   })
 
   expect(status.orphaned_credentials).toBeNull()
@@ -326,6 +331,7 @@ test('integrations_list surfaces the orphan summary and names the migrate action
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: BOOT,
+    slug_is_fallback: false,
     db: b.db,
     startOAuth: async (labels: string[]) => ({
       ok: true as const,

@@ -179,12 +179,23 @@ export interface OvernightEngineDeliver {
  * `resolveOwnerHome`, inlined to keep the onboarding module from depending
  * on the gateway layer). Honors `OWNER_HOME`, else derives from the locked
  * `<owner_home>/db/project.db` layout via `NEUTRON_DB_PATH`.
+ *
+ * BLANK IS UNSET, agreeing with `effectiveOwnerHome` (`config/index.ts`),
+ * `resolveNeutronHome` (`migrations/db-path.ts`) and its own named twin
+ * `resolveOwnerHome` (`gateway/boot-listener-registry.ts`). It did not before:
+ * a review measured `OWNER_HOME='   '` sending projects to
+ * `'   /Projects/<slug>/'` — a directory named three spaces — while every other
+ * reader of the same variable had fallen back. `null` (nobody said) is the
+ * honest answer for a blank value, and the caller already handles it; a
+ * three-space path is not. An inlined mirror that mirrors the OLD version of
+ * the thing it copied is the failure mode inlining always risks, so the
+ * agreement is now pinned by test rather than by the word "mirrors".
  */
 export function resolveOwnerHomeFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
   const fromEnv = env['OWNER_HOME']
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv
+  if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) return fromEnv
   const dbPath = env['NEUTRON_DB_PATH']
-  if (typeof dbPath === 'string' && dbPath.length > 0) {
+  if (typeof dbPath === 'string' && dbPath.trim().length > 0) {
     return dirname(dirname(dbPath))
   }
   return null

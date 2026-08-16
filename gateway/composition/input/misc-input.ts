@@ -5,6 +5,25 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 export interface MiscCompositionInput {
   db: ProjectDb
   project_slug: string
+  /**
+   * True when {@link project_slug} is the bare FALLBACK — nothing configured it,
+   * so the process does not actually know who it is.
+   *
+   * It travels WITH the slug rather than being re-derived downstream because a
+   * fallback `'dev'` and a configured `'dev'` are the same string and opposite
+   * situations; only the resolver can tell them apart, and only at boot. The
+   * credential surfaces refuse to move rows onto an unnamed process, which is a
+   * decision they cannot make from the handle alone.
+   *
+   * OPTIONAL, and ABSENT MEANS FALLBACK. "This composition did not say where its
+   * handle came from" and "this process does not know who it is" are the same
+   * statement, so the wiring reads `undefined` as anonymous and the credential
+   * surfaces refuse. That keeps a composer that forgets it FAIL-CLOSED — loudly
+   * unable to migrate — instead of silently doing the unguarded thing, which is
+   * the failure this whole guard exists for. It also spares every composition
+   * test from asserting a provenance it does not care about.
+   */
+  slug_is_fallback?: boolean
   // LOOKING FOR `push_dispatcher`? It was DELETED on 2026-08-09, along with the
   // `ReminderTickLoop.on_fired` hook it fed. It composed a native notification
   // from the reminder ROW, and the row is the wrong source — a ritual's stored

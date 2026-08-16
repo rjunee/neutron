@@ -847,7 +847,7 @@ export function buildOpenGraphComposer(
 ): GraphComposer {
   const env = options.env ?? process.env
 
-  return async ({ db, project_slug }): Promise<OpenComposition> => {
+  return async ({ db, project_slug, slug_is_fallback }): Promise<OpenComposition> => {
     const owner_home = resolveNeutronHome(env)
     const static_dir = resolveLandingStaticDir(env)
     // Single-owner: the frozen instance handle IS the boot slug.
@@ -5877,6 +5877,13 @@ export function buildOpenGraphComposer(
     return {
       db,
       project_slug,
+      // ALWAYS set, never conditionally spread. A field the composer assigns
+      // only sometimes is exactly the ambiguity `composition-field-coverage`
+      // exists to catch, and it caught this. Normalising here also puts the
+      // fail-closed reading in ONE place: a caller that did not say where the
+      // handle came from has told us as much as a process that does not know
+      // who it is, so it resolves to `true` and the credential surfaces refuse.
+      slug_is_fallback: slug_is_fallback ?? true,
       // RA2 (gbrain live-or-loud) — surface the memory backend's boot-time
       // health so `boot()` can fold it into the terminal `/healthz`: a box whose
       // `gbrain` binary is missing now reports `status:'degraded'` +

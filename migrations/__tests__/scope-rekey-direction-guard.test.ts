@@ -144,11 +144,18 @@ describe('direction guard — a fallback boot never pulls rows off an explicit h
 
   test('EXPLICIT dev vs a dev-scoped DB behaves exactly as before the guard', () => {
     // A genuine dev instance is not collateral damage: `NEUTRON_INSTANCE_SLUG=dev`
-    // set on purpose is provenance `'env'`, so the flag is absent here.
+    // set on purpose is provenance `'env'`, so the flag is `false` here.
+    //
+    // IT USED TO BE ABSENT, and that is the whole reason the option is now
+    // REQUIRED: this test demonstrated the permissive call in the file whose
+    // subject is the guard. An omitted flag and a deliberate `false` produced
+    // identical behaviour, so the suite could not tell "the caller said this is
+    // an explicit handle" from "the caller forgot to say" — and the second is
+    // the one that moves the owner's rows onto an anonymous name.
     seedOnboarding(FALLBACK)
     seedSecret(FALLBACK)
 
-    const result = reconcileInstanceScope(db, FALLBACK, { dbPath })
+    const result = reconcileInstanceScope(db, FALLBACK, { dbPath, currentSlugIsFallback: false })
 
     expect(result.action).toBe('seeded')
     expect(result.refused_direction).toBeUndefined()
