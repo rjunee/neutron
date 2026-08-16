@@ -30,8 +30,9 @@ const NEW_TWO = '## 2026-08-16 — build two\n\nbody two\n\n'
 describe('parse/serialize', () => {
   test('round-trips the REAL AS_BUILT.md byte-for-byte', () => {
     // A merge driver that cannot reproduce its own input is a corruption engine. This is the file
-    // it will actually be pointed at — 300+ entries, four duplicated headings, ten undated
-    // sections and a great deal of fenced sample markdown.
+    // it will actually be pointed at — 300+ entries, ten undated sections and a great deal of
+    // fenced sample markdown. (It also carried four duplicated headings until those were
+    // resolved and gated by `scripts/git/as-built-heading-uniqueness.ts`.)
     const text = readFileSync(REAL_LOG, 'utf8')
     expect(serializeLog(parseLog(text))).toBe(text)
   })
@@ -204,7 +205,9 @@ describe('parse/serialize', () => {
   })
 
   test('repeated headings stay distinct entries', () => {
-    // The real log genuinely repeats four headings verbatim; folding them would delete history.
+    // The real log repeated four headings verbatim until they were resolved and gated; folding
+    // two same-titled entries together would delete history, so this stays a fixture-level rule
+    // rather than something the current state of the log is allowed to make moot.
     const dup = '## 2026-08-09 — Model usage on the phone\n\nfirst\n\n'
     const dup2 = '## 2026-08-09 — Model usage on the phone\n\nsecond\n\n'
     const parsed = parseLog(log(dup, dup2))
