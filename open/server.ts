@@ -48,8 +48,35 @@ import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
  * below-the-seam readers (the composer's sub-builders, still reading
  * `process.env` today) keep working unchanged. The shim is MARKED TO DIE once
  * those readers thread BootConfig directly. Never clobbers an operator-set
- * value (writes only into an empty slot).
+ * value (writes only into an empty slot — see {@link applyEnvShim}).
  */
+/**
+ * Write the shim's derived values into EMPTY env slots only, never over an
+ * operator pin.
+ *
+ * A BLANK SLOT IS EMPTY, NOT A PIN. This predicate was `=== ''`, which is the
+ * one-keystroke-over case `effectiveOwnerHome` (`config/index.ts`) was fixed for
+ * and this site was not — while that function's docblock NAMED `open/server.ts`
+ * in its list of siblings that trim, and this file contained no `trim()` at all.
+ * Measured before the fix: `OWNER_HOME='   '` with a real `NEUTRON_HOME` ->
+ * `resolveBootConfig` reads the blank as unset and freezes the effective home as
+ * `<NEUTRON_HOME>`; the shim then sees a slot that is neither `undefined` nor
+ * `''`, declines to fill it, and the frozen config says `/real/home` while
+ * `process.env.OWNER_HOME` still says `'   '`. Below-seam readers take the env,
+ * not the config — which is the entire reason this shim exists. One variable,
+ * two answers, on the value that decides where the owner's data dir is.
+ *
+ * Extracted from the loop inside {@link startOpenServer} so the guard in
+ * `open/__tests__/owner-slug-agreement.test.ts` can drive it directly; booting a
+ * whole server to pin one predicate is not a test, it is a deployment.
+ */
+export function applyEnvShim(env: NodeJS.ProcessEnv, shim: Record<string, string>): void {
+  for (const [key, value] of Object.entries(shim)) {
+    const current = env[key]
+    if (current === undefined || current.trim().length === 0) env[key] = value
+  }
+}
+
 export async function startOpenServer(): Promise<BootHandle> {
   const env = process.env
   // Restore a previously-persisted install token BEFORE any composer resolves
@@ -125,10 +152,20 @@ export async function startOpenServer(): Promise<BootHandle> {
   // config so below-seam readers see them, keeping the gateway data dir + the
   // composer's owner_home in lockstep under NEUTRON_HOME. Only fills empty
   // slots — an operator pin is never overwritten.
-  const shim = envShimFromBootConfig(config)
-  for (const [key, value] of Object.entries(shim)) {
-    if (env[key] === undefined || env[key] === '') env[key] = value
-  }
+  //
+  // BLANK IS AN EMPTY SLOT, NOT A PIN. This predicate was `=== ''`, which is the
+  // one-keystroke-over case `effectiveOwnerHome` (`config/index.ts`) was fixed
+  // for and this site was not — while that function's docblock NAMED
+  // `open/server.ts` in its list of siblings that trim. This file contained no
+  // `trim()` at all. Measured: `OWNER_HOME='   '` with a real `NEUTRON_HOME`
+  // -> `resolveBootConfig` reads the blank as unset and freezes the effective
+  // home as `<NEUTRON_HOME>`, the shim then sees a slot that is neither
+  // `undefined` nor `''` and declines to fill it, so the frozen config says
+  // `/real/home` while `process.env.OWNER_HOME` still says `'   '`. Every
+  // below-seam reader takes the env, not the config — which is the whole reason
+  // this shim exists. One variable, two answers, on the value that decides where
+  // the owner's data dir is.
+  applyEnvShim(env, envShimFromBootConfig(config))
 
   const composer = buildOpenGraphComposer({ env, config, ownerBearer: ownerBearer.value })
   const handle = await boot({ composer, config })

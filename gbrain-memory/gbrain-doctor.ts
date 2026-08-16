@@ -197,12 +197,23 @@ export interface DoctorState {
  * Where the recorded ref lives. Under `NEUTRON_HOME` (the instance data dir
  * install.sh pins) when set, else `$HOME/neutron/data` — the same default
  * neutron-service.sh resolves. Sibling to the per-instance `gbrain/` brain dir.
+ *
+ * TRIM THE PREDICATE, NOT THE RETURN. This read already treated blank as unset
+ * (correct), but it also trimmed the value it returned — a third convention in a
+ * family where `resolveNeutronHome` (`migrations/db-path.ts`) and
+ * `effectiveOwnerHome` (`config/index.ts`) both document a byte-for-byte
+ * verbatim return. Leading/trailing spaces are legal in a POSIX path, so
+ * trimming the return silently rewrites a real directory: measured,
+ * `NEUTRON_HOME=' /real/dir '` resolved state to `/real/dir/gbrain-doctor.json`
+ * here while every sibling resolved `' /real/dir '`, so the doctor wrote its
+ * record beside a brain dir that lives somewhere else. Same seam, opposite
+ * direction from the blank case — two answers to one variable either way.
  */
 export function resolveStatePath(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env['NEUTRON_HOME']
   const home =
     typeof explicit === 'string' && explicit.trim().length > 0
-      ? explicit.trim()
+      ? explicit
       : join(env['HOME'] ?? tmpdir(), 'neutron', 'data')
   return join(home, 'gbrain-doctor.json')
 }

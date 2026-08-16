@@ -233,6 +233,558 @@ still tell them apart. The invariant's opening sentence was absolute where the
 code had two lawful paths to the attempting handle; it now names that floor in
 the first sentence, because a claim of coverage the code does not have is the
 sentence the next reviewer trusts instead of reading the code.
+## 2026-08-16 — file presence is not authorization, and this log stops losing entries quietly
+
+Landed via PR #323.
+
+Four defects in the entry-aware merge driver that shipped in the entry directly
+below, all of them in `main`, found by a retroactive review panel.
+
+THE PUBLISHER WAS EXECUTING A SCRIPT OUT OF THE CHECKOUT WITH THE OWNER'S TOKEN
+IN ITS ENVIRONMENT. `ensureAsBuiltMergeDriver` checked only that
+`scripts/install-merge-drivers.sh` EXISTED under the repo being built and then
+ran `run_host(['bash', installer])`. In production `run_host` is
+`makeLazyCredentialedHostRunner` (`open/composer.ts:2040`) over
+`githubProcessEnv` (`github/credential.ts:110`), which puts `GH_TOKEN` in that
+process's environment. So any repository trident checked out that happened to
+carry a file at that path had it executed on the publisher host, with the
+credential that publishes every PR readable from `$GH_TOKEN`. The old installer
+then configured the TARGET's own driver script, which git would run under the
+same credential on every merge of that path — the same hole one step later.
+Presence is now insufficient by construction: the two halves are written
+directly from `trident/orchestrator.ts` and the command they name is THIS
+installation's `scripts/git/as-built-merge-driver.ts` under the interpreter
+already running the process. Nothing under the checkout is executed at install
+time or at merge time. Presence still decides APPLICABILITY — the checkout needs
+`docs/AS_BUILT.md` and `scripts/git/as-built-log-merge.ts`, both read as data —
+but what applicability now authorises is "merge this one path with our own
+reviewed code, or conflict", which an untrusted repo is welcome to ask for.
+Mutation-tested: restoring the `bash <checkout>/scripts/install-merge-drivers.sh`
+call makes the hostile-installer test fail on the canary that script writes from
+`$GH_TOKEN`.
+
+…AND NAMING A TRUSTED SCRIPT WAS NOT ENOUGH, BECAUSE THE CHECKOUT STILL SUPPLIED
+THE INTERPRETER'S CONFIGURATION. git runs a merge driver with its cwd at the top
+of the working tree being merged, and bun reads `bunfig.toml` from its cwd. So a
+repository committing `preload = ["./anything.ts"]` had that file executed inside
+the driver process, before any of our code, on every merge of this path — with
+the same `GH_TOKEN` in the same environment. The first round closed WHICH SCRIPT
+runs and left this open, which is the identical mistake one layer down. The
+configured command is now `bun --config=/dev/null <driver> %O %A %B %L %P`, an
+empty TOML file, so the checkout's `bunfig.toml` supplies no `preload`, no
+`loader` and no registry override; the driver needs none of that, as it reads
+three files and writes one. What was measured is the cwd `bunfig.toml`, which is
+the one an untrusted checkout controls — the flag's effect on a `$HOME` config
+was not measured and nothing here rests on it. Where the interpreter is not bun,
+nothing is installed at all, rather than a `--config` flag being assumed to mean
+the same thing elsewhere.
+Measured on bun 1.3.9 with a control on both sides: without the flag the child
+printed `EXFIL GH_TOKEN=<the value>`, with it the payload never ran and the merge
+still succeeded. Both real-git suites run the attack the same way — the control
+produces the credential first, then the treatment suppresses it.
+
+A MALFORMED SINGLE SIDE SILENTLY DELETED HISTORY. The refusal in
+`scripts/git/as-built-log-merge.ts` required BOTH sides to parse to zero entries,
+so one bad side was merged as though every entry it lacks had been deliberately
+deleted. Reproduced against the shipped code: base holds one entry, ours is the
+literal text `TRUNCATED`, theirs adds a new entry above the old one — `ok: true`,
+and the old entry is gone. Both sides changed, so this is a live driver path.
+
+The first fix for that refused only a side that kept NONE of the base's entries,
+and REFUSING ON ZERO SURVIVORS IS NOT REFUSING ON LOST HISTORY — which is the
+same defect wearing a narrower guard. A side truncated newest-first to its top
+two entries keeps one, clears the guard with an entry to spare, and every older
+entry then reads as "deleted by us, untouched by them" and is dropped under
+`ok: true`. Against this file that is one entry kept and 307 deleted. So the rule
+is now the general one: A REMOVAL IS HONOURED ONLY WHEN BOTH SIDES MADE IT. A
+base entry present on one side and absent from the other is a conflict, whatever
+the surviving side did to it — truncation, a bad three-way, a partial checkout
+and a deliberate deletion all present identically, and only one of them wants the
+entry gone. Refusing costs one conflict a human resolves by hand, which is what
+this path did before the driver existed; guessing costs entries nobody notices
+are missing. The zero-survivor guard stays ahead of it purely for its message.
+
+VALID MARKDOWN COULD BE MERGED INTO SOMEBODY'S CODE BLOCK. The fence tracker
+flipped one boolean on EITHER delimiter, so a `~~~` quoted inside a backtick
+fence ended the block early, the sample `## ` heading below it parsed as a real
+entry, and a concurrent addition dated between the two sorted INTO the code
+block. A fence is now closed only by its own delimiter, at least as long as the
+run that opened it, with nothing after it. Its indentation is also bounded at
+CommonMark's three spaces: the regex was `^\s*`, so four-or-more spaces then
+` ``` ` — which CommonMark reads as ordinary indented-code TEXT, opening nothing
+— began a block that swallowed every heading after it until something happened to
+close it. Measured on the old regex, a two-entry input whose first entry quotes a
+four-space-indented fence parsed as ONE entry. Nothing is given up in the other
+direction, since `HEADING` only matches at column 0. Parsing of the real 308-entry
+log is byte-identical before and after, verified by running both regexes over it.
+
+THE INSTALLER COULD PRODUCE THE STATE ITS OWN HEADER CALLS IMPOSSIBLE. It has no
+`errexit` (and cannot safely take one), so a failed `git config` write did not
+stop the attribute write. Measured with a `config.lock` present: exit 0, the
+message `merge drivers: installed`, the attribute written, the driver unset.
+Every write is now checked and both halves are verified before it reports
+success. The first fix wrote `merge.<name>.name` first and UNSET it by hand when
+the `.driver` write failed — a repair performed by a THIRD config write, which
+the held `config.lock` that caused the failure would have blocked too, so the
+cleanup was best-effort exactly when it was needed. The order is now what makes
+the fatal state unreachable rather than repaired: `.driver` is written FIRST and
+nothing else happens if it fails, and `.name` follows and is not fatal. Measured
+on git 2.50.1 in both directions: a lone `.driver` with NO `.name` merges
+perfectly (the driver ran, exit 0 — `.name` is only the description
+`git config --get-regexp merge.` prints), while a lone `.name` with no `.driver`
+is `fatal: custom merge driver as-built-log lacks command line`, exit 128. Both
+of those are now pinned by tests, the lock-contention path included.
+
+THE REFUSAL WAS NOT REACHING GIT AS A REFUSAL. The rule above returns
+`{ ok: false }` for a one-sided deletion, and the driver handed that to
+`git merge-file` — which reads a one-sided deletion as a CLEAN HUNK, resolves it,
+exits 0 and writes no markers. Measured on a 20-entry log with one middle entry
+dropped on one side and an ordinary concurrent build on the other: exit 0, zero
+conflict markers, the entry gone. The refusal fired, said the right thing on
+stderr, and changed nothing about the outcome — the headline guarantee was true
+of the merge function and false end-to-end. A refusal now carries
+`wouldLoseEntries`, and the two kinds are handled differently: one about a
+MISSING ENTRY is terminated by the driver itself, which writes both sides whole
+between conflict markers with the reason on the marker label and exits non-zero,
+so nothing downstream can resolve it silently and no byte of either side is lost
+on the way; a TEXTUAL disagreement is still delegated, because there git's
+line-level three-way is a real answer and is the pre-driver behaviour. Both
+halves are pinned, through real `git merge` and with the control that shows git
+alone calling the same merge clean.
+
+THE FENCE CLASSIFIER DID NOT RUN AT ALL ON CRLF. Its trailing group was `(.*)`,
+and JavaScript's `.` excludes a carriage return along with a newline — so on a
+file with CRLF line endings the pattern matched NOTHING, no fence ever opened,
+every `## ` quoted inside a code block parsed as a real entry, and a concurrent
+addition merged into the block. Worse than the behaviour it replaced, on the one
+input class where it silently never ran. The group is `[^\n]*` now, and the
+CommonMark rule that an opening backtick fence's info string may not itself
+contain a backtick is enforced alongside it.
+
+TWO MORE INPUTS THE CHECKOUT CONTROLLED, AND THE CREDENTIAL TAKEN OUT OF SCOPE.
+`--config=/dev/null` covers `bunfig.toml` and NOT `.env`: bun auto-loads one from
+its cwd — the merged repository — independently of the config file, measured
+reaching `process.env` inside the driver with the flag already in place.
+`--env-file=/dev/null` closes it. Separately, the configured command is now
+prefixed with `env -u GH_TOKEN -u GITHUB_TOKEN` and the `GIT_CONFIG_*` triple
+that reads the token back, so the credential is not in the environment of a
+process that reads three files and writes one. Two independent controls, and the
+test proves each fails alone: with the interpreter unconfigured but the token
+scrubbed, the injected payload still runs and finds nothing.
+
+Also in this round: an ADDED undated section now sorts at the date of the entry
+it continues instead of at `''`, which had put it below every real date — i.e. at
+the very tail of the file, hundreds of entries from the text it continues — and
+one added under an entry the base already had is emitted directly after that
+entry. The driver checks `%P` and declines paths that are not this log. And two
+docs claims were corrected rather than defended: the floor when the driver is NOT
+installed is `.gitattributes merge=union` (which interleaves silently), not a
+conflict — the driver's own attribute in `$GIT_COMMON_DIR/info/attributes` takes
+precedence over the tracked file, which is what displaces it, verified with
+`git check-attr`; and the installer prevents the FATAL half-state (attribute
+without driver), while the INERT one (driver without attribute) is reachable and
+harmless, so "both halves or neither" was one word too strong.
+
+Tests live in `scripts/git/as-built-log-merge.test.ts`,
+`scripts/git/as-built-merge-realgit.test.ts` and
+`trident/as-built-publish-wiring-realgit.test.ts` — several times what the base
+commit carried. NO EXACT COUNT IS RESTATED HERE, and two earlier drafts of this
+line are why: each named a number ("44 up from 30", then "66"), each was true for
+about a day, and a permanent log that asserts a moving measurement is simply
+wrong from the next review round onward. `bun test` on those three paths prints
+the number, from the files, whenever anyone actually needs it.
+Each safety property was mutation-tested with a control proving the mutation
+landed: reverting the fence bound fails the two indentation tests and nothing
+else, restoring the old one-sided-deletion rule fails the two truncation tests
+and nothing else, and each security test produces the credential under the
+control before asserting its absence under the treatment.
+
+A LATER PANEL RETURNED TWO BLOCKERS THAT WERE ALREADY FIXED, AND THREE THAT WERE
+NOT. The two stale ones were re-verified against the branch rather than against
+the review text and found closed — the fence pattern the reviewer quoted was not
+the pattern in the file (`([^\n]*)$`, which matches every CRLF case the quoted
+form returns null on), and the delegate-after-refusal path already terminated a
+`wouldLoseEntries` refusal by constructing its own conflict. The remaining three
+were real and are fixed here.
+
+WHICH KIND A REFUSAL IS DEPENDED ON THE BASE, AND THE GUARD NEVER LOOKED AT IT.
+"Neither side parses as an entry log" returned `wouldLoseEntries: false`
+unconditionally, so it was delegated — while against an ENTRYFUL base it is the
+largest history-loss case there is, neither side keeping anything, sitting one
+guard above the rule that refuses the strictly smaller case of ONE side keeping
+nothing. Measured on a two-entry base with both sides truncated: `git merge-file`
+conflicts when the two truncations differ (exit 1) and resolves to a file with no
+entries at all when they match (exit 0, no markers). The loud outcome was git's
+accident rather than this file's decision, which is exactly what the flag exists
+to stop depending on. The test that covered the line used an entryless base and
+so could not see the difference; it now has an entryful case beside it, plus a
+control proving an entryless base still delegates.
+
+A CONTINUATION COULD DETACH FROM A HEAD THE OTHER SIDE ADDED. `attachAfter` was
+resolved only against RETAINED entries, so an undated section continuing an entry
+added IN THE SAME MERGE found no anchor and date-sorted alone. It arises whenever
+both sides write one heading and only one writes the follow-up under it. Measured:
+an addendum came out ABOVE its own head, reading as a separate top-level entry,
+because the two sort at the same date and the tie breaks on heading bytes. Such a
+run is now folded into the run that owns the entry it names.
+
+%L IS AN INPUT THE CHECKOUT CONTROLS, WHICH MAKES ONE SENTENCE IN THE ORCHESTRATOR
+TOO ABSOLUTE. git derives it from the path's `conflict-marker-size` attribute, and
+a TRACKED attributes file in the merged repo sets it — verified with a driver that
+does nothing but print `%L`, which received a committed `2000000` intact. The
+conflict this driver constructs writes that many characters three times, so one
+refusal grew from 302 bytes to 6,000,281, linearly. Clamped at 200. The claim that
+nothing the checkout contains decides what happens on the publisher host now says
+what RUNS, and names `%L` as the one input that crosses and is bounded.
+
+THE FIRST CLAMP COVERED ONE OF THE TWO CONFLICT PATHS, AND THE EXEMPTION FOR THE
+OTHER WAS A CONFIDENT SENTENCE THIS REPOSITORY ALREADY CONTRADICTED. It left
+`delegateToGit` forwarding `%L` to `git merge-file` untouched, reasoning that the
+delegated path must stay byte-for-byte what an unconfigured repo does. A
+cross-model reviewer disproved it from a tracked file: `.gitattributes` gives
+`docs/AS_BUILT.md` `merge=union`, and union never reports a conflict — so an
+unconfigured repo writes ZERO markers on this path, not six megabytes of them.
+`git merge-file` was never this path's unconfigured behaviour, so there was no
+floor property to protect. Both paths go through one `markerWidth` now, and the
+delegated one has its own test with a control distinguishing it from the
+constructed one (git labels its markers; this process names itself in them).
+`docs/SYSTEM-OVERVIEW.md` had the union point right, in the same words, while the
+driver's docblock had it wrong — the measurement was sound and only the
+conclusion drawn from it was not. An EXEMPTION from a bound needs its
+justification checked as hard as the bound.
+
+Also corrected rather than defended: a restated-count assertion
+(`entries.length > 250`) in the real-log test, which forbids a legitimate future
+and proves nothing about the test — replaced by the property the case actually
+needs, that the base has more than the one entry the truncation keeps. And the
+installer header contradicted itself on which half-state is fatal. Measured on
+git 2.50.1 with a control: attribute plus `merge.<name>.name` and no `.driver` is
+exit 128, attribute with NO config at all is exit 1 with ordinary markers, and
+`.driver` alone merges at exit 0. Only the first is fatal, so the argument for
+keeping the attribute untracked is now the true one — a committed attribute would
+swap this path's `merge=union` for a conflict in every fresh clone, not brick it.
+The same overstatement was fixed in the driver header and in SYSTEM-OVERVIEW.
+
+Each of the three fixes was mutation-tested with a control proving the mutation
+landed: restoring the unconditional `wouldLoseEntries: false` fails the entryful-
+base test and nothing else, disabling the run-folding fails the cross-side
+continuation test and nothing else, and removing the clamp fails the marker-size
+test and nothing else.
+
+A THIRD ROUND FOUND THE SAME BUG ONE LEVEL UP: THE FLAG WAS RIGHT AND THE ORDER
+OF DETECTION WAS NOT. Every refusal above says truthfully whether git may finish
+it, and `mergeAsBuiltLog` returned whichever refusal the base reached FIRST. A
+header disagreement returns before the base is scanned at all
+(`scripts/git/as-built-log-merge.ts`, the preamble check), and a both-sides-
+rewrote-one-entry refusal returns from the middle of the retained loop — so a
+one-sided deletion LATER in the base was never examined, the driver was handed
+`wouldLoseEntries: false`, and git resolved the deletion away. Measured end to
+end through `runDriver` on a 10-entry base with entry 1 rewritten on both sides
+and entry 7 dropped from `ours`: exit 1 with markers around entry 1 only, `entry
+7` absent from the merged file, 11 headings in and 10 out. The refusal fired,
+about the wrong thing, and the entry left anyway — which is indistinguishable
+from not refusing. A textual refusal is now HELD rather than returned: both
+scans run to completion, a losing refusal returns immediately because nothing
+outranks it, and the held one is returned only once the base is known whole.
+Ordering is therefore part of the guarantee, and the docblock says so.
+
+`--path-format=absolute` HAD NO FALLBACK IN THE ORCHESTRATOR, so on a git older
+than 2.31 the flag exits non-zero, `ensureAsBuiltMergeDriver` returned false —
+AFTER `merge.<driver>.driver` was already written — and the attribute was never
+bound. The replay then proceeded under the tracked `merge=union` while trident
+reported the driver unavailable: a silent downgrade rather than a loud failure.
+`scripts/install-merge-drivers.sh` has always retried with the plain spelling;
+that call site now does too, resolving a relative answer against the repo.
+
+AND THE FALLBACK NEEDED A GUARD OF ITS OWN, WHICH THE CROSS-MODEL REVIEWER
+SURFACED WHILE IT WAS BEING WRITTEN. A relative `--git-common-dir` is not
+relative to the working tree: in a LINKED worktree the value lives in
+`<main>/.git/worktrees/<name>/commondir` — read directly, verbatim `../..` —
+relative to that file's directory. Resolved against the worktree root it lands
+two levels ABOVE the worktree: a real directory, outside the repository, where an
+attributes file is silently inert. Measured on git 2.50.1 the `-C` form already
+answers absolutely so the branch never runs there, but the branch exists for the
+git that lacks the flag. Both installers now require the resolved directory to
+prove it is a git dir before writing into it, and refuse otherwise — a clone that
+merges the way it always did beats one that believes it is installed and is not.
+The reviewer's own answer was that joining against the repo is correct, hedged
+with "often already absolute"; the recorded `commondir` is what settled it.
+
+`''` MEANT BOTH "NO DATE" AND "THE OLDEST DATE" IN THE PLACEMENT LOOP. Effective
+dates carry forward, so the sentinel survives only where nothing before an entry
+was ever dated — an undated section at the very top. Every `sortDate` compares
+`>= ''`, so that one entry admitted every addition above it and a dated addition
+landed OVER an undated preface. Ordering only, and unreachable against the real
+log, which is the other correction this round: the docblocks asserted "ten
+sections in the real log carry no date" and the file holds 314 entries and ZERO
+undated ones, measured with this branch's own parser against a `grep` control on
+both the branch and `main`. That claim was last true around `d5ba62b7`, and it
+had been hiding the fact that the `effectiveDates`/`attachAfter` subsystem has no
+coverage from the real file at all. Both are now stated as measured.
+
+Two test names were overclaiming and are renamed or earned. "Finds every entry in
+the real log, and only real ones" is a bijection its own body explicitly declines
+to prove; it now says what it does — the parse and a raw heading scan agree. "A
+real added entry merges without disturbing anything else" compared entry counts
+and first lines, so a corrupted retained BODY passed; it now compares whole
+entries. And the installer's test prose still promised "both halves or not at
+all", which the installer header itself had already corrected to "never the FATAL
+half, always loudly" — only the fatal half is claimed impossible, because
+driver-without-attribute is inert and IS reachable.
+
+Merged `origin/main` to resolve #326, which corrected the same fatal-half-state
+overstatement in different words across the driver header, the installer header
+and the installer test. Both wordings were reconciled by hand rather than one
+side taken: the measured three-case table and the
+`scripts/ci/check-governed-repo-attributes.ts` gate reference are kept, and the
+installer keeps this branch's ordering-plus-verification body (which is why the
+comment claiming the verification had been deleted went with it). #326's own
+half-install tests are kept whole; one assertion moved from `FAILED` to `NOT
+INSTALLED` to match the reconciled installer's message, and its state assertions
+are unchanged because they never depended on the route.
+
+Mutation-tested with controls, again: returning the textual refusal on the spot
+fails the masking test and the end-to-end one and nothing else, returning the
+header refusal early fails the header-masking test alone, removing the
+`--path-format` fallback fails the old-git test alone, and dropping the
+`dates[i] !== ''` guard fails the undated-preface test alone.
+
+THE PARSER'S OWN DOCBLOCK NAMED A CONTRACT THE REGEX DID NOT ENFORCE, AND THE GAP
+FABRICATED THE ONE REFUSAL RESERVED FOR HISTORY LOSS. `HEADING` was `/^##[^#]/`
+while the comment above it said an entry begins at a `## ` heading, so an
+ordinary BODY line starting `##` with no delimiter — a shell comment, an `##` in
+prose — minted an entry of its own. That is not a cosmetic miscount: the split
+changes the entry KEYS, so editing such a line renames a key, the key goes
+missing from one side while the other still has it, and the merge returns
+`wouldLoseEntries: true` — the refusal the driver must never delegate, raised on
+a body edit that loses nothing. Measured on a two-entry base carrying one
+`##not-a-heading` line: three entries parsed, and an ours-side edit of that line
+came back `ok: false, wouldLoseEntries: true`. A delimiter is required now: in
+CommonMark a `#` run must be followed by a space, a tab, or the end of the line,
+and this log takes the first two.
+
+The reviewer's suggested fix was the narrower `/^## /`, and that would have been
+a worse bug in the quieter direction. CommonMark accepts a tab, and
+`scripts/git/as-built-heading-uniqueness.ts` shares this parser precisely so a
+gate and a driver can never disagree about where an entry begins; its own test
+file pins `##\ta — one`. Mutation-tested both ways: `/^##[^#]/` fails the
+`##`-body tests, and `/^## /` fails the tab tests in BOTH files — under it that
+fixture parses as ZERO entries and the gate reports the log clean, so a real
+collision goes unreported. Zero live occurrences of `^##[^# ]` exist in the
+tracked markdown (control: 308 for `^## ` in this log), so this was a latent
+trap, not an outage.
+
+REQUIRING THE DELIMITER WAS NOT ENOUGH — THREE TIMES, EACH REMAINDER FOUND BY A
+CROSS-MODEL REVIEWER RE-RUN ON THE PREVIOUS FIX. `/^##[ \t]/` rejects a bare `##`
+but ACCEPTS `## ` and `##\t`, the same empty heading with trailing whitespace.
+`/^##[ \t]+\S/` closed those and still accepted `## #`, `## ##`, `## ###   `: a
+run of `#` at the END of an ATX heading is an optional CLOSING sequence, so those
+render empty too — the spec's own example is `### ###`. Spelling that sequence
+out as `(?![ \t]*#*[ \t]*\r?$)` closed THOSE and still accepted `## #\r\r`, and
+regressed on `## ` followed by a non-breaking space, a vertical tab or a form
+feed — all of which the `\S` cut had rejected, so that one was not a leftover but
+a new hole opened by the fix. Every spelling reproduces identically: a base
+carrying one such body line parses to THREE entries, and an ours-side edit of
+that line alone (`## ` → `##`, or `## #` → `## ##`) returns `ok: false,
+wouldLoseEntries: true` on key `## 1` and `## # 1` respectively — the refusal
+reserved for history loss, fabricated by editing whitespace or punctuation.
+
+Three rounds of enumerating spellings is the argument against enumerating them.
+The rule is now a CLASS: after the delimiter there must be a character that is
+neither whitespace nor a hash — one lookahead, no cases, and nothing left for a
+fourth reviewer to spell differently. That an entry needs a TITLE is this log's
+contract rather than CommonMark's, which reads every rejected form as a valid
+empty heading and additionally allows up to three leading spaces and an
+end-of-line straight after the hashes. Two consequences are deliberate and both
+are pinned by their own tests: a title may BEGIN with a hash (`## #303 landed` is
+a heading with content, since a closing sequence counts only at the end — and
+over-narrowing there would DROP an entry, which is worse than fabricating a
+conflict), while a title made entirely of hashes and whitespace (`## # #`) is
+body text, because a lone `#` is not a merged change.
+
+One limit is recorded rather than closed: CommonMark counts a lone `\r` as a line
+ending and this parser splits on `\n` only, so `## \r2026-01-01 — x` is one line
+here and two there. Closing it means changing the line model every other
+guarantee is checked against, including the byte-exact round-trip; nothing is
+lost by it, both sides parse it identically, and no generator writes a bare `\r`
+mid-line.
+
+Also from that review: the per-entry assertion in the real-log test was changed
+off `startsWith('## ')`, which had been quietly outlawing the tab spelling the
+parser and the gate both accept.
+
+And the SECOND restated count, in the test one line above the one already fixed:
+`toBeGreaterThan(250)` on the real log's entry count. A floor is blind at the
+magnitudes real regressions come in — measured, an over-parse of one entry (309,
+the shape of the `##` bug above) and an under-parse of three (305) both clear it —
+while an archive down to 200 that has nothing wrong with it goes red. It was not
+worthless: a stuck-open fence taking the log from 308 to 13 does trip it, and
+that is the end it caught. The assertion now compares the parse against a raw
+line scan of the same bytes. Green at 308, 200 and 50; red at 309, 305 and 13.
+Stated for what it is rather than more: two oracles cross-checking, not a proof
+of a bijection, and it accepts one known false failure — an entry quoting a
+heading at column zero inside a fence would need a one-line subtraction. The
+alternative is teaching the test the fence rules, i.e. a second implementation of
+the parser, which is the exact drift the uniqueness gate was rewritten to avoid.
+It also cannot police the lexical rule it copies — a heading shape the predicate
+itself gets wrong increments both counts and passes, which is what both `HEADING`
+defects above did. Those are pinned by fixture tests that name each rejected
+spelling; this one covers the aggregate.
+
+`--check` NOW VERIFIES WHAT IS INSTALLED, NOT MERELY THAT SOMETHING IS — WHICH IS
+THE SAME FALSE-PASS THIS ENTRY IS ABOUT, ONE LAYER OUT. `scripts/install-merge-drivers.sh`
+`--check` asked two yes/no questions: is `merge.as-built-log.driver` non-empty,
+and is the attribute line present. It answered "installed" to ANY command, so a
+clone that had run an earlier version of the installer reported success while
+still holding that version's command — and none of the hardening above (the
+`env -u` credential scrub, `--config=/dev/null`, `--env-file=/dev/null`) ever
+reached it. Measured on git 2.50.1 before the fix: install, then set
+`merge.as-built-log.driver` to the predecessor's `bun <driver> %O %A %B %L %P`
+with the attribute untouched, and `--check` printed `merge drivers: installed`
+and exited 0. A check that cannot tell the hardened driver from its predecessor
+is precisely what keeps an already-installed clone on the vulnerable one, quietly
+and indefinitely. The configured command is now compared byte-for-byte against
+the one the installer would write, and a difference is `STALE` on exit 1 with
+both strings and the one-line remedy printed. Exact equality rather than a hunt
+for individual flags: a substring hunt needs extending by hand every time a flag
+is added, which is the maintenance the old check already failed at, and the
+remedy is idempotent — a false `STALE` costs one command while a false
+`installed` costs the whole property. Both halves derive the command from one
+`driver_command` function, so the check cannot drift from what the install
+writes. `NOT installed` is kept distinct from `STALE`, because a clone that never
+ran the installer is not running an older driver, and no-bun fails closed as
+`CANNOT VERIFY` rather than guessing.
+
+Mutation-tested in `scripts/git/as-built-merge-realgit.test.ts`: replacing the
+comparison with `if false` turns exactly the three staleness tests red and leaves
+the other 15 green; each of the five hardening elements is dropped individually
+from an otherwise byte-identical command and each is caught, with the mutation
+itself asserted to have landed so a no-op `String.replace` cannot pass for a
+detection.
+
+The command is also shell-quoted properly now. The wrapping was a bare
+`'$DRIVER_SCRIPT'`, which is correct for every path without a single quote in it
+and unparseable for any path with one — and that path is wherever the clone
+happens to live, so it was never the installer's to promise. `sq()` applies the
+standard `'\''` escape; for a quote-free path the emitted bytes are identical to
+the old spelling, so nothing already installed is disturbed. The test builds a
+clone under a directory whose name contains a quote and hands the resulting
+command to `/bin/sh` to parse, with the naive spelling as the control that fails.
+
+AND THE PRE-PUSH GATE STOPPED FAILING PUSHES OVER HISTORY THE AUTHOR CANNOT
+REWRITE. Merging the mainline in to clear the conflict above blocked the push on
+a commit already public on `main`, carrying the `Co-authored-by: <owner>` trailer
+GitHub stamps on a squash merge. The message scan window is `base..head` — a
+single floor — so a branch that MERGES the mainline pulls the mainline's commits
+into its own range. `.githooks/pre-push` already excluded exactly this class on
+the REBASE path, and its own header says why: a gate that cannot be satisfied is
+one people learn to bypass with `--no-verify`, which is strictly worse than no
+gate. A merge hits the identical class and a floor cannot express the exclusion,
+so `scripts/ci/leak-gate.sh` now takes `LEAK_GATE_EXCLUDE_REF` and appends
+`--not <ref>`. It is unset by default, so CI is byte-for-byte unaffected: in CI a
+`--remotes`-style exclusion would drop the PR's OWN commits, which is why this
+takes one explicit ref rather than guessing. The hook sets it to `origin/main`,
+and never when the push TARGET is main — there the new commits are the ones
+landing on main, and excluding main's ref would empty the window. An unresolvable
+ref is ignored rather than obeyed. Tested with controls: without the exclusion
+the merged-in public commit blocks the push (the bug, reproduced); with it the
+window is clean; and a NEW commit of the branch's own carrying the same term is
+still caught with the exclusion set, which is the property that keeps this from
+being a hole.
+
+THE FIRST CUT OF "VERIFY WHAT IS INSTALLED" WAS TOO STRONG BY EXACTLY TWO WORDS,
+AND ITS REMEDY WROTE THE BUG IN. Making `--check` compare the configured driver
+command against the one the script would write closed the false-pass above, and
+opened a false-FAIL: it compared the whole string byte for byte, and two of that
+string's words are absolute paths belonging to the shell that happens to be
+asking rather than to the command's hardening. The driver path came from
+`${BASH_SOURCE[0]}`, so a linked worktree rebuilt a different path and called a
+correctly-installed clone STALE — contradicting this script's own header promise
+that installing once serves every worktree. The bun path came from `command -v`
+at check time, so a hook, a CI step and a login shell with different PATH orders
+disagreed about a clone none of them had changed. Measured on git 2.50.1 at the
+previous commit: install from the main checkout, `git worktree add`, `--check`
+from the new worktree → exit 1, the two printed commands differing in nothing but
+which checkout hosts the driver. The dangerous part was the remedy it printed:
+following "re-run the installer" from a throwaway worktree wrote THAT worktree's
+driver path into the clone-wide config, where it dangled the moment the worktree
+was removed — converting a spurious warning into exactly the silent
+one-side-wins merge this change exists to stop. So `--check` now reads the two
+paths back OUT of the installed command, feeds them to the same `driver_command`
+that writes it, and requires the rebuild to reproduce the configured string byte
+for byte. Every token carrying the hardening is still exact; the two free words
+are judged on what they must BE — the driver is an
+`as-built-merge-driver.ts` that exists, the bun is executable — which also
+catches the dangling-worktree command that parses perfectly and cannot run, and
+removes the check's need for a bun on PATH at all. Install now resolves the
+driver from the MAIN worktree rather than from the invoking checkout, so the
+throwaway worktree can no longer poison the shared config in the first place.
+Tested at the boundary the rest of the suite never crossed: `--check` from a
+linked worktree, install from a throwaway worktree that is then removed, and
+`--check` under a PATH carrying a second bun — each with a control proving the
+check can still say STALE through the same seam.
+
+TWO REVIEW FINDINGS ON THE TESTS THEMSELVES, BOTH REAL. The predecessor fixture
+wrote a literal `bun` where every release of the installer wrote an absolute
+`$BUN` resolved by `command -v`, so it was rejecting a command nobody has; it now
+reads both paths out of what the installer actually wrote. And the mutation table
+claimed to drop "ANY ONE hardening element" while never individually removing
+`GITHUB_TOKEN`, `GIT_CONFIG_KEY_0` or `GIT_CONFIG_VALUE_0` — three separable
+removals in the emitted command — so a check keyed on `GH_TOKEN` alone would have
+passed a command still leaking the others and the table would have been green.
+All five scrubbed names plus the merge placeholders are now mutated one at a time.
+
+THE PRE-PUSH EXCLUSION IS NOW EXERCISED THROUGH THE HOOK THAT DECIDES IT, not
+just the variable it sets. The gate-level tests injected `LEAK_GATE_EXCLUDE_REF`
+by hand, which proves the gate honours it and can never catch a hook that fails
+to set it or sets it for the wrong ref. A pair of real `git push` runs now sends
+the SAME denylisted commit twice, varying nothing but the ref: refused at
+`main`, where excluding origin/main would empty the window, and excluded on a
+feature branch that merged it in. A second test pushes a NEW bad commit of the
+branch's own through the same seam and requires it to be blocked, so the
+exclusion cannot pass by excluding too much.
+
+THE "NO SECOND COPY" DOCBLOCK WAS FALSE ABOUT THE REPOSITORY while true about
+the file. `asBuiltDriverCommand` in `trident/orchestrator.ts` derives the same
+command in TypeScript, and it must: the publisher cannot shell out to an
+installer living in a checkout it does not control, which is the exposure this
+whole entry is named for. The comment now says so, and a test pins the two
+derivations in agreement — shape and scrub list — so a flag added to one and not
+the other fails instead of quietly splitting the fleet.
+
+`--check` NOW JUDGES THE INTERPRETER, THE BINDING AND THE DRIVER'S CONTENTS, because
+each of those was a way for a clone to answer "installed" while running something
+else. The interpreter was gated on `[ -x ]` alone, which is true of nearly every
+file on a unix box: with the bun word rewritten to `/usr/bin/true` the command
+still rebuilt to itself and `--check` still printed `installed`, and git then ran
+`true`, which exits 0 having written nothing to `%A` — so git took the merge as
+SUCCESSFUL and one side's entries left the log with no conflict and no message.
+Measured on git 2.50.1 in a two-branch fixture: the mainline heading present, ZERO
+of the side's. A directory (`/usr/bin`) and a different interpreter (`/bin/sh`)
+false-passed the same way. The word must now be a regular executable file whose
+final component is `bun`, judged by name rather than by running it — asking
+`$bun_path --revision` would be this script executing an arbitrary named binary to
+decide whether it was safe to let git execute it. The same three conditions are
+applied at INSTALL time too, so the check can never reject a command this script
+wrote. Separately, the attribute line's PRESENCE was being read as the path being
+BOUND to the driver: attributes are last-match-wins, so a later
+`docs/AS_BUILT.md merge=union` leaves the installed line right where the grep finds
+it while `git check-attr` answers `union` and the driver never runs. The verdict now
+comes from `git check-attr`, the resolver git itself uses. And because the command
+deliberately names the MAIN worktree's copy of the driver, a clone whose main
+checkout sits on an older revision runs older driver CODE behind a byte-perfect
+command at a correctly-shaped path; the contents are compared against the invoking
+checkout's copy and reported with the remedy that actually works, since re-running
+the installer rewrites the same path and would loop the reader.
+
+KNOWN AND DEFERRED, NOT FIXED HERE. Two defects the review panel confirmed in
+this file's merge logic are pre-existing on `main` rather than regressions of
+this change, and are left for follow-up rather than widening a security fix that
+has already taken eight rounds: duplicate headings in the BASE are deduplicated
+against history under `ok:true` while the docblock asserts they are preserved
+(`scripts/git/as-built-log-merge.ts`), and the fence tracker follows fenced code
+blocks but not raw HTML, so an entry body containing a raw HTML block can have an
+addition spliced inside it (`scripts/git/as-built-log-merge.ts`).
 
 ## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
 
@@ -277,6 +829,117 @@ only, never argus or synthesis; the non-parts whole-file receipt is
 unweakened; the TypeScript and JavaScript `briefIntegrity` twins remain
 parity-pinned; and `.a2` coda chunk blocks never have non-redirect-target paths
 rewritten.
+
+## 2026-08-16 — the docblock said every sibling identity read trims, and each round's proof was narrower than its claim
+
+Landed via PR #333.
+
+`config/index.ts` asserted that every read of `NEUTRON_HOME` / `OWNER_HOME` /
+`NEUTRON_DB_PATH` in this tree treats a blank value as unset. It did not, and the
+interesting part is how the claim kept surviving: each round proved a smaller thing
+than it stated, and the gap between the two was always where the next defect lived.
+
+**Nine readers brought onto the rule.** `resolveOpenDbPath` (`migrations/db-path.ts`)
+and `resolveRegistryDbPath` (`gateway/boot-listener-registry.ts`) kept `length > 0` /
+`!== ''` through the change that fixed their neighbours — they read the OTHER two
+variables, which is why a sweep organised around "the identity resolvers" missed them.
+Measured: `NEUTRON_HOME='   '` gave `'   /registry.db'` here while `resolveNeutronHome`
+answered `~/neutron` for the same variable, on the read that tells a booting instance
+its own handle. The env shim's fill predicate (`open/server.ts`) was `=== ''`, so a
+whitespace `OWNER_HOME` was mistaken for an operator pin and left in place while the
+frozen config had already resolved it — and below-seam readers take the env, not the
+config, which is the entire reason the shim exists. That predicate is now
+`applyEnvShim`, extracted so a test can drive it without booting a server. Also fixed:
+`resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`, where a blank
+resolved the skills dir to the FILESYSTEM ROOT), `DEFAULT_M2_FEEDBACK_PATH`
+(`onboarding/feedback/m2-week-4-collector.ts`), the REPL supervision home
+(`runtime/adapters/claude-code/index.ts`), and the `--home` guard
+(`scripts/email-accounts.ts`).
+
+**And one in the other direction.** `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts`) trimmed the value it RETURNED. Leading and trailing
+spaces are legal in a POSIX path, so that silently rewrote a real directory:
+`NEUTRON_HOME=' /real/dir '` put the doctor's record beside a brain dir that lives
+somewhere else. The family rule is now stated once and pinned both ways — trim the
+PREDICATE, return the bytes.
+
+**The claim's scope is a command, and the command had the same hole one level down.**
+Round 3 replaced the enumerated list with a re-runnable grep, which was the right move
+and still under-covered: it matched only literal `.OWNER_HOME` / `OWNER_HOME']`, so
+`buildPromptVars` (`prompts/template.ts`), which reaches the variable through the
+exported `OWNER_HOME_KEY` constant, was invisible to it. Worse than invisible — the
+command DID print that file, at a docblock line that merely mentions the variable, so
+the file looked audited and the untrimmed read below it was never opened. A check that
+returns a hit it cannot justify is the same defect as one that returns a negative it
+cannot justify; it just wears a tick instead of a cross. Measured on the template
+`{{OWNER_HOME}}/entities/x.md`: `''` yields `/entities/x.md` (the filesystem root,
+fails loudly) while `'   '` yields `   /entities/x.md` — a relative directory named
+three spaces, creatable, so an agent handed that prompt writes the owner's entity pages
+into a junk dir under whatever CWD it started in and nothing errors.
+`trident/agent-prompts.ts` defaults its vars to this function, so the path is live.
+
+**And the claim now stops where the check stops.** The command is
+`--include='*.ts'`, so what it bounds is a claim about TypeScript — the docblock
+says so, and names the readers it does NOT cover: `install.sh` honours a
+whitespace-only `NEUTRON_DB_PATH` via `!= ""`, and `neutron-service.sh` /
+`neutron-backup.sh` resolve the data dir with `[ -n ... ]`, true for three spaces.
+An installer and the server it installs can still disagree, one language over.
+Left unfixed on purpose: those are the install / uninstall / backup entrypoints,
+a different blast radius from a resolver. Written down rather than implied,
+because a claim wider than its proof is the defect this entry is about.
+
+**The guard is the deliverable, not the list.** `open/__tests__/owner-slug-agreement.test.ts`,
+`gbrain-memory/__tests__/gbrain-doctor.test.ts` and `prompts/template.test.ts` drive
+blank and space-padded values through every reader they can import, each with a
+real-path control so a failure means "a blank was honoured" rather than "the variable
+stopped being read" — a different bug wearing the same green. An earlier round's
+assertion for the `OWNER_HOME` axis passed a real `NEUTRON_HOME` alongside it, so the
+resolver returned on its first branch and the axis under test was never reached;
+reverting the `OWNER_HOME` trim left the suite green. It is now exercised with
+`NEUTRON_HOME` absent, and each trim was mutation-proved: reverting it turns the suite
+red, with the mutation printed first to show it landed.
+
+**AND THE SAME CLAIM WAS TOO WIDE ONE MORE TIME, WHICH IS THE POINT.** The sentence
+above was first written when it was true of six sites out of ten. A panel measured the
+other four and reverting each left its suite GREEN: `resolveSkillsDir`
+(`gateway/wiring/build-phase-spec-resolver.ts`), the M2 default path
+(`onboarding/feedback/m2-week-4-collector.ts`), the REPL supervision home
+(`runtime/adapters/claude-code/index.ts`) and the `--home` guard
+(`scripts/email-accounts.ts`). Two of them were not merely unpinned but UNPINNABLE —
+a module-private function, and a constant computed from `process.env` at import time,
+which no test can vary. So they were given seams rather than a narrower sentence:
+`resolveSkillsDir` is exported for the guard, and the path computation became
+`resolveM2FeedbackPath(env)` with the constant calling it. All four are now pinned,
+each mutation run with a control proving the mutation landed. A fourth round of
+"the proof was narrower than the claim" inside the change about that exact defect is
+the strongest argument that the guard, not the prose, is the deliverable.
+
+**One of those four was hiding a real fail-closed bug.** The supervision home was
+trimmed while `options.cwd` was still forwarded RAW to the child. `persistent/pool.ts`
+records the session as `options.cwd ?? process.cwd()` — `??` falls through on
+`undefined` but not on `'   '` — and `persistent/supervision.ts` then refuses any
+respawn whose `existsSync(record.cwd)` is false, returning `invalid-cwd`. Every crash
+recovery for that session would decline, silently, for the life of the process: a
+half-applied trim converted a loud wrong-path bug into an invisible no-recovery one.
+Both slots are now normalized once, in `resolveReplCwdAndHome`.
+
+**Which of these a live path can reach, stated rather than implied.** Reachable today:
+`resolveNeutronHome`, `resolveOpenDbPath`, `resolveOwnerHome`, `resolveOwnerHomeFromEnv`,
+`resolveStatePath`, the env-shim pair, and `buildPromptVars` (via
+`trident/agent-prompts.ts`). Published surfaces with NO in-tree invocation:
+`resolveRegistryDbPath` — re-exported from `gateway/index.ts` and
+`gateway/composer-contract.ts`, both re-exports, no caller — and `resolveM2FeedbackPath`,
+whose collector has no non-test instantiation. Defensive on a live path whose current
+callers all pass a real value: `resolveReplCwdAndHome` and `resolveSkillsDir`. The
+family consistency is worth having either way, but hardening and bug-fixing are
+different claims, and an earlier draft of this entry described the registry read as
+"the read that tells a booting instance its own handle" without noting that nothing
+in this tree calls it. Also narrowed, not widened: `skill-forge/registrar.ts` declared
+itself a "mirror" of `resolveSkillsDir` and stopped mirroring it when that function
+moved onto the rule. It has no fallback chain to copy — trimming there would turn
+`'   '` into `'/skills'`, the filesystem root, which is worse than the junk path — so
+the self-description was corrected instead.
+
 ## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
 
 Landed via PR #331.
@@ -1357,6 +2020,40 @@ and turns it red with the production error. The parser round-trips this
 17,000-line file byte-for-byte — 300+ entries, four verbatim-duplicated headings
 and ten undated sections included — because a merge driver that cannot reproduce
 its own input is a corruption engine.
+
+## 2026-08-16 — the staged-marker gate catches the bare separator
+
+The publish-path staged-byte scan (`stagedMarkerFiles` in `trident/orchestrator.ts`) matched
+`<<<<<<<` and `>>>>>>>` and nothing else. A partially hand-resolved conflict — both sides kept,
+the two outer markers deleted, the `=======` between them left behind — read as CLEAN to the
+gate and to `--diff-filter=U` alike, so it got committed and force-pushed to the shared branch.
+That is the residue MOST likely to survive a sloppy resolution, precisely because the outer
+markers are the visually obvious lines and the separator is not. The gate that exists to stop
+conflict text reaching a shared branch was blind to the one form of conflict text a human is
+most likely to leave.
+
+The rule now: an ADDED line that is EXACTLY a run of `=` — `CONFLICT_SEPARATOR_ADDED =
+/^\+={4,}\r?$/` — is residue. Exact, because git's separator never carries a label, unlike the
+outer markers which are followed by a branch name; anything suffixed (`=======trailing`,
+`const banner = "======="`) or indented is legitimate content and does not match. Four is a
+fail-closed false-positive boundary, not git's minimum: smaller configured markers remain a known
+tradeoff, while wider markers are caught. `\r?` covers a CRLF file. For `.md`/`.markdown`, the
+exemption requires the actual Setext shape in the resulting file: a nonblank title immediately
+before the underline and a blank line or EOF immediately after it. This admits both an underline
+edit and a newly added heading, while a separator followed directly by surviving conflict-side
+content is refused. A conflict that happens to form that exact Markdown shape is inherently
+indistinguishable from legitimate Setext using staged bytes alone. Each genuinely-unmerged
+candidate is scanned separately with a literal pathspec, so path quoting and glob characters
+cannot misattribute it.
+
+The diff3 base marker `|||||||` remains unmatched; a repo with
+`merge.conflictStyle=diff3` can leave the same class of residue, and catching it (same exact-line
+plus width rule, with its own real-git proof under diff3) is a follow-up card. The scan already
+runs only over paths that were genuinely unmerged in this replay, which bounds false positives
+further. Proven both ways: stub-host tests in `trident/orchestrator.test.ts` (bare separator in a
+code file refused; setext underline in a resolved `.md` publishes; suffixed and indented runs
+publish) and a real-git proof in `trident/publish-rebase-realgit.test.ts` where the resolver
+performs exactly the sloppy resolution and the branch ref never moves.
 
 ## 2026-08-15 — the gateway had no idea whether he was looking, and the two ways to fake it both end in silence
 
