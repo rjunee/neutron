@@ -8,17 +8,27 @@
  * INSTALLED, NEVER DECLARED IN A TRACKED FILE. The attribute that binds this driver to the path
  * lives in `.git/info/attributes`, written by `scripts/install-merge-drivers.sh` in the SAME step
  * that writes the `merge.as-built-log.driver` config. That pairing is deliberate and it is the
- * reason a tracked `.gitattributes` is NOT used here: a `merge=as-built-log` line committed to the
- * repo would reach every clone, and git treats a declared-but-unconfigured driver as FATAL rather
- * than falling back —
+ * reason a tracked `.gitattributes` is NOT used here. MEASURED on git 2.50.1 (Apple Git-155), a
+ * fresh repo with `log.txt merge=as-built-log` and two branches editing the same region:
  *
- *     $ git merge --no-edit other        # attribute present, driver not configured
- *     fatal: custom merge driver probe lacks command line.
+ *     # no merge.as-built-log.* config at all — NOT fatal
+ *     $ git merge --no-edit other
+ *     CONFLICT (content): Merge conflict in log.txt
+ *     MERGE_EXIT=1
+ *
+ *     # merge.as-built-log.name set, .driver unset — THIS is the fatal one
+ *     $ git merge --no-edit other
+ *     fatal: custom merge driver as-built-log lacks command line.
  *     MERGE_EXIT=128
  *
- * — for `git merge` AND for the `git apply --3way` the publisher uses. So a fresh clone, an
- * outside contributor, or CI would hard-fail on any merge touching this file until somebody ran an
- * install step they had no reason to know about. Keeping the attribute untracked means the
+ * An earlier revision of this docblock claimed the exit-128 result for the first case too. It is
+ * wrong, and the measured behaviour is the stronger argument: `docs/AS_BUILT.md merge=union` IS
+ * tracked and is the floor every clone gets, so committing `merge=as-built-log` would OVERRIDE
+ * that floor with a driver nobody has configured, and every clone without the install would go
+ * quietly back to conflicting on the log — the regression
+ * `scripts/ci/check-governed-repo-attributes.ts` gates. The exit-128 case is why the attribute and
+ * its driver must be installed together: half-installed hard-fails `git merge` AND the
+ * `git apply --3way` the publisher uses. Keeping the attribute untracked means the
  * attribute and its driver are installed together or neither is, which is the same rule
  * `scripts/install-git-hooks.sh` already applies to the leak gate and its denylist: "a control and
  * its pattern source have to be installed together or neither is real." Without the install the

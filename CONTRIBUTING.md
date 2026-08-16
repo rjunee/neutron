@@ -133,10 +133,17 @@ Unlike the hook above, this needs no secret and is useful to anyone who rebases
 a branch that touches the log. It is optional: **the attribute that binds the
 driver to the path is written to `.git/info/attributes`, not to a tracked
 `.gitattributes`**, so a clone that never runs this behaves exactly as it does
-today. That is deliberate — git treats an attribute naming an unconfigured
-driver as `fatal: … lacks command line` (exit 128) rather than falling back, so
-committing the attribute would break every clone that had not run the installer.
-The attribute and its driver arrive together or neither does.
+today. That is deliberate. `docs/AS_BUILT.md merge=union` is the tracked floor
+every clone gets; committing `merge=as-built-log` on top would override it with
+a driver nobody has configured, and — measured on git 2.50.1 — a clone with no
+`merge.as-built-log.*` config falls back to the ordinary text merge, so the log
+would quietly go back to conflicting for everyone who had not run the installer.
+(A half-install, `merge.<name>.name` with no `.driver`, is the case that really
+is `fatal: … lacks command line`, exit 128.) The attribute and its driver arrive
+together or neither does: the installer checks every write, writes `.driver`
+before `.name` — measured on git 2.50.1, `.driver` alone merges fine while
+`.name` alone is the exit-128 abort — and rolls the pair back and exits non-zero
+rather than reporting success over a partial install.
 
 Trident's publisher runs this itself before replaying a branch, so builds get it
 without anyone remembering.
