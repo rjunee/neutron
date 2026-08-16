@@ -33,10 +33,9 @@ three carried its date only in the filename
 (`docs/as-built/2026-08-09-mobile-model-providers.md`) and the other two repeated it
 in the title as `(2026-08-09)`. #304 normalised all three to `## YYYY-MM-DD — title`,
 thereby minting a heading identical to the summary's. Both sides are kept and the
-FOLDED one is suffixed
-` (detail)`, because it is the synthesised heading — no author typed it — and the
-summary's own `Detail: §` pointer, which until now resolved ambiguously to two sections
-including itself, is repointed to match. No prose changed on either side. Containment
+FOLDED one is suffixed ` (detail)`, because it is the synthesised heading — no author
+typed it — and the summary's own `Detail: §` pointer, which until now resolved
+ambiguously to two sections including itself, is repointed to match. No prose changed on either side. Containment
 was checked rather than assumed before ruling deletion out: 0 of 23 sentences in the
 three short bodies appear verbatim in their long counterpart.
 
@@ -65,13 +64,15 @@ one known limit, where occurrence indices shift and entries come back in an odd 
 Duplication here compounds or scrambles silently rather than failing loudly, and
 nothing else looks.
 
-Mutation-tested both ways — re-appending a collision to the real log reds exactly the
-conformance case, and blinding the checker's heading match reds the positive control
-while the conformance case still passes, which is the false negative a lone conformance
-assertion cannot see. That control re-appends the first heading NOT already duplicated,
-because the scenario it models is a union merge doubling the newest entry, and
-re-appending an already-doubled heading takes it from two to three without changing the
-duplicate count.
+Mutation-tested three ways. Re-appending a collision to the real log reds exactly the
+conformance case, naming the heading and both line numbers. Blinding the checker's
+heading match reds the positive control while the conformance case still passes — the
+false negative a lone conformance assertion cannot see. Splicing the first,
+hand-rolled parser back in reds all four parity cases and nothing else, so those cases
+are not decorative. The positive control re-appends the first heading NOT already
+duplicated: the scenario it models is a union merge doubling the newest entry, and
+re-appending an already-doubled heading takes it from two occurrences to three without
+changing the duplicate count at all.
 
 ## 2026-08-16 — two builds can append to this file at once
 
