@@ -407,10 +407,11 @@ describe('a checkout cannot inject code into the driver through bunfig.toml', ()
 })
 
 /**
- * The installer's own header promises the two halves arrive "together or not at all". It has no
- * `errexit` and cannot safely take one — a `--unset` of an absent key exits 5 and a `grep -v` with
- * no output exits 1, both normal here — so that promise is kept by hand, and therefore has to be
- * tested by hand.
+ * The installer's own header promises "never the FATAL half, always loudly" — deliberately NOT
+ * "never a half", because driver-without-attribute is inert and IS reachable. Only the fatal half
+ * is claimed impossible, and that is what these tests bound. It has no `errexit` and cannot safely
+ * take one — a `--unset` of an absent key exits 5 and a `grep -v` with no output exits 1, both
+ * normal here — so the promise is kept by hand, and therefore has to be tested by hand.
  *
  * TWO DISTINCT BAD STATES, MEASURED ON git 2.50.1 RATHER THAN ASSUMED:
  *
@@ -428,7 +429,7 @@ describe('a checkout cannot inject code into the driver through bunfig.toml', ()
  *     Quieter, still a lie. Reachable in the unfixed script whenever the config is unwritable: the
  *     writes failed, nothing checked them, and the attribute was appended anyway on exit 0.
  */
-describe('the installer under a locked config — the half-installed state must be impossible', () => {
+describe('the installer under a locked config — the FATAL half-state must be impossible', () => {
   function freshRepo(): string {
     const repo = mkdtempSync(join(tmpdir(), 'as-built-lock-'))
     created.push(repo)
@@ -603,5 +604,116 @@ describe('the installer under a locked config — the half-installed state must 
     expect(clean.ok).toBe(true)
     expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).not.toBe('')
     expect(attributes(repo)).toContain('merge=as-built-log')
+  }, 30_000)
+})
+
+/**
+ * The installer must never report success over a HALF-INSTALL.
+ *
+ * `install-merge-drivers.sh` runs under `set -uo pipefail` with no `-e`, so an
+ * unchecked failure used to fall through to `echo "merge drivers: installed"`
+ * and exit 0. The state that mattered is the one its own header calls fatal, and
+ * it was one step wide.
+ *
+ * MEASURED HERE, on this machine, with two branches conflicting on a path bound
+ * to `merge=as-built-log` — the asymmetry is the whole design input:
+ *
+ *   `.driver` set, `.name` UNSET  → the merge SUCCEEDS, the driver runs.
+ *   `.name` set, `.driver` UNSET  → fatal: custom merge driver as-built-log
+ *                                   lacks command line.  (exit 128)
+ *
+ * So the fix is an ordering, not just a check: `.driver` goes in first, and an
+ * interruption between the two leaves a clone that merges rather than one that
+ * cannot merge at all.
+ */
+describe('half-installing the merge driver', () => {
+  /** A throwaway repo with one path bound to the driver and two conflicting branches. */
+  function conflictRepo(): string {
+    const repo = mkdtempSync(join(tmpdir(), 'as-built-halfinstall-'))
+    created.push(repo)
+    git(repo, 'init', '-q', '-b', 'main')
+    git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+    git(repo, 'config', 'user.name', 'Trident Test')
+    git(repo, 'config', 'commit.gpgsign', 'false')
+    writeFileSync(join(repo, '.gitattributes'), 'log.txt merge=as-built-log\n')
+    writeFileSync(join(repo, 'log.txt'), 'base\n')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-qm', 'base')
+    git(repo, 'checkout', '-qb', 'other')
+    writeFileSync(join(repo, 'log.txt'), 'THEIRS\nbase\n')
+    git(repo, 'commit', '-qam', 'theirs')
+    git(repo, 'checkout', '-q', 'main')
+    writeFileSync(join(repo, 'log.txt'), 'OURS\nbase\n')
+    git(repo, 'commit', '-qam', 'ours')
+    return repo
+  }
+
+  test('MEASUREMENT — .name without .driver is the fatal state; .driver without .name is not', () => {
+    const fatal = conflictRepo()
+    git(fatal, 'config', 'merge.as-built-log.name', 'entry-aware')
+    const fatalMerge = run(fatal, ['git', 'merge', 'other'])
+    expect(fatalMerge.code).toBe(128)
+    expect(fatalMerge.stderr + fatalMerge.stdout).toContain('lacks command line')
+
+    // The other half. Without this control the ordering fix is a guess: it is
+    // only safer to write `.driver` first if `.driver` alone actually works.
+    const fine = conflictRepo()
+    git(fine, 'config', 'merge.as-built-log.driver', 'cat %A %B > %A.m && mv %A.m %A')
+    const fineMerge = run(fine, ['git', 'merge', 'other'])
+    expect(fineMerge.code).toBe(0)
+    expect(readFileSync(join(fine, 'log.txt'), 'utf8')).toContain('THEIRS')
+  }, 30_000)
+
+  test('the installer writes .driver BEFORE .name, so no interruption can wedge a clone', () => {
+    // Read from the script itself: the ordering is the safety property, and it
+    // is invisible in the installed result (both keys are present when it
+    // finishes). Only the SOURCE can show which one lands first.
+    const sh = readFileSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), 'utf8')
+    const driverAt = sh.indexOf('config "merge.$DRIVER_NAME.driver"')
+    const nameAt = sh.indexOf('config "merge.$DRIVER_NAME.name"')
+    expect(driverAt).toBeGreaterThan(-1)
+    expect(nameAt).toBeGreaterThan(-1)
+    expect(driverAt).toBeLessThan(nameAt)
+  })
+
+  test('a failing config write LEAVES NOTHING BEHIND and exits non-zero instead of printing success', () => {
+    // The reachable version of the blocker, forced deterministically: make the
+    // repo config unwritable so the very first `git config` fails. Before the
+    // fix this printed "merge drivers: installed" and exited 0.
+    //
+    // The installer reached this state by ROLLBACK when this test was written and reaches it by
+    // ORDERING now: `.driver` is written first and nothing else runs if it fails, so there is no
+    // half-state to undo. The assertions are on the resulting STATE rather than the route, which is
+    // why they survived that change unaltered — only the failure string below is route-specific.
+    const repo = conflictRepo()
+    // The scripts the installer requires must exist, or it exits 2 for an
+    // unrelated reason and this test proves nothing.
+    mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+    cpSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), join(repo, 'scripts', 'install-merge-drivers.sh'))
+    cpSync(
+      join(REPO_ROOT, 'scripts', 'git', 'as-built-merge-driver.ts'),
+      join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'),
+    )
+
+    // Read-only `.git` DIRECTORY, not a read-only `config` file: `git config`
+    // writes through `.git/config.lock` and renames, so the file's own mode
+    // never comes into it. Measured — `error: could not lock config file
+    // .git/config: Permission denied`, exit 255.
+    const gitDir = join(repo, '.git')
+    chmodSync(gitDir, 0o555)
+    const installed = run(repo, ['bash', 'scripts/install-merge-drivers.sh'])
+    chmodSync(gitDir, 0o755)
+
+    // Control: the write really was refused, so the failure under test is the
+    // one being described.
+    expect(installed.stderr).toContain('NOT INSTALLED')
+    expect(installed.ok).toBe(false)
+    expect(installed.stdout).not.toContain('merge drivers: installed')
+
+    // And nothing was left behind — in particular not `.name` without `.driver`.
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).toBe('')
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()).toBe('')
+    // Which means the repo still MERGES, rather than aborting with exit 128.
+    expect(run(repo, ['git', 'merge', 'other']).code).not.toBe(128)
   }, 30_000)
 })

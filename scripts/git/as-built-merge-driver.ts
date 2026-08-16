@@ -10,7 +10,7 @@
  * that writes the `merge.as-built-log.driver` config. That pairing is deliberate and it is the
  * reason a tracked `.gitattributes` is NOT used here. Stated as measured, because an earlier cut of
  * this paragraph claimed a declared-but-unconfigured driver is always FATAL and that is true of only
- * one of the two ways to be unconfigured (git 2.50.1, attribute present):
+ * one of the two ways to be unconfigured (git 2.50.1 / Apple Git-155, attribute present):
  *
  *     $ git merge --no-edit other   # attribute, merge.<name>.name set, no .driver
  *     fatal: custom merge driver as-built-log lacks command line.        MERGE_EXIT=128
@@ -21,12 +21,15 @@
  * A fresh clone is the SECOND state, so committing the attribute would not hard-fail it — it would
  * silently swap the `merge=union` this path gets today for a conflict on every concurrent append,
  * for every outside contributor and for CI, and leave each of them one stray `merge.<name>.name`
- * away from the 128. Both outcomes are for `git merge` AND for the `git apply --3way` the publisher
- * uses. Keeping the attribute untracked means it is never present without the driver it names — the
- * same rule `scripts/install-git-hooks.sh` applies to the leak gate and its denylist: "a control and
- * its pattern source have to be installed together or neither is real." (The reverse half-state, a
- * driver config nothing points at, is inert and IS reachable; `scripts/install-merge-drivers.sh`
- * says exactly when.) Without the install the repo
+ * away from the 128. That first outcome is the regression
+ * `scripts/ci/check-governed-repo-attributes.ts` gates: `docs/AS_BUILT.md merge=union` IS tracked
+ * and is the floor every clone gets, and committing `merge=as-built-log` would override that floor
+ * with a driver nobody has configured. Both outcomes are for `git merge` AND for the
+ * `git apply --3way` the publisher uses. Keeping the attribute untracked means it is never present
+ * without the driver it names — the same rule `scripts/install-git-hooks.sh` applies to the leak
+ * gate and its denylist: "a control and its pattern source have to be installed together or neither
+ * is real." (The reverse half-state, a driver config nothing points at, is inert and IS reachable;
+ * `scripts/install-merge-drivers.sh` says exactly when.) Without the install the repo
  * behaves as it does today — `.gitattributes` gives this path `merge=union`, which interleaves
  * rather than conflicting; with the install, `$GIT_COMMON_DIR/info/attributes` takes precedence over
  * the tracked file and concurrent appends merge whole entries instead.

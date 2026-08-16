@@ -41,15 +41,22 @@
 # with ordinary conflict markers. So committing the attribute would not brick a clone; it would
 # quietly REPLACE the `merge=union` this path gets from the tracked `.gitattributes` today with a
 # conflict on every concurrent append, for every outside contributor and for CI, until each of them
-# ran this script. That is a regression worth avoiding on its own. The genuinely fatal state needs a
-# `merge.<name>.name` with no `.driver` — a half-installed clone —
+# ran this script — the exact regression `scripts/ci/check-governed-repo-attributes.ts` gates. That
+# is worth avoiding on its own. The genuinely fatal state needs a `merge.<name>.name` with no
+# `.driver` — a half-installed clone — for `git merge` and for the `git apply --3way` the publisher
+# uses, and a committed attribute is what would put every such clone one bad config write away from
+# it. Keeping the attribute untracked means it and its driver never arrive attribute-first; a clone
+# that never runs this behaves exactly as it does today. Same rule `install-git-hooks.sh` applies to
+# the leak gate and its denylist.
 #
-#     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+# MEASURED on git 2.50.1 (Apple Git-155), a fresh repo with `log.txt merge=as-built-log` and two
+# branches editing the same region:
 #
-# — for `git merge` and for the `git apply --3way` the publisher uses, and a committed attribute is
-# what would put every such clone one bad config write away from it. Keeping the attribute untracked
-# means it and its driver never arrive attribute-first; a clone that never runs this behaves exactly
-# as it does today. Same rule `install-git-hooks.sh` applies to the leak gate and its denylist.
+#   - no `merge.as-built-log.*` config at all → NOT fatal. git falls back to the ordinary text
+#     merge: exit 1, `CONFLICT (content)`, conflict markers.
+#   - `merge.as-built-log.name` set with no `.driver` → THAT is the fatal one:
+#         fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+#   - both `.name` and `.driver` set → exit 0, the driver's output.
 #
 # "NEVER THE FATAL HALF" IS ENFORCED, NOT MERELY INTENDED. This script has no `errexit` (and
 # cannot safely acquire one — `git config --unset` exits 5 on an already-absent key and `grep -v`
