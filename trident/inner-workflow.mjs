@@ -3207,6 +3207,13 @@ function classifyRequiredChecksProbe(probe) {
   if (rulesExit === 0) {
     const parsed = between(rulesText, '[', ']')
     if (!Array.isArray(parsed)) return { mode: 'unknown', cause: probeCause(rulesText) }
+    // KNOWN LIMIT, NAMED RATHER THAN HIDDEN: only `required_status_checks` rules are
+    // read. A base branch governed ONLY by a `workflows` rule — which names workflow
+    // FILES, not check-run names, so there is nothing here to resolve it to — falls
+    // through to `required: []` and is then judged by the permissive unprotected-base
+    // rule. Pre-existing and unchanged by this PR (the identical filter is on untouched
+    // main at trident/inner-workflow.mjs:2978); closing it needs a mapping from workflow
+    // file to emitted check names, which this probe does not fetch.
     for (const rule of parsed) {
       if (rule === null || typeof rule !== 'object' || rule.type !== 'required_status_checks') continue
       const list = rule.parameters && rule.parameters.required_status_checks
@@ -3248,7 +3255,19 @@ function classifyRequiredChecksProbe(probe) {
     const parsed = between(text, '{', '}')
     if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.names)) return null
     const names = parsed.names.filter((n) => typeof n === 'string')
-    const total = typeof parsed.n === 'number' ? parsed.n : names.length
+    // A COUNT THAT IS NOT A WHOLE NUMBER IS NOT A COUNT, AND FALLING BACK TO
+    // `names.length` FOR ONE IS THE SAME FAIL-OPEN ONE STEP FURTHER IN. `typeof` alone
+    // admits any number: `NaN > names.length` is false, and so is `3.5 > 3`, so a
+    // nonsense count slid a possibly-truncated list through as complete. Substituting
+    // `names.length` when the count is unusable does exactly the same thing — it ASSUMES
+    // the arrival is complete, which is the one assumption this guard exists to refuse.
+    //
+    // So: an ABSENT count is the only "no count was reported" (older probe transcripts
+    // carry bare name arrays), and anything else present-but-not-an-integer — `null` from
+    // a jq path that missed, a float, a string — is an unreadable list. `null` is
+    // evidence of nothing, which can only ever disable the fast-fail.
+    const total = parsed.n === undefined ? names.length : parsed.n
+    if (!Number.isInteger(total)) return null
     return total > names.length ? null : names
   }
   const runNames = listFrom(runsText, 'RUNS')
@@ -3277,9 +3296,21 @@ function classifyRequiredChecksProbe(probe) {
 // to tell them apart: a required check bound to a producing App cannot be satisfied by
 // a commit status. StatusContext has no separate "is it finished" field — the state IS the
 // answer — so PENDING/EXPECTED are the non-terminal ones and everything else is a
-// verdict. When both shapes report the same name, each row is kept and BOTH must be
-// terminal and green: the conservative reading, because a rollup that disagrees with
-// itself is not evidence that the check passed.
+// verdict. When both shapes report the same name, each row is kept HERE, and by default
+// BOTH must be terminal and green: the conservative reading, because a rollup that
+// disagrees with itself is not evidence that the check passed.
+//
+// WITH ONE EXCEPTION, STATED HERE BECAUSE THIS COMMENT USED TO DENY IT. If the base
+// branch bound that requirement to an App (`{context, app_id}`), the classifier consults
+// only the CheckRun rows for that name and DISCARDS the commit statuses — including a
+// RED one. A green check run beside a FAILURE status on a bound name classifies
+// `passed`, where the same rollup on an UNBOUND name classifies `failed`; that pair is
+// pinned at `ci-gate.test.ts` "a check run beside the status answers for it, in both
+// directions". It is deliberate, and it is the same fact in both
+// directions: a producer the requirement excludes cannot SATISFY it, and cannot REFUTE
+// it either — otherwise anything able to POST a commit status could fail a check it was
+// never bound to. The filter and its limits live at `rowsOf` in
+// `classifyReviewReadiness`; this note exists so the two do not disagree again.
 const STATUS_CONTEXT_PENDING_STATES = new Set(['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'])
 function normalizeRollupRow(row) {
   if (row === null || typeof row !== 'object') return null
@@ -3409,6 +3440,14 @@ function classifyReviewReadiness(probe, requiredConfig, elapsedMs = 0) {
   // SHAPE is the one half of the producer this data can testify about, and ruling out
   // the half it can see beats ruling out neither. Narrowing further needs producer
   // identity in the probe, not a stricter guess here.
+  //
+  // AND IT DISCARDS THE RED ROW TOO, WHICH IS THE HALF THAT LOOKS WRONG. Filtering by
+  // shape drops a same-name FAILURE commit status as readily as a green one, so an
+  // app-bound `lint` whose check run is green passes while a red status carrying that
+  // name sits in the rollup. Symmetry is the point: the row is from a producer the
+  // requirement excludes, so it is not evidence either way, and honouring it would let
+  // anything able to post a commit status fail a check it was never bound to. The
+  // unbound path is unaffected — there, both rows count and the red one decides.
   const appBound = new Set(Array.isArray(config.appBound) ? config.appBound : [])
   const rowsOf = (name) => (byName.get(name) || []).filter((r) => !appBound.has(name) || r.kind === 'CheckRun')
   // SKIPPED is "did not run", so it is excluded here rather than judged below. A name
