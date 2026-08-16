@@ -5846,9 +5846,13 @@ export function buildOpenGraphComposer(
     return {
       db,
       project_slug,
-      // `exactOptionalPropertyTypes`: an explicit `undefined` is not the same as
-      // absent, and only ABSENT means "nobody said" downstream.
-      ...(slug_is_fallback !== undefined ? { slug_is_fallback } : {}),
+      // ALWAYS set, never conditionally spread. A field the composer assigns
+      // only sometimes is exactly the ambiguity `composition-field-coverage`
+      // exists to catch, and it caught this. Normalising here also puts the
+      // fail-closed reading in ONE place: a caller that did not say where the
+      // handle came from has told us as much as a process that does not know
+      // who it is, so it resolves to `true` and the credential surfaces refuse.
+      slug_is_fallback: slug_is_fallback ?? true,
       // RA2 (gbrain live-or-loud) — surface the memory backend's boot-time
       // health so `boot()` can fold it into the terminal `/healthz`: a box whose
       // `gbrain` binary is missing now reports `status:'degraded'` +

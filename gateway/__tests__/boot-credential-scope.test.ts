@@ -256,3 +256,67 @@ test('(a3) AMBIGUOUS: a real boot changes nothing, the FRESH value survives, and
     reason: 'ambiguous_census',
   })
 })
+
+// ── THE FALLBACK BOOT, AT THE AUDIT BOUNDARY ──────────────────────────────
+/**
+ * A review round pointed out the reason field had no boundary coverage: only
+ * `ambiguous_census` was ever asserted, so an inverted branch or a typo in
+ * `fallback_boot_handle_refused_direction` stayed green while the operator got
+ * the wrong instruction — and the wrong instruction here points at the one
+ * action that must not be taken.
+ *
+ * So this boots for real with NO `.url_slug` and no instance slug set, which is
+ * what an anonymous process actually is: `resolveOwnerSlugSourceFromConfig`
+ * returns the documented fallback, and the rows below belong to somebody else.
+ */
+test('a real FALLBACK boot refuses, says why in the audit row, and leaves the rows alone', async () => {
+  const LIVE = 'live-owner'
+  // The distinguishing act: no `.url_slug`, so nothing has told this process
+  // who it is. (`beforeEach` wrote one; an anonymous boot is its absence.)
+  rmSync(join(home, '.url_slug'), { force: true })
+  delete process.env['NEUTRON_INSTANCE_SLUG']
+
+  const seedDb = ProjectDb.open(dbPath)
+  try {
+    const store = new SecretsStore({ data_dir: home, db: seedDb })
+    await store.put({
+      owner_handle: asOwnerHandle(LIVE),
+      kind: 'byo_api_key',
+      label: 'anthropic:prod',
+      plaintext: 'live-token',
+    })
+  } finally {
+    seedDb.close()
+  }
+
+  const handle = await boot({ port: 0 })
+  try {
+    // The rows are exactly where they were. Asserted on the VALUE, because a
+    // migration that moved and re-encrypted would also leave one row here.
+    const store = new SecretsStore({ data_dir: home, db: handle.db })
+    expect(
+      await store.get({
+        owner_handle: asOwnerHandle(LIVE),
+        kind: 'byo_api_key',
+        label: 'anthropic:prod',
+      }),
+    ).toBe('live-token')
+
+    const names = systemEventNames()
+    expect(names).toContain('credential_scope_orphaned')
+    expect(names).not.toContain('credential_scope_migrated')
+
+    // THE POINT: the reason, by exact equality on the whole payload. A generic
+    // orphan row would send the reader to the migration that just refused.
+    const payloads = systemEventPayloads('credential_scope_orphaned')
+    expect(payloads).toHaveLength(1)
+    assertNoSecretMaterial(payloads[0]!, ['live-token'])
+    expect(JSON.parse(payloads[0]!)).toEqual({
+      from: [LIVE],
+      orphan_counts: [{ table: 'secrets', handle: LIVE, rows: 1 }],
+      reason: 'fallback_boot_handle_refused_direction',
+    })
+  } finally {
+    await handle.shutdown({ force: true })
+  }
+})

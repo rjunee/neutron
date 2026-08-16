@@ -46,8 +46,12 @@ surface funnels there, and a test that reaches past it proves nothing about what
 gets, which is how the gap survived its first suite. It carries the positive control the
 file requires: the same fixture, provenance the only difference, migrates. Mutation-tested
 both directions — disabling the guard fails the new test, refusing unconditionally fails
-five. 44 tests green across the credential and integrations suites; `typecheck-all.sh`
-51/51.
+five. A later review round added the boundary the first pass missed — the HTTP route,
+the agent-facing tool and the status response each driven for real, plus a fallback boot
+asserting the audit row's `reason` by exact equality, plus the composition chain itself
+(delete the composer's propagation and every configured boot silently refuses, which the
+field-coverage gate cannot see because the safe default and the wrong answer are the same
+literal). `typecheck-all.sh` 51/51.
 
 ## 2026-08-16 — two builds can append to this file at once
 

@@ -90,10 +90,17 @@ export type SystemEventName =
   //     pre-provisioning owner handle were unambiguously moved onto the boot
   //     handle (a repair to the owner's database; the durable record of which
   //     tables moved and how many rows).
-  //   - `credential_scope_orphaned` — the AMBIGUOUS case: rows under two
-  //     handles, or stale rows coexisting with boot-handle rows. NOTHING was
-  //     written; the row exists so a scope miss is distinguishable from "never
-  //     connected", which is the expensive half of the defect.
+  //   - `credential_scope_orphaned` — NOTHING was written, for one of TWO
+  //     reasons, which the payload's `reason` names because they call for
+  //     opposite responses and used to render identically:
+  //       `ambiguous_census` — rows under two handles, or stale rows coexisting
+  //         with boot-handle rows. Look at the credential rows.
+  //       `fallback_boot_handle_refused_direction` — this process booted on the
+  //         bare fallback handle and may not claim rows belonging to an explicit
+  //         one. Set the instance handle; do NOT run the migration, which is
+  //         what a reader of the generic sentence was being steered toward.
+  //     Either way the row exists so a scope miss is distinguishable from
+  //     "never connected", which is the expensive half of the defect.
   // Payload is COUNTS + HANDLES + TABLE NAMES only — never a secret kind/label,
   // never ciphertext, never plaintext.
   | 'credential_scope_migrated'
