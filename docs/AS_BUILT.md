@@ -281,6 +281,48 @@ and found two defects in it: the comment's arithmetic was wrong in one clause,
 and the new fixture used a fraction the OLD code already rejected, so it
 discriminated nothing. Both fixed; the mutation test now replays both weaker
 guards, including the one that shipped.
+
+Landed via PR #330.
+
+**One more round, and the three findings it answered all share a shape: a value
+that MEANS "no constraint" was read as a constraint, and the gate then waited for
+something that could never arrive.**
+
+*The wildcard app id.* GitHub documents the branch-protection `checks[].app_id`
+parameter as "The ID of the GitHub App that must provide this check", and then:
+"Pass -1 to explicitly allow any app to set the status" (REST reference, verified
+this round). The binding reader took any non-null value, so `-1` — the admin
+saying ANY producer will do — became a binding to app number minus one. The
+classifier then discarded every commit-status row carrying that name, and a
+repository whose wildcard-required check is posted through the Commit Status API
+read as never having run: no error, no finding, just a deferral on every round
+forever. That is the same fail-closed hang this whole change exists to remove,
+arriving through a different door. `-1` is now a wildcard by name
+(`APP_BINDING_WILDCARD`), in all three spellings the field arrives in, and a real
+app id still binds — the mutation test pins both sides.
+
+*The marker a check name could impersonate.* The transcript is split on markers
+the probe writes with their own `echo`, so a real one owns a whole line. A
+required context literally NAMED `___SECTION=BRANCH` lands inside the branch
+payload — the very list the 404 disambiguation reads — and a bare substring match
+took it as the last boundary, sliced the payload in half, and collapsed the whole
+classification to `unknown`. Boundaries must now start and end a line. The
+ordered backwards walk already prevented the other arrangement, where a hostile
+name in a LATER section pulls an earlier boundary; the new test states which of
+the two actually bites and controls against the unanchored matcher.
+
+*The impossible count that was merely a whole number.* The previous round
+rejected a fraction landing under the arrival and left the comparison asking only
+whether the count EXCEEDED it — so `2` against three arrived names, the identical
+claim in whole numbers, still passed as a COMPLETE list, and so did any negative.
+`total_count` is how many exist for the ref; a count below the arrival describes a
+response GitHub cannot emit. Only an exact match is now a complete page, which
+can still only ever disable the fast-fail.
+
+Recorded because the review lane that raised the first of these had itself timed
+out on the previous round: a mandatory reviewer that did not RUN is not a pass,
+and the finding it was carrying turned out to be real.
+
 ## 2026-08-16 — the guard that proved the gate runs accepted `|| true`
 
 Every fix below closes a route to the SAME outcome — the gate prints ✅, or CI
