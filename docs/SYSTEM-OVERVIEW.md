@@ -6470,6 +6470,15 @@ The fix is a git merge driver that works on **whole entries**:
   historically, and re-sorting 300 entries would bury a one-entry change);
   additions are placed newest-first among them. It is entry-aware and never
   line-aware on purpose — a `union` driver would interleave two entries, and
+  **every ambiguous case is biased toward refusing.** A side that keeps NONE of
+  the entries the base had is a truncation, a rename or a bad apply — never a
+  considered edit to an append-only history — and is refused rather than merged
+  as though each missing entry had been deliberately deleted. Entry boundaries
+  ignore `## ` inside a fenced block, and a fence is closed only by its OWN
+  delimiter, at least as long as the one that opened it, with nothing after it:
+  a `~~~` quoted inside a backtick fence used to end the block early, which made
+  the sample heading below it parse as a real entry and let concurrent additions
+  land INSIDE somebody's code block.
   interleaving inside one entry is what produced broken TypeScript in an earlier
   incident.
 - `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls.
@@ -6487,10 +6496,35 @@ The fix is a git merge driver that works on **whole entries**:
   and its driver arrive together or neither does — the same rule
   `install-git-hooks.sh` applies to the leak gate and its denylist.
 
-`rebaseOntoObservedBase` (`trident/orchestrator.ts`) runs the installer before
-it replays a branch, so build lanes get this without anyone remembering. That
-call is **conditional on the checkout shipping the installer**, so the other
-repositories trident builds are left completely untouched.
+`rebaseOntoObservedBase` (`trident/orchestrator.ts`) binds the driver before it
+replays a branch, so build lanes get this without anyone remembering.
+`ensureAsBuiltMergeDriver` writes the same two halves the script does — the
+config, then the attribute, and the attribute only if the config landed —
+**directly, and it executes nothing out of the checkout**. The command it
+configures is *this installation's* `scripts/git/as-built-merge-driver.ts` under
+the interpreter already running trident.
+
+That matters because the publisher's `run_host` carries the owner's `GH_TOKEN`
+(`open/composer.ts` composes it via `makeLazyCredentialedHostRunner` over
+`github/credential.ts` `githubProcessEnv`). The first cut took the *presence* of
+`scripts/install-merge-drivers.sh` in the checkout as its condition and then ran
+it, so any repository containing a file at that path got it executed on the
+publisher host with the credential that publishes every PR readable from its
+environment. Nothing under the checkout is executed now, at install time or at
+merge time.
+
+Applicability is still decided by what the checkout contains — it needs
+`docs/AS_BUILT.md` **and** `scripts/git/as-built-log-merge.ts` — but both are
+read as data, and what that presence now authorises is only "merge this one path
+with our own reviewed code, or conflict". Repositories failing either are left
+completely untouched.
+
+The standalone `scripts/install-merge-drivers.sh` remains the path for humans
+(`CONTRIBUTING.md`), and enforces the same ordering by hand: it has no `errexit`
+(a `--unset` of an absent key exits 5, a `grep -v` with no output exits 1 — both
+normal there), so each write is checked, a failed driver write rolls back the
+lone `merge.<name>.name` that would otherwise make git refuse the merge with
+`lacks command line`, and both halves are verified before it reports success.
 
 Proven against real git, not stubs: `scripts/git/as-built-merge-realgit.test.ts`
 replays two branches onto a moved base and asserts the conflict WITHOUT the

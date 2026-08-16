@@ -2,6 +2,66 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — file presence is not authorization, and this log stops losing entries quietly
+
+Four defects in the entry-aware merge driver that shipped in the entry directly
+below, all of them in `main`, found by a retroactive review panel.
+
+THE PUBLISHER WAS EXECUTING A SCRIPT OUT OF THE CHECKOUT WITH THE OWNER'S TOKEN
+IN ITS ENVIRONMENT. `ensureAsBuiltMergeDriver` checked only that
+`scripts/install-merge-drivers.sh` EXISTED under the repo being built and then
+ran `run_host(['bash', installer])`. In production `run_host` is
+`makeLazyCredentialedHostRunner` (`open/composer.ts:2040`) over
+`githubProcessEnv` (`github/credential.ts:110`), which puts `GH_TOKEN` in that
+process's environment. So any repository trident checked out that happened to
+carry a file at that path had it executed on the publisher host, with the
+credential that publishes every PR readable from `$GH_TOKEN`. The old installer
+then configured the TARGET's own driver script, which git would run under the
+same credential on every merge of that path — the same hole one step later.
+Presence is now insufficient by construction: the two halves are written
+directly from `trident/orchestrator.ts` and the command they name is THIS
+installation's `scripts/git/as-built-merge-driver.ts` under the interpreter
+already running the process. Nothing under the checkout is executed at install
+time or at merge time. Presence still decides APPLICABILITY — the checkout needs
+`docs/AS_BUILT.md` and `scripts/git/as-built-log-merge.ts`, both read as data —
+but what applicability now authorises is "merge this one path with our own
+reviewed code, or conflict", which an untrusted repo is welcome to ask for.
+Mutation-tested: restoring the `bash <checkout>/scripts/install-merge-drivers.sh`
+call makes the hostile-installer test fail on the canary that script writes from
+`$GH_TOKEN`.
+
+A MALFORMED SINGLE SIDE SILENTLY DELETED HISTORY. The refusal in
+`scripts/git/as-built-log-merge.ts` required BOTH sides to parse to zero entries,
+so one bad side was merged as though every entry it lacks had been deliberately
+deleted. Reproduced against the shipped code: base holds one entry, ours is the
+literal text `TRUNCATED`, theirs adds a new entry above the old one — `ok: true`,
+and the old entry is gone. Both sides changed, so this is a live driver path. A
+side that keeps NONE of the entries the base had is now refused, which catches a
+wholesale rewrite as well as a truncation because the rule is what SURVIVED
+rather than what the entry count is.
+
+VALID MARKDOWN COULD BE MERGED INTO SOMEBODY'S CODE BLOCK. The fence tracker
+flipped one boolean on EITHER delimiter, so a `~~~` quoted inside a backtick
+fence ended the block early, the sample `## ` heading below it parsed as a real
+entry, and a concurrent addition dated between the two sorted INTO the code
+block. A fence is now closed only by its own delimiter, at least as long as the
+run that opened it, with nothing after it. Parsing of the real 307-entry log is
+byte-identical before and after.
+
+THE INSTALLER COULD PRODUCE THE STATE ITS OWN HEADER CALLS IMPOSSIBLE. It has no
+`errexit` (and cannot safely take one), so a failed `git config` write did not
+stop the attribute write. Measured with a `config.lock` present: exit 0, the
+message `merge drivers: installed`, the attribute written, the driver unset.
+Every write is now checked, a failed driver write rolls back the lone
+`merge.<name>.name` — which is the config git actually refuses on, `fatal: custom
+merge driver as-built-log lacks command line`, exit 128, measured on git 2.50.1 —
+and both halves are verified before it reports success.
+
+Tests: 44 across `scripts/git/as-built-log-merge.test.ts`,
+`scripts/git/as-built-merge-realgit.test.ts` and
+`trident/as-built-publish-wiring-realgit.test.ts`, up from 30. Each safety
+property was mutation-tested with a control proving the mutation landed.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset

@@ -60,8 +60,9 @@
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -510,15 +511,70 @@ export class TridentRebaseConflict extends Error {
   }
 }
 
+/** The path the entry-aware driver is bound to, and the git config name it is bound under. */
+const AS_BUILT_LOG_PATH = 'docs/AS_BUILT.md'
+const AS_BUILT_DRIVER_NAME = 'as-built-log'
+
 /**
- * Install the entry-aware `docs/AS_BUILT.md` merge driver into a build checkout, if that checkout
- * is one that has it.
+ * THIS INSTALLATION's copy of the merge driver — never the checkout's.
  *
- * ONLY WHERE IT APPLIES. Trident builds several repositories, and most have no such log and no
- * such installer. The presence of `scripts/install-merge-drivers.sh` in the checkout IS the
- * condition — a repo without it is left completely untouched, so nothing here imposes one repo's
- * changelog layout on another. (Argus, round 1: an earlier cut of this work told every target
- * repo to adopt a layout only this one has.)
+ * Walks up from this module rather than joining a fixed `..`, because trident is a workspace
+ * package: depending on whether the resolver hands back the real path or the
+ * `node_modules/@neutronai/trident` symlink, the tree root is one hop up or three. Bounded, and a
+ * `null` return simply means "do not install", which is the same outcome as not calling this.
+ */
+function ownAsBuiltMergeDriver(): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let hop = 0; hop < 8; hop++) {
+    const candidate = join(dir, 'scripts', 'git', 'as-built-merge-driver.ts')
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+/** Single-quote a path for the shell string git stores as `merge.<name>.driver`. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/**
+ * Bind the entry-aware `docs/AS_BUILT.md` merge driver in a build checkout, where it applies.
+ *
+ * ⚠️ FILE PRESENCE IN THE TARGET CHECKOUT IS NOT AUTHORIZATION, AND NOTHING FROM THE TARGET
+ * CHECKOUT IS EXECUTED HERE. The first cut of this took the presence of
+ * `scripts/install-merge-drivers.sh` as its condition and then ran it: `run_host(['bash',
+ * installer])`. The production `run_host` is `makeLazyCredentialedHostRunner` (`open/composer.ts`),
+ * whose environment carries `GH_TOKEN` (`github/credential.ts` `githubProcessEnv`) — the owner's
+ * credential, the one that publishes every PR. So any repository the publisher checked out that
+ * happened to contain a file at that path got that file EXECUTED on the publisher host with the
+ * token readable from its environment. "We only ever check out our own repositories" is an
+ * assumption about how trident is pointed, not a control over it, and it is not the assumption a
+ * credential should rest on.
+ *
+ * WHAT REPLACES IT. The two halves the installer wrote — the `merge.<name>.driver` config and the
+ * `$GIT_COMMON_DIR/info/attributes` binding — are written directly from here, and the command they
+ * name is THIS installation's `scripts/git/as-built-merge-driver.ts` under the interpreter already
+ * running this process. Nothing under `repoPath` is executed, at install time or at merge time, so
+ * a same-named script in a target repo is inert: it is never read, never run, and never named in
+ * the config. That also closes the second half of the same hole — the old installer configured the
+ * TARGET's driver script, which git would then have run under the same credential on every merge
+ * touching this path.
+ *
+ * ONLY WHERE IT APPLIES. Two conditions, both read as DATA and neither executed: the checkout has
+ * the log, and it carries this log's merge contract (`scripts/git/as-built-log-merge.ts`), which is
+ * what distinguishes a repo using this layout from one that merely has a file by that name. A repo
+ * failing either is left completely untouched, so nothing here imposes one repo's changelog layout
+ * on another (Argus, round 1). Presence still decides APPLICABILITY — but applicability now
+ * authorises only "merge this one path with our own reviewed code, or conflict", which is a
+ * decision an untrusted repo is welcome to make.
+ *
+ * ORDER IS LOAD-BEARING: config first, attribute second, and the attribute is skipped entirely if
+ * the config did not land. Driver-without-attribute is inert; attribute-without-driver is fatal to
+ * every merge touching the path (`lacks command line`, exit 128). Same rule as the standalone
+ * installer, for the same reason.
  *
  * BEST EFFORT, NEVER FATAL. A failure to install leaves the checkout merging exactly as it does
  * today — a conflict on the log — which is the same outcome as not calling this at all. Publishing
@@ -530,11 +586,50 @@ export async function ensureAsBuiltMergeDriver(
   run_host: RunHostCommand,
   repoPath: string,
 ): Promise<boolean> {
-  const installer = join(repoPath, 'scripts', 'install-merge-drivers.sh')
-  if (!existsSync(installer)) return false
+  if (!existsSync(join(repoPath, ...AS_BUILT_LOG_PATH.split('/')))) return false
+  if (!existsSync(join(repoPath, 'scripts', 'git', 'as-built-log-merge.ts'))) return false
+
+  const driver = ownAsBuiltMergeDriver()
+  if (driver === null) return false
+
   try {
-    const res = await run_host(['bash', installer], repoPath)
-    return res.ok
+    // `process.execPath` is the interpreter already running trident, so the driver is reached
+    // without consulting the target checkout's PATH for a `bun` it might supply itself.
+    const command = `${shellQuote(process.execPath)} ${shellQuote(driver)} %O %A %B %L %P`
+    const named = await run_host(
+      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.name`, 'entry-aware merge for the AS_BUILT log'],
+      repoPath,
+    )
+    if (!named.ok) return false
+    const configured = await run_host(
+      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.driver`, command],
+      repoPath,
+    )
+    if (!configured.ok) return false
+
+    // The COMMON git dir, not the per-worktree one: a linked worktree reads attributes from the
+    // common one, which is what the publisher's throwaway rebase worktree depends on.
+    const common = await run_host(
+      ['git', '-C', repoPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      repoPath,
+    )
+    if (!common.ok) return false
+    const commonDir = common.stdout.trim()
+    if (commonDir === '') return false
+
+    const attributes = join(commonDir, 'info', 'attributes')
+    const line = `${AS_BUILT_LOG_PATH} merge=${AS_BUILT_DRIVER_NAME}`
+    const existing = existsSync(attributes) ? readFileSync(attributes, 'utf8') : ''
+    if (existing.split('\n').includes(line)) return true
+
+    // Per-process scratch file + rename, because two lanes can reach this on one checkout at the
+    // same moment and a shared scratch path is its own concurrency bug (a racing reader would see
+    // a half-written attributes file). Same construction as the standalone installer.
+    mkdirSync(dirname(attributes), { recursive: true })
+    const scratch = `${attributes}.tmp.${process.pid}`
+    writeFileSync(scratch, existing === '' || existing.endsWith('\n') ? `${existing}${line}\n` : `${existing}\n${line}\n`)
+    renameSync(scratch, attributes)
+    return true
   } catch {
     return false
   }
@@ -747,6 +842,8 @@ export async function rebaseOntoObservedBase(
   //      --3way` below DOES consult it (verified against real git, not assumed). Installed here
   //      rather than assumed present because the binding lives in `.git/info/attributes`, which is
   //      untracked by design — see the driver's docblock for why committing it would be fatal.
+  //      This binds THIS installation's driver and runs nothing out of `repoPath`; see the
+  //      docblock on `ensureAsBuiltMergeDriver` for what running the checkout's own script cost.
   await ensureAsBuiltMergeDriver(run_host, repoPath)
 
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would

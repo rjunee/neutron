@@ -25,10 +25,13 @@
  * date) means exactly where a build would have prepended it by hand.
  *
  * WHAT IT REFUSES. If both sides modify the SAME existing entry differently, or one deletes what
- * the other edits, or the preamble diverges, that is a genuine semantic conflict and this returns
- * `{ ok: false }`. The caller then falls back to `git merge-file`, so the floor of this whole
- * mechanism is exactly today's behaviour — conflict markers a human reads — never a silent
- * mis-merge. A driver that guessed here would be worse than the conflict it replaced.
+ * the other edits, or the preamble diverges, or EITHER SIDE KEEPS NONE OF THE ENTRIES THE BASE
+ * HAD, that is a genuine semantic conflict and this returns `{ ok: false }`. The caller then falls
+ * back to `git merge-file`, so the floor of this whole mechanism is exactly today's behaviour —
+ * conflict markers a human reads — never a silent mis-merge. A driver that guessed here would be
+ * worse than the conflict it replaced. Every ambiguous case is biased toward refusing: this file
+ * rewrites the project's permanent history, so a conflict costs a human five minutes and a
+ * plausible-looking result costs entries nobody notices are gone.
  *
  * KNOWN LIMIT, STATED RATHER THAN DISCOVERED LATER. Identity is the heading plus an occurrence
  * index, so adding an entry whose heading is byte-identical to an existing one (same date AND same
@@ -48,8 +51,16 @@ const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/
  * A fence opens or closes a code block. Entries in this log quote shell and markdown, so a
  * `## ` INSIDE a fence is sample text, not a heading — treating it as one would cut an entry in
  * half and let a merge place another entry between the halves.
+ *
+ * THE DELIMITER IS CAPTURED BECAUSE A FENCE IS CLOSED ONLY BY ITS OWN KIND. An earlier cut of this
+ * matched `(```|~~~)` and flipped a single boolean on either one, so a `~~~` quoted INSIDE a
+ * backtick fence ended the block early and the sample `## ` heading three lines later parsed as a
+ * real entry — after which a concurrent addition was placed INSIDE the original entry's code
+ * block. Per CommonMark a closing fence uses the SAME character, is at least as long as the
+ * opening run, and carries nothing after it but whitespace; an info string (```` ```md ````) marks
+ * an opening fence and can never close one. All three of those are enforced in `parseLog`.
  */
-const FENCE = /^\s*(```|~~~)/
+const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
 
 export interface LogEntry {
   /**
@@ -84,11 +95,23 @@ export function parseLog(text: string): ParsedLog {
   const entries: LogEntry[] = []
   const seen = new Map<string, number>()
   let current: LogEntry | null = null
-  let fenced = false
+  /** The delimiter that OPENED the block we are inside, or `null` outside any block. */
+  let fence: { char: string; length: number } | null = null
 
   for (const line of lines) {
-    if (FENCE.test(line)) fenced = !fenced
-    if (!fenced && HEADING.test(line)) {
+    const delimiter = FENCE.exec(line)
+    if (delimiter !== null) {
+      const run = delimiter[1] as string
+      const trailer = delimiter[2] as string
+      if (fence === null) {
+        fence = { char: run[0] as string, length: run.length }
+      } else if (run[0] === fence.char && run.length >= fence.length && trailer.trim() === '') {
+        fence = null
+      }
+    }
+    // A line that is itself a fence delimiter is never a heading, whichever side of the block it
+    // sits on, so it is excluded here rather than depending on the order the state was updated in.
+    if (fence === null && delimiter === null && HEADING.test(line)) {
       if (current !== null) entries.push(current)
       const heading = line.trimEnd()
       const occurrence = (seen.get(heading) ?? 0) + 1
@@ -153,10 +176,36 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
   const A = parseLog(ours)
   const B = parseLog(theirs)
 
+  const inO = index(O)
+  const inA = index(A)
+  const inB = index(B)
+
   // A file with no entries is not this log — a rename, a truncation, something unexpected. Let
   // git's own merge handle it rather than inventing structure that is not there.
   if (A.entries.length === 0 && B.entries.length === 0) {
     return { ok: false, reason: 'neither side parses as an entry log' }
+  }
+
+  // …AND THE SAME JUDGEMENT APPLIES TO ONE SIDE ALONE, WHICH IS WHERE THIS SILENTLY LOST HISTORY.
+  // The guard above used to be the only one, so a malformed side was merged as though every entry
+  // it lacks had been DELIBERATELY DELETED. Concretely: base holds one entry, `ours` is the single
+  // line `TRUNCATED`, `theirs` adds a new entry above the old one — both sides changed, so this is
+  // a live driver path — and the old entry came back out as "deleted by us, untouched by them" and
+  // vanished, under an `ok: true` that no human ever reads a diff of. A side that keeps NONE of
+  // the entries the base had is a truncation, a rename or a bad apply, never a considered edit to
+  // an append-only log, and the honest answer is the conflict this file's floor already promises.
+  // Note this refuses on what SURVIVED rather than on the entry count, so a side that replaced the
+  // whole log with different entries is caught by the same rule.
+  if (O.entries.length > 0) {
+    const keptByUs = O.entries.filter((entry) => inA.has(entry.key)).length
+    const keptByThem = O.entries.filter((entry) => inB.has(entry.key)).length
+    if (keptByUs === 0 || keptByThem === 0) {
+      const side = keptByUs === 0 ? 'ours' : 'theirs'
+      return {
+        ok: false,
+        reason: `the ${side} side keeps none of the ${O.entries.length} entries the base had — refusing to merge what looks like a truncated log`,
+      }
+    }
   }
 
   const preambleA = A.preamble.join('\n')
@@ -166,10 +215,6 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
   if (preambleA === preambleB || preambleB === preambleO) preamble = A.preamble
   else if (preambleA === preambleO) preamble = B.preamble
   else return { ok: false, reason: 'both sides changed the log header differently' }
-
-  const inO = index(O)
-  const inA = index(A)
-  const inB = index(B)
 
   // (1) Entries the base already had, in the base's order, with each side's edits applied.
   const retained: LogEntry[] = []

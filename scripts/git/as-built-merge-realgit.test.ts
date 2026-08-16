@@ -22,7 +22,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -218,5 +218,141 @@ describe('two concurrent builds publishing against a moved base', () => {
     const { applied, unmerged } = replay(repo, forkPoint, 'mutation')
     expect(applied.ok).toBe(false)
     expect(unmerged).toEqual(['docs/AS_BUILT.md'])
+  }, 30_000)
+})
+
+/**
+ * The installer's own header promises the two halves arrive "together or not at all". It has no
+ * `errexit` and cannot safely take one — a `--unset` of an absent key exits 5 and a `grep -v` with
+ * no output exits 1, both normal here — so that promise is kept by hand, and therefore has to be
+ * tested by hand.
+ *
+ * TWO DISTINCT BAD STATES, MEASURED ON git 2.50.1 RATHER THAN ASSUMED:
+ *
+ *   • `merge.<name>.name` set with no `.driver` — git finds a declared driver with no command and
+ *     REFUSES the merge outright:
+ *
+ *         fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+ *
+ *     A clone in this state believes it is installed and cannot merge this path at all, which is
+ *     strictly worse than the conflict the driver removes. Reachable in the unfixed script whenever
+ *     the first config write lands and the second does not.
+ *
+ *   • the attribute written with NO config at all — git falls back to its built-in merge silently,
+ *     so the clone reports "merge drivers: installed" and goes on conflicting exactly as before.
+ *     Quieter, still a lie. Reachable in the unfixed script whenever the config is unwritable: the
+ *     writes failed, nothing checked them, and the attribute was appended anyway on exit 0.
+ */
+describe('the installer under a locked config — the half-installed state must be impossible', () => {
+  function freshRepo(): string {
+    const repo = mkdtempSync(join(tmpdir(), 'as-built-lock-'))
+    created.push(repo)
+    git(repo, 'init', '-q', '-b', 'main')
+    mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+    cpSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), join(repo, 'scripts', 'install-merge-drivers.sh'))
+    cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-merge-driver.ts'), join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
+    cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-log-merge.ts'), join(repo, 'scripts', 'git', 'as-built-log-merge.ts'))
+    return repo
+  }
+
+  function commonDir(repo: string): string {
+    return git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.trim()
+  }
+
+  function attributes(repo: string): string {
+    const path = join(commonDir(repo), 'info', 'attributes')
+    return existsSync(path) ? readFileSync(path, 'utf8') : ''
+  }
+
+  test('a config write it cannot make is LOUD, and writes no attribute', () => {
+    const repo = freshRepo()
+    const lock = join(commonDir(repo), 'config.lock')
+    writeFileSync(lock, '')
+
+    const install = run(repo, ['bash', 'scripts/install-merge-drivers.sh'])
+
+    // Loud: the old script exited 0 here, having written the fatal half.
+    expect(install.ok).toBe(false)
+    expect(install.stderr).toContain('NOT INSTALLED')
+
+    // And the state it left is the SAFE one, not the fatal one.
+    expect(attributes(repo)).not.toContain('merge=as-built-log')
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(false)
+
+    // CONTROL — the lock is what stopped it, not something incidental about this repo: remove it,
+    // change nothing else, and the same command installs both halves.
+    rmSync(lock)
+    const retry = run(repo, ['bash', 'scripts/install-merge-drivers.sh'])
+    expect(retry.ok).toBe(true)
+    expect(attributes(repo)).toContain('merge=as-built-log')
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+  }, 30_000)
+
+  test('a lock arriving AFTER a successful install cannot leave an orphaned attribute behind', () => {
+    // The attribute is already present and correct; a re-run that cannot confirm the driver must
+    // not be the thing that strands it. (Re-running an installer is routine — every build does.)
+    const repo = freshRepo()
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    const lock = join(commonDir(repo), 'config.lock')
+    writeFileSync(lock, '')
+    const rerun = run(repo, ['bash', 'scripts/install-merge-drivers.sh'])
+    expect(rerun.ok).toBe(false)
+    rmSync(lock)
+
+    // Whatever the re-run did, the clone is never left with an attribute git has no driver for:
+    // either both halves are present, or neither is.
+    const hasAttribute = attributes(repo).includes('merge=as-built-log')
+    const hasDriver = run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim() !== ''
+    expect(hasAttribute).toBe(hasDriver)
+  }, 30_000)
+
+  test('the SECOND config write failing leaves no declared-but-commandless driver behind', () => {
+    // This is the exit-128 state specifically, and a whole-config lock cannot produce it: it needs
+    // `merge.<name>.name` to LAND and `merge.<name>.driver` to fail, i.e. a failure arriving between
+    // two writes the unfixed script made back to back and checked neither of. A `git` shim that
+    // rejects exactly the second key reproduces that window deterministically.
+    const repo = freshRepo()
+    const realGit = Bun.which('git')
+    expect(realGit).not.toBeNull()
+
+    const bin = join(repo, 'shim-bin')
+    mkdirSync(bin, { recursive: true })
+    const shim = join(bin, 'git')
+    writeFileSync(
+      shim,
+      [
+        '#!/usr/bin/env bash',
+        'for arg in "$@"; do',
+        '  if [ "$arg" = "merge.as-built-log.driver" ]; then',
+        '    echo "error: could not lock config file .git/config: File exists" >&2',
+        '    exit 255',
+        '  fi',
+        'done',
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        '',
+      ].join('\n'),
+    )
+    chmodSync(shim, 0o755)
+
+    const res = Bun.spawnSync(['bash', 'scripts/install-merge-drivers.sh'], {
+      cwd: repo,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(res.exitCode).not.toBe(0)
+
+    // The lone `.name` — the thing that makes git refuse the merge with exit 128 — is gone, and the
+    // attribute that would point at it was never written.
+    const name = run(repo, ['git', 'config', '--get', 'merge.as-built-log.name'])
+    expect(name.stdout.trim()).toBe('')
+    expect(attributes(repo)).not.toContain('merge=as-built-log')
+
+    // CONTROL — the shim is what stopped it: the identical command without it installs both halves.
+    const clean = run(repo, ['bash', 'scripts/install-merge-drivers.sh'])
+    expect(clean.ok).toBe(true)
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).not.toBe('')
+    expect(attributes(repo)).toContain('merge=as-built-log')
   }, 30_000)
 })

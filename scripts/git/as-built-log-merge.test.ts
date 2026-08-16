@@ -54,6 +54,78 @@ describe('parse/serialize', () => {
     expect(serializeLog(parsed)).toBe(text)
   })
 
+  test('a `~~~` inside a BACKTICK fence does not end it — a mismatched delimiter is body text', () => {
+    // The regression: the fence state was one boolean flipped by EITHER delimiter, so the `~~~`
+    // below closed the backtick block three lines early and the sample heading after it parsed as a
+    // real entry — after which a concurrent addition could be placed INSIDE this entry's code block.
+    const text = log(
+      '## 2026-08-16 — quotes a doc that itself quotes code\n\n```md\nintro\n~~~\n## 2000-01-01 — sample only\n```\n\ntail\n\n',
+    )
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(1)
+    expect(parsed.entries[0]!.lines.join('\n')).toContain('## 2000-01-01 — sample only')
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
+  test('a TILDE fence is closed by tildes and not by backticks', () => {
+    const text = log('## 2026-08-16 — tilde fenced\n\n~~~md\n```\n## 2000-01-01 — sample only\n```\n~~~\n\ntail\n\n')
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(1)
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
+  test('an info string opens a fence and never closes one', () => {
+    // ```` ```md ```` is an OPENING fence with a language tag; a closing fence carries nothing but
+    // whitespace. Reading it as a close ends the block early and exposes the sample heading below.
+    const text = log('## 2026-08-16 — quotes markdown about markdown\n\n```\nsample:\n```md\n## 2000-01-01 — sample only\n```\n\ntail\n\n')
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(1)
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
+  test('a longer closing run closes a shorter fence; a shorter one does not', () => {
+    // CommonMark: the closing run must be at least as long as the opening one, so the inner ``` is
+    // body text and the ```` closes the block.
+    const text = log('## 2026-08-16 — nested\n\n````md\n```\n## 2000-01-01 — sample only\n```\n````\n\ntail\n\n')
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(1)
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
+  test('an INDENTED fence opens and closes at its own indentation', () => {
+    const text = log('## 2026-08-16 — fenced inside a list\n\n- item:\n\n  ```md\n## 2000-01-01 — sample only\n  ```\n\ntail\n\n')
+    const parsed = parseLog(text)
+    expect(parsed.entries.length).toBe(1)
+    expect(serializeLog(parsed)).toBe(text)
+  })
+
+  test('the fence bug END TO END — a concurrent addition never lands inside an entry\'s code block', () => {
+    // The shape that made the parse bug a corruption bug: with the sample heading read as a real
+    // entry, the addition sorted between the two halves and was written INTO the code block.
+    // The additions are dated BETWEEN the real entry and the sample heading inside its fence, which
+    // is what turns the parse bug into a corruption bug: with the block ended early the sample reads
+    // as a 2000-01-01 entry, and both additions sort into the gap — i.e. into the code block.
+    const quoting = '## 2026-08-16 — quotes a doc that itself quotes code\n\n```md\nintro\n~~~\n## 2000-01-01 — sample only\nstill sample\n```\n\ntail\n\n'
+    const mid_one = '## 2020-06-02 — a build from between the two dates\n\nmid body one\n\n'
+    const mid_two = '## 2020-06-01 — another build from between them\n\nmid body two\n\n'
+    const base = log(quoting)
+    const res = mergeAsBuiltLog(base, log(quoting, mid_one), log(quoting, mid_two))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    const lines = res.text.split('\n')
+    const fenceOpen = lines.indexOf('```md')
+    const fenceClose = lines.lastIndexOf('```')
+    expect(fenceOpen).toBeGreaterThan(-1)
+    expect(fenceClose).toBeGreaterThan(fenceOpen)
+    for (const heading of ['## 2020-06-02 — a build from between the two dates', '## 2020-06-01 — another build from between them']) {
+      const at = lines.indexOf(heading)
+      expect(at).toBeGreaterThan(-1)
+      expect(at > fenceOpen && at < fenceClose).toBe(false)
+    }
+    // …and the quoted sample is still one uninterrupted block.
+    expect(res.text).toContain('```md\nintro\n~~~\n## 2000-01-01 — sample only\nstill sample\n```')
+  })
+
   test('repeated headings stay distinct entries', () => {
     // The real log genuinely repeats four headings verbatim; folding them would delete history.
     const dup = '## 2026-08-09 — Model usage on the phone\n\nfirst\n\n'
@@ -176,6 +248,48 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
 
   test('a file that is not an entry log is handed back to git', () => {
     expect(mergeAsBuiltLog('nothing', 'no entries here', 'none here either').ok).toBe(false)
+  })
+
+  test('ONE side arriving truncated is a conflict, not a licence to delete the history it lacks', () => {
+    // The defect this pins: the refusal used to require BOTH sides to be entryless, so a malformed
+    // single side was merged as though every entry it lacks had been deliberately deleted. `old`
+    // exists in the base and in theirs, ours is a truncation, and the result used to be `ok: true`
+    // carrying the new entry with `old` silently gone — from an append-only history, under a
+    // success no human reads a diff of.
+    const base = log(OLD_A)
+    const res = mergeAsBuiltLog(base, 'TRUNCATED\n', log(NEW_ONE, OLD_A))
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.reason).toContain('truncated')
+  })
+
+  test('…and the same when it is THEIRS that arrives truncated', () => {
+    const base = log(OLD_A)
+    expect(mergeAsBuiltLog(base, log(NEW_ONE, OLD_A), 'TRUNCATED\n').ok).toBe(false)
+  })
+
+  test('a side that replaces every entry with different ones is refused too — the rule is what SURVIVED', () => {
+    // Not entryless, so an entry-COUNT check would wave this through; every entry the base had is
+    // still gone. Refusing on survivors catches a bad apply and a wholesale rewrite alike.
+    const base = log(OLD_A, OLD_B)
+    expect(mergeAsBuiltLog(base, log(NEW_ONE), log(NEW_TWO, OLD_A, OLD_B)).ok).toBe(false)
+  })
+
+  test('CONTROL — a side keeping even ONE base entry still merges, so the guard is not "refuse everything"', () => {
+    const base = log(OLD_A, OLD_B)
+    const res = mergeAsBuiltLog(base, log(NEW_ONE, OLD_B), log(NEW_TWO, OLD_A, OLD_B))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toContain('body one')
+    expect(res.text).toContain('body two')
+    expect(res.text).toContain('body of oldest thing')
+  })
+
+  test('an empty base is still merged — the guard is about LOSING history, not about having none', () => {
+    const res = mergeAsBuiltLog(HEADER, HEADER, HEADER + NEW_ONE)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toContain('body one')
   })
 
   test('KNOWN LIMIT — a new entry colliding with an old heading keeps BOTH; only order is odd', () => {
