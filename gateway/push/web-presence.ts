@@ -8,20 +8,31 @@
  * ── WHY THIS IS A NEW SIGNAL AND NOT A NEW INFERENCE ───────────────────────
  *
  * The obvious implementation is to skip the push when a socket is open, and it
- * is wrong. The comment above the notify in `gateway/http/deliver.ts:429` had
+ * is wrong. The comment above the notify in `gateway/http/deliver.ts` had
  * already argued the mobile half of it: Android keeps the app-ws socket open
  * while the app sits in the background, so gating on `delivered_live` would
  * silence exactly the case a notification exists for. A browser tab holds its
  * socket the same way — minimised, behind another window, on a sleeping laptop.
  * "Connected" has never meant "looking".
  *
- * Nor did the client know. `chat-core/ws-client.ts:175-195` `setActive` reacts to
- * the very signal we want (`document.visibilityState`, wired at
- * `landing/chat-react/useNeutronChat.ts:65`) and does nothing with it but start
- * and stop its own heartbeat — it has never sent a byte to the server. So the
- * gateway genuinely did not have this information, and the fix is a client that
- * says so out loud (`AppWsInboundPresence`), not a cleverer reading of what it
- * already had.
+ * Nor did the client know. `chat-core/ws-client.ts` `setActive` reacts to a
+ * signal near the one we want (`document.visibilityState`, wired at
+ * `landing/chat-react/useNeutronChat.ts`) and does nothing with it but start and
+ * stop its own heartbeat — it has never sent a byte to the server. So the gateway
+ * genuinely did not have this information, and the fix is a client that says so
+ * out loud (`AppWsInboundPresence`), not a cleverer reading of what it already
+ * had.
+ *
+ * "NEAR THE ONE WE WANT" IS DOING WORK IN THAT SENTENCE, and the first cut of
+ * this feature spent it. Visibility is not attention: a chat tab on a second
+ * monitor is `visible` for as long as the machine is awake, so a client reporting
+ * visibility alone re-declares `foreground` every twenty seconds forever and the
+ * TTL below never fires — the expiry ends up protecting against a browser that
+ * DIED rather than against a live one at rest, which is where a chat tab spends
+ * most of its life. `landing/chat-react/web-attention.ts` computes the real
+ * answer (visible AND focused AND recently interacted with) and reports it
+ * through `setAttentive`, kept separate from `setActive` so an idle tab loses its
+ * presence claim without losing its socket.
  *
  * ── THE FAILURE MODE THIS MODULE IS SHAPED AROUND ──────────────────────────
  *
@@ -72,9 +83,15 @@
  * `open/wiring/app-ws-marker.ts` exist. And because there are TWO push call
  * sites — `gateway/http/deliver.ts` for out-of-turn posts and the `ownsNotify`
  * branch of `open/composer.ts`'s app-ws send path for ordinary replies — which
- * must not answer this question differently. They can't: both consume the ONE
- * sink built at `open/composer.ts:2575`, and the wrapper goes on at that single
- * construction, above both.
+ * must not answer this question differently. They can't: both consume ONE sink,
+ * and the wrapper goes on at its single construction, above both.
+ *
+ * That construction is itself a module — `open/wiring/chat-push-sink.ts` — for
+ * the same reason one level out. While it was six inline lines in the composer,
+ * "the wrapper is actually applied" and "the question is asked per-conversation"
+ * were claims no test could reach, so deleting the wrapper or quietly dropping
+ * `msg.project_id` from the predicate left the whole repo green and the owner's
+ * phone silent. Both mutations now red a test.
  *
  * ── WHAT THIS IS NOT ───────────────────────────────────────────────────────
  *

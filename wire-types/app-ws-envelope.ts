@@ -116,7 +116,7 @@ export interface AppWsInboundButtonChoice {
  * he is already reading on the web app.
  *
  * THIS FRAME EXISTS BECAUSE NOTHING ELSE ON THIS SOCKET ANSWERS THE QUESTION.
- * The client's `setActive` (`chat-core/ws-client.ts:175-195`) only starts and
+ * The client's `setActive` (`chat-core/ws-client.ts`) only starts and
  * stops the LOCAL heartbeat — it has never sent a byte to the server — so the
  * only presence signal the gateway had was "a socket is open", and that is an
  * explicitly rejected proxy: a backgrounded tab (like a backgrounded Android
@@ -135,7 +135,19 @@ export interface AppWsInboundButtonChoice {
 export interface AppWsInboundPresence {
   v: 1
   type: 'presence'
-  /** `foreground` = the owner is looking at this client right now. */
+  /**
+   * `foreground` = the owner is ACTIVELY USING this client right now.
+   *
+   * Not "the tab is un-hidden" — that is a much weaker claim and sending it here
+   * would be a bug, because a visible-but-unattended tab would then silence the
+   * owner's phone for as long as it stayed open. The web client computes the real
+   * answer in `landing/chat-react/web-attention.ts` (visible AND focused AND
+   * recently interacted with) before it sends this.
+   *
+   * THE FRAME CARRIES NO SCOPE, deliberately: the server attributes it to the
+   * SOCKET, which already knows its own `project_id`, and a client-supplied scope
+   * would be a second thing that could disagree with the connection it arrived on.
+   */
   state: 'foreground' | 'background'
 }
 
