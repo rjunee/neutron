@@ -117,4 +117,43 @@ describe('the boot resolver and the CLI resolver agree', () => {
     expect(resolveOwnerSlug(env)).toBe('live-owner')
     expect(bootSlug(env)).toBe('live-owner')
   })
+
+  /**
+   * ASKING WHO I AM MUST NOT REQUIRE THE WHOLE ENVIRONMENT TO BE VALID.
+   *
+   * The first attempt at the agreement above delegated both wrappers to
+   * `resolveBootConfig`, which validates every numeric knob — so an unrelated
+   * `NEUTRON_PORT=bad` threw a ZodError out of `neutron doctor`, past the
+   * `{ok:false}` contract `collectCliDiagnostics` documents. The agreement was
+   * right; the price was not.
+   *
+   * Both wrappers now take `resolveIdentityConfig`: same three inputs, same
+   * body, no unrelated validation.
+   */
+  it('answers identically whether or not an UNRELATED setting is malformed', () => {
+    writeFileSync(join(home, '.url_slug'), 'renamed\n', 'utf8')
+    const clean = { NEUTRON_HOME: home, NEUTRON_INSTANCE_SLUG: 'old' } as NodeJS.ProcessEnv
+    const malformed = { ...clean, NEUTRON_PORT: 'bad' } as NodeJS.ProcessEnv
+
+    // CONTROL — boot itself STILL fails loudly on the bad knob. The fix narrowed
+    // the identity question, it did not silence the validation.
+    expect(() => resolveBootConfig(malformed)).toThrow()
+
+    // The identity answer is unchanged, on the file axis (the one that needs the
+    // resolved home) and through both wrappers.
+    expect(bootSlug(clean)).toBe('renamed')
+    expect(resolveOwnerSlug(malformed)).toBe('renamed')
+    expect(gatewayResolveOwnerSlug(malformed)).toBe('renamed')
+  })
+
+  it('answers identically with a malformed knob and NO identity env at all', () => {
+    // The axis that hides behind a default: with neither `NEUTRON_HOME` nor
+    // `OWNER_HOME` set, the home is the one `resolveNeutronHome` materialises.
+    // Resolving that is exactly what pulled the full config in, so pin that the
+    // narrow path still reaches the same answer with the environment broken.
+    const clean = {} as NodeJS.ProcessEnv
+    const malformed = { NEUTRON_PORT: 'bad' } as NodeJS.ProcessEnv
+    expect(resolveOwnerSlug(malformed)).toBe(bootSlug(clean))
+    expect(gatewayResolveOwnerSlug(malformed)).toBe(bootSlug(clean))
+  })
 })

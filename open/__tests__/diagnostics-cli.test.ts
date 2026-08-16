@@ -246,6 +246,41 @@ describe('collectCliDiagnostics', () => {
     if (result.ok) return
     expect(result.error).toContain('could not open project.db')
   })
+
+  /**
+   * THE DIAGNOSTIC MUST SURVIVE THE BROKEN CONFIGURATION IT EXISTS TO REPORT.
+   *
+   * A round of this branch made `resolveOwnerSlug` delegate to the full
+   * `resolveBootConfig` so it could no longer disagree with boot about
+   * `.url_slug` or the default home. Correct about the inputs — and it inherited
+   * the validation of every unrelated numeric knob. `diagnostics-cli-impl.ts:32`
+   * calls the resolver OUTSIDE the try that produces `{ok:false}`, so a single
+   * bad `NEUTRON_PORT` made `neutron doctor` throw a ZodError at the operator
+   * instead of printing the state of their box.
+   *
+   * Reproduced before the fix: `NEUTRON_PORT=bad` → `ZodError: NEUTRON_PORT="bad"
+   * is not an integer`.
+   */
+  it('does NOT throw when an UNRELATED setting is malformed', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+
+    // CONTROL — the same env without the bad knob works, so a pass below cannot
+    // come from the fixture being broken in some other way.
+    const clean = collectCliDiagnostics(envFor(dbPath))
+    expect(clean.ok).toBe(true)
+
+    const env = { ...envFor(dbPath), NEUTRON_PORT: 'bad' } as NodeJS.ProcessEnv
+    const result = collectCliDiagnostics(env)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // …and the identity is still the RIGHT one. A `doctor` that survived by
+    // resolving the wrong slug would report an empty instance, which is the
+    // failure mode the slug work on this branch exists to close.
+    expect(result.report.project_slug).toBe('demo')
+  })
 })
 
 describe('formatDiagnosticsText', () => {

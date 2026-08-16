@@ -23,7 +23,12 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (signup/, provisioning/, identity/, proxy/).
 import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph, type MemoryHealthProvider } from './composition.ts'
 import { LoopRegistry } from '@neutronai/loop'
-import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
+import {
+  resolveBootConfig,
+  resolveIdentityConfig,
+  type BootConfig,
+  type IdentityConfig,
+} from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
 
@@ -161,8 +166,11 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
   // returned `dev`.
   //
   // There is no version of "copy the inputs correctly" that stays correct. Use
-  // the same function boot uses to decide what the inputs ARE.
-  return resolveOwnerSlugSourceFromConfig(resolveBootConfig(env)).slug
+  // the same function boot uses to decide what the inputs ARE — but only the
+  // IDENTITY slice of it. Delegating to the full `resolveBootConfig` also
+  // inherited its validation of every unrelated numeric knob, which turned
+  // `NEUTRON_PORT=bad` into a throw out of `neutron doctor`.
+  return resolveOwnerSlugSourceFromConfig(resolveIdentityConfig(env)).slug
 }
 
 /**
@@ -204,7 +212,7 @@ export interface OwnerSlugResolution {
  * a live `NEUTRON_HOME` re-keyed every credential row onto the `'dev'` fallback,
  * and the running gateway — frozen on its real handle — read zero secrets). A
  * bare string cannot carry that distinction, and `config.instanceSlug` is
- * `undefined` exactly when the env var was absent (`config/index.ts:393`), so it
+ * `undefined` exactly when the env var was absent (`config/index.ts:428`), so it
  * is recoverable HERE and nowhere later.
  *
  * Precedence: `.url_slug` file > `instanceSlug` > `'dev'`. An EXPLICIT
@@ -218,8 +226,15 @@ export interface OwnerSlugResolution {
  * told the credential direction guard this process knows who it is and let an
  * explicit migration move rows onto the empty handle. An empty variable is not
  * an identity; it is the absence of one wearing its shape.
+ *
+ * TAKES `IdentityConfig`, NOT `BootConfig`. It only ever read those three
+ * fields, and demanding the whole config forced every caller to VALIDATE the
+ * whole environment first — which is how an unrelated `NEUTRON_PORT=bad` began
+ * throwing out of `neutron doctor`. `BootConfig extends IdentityConfig`, so
+ * boot still passes its frozen config here unchanged and the three resolvers
+ * still share one body.
  */
-export function resolveOwnerSlugSourceFromConfig(config: BootConfig): OwnerSlugResolution {
+export function resolveOwnerSlugSourceFromConfig(config: IdentityConfig): OwnerSlugResolution {
   const ownerHome = config.ownerHome ?? config.neutronHome
   if (ownerHome !== undefined && ownerHome !== '') {
     const slugFile = join(ownerHome, '.url_slug')

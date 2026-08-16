@@ -15,7 +15,7 @@
 
 import type { PlatformInstanceInfo } from '@neutronai/runtime/platform-adapter.ts'
 import { resolveOwnerSlugSourceFromConfig } from '@neutronai/gateway/index.ts'
-import { resolveBootConfig } from '@neutronai/config/index.ts'
+import { resolveIdentityConfig } from '@neutronai/config/index.ts'
 
 // `resolveNeutronHome` + `resolveOpenDbPath` moved to `../migrations/db-path.ts`
 // (L3, 2026-07) so the `migrations` leaf no longer imports UP into `open`.
@@ -57,7 +57,16 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
   // Same function boot uses to decide what the inputs ARE — see the twin in
   // `gateway/index.ts`. Copying env vars by hand kept being not-quite-right in
   // a new way each review round.
-  return resolveOwnerSlugSourceFromConfig(resolveBootConfig(env)).slug
+  //
+  // THE IDENTITY SLICE, NOT THE WHOLE CONFIG. This briefly called
+  // `resolveBootConfig`, which validates every numeric knob in the environment
+  // — so an unrelated `NEUTRON_PORT=bad` threw a ZodError from here, and
+  // `diagnostics-cli-impl.ts:32` calls this OUTSIDE its try, so the throw
+  // escaped `collectCliDiagnostics`' documented `{ok:false}` contract. A
+  // diagnostic tool must survive the broken configuration it exists to report.
+  // `resolveIdentityConfig` is the same code path boot's config takes for these
+  // three fields, so the agreement the previous rounds established is intact.
+  return resolveOwnerSlugSourceFromConfig(resolveIdentityConfig(env)).slug
 }
 
 /**

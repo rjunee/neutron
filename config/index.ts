@@ -271,7 +271,36 @@ export interface BootConfigSecrets {
   readonly claudeCodeOauthToken: string | undefined
 }
 
-export interface BootConfig {
+/**
+ * THE THREE INPUTS TO "WHICH INSTANCE AM I", and nothing else.
+ *
+ * `resolveOwnerSlugSourceFromConfig` (gateway/index.ts) reads exactly these
+ * three fields off {@link BootConfig} — the effective owner home it looks for
+ * `.url_slug` in, and the raw `NEUTRON_INSTANCE_SLUG`. It never reads a port, a
+ * model id or an upload cap.
+ *
+ * They live in their own interface because ASKING WHO I AM MUST NOT REQUIRE THE
+ * WHOLE ENVIRONMENT TO BE VALID. A prior round made the CLI's slug resolver
+ * delegate to `resolveBootConfig` — correct about the inputs, and it dragged
+ * every unrelated numeric knob's validation along with it, so `NEUTRON_PORT=bad`
+ * made `neutron doctor` THROW out of `collectCliDiagnostics` instead of
+ * returning its documented `{ok:false}` (open/diagnostics-cli-impl.ts:32 calls
+ * the resolver outside the try). A diagnostic that dies on the malformed
+ * configuration it exists to report is the one failure mode it cannot have.
+ *
+ * `BootConfig` structurally satisfies this, so boot keeps passing its frozen
+ * full config and there is still exactly ONE resolver body.
+ */
+export interface IdentityConfig {
+  /** Effective `NEUTRON_HOME` — including the `~/neutron` default. */
+  readonly neutronHome: string
+  /** Raw `OWNER_HOME`; the `.url_slug` lookup prefers it over `neutronHome`. */
+  readonly ownerHome: string | undefined
+  /** Raw `NEUTRON_INSTANCE_SLUG` — `undefined` exactly when the var was absent. */
+  readonly instanceSlug: string | undefined
+}
+
+export interface BootConfig extends IdentityConfig {
   /** Raw `NODE_ENV` (compared `=== 'test'` / `=== 'production'` at read sites). */
   readonly nodeEnv: string | undefined
   /** Resolved deployment role (`NEUTRON_ROLE`, default `open`). */
@@ -280,8 +309,10 @@ export interface BootConfig {
   readonly hostedRelayMetered: boolean
 
   // identity / paths -------------------------------------------------------
-  readonly neutronHome: string
-  readonly ownerHome: string | undefined
+  // `neutronHome` / `ownerHome` / `instanceSlug` are INHERITED from
+  // `IdentityConfig` and deliberately not re-declared: two declarations of the
+  // same field are two places to change it, and the whole point of that
+  // interface is that there is one answer to "which instance am I".
   /**
    * THE resolved SQLite path — `NEUTRON_DB_PATH` else `<neutronHome>/project.db`
    * (the `migrations/db-path.ts` single-source precedence). This unifies the
@@ -290,7 +321,6 @@ export interface BootConfig {
    * brief) — both entrypoints now resolve the SAME file through here.
    */
   readonly dbPath: string
-  readonly instanceSlug: string | undefined
   readonly agentName: string | undefined
   readonly codexHome: string | undefined
   readonly landingStaticDir: string | undefined
@@ -361,6 +391,45 @@ function hostedRelayMarker(raw: string | undefined): boolean {
 }
 
 /**
+ * The identity-only slice of {@link bootEnvSchema} — three raw vars, every one
+ * of them a plain optional string, so parsing it CANNOT fail on a malformed
+ * knob it does not contain.
+ *
+ * `NEUTRON_DB_PATH` is deliberately absent: `resolveNeutronHome`
+ * (`migrations/db-path.ts:35-41`) reads only `NEUTRON_HOME` then `OWNER_HOME`
+ * then the `~/neutron` default — it never looks at the DB path. Passing it
+ * would suggest a precedence that does not exist.
+ */
+const identityEnvSchema = bootEnvSchema.pick({
+  NEUTRON_HOME: true,
+  OWNER_HOME: true,
+  NEUTRON_INSTANCE_SLUG: true,
+})
+
+/**
+ * Resolve ONLY the three identity inputs (see {@link IdentityConfig}).
+ *
+ * `resolveBootConfig` below calls this for its own identity fields, so the
+ * `~/neutron` default that `resolveNeutronHome` materialises when neither
+ * `NEUTRON_HOME` nor `OWNER_HOME` is set is computed in ONE place and boot, the
+ * gateway wrapper and the CLI cannot drift apart on it — which is what the
+ * previous rounds were fixing. What this does NOT do is validate `NEUTRON_PORT`
+ * or any other knob: `neutron doctor`'s whole job is to run on a box whose
+ * configuration is broken.
+ */
+export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig {
+  const e = identityEnvSchema.parse(env)
+  return {
+    neutronHome: resolveNeutronHome({
+      NEUTRON_HOME: e.NEUTRON_HOME,
+      OWNER_HOME: e.OWNER_HOME,
+    }),
+    ownerHome: e.OWNER_HOME,
+    instanceSlug: e.NEUTRON_INSTANCE_SLUG,
+  }
+}
+
+/**
  * Resolve + validate the process environment ONCE into a frozen BootConfig.
  * Throws (aggregated Zod error) if any numeric knob is malformed — the loud
  * failure that replaces the old silent-`NaN` behavior.
@@ -378,6 +447,11 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
     NEUTRON_DB_PATH: e.NEUTRON_DB_PATH,
   }
 
+  // The identity slice comes from the SAME function the slug-only callers use,
+  // so a full boot and a `neutron doctor` on the same box cannot disagree about
+  // which instance they are looking at.
+  const identity = resolveIdentityConfig(env)
+
   const disableAmbientRaw = e.NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH
   const skipRaw = e.NEUTRON_SKIP_GBRAIN
 
@@ -387,10 +461,10 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
     hostedRelayMetered:
       normalizeRole(e.NEUTRON_ROLE) === 'connect' && hostedRelayMarker(e.NEUTRON_CONNECT_METERED),
 
-    neutronHome: resolveNeutronHome(dbEnv),
-    ownerHome: e.OWNER_HOME,
+    neutronHome: identity.neutronHome,
+    ownerHome: identity.ownerHome,
     dbPath: resolveOpenDbPath(dbEnv),
-    instanceSlug: e.NEUTRON_INSTANCE_SLUG,
+    instanceSlug: identity.instanceSlug,
     agentName: e.NEUTRON_AGENT_NAME,
     codexHome: e.NEUTRON_CODEX_HOME,
     landingStaticDir: e.NEUTRON_LANDING_STATIC_DIR,
