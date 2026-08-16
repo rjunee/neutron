@@ -2,6 +2,38 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
+
+Landed via PR #331.
+
+The owner's sentence was the spec: *"my sessions need to wake up and check every 5min … and
+actually take actions to get this moving."* The thing that makes the reference agent work all
+night is a SERVER-SIDE tick, not a session-side timer — and this tree already wrote that lesson
+down once (`trident/tick.ts` replaced the legacy ScheduleWakeup driver with an in-process sweep,
+for the same reason: a session-bound schedule dies with its session, silently). So the new
+`work-wakeup` loop (`gateway/proactive/work-wakeup.ts`, 12th composer loop) sweeps every five
+minutes: each Work Board item `in_progress` with no live bound run gets its project's warm chat
+session re-entered with a continue-work turn — the same substrate entry, session keying
+(`metering_context.project_id`) and `--tools` surface as a fired reminder, which is what lands
+the turn ON the owner's session instead of evicting it. Arming is the board itself: no second
+queue, durable across restarts, and the trident tick keeps sole custody of items a run is
+already driving.
+
+**Quiet on progress, loud on trouble.** Reports post as durable inert chat rows with the device
+buzz suppressed — the deliver envelope grew an explicit `notify: 'suppress'` opt-out
+(`gateway/http/deliver.ts`), a narrow exception that keeps "forgetting still notifies" true. A
+`BLOCKED:` reply and a wakeup mechanism failure buzz normally (first failure and every sixth).
+An owner-activity grace window (30 min, person-only watermark) keeps the loop out of a session
+he is actively driving.
+
+**And a degraded reminder now names its route.** Three fired reminders degraded in one night
+and the journal carried only the downstream `nudge_refused` guard — the per-route diagnostics
+sat on the debug level the production `info` filter drops, so no one could tell WHICH of the
+three degrade routes fired. Each route now emits one structured `warn`
+(`event=nudge_degraded`, `route=no_llm|compose_failed|over_max_body_chars`, bounded reason,
+zero bytes of stored intent), so the next degraded cycle diagnoses itself instead of inviting
+another guess.
+
 ## 2026-08-16 — the review-readiness gate stops failing open
 
 Three defects in the gate that resolves which status checks a PR's base branch
