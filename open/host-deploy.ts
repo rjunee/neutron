@@ -110,11 +110,56 @@ export const HOST_DEPLOY_SUBJECT_CAP = 120
 export const HOST_DEPLOY_URL_SERVICE = 'host_deploy_url' as const
 export const HOST_DEPLOY_TOKEN_SERVICE = 'host_deploy_token' as const
 
-/** Hard ceiling on the ONE authenticated control-plane call. */
-export const HOST_DEPLOY_CALL_TIMEOUT_MS = 30_000
+/**
+ * Hard ceiling on the ONE authenticated control-plane call.
+ *
+ * MEASURED, not guessed. A real deploy is not a request/response — the control
+ * plane checks out the new Open ref, runs its ENTIRE test suite as the contract
+ * gate, installs both dependency trees, and only then restarts with health
+ * waits. Measured on a real deployment (2026-08-15): the checkout landed at
+ * 00:33:44 and the instance came back at 00:34:39 — about 60-90 seconds
+ * end-to-end, on a warm cache.
+ *
+ * At 30s this timer therefore expired on EVERY REAL DEPLOY, without exception,
+ * while the deploy itself went on to succeed. The owner saw "the operation timed
+ * out" and a message telling him nothing had happened, at 00:34, for a deploy
+ * that was at that moment finishing. Three minutes clears the measured envelope
+ * with room for a colder cache or a larger fleet.
+ *
+ * ⚠️ AND IT STILL DOES NOT MAKE A TIMEOUT MEAN "IT FAILED" — see the timeout
+ * branch in `answer()`. A longer wait reduces how often we stop listening; it
+ * cannot turn not-listening into knowledge. Raising this without fixing that
+ * message would have made the lie rarer and therefore harder to catch.
+ */
+export const HOST_DEPLOY_CALL_TIMEOUT_MS = 180_000
 
 /** Hard ceiling on resolving a remote deploy target. */
 export const HOST_DEPLOY_REMOTE_TIMEOUT_MS = 30_000
+
+/**
+ * Did this dispatch failure mean "I stopped waiting", rather than "it failed"?
+ *
+ * `createHostDeployDispatch` aborts with `AbortSignal.timeout(...)`, which
+ * rejects with a `TimeoutError` — the DOMException whose message is literally
+ * "The operation timed out." That is the string the owner was shown.
+ *
+ * MATCHED ON `name`, NOT ON THE MESSAGE. The message is human-facing text that
+ * varies by runtime and locale; `name` is the contract. A `.includes('timed
+ * out')` check would look equivalent, pass every test written against one
+ * runtime, and quietly stop recognising a timeout on another — turning this
+ * branch back into the confident falsehood it exists to remove.
+ *
+ * `AbortError` is deliberately NOT treated as a timeout: that is a deliberate
+ * cancellation by a caller, which is a different fact about the world.
+ */
+export function isDispatchTimeout(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'name' in err &&
+    (err as { name?: unknown }).name === 'TimeoutError'
+  )
+}
 
 /** Longest slice of a control-plane response body echoed into chat. */
 export const HOST_DEPLOY_DETAIL_CAP = 400
@@ -1057,6 +1102,34 @@ export function createHostDeployService(
       })
     } catch (err) {
       const detail = scrubHostDeploySecrets(errText(err), secrets)
+      // A TIMEOUT IS NOT A FAILURE REPORT — it is the absence of one, and the two
+      // must never share a sentence. The request had already been accepted and
+      // authenticated; what expired is OUR patience. The deploy may be running
+      // right now, may have finished, or may yet be refused by the gate, and this
+      // process cannot tell which.
+      //
+      // It said "Nothing was deployed; ask again to retry" — an absence claim
+      // with no evidence behind it, on top of an invitation to re-run an
+      // operation that RESTARTS THE OWNER'S INSTANCE. On 2026-08-15 he got
+      // exactly that message for a deploy that succeeded 55 seconds later, and
+      // the only reason a second one did not follow is that he asked first.
+      //
+      // ⇒ report what is true (we stopped waiting), name the state as unknown,
+      // and point at the check that CAN answer it. Never invite a blind retry of
+      // a non-idempotent action whose outcome is unobserved.
+      if (isDispatchTimeout(err)) {
+        log(`host-deploy call TIMED OUT ref=${ref} sha=${shortSha(approved_sha)}: ${detail}`)
+        return {
+          body:
+            `Approved, and the deploy was requested — but I stopped waiting for the answer after ` +
+            `${Math.round(HOST_DEPLOY_CALL_TIMEOUT_MS / 1000)}s. ${detail}\n\n` +
+            `**It may still be running, and it may already have succeeded.** A deploy takes minutes ` +
+            `(the contract gate runs the full test suite before anything is bumped), so a timeout here ` +
+            `says only that I gave up listening — not that nothing happened.\n\n` +
+            `Ask for the deploy status rather than re-approving: a second deploy would restart the ` +
+            `instance again.`,
+        }
+      }
       log(`host-deploy call failed ref=${ref} sha=${shortSha(approved_sha)}: ${detail}`)
       return {
         body: `Approved, but the deploy request did not go through: ${detail}. Nothing was deployed; ask again to retry.`,

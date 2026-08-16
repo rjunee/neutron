@@ -1706,7 +1706,7 @@ ${task}`
 const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 
 function planProbePrompt() {
-  const planPath = `${planProbeRef}:IMPLEMENTATION_PLAN.md`
+  const planPath = `${planProbeRef}:.trident/plans/${forgeBranch}.md`
   return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
 1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
@@ -1729,9 +1729,10 @@ NEVER EXIT SILENTLY.`
 // saving is the ABSENT SURVEY, not a cheaper model — the routing matches
 // `plan:fable` deliberately, because choosing the next task and writing its
 // execution spec is still the high-value thinking.
-function planNextPrompt(body) {
+function planNextPrompt(body, forgeBranch) {
+  const planPath = `.trident/plans/${forgeBranch}.md`
   return `You are the CONTINUATION PLANNER for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
-A PRIOR ITERATION of this same build regenerated the IMPLEMENTATION_PLAN.md below and committed it to branch ${forgeBranch} with the task it built already marked '- [x]'. That plan is CURRENT. Your job is to pick up where it left off — NOT to re-derive it.
+A PRIOR ITERATION of this same build regenerated ${planPath} below and committed it to branch ${forgeBranch} with the task it built already marked '- [x]'. That plan is CURRENT. Your job is to pick up where it left off — NOT to re-derive it.
 - Do NOT read SPEC.md. Do NOT survey, read, or diff the codebase. Do NOT run any command. Everything you need is in this prompt.
 - Do NOT regenerate, re-order, re-word, or re-prioritise the checklist.
 1. Return \`implementationPlan\` = EXACTLY the committed plan body below, VERBATIM, byte for byte (the executor persists it again with the task you pick marked '- [x]', so any edit here silently rewrites the card's plan).
@@ -1740,7 +1741,7 @@ A PRIOR ITERATION of this same build regenerated the IMPLEMENTATION_PLAN.md belo
 4. Tag \`complexity\`: 'mechanical' (boilerplate, tests, formatting, a single-file edit) vs 'reasoning' (multi-file, architecture-touching, tricky invariants). When genuinely uncertain choose 'reasoning' (Opus is the safer executor).
 5. Return \`remainingTasks\` = the count of unchecked items left AFTER the one you picked. A probe counted the unchecked '- [ ]' items in this body already, so this should be that count minus one.
 Return via the schema. NEVER exit silently.
-COMMITTED IMPLEMENTATION_PLAN.md (verbatim):
+COMMITTED PLAN (verbatim):
 ${body}
 TASK CONTEXT:
 ${task}`
@@ -1748,16 +1749,16 @@ ${task}`
 
 // Appended to the forge:build/forge:fix prompt in Ralph mode. Forge is now a PURE
 // EXECUTOR: it implements the ONE task from Fable's exec spec (no re-planning)
-// and PERSISTS the regenerated IMPLEMENTATION_PLAN.md into its worktree (with the
-// task checked off) so the plan lands on the branch/PR.
-function ralphExecuteNote(plan) {
+// and PERSISTS the regenerated plan into its worktree (with the task checked off).
+function ralphExecuteNote(plan, forgeBranch) {
+  const planPath = `.trident/plans/${forgeBranch}.md`
   return `\n\nRALPH MODE — you are the EXECUTOR. The plan was authored by the Fable orchestrator; do NOT re-plan or redesign — implement it.
 - Implement ONLY this one task: ${plan.topTask}
 - EXECUTION SPEC (follow it exactly):
 ${plan.executionSpec}
-- Persist the plan: write IMPLEMENTATION_PLAN.md at the repo root with EXACTLY this body, but with the task above marked '- [x]':
+- Persist the plan: write ${planPath} with EXACTLY this body, but with the task above marked '- [x]':
 ${plan.implementationPlan}
-- Commit IMPLEMENTATION_PLAN.md together with your code + tests.
+- Commit ${planPath} together with your code + tests.
 - Report \`deviatedFromSpec: true\` in your structured result ONLY if you materially deviated from the EXECUTION SPEC above (different target files, a different design, or the task as built is not the task as specced) — a true here forces the next iteration to re-derive the whole plan, so do not set it for cosmetic drift. Otherwise report false or omit it.`
 }
 
@@ -4556,7 +4557,7 @@ try {
       const plannerLabel = usePlanNext ? 'plan:next' : 'plan:fable'
       const plan = usePlanNext
         ? await agent(
-            planNextPrompt(planProbe.planBody),
+            planNextPrompt(planProbe.planBody, forgeBranch),
             withModel({ label: 'plan:next', phase: 'Build', schema: PLAN_SCHEMA }),
           )
         : await agent(
@@ -4645,7 +4646,7 @@ try {
         }
       }
       complexityTag = plan.complexity
-      ralphNote = ralphExecuteNote(plan)
+      ralphNote = ralphExecuteNote(plan, forgeBranch)
       ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
       log(`trident-v2 ${plannerLabel} → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
     }

@@ -9,7 +9,7 @@ import {
   CapabilityGuard,
   SecretAuditLog,
 } from '@neutronai/cores-runtime'
-import type { NeutronManifest } from '@neutronai/cores-sdk'
+import type { NeutronManifest, ToolCallContext } from '@neutronai/cores-sdk'
 import { ReminderStore } from '@neutronai/reminders'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -493,5 +493,68 @@ describe('buildTools — capability-gated dispatch', () => {
     if (!result.ok) {
       expect(result.code).toBe('tool_not_declared')
     }
+  })
+})
+
+/**
+ * #293 — `reminders_create` derives `project_id` from the CALLING TOPIC.
+ *
+ * The stored `topic_id` IS the fire-time delivery destination
+ * (`backend.ts`: `topic_id: input.project_id ?? null`). `reminders_create` used
+ * to discard the registry's `ToolCallContext` entirely, so an agent that did not
+ * think to pass `project_id` — and nothing in the tool's shape suggests a
+ * reminder has a home — created a GENERAL reminder while talking inside a
+ * project, and the fire landed in General. Routing the fire correctly cannot
+ * rescue a row that was never told where it belongs.
+ */
+describe('buildTools — reminders_create project scoping from the call context', () => {
+  const ctx = (project_id: string | null): ToolCallContext => ({
+    project_slug: OWNER,
+    project_id,
+    topic_id: project_id === null ? 'app:owner' : `app:owner:${project_id}`,
+    call_id: 'c1',
+    speaker_user_id: null,
+  })
+
+  test('an omitted project_id defaults to the bound topic project', async () => {
+    const tools = makeTools()
+
+    const created = await tools.reminders_create(
+      { message: 'check the launch status', fire_at: 1_700_000_500 },
+      ctx('neutron-open'),
+    )
+
+    const row = store.get(created.id)
+    expect(row?.topic_id).toBe('neutron-open')
+  })
+
+  test('an EXPLICIT project_id still wins over the calling topic', async () => {
+    const tools = makeTools()
+
+    const created = await tools.reminders_create(
+      { message: 'file this elsewhere', fire_at: 1_700_000_500, project_id: 'other-project' },
+      ctx('neutron-open'),
+    )
+
+    expect(store.get(created.id)?.topic_id).toBe('other-project')
+  })
+
+  test('a General call context leaves the reminder instance-level', async () => {
+    const tools = makeTools()
+
+    const created = await tools.reminders_create(
+      { message: 'general nudge', fire_at: 1_700_000_500 },
+      ctx(null),
+    )
+
+    expect(store.get(created.id)?.topic_id).toBeNull()
+  })
+
+  test('no context at all (cron / system call) still creates a General reminder', async () => {
+    const tools = makeTools()
+
+    const created = await tools.reminders_create({ message: 'sys', fire_at: 1_700_000_500 })
+
+    expect(store.get(created.id)?.topic_id).toBeNull()
   })
 })

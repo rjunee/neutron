@@ -131,6 +131,7 @@ import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { buildAppWsApprovalNotifier } from './wiring/approval-notifier.ts'
+import { buildAppWsReminderTopicResolver } from './wiring/reminder-topic.ts'
 import { buildWatchdogAlertEnvelope, wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
@@ -395,6 +396,7 @@ import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-tel
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
+import { parseAppWsSendMarker, shouldNotifyForSend } from './wiring/app-ws-marker.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
 import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
 import {
@@ -2368,6 +2370,30 @@ export function buildOpenGraphComposer(
         return []
       }
     }
+    /**
+     * JUST the live project ids — the question "does this id name a project?".
+     *
+     * NOT `readProjectRows().map(r => r.id)` (Argus round 1, confirmed x2, on two
+     * counts). First, that drags the WHOLE rail computation per call —
+     * `readProjectUnread` + `readProjectRailExtras` (a `boardRunStore.get` per
+     * linked work-board item, a latest-message preview query, a live-run count) —
+     * O(projects x board items) of DB work to answer a membership test that is one
+     * indexed SELECT. Second, and worse, `readProjectRows` catches and returns `[]`:
+     * a transient DB failure would make EVERY project unknown and reroute EVERY
+     * project reminder to General, silently — the precise failure mode this card
+     * exists to eliminate, reintroduced fail-open.
+     *
+     * So this one DOES NOT CATCH. The reminder-topic resolver owns the failure and
+     * reports it as `project_list_unavailable` instead of pretending the box has no
+     * projects.
+     */
+    const listProjectIds = (): string[] =>
+      db
+        .prepare<{ id: string }, []>(
+          `SELECT id FROM projects WHERE deleted_at IS NULL ORDER BY id ASC`,
+        )
+        .all()
+        .map((r) => r.id)
     // ── The owner gate (C3c: carved to open/wiring/owner-gate.ts) ──────────
     // `coldStartRedirect` / `hasResumableState` / the React-shell bootstrap HTML
     // injection (`projectsBootstrapScript` / `onboardingBootstrapScript` /
@@ -2519,8 +2545,18 @@ export function buildOpenGraphComposer(
     //     push was composed in the reminder tick, so nothing but a fired reminder ever
     //     notified at all), and routing it through `deliver` is a change to the Trident
     //     delivery seam rather than a line here.
-    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, which is
-    //     deliberate: the owner sent the message that caused it, so it is in-turn.
+    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, and
+    //     it NOW NOTIFIES TOO — see the push block in that function. This line
+    //     used to read "which is deliberate: the owner sent the message that
+    //     caused it, so it is in-turn", and that was true until 2026-08-15, when
+    //     the owner overruled it: "Everything should be a chat message, and I get
+    //     notified for any and all chat messages if I'm not actively in the app."
+    //     Kept as a correction rather than deleted, because the ORIGINAL reasoning
+    //     was sound and its replacement depends on a condition that did not exist
+    //     when it was written: "in-turn" was standing in for "he is looking at
+    //     this", and the device now answers that question directly
+    //     (`app/lib/push-foreground-policy.ts`). Remove that device policy and
+    //     this exclusion becomes right again.
     //
     // Written down because the previous wording here said "EVERY out-of-turn post",
     // which is the confidently-specific kind of comment that gets believed instead of
@@ -2540,6 +2576,28 @@ export function buildOpenGraphComposer(
       fanOut: pushTransport,
       project_slug,
     })
+    /**
+     * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign
+     * topic) → undefined.
+     *
+     * WHY THE DELIVER SEAM NEEDS THIS (Argus round 1). Routing the fire to the
+     * project topic is only half of "the owner sees it". `buildAppWsSendReplyResult`
+     * takes the project id as a SEPARATE argument and uses it to stamp
+     * `projects.last_activity_at` and re-fan `projects_changed` — the rail pop and
+     * the unread badge. Called with the topic alone, a fired project reminder wrote
+     * a durable row into the project topic and changed NOTHING in the rail: invisible
+     * unless the owner already happened to be sitting inside that project. Deriving
+     * the id back off the topic here makes an out-of-turn post behave exactly like a
+     * steady-state agent reply on the same topic, which is the one path already
+     * proven to light the rail. (A transient system notice is still exempt — that
+     * check lives inside `buildAppWsSendReplyResult`.)
+     */
+    const appWsProjectIdOfTopic = (topic_id: string): string | undefined => {
+      const prefix = `${appWsTopicId(OWNER_USER_ID)}:`
+      if (!topic_id.startsWith(prefix)) return undefined
+      const project_id = topic_id.slice(prefix.length)
+      return project_id.length > 0 ? project_id : undefined
+    }
     const deliver: Deliver = createDeliver({
       buttonStore: landing.buttonStore,
       // Every durably-posted out-of-turn message notifies the owner's devices;
@@ -2552,7 +2610,7 @@ export function buildOpenGraphComposer(
         // NOT a hardcoded true or a stale pre-send registry snapshot (Codex/O6). The
         // persist + fan still happen inside the awaited send.
         app: (topic_id: string, event: ChatOutbound): Promise<boolean> =>
-          buildAppWsSendReplyResult(topic_id)(event),
+          buildAppWsSendReplyResult(topic_id, appWsProjectIdOfTopic(topic_id))(event),
         web: (topic_id: string, event: ChatOutbound): boolean =>
           landing.registry.send(topic_id, event),
       },
@@ -2567,36 +2625,51 @@ export function buildOpenGraphComposer(
     // notifier resolves the same holder (durability 'inert' — a proposal must
     // survive until he opens the app, unlike a transient notice pill).
     noticeDeliverHolder.deliver = deliver
-    // Resolve every fired reminder/brief to the app-ws topic the client binds:
-    // the owner's BARE `app:<user>`.
+    // Resolve every fired reminder/brief to the app-ws topic that OWNS the work.
     //
-    // THE BUG (M1 E2E Round 2, 2026-06-29 — the residual #105 missed): the app-ws
-    // client opens ONE `/ws/app/chat` socket and registers its live sender +
-    // replays history on the BARE `app:<user>` topic only (`app-ws-surface.ts`
-    // registers `appWsTopicId(user_id)`; `config.topicId = appWsTopicId(userId)`);
-    // project context is a per-FRAME field, NOT a topic suffix. This differs from
-    // the LEGACY web path, which bound a per-socket sender on
-    // `web:<user>:<project>` — and #105 ported that suffixing pattern here,
-    // mapping a project reminder (`app-project:<id>`) to `app:<user>:<id>`. But
-    // NO sender is ever registered on that suffixed topic, so the live push
-    // matches nothing (`registry.send` → false, dropped), AND the durable
-    // `button_prompts` row lands under a topic the client NEVER replays (it only
-    // ever hydrates the bare `app:<user>`) — so a project-scoped reminder VANISHES
-    // entirely, live and on reload. (General reminders — `explicit_topic` null →
-    // bare topic — are the only case #105's test exercised, which is why this
-    // slipped through.)
+    // THE BUG (measured 2026-08-15): 24 reminder fires landed on the bare
+    // `app:<owner>` topic across one night while the owner was reading — and
+    // writing in — `app:owner:neutron-open`. Every fire resolved to General
+    // because this closure discarded its `explicit_topic` argument. That was the
+    // CORRECT behaviour when written (the residual #105 fix, 2026-06-29): back
+    // then the app-ws client bound its live sender and replayed history on the
+    // bare `app:<user>` topic ONLY, so a project-suffixed delivery topic matched
+    // no sender and persisted under a topic nothing hydrated — the reminder
+    // vanished, live and on reload. It has been false since app-ws topic scoping
+    // (`gateway/http/app-ws-surface.ts` `resolveChannelTopicId`, ISSUES #399):
+    // each project chat now BINDS and HYDRATES its own `app:<user>:<project>`
+    // topic — which is exactly where the trident build cards the owner WAS seeing
+    // land.
     //
-    // THE FIX: deliver ALL fired reminders/briefs to the owner's bare
-    // `app:<user>` topic — exactly the general-reminder path #105 made work and
-    // the one topic the client actually binds + hydrates. Project GROUPING is
-    // unaffected: it lives on the reminder row's stored `topic_id`
-    // (`app-project:<id>`) which the reminders tab filters on (`store.listBy*`)
-    // and `deriveReminderProjectId` keys context/metering off — neither reads
-    // this delivery topic. The fired message simply surfaces in the owner's chat,
-    // the single surface the app reads, instead of silently disappearing.
+    // THE FIX: a fire resolves to the project topic when its stored destination
+    // names an EXISTING project (raw `project_id` from the Reminders Core,
+    // `app-project:<id>` from the app surface, or legacy `web:<user>:<id>`), and
+    // to General otherwise. An unknown destination deliberately falls back to
+    // General — the #105 lesson, kept: a fire must NEVER persist into a topic no
+    // client reads. `resolveAppWsReminderTopic(null)` (ritual approvals, executor
+    // ritual posts, briefs) still means General. Project GROUPING in the
+    // reminders tab is unaffected either way: it reads the reminder row's stored
+    // `topic_id` (`store.listBy*` / `deriveReminderProjectId`), not this
+    // delivery topic.
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
-    const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
-      reminderGeneralTopic
+    //
+    // EVERY downgrade to General is SAID OUT LOUD (`onDowngrade`). A fire that
+    // names a destination and lands somewhere else is precisely the defect —
+    // going quiet about it is how it survived a night unnoticed. The resolver's
+    // lister is the cheap `listProjectIds` SELECT, which does NOT swallow read
+    // errors: a DB failure reports `project_list_unavailable` rather than
+    // masquerading as "this box has no projects".
+    const resolveAppWsReminderTopic = buildAppWsReminderTopicResolver({
+      owner_user_id: OWNER_USER_ID,
+      listProjectIds,
+      onDowngrade: (event) =>
+        log.warn('reminder_topic_downgraded_to_general', {
+          explicit_topic: event.explicit_topic,
+          reason: event.reason,
+          candidate: event.candidate,
+          ...(event.error !== undefined ? { error: event.error } : {}),
+        }),
+    })
     // ONE outbound + ONE runs store hoisted so the nudge dispatcher, the ritual
     // executor, and the boot reap all post through / write to the SAME instances
     // (one deliver seam, one `code_ritual_runs` writer).
@@ -5166,8 +5239,22 @@ export function buildOpenGraphComposer(
     // `(out) => void` wiring contract (app-ws.ts) — a rejection must not escape into
     // sendSafe's SYNC-only guard.
     const buildAppWsSendReplyResult =
-      (channel_topic_id: string, project_id?: string) =>
+      (channel_topic_id: string, project_id?: string, opts?: { notify?: boolean }) =>
       async (out: ChatOutbound): Promise<boolean> => {
+        // WHO OWNS THE NOTIFICATION FOR THIS SEND, stated at the call site.
+        //
+        // This function has exactly two callers and they are NOT peers: a live
+        // agent turn calls it DIRECTLY, and `deliver` calls it as its live
+        // fan-out (`push.app`). So a delivered post passes through here too —
+        // and `deliver` already notifies from its own seam, with the dedup and
+        // the delivered_at stamp that belong to it.
+        //
+        // Notifying unconditionally here therefore BUZZED HIM TWICE for every
+        // out-of-turn post, which is exactly what the push E2E caught: expected
+        // 1 push, received 2. Defaulting to false and letting the live-turn call
+        // site opt IN keeps one notification per message with the ownership
+        // written down, rather than inferred from which stack frame you are in.
+        const ownsNotify = opts?.notify === true
         if (out.type !== 'agent_message') return false
         const msg: OutgoingMessage = {
           topic: {
@@ -5207,10 +5294,50 @@ export function buildOpenGraphComposer(
         // is written before this resolves. The delivered_live boolean is returned at
         // the END (after the best-effort last_activity stamp below).
         const marker = await appWs.deref((adapter) => adapter.send(msg))
-        const deliveredLive =
-          typeof marker === 'string' &&
-          !marker.startsWith('app-ws:dropped:') &&
-          !marker.startsWith('app-ws:lost:')
+        const sent = parseAppWsSendMarker(marker)
+        const deliveredLive = sent.delivered_live
+        // NOTIFY HIS DEVICES FOR AN ORDINARY REPLY TOO (owner, 2026-08-15:
+        // "Everything should be a chat message, and I get notified for any and
+        // all chat messages if I'm not actively in the app").
+        //
+        // This path was excluded ON PURPOSE until now, and the reasoning was
+        // sound at the time: he sent the message that caused this reply, so it
+        // is in-turn, and buzzing someone about the answer to what they just
+        // typed is noise. What changed is the OTHER half — the device now
+        // declines to interrupt the conversation on screen
+        // (`app/lib/push-foreground-policy.ts`). With that in place, "in-turn"
+        // stops being a proxy for "he is looking": he can send a message, put
+        // the phone down, and the reply is news exactly the way it is in every
+        // other chat app.
+        //
+        // ⚠️ SO THE TWO HALVES ARE COUPLED. If that device policy is ever
+        // weakened, this notify has to be revisited in the SAME change, or his
+        // phone buzzes while he types into it.
+        //
+        // Gated on `durable`, not on `!delivered_live`: the id has to point at a
+        // row that exists. `app-ws:dropped:<id>` — persisted, nobody listening —
+        // is precisely the case worth notifying, while `app-ws:lost:<id>` has no
+        // row for the tap to open. The old `!startsWith` predicate could not tell
+        // those apart. A `system_notice` is live-only by construction and carries
+        // no row at all.
+        if (
+          shouldNotifyForSend({
+            owns_notify: ownsNotify,
+            system_notice: out.system_notice === true,
+            sent,
+          }) &&
+          chatMessagePush !== undefined
+        ) {
+          // Fire-and-forget: a push failure must never cost the reply. The sink
+          // already records its own outcome.
+          fireAndForget('composer.chat-message-push', (async (): Promise<void> => {
+            await chatMessagePush({
+              project_id: project_id ?? null,
+              message_id: sent.message_id as string,
+              body: out.body,
+            })
+          })())
+        }
         // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
         // stamp the project's `last_activity_at` and re-fan `projects_changed`
         // so every connected rail reorders (this project pops to the top) and
@@ -5245,7 +5372,13 @@ export function buildOpenGraphComposer(
     const buildAppWsSendReply =
       (channel_topic_id: string, project_id?: string) =>
       (out: ChatOutbound): void => {
-        fireAndForget('composer.deref', buildAppWsSendReplyResult(channel_topic_id, project_id)(out))
+        // The LIVE-TURN send owns its notification: nothing else will send one
+        // for an ordinary reply. `deliver`'s call site (above) deliberately does
+        // not, because `deliver` notifies from its own seam.
+        fireAndForget(
+          'composer.deref',
+          buildAppWsSendReplyResult(channel_topic_id, project_id, { notify: true })(out),
+        )
       }
     // ── app-ws receiver + delivery cluster (C3d: carved to open/wiring/app-ws.ts) ─
     // The Path-1 closing/opening delivery (`onboardingMsg` bind), the ephemeral

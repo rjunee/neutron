@@ -1584,9 +1584,14 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    down the socket and stands up a fresh one bound to the new topic, hydrating
 >    that topic's transcript from the shared OPFS store (`main.tsx topicForProject`
 >    / `wsUrlFor`). **Gated on `platform === 'web'`** — mobile keeps its single
->    `app:<user>` socket + `project_id`-field model, unchanged. Reminders/briefs
->    still fan to the bare `app:<user>` (General inbox) topic, so they surface in
->    General (durable rows under `app:<user>`), not the per-project chats.
+>    `app:<user>` socket + `project_id`-field model, unchanged. **Since #293
+>    (2026-08-15)** a fired reminder is delivered to the topic that OWNS the work:
+>    `app:<user>:<project>` when its stored destination names an EXISTING project,
+>    General otherwise (`open/wiring/reminder-topic.ts`). Briefs and ritual posts
+>    carry no destination and still land in General. The durable row and the live
+>    push share that topic, and the deliver seam stamps the project's
+>    `last_activity_at` so the rail pops — an out-of-turn post behaves exactly like
+>    a steady-state agent reply on the same topic.
 >    **Mounted-per-conversation surface cache (#343).** `ChatApp` no longer
 >    remounts the whole chat surface on a project switch (the old `key={convId}`
 >    on the sole runtime host tore down thread + composer, flashed the empty
@@ -2905,12 +2910,22 @@ actionable `dispatchConstraint` describing the wrapper or executor required to w
     does it re-fire the workflow from `outer-published:<sha>` for review.
     Before the lease observation the outer loop also REBASES the branch onto the
     observed base tip (`rebaseOntoObservedBase`): the shared checkout is shallow
-    (#574), so it replays the branch's own diff (`gh pr diff` when a PR exists,
-    two-dot diff on first publish) onto the base tip in a throwaway worktree with
-    `git apply --3way` and moves the branch ref by compare-and-swap — a stale branch
-    reaches review as `MERGEABLE`, and a replay conflict is an ATTENTION failure
-    (`TridentRebaseConflict`, naming the conflicting paths), never a
-    `REQUEST_CHANGES` and never auto-resolved. The credential
+    (#574), so it replays the branch's own diff (`gh pr diff` when a PR exists, the
+    diff from the branch's FORK POINT on first publish — a two-dot `base..branch`
+    diff would replay work `base` already has) onto the base tip in a throwaway
+    worktree with `git apply --3way` and moves the branch ref by compare-and-swap —
+    a stale branch reaches review as `MERGEABLE`. A replay CONFLICT is handed to
+    the bounded Forge `resolve_conflict` resolver first, in that throwaway worktree:
+    this is the autonomous path, so unlike the local-merge path there is no human
+    present to reconcile the branch by hand. The resolver's claim is checked against
+    git, not taken — the unmerged set AND the staged bytes must come back free of
+    conflict markers, and every round must shrink the set. With no resolver
+    configured, on a decline, on a round that makes no progress, or on an exhausted
+    bound, the outcome is the unchanged ATTENTION failure (`TridentRebaseConflict`,
+    naming the conflicting paths), never a `REQUEST_CHANGES`. A resolved conflict
+    shortcuts nothing: resolution is a mergeability operation, not a verdict, and
+    the branch goes through the full review gate exactly as a clean replay does.
+    The credential
     is injected at the host-command boundary in `open/composer.ts`; it never enters the
     wrapper command, the Forge transcript, or any process below the inner workflow.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
