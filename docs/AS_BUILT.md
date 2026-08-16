@@ -2,6 +2,50 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
+
+The launcher now composes reflection guidance ONCE. `trident/inner-loop.ts`
+`buildWorkflowFirer` threads the same string into both `writeBriefParts` (the
+disk write in `trident/brief-parts.ts`) and `buildWorkflowArgs`. The disk
+manifest is therefore the single authority for the brief's middle. Copies in
+the workflow args JSON are ADVISORY only: the fire-launcher bridge model
+retypes them, so those copies can no longer refuse a dispatch.
+
+`trident/inner-workflow.mjs` `codexBriefByPath` no longer has either
+`CODEX_BUILD_BRIEF_ARGS_CORRUPT` throw. Its part list is keyed on the manifest's
+`briefParts.reflectionFile`, not args `reflectionGuidance`; the launcher's
+receipts come from that manifest, while receipts for the workflow-composed
+`.a1` and `.a2` segments are computed locally. Consequently
+`CODEX_BUILD_BRIEF_ARGS_CORRUPT` no longer exists as a failure mode on the
+parts path.
+
+The parts-mode prompt now emits
+`NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY`, a newline list aligned 1:1 with
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS`, INSTEAD of the whole-file
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY`. `trident/codex-build.sh` verifies every
+part file byte-for-byte before assembly and no longer requires a whole-file
+receipt in parts mode: the whole is the host script's own `cat` of verified
+parts. The non-parts fallback is unchanged and retains its whole-file receipt.
+
+The remaining corruption tags now have disjoint jobs:
+
+| tag | corruption class |
+|---|---|
+| `CODEX_BUILD_BRIEF_CORRUPT` | A bridge-retyped whole brief on the non-parts fallback path. |
+| `CODEX_BUILD_BRIEF_PART_CORRUPT` | A disk part file whose bytes do not match its receipt; exits 3 and names the file and both measurements. |
+| `CODEX_BUILD_BRIEF_PART_MISSING` | The unchanged fail-closed guard for a listed part file that is absent. |
+
+Per-part receipts are the only workable decomposition. FNV-1a over a
+concatenation cannot be derived from standalone segment hashes, and
+`inner-workflow.mjs` has no `fs`, so it can never measure the disk copies
+itself.
+
+The existing guard rails remain: reflection guidance reaches Forge builders
+only, never argus or synthesis; the non-parts whole-file receipt is
+unweakened; the TypeScript and JavaScript `briefIntegrity` twins remain
+parity-pinned; and `.a2` coda chunk blocks never have non-redirect-target paths
+rewritten.
+
 ## 2026-08-16 — two builds can append to this file at once
 
 This log is newest-first, so every build prepends its entry at the same offset
@@ -17808,4 +17852,3 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
-
