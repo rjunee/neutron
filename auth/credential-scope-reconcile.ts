@@ -207,16 +207,15 @@ export interface CredentialScopeProvenance {
   slug_is_fallback: boolean
 }
 
-/** Options for one boot-time credential-scope reconciliation. */
-export interface CredentialScopeReconcileOptions {
-  /**
-   * True when the boot handle is the bare fallback — env/config absent, not
-   * explicitly set. A fallback identity may never pull rows off an explicit
-   * handle. Mirrors `ReconcileInstanceScopeOptions.currentSlugIsFallback` in
-   * `migrations/scope-rekey.ts`; both are fed from the same `slugResolution`.
-   */
-  currentSlugIsFallback?: boolean
-}
+/**
+ * Options for one boot-time credential-scope reconciliation.
+ *
+ * ONE TYPE, ONE NAME. This used to be a separate interface whose field was
+ * `currentSlugIsFallback` while the explicit path's was `slug_is_fallback` —
+ * the same question spelled two ways in one module, which is how a caller ends
+ * up satisfying the type and answering nothing.
+ */
+export type CredentialScopeReconcileOptions = CredentialScopeProvenance
 
 /**
  * What one EXPLICIT (owner-driven) migration did. Like the boot result, this
@@ -407,7 +406,13 @@ export function listOrphanedSecretSlots(
 export async function reconcileCredentialScope(
   db: ProjectDb,
   boot_handle: string,
-  options: CredentialScopeReconcileOptions = {},
+  // REQUIRED, like the explicit path's. It defaulted to `{}` and the guard only
+  // fired on an explicit `true`, so `reconcileCredentialScope(db, 'dev')`
+  // migrated the live owner's rows — the AUTOMATIC path failing open while the
+  // explicit one failed closed, which is the exact asymmetry this whole change
+  // exists to remove, one level further in. A review caught it by noticing the
+  // positive-control test demonstrates the unsafe call.
+  options: CredentialScopeReconcileOptions,
 ): Promise<CredentialScopeReconcileResult> {
   const census = censusCredentialScopeTables(db, boot_handle)
   const { stale_handles } = census
@@ -429,7 +434,7 @@ export async function reconcileCredentialScope(
   // already the honest description of what this process can see, and the
   // integrations surface renders it as "scoped to a previous handle" rather
   // than the "not connected" that sent the owner hunting for a lost token.
-  if (options.currentSlugIsFallback === true) {
+  if (options.slug_is_fallback === true) {
     return {
       action: 'orphaned',
       boot_handle,

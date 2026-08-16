@@ -154,6 +154,15 @@ function ciphertextOf(db: ProjectDb, handle: string, label: string): string | nu
   return row === null ? null : row.ciphertext
 }
 
+/** Rows in any swept table under one handle — the tables `countSecrets` cannot see. */
+function countRows(db: ProjectDb, table: string, column: string, handle: string): number {
+  const row = db.get<{ n: number }, [string]>(
+    `SELECT count(*) AS n FROM ${table} WHERE ${column} = ?`,
+    [handle],
+  )
+  return row === null ? 0 : row.n
+}
+
 function countSecrets(db: ProjectDb, handle: string, label: string): number {
   const row = db.get<{ n: number }, [string, string]>(
     'SELECT count(*) AS n FROM secrets WHERE project_slug = ? AND label = ?',
@@ -398,6 +407,25 @@ test('a fallback boot handle cannot claim rows through the explicit migrate eith
   expect(await b.secrets.get({ owner_handle: STALE, kind: 'byo_api_key', label: 'tavily' })).toBe(
     STALE_VAL,
   )
+
+  // ALL THREE SWEPT TABLES, not just `secrets`. The fixture seeds three because
+  // the guard's claim is about every surface and every table; verifying one and
+  // trusting the implementation's own aggregate for the rest would let a guard
+  // that covers `secrets` alone pass as if it covered everything — the aggregate
+  // is the thing under test, so it cannot also be the evidence.
+  expect(countRows(b.db, 'project_credentials', 'owner_slug', STALE)).toBe(1)
+  expect(countRows(b.db, 'project_credentials', 'owner_slug', BOOT)).toBe(0)
+  expect(countRows(b.db, 'api_keys', 'project_slug', STALE)).toBe(1)
+  expect(countRows(b.db, 'api_keys', 'project_slug', BOOT)).toBe(0)
+
+  // And the refusal reports every orphan as skipped rather than quietly
+  // shortening the list.
+  expect(refused.total_skipped).toBe(3)
+  expect([...refused.skipped].map((s) => s.table).sort()).toEqual([
+    'api_keys',
+    'project_credentials',
+    'secrets',
+  ])
 
   // POSITIVE CONTROL — the same fixture, the same call, provenance the only
   // difference. Without it this test passes just as well against a migration

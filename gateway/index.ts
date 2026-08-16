@@ -144,15 +144,20 @@ export interface BootServer {
  * returns the new value on the next boot.
  */
 export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
-  const ownerHome = env['OWNER_HOME']
-  if (ownerHome !== undefined && ownerHome !== '') {
-    const slugFile = join(ownerHome, '.url_slug')
-    if (existsSync(slugFile)) {
-      const fromFile = readFileSync(slugFile, 'utf8').trim()
-      if (fromFile.length > 0) return fromFile
-    }
-  }
-  return env['NEUTRON_INSTANCE_SLUG'] ?? 'dev'
+  // DELEGATES. This used to be a hand-copied duplicate of the resolver below,
+  // and its docblock claimed "identical precedence" — which held right up until
+  // one of them learned to trim an empty slug and the other did not. Three
+  // copies of "who am I" existed at once; a review found two of them disagreeing
+  // with boot, and `neutron doctor` reading one of the wrong ones would report
+  // an empty instance for a system running perfectly well.
+  //
+  // A duplicated answer is not redundancy, it is a second opinion nobody asked
+  // for. There is now ONE implementation and the others call it.
+  return resolveOwnerSlugSourceFromConfig({
+    ownerHome: env['OWNER_HOME'],
+    neutronHome: undefined,
+    instanceSlug: env['NEUTRON_INSTANCE_SLUG'],
+  } as unknown as BootConfig).slug
 }
 
 /**
@@ -444,7 +449,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // has to be given to both or the anonymous boot simply takes the rows the
     // other one refused.
     const credentialScope = await reconcileCredentialScope(db, project_slug, {
-      currentSlugIsFallback: slugResolution.source === 'fallback',
+      slug_is_fallback: slugResolution.source === 'fallback',
     })
     if (credentialScope.action === 'migrated') {
       log.warn('credential_scope_migrated', {
