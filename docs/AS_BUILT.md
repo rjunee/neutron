@@ -2,6 +2,52 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the codex build brief is proven to ARRIVE at the child, and the run id to correlate
+
+The card reported two live symptoms: the brief parts are written but
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS` never reaches the child, so the build starts blind;
+and the run id is mistyped on the same path, so the run cannot be correlated back.
+Both were RE-MEASURED on main before anything was changed, by executing the transport
+the workflow actually emits rather than by reading it. Neither reproduces. The emitted
+run command, run verbatim against the real `trident/codex-build.sh`, delivered
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS` into the wrapper's child environment; the wrapper
+assembled the parts in order and what landed on the codex seam's stdin measured
+byte-identical to the prompt's OWN `NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` receipt;
+`CODEX_BUILD_MODEL` arrived; `GH_TOKEN` was gone; and the `.exit` and `.trailer` files
+landed at exactly the run-id-keyed paths the test constructed from its own id string.
+The run id is a string end-to-end (`TridentRun.id` → `buildWorkflowArgs.runId` → the
+part filenames at `trident/brief-parts.ts:71`); there is no retyping on that path. No
+production code changed.
+
+What was actually missing is the measurement that says so. Every existing suite stops
+one seam short: `inner-workflow.test.ts` asserts prompt TEXT, `codex-build.test.ts`
+hands the wrapper a HAND-BUILT environment, and the `inner-workflow-assembly.test.ts`
+lockstep executes the emitted chunk blocks but assembles files and never launches
+anything. Nothing executed the workflow-EMITTED run command and then read the CHILD's
+environment — so a regression dropping `${partsEnv}` from the command, breaking
+`shSingleQuote` on the newline-joined parts list, or drifting the run id between the
+artifact paths would have shipped green, and the symptom would have been exactly what
+the card describes.
+
+`trident/codex-build-arrival.test.ts` closes it, in the `trident/gh-authed.test.ts`
+style: the real `writeBriefParts` writes the host-held parts, the real
+`inner-workflow.mjs` composes the forge:build prompt, real bash runs the prompt's own
+chunk blocks and its own run command against the real wrapper with a stub `codex`, and
+the wrapper's documented `NEUTRON_CODEX_BUILD_EXEC_CMD` seam dumps the child's
+environment and stdin. Every assertion is on a child-written artifact — the env dump,
+the stdin dump, the exit/trailer/err files — and none on an object the parent built.
+The stripped-PARTS negative control is what makes the suite able to fail: with the
+PARTS assignment cut out of the emitted command the wrapper refuses at exit 3 with
+`CODEX_BUILD_NO_BRIEF` and the seam never runs at all, so a blind build is refused
+before a token is spent rather than started and then noticed.
+
+ONE HAZARD IS WORTH NAMING because it will be re-hit otherwise: the emitted run
+command contains REAL embedded newlines — inside the supervisor's `printf "%s\n"` and
+inside the single-quoted PARTS value — so it cannot be recovered by splitting the
+prompt on lines. Slicing from `rm -f ` to the trailing `</dev/null &` is the only
+correct extraction, and a line-based parse silently yields a truncated command that
+"passes" by never launching the wrapper.
+
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
 The gate carried `['test', 'lint', 'typecheck']` — THIS repository's job names — frozen
