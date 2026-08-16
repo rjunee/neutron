@@ -4,6 +4,7 @@ Running log of what shipped, newest first. One entry per merged change.
 
 ## 2026-08-16 — four headings collided in this log; only one was a duplicate
 
+Landed via PR #325.
 "One entry per merged change" (line 3) had never been checked. Measured at f99d6d49:
 307 headings, 303 distinct — four collisions, arriving by two unrelated routes, which
 is why this ends in a standing gate rather than a tidy-up. No single review would have
