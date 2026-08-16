@@ -98,13 +98,25 @@ async function runWorkflow(script: Script): Promise<RunOut> {
         ? { raw: '[{"name":"test","state":"SUCCESS","link":"x"}]\n___EXIT=0', exit_code: 0 }
         : script.ciProbe(n)
     }
-    // What the base branch requires, in the three-section shape the probe transcribes:
-    // protection 404 (unprotected), no rulesets, and the check names this repo emits.
+    // What the base branch requires, in the five-section shape the probe transcribes:
+    // protection 404, the branch read PROVING that 404 means unprotected, the
+    // credential's own permissions, no rulesets, and the names this repo emits as both
+    // check runs and classic commit statuses.
+    //
+    // THE BRANCH READ IS LOAD-BEARING, not decoration. A 404 from the protection
+    // endpoint is also how GitHub answers a credential without Administration-read, so
+    // `protected:false` is what distinguishes "there is no protection" from "you may
+    // not ask" — without it the gate correctly refuses to assume the permissive rule
+    // and this healthy run defers. See `classifyRequiredChecksProbe`.
     if (label.startsWith('required-checks-r')) {
       return {
         raw:
-          'gh: Not Found (HTTP 404)\n___PROT_EXIT=1\n___SECTION=RULES\n[]\n___RULES_EXIT=0\n' +
-          '___SECTION=RUNS\n["test","lint","typecheck"]\n___RUNS_EXIT=0\n___EXIT=0',
+          'gh: Not Found (HTTP 404)\n___PROT_EXIT=1\n' +
+          '___SECTION=BRANCH\n{"protected":false}\n___BRANCH_EXIT=0\n' +
+          '___SECTION=PERM\n{"admin":false}\n___PERM_EXIT=0\n' +
+          '___SECTION=RULES\n[]\n___RULES_EXIT=0\n' +
+          '___SECTION=RUNS\n["test","lint","typecheck"]\n___RUNS_EXIT=0\n' +
+          '___SECTION=STATUSES\n[]\n___STATUSES_EXIT=0\n___EXIT=0',
         exit_code: 0,
       }
     }
