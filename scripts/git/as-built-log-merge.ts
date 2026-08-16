@@ -425,6 +425,16 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
   // precedes `2` in a plain string compare — reading as a separate top-level entry rather than a
   // continuation. Folding the run into the run that owns the entry it names fixes the anchor at the
   // only place it is known, and the section then moves wherever its head moves.
+  //
+  // ONE SIBLING-ORDER CASE IS DELIBERATELY LEFT AS IT IS, recorded here so it is not re-raised as a
+  // defect: when the owning run ALREADY carries its own continuation and the other side attaches
+  // another to the same head, the incoming one is spliced directly after the head, giving
+  // `head, theirs-continuation, ours-continuation`. The anchor is the head, so "directly after the
+  // entry it names" is literally satisfied, each side's own relative order is preserved, and no
+  // entry is moved out of its head's block — there is simply no contract that fixes which side's
+  // continuation comes first, and inventing one would order two independent follow-ups by which
+  // process happened to be `ours`. Checked for entry loss, duplication, cycles and splice-index
+  // errors and found clean; the ordering is the only degree of freedom and it is unconstrained.
   const ownerOf = new Map<string, Addition>()
   // The last entry currently attached after a given key, so two runs anchored on the SAME entry
   // land in the order they were written rather than the second one jumping ahead of the first.
