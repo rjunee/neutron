@@ -38,3 +38,8 @@ leak-gate-pii-denylist*
 # restart markers). Machine-local: a committed repl-registry.json carries this
 # install's absolute data path, which the leak gate correctly refuses.
 .neutron/
+
+# Scratch COPY of `trident/git-mode.ts` + its suite, written inside the tree by
+# `trident/git-mode-mutation.test.ts` so bun resolves the workspace packages, and
+# removed on exit. Ignored so a killed run can never leave a committable stray.
+.trident-mutants/

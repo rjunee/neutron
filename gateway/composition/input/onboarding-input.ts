@@ -87,6 +87,14 @@ export interface OnboardingCompositionInput {
    */
   onboarding_overnight_cron?: {
     /**
+     * The GitHub credential the outer publisher uses, for merge-mode detection
+     * on overnight builds. REQUIRED when this config is supplied at all — the
+     * overnight seam used to build an UNCREDENTIALED `gh auth status` probe and
+     * refuse every GitHub-backed overnight build (see
+     * `trident/git-mode.ts` `defaultGitModeProbe`).
+     */
+    publisher_credential: import('@neutronai/trident/git-mode.ts').PublisherCredentialSource
+    /**
      * Deliver one morning-brief message. Production wires this to the ONE
      * out-of-turn delivery seam (`gateway/http/deliver.ts`), which persists a
      * durable row FIRST and then best-effort live-pushes — so the return value

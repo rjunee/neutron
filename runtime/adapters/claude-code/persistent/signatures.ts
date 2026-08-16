@@ -420,9 +420,12 @@ export function surfaceSizeAlert(
     // A bad alert hook must never crash the watchdog tick.
   }
 }
-export function defaultIsPidAlive(pid: number): boolean {
+export function defaultIsPidAlive(
+  pid: number,
+  kill: (pid: number, signal: 0) => true = process.kill.bind(process),
+): boolean {
   try {
-    process.kill(pid, 0)
+    kill(pid, 0)
     return true
   } catch {
     return false

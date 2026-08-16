@@ -21,6 +21,28 @@ import {
   WORK_BOARD_DISPATCH_BUILD_TOOL,
   WORK_BOARD_START_TOOL,
 } from './work-board-build-tool.ts'
+import type { GitModeProbe } from './git-mode.ts'
+
+/**
+ * A merge-mode probe that never shells out. `hasGithubOrigin: false` short-
+ * circuits `detectMergeMode` to 'local' before it ever consults the credential,
+ * which is what these tests want and what a local project genuinely is.
+ *
+ * It carries a `credential` because every probe must: the whole point of the
+ * seam taking a probe rather than a bare resolver is that WHOSE credential is in
+ * play is always visible, and inspectable by identity rather than by label.
+ */
+function localProbe(): GitModeProbe {
+  return {
+    credential: {
+      owner_handle: 'test-owner',
+      source: 'test stub',
+      load: async () => ({}),
+    },
+    hasGithubOrigin: async () => false,
+    publisherAvailable: async () => ({ authenticated: true }),
+  }
+}
 
 let tmp: string
 let db: ProjectDb
@@ -74,7 +96,7 @@ function toolFor() {
     repo_path: '/repo',
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
     resolveBuildRepo: async (home) => home,
-    resolveMergeMode: async () => 'local',
+    merge_mode_probe: localProbe(),
     resolveRalph: async () => false,
   })
   return reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
@@ -87,6 +109,7 @@ describe('work_board_dispatch_build tool', () => {
       store,
       work_board: board(),
       repo_path: '/repo',
+      merge_mode_probe: localProbe(),
     })
     const tool = reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
     expect(tool.capability_required).toBe('agent:dispatch_subagent')
@@ -122,7 +145,7 @@ describe('work_board_dispatch_build tool', () => {
         work_board: board(),
         repo_path: specDir,
         resolveBuildRepo: async (home) => home, // identity — repo_path stays specDir
-        resolveMergeMode: async () => 'local',
+        merge_mode_probe: localProbe(),
         // resolveRalph deliberately OMITTED — exercises the detectRalphMode default.
       })
       const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
@@ -149,7 +172,7 @@ describe('work_board_dispatch_build tool', () => {
         work_board: board(),
         repo_path: noSpecDir,
         resolveBuildRepo: async (home) => home,
-        resolveMergeMode: async () => 'local',
+        merge_mode_probe: localProbe(),
         // resolveRalph deliberately OMITTED; no SPEC.md on disk.
       })
       const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
@@ -170,7 +193,7 @@ describe('work_board_dispatch_build tool', () => {
       work_board: board(),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
-      resolveMergeMode: async () => 'local',
+      merge_mode_probe: localProbe(),
       resolveRalph: async () => false,
       resolve_delivery: (projectId) => ({
         chat_id: projectId !== null ? `app:owner:${projectId}` : 'app:owner',
@@ -237,7 +260,7 @@ describe('active-project scoping (P0: a named-project build lands on that projec
       work_board: board_stub,
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
-      resolveMergeMode: async () => 'local',
+      merge_mode_probe: localProbe(),
       resolveRalph: async () => false,
     })
     return reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
@@ -277,7 +300,7 @@ describe('active-project scoping (P0: a named-project build lands on that projec
       work_board: recordingBoard(seen),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
-      resolveMergeMode: async () => 'local',
+      merge_mode_probe: localProbe(),
       resolveRalph: async () => false,
       resolve_task: async (slug) => {
         resolveSlugs.push(slug)
@@ -302,7 +325,7 @@ function startToolFor(resolve_task?: (slug: string, item: { title: string; desig
     repo_path: '/repo',
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
     resolveBuildRepo: async (home) => home,
-    resolveMergeMode: async () => 'local',
+    merge_mode_probe: localProbe(),
     resolveRalph: async () => false,
     ...(resolve_task !== undefined ? { resolve_task } : {}),
   })
@@ -422,7 +445,7 @@ describe('chat-ack seam (#429 task 4)', () => {
       work_board: board(),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
-      resolveMergeMode: async () => 'local',
+      merge_mode_probe: localProbe(),
       resolveRalph: async () => false,
       chat_ack,
     })

@@ -62,13 +62,20 @@ import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
-import { TridentTickLoop, type TridentTerminalHook, type TridentTransitionHook } from '@neutronai/trident/tick.ts'
+import {
+  TridentTickLoop,
+  type TridentDeadLauncherLatch,
+  type TridentLivenessProbe,
+  type TridentTerminalHook,
+  type TridentTransitionHook,
+} from '@neutronai/trident/tick.ts'
 import { stubAdvanceDeps } from '@neutronai/trident/state-machine.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
@@ -539,6 +546,19 @@ export function buildCoreModules(
         tridentWiring?.watch_interval_ms === undefined
           ? {}
           : { watch_interval_ms: tridentWiring.watch_interval_ms }
+      // The external signal observes the warm launcher, not the detached build.
+      // Route it through #267's durable crash latch so harvest-first continuation
+      // remains authoritative across gateway restarts.
+      const livenessOpt: {
+        probe_launcher_alive?: TridentLivenessProbe
+        latch_launcher_dead?: TridentDeadLauncherLatch
+      } =
+        tridentWiring?.probe_launcher_alive === undefined
+          ? {}
+          : {
+              probe_launcher_alive: tridentWiring.probe_launcher_alive,
+              latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
+            }
       let loop: TridentTickLoop
       // §F1 — the orchestrator's `drain()` (previously destructured away and
       // never called) settles every in-flight FIRE turn on shutdown. Captured
@@ -643,6 +663,7 @@ export function buildCoreModules(
           on_terminal,
           ...transitionOpt,
           ...watchOpt,
+          ...livenessOpt,
         })
         drain = orchestrator.drain
       } else {
@@ -652,12 +673,13 @@ export function buildCoreModules(
           on_terminal,
           ...transitionOpt,
           ...watchOpt,
+          ...livenessOpt,
         })
       }
       // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
-      // `describeAll`, not `describe`: trident owns TWO timers — the 90 s sweep and
-      // the 2 s wake-on-change watcher — and an unregistered timer is one the
-      // inventory reports as healthy by never mentioning it.
+      // `describeAll`, not `describe`: trident owns up to THREE timers — the 90 s sweep,
+      // the 2 s wake-on-change watcher, and the 15 s liveness probe — and an
+      // unregistered timer is one the inventory reports as healthy by never mentioning it.
       for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       loop.start()
       return drain !== undefined ? { store, loop, drain } : { store, loop }
@@ -887,6 +909,16 @@ export function buildCoreModules(
         const overnightCfg = input.onboarding_overnight_cron
         const handler = buildOvernightEngineHandler({
           db: input.db,
+          // Merge-mode detection needs the PUBLISHER'S credential, not the
+          // gateway's ambient `gh` state (which is empty by design — the token
+          // is injected per spawn). A composer that supplied no overnight config
+          // gets the honest "nothing wired" source, which refuses a GitHub-backed
+          // overnight build by NAME instead of asking a bare `gh` and getting a
+          // truthful answer about the wrong process. It is given no handle
+          // deliberately: the project slug is not an owner handle, and passing it
+          // here made the refusal name an identity that was never looked up.
+          publisher_credential:
+            overnightCfg?.publisher_credential ?? unwiredPublisherCredential(),
           ...(overnightCfg?.deliver !== undefined ? { deliver: overnightCfg.deliver } : {}),
           // The composer's topic beats the onboarding-row read (ISSUES #443 —
           // on Open that row never carries one, so the brief was skipped).

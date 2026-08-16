@@ -190,16 +190,32 @@ export type CredentialScopeReconcileResult =
       refused_direction?: true
     }
 
-/** Options for one boot-time credential-scope reconciliation. */
-export interface CredentialScopeReconcileOptions {
+/**
+ * Where the boot handle CAME FROM. Carried separately from the handle itself
+ * because the handle alone cannot answer the only question that matters here:
+ * a fallback `'dev'` and a configured `'dev'` are the same string and opposite
+ * situations.
+ */
+export interface CredentialScopeProvenance {
   /**
    * True when the boot handle is the bare fallback — env/config absent, not
    * explicitly set. A fallback identity may never pull rows off an explicit
-   * handle. Mirrors `ReconcileInstanceScopeOptions.currentSlugIsFallback` in
-   * `migrations/scope-rekey.ts`; both are fed from the same `slugResolution`.
+   * handle, on ANY surface: not at boot, and not when an owner-driven action
+   * asks for it, because a process that does not know who it is has no owner
+   * to have been asked by.
    */
-  currentSlugIsFallback?: boolean
+  slug_is_fallback: boolean
 }
+
+/**
+ * Options for one boot-time credential-scope reconciliation.
+ *
+ * ONE TYPE, ONE NAME. This used to be a separate interface whose field was
+ * `currentSlugIsFallback` while the explicit path's was `slug_is_fallback` —
+ * the same question spelled two ways in one module, which is how a caller ends
+ * up satisfying the type and answering nothing.
+ */
+export type CredentialScopeReconcileOptions = CredentialScopeProvenance
 
 /**
  * What one EXPLICIT (owner-driven) migration did. Like the boot result, this
@@ -207,6 +223,19 @@ export interface CredentialScopeReconcileOptions {
  * `service` VALUE, never ciphertext, never plaintext (acceptance (d)).
  */
 export interface CredentialScopeMigrateResult {
+  /**
+   * Present only when the DIRECTION guard refused: the boot handle was the
+   * fallback, so nothing moved and every orphan is reported as skipped.
+   *
+   * Callers render a different sentence for this than for a collision — "set the
+   * handle" rather than "the slot is taken" — AND propagate the flag itself
+   * (`MigrateOrphanedCredentialsResult.refused_direction`,
+   * `gateway/cores/integrations.ts`), so the distinction survives as data all
+   * the way out of `POST /api/cores/integrations/migrate-orphaned`. This
+   * sentence used to promise only the sentence, which made the prose the sole
+   * evidence a security guard had fired.
+   */
+  refused_direction?: true
   boot_handle: string
   /** Every non-boot handle seen in the census (whether or not anything moved). */
   stale_handles: string[]
@@ -383,7 +412,13 @@ export function listOrphanedSecretSlots(
 export async function reconcileCredentialScope(
   db: ProjectDb,
   boot_handle: string,
-  options: CredentialScopeReconcileOptions = {},
+  // REQUIRED, like the explicit path's. It defaulted to `{}` and the guard only
+  // fired on an explicit `true`, so `reconcileCredentialScope(db, 'dev')`
+  // migrated the live owner's rows — the AUTOMATIC path failing open while the
+  // explicit one failed closed, which is the exact asymmetry this whole change
+  // exists to remove, one level further in. A review caught it by noticing the
+  // positive-control test demonstrates the unsafe call.
+  options: CredentialScopeReconcileOptions,
 ): Promise<CredentialScopeReconcileResult> {
   const census = censusCredentialScopeTables(db, boot_handle)
   const { stale_handles } = census
@@ -405,7 +440,7 @@ export async function reconcileCredentialScope(
   // already the honest description of what this process can see, and the
   // integrations surface renders it as "scoped to a previous handle" rather
   // than the "not connected" that sent the owner hunting for a lost token.
-  if (options.currentSlugIsFallback === true) {
+  if (options.slug_is_fallback === true) {
     return {
       action: 'orphaned',
       boot_handle,
@@ -474,11 +509,41 @@ export async function reconcileCredentialScope(
 export async function migrateOrphanedCredentialScope(
   db: ProjectDb,
   boot_handle: string,
+  provenance: CredentialScopeProvenance,
 ): Promise<CredentialScopeMigrateResult> {
   const census = censusCredentialScopeTables(db, boot_handle)
   const { stale_handles } = census
   if (stale_handles.length === 0) {
     return { boot_handle, stale_handles: [], moved: [], skipped: [] }
+  }
+
+  // THE DIRECTION GUARD, ON THIS SIDE TOO — and the reason it is a REQUIRED
+  // argument rather than an option with a safe default.
+  //
+  // The boot path refused an anonymous fallback and this one did not, so the
+  // guard was real and bypassable in one step: boot as the `'dev'` fallback,
+  // call the explicit migration, and every row moves off the live handle. A
+  // review found it; the repro is one seeded row and one dispatch. Closing the
+  // direction on the automatic sweep closed nothing while an explicit surface
+  // sat beside it doing the same write with no question asked — the same
+  // mistake as the two-reconcilers one, one level up.
+  //
+  // "Explicit" is not the property that makes a move safe. The owner asking is
+  // only meaningful when the process knows WHO it is; a fallback handle means
+  // nobody said, so there is no owner to have asked. An anonymous process
+  // asking itself politely is still an anonymous process.
+  //
+  // Required, not optional-defaulting-to-false, because the failure is silent:
+  // a new surface that forgets it would compile, pass, and quietly do the
+  // unguarded thing. This way forgetting is a type error.
+  if (provenance.slug_is_fallback) {
+    return {
+      boot_handle,
+      stale_handles,
+      moved: [],
+      skipped: orphanCountsOf(census),
+      refused_direction: true,
+    }
   }
 
   // ONE transaction for the whole move, same as the boot path: a partial

@@ -179,6 +179,15 @@ export async function wireCoresSurfaces(
           registry: coresState.registry,
           tokens,
           secretsStore,
+          // Absent means "nobody said", which is the same thing as "this process
+          // does not know who it is" — so it reads as a fallback and the
+          // credential surfaces refuse. Forgetting fails CLOSED.
+          //
+          // Driven end-to-end (composer → graph → served route) by
+          // `tests/integration/cores-slug-provenance-wired.open.test.ts`. The
+          // surface's own tests construct this object, so they cannot see this
+          // line at all.
+          slug_is_fallback: input.slug_is_fallback ?? true,
           db: input.db,
           project_slug: input.project_slug,
           auth,
@@ -202,6 +211,15 @@ export async function wireCoresSurfaces(
         tokens,
         secretsStore,
         project_slug: input.project_slug,
+        // Absent means "nobody said", which is the same thing as "this process
+        // does not know who it is" — so it reads as a fallback and the
+        // credential surfaces refuse. Forgetting fails CLOSED.
+        //
+        // Driven end-to-end (composer → graph → registered tool) by
+        // `tests/integration/cores-slug-provenance-wired.open.test.ts`: hard-
+        // coding this to either constant reds that suite, and reds NOTHING
+        // else, which is why it exists.
+        slug_is_fallback: input.slug_is_fallback ?? true,
         db: input.db,
         startOAuth,
       })
