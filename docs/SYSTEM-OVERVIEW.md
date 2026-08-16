@@ -6590,11 +6590,27 @@ The fix is a git merge driver that works on **whole entries**:
   never reached it. Measured on git 2.50.1 before the fix: install, replace the
   config value with the predecessor's `bun <driver> %O %A %B %L %P`, leave the
   attribute alone, and `--check` printed `merge drivers: installed`, exit 0. It
-  now compares the configured command byte-for-byte against the one
-  `driver_command` would write — one definition shared by the install and the
-  check, so they cannot drift — and reports `STALE` (exit 1) with both strings
-  and the remedy. `NOT installed` stays distinct from `STALE`, and a host with no
-  bun fails closed as `CANNOT VERIFY` (exit 2) rather than guessing.
+  now reports `STALE` (exit 1) with both strings and the remedy, and `NOT
+  installed` stays distinct from `STALE`.
+- **…but WHERE the check runs is not part of WHAT is installed.** The first cut
+  of the above compared the whole command byte-for-byte, and two of its words are
+  absolute paths belonging to the shell asking rather than to the hardening: the
+  driver path came from `${BASH_SOURCE[0]}`, and the config it is compared
+  against lives in the COMMON git dir and is shared by every worktree; the bun
+  path came from `command -v` at check time. So a linked worktree reported a
+  correctly-installed clone STALE (measured on git 2.50.1), contradicting the
+  script's own promise that installing once serves every worktree — and following
+  the remedy it printed from a throwaway worktree wrote that worktree's path into
+  the shared config, where it dangled once the worktree was removed. `--check`
+  now reads both paths back OUT of the installed command, feeds them to the same
+  `driver_command` the install uses, and requires the rebuild to reproduce the
+  configured string byte for byte. Every hardening token is still exact; the two
+  free words are validated for what they must BE — the driver is an
+  `as-built-merge-driver.ts` that exists, the bun is executable — which also
+  catches a dangling command that parses perfectly and cannot run, and means the
+  check no longer needs a bun on `PATH` at all. Install resolves the driver from
+  the MAIN worktree, so a throwaway checkout cannot write a path that dies with
+  it.
 
 **What "the repo merges exactly as it does today" means here, precisely.** It is
 **not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,
