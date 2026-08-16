@@ -173,15 +173,48 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
  * alone would silently ignore the rename file on such a box.
  */
 export function resolveOwnerSlugFromConfig(config: BootConfig): string {
+  return resolveOwnerSlugSourceFromConfig(config).slug
+}
+
+/** Where the boot slug came from — see {@link resolveOwnerSlugSourceFromConfig}. */
+export type OwnerSlugSource = 'file' | 'env' | 'fallback'
+
+/** The boot slug plus its provenance. */
+export interface OwnerSlugResolution {
+  slug: string
+  source: OwnerSlugSource
+}
+
+/**
+ * {@link resolveOwnerSlugFromConfig}'s body, plus the one bit that call site
+ * throws away: WHERE the slug came from.
+ *
+ * The scope reconciler needs to tell "explicitly dev" from "nobody told me who
+ * I am" (defect 2026-08-14: an `NEUTRON_INSTANCE_SLUG`-unset boot that inherited
+ * a live `NEUTRON_HOME` re-keyed every credential row onto the `'dev'` fallback,
+ * and the running gateway — frozen on its real handle — read zero secrets). A
+ * bare string cannot carry that distinction, and `config.instanceSlug` is
+ * `undefined` exactly when the env var was absent (`config/index.ts:393`), so it
+ * is recoverable HERE and nowhere later.
+ *
+ * Precedence is byte-for-byte the old one: `.url_slug` file > `instanceSlug` >
+ * `'dev'`. Note the `??` semantics that were already there — an EXPLICIT
+ * `NEUTRON_INSTANCE_SLUG=dev` (or even an empty string) is `'env'`, not
+ * `'fallback'`; only an absent value falls through.
+ */
+export function resolveOwnerSlugSourceFromConfig(config: BootConfig): OwnerSlugResolution {
   const ownerHome = config.ownerHome ?? config.neutronHome
   if (ownerHome !== undefined && ownerHome !== '') {
     const slugFile = join(ownerHome, '.url_slug')
     if (existsSync(slugFile)) {
       const fromFile = readFileSync(slugFile, 'utf8').trim()
-      if (fromFile.length > 0) return fromFile
+      if (fromFile.length > 0) return { slug: fromFile, source: 'file' }
     }
   }
-  return config.instanceSlug ?? 'dev'
+  if (config.instanceSlug !== undefined && config.instanceSlug !== null) {
+    return { slug: config.instanceSlug, source: 'env' }
+  }
+  return { slug: 'dev', source: 'fallback' }
 }
 
 
@@ -260,8 +293,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // the just-registered sink. Guard the DB (the one resource open so far) so a
   // slug-read failure closes it before propagating.
   let project_slug: string
+  let slugResolution: OwnerSlugResolution
   try {
-    project_slug = resolveOwnerSlugFromConfig(config)
+    slugResolution = resolveOwnerSlugSourceFromConfig(config)
+    project_slug = slugResolution.slug
   } catch (err) {
     db.close()
     throw err
@@ -303,7 +338,15 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // mirrors the guards above (`bootFailureCleanup` is not declared yet here).
   let scopeReconcile: ScopeReconcileResult
   try {
-    scopeReconcile = reconcileInstanceScopeOnProjectDb(db, project_slug, { dbPath })
+    // `currentSlugIsFallback` is the DIRECTION half of the reconcile decision:
+    // a slug nobody configured may never pull the live instance's rows onto
+    // itself (defect 2026-08-14). It degrades to noop-and-log, never a refused
+    // boot — a headless box that refuses to boot has no surface left to explain
+    // itself.
+    scopeReconcile = reconcileInstanceScopeOnProjectDb(db, project_slug, {
+      dbPath,
+      currentSlugIsFallback: slugResolution.source === 'fallback',
+    })
   } catch (err) {
     clearOwnedSystemEventSink()
     await systemEventSink.drain()
@@ -338,6 +381,28 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
             r.tables.map((t) => ({ table: t.table, moved: t.moved, dropped: t.dropped })),
           ),
         },
+      }),
+    )
+  }
+  // The direction guard fired: an unconfigured identity found rows under a real
+  // handle and left them alone. Nothing is broken, but the box is running under
+  // the wrong name against someone else's database, and that must be visible
+  // without anyone having gone looking — the expensive part of this class of bug
+  // is that the symptom surfaces three layers away as "not connected".
+  if (scopeReconcile.refused_direction !== undefined) {
+    log.warn('instance_scope_rekey_refused', {
+      current_slug: scopeReconcile.current_slug,
+      stranded_keys: scopeReconcile.refused_direction.stranded_keys.join(','),
+      stranded_rows: scopeReconcile.refused_direction.stranded_rows,
+    })
+    fireAndForget(
+      'gateway.scope_rekey_refused_journal',
+      systemEventSink.record({
+        event: 'instance_scope_rekey_refused',
+        module: 'gateway',
+        level: 'warn',
+        project_slug: scopeReconcile.current_slug,
+        payload: scopeReconcile.refused_direction,
       }),
     )
   }
