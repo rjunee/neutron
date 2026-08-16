@@ -178,6 +178,21 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     expect(mergeAsBuiltLog('nothing', 'no entries here', 'none here either').ok).toBe(false)
   })
 
+  test('KNOWN LIMIT — a new entry colliding with an old heading keeps BOTH; only order is odd', () => {
+    // Identity is heading + occurrence, so an addition whose heading is byte-identical to an
+    // existing entry shifts the indices below it. The documented consequence is a possibly odd
+    // ORDER — never a dropped entry. This pins the part that matters: nothing is lost.
+    const collide = '## 2026-08-10 — older thing\n\na genuinely new entry that reuses the heading\n\n'
+    const base = log(OLD_A, OLD_B)
+    const res = mergeAsBuiltLog(base, log(collide, OLD_A, OLD_B), log(NEW_TWO, OLD_A, OLD_B))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toContain('a genuinely new entry that reuses the heading')
+    expect(res.text).toContain('body of older thing')
+    expect(res.text).toContain('body two')
+    expect(res.text).toContain('body of oldest thing')
+  })
+
   test('both sides deleting the same entry is agreement, not a conflict', () => {
     const base = log(OLD_A, OLD_B)
     const res = mergeAsBuiltLog(base, log(OLD_B), log(OLD_B))

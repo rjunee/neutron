@@ -29,6 +29,15 @@
  * `{ ok: false }`. The caller then falls back to `git merge-file`, so the floor of this whole
  * mechanism is exactly today's behaviour — conflict markers a human reads — never a silent
  * mis-merge. A driver that guessed here would be worse than the conflict it replaced.
+ *
+ * KNOWN LIMIT, STATED RATHER THAN DISCOVERED LATER. Identity is the heading plus an occurrence
+ * index, so adding an entry whose heading is byte-identical to an existing one (same date AND same
+ * title) SHIFTS the indices of the entries below it, and this then reads the addition as an edit
+ * of the old entry plus a re-addition of it. Every entry still survives — nothing is dropped, which
+ * is the property that actually matters — but their ORDER can come out odd. The real log contains
+ * four verbatim-duplicated headings, all historical, so this needs a new entry to collide exactly
+ * with an old one to trigger. Keying on a content hash instead would fix it and would break
+ * something worse: an ordinary edit to an entry would read as a delete plus an add.
  */
 
 /** An entry begins at a `## ` heading. `#` (the file title) and `### ` (subsections) do not. */
