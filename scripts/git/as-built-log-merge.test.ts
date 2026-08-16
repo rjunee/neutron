@@ -668,6 +668,35 @@ describe('the driver CLI — what git actually gets back', () => {
     expect(result).toContain('body of oldest thing')
   })
 
+  test('…and the DELEGATED path is bounded too, which the first cut of the clamp was not', () => {
+    // THE DEFECT THIS PINS, found by the cross-model reviewer. The clamp originally covered only
+    // the conflict this process constructs, and left `delegateToGit` forwarding `%L` to
+    // `git merge-file` untouched — justified as keeping the delegated path byte-for-byte what an
+    // unconfigured repo does. That justification is false in THIS repository: `.gitattributes`
+    // gives `docs/AS_BUILT.md` `merge=union`, and union never reports a conflict, so an
+    // unconfigured repo writes ZERO markers on this path rather than six megabytes of them. There
+    // was no floor property to protect, so both paths are bounded now.
+    //
+    // A TEXTUAL disagreement, which is the input that reaches `git merge-file` rather than
+    // `writeConflict` — both sides rewriting one entry, nothing deleted.
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-driver-'))
+    dirs.push(dir)
+    const paths = { O: join(dir, 'base'), A: join(dir, 'ours'), B: join(dir, 'theirs') }
+    writeFileSync(paths.O, log(OLD_A))
+    writeFileSync(paths.A, log('## 2026-08-10 — older thing\n\nours version\n\n'))
+    writeFileSync(paths.B, log('## 2026-08-10 — older thing\n\ntheirs version\n\n'))
+    expect(runDriver([paths.O, paths.A, paths.B, '2000000', 'docs/AS_BUILT.md'])).not.toBe(0)
+    const result = readFileSync(paths.A, 'utf8')
+    // CONTROL — this really is the delegated path: git labels its markers, this process does not.
+    expect(result).toContain('<<<<<<< ours')
+    expect(result).not.toContain('REFUSED by as-built-merge-driver')
+    expect(result).not.toContain('<'.repeat(201))
+    expect(result.length).toBeLessThan(10_000)
+    // Both sides still whole, so the bound applied to the markers and nothing else.
+    expect(result).toContain('ours version')
+    expect(result).toContain('theirs version')
+  })
+
   test('a missing input file is a conflict, never a silent clean merge', () => {
     const dir = mkdtempSync(join(tmpdir(), 'as-built-driver-'))
     dirs.push(dir)

@@ -199,10 +199,23 @@ does nothing but print `%L`, which received a committed `2000000` intact. The
 conflict this driver constructs writes that many characters three times, so one
 refusal grew from 302 bytes to 6,000,281, linearly. Clamped at 200. The claim that
 nothing the checkout contains decides what happens on the publisher host now says
-what RUNS, and names `%L` as the one input that crosses and is bounded. The
-delegated path still passes `%L` through, deliberately: its stated property is
-that it is byte-for-byte an unconfigured repo, and git does not bound it either
-(measured, 6,000,148 bytes from git alone).
+what RUNS, and names `%L` as the one input that crosses and is bounded.
+
+THE FIRST CLAMP COVERED ONE OF THE TWO CONFLICT PATHS, AND THE EXEMPTION FOR THE
+OTHER WAS A CONFIDENT SENTENCE THIS REPOSITORY ALREADY CONTRADICTED. It left
+`delegateToGit` forwarding `%L` to `git merge-file` untouched, reasoning that the
+delegated path must stay byte-for-byte what an unconfigured repo does. A
+cross-model reviewer disproved it from a tracked file: `.gitattributes` gives
+`docs/AS_BUILT.md` `merge=union`, and union never reports a conflict — so an
+unconfigured repo writes ZERO markers on this path, not six megabytes of them.
+`git merge-file` was never this path's unconfigured behaviour, so there was no
+floor property to protect. Both paths go through one `markerWidth` now, and the
+delegated one has its own test with a control distinguishing it from the
+constructed one (git labels its markers; this process names itself in them).
+`docs/SYSTEM-OVERVIEW.md` had the union point right, in the same words, while the
+driver's docblock had it wrong — the measurement was sound and only the
+conclusion drawn from it was not. An EXEMPTION from a bound needs its
+justification checked as hard as the bound.
 
 Also corrected rather than defended: a restated-count assertion
 (`entries.length > 250`) in the real-log test, which forbids a legitimate future

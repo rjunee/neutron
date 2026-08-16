@@ -309,6 +309,14 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
     // resolves to a file with no entries at all when they match (exit 0, no markers). The loud
     // outcome was git's accident, not this file's decision, and a driver whose stated rule is
     // "a refusal about a missing entry is never handed to git" must not depend on the accident.
+    //
+    // IT IS A DELIBERATE EXCEPTION TO "BOTH DELETED IT — AGREED" BELOW, NOT AN OVERSIGHT. That rule
+    // honours a removal both sides made, and two sides that agreed to empty the log entirely are
+    // formally the same shape. The difference is scale and recoverability: a partial agreed deletion
+    // is a reviewable diff, while every entry vanishing at once is the exact outcome this file
+    // exists to make impossible, and the cost of being wrong about it is asymmetric — a conflict a
+    // human resolves in five minutes against a permanent history nobody notices is gone. Emptying
+    // the log deliberately is still available; it just cannot be done by a merge nobody reads.
     return {
       ok: false,
       reason:

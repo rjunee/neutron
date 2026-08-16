@@ -58,35 +58,55 @@ import { mergeAsBuiltLog } from './as-built-log-merge.ts'
 const LOG_PATH = 'docs/AS_BUILT.md'
 
 /**
- * The widest conflict marker this process will WRITE, whatever `%L` asks for.
+ * The widest conflict marker this process will cause to be written, whatever `%L` asks for.
  *
  * `%L` is not ours: git derives it from the `conflict-marker-size` attribute of the path, which a
  * TRACKED `.gitattributes` in the merged repository sets — verified by handing git a driver that
- * does nothing but print `%L`, which reported `2000000` from a committed attributes file. The
- * conflict this file constructs writes that many characters three times, so the same refusal that
- * costs 302 bytes at the default cost 6,000,281 bytes at that setting, scaling linearly with a
- * number the checkout chooses.
+ * does nothing but print `%L`, which reported `2000000` from a committed attributes file. A
+ * conflict writes that many characters three times, so the same refusal that costs 302 bytes at
+ * the default costs 6,000,281 at that setting, scaling linearly with a number the checkout chooses.
  *
- * WHAT THIS DOES AND DOES NOT CLOSE, because the honest version is narrower than "clamped".
- * `delegateToGit` still passes `%L` to `git merge-file` unclamped, and git does not bound it either
- * — measured, the same 2000000 produces 6,000,148 bytes from git alone on a three-line file. That
- * path is deliberately left alone: its stated property is that the fallback is byte-for-byte what
- * an unconfigured repo does, and clamping it would make that false to fix an amplification the
- * unconfigured repo has anyway. So this bound covers the output THIS code authors, and the
- * remaining exposure is git's own, identical with or without this driver installed. Git's default
- * is 7 and no real setting is near three digits, so 200 is far above any legitimate use.
+ * IT BOUNDS BOTH CONFLICT PATHS, AND THE FIRST CUT OF IT BOUNDED ONLY ONE. That cut left
+ * `delegateToGit` forwarding `%L` to `git merge-file` untouched, on the reasoning that the
+ * delegated path's stated property is to be byte-for-byte what an unconfigured repo does, so
+ * clamping it would make that claim false. THE REASONING WAS WRONG, and the file that disproves it
+ * is in this repository: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`, and union never
+ * reports a conflict at all. An unconfigured repo therefore writes ZERO markers on this path, not
+ * six megabytes of them — so `git merge-file` was never the unconfigured behaviour here, and there
+ * was no floor property to protect. (`docs/SYSTEM-OVERVIEW.md` had this right in the same words
+ * while this docblock had it wrong; the measured 6,000,148 bytes from git alone was real, and only
+ * the conclusion drawn from it was not.) Both call sites go through `markerWidth` now.
+ *
+ * THE VALUE IS A POLICY, NOT A MEASUREMENT, and is labelled as one. git's default is 7 and nothing
+ * legitimate is near three digits, so 200 is far above any real setting while bounding the output
+ * at a few hundred bytes of markers. It is not derived from a limit in git, which has none.
  */
 const MAX_MARKER_SIZE = 200
 
 /**
+ * `%L` as a width this process is willing to act on: git's default for anything unparseable, at
+ * least `minimum`, and never more than `MAX_MARKER_SIZE`.
+ *
+ * The ceiling is the whole point — see `MAX_MARKER_SIZE`. A digit string too large for a double
+ * parses to `Infinity`, which `Math.min` pins to the ceiling like any other oversized value, so
+ * there is no separate finiteness case to get wrong.
+ */
+function markerWidth(markerSize: string, minimum: number): number {
+  const parsed = /^\d+$/.test(markerSize) ? Number(markerSize) : 7
+  return Math.min(Math.max(parsed, minimum), MAX_MARKER_SIZE)
+}
+
+/**
  * Hand the merge back to git. Writes standard conflict markers into `ours` and returns git's exit
- * status, so this floor is byte-for-byte what an unconfigured repo does.
+ * status.
  *
  * ONLY EVER CALLED WHERE GIT'S ANSWER IS A REAL ONE. Anything that could resolve away an entry goes
  * to `writeConflict` instead — see the header.
  */
 function delegateToGit(base: string, ours: string, theirs: string, markerSize: string): number {
-  const size = /^\d+$/.test(markerSize) ? markerSize : '7'
+  // Floor of 0: git owns its own minimum on this path, and the only thing being imposed here is the
+  // ceiling. `writeConflict` floors at 7 because it formats the markers itself.
+  const size = markerWidth(markerSize, 0)
   const res = spawnSync(
     'git',
     ['merge-file', `--marker-size=${size}`, '-L', 'ours', '-L', 'base', '-L', 'theirs', ours, base, theirs],
@@ -104,8 +124,7 @@ function delegateToGit(base: string, ours: string, theirs: string, markerSize: s
  * --ours/--theirs` style recovery still finds each side intact.
  */
 function writeConflict(oursPath: string, ours: string, theirs: string, markerSize: string, reason: string): number {
-  const size = /^\d+$/.test(markerSize) ? Number(markerSize) : 7
-  const width = Number.isFinite(size) && size >= 7 ? Math.min(size, MAX_MARKER_SIZE) : 7
+  const width = markerWidth(markerSize, 7)
   const withNewline = (text: string): string => (text === '' || text.endsWith('\n') ? text : `${text}\n`)
   writeFileSync(
     oursPath,

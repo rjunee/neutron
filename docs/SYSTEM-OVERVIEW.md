@@ -6532,11 +6532,15 @@ The fix is a git merge driver that works on **whole entries**:
   `.gitattributes` in the merged repo sets — verified by handing git a driver
   that prints `%L` and reading back a committed `2000000`. The conflict this
   driver constructs writes that many characters three times, so one refusal grew
-  from 302 bytes to 6,000,281, linearly. Capped at 200 (git's default is 7). The
-  cap covers what THIS code writes; `git merge-file` on the delegated path is
-  still handed `%L` unclamped, because that path's stated property is that it is
-  byte-for-byte what an unconfigured repo does — and git does not bound it
-  either, measured at the same 6 MB from git alone.
+  from 302 bytes to 6,000,281, linearly. Capped at 200 (git's default is 7),
+  **on both conflict paths**. The first cut of the cap covered only the
+  constructed conflict and left `git merge-file` handed `%L` unclamped, on the
+  reasoning that the delegated path must stay byte-for-byte what an unconfigured
+  repo does. That reasoning is false here and the next bullet is why: without the
+  driver this path is `merge=union`, which never conflicts at all, so an
+  unconfigured repo writes **zero** markers rather than six megabytes of them.
+  There was no floor property to protect. (git does not bound `%L` either —
+  measured at the same 6 MB from `git merge-file` alone.)
 - `scripts/install-merge-drivers.sh` — installs the driver config AND the
   binding. **The binding lives in `.git/info/attributes`, not in a tracked
   `.gitattributes`** — and the reason is the measured one rather than the

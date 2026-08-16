@@ -649,9 +649,15 @@ function asBuiltDriverCommand(driver: string): string | null {
  * print `%L` — a committed `conflict-marker-size=2000000` arrived intact. It selects no code and
  * executes nothing, but it did size a buffer: the conflict `as-built-merge-driver.ts` constructs
  * grew from 302 bytes to 6,000,281 on that value, linearly. It is clamped there now
- * (`MAX_MARKER_SIZE`), so the one checkout-supplied input the driver takes is bounded. The general
- * lesson is worth more than the fix: an absolute claim about a boundary should be read against
- * every argument that crosses it, and `%O %A %B %L %P` had five.
+ * (`MAX_MARKER_SIZE`), on BOTH conflict paths — the first clamp covered only the constructed
+ * conflict and left the delegated one forwarding `%L` to `git merge-file`, which a cross-model
+ * reviewer caught: the exemption rested on the delegated path being byte-for-byte an unconfigured
+ * repo, and without this driver the path is `merge=union`, which never conflicts and writes no
+ * markers at all. So the one checkout-supplied input the driver takes is bounded wherever it lands.
+ * The general lesson is worth more than the fix: an absolute claim about a boundary should be read
+ * against every argument that crosses it, and `%O %A %B %L %P` had five — and an EXEMPTION from a
+ * bound needs its justification checked as hard as the bound itself, because this one was a
+ * confident sentence about behaviour a file in this repository already contradicted.
  *
  * ONLY WHERE IT APPLIES. Two conditions, both read as DATA and neither executed: the checkout has
  * the log, and it carries this log's merge contract (`scripts/git/as-built-log-merge.ts`), which is
