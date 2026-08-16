@@ -146,6 +146,36 @@ describe('inner-workflow.mjs — args normalization behavior', () => {
 })
 
 describe('inner-workflow.mjs — inlined contracts + rules in EVERY agent', () => {
+  test('Forge writes an artifact-time checkpoint with the shell-resolved branch head', () => {
+    const helper = grabFunction('artifactCheckpointCommand')
+    const contract = grabFunction('forgeBuildContract')
+    expect(helper).toContain('if (!dbPath || !runId) return null')
+    expect(helper).toContain('inner_checkpoint_head "$(git rev-parse --verify HEAD)"')
+    expect(contract).toContain("artifactCommand === null ? 6 : 7")
+    expect(contract).toContain("artifactCommand === null\n    ? ''")
+    expect(SRC).toContain("forgeBuildContract(resuming, 'forge-done')")
+    expect(SRC).toContain('forgeBuildContract(true, `fix-round-${round}`)')
+
+    const whitelist = CHECKPOINT_SH.slice(CHECKPOINT_SH.indexOf('case "$field" in'), CHECKPOINT_SH.indexOf('    *)', CHECKPOINT_SH.indexOf('case "$field" in')))
+    for (const field of ['branch', 'inner_checkpoint', 'inner_checkpoint_head', 'inner_findings_file', 'subagent_status']) {
+      expect(helper).toContain(field)
+      expect(whitelist).toContain(field)
+    }
+    expect(helper.match(/bash \$\{shSingleQuote\(checkpointSh\)\}/g)).toHaveLength(1)
+  })
+
+  test('Codex dispatch threads the same artifact checkpoint names only with run storage', () => {
+    const prompt = grabFunction('codexBuildPrompt')
+    const dispatch = grabFunction('forgeAgent')
+    expect(prompt).toContain("const checkpointEnv = !dbPath || !runId")
+    for (const name of ['SCRIPT', 'DB', 'RUN_ID', 'NAME']) {
+      expect(prompt).toContain(`NEUTRON_CODEX_BUILD_CHECKPOINT_${name}`)
+    }
+    expect(dispatch).toContain("opts.label === 'forge:build' ? 'forge-done' : opts.label.slice('forge:'.length)")
+    expect(SRC).toContain('await checkpoint(`fix-round-${round}`')
+    expect(SRC).toContain("await checkpoint('forge-done'")
+  })
+
   test('inlines the Forge build contract (PR_NUMBER/BRANCH/WORKTREE, push + open PR, smallest-correct-change)', () => {
     expect(SRC).toContain('PR_NUMBER=')
     expect(SRC).toContain('BRANCH=')
@@ -452,9 +482,9 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     // round-1 (create) contract in fix rounds told Forge to `git switch -c` an
     // already-created branch + `gh pr create` a duplicate — breaking every
     // REQUEST_CHANGES run.
-    expect(SRC).toContain('function forgeBuildContract(reenter)')
-    expect(SRC).toContain('forgeBuildContract(resuming)')
-    expect(SRC).toContain('forgeBuildContract(true)')
+    expect(SRC).toContain('function forgeBuildContract(reenter, artifactCheckpointName)')
+    expect(SRC).toContain("forgeBuildContract(resuming, 'forge-done')")
+    expect(SRC).toContain('forgeBuildContract(true, `fix-round-${round}`)')
     // The re-enter step switches WITHOUT -c; the create step uses -c.
     expect(SRC).toContain('Re-enter it WITHOUT')
   })
