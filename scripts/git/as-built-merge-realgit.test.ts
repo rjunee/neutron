@@ -784,6 +784,35 @@ describe('the installer under a locked config — the FATAL half-state must be i
         expect(`${label}: ${checked.stderr}`).toContain('STALE')
       }
 
+      // EACH PREDICATE ON ITS OWN. Every impostor above also fails the NAME test, so the three of
+      // them together would stay green with `-f` or `-x` deleted — the check would be resting
+      // entirely on the basename and the table would not notice. A cross-model reviewer caught
+      // exactly that. These two are NAMED `bun` and fail on one predicate each.
+      const named = mkdtempSync(join(tmpdir(), 'as-built-named-bun-'))
+      created.push(named)
+
+      // `-f` alone: a directory called `bun`. `-x` passes on it (the bit means "searchable"), and
+      // so does the name, so this is red only while `-f` is there.
+      const dirBun = join(named, 'dir', 'bun')
+      mkdirSync(dirBun, { recursive: true })
+      // `-x` alone: a regular file called `bun` with no execute bit. `-f` and the name both pass.
+      const dullBun = join(named, 'plain', 'bun')
+      mkdirSync(dirname(dullBun), { recursive: true })
+      writeFileSync(dullBun, '#!/bin/sh\n')
+      chmodSync(dullBun, 0o644)
+
+      for (const [label, impostor] of [
+        ['a DIRECTORY named bun — only `-f` rejects it', dirBun],
+        ['a NON-EXECUTABLE file named bun — only `-x` rejects it', dullBun],
+      ] as Array<[string, string]>) {
+        const mutated = hardened.replace(`'${bun}'`, `'${impostor}'`)
+        expect(mutated).not.toBe(hardened)
+        git(repo, 'config', 'merge.as-built-log.driver', mutated)
+        const checked = run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check'])
+        expect(`${label}: exit ${checked.code}`).toBe(`${label}: exit 1`)
+        expect(`${label}: ${checked.stderr}`).toContain('STALE')
+      }
+
       // CONTROL — the interpreter word is what made each of those stale. Put the real one back,
       // change nothing else, and the same check passes.
       git(repo, 'config', 'merge.as-built-log.driver', hardened)

@@ -225,6 +225,23 @@ sq() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+# Is this path's final component the bun interpreter? Used by BOTH the install-time guard and
+# `--check`, so the two cannot disagree about what counts as bun.
+#
+# The `.exe` suffix is stripped case-insensitively, matching `asBuiltDriverCommand` in
+# `trident/orchestrator.ts:633` (`basename(process.execPath).replace(/\.exe$/i, '') !== 'bun'`).
+# That repository is macOS and ubuntu today, so this is not a supported platform being added —
+# it is the OTHER derivation of this same decision already handling it, and a docblock in this
+# file claiming the two agree on what counts as bun. Without this line that claim is false, and a
+# claim about agreement is exactly the kind that goes stale silently.
+is_bun_named() {
+  local base="${1##*/}"
+  case "$base" in
+    *.exe | *.EXE | *.Exe) base="${base%.*}" ;;
+  esac
+  [ "$base" = bun ]
+}
+
 # The exact inverse of `sq`, for reading a path back OUT of an installed command. Non-zero if the
 # word is not a single-quoted one, which is itself a difference worth reporting rather than
 # guessing past. Deliberately NOT `eval`: the string comes from the repo config, and the whole
@@ -395,7 +412,8 @@ if [ "${1:-}" = "--check" ]; then
   # would be this script executing an arbitrary named binary to find out whether it was safe to let
   # git execute it, which answers the question by doing the thing. The same rule is already the one
   # the other derivation applies to itself — `asBuiltDriverCommand` (`trident/orchestrator.ts:633`)
-  # gates on `basename(process.execPath) !== 'bun'` — so the two agree on what counts as bun.
+  # gates on `basename(process.execPath) !== 'bun'` — and `is_bun_named` above is spelled to match
+  # it down to the `.exe` strip, so the two genuinely agree rather than merely reading as if they do.
   #
   # RESIDUAL, STATED RATHER THAN PAPERED OVER: a file that is NAMED `bun` and is not bun passes
   # this. Catching that means running it, see above. What the name check does cover is every
@@ -404,10 +422,7 @@ if [ "${1:-}" = "--check" ]; then
   # always a hand-edit or an older release's spelling, never a clone this script wrote.
   [ -f "$bun_path" ] || stale "the bun it names is not a file — $bun_path"
   [ -x "$bun_path" ] || stale "the bun it names is not executable — $bun_path"
-  case "${bun_path##*/}" in
-    bun) ;;
-    *) stale "its interpreter is ${bun_path##*/}, not bun — $bun_path" ;;
-  esac
+  is_bun_named "$bun_path" || stale "its interpreter is ${bun_path##*/}, not bun — $bun_path"
 
   # …AND THE DRIVER IT NAMES HAS TO BE THIS CHECKOUT'S DRIVER, not merely a file at a plausible
   # path. The command deliberately names the MAIN worktree's copy (see the DRIVER PATH block
@@ -465,7 +480,7 @@ case "$BUN" in
      echo "                       way; the driver needs a real binary. Install bun, then re-run." >&2
      exit 2 ;;
 esac
-if [ ! -f "$BUN" ] || [ ! -x "$BUN" ] || [ "${BUN##*/}" != bun ]; then
+if [ ! -f "$BUN" ] || [ ! -x "$BUN" ] || ! is_bun_named "$BUN"; then
   echo "install-merge-drivers: NOT INSTALLED — '$BUN' is not an executable file named bun." >&2
   echo "                       The driver runs under bun; refusing to write a command that names" >&2
   echo "                       something else. Install bun, then re-run this script." >&2
