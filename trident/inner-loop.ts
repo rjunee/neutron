@@ -363,6 +363,7 @@ export const WORKFLOW_FIRE_TOOL_NAMES = [
 export function buildWorkflowArgs(
   input: InnerLoopInput,
   briefParts?: BriefParts | null,
+  reflectionGuidance?: string,
 ): Record<string, unknown> {
   const run = input.run
   return {
@@ -440,7 +441,7 @@ export function buildWorkflowArgs(
     // already relies on. Empty string for a null/whitespace/non-string context → the
     // workflow appends nothing (a clean no-op). The `.mjs` cannot import this helper
     // (no module resolution), so the derivation lives here.
-    reflectionGuidance: buildReflectionGuidance(input.reflection_context),
+    reflectionGuidance: reflectionGuidance ?? buildReflectionGuidance(input.reflection_context),
     // The TEST EXECUTION block, carried EXACTLY like `reflectionGuidance` above: an
     // already-rendered string (the `.mjs` has no module resolution), spliced into the
     // FORGE contract only, never argus. Unlike the guidance it is DERIVED UPSTREAM by
@@ -543,8 +544,9 @@ export function buildFireWorkflowPrompt(
   scriptPath: string,
   input: InnerLoopInput,
   briefParts?: BriefParts | null,
+  reflectionGuidance?: string,
 ): string {
-  const argsJson = JSON.stringify(buildWorkflowArgs(input, briefParts))
+  const argsJson = JSON.stringify(buildWorkflowArgs(input, briefParts, reflectionGuidance))
   return `You are the trident-v2 inner-loop LAUNCHER. Your ENTIRE job is to FIRE one background Workflow and then immediately reply — you run UNATTENDED and must NEVER ask for input.
 
 Do EXACTLY this, nothing else:
@@ -676,16 +678,15 @@ export function buildWorkflowFirer(opts: BuildWorkflowFirerOptions): TridentWork
 
   return async function fireWorkflow(input: InnerLoopInput): Promise<FireOutcome> {
     const cwd = input.run.worktree ?? input.run.repo_path
-    // CRITICAL: these must be exactly the strings buildWorkflowArgs carries. T3
-    // verifies args text against these receipts before substituting the files;
-    // derivation drift would make every codex build refuse. The guidance helper
-    // is pure and deterministic, so its two calls produce identical strings.
+    // Compose the guidance exactly once: the same string is written as the
+    // authoritative disk part and carried in args for the Claude route.
+    const reflectionGuidance = buildReflectionGuidance(input.reflection_context)
     const briefParts = writeParts({
       runId: input.run.id,
       task: input.run.task,
-      reflectionGuidance: buildReflectionGuidance(input.reflection_context),
+      reflectionGuidance,
     })
-    const prompt = buildFireWorkflowPrompt(scriptPath, input, briefParts)
+    const prompt = buildFireWorkflowPrompt(scriptPath, input, briefParts, reflectionGuidance)
     try {
       return await opts.fire({ prompt, cwd, settle_timeout_ms: settleTimeoutMs })
     } catch (e) {
