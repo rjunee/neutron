@@ -61,7 +61,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
@@ -729,12 +729,27 @@ export async function ensureAsBuiltMergeDriver(
 
     // The COMMON git dir, not the per-worktree one: a linked worktree reads attributes from the
     // common one, which is what the publisher's throwaway rebase worktree depends on.
+    //
+    // AND `--path-format=absolute` NEEDS A FALLBACK, because it arrived in git 2.31 and a `git`
+    // that predates it exits non-zero on the flag rather than ignoring it. Returning false there
+    // would be the silent-regression shape this file keeps finding: `merge.<driver>.driver` is
+    // ALREADY written by the time this runs, so a bare `return false` leaves the config half-placed
+    // and the attribute unwritten, and the replay then proceeds under the tracked `merge=union`
+    // while trident reports the driver as unavailable. The shell installer has always had this
+    // fallback (`scripts/install-merge-drivers.sh`); this call site did not.
+    let commonDir = ''
     const common = await run_host(
       ['git', '-C', repoPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
       repoPath,
     )
-    if (!common.ok) return false
-    const commonDir = common.stdout.trim()
+    if (common.ok) commonDir = common.stdout.trim()
+    else {
+      // Plain `--git-common-dir` answers relative to the working tree, so it is resolved here.
+      const plain = await run_host(['git', '-C', repoPath, 'rev-parse', '--git-common-dir'], repoPath)
+      if (!plain.ok) return false
+      const raw = plain.stdout.trim()
+      commonDir = raw === '' ? '' : isAbsolute(raw) ? raw : join(repoPath, raw)
+    }
     if (commonDir === '') return false
 
     const attributes = join(commonDir, 'info', 'attributes')

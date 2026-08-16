@@ -278,10 +278,15 @@ function index(log: ParsedLog): Map<string, LogEntry> {
 /**
  * The date each retained entry sorts AT.
  *
- * Ten sections in the real log carry no date of their own; #304 placed each one beside the entry
- * it belongs to rather than flinging it to the end. So an undated entry INHERITS its predecessor's
- * date, which stops a newly-merged entry from being inserted between an entry and its own
- * continuation.
+ * An entry with no date of its own INHERITS its predecessor's, which stops a newly-merged entry
+ * from being inserted between an entry and its own continuation — the placement #304 asked for.
+ *
+ * THE REAL LOG CARRIES NONE OF THEM TODAY, WHICH IS SAID HERE BECAUSE IT WAS NOT. This docblock
+ * asserted "ten sections in the real log carry no date"; measured with this file's own parser at
+ * the time of writing, `docs/AS_BUILT.md` holds 314 entries and ZERO undated ones, and a `grep`
+ * control agrees on this branch and on `main`. The claim was last true around `d5ba62b7`. So this
+ * subsystem and `attachAfter` have NO coverage from the real file and are exercised only by the
+ * fixtures in the test suite — which is worth knowing before trusting either against it.
  */
 function effectiveDates(entries: LogEntry[]): string[] {
   const dates: string[] = []
@@ -303,6 +308,11 @@ function effectiveDates(entries: LogEntry[]): string[] {
  * entries: `git merge-file` exit 0, zero conflict markers, 3 of 21 headings surviving. So these
  * refusals are terminated by the driver itself, and only the rest — where the disagreement is
  * textual and git's own three-way is exactly the pre-driver behaviour — are delegated.
+ *
+ * WHICH MAKES THE ORDER OF DETECTION PART OF THE GUARANTEE, NOT AN IMPLEMENTATION DETAIL. Returning
+ * a textual refusal while an unexamined entry is missing from one side delegates that entry to git,
+ * and git resolves it away — so `mergeAsBuiltLog` finishes scanning the base before it returns any
+ * refusal at all, and a losing one always outranks a textual one. See the comment above the scan.
  */
 export type MergeRefusal = { ok: false; reason: string; wouldLoseEntries: boolean }
 export type MergeResult = { ok: true; text: string } | MergeRefusal
@@ -411,13 +421,32 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
     }
   }
 
+  // A TEXTUAL REFUSAL IS REMEMBERED, NOT RETURNED, UNTIL THE WHOLE BASE HAS BEEN SCANNED.
+  //
+  // The two kinds of refusal are handled differently by the driver — a textual one is delegated to
+  // `git merge-file`, a losing one is terminated with a constructed conflict — so RETURNING THE
+  // WRONG KIND FIRST IS THE SAME BUG AS NOT REFUSING AT ALL. A header disagreement or one rewritten
+  // entry used to return on the spot, and a one-sided deletion further down the base was never
+  // reached: the driver saw `wouldLoseEntries: false`, handed the file to git, and git read the
+  // deletion as a clean hunk and applied it. MEASURED end-to-end on a 10-entry base with entry 1
+  // rewritten on both sides AND entry 7 dropped from `ours`: exit 1 with markers around entry 1
+  // only, and `entry 7` absent from the merged file — 11 headings in, 10 out, the refusal fired
+  // about the wrong thing and the entry left anyway.
+  //
+  // So every refusal whose content is "an entry is missing" wins over every refusal whose content is
+  // "two texts disagree", regardless of which one the base reaches first. Both loops below run to
+  // completion; the losing refusal returns immediately because nothing outranks it, and the textual
+  // one is held here and returned only once the base is known to be whole.
+  let textualRefusal: MergeRefusal | null = null
+
   const preambleA = A.preamble.join('\n')
   const preambleB = B.preamble.join('\n')
   const preambleO = O.preamble.join('\n')
-  let preamble: string[]
+  // Unused when a refusal is returned; assigned so the scan below can still run to completion.
+  let preamble: string[] = A.preamble
   if (preambleA === preambleB || preambleB === preambleO) preamble = A.preamble
   else if (preambleA === preambleO) preamble = B.preamble
-  else return { ok: false, reason: 'both sides changed the log header differently', wouldLoseEntries: false }
+  else textualRefusal = { ok: false, reason: 'both sides changed the log header differently', wouldLoseEntries: false }
 
   // (1) Entries the base already had, in the base's order, with each side's edits applied.
   const retained: LogEntry[] = []
@@ -453,10 +482,19 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
     else {
       // Both sides rewrote one entry. Nothing is being DELETED here, so git's line-level three-way
       // is a real answer: it merges disjoint edits inside the entry and conflicts on overlapping
-      // ones, which is exactly what this file's merges did before the driver existed.
-      return { ok: false, reason: `both sides edited the same entry differently: ${original.key}`, wouldLoseEntries: false }
+      // ones, which is exactly what this file's merges did before the driver existed. HELD rather
+      // than returned — a later entry may be missing from one side, and that outranks this.
+      textualRefusal ??= {
+        ok: false,
+        reason: `both sides edited the same entry differently: ${original.key}`,
+        wouldLoseEntries: false,
+      }
     }
   }
+
+  // The base is whole: every entry it had is on both sides or on neither. Only now may a refusal
+  // that git is allowed to finish be returned.
+  if (textualRefusal !== null) return textualRefusal
 
   // (2) Additions — an entry present on a side and absent from the base. THIS is the union that
   //     makes two concurrent builds land together.
@@ -546,7 +584,17 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
   const merged: LogEntry[] = []
   let next = 0
   for (let i = 0; i < retained.length; i++) {
-    while (next < free.length && free[next]!.sortDate >= dates[i]!) merged.push(...free[next++]!.entries)
+    // `dates[i] === ''` IS "NO DATE", NOT "THE OLDEST DATE", AND THE COMPARISON READ IT AS BOTH.
+    // `effectiveDates` carries a date forward, so the sentinel survives only where nothing before an
+    // entry was ever dated — i.e. an undated section at the very TOP of the log. Every `sortDate` is
+    // `>= ''`, so that one entry admitted every addition above it, and a dated addition landed over
+    // an undated preface instead of under it. (Measured: an undated first entry plus a 2026-01-01
+    // addition emitted the addition at the top.) An entry with no effective date carries no ordering
+    // information, so nothing is positioned against it — it keeps its place and the next dated entry
+    // decides. Unreachable against the real log today, which has 314 entries and zero undated; it is
+    // closed because it is one clause, and because "unreachable" is a property of a file that
+    // changes weekly.
+    while (next < free.length && dates[i] !== '' && free[next]!.sortDate >= dates[i]!) merged.push(...free[next++]!.entries)
     merged.push(retained[i]!)
     const continuation = continuations.get(retained[i]!.key)
     if (continuation !== undefined) merged.push(...continuation)

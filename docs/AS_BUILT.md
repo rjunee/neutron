@@ -152,11 +152,14 @@ precedence over the tracked file, which is what displaces it, verified with
 without driver), while the INERT one (driver without attribute) is reachable and
 harmless, so "both halves or neither" was one word too strong.
 
-Tests: 66 across `scripts/git/as-built-log-merge.test.ts`,
+Tests live in `scripts/git/as-built-log-merge.test.ts`,
 `scripts/git/as-built-merge-realgit.test.ts` and
-`trident/as-built-publish-wiring-realgit.test.ts`, up from 29 on the base
-commit — measured by running the three files on each side, not counted by hand
-(the first draft of this line said 44 up from 30 and both numbers were wrong).
+`trident/as-built-publish-wiring-realgit.test.ts` — several times what the base
+commit carried. NO EXACT COUNT IS RESTATED HERE, and two earlier drafts of this
+line are why: each named a number ("44 up from 30", then "66"), each was true for
+about a day, and a permanent log that asserts a moving measurement is simply
+wrong from the next review round onward. `bun test` on those three paths prints
+the number, from the files, whenever anyone actually needs it.
 Each safety property was mutation-tested with a control proving the mutation
 landed: reverting the fence bound fails the two indentation tests and nothing
 else, restoring the old one-sided-deletion rule fails the two truncation tests
@@ -234,6 +237,70 @@ landed: restoring the unconditional `wouldLoseEntries: false` fails the entryful
 base test and nothing else, disabling the run-folding fails the cross-side
 continuation test and nothing else, and removing the clamp fails the marker-size
 test and nothing else.
+
+A THIRD ROUND FOUND THE SAME BUG ONE LEVEL UP: THE FLAG WAS RIGHT AND THE ORDER
+OF DETECTION WAS NOT. Every refusal above says truthfully whether git may finish
+it, and `mergeAsBuiltLog` returned whichever refusal the base reached FIRST. A
+header disagreement returns before the base is scanned at all
+(`scripts/git/as-built-log-merge.ts`, the preamble check), and a both-sides-
+rewrote-one-entry refusal returns from the middle of the retained loop — so a
+one-sided deletion LATER in the base was never examined, the driver was handed
+`wouldLoseEntries: false`, and git resolved the deletion away. Measured end to
+end through `runDriver` on a 10-entry base with entry 1 rewritten on both sides
+and entry 7 dropped from `ours`: exit 1 with markers around entry 1 only, `entry
+7` absent from the merged file, 11 headings in and 10 out. The refusal fired,
+about the wrong thing, and the entry left anyway — which is indistinguishable
+from not refusing. A textual refusal is now HELD rather than returned: both
+scans run to completion, a losing refusal returns immediately because nothing
+outranks it, and the held one is returned only once the base is known whole.
+Ordering is therefore part of the guarantee, and the docblock says so.
+
+`--path-format=absolute` HAD NO FALLBACK IN THE ORCHESTRATOR, so on a git older
+than 2.31 the flag exits non-zero, `ensureAsBuiltMergeDriver` returned false —
+AFTER `merge.<driver>.driver` was already written — and the attribute was never
+bound. The replay then proceeded under the tracked `merge=union` while trident
+reported the driver unavailable: a silent downgrade rather than a loud failure.
+`scripts/install-merge-drivers.sh` has always retried with the plain spelling;
+that call site now does too, resolving a relative answer against the repo.
+
+`''` MEANT BOTH "NO DATE" AND "THE OLDEST DATE" IN THE PLACEMENT LOOP. Effective
+dates carry forward, so the sentinel survives only where nothing before an entry
+was ever dated — an undated section at the very top. Every `sortDate` compares
+`>= ''`, so that one entry admitted every addition above it and a dated addition
+landed OVER an undated preface. Ordering only, and unreachable against the real
+log, which is the other correction this round: the docblocks asserted "ten
+sections in the real log carry no date" and the file holds 314 entries and ZERO
+undated ones, measured with this branch's own parser against a `grep` control on
+both the branch and `main`. That claim was last true around `d5ba62b7`, and it
+had been hiding the fact that the `effectiveDates`/`attachAfter` subsystem has no
+coverage from the real file at all. Both are now stated as measured.
+
+Two test names were overclaiming and are renamed or earned. "Finds every entry in
+the real log, and only real ones" is a bijection its own body explicitly declines
+to prove; it now says what it does — the parse and a raw heading scan agree. "A
+real added entry merges without disturbing anything else" compared entry counts
+and first lines, so a corrupted retained BODY passed; it now compares whole
+entries. And the installer's test prose still promised "both halves or not at
+all", which the installer header itself had already corrected to "never the FATAL
+half, always loudly" — only the fatal half is claimed impossible, because
+driver-without-attribute is inert and IS reachable.
+
+Merged `origin/main` to resolve #326, which corrected the same fatal-half-state
+overstatement in different words across the driver header, the installer header
+and the installer test. Both wordings were reconciled by hand rather than one
+side taken: the measured three-case table and the
+`scripts/ci/check-governed-repo-attributes.ts` gate reference are kept, and the
+installer keeps this branch's ordering-plus-verification body (which is why the
+comment claiming the verification had been deleted went with it). #326's own
+half-install tests are kept whole; one assertion moved from `FAILED` to `NOT
+INSTALLED` to match the reconciled installer's message, and its state assertions
+are unchanged because they never depended on the route.
+
+Mutation-tested with controls, again: returning the textual refusal on the spot
+fails the masking test and the end-to-end one and nothing else, returning the
+header refusal early fails the header-masking test alone, removing the
+`--path-format` fallback fails the old-git test alone, and dropping the
+`dates[i] !== ''` guard fails the undated-preface test alone.
 
 THE PARSER'S OWN DOCBLOCK NAMED A CONTRACT THE REGEX DID NOT ENFORCE, AND THE GAP
 FABRICATED THE ONE REFUSAL RESERVED FOR HISTORY LOSS. `HEADING` was `/^##[^#]/`

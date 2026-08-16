@@ -6510,6 +6510,28 @@ The fix is a git merge driver that works on **whole entries**:
   keeping nothing. Measured, `git merge-file` conflicts when the two truncations
   differ and resolves to a file with no entries when they match, so the loud
   outcome was git's accident rather than the driver's decision.
+- **And the ORDER the refusals are found in is part of that guarantee.** Each one
+  was individually right about its own flag while the function returned whichever
+  the base reached first — so a header disagreement (checked before the base is
+  scanned at all) or a both-sides-rewrote-this-entry refusal from the middle of
+  the scan was returned while a one-sided deletion further down went unexamined,
+  and the driver delegated a file that git then resolved the deletion out of.
+  Measured end to end on a 10-entry base with entry 1 rewritten on both sides and
+  entry 7 dropped from `ours`: markers around entry 1 only, `entry 7` gone, 11
+  headings in and 10 out. A refusal that fires about the wrong thing and loses
+  the entry anyway is indistinguishable from no refusal. A textual refusal is now
+  HELD until both scans complete; a losing one returns immediately, because
+  nothing outranks it.
+- **An undated FIRST entry is "no date", not "the oldest date".** Effective dates
+  carry forward, so the `''` sentinel survives only where nothing before an entry
+  was ever dated — an undated section at the very top of the log. Every addition
+  compares `sortDate >= ''`, so that one entry admitted all of them above it and
+  a dated addition landed OVER an undated preface. An entry with no effective
+  date now orders nothing. Unreachable against the real log, which holds 314
+  entries and ZERO undated ones — the docblocks that said "ten sections carry no
+  date" were last true around `d5ba62b7`, and the correction matters beyond the
+  number: this subsystem has no coverage from the real file and is exercised only
+  by fixtures.
 - An **added undated section** sorts at the date of the entry it continues, not
   at `''`. Sorting at `''` put it below every real date, i.e. at the very tail of
   the file, hundreds of entries away from the entry whose text it continues; one
@@ -6640,6 +6662,16 @@ lone `.name` with no `.driver` is `lacks command line`, exit 128. The earlier
 version wrote `.name` first and unset it by hand on failure, i.e. it repaired the
 fatal state with a THIRD write that the held `config.lock` causing the failure
 would also have blocked.
+
+Both installers locate `$GIT_COMMON_DIR` with `rev-parse --path-format=absolute`
+and **both fall back to the plain spelling**, resolving a relative answer against
+the repo. That flag arrived in git 2.31 and an older git exits non-zero on it
+rather than ignoring it. The shell installer always had the retry; the
+orchestrator's in-process copy did not, and returned false there — *after*
+`merge.<name>.driver` had been written — so the attribute was never bound, the
+replay went ahead under the tracked `merge=union`, and trident reported the
+driver as unavailable. A downgrade that reports itself as an absence is the shape
+this subsystem keeps producing, so it is now a fallback rather than a return.
 
 Proven against real git, not stubs: `scripts/git/as-built-merge-realgit.test.ts`
 replays two branches onto a moved base and asserts the conflict WITHOUT the

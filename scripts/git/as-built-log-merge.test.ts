@@ -30,14 +30,18 @@ const NEW_TWO = '## 2026-08-16 — build two\n\nbody two\n\n'
 describe('parse/serialize', () => {
   test('round-trips the REAL AS_BUILT.md byte-for-byte', () => {
     // A merge driver that cannot reproduce its own input is a corruption engine. This is the file
-    // it will actually be pointed at — 300+ entries, ten undated sections and a great deal of
+    // it will actually be pointed at — 300+ entries and a great deal of
     // fenced sample markdown. (It also carried four duplicated headings until those were
     // resolved and gated by `scripts/git/as-built-heading-uniqueness.ts`.)
     const text = readFileSync(REAL_LOG, 'utf8')
     expect(serializeLog(parseLog(text))).toBe(text)
   })
 
-  test('finds every entry in the real log, and only real ones', () => {
+  // NAMED FOR WHAT IT PROVES. It was called "finds every entry in the real log, and only real
+  // ones", which is a bijection claim the body below explicitly declines to make — it cross-checks
+  // two oracles that share a predicate, and says so. A test name is read far more often than a test
+  // body, so an overclaiming one is a false coverage report for every future reader.
+  test('the parse and a raw heading scan of the real log agree, entry for entry', () => {
     const text = readFileSync(REAL_LOG, 'utf8')
     const parsed = parseLog(text)
 
@@ -347,6 +351,11 @@ describe('merge', () => {
     expect(merged.entries.length).toBe(parsed.entries.length + 2)
     const originals = merged.entries.filter((e) => e.lines[0] !== '## 2026-08-17 — ours' && e.lines[0] !== '## 2026-08-17 — theirs')
     expect(originals.map((e) => e.lines[0])).toEqual(parsed.entries.map((e) => e.lines[0]))
+    // AND THEIR BODIES, WHICH THE HEADING COMPARISON ABOVE CANNOT SEE. "Disturbing nothing else"
+    // was asserted by counting entries and matching first lines, so a merge that kept all 311
+    // headings in order while corrupting the text under one of them passed. Compare the whole
+    // retained entry, not its label.
+    expect(originals.map((e) => e.lines.join('\n'))).toEqual(parsed.entries.map((e) => e.lines.join('\n')))
   })
 
   test('one side adding while the other stands still keeps the addition', () => {
@@ -418,9 +427,33 @@ describe('merge', () => {
     expect(res.text).toBe(log(OLD_A, between, OLD_B))
   })
 
+  test('an UNDATED FIRST entry does not float every addition above it — `` is no date, not the oldest', () => {
+    // THE DEFECT THIS PINS. `effectiveDates` carries a date forward, so `''` survives only where
+    // nothing before an entry was ever dated: an undated section at the very TOP of the log. Every
+    // `sortDate` compares `>= ''`, so that one entry admitted EVERY addition above it and a dated
+    // addition was emitted over an undated preface rather than under it. Measured before the fix:
+    // the 2026-01-01 addition came out first, above the preface it should follow.
+    const preface = '## how to read this log\n\npreface body\n\n'
+    const base = log(preface, OLD_A)
+    const addition = '## 2026-01-01 — a dated addition\n\nadded body\n\n'
+    const res = mergeAsBuiltLog(base, log(preface, OLD_A, addition), base)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    // The preface keeps the top; the addition sorts among the DATED entries, below 2026-08-10.
+    expect(res.text).toBe(log(preface, OLD_A, addition))
+    // CONTROL — the same addition with a date NEWER than the dated entry still moves up to just
+    // under the preface, so the guard suppressed the bogus comparison and not date ordering itself.
+    const newer = '## 2026-08-20 — a newer addition\n\nnewer body\n\n'
+    const above = mergeAsBuiltLog(base, log(preface, newer, OLD_A), base)
+    expect(above.ok).toBe(true)
+    if (!above.ok) return
+    expect(above.text).toBe(log(preface, newer, OLD_A))
+  })
+
   test('an undated subsection stays with the entry it belongs to', () => {
-    // Ten sections in the real log carry no date; a new entry must not be inserted between an
-    // entry and its own continuation.
+    // An undated section is a continuation of the entry above it, and a new entry must not be
+    // inserted between the two. The real log holds no undated entry today (measured: 314 entries,
+    // zero undated), so this fixture is the ONLY coverage this behaviour has — see `effectiveDates`.
     const sub = '## a subsection with no date\n\nsub body\n\n'
     const base = log(OLD_A, sub, OLD_B)
     const res = mergeAsBuiltLog(base, log(NEW_ONE, OLD_A, sub, OLD_B), base)
@@ -566,6 +599,64 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     expect(res.ok).toBe(false)
     if (res.ok) return
     expect(res.wouldLoseEntries).toBe(false)
+  })
+
+  /**
+   * A refusal about a MISSING ENTRY outranks a refusal about DISAGREEING TEXT, wherever each is
+   * found in the base.
+   *
+   * THE DEFECT THIS PINS. The two refusals are handled differently by the driver — textual ones go
+   * to `git merge-file`, losing ones are terminated with a constructed conflict — and the scan used
+   * to return whichever it hit FIRST. A base whose early entry was rewritten on both sides and
+   * whose later entry was dropped from one side therefore reported `wouldLoseEntries: false`, the
+   * driver delegated, and git read the deletion as a clean hunk and applied it. Measured end-to-end
+   * below: the refusal fired about the wrong entry and the dropped one left anyway.
+   */
+  const TEN = Array.from({ length: 10 }, (_, i) => {
+    const n = 10 - i
+    return `## 2026-07-${String(n).padStart(2, '0')} — entry ${n}\n\nbody of entry ${n}\n\n`
+  })
+  /** The same ten entries with #7 (0-indexed 3) removed — a one-sided loss deep in the base. */
+  const TEN_MINUS_SEVEN = TEN.filter((_, i) => i !== 3)
+  /** Entry 10, the NEWEST and so the first the scan reaches, rewritten. */
+  const TEN_REWRITTEN = '## 2026-07-10 — entry 10\n\nrewritten body\n\n'
+
+  test('a rewritten entry found FIRST does not mask an entry dropped LATER in the base', () => {
+    const base = log(...TEN)
+    const ours = log(TEN_REWRITTEN, ...TEN_MINUS_SEVEN.slice(1))
+    const theirs = log('## 2026-07-10 — entry 10\n\ntheir rewrite\n\n', ...TEN.slice(1))
+    const res = mergeAsBuiltLog(base, ours, theirs)
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    // Not "both sides edited the same entry differently" about entry 10, which is what it said.
+    expect(res.wouldLoseEntries).toBe(true)
+    expect(res.reason).toContain('entry 7')
+  })
+
+  test('CONTROL — with nothing dropped, the SAME rewrite is still the textual refusal git may finish', () => {
+    // The one variable changed: `ours` keeps all ten entries. If this went red the fix would have
+    // become "call every disagreement a loss", which would send every ordinary both-edited conflict
+    // down the terminating path instead of git's three-way — a different feature, and a worse one.
+    const base = log(...TEN)
+    const ours = log(TEN_REWRITTEN, ...TEN.slice(1))
+    const theirs = log('## 2026-07-10 — entry 10\n\ntheir rewrite\n\n', ...TEN.slice(1))
+    const res = mergeAsBuiltLog(base, ours, theirs)
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.wouldLoseEntries).toBe(false)
+    expect(res.reason).toContain('both sides edited the same entry differently')
+  })
+
+  test('…and a diverged HEADER does not mask it either, which is the refusal that returns EARLIEST', () => {
+    // The header check runs before the base is scanned at all, so it could mask a loss anywhere.
+    const base = log(...TEN)
+    const ours = `# AS_BUILT\n\nours header\n\n${TEN_MINUS_SEVEN.join('')}`
+    const theirs = `# AS_BUILT\n\ntheirs header\n\n${TEN.join('')}`
+    const res = mergeAsBuiltLog(base, ours, theirs)
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.wouldLoseEntries).toBe(true)
+    expect(res.reason).toContain('entry 7')
   })
 
   test('ONE side arriving truncated is a conflict, not a licence to delete the history it lacks', () => {
@@ -839,6 +930,41 @@ describe('the driver CLI — what git actually gets back', () => {
     // Both sides still whole, so the bound applied to the markers and nothing else.
     expect(result).toContain('ours version')
     expect(result).toContain('theirs version')
+  })
+
+  test('END TO END — the masked entry survives the driver, which is the claim that actually matters', () => {
+    // `wouldLoseEntries` is a flag on a return value; what it is FOR is whether the driver hands
+    // the file to git. Measured through `runDriver` because the pure-function assertions above
+    // cannot see that step, and that step is where the entry used to disappear.
+    const ten = Array.from({ length: 10 }, (_, i) => {
+      const n = 10 - i
+      return `## 2026-07-${String(n).padStart(2, '0')} — entry ${n}\n\nbody of entry ${n}\n\n`
+    })
+    const oursTruncated = ten.filter((_, i) => i !== 3).slice(1)
+
+    const dir = mkdtempSync(join(tmpdir(), 'as-built-driver-'))
+    dirs.push(dir)
+    const paths = { O: join(dir, 'base'), A: join(dir, 'ours'), B: join(dir, 'theirs') }
+    writeFileSync(paths.O, log(...ten))
+    writeFileSync(paths.A, log('## 2026-07-10 — entry 10\n\nrewritten body\n\n', ...oursTruncated))
+    writeFileSync(paths.B, log('## 2026-07-10 — entry 10\n\ntheir rewrite\n\n', ...ten.slice(1)))
+    expect(runDriver([paths.O, paths.A, paths.B, '7', 'docs/AS_BUILT.md'])).not.toBe(0)
+
+    const result = readFileSync(paths.A, 'utf8')
+    // The entry that used to be resolved away is in the file, on the side that still had it.
+    expect(result).toContain('## 2026-07-07 — entry 7')
+    expect(result).toContain('body of entry 7')
+    // CONTROL — this is the TERMINATING path, not git's. Without it the test would pass on a
+    // DELEGATED merge that happened to conflict rather than resolve, which is exactly the accident
+    // the fix removes: git conflicts on these bytes only when the deletion and the rewrite land in
+    // one hunk, and stays silent when they do not.
+    //
+    // The discriminator is the marker LABEL, and it has to be the whole label: this process writes
+    // `<<<<<<< ours — REFUSED by …`, so `toContain('<<<<<<< ours')` matches BOTH paths and proves
+    // nothing. git's own label is the bare word and a newline.
+    expect(result).toContain('REFUSED by as-built-merge-driver')
+    expect(result).toContain('the ours side is missing an entry the other still has')
+    expect(result).not.toContain('<<<<<<< ours\n')
   })
 
   test('a missing input file is a conflict, never a silent clean merge', () => {

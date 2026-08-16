@@ -373,6 +373,44 @@ describe('the publisher replaying a branch whose log entry raced another', () =>
     expect(driverWrite?.at(-1)).toContain('--config=/dev/null')
   })
 
+  test('a git too old for --path-format=absolute still binds the attribute, resolving the relative answer', async () => {
+    // THE DEFECT THIS PINS. `--path-format=absolute` landed in git 2.31; an older `git` exits
+    // non-zero on the flag rather than ignoring it, and this function returned false there — AFTER
+    // `merge.<name>.driver` had already been written. So the config was half-placed, the attribute
+    // was never written, and the replay went on under the tracked `merge=union` while trident
+    // reported the driver as unavailable: a silent downgrade, not a loud failure. The shell
+    // installer has carried the fallback since it shipped; this call site had not.
+    const repo = mkdtempSync(join(tmpdir(), 'as-built-oldgit-'))
+    created.push(repo)
+    // Only the applicability gate reads these, and it reads existence alone.
+    mkdirSync(join(repo, 'docs'), { recursive: true })
+    mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), '# AS_BUILT\n')
+    writeFileSync(join(repo, 'scripts', 'git', 'as-built-log-merge.ts'), '')
+
+    const calls: string[][] = []
+    const oldGit = async (cmd: string[]) => {
+      calls.push(cmd)
+      if (cmd.includes('--path-format=absolute')) {
+        return { ok: false, exit_code: 129, stdout: '', stderr: "unknown option: --path-format=absolute" }
+      }
+      // What the old spelling answers: RELATIVE to the working tree, which is the half that has to
+      // be resolved rather than used as-is.
+      if (cmd.includes('--git-common-dir')) return { ok: true, exit_code: 0, stdout: '.git\n', stderr: '' }
+      return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await ensureAsBuiltMergeDriver(oldGit, repo)).toBe(true)
+    // Resolved against the repo, not against this process's cwd — the assertion that fails if the
+    // relative answer is passed through untouched.
+    expect(readFileSync(join(repo, '.git', 'info', 'attributes'), 'utf8')).toContain(
+      'docs/AS_BUILT.md merge=as-built-log',
+    )
+    // CONTROL — the modern spelling really was tried first and really did fail, so this is the
+    // fallback under test and not the ordinary path with an unusual answer.
+    expect(calls.some((cmd) => cmd.includes('--path-format=absolute'))).toBe(true)
+  })
+
   test('SECURITY — a bunfig.toml in the checkout cannot preload code into the driver process', async () => {
     // The vector round 1 left open. git runs a merge driver with cwd at the top of the working tree
     // being merged, and bun reads `bunfig.toml` from cwd — so naming a trusted script is not enough
