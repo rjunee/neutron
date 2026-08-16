@@ -48,6 +48,7 @@ import {
   type HostDeployGit,
   type HostDeployRequestResult,
   type HostDeployService,
+  isDispatchTimeout,
 } from '../host-deploy.ts'
 import { createHostDeployRemoteGit } from '../host-deploy-runtime.ts'
 
@@ -1467,5 +1468,117 @@ describe('input + failure handling', () => {
     await settle()
     // No orphan pending grant lingering until the TTL sweep.
     expect(approvals.listPending(PROJECT)).toEqual([])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * A TIMEOUT IS THE ABSENCE OF A REPORT, NOT A REPORT OF FAILURE.
+ *
+ * The client waited 30s for an operation that takes minutes, so the timer
+ * expired on every real deploy — and the message it produced told the owner
+ * "Nothing was deployed; ask again to retry". On 2026-08-15 he was shown exactly
+ * that at 00:34 for a deploy that completed 55 seconds later. Re-approving would
+ * have restarted his instance a second time.
+ */
+describe('a dispatch TIMEOUT never claims nothing happened', () => {
+  const timeoutErr = (): Error => {
+    // What `AbortSignal.timeout()` actually rejects with.
+    const e = new Error('The operation timed out.')
+    e.name = 'TimeoutError'
+    return e
+  }
+
+  test('it does NOT say nothing was deployed', async () => {
+    const h = harness({
+      dispatch: async () => {
+        throw timeoutErr()
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out).not.toBeNull()
+    expect(out!.body).not.toContain('Nothing was deployed')
+  })
+
+  test('it does NOT invite a blind retry of an instance-restarting action', async () => {
+    const h = harness({
+      dispatch: async () => {
+        throw timeoutErr()
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).not.toContain('ask again to retry')
+  })
+
+  test('it says the deploy may still be running, and points at the status check', async () => {
+    const h = harness({
+      dispatch: async () => {
+        throw timeoutErr()
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).toContain('may still be running')
+    expect(out!.body.toLowerCase()).toContain('status')
+  })
+
+  test('a NON-timeout dispatch failure still reports failure — the distinction is the point', async () => {
+    // Connection refused really does mean nothing happened. Collapsing the two
+    // cases in either direction loses information the owner needs.
+    const h = harness({
+      dispatch: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:7780')
+      },
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).toContain('Nothing was deployed')
+    expect(out!.body).toContain('ask again to retry')
+  })
+
+  test('a refused gate is still a refusal, not a timeout', async () => {
+    // The HTTP-refusal path must be untouched by this change.
+    const h = harness({
+      dispatch: async () => ({ ok: false, detail: 'HTTP 500 — contract gate FAILED' }),
+    })
+    await h.service.request({})
+    await settle()
+    const out = await answer(h, h.approveValue())
+    expect(out!.body).toContain('The host refused the deploy')
+    expect(out!.body).not.toContain('may still be running')
+  })
+})
+
+describe('isDispatchTimeout', () => {
+  test('recognises the TimeoutError AbortSignal.timeout rejects with', () => {
+    const e = new Error('The operation timed out.')
+    e.name = 'TimeoutError'
+    expect(isDispatchTimeout(e)).toBe(true)
+  })
+
+  test('matches on NAME, not on the human-facing message', () => {
+    // A `.includes("timed out")` check would pass every test written against one
+    // runtime and silently stop recognising a timeout on another.
+    const impostor = new Error('The operation timed out.')
+    impostor.name = 'Error'
+    expect(isDispatchTimeout(impostor)).toBe(false)
+  })
+
+  test('an explicit AbortError is NOT a timeout — it is a cancellation', () => {
+    const e = new Error('aborted')
+    e.name = 'AbortError'
+    expect(isDispatchTimeout(e)).toBe(false)
+  })
+
+  test('ordinary transport errors and junk are not timeouts', () => {
+    expect(isDispatchTimeout(new Error('ECONNREFUSED'))).toBe(false)
+    expect(isDispatchTimeout(null)).toBe(false)
+    expect(isDispatchTimeout('TimeoutError')).toBe(false)
   })
 })
