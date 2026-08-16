@@ -489,8 +489,10 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
 
 /**
  * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
- * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
- * so matching those would fail closed on ordinary prose. Seven of either, then a space or EOL.
+ * these are the labelled markers, which carry a branch name after the run and so end in a space
+ * or a tab. A bare `=======` separator is caught separately by `CONFLICT_SEPARATOR_ADDED` below
+ * (exact-line, and exempt in markdown, where it is a setext underline). `|||||||` remains
+ * unmatched: it only appears under `merge.conflictStyle=diff3`, and catching it is a follow-up.
  *
  * SEVEN OR MORE, not exactly seven. `.gitattributes` can set `conflict-marker-size=32` for a
  * path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
@@ -501,6 +503,29 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
  * long marker, so it proves git's behaviour rather than the fixture's.
  */
 const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|$)/
+
+/**
+ * A `git diff --cached -U0` line that ADDS git's bare conflict SEPARATOR. Unlike `<<<<<<<` and
+ * `>>>>>>>`, the separator line git writes carries NO label — it is exactly a run of `=` and
+ * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
+ * indented docstring underline) never matches. `{7,}` and not `{7}` for the same reason as
+ * CONFLICT_MARKER_ADDED: `conflict-marker-size` widens the separator too. `\r?` covers a CRLF
+ * file. This is the residue MOST likely to survive a sloppy hand-resolution: the outer markers
+ * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
+ * gate entirely.
+ */
+const CONFLICT_SEPARATOR_ADDED = /^\+={7,}\r?$/
+
+/**
+ * Paths where a bare all-`=` line is legitimate prose: a markdown setext H1 underline is
+ * byte-identical to git's separator, and `-U0` output carries no context that could tell them
+ * apart. So in `.md`/`.markdown` files the bare separator ALONE is not treated as residue —
+ * matching it there would fail closed on ordinary prose (the reason this gate historically
+ * skipped `=======` everywhere), and doc files are the paths that conflict most. STATED RESIDUAL
+ * GAP, deliberate: a markdown file whose outer markers were deleted but whose separator was left
+ * still passes; a markdown file with ANY outer marker still refuses via CONFLICT_MARKER_ADDED.
+ */
+const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
 
 /**
  * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
@@ -869,7 +894,13 @@ export async function rebaseOntoObservedBase(
             current = named === undefined || named === '/dev/null' ? null : named
             continue
           }
-          if (current !== null && CONFLICT_MARKER_ADDED.test(line) && !marked.includes(current)) marked.push(current)
+          if (current !== null && !marked.includes(current)) {
+            if (
+              CONFLICT_MARKER_ADDED.test(line) ||
+              (CONFLICT_SEPARATOR_ADDED.test(line) && !SETEXT_UNDERLINE_PATHS.test(current))
+            )
+              marked.push(current)
+          }
         }
         return marked
       }

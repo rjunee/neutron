@@ -1109,6 +1109,37 @@ and turns it red with the production error. The parser round-trips this
 17,000-line file byte-for-byte — 300+ entries, four verbatim-duplicated headings
 and ten undated sections included — because a merge driver that cannot reproduce
 its own input is a corruption engine.
+## 2026-08-16 — the staged-marker gate catches the bare separator
+
+The publish-path staged-byte scan (`stagedMarkerFiles` in `trident/orchestrator.ts`) matched
+`<<<<<<<` and `>>>>>>>` and nothing else. A partially hand-resolved conflict — both sides kept,
+the two outer markers deleted, the `=======` between them left behind — read as CLEAN to the
+gate and to `--diff-filter=U` alike, so it got committed and force-pushed to the shared branch.
+That is the residue MOST likely to survive a sloppy resolution, precisely because the outer
+markers are the visually obvious lines and the separator is not. The gate that exists to stop
+conflict text reaching a shared branch was blind to the one form of conflict text a human is
+most likely to leave.
+
+The rule now: an ADDED line that is EXACTLY a run of `=` — `CONFLICT_SEPARATOR_ADDED =
+/^\+={7,}\r?$/` — is residue. Exact, because git's separator never carries a label, unlike the
+outer markers which are followed by a branch name; anything suffixed (`=======trailing`,
+`const banner = "======="`) or indented is legitimate content and does not match. `{7,}` rather
+than `{7}` for the same reason as `CONFLICT_MARKER_ADDED`: `conflict-marker-size` widens the
+separator too. `\r?` covers a CRLF file. `.md`/`.markdown` are EXEMPT: a markdown setext H1
+underline is byte-identical to git's separator, and `git diff --cached -U0` carries no context
+that could tell them apart, so matching there would fail closed on ordinary prose in exactly the
+files that conflict most.
+
+Residual gap, stated rather than hidden: a markdown file whose ONLY residue is the bare
+separator still passes — though a markdown file with any outer marker still refuses via
+`CONFLICT_MARKER_ADDED`. And the diff3 base marker `|||||||` remains unmatched; a repo with
+`merge.conflictStyle=diff3` can leave the same class of residue, and catching it (same exact-line
+plus width rule, with its own real-git proof under diff3) is a follow-up card. The scan already
+runs only over paths that were genuinely unmerged in this replay, which bounds false positives
+further. Proven both ways: stub-host tests in `trident/orchestrator.test.ts` (bare separator in a
+code file refused; setext underline in a resolved `.md` publishes; suffixed and indented runs
+publish) and a real-git proof in `trident/publish-rebase-realgit.test.ts` where the resolver
+performs exactly the sloppy resolution and the branch ref never moves.
 
 ## 2026-08-15 — the gateway had no idea whether he was looking, and the two ways to fake it both end in silence
 
