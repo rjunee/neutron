@@ -62,11 +62,18 @@ function seedLedger(db: ProjectDb, slug: string): void {
 
 // ── resolveOwnerReadableScopes ────────────────────────────────────────────────
 
-test('the LEDGER is the answer when it has one — it is written only by an explicit boot', () => {
+test('the LEDGER WINS over a leftover onboarding row under a different handle', () => {
+  // The name says what the body checks, and no more (Argus r2 blocker,
+  // 2026-08-16). It previously claimed the ledger "is written only by an
+  // explicit boot" — a property this test never exercised (it INSERTs the ledger
+  // directly and performs no boot at all) and which the code contradicts: a
+  // fallback boot with nothing stranded falls past the guard and seeds it, as
+  // `migrations/__tests__/scope-rekey-direction-guard.test.ts` "a FRESH dev box
+  // still seeds" proves. A test name is read as an assertion; this one asserted
+  // something no assertion in its body could fail on.
   const db = freshDb()
   try {
     seedLedger(db, 'alpha')
-    // A leftover onboarding row under a DIFFERENT handle must not dilute it.
     seedOnboarding(db, 'beta')
     expect(resolveOwnerReadableScopes(db)).toEqual(['alpha'])
   } finally {
@@ -163,7 +170,6 @@ test('the degraded read lands on the documented FLOOR, not on an unwritable plan
       },
     }),
     stranded_keys: ['alpha'],
-    stranded_rows_by_key: { alpha: 3 },
     attempted_by_slug: FALLBACK,
   })
   expect(rows.map((r) => r.scope)).toEqual([FALLBACK])
@@ -184,19 +190,16 @@ test('a healthy read is UNCHANGED by the wrapper — the control for the two abo
 
 // ── planInstanceRefusalRows ───────────────────────────────────────────────────
 
-test('one row per readable scope, each carrying ONLY its own handle and its own count', () => {
+test('one row per readable scope, each naming ONLY its own handle — and NO row count at all', () => {
   const rows = planInstanceRefusalRows({
     owner_scopes: ['alpha', 'gamma'],
     stranded_keys: ['alpha', 'gamma'],
-    stranded_rows_by_key: { alpha: 4, gamma: 11 },
     attempted_by_slug: FALLBACK,
   })
   expect(rows.map((r) => r.scope)).toEqual(['alpha', 'gamma'])
   expect(rows[0]!.payload).toEqual({
-    stranded_slug: 'alpha',
-    stranded_rows: 4,
-    other_stranded_handles: 1,
-    other_stranded_rows: 11,
+    targeted_slug: 'alpha',
+    other_targeted_handles: 1,
     attempted_by_slug: FALLBACK,
   })
   // THE DISCLOSURE ASSERTION: `alpha`'s row names no other handle, anywhere in
@@ -204,18 +207,61 @@ test('one row per readable scope, each carrying ONLY its own handle and its own 
   expect(JSON.stringify(rows[0]!.payload)).not.toContain('gamma')
   expect(JSON.stringify(rows[1]!.payload)).not.toContain('alpha')
   // And it does not lose the fact that there IS more: a count, never a name.
-  // THE SECOND ROW IS ASSERTED IN FULL, not just on its `other_*` counts (Argus
-  // r1, 2026-08-16). With only the first row pinned exactly, a mutant that
-  // computed `own` ONCE and reused the first scope's count for every later row
-  // survived the suite — `gamma` would report 4 stranded rows of its own, which
-  // is `alpha`'s number, and nothing was watching.
+  // THE SECOND ROW IS ASSERTED IN FULL, not just on its `other_*` count (Argus
+  // r1, 2026-08-16), because with only the first row pinned exactly a mutant
+  // that computed one scope's value once and reused it for every later row
+  // survived the whole suite.
   expect(rows[1]!.payload).toEqual({
-    stranded_slug: 'gamma',
-    stranded_rows: 11,
-    other_stranded_handles: 1,
-    other_stranded_rows: 4,
+    targeted_slug: 'gamma',
+    other_targeted_handles: 1,
     attempted_by_slug: FALLBACK,
   })
+})
+
+test('THE PAYLOAD KEY SET IS PINNED — a row count may never come back (Argus r2 blocker)', () => {
+  // The unit-level guard for the starvation fixed in round 3. The end-to-end
+  // proof lives in `boot-refusal-scope.test.ts` ("ORDINARY OWNER ACTIVITY
+  // between boots"), but that test is slow and its failure mode reads as a dedup
+  // bug rather than as its cause. This one names the cause: the edge trigger
+  // hashes the whole payload, so ANY field sourced from a `COUNT(*)` over the
+  // swept tables moves whenever the owner creates a task and re-arms the trigger
+  // on every boot. Freezing the key set is what stops the next well-meaning
+  // "let's tell him how many rows were at stake" from silently draining his
+  // 50-row diagnostics window again.
+  const rows = planInstanceRefusalRows({
+    owner_scopes: ['alpha'],
+    stranded_keys: ['alpha', 'gamma'],
+    attempted_by_slug: FALLBACK,
+  })
+  expect(Object.keys(rows[0]!.payload).sort()).toEqual([
+    'attempted_by_slug',
+    'other_targeted_handles',
+    'targeted_slug',
+  ])
+})
+
+test('the SAME refusal is byte-identical however much data sits under the handle (Argus r2 blocker)', () => {
+  // The property, stated directly: the payload is a function of the CONDITION
+  // (who attempted it, whose handle was targeted, how many other handles) and of
+  // nothing that ordinary owner activity moves. `planInstanceRefusalRows` no
+  // longer has an input that could carry a row volume, so this is the type
+  // system's assertion made executable — it is what fails first if anyone
+  // re-adds one.
+  const call = (): Record<string, unknown> =>
+    planInstanceRefusalRows({
+      owner_scopes: ['alpha'],
+      stranded_keys: ['alpha'],
+      attempted_by_slug: FALLBACK,
+    })[0]!.payload
+  expect(JSON.stringify(call())).toBe(JSON.stringify(call()))
+  // The control: a genuine CHANGE in the refusal still reads as new information,
+  // or "stable" would be satisfied by a constant.
+  const withAnotherHandle = planInstanceRefusalRows({
+    owner_scopes: ['alpha'],
+    stranded_keys: ['alpha', 'gamma'],
+    attempted_by_slug: FALLBACK,
+  })[0]!.payload
+  expect(isNewJournalState([{ payload: call() } as never], withAnotherHandle)).toBe(true)
 })
 
 test('a suppression window WIDER than the feed hides the warning — why the two are one constant (Argus r1)', () => {
@@ -231,7 +277,7 @@ test('a suppression window WIDER than the feed hides the warning — why the two
   const db = freshDb()
   try {
     const store = new SystemEventsStore({ db })
-    const payload = { stranded_slug: 'alpha', stranded_rows: 4 }
+    const payload = { targeted_slug: 'alpha', other_targeted_handles: 0 }
     db.runSync(
       `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
        VALUES ('refusal', 1, 'warn', 'gateway', 'instance_scope_rekey_refused', ?, 'alpha', NULL)`,
@@ -284,27 +330,24 @@ test('no readable scope recorded at all → the attempting handle, never a stran
   const rows = planInstanceRefusalRows({
     owner_scopes: [],
     stranded_keys: ['', '  ', 'alpha'],
-    stranded_rows_by_key: { '': 1, '  ': 1, alpha: 3 },
     attempted_by_slug: FALLBACK,
   })
   expect(rows.map((r) => r.scope)).toEqual([FALLBACK])
 })
 
-test('a readable scope is trimmed, and PADDED persisted keys still count as its own rows', () => {
+test('a readable scope is trimmed, and a PADDED persisted key is not counted as a foreign handle', () => {
   // A legacy persisted key of `' alpha '` is the same handle as `alpha`. The
-  // scope on the row is trimmed, so an untrimmed count lookup reported the
-  // reader ZERO rows of his own AND counted his own rows as somebody else's —
-  // wrong in both directions at once (Argus r2).
+  // scope on the row is trimmed, so an untrimmed comparison would tell the reader
+  // TWO other handles were targeted when only one was — and the extra one would
+  // be himself (Argus r2).
   const rows = planInstanceRefusalRows({
     owner_scopes: [' alpha '],
     stranded_keys: [' alpha ', 'gamma'],
-    stranded_rows_by_key: { ' alpha ': 4, gamma: 11 },
     attempted_by_slug: FALLBACK,
   })
   expect(rows.map((r) => r.scope)).toEqual(['alpha'])
-  expect(rows[0]!.payload['stranded_rows']).toBe(4)
-  expect(rows[0]!.payload['other_stranded_handles']).toBe(1)
-  expect(rows[0]!.payload['other_stranded_rows']).toBe(11)
+  expect(rows[0]!.payload['targeted_slug']).toBe('alpha')
+  expect(rows[0]!.payload['other_targeted_handles']).toBe(1)
 })
 
 // ── planCredentialRefusalRows ─────────────────────────────────────────────────
@@ -387,7 +430,6 @@ test('an unchanged repeat is NOT re-journalled — 25 anonymous boots cannot evi
   const payload = planInstanceRefusalRows({
     owner_scopes: ['alpha'],
     stranded_keys: ['alpha'],
-    stranded_rows_by_key: { alpha: 4 },
     attempted_by_slug: FALLBACK,
   })[0]!.payload
   expect(isNewJournalState([], payload)).toBe(true)
@@ -398,10 +440,8 @@ test('an unchanged repeat is NOT re-journalled — 25 anonymous boots cannot evi
       [
         persisted({
           attempted_by_slug: FALLBACK,
-          other_stranded_rows: 0,
-          other_stranded_handles: 0,
-          stranded_rows: 4,
-          stranded_slug: 'alpha',
+          other_targeted_handles: 0,
+          targeted_slug: 'alpha',
         }),
       ],
       payload,
@@ -432,7 +472,7 @@ test('shouldJournal treats a THROWN read as "not visible" and writes (Argus r2)'
   // One corrupt historical `payload_json` makes the reader throw, and this runs
   // on the boot path before the boot's own failure cleanup exists. A dedup
   // optimisation must never be able to abort a boot.
-  const payload = { stranded_slug: 'alpha', stranded_rows: 4 }
+  const payload = { targeted_slug: 'alpha', other_targeted_handles: 0 }
   expect(
     shouldJournal(() => {
       throw new Error('corrupt payload_json in system_events')
@@ -495,17 +535,28 @@ test('THE ALTERNATION BLOCKER: two shapes under one event key settle, they do no
 })
 
 test('a CHANGED refusal is new information and does get a row', () => {
+  // "Changed" now means the CONDITION changed, which is the only kind of change
+  // worth a slot in a 50-row window (Argus r2 blocker). This used to assert on a
+  // growing row count — the very field whose drift defeated the trigger on any
+  // instance the owner was actually using. A second handle coming under attack
+  // is real news; four more tasks in his own database is not.
   const before = planInstanceRefusalRows({
     owner_scopes: ['alpha'],
     stranded_keys: ['alpha'],
-    stranded_rows_by_key: { alpha: 4 },
     attempted_by_slug: FALLBACK,
   })[0]!.payload
-  const after = planInstanceRefusalRows({
+  const anotherHandleTargeted = planInstanceRefusalRows({
+    owner_scopes: ['alpha'],
+    stranded_keys: ['alpha', 'gamma'],
+    attempted_by_slug: FALLBACK,
+  })[0]!.payload
+  expect(isNewJournalState([persisted(before)], anotherHandleTargeted)).toBe(true)
+
+  // And a different anonymous process attempting the move is also new.
+  const differentAttempt = planInstanceRefusalRows({
     owner_scopes: ['alpha'],
     stranded_keys: ['alpha'],
-    stranded_rows_by_key: { alpha: 9 },
-    attempted_by_slug: FALLBACK,
+    attempted_by_slug: 'someone-else',
   })[0]!.payload
-  expect(isNewJournalState([persisted(before)], after)).toBe(true)
+  expect(isNewJournalState([persisted(before)], differentAttempt)).toBe(true)
 })

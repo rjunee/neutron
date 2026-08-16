@@ -437,10 +437,15 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       stranded_keys: refusal.stranded_keys.join(','),
       stranded_rows: refusal.stranded_rows,
     })
+    // `refusal.stranded_rows` is deliberately NOT passed on. It is a `COUNT(*)`
+    // over ~40 swept tables, so it moves whenever the owner creates a task —
+    // and a journal payload that moves is a journal payload that is written
+    // every boot, which drains the 50-row window this trigger exists to protect
+    // (Argus r2 blocker, 2026-08-16). It rides in the log line above instead,
+    // where nothing competes for space. See `./scope-refusal-journal.ts`.
     for (const row of planInstanceRefusalRows({
       owner_scopes: ownerReadableScopes(),
       stranded_keys: refusal.stranded_keys,
-      stranded_rows_by_key: refusal.stranded_rows_by_key,
       attempted_by_slug: scopeReconcile.current_slug,
     })) {
       if (

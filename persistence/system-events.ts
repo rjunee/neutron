@@ -128,15 +128,23 @@ export type SystemEventName =
   // the live one IS the condition being reported. `listRecentForScope` below is
   // strictly `WHERE project_slug = ?`, so any other choice is unreadable
   // forever. One row per readable scope, each NARROWED to that scope — its own
-  // handle and its own counts; every other handle is reduced to a count, never a
-  // name, because a foreign key in an instance-scoped feed is exactly the
-  // cross-scope disclosure that predicate exists to prevent. The attempting
-  // handle rides in `attempted_by_slug`. EDGE-TRIGGERED against the VISIBLE
-  // window: an unchanged repeat the owner can still see is not re-journalled
-  // (`listVisibleForScopeAndName` + `shouldJournal`), so a repeating anonymous
-  // boot cannot starve the 50-row window — while a repeat that has rotated OUT
-  // of it is written again, because the owner can no longer see it. The same
-  // rule applies to `credential_scope_orphaned` on BOTH its branches.
+  // handle named; every other handle is reduced to a count, never a name,
+  // because a foreign key in an instance-scoped feed is exactly the cross-scope
+  // disclosure that predicate exists to prevent. The attempting handle rides in
+  // `attempted_by_slug`. EDGE-TRIGGERED against the VISIBLE window: a repeat the
+  // owner can still see is not re-journalled (`listVisibleForScopeAndName` +
+  // `shouldJournal`), while a repeat that has rotated OUT of it is written
+  // again, because the owner can no longer see it. The same rule applies to
+  // `credential_scope_orphaned` on BOTH its branches.
+  //
+  // AND THE PAYLOADS CARRY NO ROW COUNTS, WHICH IS WHAT MAKES THE TRIGGER WORTH
+  // ANYTHING (Argus r2 blocker on PR #322, 2026-08-16). The trigger hashes the
+  // payload, so any field that moves with ordinary owner activity re-arms it
+  // every boot and the starvation is back in full — and only on instances that
+  // are in USE, which is why every test that boots against an idle database
+  // passed while it was broken. `instance_scope_rekey_refused` carried a
+  // `COUNT(*)` over ~40 swept tables and did exactly that. Volumes belong in the
+  // log lines, which are unbounded; these payloads state the CONDITION.
   | 'instance_scope_rekey_refused'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [

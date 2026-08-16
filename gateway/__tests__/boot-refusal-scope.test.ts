@@ -159,10 +159,10 @@ test('the refusal reaches the LIVE handle when the frozen credential handle dive
   // ── THE RE-KEY REFUSAL ──────────────────────────────────────────────────
   const rekeyRefusal = feed(LIVE, 'instance_scope_rekey_refused')
   expect(rekeyRefusal).toHaveLength(1)
-  expect(rekeyRefusal[0]!['stranded_slug']).toBe(LIVE)
+  expect(rekeyRefusal[0]!['targeted_slug']).toBe(LIVE)
   expect(rekeyRefusal[0]!['attempted_by_slug']).toBe(FALLBACK)
-  // No other handle was stranded, so the row says so with a count.
-  expect(rekeyRefusal[0]!['other_stranded_handles']).toBe(0)
+  // No other handle was targeted, so the row says so with a count.
+  expect(rekeyRefusal[0]!['other_targeted_handles']).toBe(0)
 
   // ── THE CREDENTIAL REFUSAL — the blocker this file exists for ───────────
   const credRefusal = feed(LIVE, 'credential_scope_orphaned')
@@ -420,3 +420,54 @@ test('one CORRUPT historical row cannot abort the boot (Argus r2)', async () => 
   withDb((db) => db.runSync(`DELETE FROM system_events WHERE id = 'corrupt-1'`, []))
   expect(feed(LIVE, 'credential_scope_orphaned')).toHaveLength(1)
 }, 60_000)
+
+test('ORDINARY OWNER ACTIVITY between boots does not defeat the trigger (Argus r2 blocker)', async () => {
+  // THE HOLE EVERY OTHER TEST IN THIS FILE IS BLIND TO, and it is blind by
+  // construction: the boots above are performed on a database nobody is USING,
+  // so every field of the payload is frozen and the edge trigger is never asked
+  // a hard question. A real instance is being used between boots.
+  //
+  // The payload used to carry `stranded_rows` — `countStrandedRows`, a `COUNT(*)`
+  // across ~40 swept tables under the reader's own handle. `tasks` is one of
+  // them (`migrations/scope-rekey.ts` `SCOPE_SWEEP_COLUMNS`). So one task
+  // created between two anonymous boots changed the payload, `isNewJournalState`
+  // saw new information, and the row was written AGAIN — every boot, without
+  // bound, into a 50-row window with no retention sweep. The dedup was an
+  // edge trigger only on a box nobody touched.
+  //
+  // The CONTROL is in the same run: `credential_scope_orphaned` carries only
+  // frozen-credential counts, which owner activity does not move, so it stays at
+  // one row throughout. If both feeds grew, the trigger would be broken in
+  // general and this test would be measuring the wrong thing.
+  await seedRenamedInstance()
+
+  let taskSeq = 0
+  const ownerCreatesATask = (): void => {
+    taskSeq += 1
+    withDb((db) => {
+      db.runSync(
+        `INSERT INTO tasks (id, project_slug, title, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'open', '2026-08-16T00:00:00Z', '2026-08-16T00:00:00Z')`,
+        [`t-${taskSeq}`, LIVE, `task ${taskSeq}`],
+      )
+    })
+  }
+
+  await anonymousBoot()
+  ownerCreatesATask()
+  await anonymousBoot()
+  ownerCreatesATask()
+  await anonymousBoot()
+  ownerCreatesATask()
+  await anonymousBoot()
+
+  // Four anonymous boots, four tasks, ONE row. The refusal is the same refusal:
+  // an anonymous process was pointed at this database and was turned away.
+  expect(feed(LIVE, 'instance_scope_rekey_refused')).toHaveLength(1)
+  // The control: the credential half never depended on a drifting count.
+  expect(feed(LIVE, 'credential_scope_orphaned')).toHaveLength(1)
+
+  // And the surviving row says nothing that the owner's own row volume moves —
+  // the property, not just the count. `tasks` has grown four times over.
+  expect(JSON.stringify(feed(LIVE, 'instance_scope_rekey_refused')[0])).not.toContain('4')
+}, 120_000)

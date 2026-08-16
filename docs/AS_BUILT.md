@@ -25,8 +25,11 @@ class the guard exists to close.
 
 THE DECISION, written down because the row genuinely has several candidate
 scopes and the owner can only ever read one: a refusal belongs to the handle the
-OWNER READS UNDER — the `instance_scope_ledger`'s handle (authoritative, written
-only by an explicit boot) or, absent a ledger, `onboarding_state`'s. Never the
+OWNER READS UNDER — the `instance_scope_ledger`'s handle (authoritative: it
+names a handle THIS database has committed to inside the re-key transaction, so
+someone can open its feed — note that a fallback boot with nothing stranded also
+seeds it, so "explicit boots only" is not a property this rests on) or, absent a
+ledger, `onboarding_state`'s. Never the
 anonymous handle that attempted the move, and never a FROZEN credential handle.
 The attempting handle is preserved in `payload.attempted_by_slug`. Applied to
 BOTH reconcilers: `instance_scope_rekey_refused` and `credential_scope_orphaned`
@@ -49,25 +52,41 @@ shape, and asserts BOTH unreadable scopes empty as the control.
 Two more properties the journal has to hold, both in
 `gateway/scope-refusal-journal.ts` with the reasoning:
 
-- NARROWED PER SCOPE. One row per readable scope, each carrying its own handle
-  and its own row count; every other handle is a COUNT, never a name. A
-  per-handle fan-out of the full multi-handle payload puts one scope's keys and
-  volumes into another scope's instance-scoped feed — the cross-scope disclosure
-  `listRecentForScope`'s own docblock exists to prevent.
-- EDGE-TRIGGERED. `SystemEventsStore.latestVisibleForScopeAndName` +
+- NARROWED PER SCOPE. One row per readable scope, each naming its own handle;
+  every other handle is a COUNT, never a name. A per-handle fan-out of the full
+  multi-handle payload puts one scope's keys and volumes into another scope's
+  instance-scoped feed — the cross-scope disclosure `listRecentForScope`'s own
+  docblock exists to prevent.
+- EDGE-TRIGGERED. `SystemEventsStore.listVisibleForScopeAndName` +
   `shouldJournal`
-  skip an exact repeat the owner can still SEE, because his window is the newest 50 events and
+  skip a repeat the owner can still SEE, because his window is the newest 50 events and
   `system_events` has no retention sweep: two unconditional rows per anonymous
   boot is a way for this warning to evict every other degrade event out of the
   report it is trying to appear in.
+- AND THE PAYLOAD DESCRIBES THE CONDITION, NEVER ITS VOLUME. The trigger above is
+  only as stable as the payload it hashes, so a field that moves with ordinary
+  owner activity re-arms it on every boot and restores the starvation in full.
+  `instance_scope_rekey_refused` carried `stranded_rows` — a `COUNT(*)` over ~40
+  swept tables including `tasks` and `reminders` — and did exactly that:
+  measured on this branch, four anonymous boots with one task created between
+  each wrote FOUR rows, with the count climbing 1 → 3 → 4. Every dedup test in
+  the suite passed anyway, because each boots against a database nobody is
+  using, which freezes the payload by construction. The same field was also
+  false: once the row moved to the LIVE handle, `stranded_slug` was the reader's
+  OWN handle and `stranded_rows` his own healthy data, which the guard had just
+  protected — rendered in his feed as a worsening data-loss condition. Both are
+  gone; the payload is now `targeted_slug` / `other_targeted_handles` /
+  `attempted_by_slug`, and the row count lives in the (unbounded) log lines.
+  `gateway/__tests__/boot-refusal-scope.test.ts` "ORDINARY OWNER ACTIVITY
+  between boots" is the regression, with the credential feed as the in-run
+  control.
 
 And one thing measurement caught that reasoning did not: the refusal's row count
 must EXCLUDE `system_events`. `system_events` is a swept table, so the count of
 "rows at stake" under the live handle included the refusal rows THEMSELVES —
-1 → 3 → 4 across three identical boots. That is a wrong number and it defeats the
-edge trigger, since a payload that changes every boot is never a repeat. The
-exclusion is in `countRowsByKey` (`migrations/scope-rekey.ts`); the sweep still
-carries `system_events` forward on a legitimate rename.
+1 → 3 → 4 across three identical boots. That is a wrong number wherever it is
+reported. The exclusion is in `countStrandedRows` (`migrations/scope-rekey.ts`);
+the sweep still carries `system_events` forward on a legitimate rename.
 
 Also fixed here: a BLANK `NEUTRON_INSTANCE_SLUG`. `NEUTRON_INSTANCE_SLUG=` (or
 whitespace) reached the resolver as `''`, not `undefined`, and the old
@@ -111,7 +130,7 @@ that held where it was watched and broke where it was not:
   while the owner sees the newest 50 rows and `system_events` has no retention
   sweep. Refusal, 50 unrelated events, refusal again: the dedup matched a row
   that had rotated off the page and skipped the write, permanently and
-  silently. It is now `latestVisibleForScopeAndName(scope, event, 50)` —
+  silently. It is now `listVisibleForScopeAndName(scope, event, 50)` —
   bounded to the same window the feed returns, sharing
   `DEFAULT_MAX_RECENT_EVENTS` with the reader rather than restating it.
 - A FALLBACK NOBODY EXERCISES IS A RULE THAT DOES NOT HOLD. "Never a frozen

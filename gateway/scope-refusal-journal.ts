@@ -42,26 +42,42 @@
  *
  * The refusal belongs to the LIVE handle. That is what
  * {@link resolveOwnerReadableScopes} computes, from the two places this database
- * records who it belongs to: `instance_scope_ledger` (authoritative — it is
- * written only by an explicit boot) and, when the ledger is absent, the distinct
- * `onboarding_state.project_slug` (the anchor table the re-key backfill itself
- * trusts for exactly this question).
+ * records who it belongs to: `instance_scope_ledger` (authoritative — it names a
+ * handle this database has committed to inside the re-key transaction; see that
+ * function for why "explicit boots only" is NOT the property being relied on)
+ * and, when the ledger is absent, the distinct `onboarding_state.project_slug`
+ * (the anchor table the re-key backfill itself trusts for exactly this
+ * question).
  *
  * ── AND HOW MUCH EACH ROW MAY SAY ──────────────────────────────────────────
  * One row per readable scope, and each row's payload is NARROWED to its own
- * scope: its own handle name and its own row count, with everything else
- * reduced to counts. A per-scope fan-out carrying the full multi-handle payload
- * would put scope A's handle names and volumes into scope B's instance-scoped
- * feed — the cross-scope disclosure `listRecentForScope`'s own docblock exists
- * to prevent (Argus r1, 2026-08-16).
+ * scope: its own handle NAMED, every other handle reduced to a count. A
+ * per-scope fan-out carrying the full multi-handle payload would put scope A's
+ * handle names and volumes into scope B's instance-scoped feed — the cross-scope
+ * disclosure `listRecentForScope`'s own docblock exists to prevent (Argus r1,
+ * 2026-08-16). And no ROW COUNT at all, in either direction — see the next
+ * section, which is where that constraint comes from and why it is not merely
+ * about disclosure.
  *
  * ── AND HOW OFTEN ──────────────────────────────────────────────────────────
  * The owner's diagnostics window is the newest `DEFAULT_MAX_RECENT_EVENTS` = 50
  * rows and `system_events` has no retention sweep, so two unconditional rows per
  * anonymous boot is a way to evict every OTHER degrade event out of the feed —
  * a warning that starves the report it is trying to appear in. {@link
- * isNewJournalState} makes the journal edge-triggered: identical state, already
- * the latest row under that scope for that event ⇒ nothing is written.
+ * isNewJournalState} makes the journal edge-triggered: a payload already visible
+ * under that scope for that event ⇒ nothing is written.
+ *
+ * AN EDGE TRIGGER IS ONLY AS STABLE AS THE PAYLOAD IT HASHES, AND THAT IS A
+ * CONSTRAINT ON WHAT MAY GO IN A PAYLOAD (Argus r2 blocker on PR #322,
+ * 2026-08-16). Any field that moves with ordinary owner activity re-arms the
+ * trigger on every boot and restores the starvation in full, silently, on
+ * precisely the instances that are in use — while every test that boots against
+ * an idle database still passes. `instance_scope_rekey_refused` carried
+ * `stranded_rows`, a `COUNT(*)` over ~40 swept tables including `tasks` and
+ * `reminders`, and did exactly that. So the rule these payloads are now built to
+ * is: A JOURNAL PAYLOAD DESCRIBES THE CONDITION, NEVER ITS VOLUME. Volumes that
+ * an operator genuinely wants go to the log lines, which are unbounded and
+ * compete with nothing. See {@link planInstanceRefusalRows}.
  *
  * THE COMPARISON IS AGAINST THE VISIBLE FEED, NOT AGAINST HISTORY (Argus r2
  * blocker, 2026-08-16). Suppression is only ever "the owner is already looking
@@ -120,12 +136,27 @@ function usable(value: string | null | undefined): string | null {
  * The handles under which an owner can ACTUALLY read this database's
  * diagnostics feed — i.e. the handles this database RECORDS AS ITS OWN.
  *
- * The ledger wins when it is present: it is written only inside the re-key
- * transaction, by an EXPLICIT boot, and it therefore records the handle the
- * owner's gateway boots as. Only when it is absent (a first boot that never
- * completed the backfill) does this fall back to `onboarding_state`, the anchor
- * table the reconciler itself uses to answer the same question
- * (`migrations/scope-rekey.ts:620-630`).
+ * The ledger wins when it is present: it is written inside the re-key
+ * transaction, and it therefore records the handle a boot of THIS database
+ * committed to. Only when it is absent (a first boot that never completed the
+ * backfill) does this fall back to `onboarding_state`, the anchor table the
+ * reconciler itself uses to answer the same question (`migrations/scope-rekey.ts`
+ * — the stale-key discovery query).
+ *
+ * "WRITTEN ONLY BY AN EXPLICIT BOOT" IS NOT TRUE AND THIS MODULE MUST NOT REST
+ * ON IT (Argus r2 blocker, 2026-08-16 — a docblock stating a property one branch
+ * of the code contradicts, CLAUDE.md rule 3a). A FALLBACK boot returns early
+ * without touching the ledger only when something is STRANDED; on a database
+ * with nothing stranded it falls straight through to the seed and writes `dev`
+ * (`migrations/scope-rekey.ts` — the guard's `staleKeys.length > 0` condition,
+ * then the ledger INSERT below it; proven by
+ * `migrations/__tests__/scope-rekey-direction-guard.test.ts` "a FRESH dev box
+ * still seeds"). The property this module actually needs is the weaker and
+ * true one — the ledger names a handle THIS database has booted under, so it is
+ * a handle whose diagnostics feed someone can open — and that holds on both
+ * branches. It is also self-correcting: the only way a fallback boot seeds `dev`
+ * is on a database with no other identity in it, and the first explicit boot
+ * afterwards re-keys forward and overwrites it.
  *
  * NOTHING IS EXCLUDED BY STRING EQUALITY WITH THE BOOTING PROCESS. If the
  * ledger says this database is `dev`, then `dev` is the handle its owner reads
@@ -224,45 +255,69 @@ function journalScopes(owner_scopes: string[], attempted_by_slug: string): strin
 /**
  * Rows for `instance_scope_rekey_refused` — one per readable scope, narrowed.
  *
- * KEYS ARE TRIMMED BEFORE THEY ARE COMPARED OR COUNTED. The scope on the row is
- * the trimmed handle (`usable`), so a legacy persisted key of `' alpha '` would
- * otherwise report the reader ZERO stranded rows of his own and count his own
- * rows as somebody else's — a payload that is wrong in both directions at once
- * (Argus r2, 2026-08-16). Two keys that trim to the same handle are one handle
- * and their counts add.
+ * NO ROW COUNT APPEARS IN THIS PAYLOAD, AND THAT IS THE WHOLE POINT (Argus r2
+ * blocker on PR #322, 2026-08-16). It used to carry `stranded_rows` — the
+ * reader's own handle's share of `countRowsByKey`, a `COUNT(*)` across every
+ * swept table (`migrations/scope-rekey.ts` `SCOPE_SWEEP_COLUMNS`). Two things
+ * were wrong with it at once, and they are the same mistake seen from two sides:
+ *
+ *   - IT DRIFTS, so the edge trigger never fired on a box anyone was USING.
+ *     `tasks`, `reminders`, `topics`, `gateway_events`, `work_board_items` are
+ *     all swept, so writing one task between two anonymous boots changed the
+ *     payload, {@link isNewJournalState} correctly read that as new information,
+ *     and the row was written AGAIN — unbounded, into the 50-row window with no
+ *     retention sweep behind it. Measured on this branch before the fix: four
+ *     anonymous boots with one task created between each produced FOUR rows and
+ *     a count that climbed 1 → 3 → 4. Every earlier dedup test passed because
+ *     each one boots against a database nobody touches, which freezes the
+ *     payload by construction and never asks the trigger a hard question. So the
+ *     starvation this module exists to prevent was live on exactly the instances
+ *     it was written for, and invisible on every instance it was tested on.
+ *   - IT IS ALSO A LIE. Since the row moved to the LIVE handle, `stranded_slug`
+ *     was the READER'S OWN handle and `stranded_rows` was his own healthy row
+ *     count. The guard REFUSED: nothing of his moved, nothing of his is
+ *     stranded. The feed rendered his ordinary growth as a worsening data-loss
+ *     condition. The names described the WRITER's frame (the re-key's stale
+ *     keys) and were read in the READER's — CLAUDE.md rule 10, in the payload
+ *     rather than in a field name.
+ *
+ * The cure for both is the same: the reader is told WHAT HAPPENED, which does
+ * not drift, instead of HOW MUCH, which does and is not his to worry about.
+ * An anonymous process was pointed at this database and tried to pull rows off
+ * his handle; it was refused. The number of rows at stake keeps its value for
+ * the operator and stays where an unbounded stream belongs — the log line at
+ * `migrations/scope-rekey.ts` `scope_rekey_refused_fallback_direction` and
+ * `gateway/index.ts` `instance_scope_rekey_refused`, neither of which competes
+ * for the owner's 50 slots.
+ *
+ * KEYS ARE TRIMMED BEFORE THEY ARE COMPARED. The scope on the row is the trimmed
+ * handle (`usable`), so a legacy persisted key of `' alpha '` is the same handle
+ * as `'alpha'` and must not also be counted as a foreign one (Argus r2,
+ * 2026-08-16).
  */
 export function planInstanceRefusalRows(input: {
   owner_scopes: string[]
   stranded_keys: string[]
-  stranded_rows_by_key: Record<string, number>
   attempted_by_slug: string
 }): RefusalJournalRow[] {
-  const countByKey = new Map<string, number>()
-  for (const [key, rows] of Object.entries(input.stranded_rows_by_key)) {
-    const trimmed = key.trim()
-    countByKey.set(trimmed, (countByKey.get(trimmed) ?? 0) + rows)
-  }
-  const strandedKeys = [
+  const targetedKeys = [
     ...new Set(input.stranded_keys.map(usable).filter((k): k is string => k !== null)),
   ]
-  const totalRows = [...countByKey.values()].reduce((a, n) => a + n, 0)
-  return journalScopes(input.owner_scopes, input.attempted_by_slug).map((scope) => {
-    const own = countByKey.get(scope) ?? 0
-    const others = strandedKeys.filter((k) => k !== scope)
-    return {
-      scope,
-      payload: {
-        // The handle THIS row is about. Named, because it is the reader's own.
-        stranded_slug: scope,
-        stranded_rows: own,
-        // Everything else is a COUNT: a foreign handle's NAME in this feed is
-        // the cross-scope disclosure the strict scope predicate forbids.
-        other_stranded_handles: others.length,
-        other_stranded_rows: totalRows - own,
-        attempted_by_slug: input.attempted_by_slug,
-      },
-    }
-  })
+  return journalScopes(input.owner_scopes, input.attempted_by_slug).map((scope) => ({
+    scope,
+    payload: {
+      // The handle THIS row is about: the one the anonymous boot would have
+      // pulled rows OFF. Named, because it is the reader's own. `targeted`, not
+      // `stranded` — the guard held, so nothing of his is stranded anywhere.
+      targeted_slug: scope,
+      // Everything else is a COUNT: a foreign handle's NAME in this feed is the
+      // cross-scope disclosure the strict scope predicate forbids. A count of
+      // HANDLES, not of rows — the handle set is the refusal, and it does not
+      // move when the owner uses his instance.
+      other_targeted_handles: targetedKeys.filter((k) => k !== scope).length,
+      attempted_by_slug: input.attempted_by_slug,
+    },
+  }))
 }
 
 /**
@@ -314,8 +369,8 @@ export function planCredentialRefusalRows(input: {
  * that is not also a top-level key is dropped from the output — and two
  * payloads differing only inside a nested object compare EQUAL and the change
  * is silently swallowed. Harmless while every value is a scalar or a string
- * array; a defect the moment anyone adds a `Record<string, number>` such as
- * `stranded_rows_by_key` (Argus r2, 2026-08-16). Array ORDER is preserved —
+ * array; a defect the moment anyone NESTS an object in a payload
+ * (Argus r2, 2026-08-16). Array ORDER is preserved —
  * `orphaned_tables` is sorted where it is built, and a reordered array is a
  * change worth reporting anywhere else.
  */

@@ -229,9 +229,20 @@ with cross-references noted inline.
     alternates between an anonymous and an explicit boot — a unit that intermittently loses its slug
     env — sees the OTHER shape as the newest row every time, and every boot writes. Asked "is this
     payload already anywhere on the page", the feed settles at one row per distinct shape, and any
-    future third shape is covered without anyone noticing it exists. For the same starvation reason the
-    refusal's row count EXCLUDES `system_events` — counting the journal's own table makes the
-    payload change every boot, which both misreports "rows at stake" and defeats the edge trigger.
+    future third shape is covered without anyone noticing it exists.
+    AND NO JOURNAL PAYLOAD ON THIS PATH MAY CONTAIN A ROW COUNT — the trigger hashes the payload, so
+    a field that moves when the owner creates a task re-arms it on every boot and the starvation
+    returns in full, on exactly the instances that are in USE and on none of the idle databases the
+    dedup tests boot against (Argus r2 blocker on PR #322, 2026-08-16: `instance_scope_rekey_refused`
+    carried `stranded_rows`, a `COUNT(*)` over ~40 swept tables including `tasks`; four anonymous
+    boots with one task between each wrote FOUR rows). That same field was independently FALSE once
+    the row moved to the live handle — `stranded_slug`/`stranded_rows` named the reader's own handle
+    and his own healthy data, which the guard had just protected, and the feed rendered his ordinary
+    growth as a worsening data-loss condition. The payload is `targeted_slug`,
+    `other_targeted_handles`, `attempted_by_slug`: the CONDITION, never its volume. Volumes go to the
+    log lines, which are unbounded and compete with nothing — and for the same reason those log
+    counts EXCLUDE `system_events`, since counting the journal's own table reported the previous
+    boot's warning as "rows at stake" and climbed 1 → 3 → 4 across three IDENTICAL boots.
     AND THE READER MUST RESOLVE THE SAME SCOPE BOOT FROZE: `neutron doctor`
     (`open/owner-identity.ts` `resolveOwnerSlug` → `open/diagnostics-cli-impl.ts`) follows boot's
     precedence exactly — `.url_slug` file > trimmed `NEUTRON_INSTANCE_SLUG` > `dev` — because a

@@ -411,7 +411,7 @@ describe('collectCliDiagnostics — the CLI scope agrees with the boot scope', (
     db.runSync(
       `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
        VALUES ('r1', 700, 'warn', 'gateway', 'instance_scope_rekey_refused', ?, ?, NULL)`,
-      [JSON.stringify({ stranded_slug: scope, attempted_by_slug: 'dev' }), scope],
+      [JSON.stringify({ targeted_slug: scope, attempted_by_slug: 'dev' }), scope],
     )
     db.close()
   }

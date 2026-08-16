@@ -333,11 +333,20 @@ describe('direction guard at boot — an anonymous process cannot steal the live
     const visible = refusalIsVisibleToOwner(LIVE)
     expect(visible).toHaveLength(1)
     expect(visible[0]!.payload['attempted_by_slug']).toBe('dev')
-    expect(visible[0]!.payload['stranded_slug']).toBe(LIVE)
-    // Narrowed to this scope: no OTHER handle's name or volume rides along
-    // (Argus r1 — a per-handle fan-out of the full payload is a cross-scope
-    // disclosure). Here there is only one, so the counts are zero.
-    expect(visible[0]!.payload['other_stranded_handles']).toBe(0)
+    expect(visible[0]!.payload['targeted_slug']).toBe(LIVE)
+    // Narrowed to this scope: no OTHER handle's name rides along (Argus r1 — a
+    // per-handle fan-out of the full payload is a cross-scope disclosure). Here
+    // there is only one, so the count is zero.
+    expect(visible[0]!.payload['other_targeted_handles']).toBe(0)
+    // And no ROW COUNT rides along either, from any handle (Argus r2 blocker):
+    // a payload field sourced from a `COUNT(*)` over the swept tables moves when
+    // the owner creates a task, which re-arms the edge trigger on every boot and
+    // drains the very window this row is competing to appear in.
+    expect(Object.keys(visible[0]!.payload).sort()).toEqual([
+      'attempted_by_slug',
+      'other_targeted_handles',
+      'targeted_slug',
+    ])
     // The negative control that makes the assertion above mean something: the
     // anonymous scope holds nothing, so `toEqual([LIVE])` is a real placement
     // and not a duplicate written to both.
