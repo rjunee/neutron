@@ -6,6 +6,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   DEFAULT_TIMEOUT_MS,
+  LIVENESS_PROBE_INTERVAL_MS,
   STALLED_WARN_MS,
   NO_ADVANCE_HANG_MS,
   DEFAULT_MAX_INFLIGHT_MS,
@@ -59,6 +60,16 @@ describe('liveness constants — ordering invariant', () => {
   test('DEFAULT_TIMEOUT_MS (conflict resolver timeout) is defined', () => {
     // 8 minutes — resolver's per-turn wall-clock ceiling
     expect(DEFAULT_TIMEOUT_MS).toBe(8 * 60_000)
+  })
+
+  // The EXTERNAL liveness probe polls far faster than any display or reap
+  // threshold — that is the whole point: a hard death is named in seconds instead
+  // of waiting out the 90-minute backstop. It is a POLL RATE, not a threshold: its
+  // answer is binary process aliveness, so it can never reap a slow-but-alive run.
+  test('LIVENESS_PROBE_INTERVAL_MS is a fast, finite cadence well under every threshold', () => {
+    expect(Number.isFinite(LIVENESS_PROBE_INTERVAL_MS)).toBe(true)
+    expect(LIVENESS_PROBE_INTERVAL_MS).toBeGreaterThan(0)
+    expect(LIVENESS_PROBE_INTERVAL_MS).toBeLessThan(STALLED_WARN_MS)
   })
 
   test('DEFAULT_SETTLE_TIMEOUT_MS (launching turn settle) is defined', () => {

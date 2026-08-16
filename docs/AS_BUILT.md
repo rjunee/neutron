@@ -45,6 +45,959 @@ only, never argus or synthesis; the non-parts whole-file receipt is
 unweakened; the TypeScript and JavaScript `briefIntegrity` twins remain
 parity-pinned; and `.a2` coda chunk blocks never have non-redirect-target paths
 rewritten.
+## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
+
+Landed via PR #331.
+
+The owner's sentence was the spec: *"my sessions need to wake up and check every 5min … and
+actually take actions to get this moving."* The thing that makes the reference agent work all
+night is a SERVER-SIDE tick, not a session-side timer — and this tree already wrote that lesson
+down once (`trident/tick.ts` replaced the legacy ScheduleWakeup driver with an in-process sweep,
+for the same reason: a session-bound schedule dies with its session, silently). So the new
+`work-wakeup` loop (`gateway/proactive/work-wakeup.ts`, 12th composer loop) sweeps every five
+minutes: each Work Board item `in_progress` with no live bound run gets its project's warm chat
+session re-entered with a continue-work turn — the same substrate entry, session keying
+(`metering_context.project_id`) and `--tools` surface as a fired reminder, which is what lands
+the turn ON the owner's session instead of evicting it. Arming is the board itself: no second
+queue, durable across restarts, and the trident tick keeps sole custody of items a run is
+already driving.
+
+**Quiet on progress, loud on trouble.** Reports post as durable inert chat rows with the device
+buzz suppressed — the deliver envelope grew an explicit `notify: 'suppress'` opt-out
+(`gateway/http/deliver.ts`), a narrow exception that keeps "forgetting still notifies" true. A
+`BLOCKED:` reply and a wakeup mechanism failure buzz normally (first failure and every sixth).
+An owner-activity grace window (30 min, person-only watermark) keeps the loop out of a session
+he is actively driving.
+
+**And a degraded reminder now names its route.** Three fired reminders degraded in one night
+and the journal carried only the downstream `nudge_refused` guard — the per-route diagnostics
+sat on the debug level the production `info` filter drops, so no one could tell WHICH of the
+three degrade routes fired. Each route now emits one structured `warn`
+(`event=nudge_degraded`, `route=no_llm|compose_failed|over_max_body_chars`, bounded reason,
+zero bytes of stored intent), so the next degraded cycle diagnoses itself instead of inviting
+another guess.
+
+## 2026-08-16 — the review-readiness gate stops failing open
+
+Three defects in the gate that resolves which status checks a PR's base branch
+requires (`trident/inner-workflow.mjs`). It decides whether a review runs at
+all, so every downstream guarantee — the panel, the merge gate — was
+conditional on it, and all three failed toward LETTING THINGS THROUGH or toward
+refusing a legitimate configuration.
+
+**A 404 was treated as proof that a branch is unprotected.** `isMissing` matched
+`/HTTP 404|Not Found|Branch not protected/i` and the classifier returned
+`required: []` — the permissive all-green rule. But
+`branches/{b}/protection/required_status_checks` needs Administration-read, and
+GitHub answers 404 rather than 403 for a resource the credential may not ask
+about, precisely so the endpoint does not disclose that it exists. The same body
+therefore meant two opposite things, and a credential with PR + check scope but
+no Administration-read silently downgraded a PROTECTED base to unprotected and
+reported success. The permissive reading now requires a POSITIVE CONTROL, and it
+has to come from a read PLAIN PULL ACCESS can do, because the credential that
+cannot read protection is the entire case. `branches/{b}` is that read, it is
+readable with plain pull access, and it answers on THREE fields in order:
+
+1. `protection.required_status_checks.contexts` — THE ANSWER ITSELF. The branch
+   payload embeds the very list the 404'd subresource would have returned, so
+   when it is present there is no ambiguity left to settle.
+2. `protection.enabled:false` — no CLASSIC protection specifically, which is
+   exactly what the 404 was about. `protected` is TRUE whenever a RULESET
+   applies, so it can never clear a ruleset-governed branch on its own.
+3. `protected:false` — nothing guards the branch at all.
+
+Rung 1 exists because rungs 2-3 alone DEADLOCK the common case, and that was the
+shape of the over-correction: reading only the two flags turns every genuinely
+classic-protected base into `unknown`, and `unknown` defers the round — every
+round, forever, with zero rounds spent. Fail-open became fail-closed; both report
+a review that never happened. Measured with a credential holding no admin role,
+protection subresource → HTTP 404 on all three: this gate's own base branch →
+`{"protected":true,"protectionEnabled":false,"contexts":[]}` (rung 2 clears it,
+rules supply `["test"]`); `rails/rails` @ main → `{"protected":true,
+"protectionEnabled":true,"contexts":[]}` (rung 1 resolves it, rungs 2-3 could
+not); `microsoft/vscode` @ main → the same with 23 contexts, each carrying an
+`app_id` — the exact data the deferral was throwing away.
+
+An ABSENT `contexts` key is not an empty one. Rung 1 fires only on an ARRAY:
+present-and-empty is an answer, absent is a silence, and a silence that rungs 2-3
+cannot clear either is still `mode:'unknown'` with the ambiguity named. The
+rulesets read is not ambiguous the same way — `rules/branches/{b}` is readable
+with pull access and answers `[]` — so its 404 keeps its old meaning.
+
+**A required check can name its producer, and the name alone does not.** Branch
+protection and rulesets both bind a required check to one App
+(`{"context":"test","integration_id":15368}` on this repository's own ruleset,
+`{"app_id":15368,"context":"Linux / CLI"}` on vscode's branch payload — both
+measured). Keying satisfaction on the context alone let anything carrying the name
+satisfy it, including a commit status from a different producer. The binding is
+now carried through to the classifier as `appBound`, and an app-bound requirement
+can only be satisfied by a CheckRun row. What this CANNOT do is stated in the
+source rather than implied: `gh pr view --json statusCheckRollup` carries no app
+or check-suite identity for a CheckRun (measured), so a check run from the WRONG
+app with the right name still passes. The row SHAPE is the one half of the
+producer this data can testify about; narrowing further needs producer identity in
+the probe.
+
+`permissions.admin` is NOT a proof and is no longer read. A repository ROLE and a
+token's permission set are different things: a fine-grained token can carry the
+admin role through its user and still lack Administration-read, so its 404 means
+"may not ask" while `admin:true` calls it "there is none" — the same fail-open in
+the other direction. `GET /repos` needs only Metadata-read, so that field can
+never testify about a scope it did not have to hold. The read is gone from the
+probe entirely, which also removes one mandatory per-round API call.
+
+**Successful commit-status checks were rejected as "not produced".**
+`statusCheckRollup` returns TWO row shapes: CheckRun (`name`/`status`/
+`conclusion`) for Actions jobs, and StatusContext (`context`/`state`) for
+classic commit statuses. The gate read only the CheckRun fields, so a
+StatusContext had no name at all and never entered the map — a required check
+named `legacy-ci`, present and SUCCESS, came back as `config-error: required
+check legacy-ci is not produced by any workflow in this repository`. The
+produced-check probe had the matching hole, reading only `check-runs` and never
+`commits/{sha}/status`. A repository on classic statuses could not satisfy its
+own required checks at all. Rows now normalise to `{name, terminal, conclusion}`
+and both shapes are judged by one rule; when both report the SAME name, every
+row is kept and all of them must be terminal and green, because a rollup that
+disagrees with itself is not evidence the check passed. `produced` is the union
+of check runs and commit statuses, and one unreadable list nulls both — a
+partial union looks authoritative while missing exactly the names the failed
+read would have supplied.
+
+**One base-head snapshot cannot prove no workflow emits a name.** `produced` is
+what GitHub has reported on the BASE BRANCH HEAD; a `pull_request`-only job, or
+one gated on a path/branch/event filter, is legitimately absent from it, and on
+a PR's first poll nothing has appeared yet. Read as proof on the first probe, a
+correctly configured repository got a permanent configuration fault seconds
+after the push.
+
+Waiting cannot turn that snapshot into proof, so the stop no longer claims it is
+one. What waiting buys is the OTHER half of the evidence: the name is also absent
+from this PR's OWN rollup, which is exactly where a `pull_request`-only job would
+appear. But a settle window alone only DELAYED the ambiguity — a required job that
+was queued or running at minute 10 was still called a configuration fault. GitHub
+creates a check run when the job is QUEUED, so a job that exists and is merely
+slow IS in the PR's rollup as a non-terminal row, and that is the evidence the
+stop was missing. The config error therefore needs all four — absent from the PR's
+rollup, absent from a base head that reported OTHER checks, absent for longer than
+the settle window, and THIS PR'S ROLLUP HAS STOPPED MOVING (every row terminal).
+What remains unprovable is small and named: a job created after everything else on
+the PR has finished.
+
+The base-head snapshot is also no longer allowed to be stale at the moment it
+stops a build. `produced` is resolved ONCE per round and reused by every attempt,
+so by the time the fast-fail fires it can be a full settle window old.
+`confirmedConfigError` re-derives the verdict from a FRESH read before the only
+terminal snapshot-based stop is allowed to stand — one extra seat, on the one
+attempt of the one round where the stop would otherwise fire — and a fresh read
+that did not RESOLVE leaves the original verdict alone rather than letting a
+transient credential failure overwrite it.
+
+The sentence it returns states that evidence instead of
+asserting "is not produced by any workflow in this repository", a claim this data
+cannot support and one that sends the owner hunting for a workflow that may exist
+and simply be conditional. The deferral text now names the conditional-filter case
+explicitly.
+
+An EMPTY produced list is the input that proves nothing at all — a base commit
+whose CI never ran, or whose checks expired — and it can no longer fire the
+fast-fail however long it persists.
+
+`REVIEW_READINESS_CONFIG_GRACE_MS` is DERIVED from the budget (two thirds of it,
+snapped UP to a whole number of retries — 10 minutes at the current 15) rather
+than hand-written. Two tuned durations beside each other is how the budget comment
+came to argue for a 3x margin over the measured 328 s appearance time while the
+number next to it was 1.5x; as a ratio it moves WITH the budget and the fast-fail
+stays reachable by construction. The snap matters because the gate cannot spend a
+fraction of a sleep: an un-snapped window is crossed LATE, so the sentence the
+owner reads claims a shorter wait than the loop performed and the guard's attempt
+arithmetic stops being an integer (measured at a mutant budget of 600000 ms:
+14.33 probes asserted against 15 actually spent). It must
+stay STRICTLY below the budget or the config-error branch becomes unreachable and
+the gate silently reverts to burning the whole budget on a fault it can already
+name; the test suite asserts the inequality anyway, because that failure is
+invisible — it looks like patience.
+
+Both produced-list reads also ask for GitHub's `total_count` beside the names.
+`per_page=100` without pagination exits 0 and returns a complete-LOOKING array, so
+a base head reporting more than 100 checks would silently drop names — and a
+dropped name is indistinguishable from one no workflow emits, which is the single
+reading that STOPS a build. A count larger than what arrived now nulls the list
+out, which can only ever disable the fast-fail. That safety is not free and the
+cost is now written down where the guard is: on a base head with more than 100
+checks (`microsoft/vscode` measured at 120) a genuinely mis-named required check
+no longer stops early — it burns the full budget and defers as `absent`, which
+reads like a queue problem rather than a configuration one. The fix when it bites
+is pagination in the probe, not a looser guard.
+
+The probe grew from three reads to five, all in the SAME Bookkeeping seat and
+all through `ghReadCommand`, and the transcript is split by section NAME rather
+than by `indexOf` offsets — taking each marker's LAST occurrence, for the same
+reason `exitOf` already did. Splitting on the FIRST had its own version of the
+offset bug: the probe's own command line carries all four markers, so ONE echoed
+command moved every boundary to the echo and mis-assigned every section (measured:
+a transcript with the command echoed in front classified as `unknown` where the
+identical clean transcript resolved). The JSON extractor inside a section is
+tolerant of the same echo — it tries candidate `{` positions from the outermost in
+rather than assuming the first brace is the payload's, because `repos/{owner}/
+{repo}` is not. An absent section reads as unreadable rather than being silently
+mis-attributed. `elapsedMs` counts the sleeps and not the probe round-trips
+between them, so it is a FLOOR — the safe direction for its one consumer, since
+the fast-fail can only fire later than the window and never earlier — and every
+owner-facing sentence built from it says "at least".
+
+**One existing test asserted the buggy behaviour and had to change.** `404
+protection + no rulesets is a definitively UNPROTECTED base` fed a bare 404 with
+nothing establishing whether the credential was even allowed to ask, and
+required the classifier to answer `required: []`. That test is why the defect
+shipped: the behaviour was pinned, so nothing downstream could notice it. It is
+replaced by tests that assert the DECISION under each reading of the ambiguity —
+404-with-proof resolves, authorization-shaped 404 defers and spends zero review
+seats.
+
+**And the mutation tests had the same defect one level up.** Several asserted the
+MUTANT'S OWN answer (`expect(mutantAnswer).toBe('config-error')`), which documents
+that the mutant behaves differently and stops there — it never shows that any
+guard in the file would CATCH it, so those tests stayed green against their own
+mutants. Asserting only that something threw is worse: a mutant whose source no
+longer parses throws on LOAD, so `toThrow()` passes while the mutation never ran.
+Every mutant now proves three things through one shared helper — the replacement
+MATCHED, the mutant LOADS, and the real guard's own assertion replayed against it
+goes RED — and records the wrong answer as documentation rather than as the
+assertion carrying the test.
+
+**A shared fixture defaulted to a branch state GitHub never emits.** Every
+`requiredProbe` case defaulted `branch` to `{"protected":false}`, and a
+ruleset-governed branch reports `protected:true`. No test paired a protection 404
+with a non-empty ruleset and a realistic `protected:true`, which is precisely why
+nothing caught that the first version of this fix answered `unknown` on the
+repository trident actually builds and would have deferred EVERY review round
+there — the same fixture-pins-impossible-behaviour defect class as the test the
+entry above describes. The fixture now carries the measured shapes by name
+(`RULESET_GOVERNED_BRANCH`, `CLASSIC_PROTECTED_BRANCH`) and the missing pairing is
+a headline test.
+
+**An EMPTY rollup satisfied "everything has finished" vacuously.** `rollupSettled`
+was initialised to `true` and falsified only from inside a loop over the rollup's
+own rows, so ZERO rows left it true. The config-error fast-fail then declared a
+configuration fault whose sentence read `every other check on this PR has
+finished` over a PR where nothing had started — and because config-error is
+terminal, it also spent the remaining waits on a state that only needed waiting.
+The trigger is ordinary rather than exotic: a fork or first-time-contributor PR
+whose workflows sit `awaiting approval` reports `statusCheckRollup: []` until a
+maintainer approves them, which is exactly the case that must WAIT. The
+unprotected-base path already refused the empty rollup for this reason
+(`ran.length === 0` ⇒ `absent`), so the asymmetry was unintended; the flag now
+seeds from the rollup's own size and both paths agree. A SKIPPED-only rollup is
+still settled, which the existing test pins.
+
+**And the fixture default could still describe two worlds at once.** Naming the
+measured shapes was not enough on its own: the flagship `a 404 on protection is
+an ANSWER — the ruleset still speaks` test kept taking the `protected:false`
+default while asserting that a NON-EMPTY ruleset speaks, a pairing GitHub cannot
+emit. It now states the ruleset-governed payload, and the fixture builder REFUSES
+the contradiction outright — a branch reporting `protected:false` alongside a
+ruleset that requires a status check throws, so no future case can smuggle the
+combination back in. The guard is scoped to where the branch section is
+LOAD-BEARING, which is NARROWER than "the protection read failed": the classifier
+consults the branch payload only when the protection body is a RECOGNISED 404 and
+the branch read itself succeeded. Any other protection failure returns `unknown`
+before the branch or the rulesets are touched, and an unreadable branch body is
+discarded — so guarding those would reject fixtures the classifier never looks at.
+The cross-model reviewer caught that over-scoping; both cases are now controls.
+
+**A later round tightened one more fail-open and settled one contradiction in the
+prose.** The truncation guard read the arrival count with `typeof n === 'number'`,
+which admits values a comparison cannot answer for: a fraction landing UNDER the
+arrival (`2.5 > 3` is false) passed a possibly-truncated list through as complete,
+and so would `NaN`. An absent count is now the only "no count was reported";
+anything present that is not a whole number nulls the list out, which can only
+ever disable the fast-fail and never create a stop. Separately, the normaliser's
+own comment claimed every row for a repeated name is kept and judged, while the
+classifier discards commit statuses — including RED ones — for a name the base
+branch binds to an App. The behaviour is deliberate and was already pinned by a
+test (a producer the requirement excludes cannot satisfy it, and by the same
+token cannot refute it, or anything able to POST a status could fail a check it
+was never bound to); the comment now says so instead of denying it. The
+`workflows` ruleset rule type is still skipped, which is stated in place rather
+than left to be rediscovered. The cross-model reviewer ran again on this round
+and found two defects in it: the comment's arithmetic was wrong in one clause,
+and the new fixture used a fraction the OLD code already rejected, so it
+discriminated nothing. Both fixed; the mutation test now replays both weaker
+guards, including the one that shipped.
+## 2026-08-16 — the guard that proved the gate runs accepted `|| true`
+
+Every fix below closes a route to the SAME outcome — the gate prints ✅, or CI
+prints a green check, while the property is violated. Two were reproduced
+independently by two reviewers against the live branch before any of this was
+written.
+
+**The workflow guard was a string search wearing a docblock.**
+`scripts/ci/ci-workflow.test.ts` asserted the gate step "runs, unconditionally,
+with its exit code honoured" and checked only for `if:` and
+`continue-on-error:`. Appending `|| true` to the `- run:` line satisfies both,
+leaves the step present and running, and turns the check green whatever the gate
+decides. Reproduced against the branch: the mutation landed, the suite stayed
+0-fail, and the deleted-step control still went red — so the suite proved a
+string was in a file. `whyNotGating` now requires the gate to be the WHOLE shell
+command (nothing before it, no `|`, `;` or `&` after it), and six shell bypasses
+join the six YAML ones as permanent mutations: `|| true`, `|| :`, `; true`, a
+pipe, a trailing `&`, and a `set +e` prefix.
+
+**The installer could report success over the state it calls fatal.**
+`scripts/install-merge-drivers.sh` runs `set -uo pipefail` with no `-e`, and
+neither `git config` call nor the attributes append was checked, so a failure
+fell through to `echo "merge drivers: installed"` and exit 0. Measured here on
+git 2.50.1 (Apple Git-155), same repo, two branches conflicting on a path bound
+to `merge=as-built-log`: `.name` set with `.driver` unset is
+`fatal: custom merge driver as-built-log lacks command line.` (exit 128), and
+`.driver` set with `.name` unset merges fine at exit 0. That asymmetry is the
+fix, not just the checks — `.driver` is now written FIRST, so an interruption
+between the two leaves a clone that merges rather than one that cannot. Every
+step is checked and a failure rolls the pair back and exits 1. A first draft
+also re-read both halves before printing success; mutating that block away left
+the whole suite green, because every reachable failure is already caught at the
+write, so it is deleted rather than kept — the same call, for the same reason, as
+the empty-`--template=` dance dropped from the attributes probe one round ago.
+A test makes `.git` read-only (the config
+LOCK file is what needs the directory, not the config file's own mode: measured
+`could not lock config file .git/config: Permission denied`, exit 255) and
+asserts the installer fails loudly leaving neither key set.
+
+**A local `refs/replace/*` forged the committed floor.** Object reads honour
+replace refs, so `git show HEAD:.gitattributes` can return a blob the commit does
+not contain. Measured: a repo whose committed attributes file is
+`# broken, no union rule`, with that blob replaced by a healthy one, answers
+`docs/AS_BUILT.md merge=union` to `git show` — while `GIT_NO_REPLACE_OBJECTS=1`
+and a fresh `git clone` both return the broken file. `clone` does not carry
+`refs/replace/*` and neither does `actions/checkout`, so this is a reading that
+travels nowhere, the same class as a machine-global attributes file.
+`GIT_NO_REPLACE_OBJECTS=1` is now part of `CHECK_ATTR_ISOLATION_ENV`, with the
+clone as the control.
+
+**The probe inherited case-insensitivity from `$TMPDIR`.** `git init` probes the
+filesystem and writes `core.ignorecase = true` on macOS, so the throwaway probe
+matched a wrong-case rule that no case-sensitive clone honours. Measured:
+`docs/as_built.md merge=union` resolves `union` for `docs/AS_BUILT.md` by
+default and `unspecified` under `-c core.ignorecase=false`. The pin is applied to
+the PROBE only and deliberately not to `localEffectiveMergeDrivers`, which
+reports what this clone really does and must not describe a repository the
+developer is not using. The test reads `core.ignorecase` rather than asserting
+it, because on a case-sensitive runner there is no poison to defeat and
+demanding one would red CI for the platform being right.
+
+**A committed-but-not-checked-out `SPEC.md` turned the whole gate off.**
+Governedness was a disk read — the previous entry says "`SPEC.md` stays a disk
+read on purpose", and that is now wrong: under a sparse checkout the spec is in
+the tree and not on disk, and the gate exited 0 with "not a governed repo" over a
+floor nothing had looked at. It is now the UNION of disk and the committed tree,
+since each alone fails silently in a different direction (tree alone would drop
+the first commit of a new repo, and every fixture in the gate's own tests).
+
+**`presentAsBuiltLogs` was the module's one fail-OPEN path.** Its
+`catch { return [] }` reached the caller as "no append-only build log found —
+nothing to enforce" and exit 0, so an unreadable governed repo read as a clean
+bill of health. It now throws, and the test proves the read really is broken
+(`git ls-files` exit 128) before asserting the throw.
+
+Three diagnostics said things about git that are not true. `unset` was reported
+as "your `<path> -merge` rule", but the built-in `binary` MACRO expands to
+`-diff -merge -text` and produces the same `unset` from a line with no `merge`
+token in it — measured — so both spellings are now named. Duplicate exact rules
+beaten by a later WILDCARD were listed under "the LAST wins", pointing the reader
+at a line whose edit changes nothing; that heading is now used only when the last
+collected rule is what git actually resolved. And the local-clone note credited
+`scripts/install-merge-drivers.sh` for any overlay naming its driver without
+checking whether the driver is configured at all — i.e. it described a broken
+clone as a sanctioned upgrade. It now reads BOTH `merge.as-built-log.driver` and
+`.name`, because the three config states are three different git outcomes and the
+first draft of this very fix got that wrong: reading only `.driver` cannot tell
+`.name`-without-`.driver` (the exit-128 `lacks command line` abort) from no
+config at all (an ordinary exit-1 content conflict), and it would have printed
+"exit 128" over the second — a new confident wrong sentence about git, inside the
+change whose subject is confident wrong sentences about git. Each state now has
+its own message and its own test.
+
+Two test-quality fixes with no behaviour change: `AS_BUILT_CANDIDATES` was
+asserted only to contain the substring `BUILT`, which is satisfied by any three
+of the four and by names that are not logs, and is now pinned as the exact set;
+and every fixture commit pins `commit.gpgsign=false`, so the suite does not reach
+for a signing key on a maintainer's machine or block on a pinentry prompt in a
+run that is supposed to be unattended.
+
+Eleven mutations were run with the unmutated suite green as the control, each
+reverting exactly one property above: `|| true` on the workflow step, the
+`GIT_NO_REPLACE_OBJECTS` pin, the probe's case pin, `presentAsBuiltLogs` failing
+open, governedness back to disk-only, the installer's `.name`-first ordering with
+unchecked writes, the half-install note reading only `.driver`, the wildcard
+override back to "the LAST wins", a dropped `AS_BUILT_CANDIDATES` entry, and the
+`-merge` diagnostic losing the macro spelling. Ten turn a test red. The eleventh
+is the deleted verification block above, and its deletion is the finding.
+
+The version acceptance test asserted `git version 2.` under a docblock claiming
+it existed "because 'measured on 2.50.1' stops being a true statement the moment
+the runner's git differs" — it accepts every git of the decade, so the promise
+and the assertion were different claims. Pinning the number is the wrong repair:
+it would red this suite on the Linux runner for a reason unrelated to the
+property, and a version string is not a behaviour anyway. The guarantee comes
+from the six real merges in the same file, which re-measure every claim on
+whatever git is present. `2.50.1` in the docblocks is provenance; the merges are
+what keep it true.
+
+## 2026-08-16 — the guard was on the automatic path only, so the explicit one still moved the rows
+
+A review of the merged #266 found it and the repro is two lines: seed a credential row
+under an explicit handle, boot on the `'dev'` fallback, dispatch the explicit migration.
+`total_moved:1`, and the row now belongs to a process that cannot say who it is. The
+automatic reconciler refused exactly this; `migrateOrphanedCredentialScope` took a handle
+and no provenance at all, so it could not have refused anything. **Closing the direction
+on one sweep closed nothing** — the same sentence that entry was written to record, one
+level up, inside the patch that recorded it. Worse, the integrations status screen
+ADVERTISED the migration as the repair.
+
+**Provenance is a REQUIRED argument, not an option with a safe default.** A
+`CredentialScopeProvenance` is threaded from the boot resolver (`gateway/index.ts`, the
+same `slugResolution` the automatic guard reads) through the composer, the composition
+input, the cores wiring, and both explicit surfaces — the `integrations_migrate_orphaned`
+tool and `POST /api/cores/integrations/migrate-orphaned` — into the brain and the scope
+function. Required, because the failure is silent: a new surface that forgot would
+compile, pass, and quietly do the unguarded thing. Now forgetting is a type error, and
+the compiler enumerated every site rather than a human guessing at them.
+
+**Absent means fallback.** Making it required all the way up touched 89 files, most of
+them composition tests asserting a provenance they have no opinion about, so at the
+composition boundary it is optional and `undefined` reads as anonymous. "This caller did
+not say where its handle came from" and "this process does not know who it is" are the
+same statement, so a composer that forgets is refused rather than trusted — fail-closed,
+and 89 files became 6.
+
+**A surface no longer offers an action the brain will refuse.** On a fallback boot the
+orphan summary carries `migrate_action: null` and a sentence naming the real repair (set
+the handle and restart) instead of pointing at the migration that would take someone
+else's rows.
+
+**And the boot log now says WHY nothing moved.** `credential_scope_orphaned` carried no
+reason, so `ambiguous_census` and `fallback_boot_handle_refused_direction` — which need
+opposite responses — rendered identically, and the operator reading the generic sentence
+was being steered toward the unsafe action. Both the log line and the journal payload
+carry it; the payload assertion is exact equality, because an audit row that grows a
+field silently is how one starts carrying something it should not.
+
+Regression asserted THROUGH THE SHARED BRAIN, not by calling a tool handler — every
+surface funnels there, and a test that reaches past it proves nothing about what a caller
+gets, which is how the gap survived its first suite. It carries the positive control the
+file requires: the same fixture, provenance the only difference, migrates. Mutation-tested
+both directions — disabling the guard fails the new test, refusing unconditionally fails
+five. A later review round added the boundary the first pass missed — the HTTP route,
+the agent-facing tool and the status response each driven for real, plus a fallback boot
+asserting the audit row's `reason` by exact equality, plus the composition chain itself
+(delete the composer's propagation and every configured boot silently refuses, which the
+field-coverage gate cannot see because the safe default and the wrong answer are the same
+literal). Gate results for the whole entry are recorded ONCE, at its end — an earlier
+draft stated `typecheck-all.sh` twice with two different counts, which leaves a reader no
+way to know which run was the real one.
+
+**A LATER ROUND FOUND THE GUARD FAILING THE OTHER WAY, AND IT WAS LIVE.** The refusal is
+silent in both directions — a broken guard silently steals rows, and a guard that
+misreads its own configuration silently refuses every migration on a correct machine.
+`resolveOwnerSlugSourceFromConfig` read the effective owner home as `config.ownerHome ??
+config.neutronHome`, and `??` falls through on `undefined` but NOT on `''`. So
+`OWNER_HOME=''` resolved the home to the empty string, the guard on the next line
+rejected that as unusable, and the `.url_slug` lookup was SKIPPED rather than falling
+back to `NEUTRON_HOME` — collapsing all three slug resolvers onto the bare `'dev'`
+fallback at once. A correctly renamed instance then journalled its own handle as
+orphaned and answered `Refused` to every explicit migration, telling the owner to set a
+handle that was already set. `resolveNeutronHome` (`migrations/db-path.ts`) has always
+treated an empty value as unset, so the two halves of one identity resolution disagreed
+about what empty means, ten lines apart. There is now ONE `effectiveOwnerHome` in
+`config/index.ts` that both the slug resolver and the env shim call — the shim was the
+second live site, and because `open/server.ts` fills a slot that is `undefined` OR `''`
+it re-wrote the empty string over itself, leaving every below-seam reader of
+`process.env.OWNER_HOME` holding `''`. Fixing only the resolver would have left the
+running server's owner home empty. The agreement suite could not see this axis by
+construction: it varies `NEUTRON_INSTANCE_SLUG` and never passes an empty `OWNER_HOME`,
+and all three resolvers were wrong the SAME way, so they agreed perfectly on the wrong
+answer.
+
+**`neutron doctor` escaped its `{ok:false}` contract again, on the same line.** The
+previous round closed the ZodError path and opened a filesystem one: the `.url_slug` read
+behind `existsSync` was unguarded, and `existsSync` is true for a chmod-000 file and for
+a DIRECTORY of that name — the read then throws EACCES / EISDIR out of a function
+`open/diagnostics-cli-impl.ts` calls OUTSIDE the try that produces `{ok:false}`. Both
+variants were reproduced against the branch.
+
+**THE FIRST FIX FOR THAT WAS WRONG, AND THE NEXT ROUND MEASURED WHY.** It made the
+resolver SWALLOW the read error and fall through to `NEUTRON_INSTANCE_SLUG`, so `doctor`
+stopped throwing. On the exact configuration `open/owner-identity.ts` documents — a
+renamed instance, `.url_slug` holding the new handle and the env var still holding the
+old one — the fall-through answers `{slug:'old-handle', source:'env'}`. That is a
+CONFIGURED provenance, so `slug_is_fallback` reaches the direction guard as `false` and
+the sweep migrates the owner's credential rows BACKWARD onto the name they were renamed
+away from, with no log line and no journal row. EACCES on `.url_slug` is a recorded real
+deployment failure, not a hypothetical. It also deleted a pinned invariant repo-wide:
+`gateway/__tests__/boot-init-cleanup.test.ts` asserts boot FAILS LOUDLY on an
+unresolvable slug, and the swallow turned that suite red on `main`'s own test.
+
+An unreadable rename file is now an ERROR, not an absence: the resolver throws
+`OwnerSlugUnreadableError` (`config/index.ts`), boot rejects as it always did, and the
+ONE caller that would rather have an answer than the truth — `neutron doctor` — catches
+it and renders its documented `{ok:false}` with the errno, which is what `main` returned
+before this branch existed. A substituted slug was never acceptable there either: the
+slug filters every event and job in the report, so `{ok:true}` with the wrong identity
+renders a healthy instance as empty. A file that reads successfully and is BLANK is still
+the absent case; only a file that could not be read at all is unknown.
+
+The EACCES fixtures prove the mode really denies the read before asserting the deny-path
+behaviour, because `chmod 000` is advisory against root — and where they previously
+bailed with a bare `return` when it did not bite (a test named for the EACCES axis
+passing green on a root runner having asserted nothing), they now assert the correct
+outcome for whichever world they are in: root still reads the file, and then the file
+must WIN. The EISDIR case denies root too and carries the axis unconditionally.
+
+**The canonical resolver moved out of the gateway ENTRY module.** It was defined on
+`gateway/index.ts` and `open/owner-identity.ts` imported it from there, which put the
+entry into `open/composer.ts`'s own static import graph — the one edge
+`gateway/composer-contract.ts` forbids by name, because entry↔composer is the
+top-level-await cycle that completes under Bun's current loader and can deadlock under a
+strict reading of the ESM TLA spec. No mechanical gate saw it: the depcruise rule that
+looks closest exempts `^open` outright, and the no-cycles rule only fires once a cycle
+COMPLETES. The resolver now lives in the `config` leaf beside the `IdentityConfig` it
+consumes and the `effectiveOwnerHome` it calls; `gateway/index.ts` re-exports it for its
+own importers. `open/__tests__/composer-graph-excludes-gateway-entry.test.ts` walks the
+real static graph through `Bun.resolveSync` and names the offending module — it carries
+a positive control (the same walker, seeded at a file that really does import the entry,
+must find it) so a walker that resolved nothing cannot read as a clean graph.
+
+**Whitespace is empty too.** `effectiveOwnerHome` and `resolveNeutronHome` both guarded
+`length > 0`, so `OWNER_HOME='   '` was answered as a home: the `.url_slug` lookup ran
+against a directory named three spaces and a correctly renamed instance resolved
+anonymous again — the identical defect, one space past the fix for it, and through an
+input no empty-string case can reach. Both trim now; both still return the value
+verbatim, because blank means unset and a real path is published back byte-for-byte.
+
+**The fail-closed default in the wiring was dead.** `wire-cores-surfaces.ts` reads
+`input.slug_is_fallback ?? true` at both handoffs and the comment above each says
+forgetting fails closed — but `open/composer.ts` normalises the field and always sets it,
+so no test ever produced the absent case and mutating `?? true` to `?? false` left every
+suite green. The integration test now composes with the DANGEROUS value and deletes the
+field before composing the graph, which is the only way to reach that default; the same
+mutation reds exactly that test and nothing else.
+
+**The refusal is data now, not prose.** `MigrateOrphanedCredentialsResult` carried no
+field for it — `refused_direction` was consumed only to build a sentence and the call
+still returned `ok:true`, so `POST /api/cores/integrations/migrate-orphaned` answered a
+refusal with `200 {ok:true,total_moved:0}`, structurally identical to a collision skip
+and to a clean no-op. Five assertions guarding a security-relevant refusal were
+`message).toContain('Refused')`, so editing one English sentence disarmed all five while
+leaving the guard untested. The flag now propagates to the result and out over the wire,
+and those assertions are structural; the operator-facing sentence stays pinned once,
+deliberately, rather than being the sole evidence in five places. **And the refusal
+leaves an audit row.** The journal emit was gated on `total_moved > 0` and a refusal
+moves nothing, so the one security-relevant outcome reachable from HTTP and from an agent
+tool wrote nothing at all while the automatic path journalled a reasoned row. It now
+emits `credential_scope_orphaned` with boot's own
+`reason: 'fallback_boot_handle_refused_direction'` plus a `surface` key, asserted by
+exact payload equality with the no-secret-material sweep.
+
+Mutations, each performed and reverted with a control proving it landed: reinstating the
+`??`, dropping the structural flag, suppressing the audit emit, and disarming the
+direction guard itself — the last one proving the suite still catches rows actually
+MOVING, not merely a missing marker. Four more in the round that fixed the swallow:
+restoring the swallow reds 6 tests across three files (including the boot invariant it
+had broken); reverting either trim to `length > 0` reds the whitespace case; re-adding the
+`gateway/index.ts` import to `open/owner-identity.ts` reds the graph walker, which names
+the module; mutating `?? true` to `?? false` at both wiring handoffs reds only the new
+absent-field case. Removing the composer's `slug_is_fallback` assignment reds the
+FIELD-SPECIFIC ratchet by name (`composition-field-coverage.test.ts` over `WIRED_FIELDS`),
+not merely the count floor — measured, because a review reported the opposite.
+
+**A LATER ROUND FOUND THE PIN FOR ONE OF THOSE TRIMS ASSERTING NOTHING.** A review
+mutation-proved it: revert the `OWNER_HOME` trim in `resolveNeutronHome`
+(`migrations/db-path.ts`) and the suite stayed green, because the assertion that named
+that property passed `NEUTRON_HOME` too — which wins at the line above and RETURNS, so
+the line under test never ran. The positive control (the same mutation on the
+`NEUTRON_HOME` branch) WAS caught, which is what made the gap legible rather than
+invisible. The property is now asserted with `NEUTRON_HOME` ABSENT, where only the trim
+can produce the documented `~/neutron` default, plus a control that a real `OWNER_HOME`
+path still resolves verbatim so the case cannot pass by the variable going unread.
+An assertion that cannot fail for the property it names is not coverage.
+
+**AND THE DOCBLOCK'S CLAIM ABOUT ITS SIBLINGS WAS FALSE.** `config/index.ts` stated that
+every sibling identity read in the repo trims; two did not — `resolveOwnerHome`
+(`gateway/boot-listener-registry.ts`) and its inlined twin `resolveOwnerHomeFromEnv`
+(`onboarding/overnight/register.ts`), both `length > 0`. With `OWNER_HOME='   '`, config
+and identity fell back while those two answered a directory named three spaces: one
+variable, two homes, and the overnight engine enumerating projects somewhere nothing had
+ever written. Fixed at the two call sites rather than by narrowing the sentence, because
+the split brain was the defect and the prose was only the evidence. The adjacent
+`NEUTRON_DB_PATH` guards got the same treatment — `dirname(dirname('   '))` is `'.'`, so a
+blank pin resolved owner_home to the process CWD, the identical defect one line down that
+fixing only the first line would have left live.
+
+`ReconcileInstanceScopeOptions.currentSlugIsFallback` is now REQUIRED, matching the
+explicit path's `provenance` argument. It was optional and the guard fires only on an
+explicit `true`, so an omitted flag failed OPEN — and the demonstration of the permissive
+call was sitting in the guard's own test file, where an omission and a deliberate `false`
+were indistinguishable. Optional provenance on a safety decision is a way to forget.
+
+`ENOENT` from the `.url_slug` read is deliberately NOT special-cased, and the reasoning is
+recorded at the call site: a review proposed falling through when the read races an
+unlink, but the fall-through answers with `NEUTRON_INSTANCE_SLUG`, which on a renamed box
+holds the OLD handle — so it would hand the credential guard "this process knows who it
+is" at the exact moment something is rewriting the file that says who it is.
+
+Mutations this round, each applied and reverted with a control proving it landed and a
+baseline proving the suite was green first (23 pass / 0 fail): reverting the
+`OWNER_HOME` trim in `resolveNeutronHome` reds the new absent-`NEUTRON_HOME` case;
+reverting either sibling's `OWNER_HOME` trim reds that sibling's assertion by name;
+reverting either `NEUTRON_DB_PATH` trim reds the CWD case; and dropping
+`currentSlugIsFallback` from one call site is now a TS2345 compile error naming the
+missing property, which is the whole point of making it required.
+
+Suites: `open/__tests__/owner-slug-agreement.test.ts` 23 pass, `migrations/` +
+`onboarding/overnight/` 110 pass across 14 files, gateway boot-credential-scope +
+boot-init-cleanup + `config/` 48 pass across 4 files, and the four direction-guard
+suites together 40 pass. `open/__tests__/` as a whole ran 750 across 98 files; the three
+failures there are load-sensitive and NOT this branch — the identical two
+(`projects_changed` live-refresh, the `#514` watchdog reap) reproduce on the untouched
+base worktree at `81548e81` under the same three-file load, the third
+(`sanitizeInboundAttachments`) does not recur, and the watchdog case passes 30/30 when its
+file runs alone. The failure SET differenced against untouched main is empty; the count
+alone would have read as a regression.
+
+`lint.sh` clean (7 gates). `typecheck-all.sh` 50/51 with the one failure
+(`app/tsconfig.json`, `TS2688 Cannot find type definition file for 'node'`) reproduced
+identically on the untouched base worktree at `81548e81` — a local install artifact
+(`app/node_modules/@types` holds only `react`), unchanged by this work. Differenced as a
+failure SET, not counted.
+## 2026-08-16 — four headings collided in this log; only one was a duplicate
+
+Landed via PR #325.
+"One entry per merged change" (line 3) had never been checked. Measured at f99d6d49:
+307 headings, 303 distinct — four collisions, arriving by two unrelated routes, which
+is why this ends in a standing gate rather than a tidy-up. No single review would have
+caught both.
+
+THREE were minted by folding the 46 per-entry files back into this file (bb90794b,
+#304). Each reads 1 at `bb90794b^` and 2 at `bb90794b`. #304 verified that every
+original heading was still PRESENT; nothing asked whether any had become a twin.
+
+The FOURTH has nothing to do with the fold and already read 2 at `bb90794b^`.
+`## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt`
+was written by a84d6cbb (#261) and then re-appended VERBATIM by 6da6ddb9 (#275) — a
+different change, which added its own entry in the same commit, so the copy was a
+merge artefact rather than a second record. It is the one real duplicate and it is
+removed. The two bodies were byte-identical apart from the blank separator the copy
+dropped, which is why the copy sat flush against the next heading. Asserted equal
+before removing it, and the removal is 26 lines of prose that still exist 26 lines
+above.
+
+The three the fold minted were NOT duplicates and deleting either side would have
+destroyed history. `Codex and Kimi are connectable from a phone` (1281 vs 4275 chars),
+`The chat agent can search the web` (942 vs 2582) and `Model usage on the phone` (784
+vs 2464) are each a SUMMARY entry written straight into this log by its original change
+(0e56be5b #161, 4df45217 #168, 68a9a930 #169) plus the long-form companion that the
+same commits wrote to a separate file. Those files were titled `# Title`; one of the
+three carried its date only in the filename
+(`docs/as-built/2026-08-09-mobile-model-providers.md`) and the other two repeated it
+in the title as `(2026-08-09)`. #304 normalised all three to `## YYYY-MM-DD — title`,
+thereby minting a heading identical to the summary's. Both sides are kept and the
+FOLDED one is suffixed ` (detail)`, because it is the synthesised heading — no author
+typed it — and the summary's own `Detail: §` pointer, which until now resolved
+ambiguously to two sections including itself, is repointed to match. No prose changed on either side. Containment
+was checked rather than assumed before ruling deletion out: 0 of 23 sentences in the
+three short bodies appear verbatim in their long counterpart.
+
+The contract is now mechanical. `scripts/git/as-built-heading-uniqueness.ts` reports every
+repeated `## ` heading and `scripts/git/as-built-heading-uniqueness.test.ts` runs it
+against this file on every PR. Keyed on the WHOLE heading line, never the date — this
+log carries more than twenty entries dated 2026-08-09 alone, and a gate that cries wolf
+gets waved through.
+
+It does not decide for itself what an entry IS: it calls `parseLog` from
+`scripts/git/as-built-log-merge.ts`, the merge driver's own parser, so a gate and a
+merge can never disagree about where an entry begins. Its first shape re-derived that
+parsing and had already drifted three ways — `~~~` fences unrecognised, an indented
+fence closer leaving the scanner stuck open, and `##\ttitle` counted by the driver but
+missed by the gate. Each is a case where a merge folds two entries the gate swears are
+one. All three are now regression cases.
+
+It matters because NEITHER merge driver this path can carry reports a collision.
+Tracked `.gitattributes` binds `merge=union` (cb39016f), which keeps both sides of a
+conflicting hunk rather than raising. A clone that has run
+`scripts/install-merge-drivers.sh` instead gets `merge=as-built-log` from
+`$GIT_COMMON_DIR/info/attributes`, which outranks `.gitattributes` (verified with
+`git check-attr merge -- docs/AS_BUILT.md` in a throwaway repo: `union` before the
+line is added, `as-built-log` after) — and that driver names this exact case as its
+one known limit, where occurrence indices shift and entries come back in an odd order.
+Duplication here compounds or scrambles silently rather than failing loudly, and
+nothing else looks.
+
+Mutation-tested three ways. Re-appending a collision to the real log reds exactly the
+conformance case, naming the heading and both line numbers. Blinding the checker's
+heading match reds the positive control while the conformance case still passes — the
+false negative a lone conformance assertion cannot see. Splicing the first,
+hand-rolled parser back in reds all four parity cases and nothing else, so those cases
+are not decorative. The positive control re-appends the first heading NOT already
+duplicated: the scenario it models is a union merge doubling the newest entry, and
+re-appending an already-doubled heading takes it from two occurrences to three without
+changing the duplicate count at all.
+## 2026-08-16 — the union gate asks git instead of re-deriving it
+
+#315 added a CI gate asserting this log carries `merge=union`, and decided that
+by PARSING `.gitattributes` and taking the FIRST exact-path `merge=` assignment.
+git takes the LAST one, and a later WILDCARD beats an earlier exact path.
+Measured here on git 2.50.1: a file containing `docs/AS_BUILT.md merge=union`
+followed by `docs/AS_BUILT.md merge=as-built-log` resolves in git to
+`as-built-log`, and the shipped gate printed `✅ … (already-union)` and exited 0
+over it. Same with a following `docs/*.md merge=binary`. So the floor this gate
+exists to hold could be removed with the gate reporting green — the regression
+it was written to prevent, wearing its own ✅.
+
+The verdict now comes from `git check-attr`, asked in a THROWAWAY repository
+seeded with EVERY tracked attributes file that can reach the log. The isolation
+is the design, not tidiness: the entry-aware driver binds itself in the untracked
+`$GIT_COMMON_DIR/info/attributes`, which OUTRANKS the tracked file, so a machine
+that ran `scripts/install-merge-drivers.sh` answers `as-built-log` for a repo
+whose tracked line is gone. Asking the local clone would pass that repo. The
+gate now asks two separate questions — is the FLOOR every fresh clone gets
+intact (decides), and does THIS clone additionally carry the opt-in upgrade
+(printed, never decisive).
+
+Seeding the probe with the ROOT `.gitattributes` alone was the same bug one level
+up, and it survived the first fix. git consults a `.gitattributes` in the path's
+own directory and every ancestor, deeper beating shallower. Measured on git
+2.50.1: a root `docs/AS_BUILT.md merge=union` plus a tracked `docs/.gitattributes`
+saying `AS_BUILT.md merge=binary` resolves to `binary` — in the repo AND in a
+fresh clone of it, verified by cloning — while a root-only probe answers `union`
+and the gate prints ✅. The probe now collects `.gitattributes` for the path's
+directory and each ancestor (a bounded, provably complete set), reads them from
+the COMMITTED TREE rather than the working tree so an uncommitted or untracked
+file cannot manufacture a floor that reaches no clone, and reproduces the
+directory layout in the scratch repo so git applies its own precedence.
+
+Reading a tree is right only at the repository TOP LEVEL, and getting that
+wrong reintroduces the same bug the fix was for. A tree path is always spelled
+from the top level, so for a governed tree nested inside a larger repo
+`git show HEAD:docs/.gitattributes` returns the OUTER repo's file — a confident
+answer to a different question. The check compares `rev-parse --show-toplevel`
+against the directory being asked about, through `realpathSync` on both sides,
+because macOS hands out `/var/...` paths that resolve to `/private/var/...` and a
+raw string compare would call the top level "nested" and fall back to disk for
+every temp-dir fixture. Nested trees read from disk.
+
+The isolation itself was asserted rather than real. `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM` and `GIT_ATTR_NOSYSTEM` do not close the door: measured on
+git 2.50.1 against an attributes-free repo whose control answer is `unspecified`,
+each of `GIT_CONFIG_PARAMETERS` (what `git -c` exports to every child, hook and
+alias), `GIT_CONFIG_COUNT`+`GIT_CONFIG_KEY_n`/`VALUE_n`, `GIT_DIR` pointing at
+another repository, and `GIT_ATTR_SOURCE=HEAD` steered the answer straight past
+the pins. The CI step runs from a clean runner env, but this repo already runs
+`scripts/ci` gates from git hooks, where git has exported `GIT_DIR` itself, and
+the failure mode is a silent PASS. Those variables plus the numbered config keys
+are now DELETED from the probe env — deleted, not set to `undefined`, since
+`GIT_DIR=undefined` is a path. Each has a test with an unpinned control proving
+the poison lands without the fix, alongside the pre-existing
+`core.attributesFile` and `init.templateDir` controls.
+
+The gate's stated rationale was also wrong about git and is corrected to what
+was measured. It claimed a custom driver named in a tracked file is fatal in
+every fresh clone (`lacks command line`, exit 128). It is not: with NO
+`merge.<name>.*` config, git falls back to the ordinary text merge — exit 1,
+`CONFLICT (content)`, markers in the file. The exit-128 abort needs
+`merge.<name>.name` defined WITHOUT `.driver`; with both keys set the driver
+runs and exits 0. All three states measured with real two-branch merges. A
+custom driver in the tracked file is still rejected, because it is not union,
+but the remediation text now describes the symptom a reader will actually meet.
+
+The same false claim was load-bearing prose in three more places, all corrected
+to the measurement: `scripts/install-merge-drivers.sh`,
+`scripts/git/as-built-merge-driver.ts` and `CONTRIBUTING.md` each justified
+keeping the driver's binding untracked by saying a tracked one would hard-fail
+every clone. The conclusion is right and the reason was not. The true reason is
+better: `docs/AS_BUILT.md merge=union` IS tracked and is the floor, so a
+committed `merge=as-built-log` would OVERRIDE that floor with a driver nobody
+has configured and quietly return the log to conflicting — precisely the
+regression this gate now catches.
+
+`git check-attr` also answers `set` for a bare `<path> merge` rule and `unset`
+for `<path> -merge`. Neither is a driver name, and both were being reported as
+"a CUSTOM driver" with a remediation naming `merge.set.*` — a config key git has
+never had. Both are now described as the states they are, with what git measurably
+does: `set` is the ordinary text merge (exit 1, markers); `unset` makes git treat
+the file as BINARY (`Cannot merge binary files`, ours kept whole, the other
+side's entries absent from the working file). Both still fail the gate.
+
+The informational local-clone note used to attribute ANY divergence to "an
+untracked overlay", named whether or not that file existed — reassurance at the
+moment something unaccounted-for is rewriting a developer's merges. It now reads
+the real `$GIT_COMMON_DIR/info/attributes` and attributes the divergence by
+ASKING GIT: the probe is re-run with that overlay layered on, and the overlay is
+credited only for paths whose local answer it actually reproduces. A substring
+search would have mis-reported a `docs/*.md` glob binding as unexplained on every
+machine running the installer; that case has a test. Anything the overlay does
+not explain is now reported as unexplained, pointing at the usual cause (an
+uncommitted `.gitattributes` edit) rather than at the installer.
+
+Two more things this turned up. The gate had NO workflow step — it ran nowhere,
+in any repository, since it merged; it is now a step in the `layering` job, with
+a job-scoped test in `scripts/ci/ci-workflow.test.ts` anchored to a real `- run:`
+key so deleting the step fails CI (mutation-proved) rather than passing it.
+And another built-in driver on the log (`binary`, `text`) used to PASS, inherited
+from the fixer's "don't overwrite somebody's choice" rule: correct for a fixer,
+wrong for a gate, since neither one union-merges. A fixer must not overwrite; a
+gate must not bless.
+
+The fixer itself is gone. `planUnionAttribute`/`ensureUnionAttribute` and their
+filesystem probe lost their last production caller when the gate stopped parsing,
+leaving ~150 lines of module and ~90 lines of test that only their own tests
+referenced, under a docblock describing them as live behaviour — the shape of
+thing that reads as a feature for months. The module is now only the question the
+gate asks.
+
+The isolation reached the last step in the chain and not the ones feeding it,
+which isolates nothing. `resolveTrackedMergeDrivers` ran under a scrubbed
+environment; `collectTrackedAttributesFiles` — which decides WHICH
+`.gitattributes` that probe is then shown — ran `git show :<path>` under the
+caller's. Measured end to end on git 2.50.1 against a governed repo whose union
+line had been deleted: with `GIT_DIR` pointed at a healthy repo, the gate exited
+0 and printed `✅ governed-repo attributes OK`; the same with `GIT_INDEX_FILE`
+plus `GIT_OBJECT_DIRECTORY`. The probe was answering correctly about a different
+repository. Every git read in the module now carries the same isolation, and the
+regression tests for it run the gate as a SUBPROCESS under each poisoned
+environment, because an in-process test hands the poison in explicitly and
+therefore cannot see an inherited one — dropping the `env` argument leaves the
+in-process tests green and turns the four subprocess ones red, which is exactly
+how this shipped.
+
+`GIT_CONFIG_GLOBAL=/dev/null` does not disable git's global attributes file,
+because that file has a DEFAULT needing no config at all:
+`$XDG_CONFIG_HOME/git/attributes`, falling back to `~/.config/git/attributes`.
+Measured: with `docs/AS_BUILT.md merge=union` in that file, the gate passed a
+repo tracking no such rule. Every `check-attr` now runs with
+`-c core.attributesFile=/dev/null`, which outranks every config FILE including a
+repo-local one — and that also closes an init TEMPLATE whose `config` sets
+`core.attributesFile`, measured as the same false PASS. A draft carried a second
+mechanism for the template case (an empty `--template=` plus stripping
+`GIT_TEMPLATE_DIR`); mutating both away left the whole suite green, so they were
+removed rather than kept as a defence no test can distinguish from its absence.
+
+Log PRESENCE was read from disk while the RULE reaching it was read from the
+index. An untracked `AS-BUILT.md` in a working tree therefore failed a repo whose
+tracked floor was perfect — loud rather than silent, but still the gate answering
+about a file that reaches no clone. Presence now comes from `git ls-files` at the
+top level, disk only outside a repository. `SPEC.md` stays a disk read on
+purpose: it decides only WHETHER to run.
+
+The workflow guard proved the step's TEXT was present, nothing more. Adding
+`if: false` or `continue-on-error: true` to that same step left it green while
+the gate decided nothing — one-word edits that read as configuration rather than
+as deletion, and the exact edits a red gate tempts someone into. The check is now
+a pure function over the YAML, and the four bypasses (delete the step, disable
+the step, swallow its exit code, disable the whole job) are run against it as
+tests, each asserting its mutation landed before asserting it was caught.
+
+Nothing performed a real merge. Every "measured on git 2.50.1" sentence in this
+subsystem — including the one that had already been WRONG in shipped remediation
+text — was prose checked once by hand. Six real two-branch merges now pin them:
+`union` keeps both entries at exit 0 with no markers; a custom driver with no
+config is an ordinary `CONFLICT (content)` at exit 1 WITH markers and explicitly
+not 128; `merge.<name>.name` without `.driver` is the exit-128
+`lacks command line`; a bare `merge` rule is the ordinary text merge; `-merge`
+and `merge=binary` both make git treat the file as binary, keeping ours whole and
+dropping the other side's entries with no marker to notice them by.
+
+The local-clone note credited ANY overlay rule to `install-merge-drivers.sh`, so
+a hand-written `merge=binary` in someone's `info/attributes` was reported as the
+sanctioned upgrade — a driver that DROPS the other side's entries, described as
+harmless, pointing at a script that never wrote it. The installer's driver name
+is now a single exported constant pinned by a test against the shell script's
+`DRIVER_NAME`, and only that driver earns the installer's name in the note.
+
+Tests went 41 → 108 across the three files. The two that carry the gate went
+17 → 78 (51 module + 27 gate); the workflow-wiring file went 24 → 30. All 17
+originals passed over every false success above, because they only ever
+exercised pure helpers and an in-memory probe — the bug was never in a helper, it
+was in deciding a verdict from one. There are now subprocess tests running the
+real gate against throwaway trees (union present, rule missing, no attributes
+file, another built-in, a custom driver, `merge`/`-merge` states, duplicate
+rules, overriding wildcard, SUBDIRECTORY override, an untracked subdirectory
+override that must NOT fail, an untracked LOG that must NOT fail, two logs,
+governed, ungoverned, an overlay over a broken floor, an overlay over an intact
+one, a glob overlay, a non-installer overlay, an unexplained divergence, and a
+broken floor under each of four poisoned environments with an intact floor as
+the positive control) plus real-`git check-attr` boundary tests and real merges,
+with clone-verified controls.
+
+The "checks EVERY log" test was itself vacuous: the candidate ordering made the
+first present log the broken one, so a gate checking only `present[0]` stayed
+green through it. The fixture now makes the FIRST log conformant and a LATER one
+broken, and that mutation now fails. Every safety property here was mutated with
+the unmutated suite green as the control — root-only attributes collection,
+isolation-strips-nothing, `present[0]`-only, set/unset-as-custom-driver,
+overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo, the
+collector inheriting the ambient environment, the collector reading an unscrubbed
+one, dropping the `core.attributesFile` argv pin, presence read from disk,
+crediting every overlay to the installer, and disabling the step-scope half of
+the workflow guard — and every one turns a test red. The workflow guard's own six
+bypasses live IN the test file as permanent mutations (delete the step, `if:` or
+`continue-on-error:` before the `run:` key and again after it, disable the whole
+job), each asserting its mutation landed before asserting it was caught.
+
+One mutation did NOT fail, and that is why the code it removed is absent from
+this change: deleting the empty-`--template=` dance left the entire suite green,
+the `-c core.attributesFile` pin having already covered it.
+
+Building the guard's pattern by escaping a constant into a `new RegExp` was
+itself a defect — an incomplete escape (`/` and `.` handled, `\` not), which
+CodeQL flags high as `js/incomplete-sanitization` and which had no reason to
+exist, since the thing being matched is a literal. It is a static regex for the
+line SHAPE plus a plain substring for the command.
+
+The last false PASS was one word wide. "Read from the index, because only that
+answers what a fresh clone gets" was written in the gate's own header and is
+false: the index also holds STAGED work, and staged work travels nowhere.
+Measured on git 2.50.1 against a repo whose committed `.gitattributes` reads
+`# the union line was deleted` with `docs/AS_BUILT.md merge=union` staged on top
+— `git clone` of it, then `check-attr` in the clone, answers `unspecified`,
+while the gate printed `✅ governed-repo attributes OK` and exited 0. Every read
+that decides the verdict now names the COMMITTED TREE: `git show HEAD:<path>`
+for the attributes, `git ls-tree -r HEAD` for which logs exist. Presence and rule
+must come from ONE source or they disagree in the other direction too — a
+staged-only `AS-BUILT.md` is listed by `ls-files` and absent from `ls-tree`, so
+reading the index for presence demands a floor for a file no clone has.
+
+The one case with no tree to read is an UNBORN HEAD, and it falls back to the
+index deliberately. `git rev-parse --verify --quiet HEAD` exits 1 in a freshly
+`init`ed repo and `ls-tree -r HEAD` there is `fatal: Not a valid object name
+HEAD`; refusing to answer would print "no append-only build log found" and exit 0
+over a repo whose first commit is about to ship a broken floor, which is a
+silent pass, and silent passes are the thing this gate keeps being fixed for.
+
+Three more mutations, each with its landing proved before the suite was run and
+the unmutated suite green as the control: reverting the attributes read to
+`git show :<path>` reds the staged-only reproduction and its mirror; reverting
+presence to `ls-files` reds the staged-only-log and unborn-HEAD cases; and
+returning `HEAD` for an unborn repo instead of the index reds all three unborn
+cases. The reproduction and its mirror are both there on purpose — a gate that
+also failed a developer mid-edit on a file every clone still resolves correctly
+would be strictness, not correctness, so the committed-floor-intact-with-a-
+staged-deletion case asserts exit 0, with a real `git clone` as its control.
+## 2026-08-16 — dead Trident launchers are detected externally in seconds
+
+Trident now polls the recorded launcher generation every 15 seconds in the supervised
+`trident-liveness` loop. `probeLauncherGenerationAlive` checks the live persistent
+pool child first and its durable PID registry fallback; the production wiring derives
+both supervision-path candidates and reports ambiguity or unreadable state as
+`unknown`. Only a positive `dead` answer reaches the existing durable
+`TridentRunStore.crashRunningByLauncher` latch, with an honest `inner workflow
+launcher crashed:` reason.
+
+The launcher is shared infrastructure, not the detached build. Pull and push detection
+therefore converge on the same harvest-first, bounded continuation path: an already-written
+result wins, otherwise the next sweep releases and relaunches the lane from its checkpoint.
+A registry UPSERT can supersede an older generation before
+the probe sees it; that ambiguity remains `unknown` and the existing reaper is retained.
+`trident/liveness-death-e2e.test.ts` proves a stale but positively alive run is untouched.
 
 ## 2026-08-16 — two builds can append to this file at once
 
@@ -223,6 +1176,374 @@ look like noise.** Adding four test files shifted every file's index, which move
 test between shards run to run; that is why the same failure looked like it "moved around" and why it
 was tempting to call it flaky. The discriminator was never the shard: it was whether the bundle got
 built inside a loaded chunk at all.
+## 2026-08-15 — the publisher auth probe asked an un-credentialed CLI whether it was credentialed
+
+A build was refused at creation with `could not prepare the build workspace for
+"<project>": GitHub origin detected but the outer publisher cannot authenticate;
+refusing to silently weaken the PR merge gate`. The refusal is correct and stays
+(`trident/git-mode.ts` `detectMergeMode`) — selecting local mode there would drop the PR
+and CI gates. It fired while a valid credential existed, and it did not say why.
+
+THE ROOT CAUSE, REPRODUCED ON THE HOST (gh 2.97.0) — and it is none of the mechanisms the
+first two drafts of this entry named. The probe ran `gh auth status` with NO flags. Per
+that command's own `--help`, it "tests the authentication state of each known account on
+each known GitHub host" and "if an account on any host … has authentication issues, the
+command will exit with 1". Run with a VALID publisher token injected, it printed
+
+    ✓ Logged in to github.com account <handle> (GH_TOKEN)
+    X Failed to log in to github.com account <handle> (default)
+      - The token in default is invalid.
+
+and exited 1. The probe was `return res.ok`, so a good credential plus one stale account
+the publisher never uses produced "the outer publisher cannot authenticate", and every
+board build was refused. The same token with `--hostname github.com --active` exits 0.
+The probe now asks that scoped question (`PUBLISHER_AUTH_COMMAND`, `trident/git-mode.ts`):
+`--hostname github.com` is the only host the publisher targets, and `--active` is the only
+account it would use — with `GH_TOKEN` set that IS the injected credential, and with an
+empty env it is the ambient login the publisher inherits, so the mirror property holds in
+both directions. A `gh` too old for the flags (`--active` is gh >= 2.41) answers
+`unknown flag` and is classified `publisher_cli_unavailable`, never as a bad token.
+
+WHAT WAS ALSO MEASURED, because the first draft of this entry overclaimed and the
+overclaim is the more useful record. It said "every board-dispatched build was refused
+because the probe was uncredentialed". That is false: at `bb90794b`, `open/composer.ts`
+already passed a credentialed `resolveMergeMode` into `trident_build_dispatch`, which is
+the seam `work_board_start` runs through (`gateway/composition/build-core-modules.ts:241`
+→ `trident/work-board-build-tool.ts`). The uncredentialed `defaultGitModeProbe()` default
+was taken by `onboarding/overnight/register.ts` and by `board-dispatch.ts`'s own `??`
+fallback, which production did not reach. Two distinct paths produce the identical
+refusal, and only naming both explains the symptom:
+
+  1. NO CREDENTIAL AT ALL. `defaultGitModeProbe` defaulted its runner to a plain
+     `spawnCapture` and asked `gh auth status` about the gateway's own environment. The
+     gateway holds no `GH_TOKEN` by design — it arrives PER SPAWN via
+     `setGithubSpawnEnvResolver` (`open/composer.ts:1002`) — so the answer was a truthful
+     "not authenticated" about a process that structurally cannot be.
+  2. A CREDENTIALED RUNNER THAT RESOLVED TO NOTHING. When the token lookup missed (the
+     row filed under a different handle), `githubProcessEnv(null)` returned `{}`,
+     `spawnCapture` omits `env` entirely for an empty extra-env, and the credentialed
+     runner degraded silently into exactly the same bare `gh auth status` — reported to
+     the owner as an authentication failure rather than as "not connected".
+
+`defaultGitModeProbe(credential, run?)` now REQUIRES a `PublisherCredentialSource`
+(`{owner_handle, source, load()}`, `trident/git-mode.ts:312`), so path 1 is
+unrepresentable rather than merely unused, and the probe always knows whose credential it
+asked for — which closes path 2, because "the lookup returned nothing" is now a distinct
+answer instead of an indistinguishable one. `open/composer.ts:2061` builds ONE probe,
+shared by `/code`, the HTTP route, the agent-native board seam
+(`open/composer.ts:6326`) and the overnight seam (`open/composer.ts:6130`).
+
+The board seam takes the PROBE, not a resolver function: `merge_mode_probe: GitModeProbe`
+replaced `resolveMergeMode: (path) => Promise<MergeMode>` on `TridentBuildToolDeps` and on
+the `trident_build_dispatch` composition input. An opaque function satisfies its type with
+or without a credential, so a wiring test could only assert `typeof … === 'function'` —
+which the buggy composition also passed. A probe carries its `credential` — the SOURCE
+OBJECT, not a copy of its labels — so which credential the seam closes over is assertable
+BY IDENTITY. That distinction is load-bearing: round 2 exposed a `publisher` snapshot of
+`{owner_handle, source}` and the wiring test compared those two strings, which a probe
+backed by the WRONG STORE with matching labels satisfies. A composition with nothing to
+give uses
+`unwiredPublisherCredential()` (`trident/git-mode.ts:140`), which takes no handle: its one
+caller had none and was passing the PROJECT SLUG, so the refusal named an identity that
+was never looked up.
+
+THE PROBE IS A MIRROR OF THE PUBLISHER, NOT A STRICTER GATE IN FRONT OF IT. It runs the
+same command in the same environment the publisher will use, including when that
+environment is empty. An earlier revision short-circuited an empty store straight to
+`no_credential_available` without asking anything, which would have started refusing every
+host where the owner had run `gh auth login` and never connected GitHub in-app — hosts
+that publish fine, because the publisher inherits that session. That traded the original
+false negative for a new one.
+
+The refusal names WHICH cause and under WHICH owner handle the lookup was made (five at
+first, seven after the correction round below adds `credential_verdict_unavailable` and
+`github_rate_limited`):
+`no_credential_available` (nothing stored AND no ambient session — "not an expired
+token"), `credential_rejected` (expired/revoked/scope), `could_not_reach_github`,
+`publisher_cli_unavailable` (spawn failure, exit -1), `probe_failed`. `gh auth status`
+makes a live API round-trip, so DNS failure, an offline host, a proxy and a GitHub 5xx all
+exit non-zero with a good token; so does our own 60s watchdog kill, which is why
+`spawnCapture` now records `timed_out` (`trident/git-mode.ts:473`) — the exit code alone
+cannot distinguish a kill from a verdict. Every one of those used to render as "your token
+was REJECTED — expired, revoked, or missing a scope", sending the owner to rotate a
+working credential during an outage.
+
+THE CLASSIFIER IS INVERTED FROM ITS FIRST SHAPE, WHICH WAS BACKWARDS IN THE EXPENSIVE
+DIRECTION. It whitelisted transport failures (`looksLikeGithubUnreachable`) and let
+everything ELSE fall through to `credential_rejected` — described in the code as
+"conservative", when the fallthrough destination was the single cause that costs the owner
+a token rotation. An x509/TLS error matches no transport pattern, so "certificate signed
+by unknown authority" arrived as "expired, revoked, or missing a scope": confident,
+specific, and about a token nothing had been learned about. `credential_rejected` now
+requires POSITIVE evidence that `gh` refused the credential, and an unclassifiable failure
+reports `probe_failed` naming the command and exit code. (The evidence list that first
+shipped here — `bad credentials`, `is invalid`, `failed to log in`, `HTTP 401/403`,
+missing scopes — was itself wrong in three places and is corrected in the round below.)
+Two related honesty fixes ride along: `gh` reporting NO authentication while the probe HAD
+resolved a token means the host runner dropped the environment (`EnvCapableHostRunner`'s
+third parameter is optional, so a two-parameter runner type-checks and silently discards
+it) — that is now reported as a wiring fault, not a rejection; and `probe_failed`'s text
+tells the owner not to rotate on that signal.
+
+THE CLASSIFIER WAS STILL WRONG ABOUT THREE OF THE FIVE CAUSES, AND A WRONG CAUSE IS WORSE
+THAN THE VAGUE MESSAGE IT REPLACED — it converts a correct refusal into confident
+misdirection. All four defects were in the new classify/message logic, all measured
+against real `gh version 2.97.0 (2026-07-31)` rather than reasoned about:
+
+1. **A TRANSPORT FAILURE WAS SOLD AS A BAD TOKEN.** Measured: `gh auth status --hostname
+   github.com --active` behind a dead proxy — GitHub never reached, token irrelevant —
+   prints stderr BYTE-IDENTICAL to a genuinely invalid token:
+
+       github.com
+         X Failed to log in to github.com using token (GH_TOKEN)
+         - Active account: true
+         - The token in GH_TOKEN is invalid.
+
+   `is invalid` matched the REJECTION list, and the `dial tcp`/`no such host` strings
+   `looksLikeGithubUnreachable` looks for are emitted only under `GH_DEBUG` — so ordering
+   the unreachable check first could not rescue it. There is NO signal here that separates
+   the two, so the honest answer is that there is no verdict: the ambiguous wordings now
+   route to a new `credential_verdict_unavailable` (`trident/git-mode.ts`
+   `looksLikeAmbiguousLoginFailure`) whose refusal says the output does not say WHICH, and
+   sends the owner to check network/DNS/proxy FIRST. What remains `credential_rejected` is
+   only wording a LIVE RESPONSE BODY must exist to produce (`bad credentials`, a scope
+   list, `requires authentication`, `resource not accessible by`) — a dead network cannot
+   fabricate those.
+2. **A RATE-LIMITED 403 WAS A REJECTION.** GitHub returns **403**, not 429, for both the
+   primary and secondary rate limit, and returns it to a request whose credential it
+   ACCEPTED and counted; `gh auth status` makes a live round-trip, so it hits this. The
+   blanket `/\bhttp 40[13]\b/` therefore told a rate-limited owner to rotate a working
+   token. New `looksLikeGithubRateLimited` is subtracted inside
+   `looksLikeCredentialRejected` AND branches first in the probe — two independent guards,
+   mutation-tested separately — and the new `github_rate_limited` refusal says the limit is
+   evidence the token is FINE and the action is to wait.
+3. **THE CAUSE WAS KEYED ON THE CONFIGURED SOURCE, NOT ON WHAT HAPPENED.** The rejection
+   branch computed `token.length === 0 ? 'no_credential_available' : 'credential_rejected'`,
+   which is self-contradicting: control only reaches it on positive evidence a credential
+   WAS presented and refused, so "no credential available" denies the observation that
+   selected the branch. Real case, not hypothetical — a stale ambient account whose
+   `hosts.yml` token is invalid lands exactly there with an empty store. An empty store
+   does not mean nothing was tried; it means `gh` fell back to the host's AMBIENT login, so
+   that fact moved into the detail (`describeWhichCredential`) where it tells the owner
+   which credential to go fix, and the message no longer claims the stored one.
+4. **MULTI-LINE `gh` STDERR WAS TRUNCATED TO ITS FIRST LINE.** `result.detail.split('\n')[0]`
+   — and gh's first line is the BARE HOSTNAME, so the refusal kept the one line that
+   diagnoses nothing, discarded all three that do, and ended `…missing a scope:
+   github.com`. `renderAuthFailureDetail` now flattens every non-empty line (`; `-joined),
+   bounded at `MAX_AUTH_FAILURE_DETAIL_CHARS`. **Why the suite could not see it: every
+   stubbed detail was single-line, so `[0]` WAS the whole string and the defect was
+   invisible by construction.** The fixtures are now real captured multi-line `gh` output,
+   which is the part that keeps the next regression visible.
+
+Each of the four has a test asserting BOTH the classification and the owner-facing
+message, and each was mutation-tested by re-introducing the exact defect: 3 red for (1),
+1 red for the classifier guard and 4 more for the probe-ordering guard in (2), 4 red for
+(3), 2 red for (4). Narrowing the rejection list also silently widened
+`looksLikeNoGithubAuth`, whose `gh auth login` hint was only trusted when nothing else in
+the output was a verdict — its exclusion now covers the ambiguous wordings too, with a
+control asserting an "invalid token … run: gh auth login" output does not read as "nothing
+stored". `git-mode.test.ts` + `git-mode-credential-seam.test.ts` go 53 → 71 tests.
+
+Guards. `trident/git-mode-credential-seam.test.ts` drives a REAL `SecretsStore` on a temp
+db through the composer's exact construction: a stored token makes the probe available on
+a host with no ambient login (control: the token reached the call), an EMPTY store on a
+host that IS logged in stays available (control: the store was empty and the host was
+consulted with an empty env), an empty store on a host with no session refuses by name,
+and a credential connected AFTER composition takes effect with no restart. `process.env`
+is never mutated — setting `GH_TOKEN` on the test process would exercise the ambient read
+being removed and would pass for the broken code too.
+
+The reported bug is guarded directly, reduced to its mechanism: a host stub carrying a
+stale second account answers the UNSCOPED question with failure and the SCOPED one with
+success, so a valid token resolves to `'pr'`, and the CONTROL runs the SAME host against
+the pre-fix unscoped question and gets the refusal the owner saw. The exact argv is
+asserted, so the flags cannot be dropped as incidental.
+
+THE BOOT-WIRING GUARD NOW EXERCISES THE PATH IT NAMES. Round 2 called
+`dispatchBoardBoundBuild` with a hardcoded `resolveMergeMode: async () => 'local'`, which
+bypassed the composed probe entirely, then asserted two strings. It now drives the exact
+expression `work_board_start` uses (`detectMergeMode(path, tbd.merge_mode_probe)`) — the
+temp workspace is not a git repo, so `hasGithubOrigin` fails first and no `gh` or network
+call is reachable — and proves the credential BY ROUND-TRIP: a token planted through
+`composition.cores.secretsStore` comes back out of the probe's own credential, which a
+probe wired to any other store cannot fake. Mutation-tested BOTH layers independently:
+pointing the composer's probe at a different source carrying IDENTICAL labels reddens the
+identity assertion, and with that assertion disabled the store round-trip reddens on its
+own (`Expected: "ghp_BOOT_WIRING_SENTINEL_0001" / Received: undefined`) — the case round
+2's string comparison accepted.
+
+`spawnCapture`'s watchdog is now testable rather than asserted-by-stub: the 60s budget
+moved into a `timeoutMs` parameter (`DEFAULT_HOST_COMMAND_TIMEOUT_MS`), and the suite
+kills a REAL child (`sleep 5` at 50 ms) to assert `timed_out`, with a control proving the
+same budget does not flag a fast command, plus an end-to-end case where a real timeout
+reaches the owner as `could_not_reach_github`. Previously every positive assertion
+injected the flag via a stubbed result, so deleting the watchdog left the suite green.
+
+Verification for this round: `bash scripts/ci/typecheck-all.sh` → 51/51 tsconfigs pass.
+Full suite via the CI sharding (`scripts/run-tests.sh`, 4 shards) → 15,892 tests across
+1,300 files. The 15 failures are IDENTICAL to untouched `main` at `f99d6d49`, differenced
+file-by-file rather than counted: `trident/merge-realgit.test.ts` (2) and
+`trident/worktree-cleanup-sh.test.ts` (12) reproduce failure-for-failure on a clean
+baseline worktree, as does the commit-trailer case — all real-`git` shell tests, none
+touching this change. Note the shard partition is NOT comparable across the two trees:
+this branch declares 1,300 test files to main's 1,299, which shifts the assignment, so
+the comparison was made per-file.
+
+ROUND 4 — the taxonomy was right and three of its verdicts were still wrong, because
+`gh auth status` cannot answer the question the classifier was asking it. Measured on
+this host against `gh version 2.97.0 (2026-07-31)`, each run with an isolated
+`GH_CONFIG_DIR` so the host's own login was neither read nor disturbed: an invalid token,
+a proxy that refuses the connection, a proxy host that does not resolve, and a blackholed
+proxy ALL print the identical four lines, ending `- The token in GH_TOKEN is invalid.`
+That is structural rather than incidental — `gh` renders a fixed failure entry and never
+prints the underlying API or transport error (`pkg/cmd/auth/status/status.go` L90-108 in
+v2.97.0), and `Missing required token scopes` is printed only by the SUCCESS entry (L86).
+
+Two consequences, opposite in direction and identical in root. A network outage matched
+`is invalid` and was sold to the owner as a bad token; and `credential_rejected` was
+UNREACHABLE from real output, so a genuinely expired token was reported as "we could not
+tell — check your network first". No regex over that output can fix either, because the
+distinguishing information is not in it. So the probe now asks a SECOND question on the
+ambiguous branch only — `PUBLISHER_REACHABILITY_COMMAND` (`gh api --hostname github.com
+/zen`) — which does not flatten: measured, it answers `gh: Bad credentials (HTTP 401)`
+for the refusal, `proxyconnect tcp … connection refused` for the dead proxy, `error
+connecting to <host>` / `check your internet connection` for the DNS failure, and
+`proxyconnect tcp … i/o timeout` for the blackhole. Same binary, same env, same proxy
+handling, deliberately: a `fetch`/`curl` reachability check would answer about a
+different network path and could convert a transport outage into "your token was
+rejected". `credential_verdict_unavailable` survives as the last resort when both
+measurements are mute, which is the honest answer rather than the default one
+(`trident/git-mode.ts` `classifyGithubReachability`).
+
+Also in this round: the blanket `/\bhttp 40[13]\b/` narrowed to `401`, because GitHub
+returns 403 TO A REQUEST WHOSE TOKEN IT ACCEPTED for both rate limits, SAML/SSO
+authorization and resource restrictions — the rate-limit subtraction only rescued the
+403s that said "rate limit", so a bare `HTTP 403: Forbidden` still read as "expired,
+revoked, or missing a scope". A 403 still reads as a refusal when the WORDING says so,
+which required naming GraphQL's `has not been granted the required scopes` explicitly,
+since the status-code test had been covering it by accident. `gh`'s third rendering
+state (`Timeout trying to log in`, L110-117) now classifies as `could_not_reach_github`
+instead of falling through to `probe_failed`.
+
+The fixtures were the reason none of this was caught: three of them were labelled
+"copied from gh version 2.97.0" and could not have been — the rejection CONTROL certifying
+that `credential_rejected` still worked mixed the failure entry's header with the success
+entry's scope lines, and both rate-limit blocks embedded an HTTP status into a block that
+structurally cannot carry one. Every fixture now states MEASURED (with the command that
+produced it) or CONSTRUCTED (with what it was built from and why it could not be
+measured). The rate-limit cases moved onto the reachability surface, where a 403 can
+actually arrive. `every refusal keeps the original guard sentence` now iterates all seven
+members of `PublisherAuthFailureCause` rather than sampling one, joined by two more
+enumerations: every cause names the handle/source/detail and renders a DISTINCT sentence,
+and only the two causes the owner can act on mention repairing the credential.
+
+Verification: `trident/git-mode.test.ts` 84 pass / 0 fail (254 assertions), up from 66;
+`trident/git-mode-credential-seam.test.ts` 5 pass / 0 fail, still asserting through the
+token-store seam that a stored token with no ambient login resolves to `'pr'`.
+`bash scripts/ci/typecheck-all.sh` → 51/51 tsconfigs pass; `bash scripts/ci/lint.sh` → all
+gates 0 findings. The leak gate's finding SET was differenced against untouched `main` at
+`f99d6d49` rather than counted: zero new findings (main reports more, not fewer). Eight
+mutation proofs, each reverted after: re-widening to `40[13]` reddens 2; deleting the
+reachability call reddens 15; guessing `refused` when it is mute reddens 4; letting a rate
+limit say REJECTED reddens 3; collapsing two causes onto one message reddens 2; dropping
+the TIMEOUT entry reddens 1; dropping the scope-list verdict reddens 5 — confirming the
+corrected CONTROL fixture still bites. Across the whole `trident/` directory 17 tests fail
+and 16 are identical on untouched `main`; the residue is flaky rather than differential,
+reproduced by running the same two files three times on unchanged code and getting three
+different failing subsets — all real-`git`/network shell tests, none touching this change.
+
+### Round 5 — the message and the classifier were reading different bytes
+
+Five review findings, and four of them are the same shape: a classifier that had been
+fixed, standing next to a MESSAGE or a TEST that had not. That shape is worse than an
+unfixed classifier, because a refusal whose wording contradicts its own verdict invites
+the owner to overrule a correct answer.
+
+1. **THE RATE-LIMIT REFUSAL CLAIMED THE CREDENTIAL WAS GOOD.** It read "GitHub returns a
+   rate limit WITH a working credential, so this is evidence the token is fine" — a
+   POSITIVE claim about a credential nothing had verified. GitHub 403-rate-limits
+   UNAUTHENTICATED requests too, against the source IP, and `gh` has documented modes
+   (cli/cli#13317) where a keychain error silently drops the credential and the request
+   goes out unauthenticated. The same 403 is therefore equally consistent with "fine" and
+   with "no credential was sent at all". The refusal now states the one-directional
+   reading — not evidence of rejection, not evidence of acceptance — and the docblock on
+   `looksLikeGithubRateLimited` and the entry in `PublisherAuthFailureCause` were corrected
+   with it. The AS-BUILT paragraph above that says "evidence the token is FINE" describes
+   round 4 and is superseded here.
+2. **THE EVIDENCE SENTENCE READ STDERR WHILE THE CLASSIFIER READ BOTH STREAMS.**
+   `classifyGithubReachability` reads `stderr + stdout`; the owner-facing sentence branched
+   on `reach.stderr` alone and fell back to "exited N without printing anything". MEASURED
+   on gh 2.97.0 in this round: `gh api /zen` on SUCCESS writes its body to STDOUT and 0
+   bytes to stderr, and on a bad token writes the 112-byte JSON error body to STDOUT with
+   only a 31-byte summary on stderr — so the fuller diagnostic was the one being discarded,
+   and a call that plainly answered was reported as mute. `describeReachabilityAnswer` now
+   derives the sentence from the same two streams, and says "printed nothing" only when
+   both are genuinely empty.
+3. **A SUCCESSFUL REACHABILITY CALL WAS CALLED INCONCLUSIVE.** A `gh api /zen` that exits 0
+   proves GitHub answered AND accepted this credential. Round 4 returned `'inconclusive'`
+   for it, so a probe whose second measurement had just succeeded told the owner to "Check
+   network/DNS/proxy FIRST". New `'reachable'` verdict → new cause
+   `github_reachable_but_login_failed`, which points at the host's local `gh` login state
+   and says not to rotate.
+4. **x509/TLS INTERCEPTION RENDERED AS "the probe itself failed".** The round-4 docblock
+   cited x509 as its motivating example and no pattern matched it. The Go TLS vocabulary
+   (`x509:`, untrusted root, self-signed, expired cert, `tls: handshake failure`) now
+   classifies as `could_not_reach_github` — a handshake that never completed carried no
+   credential to GitHub. Deliberately the TLS vocabulary and NOT the bare word
+   `certificate`, with a control asserting a 401 that happens to mention one is still a
+   rejection.
+5. **A SAML/SSO 403 HAD NO BRANCH AT ALL.** Named in a docblock, handled nowhere, so it
+   fell to the unclassified tail and reported "nothing was learned about the credential"
+   when the single most actionable thing had been learned: GitHub accepted WHO the token
+   is and refused WHAT it asked for. New cause `credential_needs_sso_authorization` tells
+   the owner to authorize the token he has, because rotating produces another unauthorized
+   one.
+
+Two more, both about guards that could not have failed:
+
+- **`ALL_CAUSES` was a `readonly Cause[]`, which any subset satisfies.** The two causes
+  added in this round would have compiled while going unasserted — the exact failure the
+  list exists to prevent. It is now derived from a `satisfies Record<PublisherAuthFailure
+  Cause, …>` map, so omitting a member is a compile error naming it. Mutation-proved with
+  `tsc`: deleting one key yields `TS1360: Property 'github_reachable_but_login_failed' is
+  missing`, control run passes.
+- **Every `gh api` fixture hardcoded `stdout: ''`.** The classifier reads both streams, so
+  no fixture could exercise half of its input and a regression dropping stdout moved no
+  test. Fixtures are now two-stream captures with the measured split, `ghHost` spreads the
+  capture instead of forcing an empty stdout, and a direct guard asserts a verdict that
+  lands ONLY on stdout is still read.
+- **The `never dropped` test name contradicted the length cap standing next to it.**
+  Renamed to what it actually guarantees — no line is ever SELECTED BETWEEN — with a
+  companion test pinning the cap as the only thing that removes characters, from the tail.
+- **The follow-up call doubled the worst case to 120s.** The docblock said "one extra `gh`
+  invocation", which is true as a COUNT and silent about the time; the blackholed-proxy
+  case hangs for the full budget and no caller imposes a deadline (`open/composer.ts`,
+  `trident/work-board-build-tool.ts`, `onboarding/overnight/register.ts` all just await
+  it). `EnvCapableHostRunner` gained an optional 4th `timeoutMs` — a three-parameter runner
+  still satisfies the type, so no existing double changed — and the reachability call now
+  asks for `PUBLISHER_REACHABILITY_TIMEOUT_MS` (15s). Worst case 60s + 15s, asserted at the
+  seam rather than in prose.
+
+**Mutation acceptance is now a checked-in test, not a claim in this file.**
+`trident/git-mode-mutation.test.ts` copies `git-mode.ts` and its suite into a gitignored
+dot-directory, re-introduces each defect as an exact substring edit, runs the real suite
+against the copy, and asserts it goes RED *and names the specific guard that caught it* —
+so a mutation that reddens something unrelated does not count. 11 mutations, all caught,
+plus a POSITIVE CONTROL that runs the unmutated copy first. The control earned its keep
+immediately: bun skips dot-directories in discovery, so the first draft's bare
+`.trident-mutants/…` filter matched no files and exited 1, which is indistinguishable from
+a red suite — every mutation would have been reported as caught while nothing ran.
+
+Verification (this round): `trident/git-mode.test.ts` 100 pass / 0 fail (355 assertions),
+up from 84; `trident/git-mode-mutation.test.ts` 12 pass / 0 fail; `trident/git-mode-
+credential-seam.test.ts` unchanged at 5 pass / 0 fail, still asserting through the
+token-store seam that a stored token with NO ambient login resolves to `'pr'`, with
+`process.env` never mutated. `bash scripts/ci/typecheck-all.sh` → 51/51 pass. A review of
+round 4 reported `app/tsconfig.json` failing `TS2688 Cannot find type definition file for
+node` and self-flagged it as possibly environmental; it is — the same script on UNTOUCHED
+`main` at `f99d6d49` passes 51/51 including `app/`, so the finding was an unpopulated
+`app/node_modules` in the review worktree and not a branch regression. Test failures were
+differenced against that same main baseline rather than counted.
 
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
@@ -1614,37 +2935,11 @@ one-character head-slice shift and under a one-character tail edit, both new tes
 RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
 gap this task existed to close.
 
-## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
-
-`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
-build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
->30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
-the host-held part files into a temp dir, the real workflow composes the forge:build
-prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
-by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
-then concatenated in the listed order and measured against the prompt's
-`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
-recomputes before it spends a token. Chained with the by-path suite in
-`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
-reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
-agent retyping anywhere in the path. Test-only; no production file changed.
-
-Two findings from building it. First, the chunk blocks may NOT have their paths
-rewritten wholesale: the coda forming the `.a2` segment names
-`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
-bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
-the assembled brief is asserted to mention neither segment path. Second, dropping the
-trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
-`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
-newline; the sensitivity check therefore uses mutations that move a real byte. Under a
-one-character head-slice shift and under a one-character tail edit, both new tests go
-RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
-gap this task existed to close.
 ## 2026-08-14 — credentials scoped to a previous owner handle migrate at boot, and a scope miss is no longer "not connected"
 
 Rows in `secrets` and `project_credentials` are keyed by the frozen owner handle; rows written before provisioning froze a different handle were invisible to the instance and reported as "not connected". Boot now runs `auth/credential-scope-reconcile.ts` (wired in `gateway/index.ts` inside a never-fail-boot guard): when every credential row sits under exactly one non-boot handle and ZERO rows exist under the boot handle, the scope columns are rewritten in one transaction — a pure metadata move, ciphertext bytes untouched — and a `credential_scope_migrated` audit row records handles, tables, and counts only. Any ambiguity (rows under more than one handle, or any row already under the boot handle) migrates NOTHING: a stale row must never overwrite a freshly connected credential. The sweep covers both `SHARED_KEY_ENCRYPTED_TABLES` members plus the `api_keys` metadata twin, and boot never refuses either way.
 
-The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately.
+The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately. **Superseded in one respect by the 2026-08-16 entry: this description omits the fallback exception, and did so because the exception did not exist yet — an explicit migration onto a FALLBACK boot handle is now refused outright, on every surface.**
 
 Tests in `auth/__tests__/credential-scope-reconcile.test.ts`, `gateway/__tests__/boot-credential-scope.test.ts`, `gateway/cores/__tests__/integrations-orphaned.test.ts`, and `gateway/cores/__tests__/integrations-migrate-orphaned.test.ts` pin the acceptance: the unambiguous move reads the token back with unchanged ciphertext bytes plus an audit row; the rotation-hazard case asserts on the decrypted value that the fresh credential survives; a real `boot()` never exits non-zero; a positive control succeeds under the correct handle so deleting the migration turns the suite red; and no secret material reaches logs, status output, or the audit payload. `reminders.project_slug` carries the same stale slug but is a read-filter, not a crypto scope, with no slug-bearing UNIQUE key and hence no rotation hazard; its drop-or-sweep is recorded as a follow-up decision, rows untouched.
 
@@ -6031,7 +7326,7 @@ silent, so the test asserts it.
 12 tests that PRESS the real controls; four mutants each caught, including "the Connect
 button is rendered but inert" — the failure a source check cannot see.
 
-Detail: § 2026-08-09 — Codex and Kimi are connectable from a phone.
+Detail: § 2026-08-09 — Codex and Kimi are connectable from a phone (detail).
 
 ## 2026-08-09 — the Kimi key comes from the store, and only the store
 
@@ -6203,7 +7498,7 @@ Guarded by a new test asserting every bundled ritual's declared built-ins are a 
 of the live surface — the join between two green suites whose union was broken, the same
 shape as the push-kind drift.
 
-Detail: § 2026-08-09 — The chat agent can search the web.
+Detail: § 2026-08-09 — The chat agent can search the web (detail).
 
 ## 2026-08-09 — Model usage on the phone
 
@@ -6220,7 +7515,7 @@ production code in `app/lib` never imports `landing`.
 Every refusal mutation-tested separately, including one attempt that was NOT faithful and
 proved nothing until rewritten.
 
-Detail: § 2026-08-09 — Model usage on the phone.
+Detail: § 2026-08-09 — Model usage on the phone (detail).
 
 ## 2026-08-09 — Naming the account behind a usage reading
 
@@ -6985,7 +8280,7 @@ a pre-set env value not being overwritten, i.e. the old behaviour restored (3 te
 
 Typecheck 51/51 · lint clean.
 
-## 2026-08-09 — The chat agent can search the web
+## 2026-08-09 — The chat agent can search the web (detail)
 
 Reported as *"Kaizen ritual said it can't do web search."* It couldn't — and
 neither could ordinary chat. `LIVE_AGENT_TOOL_NAMES` in
@@ -7038,7 +8333,7 @@ Adding to `LIVE_AGENT_TOOL_NAMES` is safe because it stays a CONSTANT surface, j
 a larger one; the reuse guard refuses a VARYING surface. The first turn after deploy
 respawns the warm child once, as any deploy does.
 
-## 2026-08-09 — Codex and Kimi are connectable from a phone
+## 2026-08-09 — Codex and Kimi are connectable from a phone (detail)
 
 ### The gap, stated accurately
 
@@ -7119,7 +8414,7 @@ test's, which is what two failures actually were.
 
 Typecheck 51/51 · lint clean · byte-scanned.
 
-## 2026-08-09 — Model usage on the phone
+## 2026-08-09 — Model usage on the phone (detail)
 
 The web card shipped a day earlier and the phone had nothing. ☰ → Settings →
 **Model usage**: the same two windows, the same pace, the same refusals.

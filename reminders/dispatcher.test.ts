@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import {
@@ -451,5 +451,124 @@ describe('deriveReminderProjectId', () => {
     expect(deriveReminderProjectId({ ...base, topic_id: 'app-project:~generalize' })).toBe(
       '~generalize',
     )
+  })
+})
+
+/**
+ * Degrade-route VISIBILITY (the 2026-08-14 undiagnosable night). Three fired
+ * reminders each degraded and the only journal line was the downstream
+ * `nudge_refused` guard — the per-route diagnostics default onto
+ * `dispatcherLog.debug`, which the production `info` level drops, so nobody
+ * could tell WHICH of the three degrade routes fired. Each route must now emit
+ * ONE structured `warn` (`event=nudge_degraded` + a discriminating `route=`)
+ * on the default console sink — the sink that demonstrably reaches the journal,
+ * because `nudge_refused` (also `warn`) was visible that night.
+ *
+ * The success-path control at the end is the mutation test: it proves the warn
+ * is emitted BY the degrade routes, not unconditionally by every dispatch.
+ */
+describe('buildReminderDispatcher — degrade routes are visible at warn', () => {
+  function captureWarns(): { lines: string[]; restore: () => void } {
+    const lines: string[] = []
+    const spy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(' '))
+    })
+    return { lines, restore: () => spy.mockRestore() }
+  }
+
+  test('no LLM wired → warn names route=no_llm', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const d = buildReminderDispatcher({ outbound, llm: null })
+      await d.dispatch(makeReminder({ message: 'call the dentist' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=no_llm')
+      expect(hit!).toContain('reminder=r1')
+      // Privacy: the structured line carries NONE of the stored intent.
+      expect(hit!).not.toContain('dentist')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('compose throws → warn names route=compose_failed and the cause', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const llm: ReminderLlm = { compose: async () => { throw new Error('substrate down') } }
+      const d = buildReminderDispatcher({ outbound, llm })
+      await d.dispatch(makeReminder({ message: 'pay the rent' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=compose_failed')
+      expect(hit!).toContain('substrate down')
+      expect(hit!).not.toContain('rent')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('compose returns empty → warn names route=compose_failed (empty body reason)', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const d = buildReminderDispatcher({ outbound, llm: recordingLlm('   ') })
+      await d.dispatch(makeReminder({ message: 'feed the cat' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=compose_failed')
+      expect(hit!).toContain('empty body')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('composed body over MAX_NUDGE_BODY_CHARS → warn names route=over_max_body_chars + size', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const long = 'x'.repeat(MAX_NUDGE_BODY_CHARS + 1)
+      const d = buildReminderDispatcher({ outbound, llm: recordingLlm(long) })
+      await d.dispatch(makeReminder({ message: 'water plants' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=over_max_body_chars')
+      expect(hit!).toContain(`composed_chars=${MAX_NUDGE_BODY_CHARS + 1}`)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('a compose_failed reason is BOUNDED on the structured line (stacks stay greppable, not dumped)', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const llm: ReminderLlm = {
+        compose: async () => { throw new Error('boom ' + 'y'.repeat(2000)) },
+      }
+      const d = buildReminderDispatcher({ outbound, llm })
+      await d.dispatch(makeReminder())
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      // 400-char bound on the reason field + fixed prefix/escaping slack.
+      expect(hit!.length).toBeLessThan(600)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('CONTROL — a successful compose emits NO nudge_degraded warn', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const d = buildReminderDispatcher({ outbound, llm: recordingLlm('all good, on it') })
+      await d.dispatch(makeReminder())
+      expect(outbound.posts[0]!.body).toBe('all good, on it')
+      expect(cap.lines.find((l) => l.includes('event=nudge_degraded'))).toBeUndefined()
+    } finally {
+      cap.restore()
+    }
   })
 })

@@ -138,11 +138,13 @@ export interface TridentCodeContext {
    */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
   /**
-   * Resolve the git-mode for this repo. Defaults to `detectMergeMode` over
-   * the production probe (GitHub origin + `gh` → `'pr'`, else `'local'`).
+   * Resolve the git-mode for this repo (GitHub origin + an authenticated
+   * publisher → `'pr'`, else `'local'`). REQUIRED — the composition root owns
+   * the GitHub credential, so it owns this resolver; a default here would be
+   * the uncredentialed `gh` probe that refused every build (`board-dispatch.ts`).
    * Tests inject a deterministic resolver.
    */
-  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
+  resolveMergeMode: (repo_path: string) => Promise<MergeMode>
   /**
    * Resolve whether this build is governed (Ralph one-task-per-context
    * loop). Defaults to `detectRalphMode` (see board-dispatch.ts) — a
@@ -214,7 +216,7 @@ async function executeDispatch(
     project_slug: ctx.project_slug,
     repo_path: ctx.repo_path,
     ...(ctx.resolveBuildRepo !== undefined ? { resolveBuildRepo: ctx.resolveBuildRepo } : {}),
-    ...(ctx.resolveMergeMode !== undefined ? { resolveMergeMode: ctx.resolveMergeMode } : {}),
+    resolveMergeMode: ctx.resolveMergeMode,
     ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
     ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
     ...(ctx.thread_id !== undefined ? { thread_id: ctx.thread_id } : {}),

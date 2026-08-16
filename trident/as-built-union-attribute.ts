@@ -1,5 +1,5 @@
 /**
- * @neutronai/trident — every governed repo gets `merge=union` on its build log.
+ * @neutronai/trident — does a governed repo's build log resolve to `merge=union`?
  *
  * A governed repo (one with a `SPEC.md` at its git root) keeps an append-only
  * as-built log, and every change adds an entry at the TOP of it. So two open
@@ -17,17 +17,21 @@
  * ⚠️ THE SCOPE LIMIT IS THE LOAD-BEARING PART. Union NEVER reports a conflict.
  * That is precisely right for a file whose changes only ever ADD, and precisely
  * wrong everywhere else: pointed at a file whose existing lines get rewritten,
- * it silently doubles the rewrite instead of flagging it. So this module marks
- * the append-only log and NOTHING else — never `SPEC.md`, never `ISSUES.md`,
- * both of which are edited in place and want a real conflict.
+ * it silently doubles the rewrite instead of flagging it. So the convention
+ * covers the append-only log and NOTHING else — never `SPEC.md`, never
+ * `ISSUES.md`, both of which are edited in place and want a real conflict.
  *
- * It also never overwrites an existing rule. If a repo already assigns some
- * other merge driver to its log, that is a decision someone made, and silently
- * replacing it would be the same class of mistake as the one above. But it does
- * DISTINGUISH them: another built-in driver is a preference, while a CUSTOM one
- * named in the tracked file is a defect the CI gate fails on — see
- * {@link BUILT_IN_MERGE_DRIVERS}.
+ * ⚠️ THE VERDICT COMES FROM GIT. `mergeRulesFor` below reads text, which
+ * answers "what does this file SAY" — a different question from "what will git
+ * DO", and the difference is not academic. It is used ONLY to compose
+ * suggestion text that can point at a line number. The pass/fail answer comes
+ * from {@link resolveTrackedMergeDrivers}, which runs `git check-attr`.
  */
+
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, posix } from 'node:path'
 
 /**
  * Filenames a governed repo's append-only build log is known to use. Both
@@ -46,175 +50,739 @@ export function unionAttributeLine(logPath: string): string {
   return `${logPath} merge=union`
 }
 
-/** The comment block written above the rules the first time the file is created. */
-const HEADER = [
-  '# The as-built log is append-only: every change adds an entry at the top, so',
-  '# two open PRs conflict by construction rather than by subject, and every',
-  '# resolution is the same mechanical "keep both". `union` is git\'s built-in',
-  '# driver for that shape — it takes both sides of a conflicting hunk.',
-  '#',
-  '# Scoped to the append-only log ON PURPOSE. Union never reports a conflict, so',
-  '# pointing it at a file whose existing lines get rewritten (SPEC.md, ISSUES.md)',
-  '# would silently double the rewrite instead of flagging it.',
-]
-
 /**
  * The merge drivers git implements itself. Anything else must be defined by a
- * `merge.<name>.driver` config entry, and git treats a TRACKED attribute naming
- * an undefined one as FATAL rather than falling back:
+ * `merge.<name>.driver` config entry.
  *
- *     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+ * WHAT GIT ACTUALLY DOES with a custom driver named in a TRACKED
+ * `.gitattributes`, measured on git 2.50.1 (Apple Git-155) — a fresh repo with
+ * `log.txt merge=as-built-log`, two branches editing the same region, merged:
  *
- * So a custom driver named in a COMMITTED `.gitattributes` breaks every fresh
- * clone, every outside contributor and CI, on any merge touching that path —
- * which is why `scripts/install-merge-drivers.sh` binds its driver in the
- * untracked `$GIT_COMMON_DIR/info/attributes` instead.
+ *   - NO `merge.as-built-log.*` config at all → git falls back to the ordinary
+ *     text merge: exit 1, `CONFLICT (content)`, conflict markers in the file.
+ *   - `merge.as-built-log.name` set but `.driver` unset → THAT is the fatal one:
+ *     `fatal: custom merge driver as-built-log lacks command line.` (exit 128).
+ *   - both `.name` and `.driver` set → exit 0, the driver's output.
+ *
+ * An earlier revision of this file (and of the CI gate's remediation text)
+ * claimed the exit-128 result for the first case too. It is wrong: a clone with
+ * no config for the driver merges, it just merges the DEFAULT way. That is
+ * still a reason a gate must not bless a custom driver in the tracked file —
+ * the tracked rule is supposed to be the union floor and this is not union — but
+ * it is a quieter failure than "nobody can merge at all", and the remediation
+ * text has to say the true thing or the next reader debugs the wrong symptom.
+ *
+ * Both halves matter to `scripts/install-merge-drivers.sh`, which sets `.name`
+ * AND `.driver` together and binds the path in the untracked
+ * `$GIT_COMMON_DIR/info/attributes`: half-installed (name without driver) is the
+ * exit-128 state, so the two config keys travel together or not at all.
  */
 export const BUILT_IN_MERGE_DRIVERS = ['text', 'binary', 'union'] as const
 
-/** Why a log path was left alone. */
-export type UnionAttributeSkipReason =
-  /** Already `merge=union` — nothing to do. */
-  | 'already-union'
-  /** Another BUILT-IN driver. Somebody's choice; safe, and not overwritten. */
-  | 'builtin-driver'
-  /**
-   * A CUSTOM driver, in the tracked file. Not overwritten either — but this one
-   * is a defect, not a preference, and the CI gate fails on it.
-   */
-  | 'custom-driver'
+/**
+ * Values `git check-attr merge` reports that are attribute STATES rather than
+ * driver names, so a diagnostic must not describe them as drivers or invent a
+ * `merge.<value>.driver` remediation for them.
+ *
+ * Measured on git 2.50.1, each with the same two-branch conflicting merge:
+ *
+ *   - `<path> merge`  → check-attr says `set`. Ordinary text merge: exit 1,
+ *     `CONFLICT (content)`, markers. Identical to having no rule at all.
+ *   - `<path> -merge` → check-attr says `unset`. git treats the file as BINARY:
+ *     `warning: Cannot merge binary files`, exit 1, ours kept whole, NO markers.
+ *
+ * Both fail the union property, and both used to be reported as
+ * "'set' is a CUSTOM driver … no merge.set.* config", naming a config key that
+ * does not exist.
+ *
+ * ⚠️ `unset` DOES NOT MEAN THE READER WROTE `-merge`. The built-in `binary`
+ * MACRO expands to `-diff -merge -text`, so it produces the same `unset` from a
+ * line that contains no `merge` token at all. Measured on git 2.50.1, with
+ * `.gitattributes` = `docs/AS_BUILT.md binary`:
+ *
+ *     $ git check-attr -a -- docs/AS_BUILT.md
+ *     docs/AS_BUILT.md: binary: set
+ *     docs/AS_BUILT.md: diff: unset
+ *     docs/AS_BUILT.md: merge: unset
+ *     docs/AS_BUILT.md: text: unset
+ *
+ * A diagnostic that says "your `-merge` rule" over that sends the reader
+ * grepping for a string that is not in the file. It has to name both spellings.
+ *
+ * (`<path> !merge` reports `unspecified`, which this module already maps to
+ * `null` — no rule reaches the path.)
+ */
+export const MERGE_ATTRIBUTE_STATES = ['set', 'unset'] as const
 
-/** What one repo needs, if anything. */
-export interface UnionAttributePlan {
-  /** `noop` when nothing needs writing. */
-  action: 'noop' | 'write'
-  /** Full new `.gitattributes` content. Empty string when `action` is `noop`. */
+/**
+ * The driver name `scripts/install-merge-drivers.sh` binds (its `DRIVER_NAME`).
+ *
+ * Named here so a diagnostic can tell the sanctioned opt-in upgrade apart from
+ * any other rule someone put in their untracked `info/attributes`. Crediting
+ * every overlay to the installer sends a reader to a script that never wrote
+ * the line they are looking at. A test pins this against the shell script.
+ */
+export const INSTALLER_MERGE_DRIVER = 'as-built-log'
+
+/** One `merge=` assignment found in an attributes file, with where it was found. */
+export interface MergeRule {
+  /** The attributes file it came from, repo-relative (e.g. `docs/.gitattributes`). */
+  file: string
+  /** 1-based line number in that file, for a diagnostic a human can act on. */
+  line: number
+  /** The line as written, trimmed. */
+  text: string
+  /** The driver named after `merge=`. */
+  driver: string
+}
+
+/** One tracked `.gitattributes`, and where in the tree it sits. */
+export interface AttributesFile {
+  /** Repo-relative POSIX path, e.g. `.gitattributes` or `docs/.gitattributes`. */
+  path: string
+  /** Its full contents. */
   content: string
-  /** Log paths this plan adds a rule for, in `asBuiltPaths` order. */
-  added: string[]
-  /** Log paths deliberately left alone, each with why. */
-  skipped: Array<{ path: string; reason: UnionAttributeSkipReason }>
 }
 
 /**
- * Does `attributes` already carry a merge rule for `logPath`?
+ * Every ACTIVE rule in `attributes` that assigns a merge driver to the EXACT
+ * pattern `pattern`, in file order.
  *
- * Returns the driver name, or `null` when no ACTIVE rule exists. A commented
- * line does not count — an entry that was deliberately disabled reads exactly
- * like an entry that is present, and treating the two the same is how a repo
- * ends up believing it has a guard it turned off.
+ * A commented line does not count — an entry that was deliberately disabled
+ * reads exactly like an entry that is present, and treating the two the same is
+ * how a repo ends up believing it has a guard it turned off.
+ *
+ * Plural on purpose: a file may carry several, and which one wins is git's
+ * business, not this function's.
  */
-export function existingMergeDriver(attributes: string, logPath: string): string | null {
-  for (const raw of attributes.split('\n')) {
-    const line = raw.trim()
+export function mergeRulesFor(attributes: string, pattern: string, file = '.gitattributes'): MergeRule[] {
+  const found: MergeRule[] = []
+  const lines = attributes.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const line = (lines[i] ?? '').trim()
     if (line.length === 0 || line.startsWith('#')) continue
     // A `.gitattributes` line is `<pattern> <attr>...`, whitespace-separated.
-    const [pattern, ...attrs] = line.split(/\s+/)
-    if (pattern !== logPath) continue
+    const [linePattern, ...attrs] = line.split(/\s+/)
+    if (linePattern !== pattern) continue
     for (const attr of attrs) {
-      if (attr.startsWith('merge=')) return attr.slice('merge='.length)
+      if (attr.startsWith('merge=')) {
+        found.push({ file, line: i + 1, text: line, driver: attr.slice('merge='.length) })
+        break
+      }
     }
   }
-  return null
+  return found
 }
 
 /**
- * Decide what a repo's `.gitattributes` should become. Pure: the caller does
- * the reading and the writing, so the decision is testable without a repo.
+ * Every exact-path merge rule for `logPath` across ALL the attributes files,
+ * in git's own precedence order — shallowest file first, last rule wins.
  *
- * @param attributes existing `.gitattributes`, or `null` when the file is absent
- * @param asBuiltPaths append-only logs actually PRESENT in the repo — a rule for
- *   a file that does not exist is noise, and it is how a stale convention
- *   outlives the layout it described
+ * A rule in `docs/.gitattributes` is written RELATIVE to that directory, so the
+ * pattern matched against is `logPath` with the file's directory stripped. A
+ * root file spells the same rule `docs/AS_BUILT.md`; the one inside `docs/`
+ * spells it `AS_BUILT.md`. Reading only the root spelling is how a subdirectory
+ * override became invisible.
  */
-export function planUnionAttribute(input: {
-  attributes: string | null
-  asBuiltPaths: readonly string[]
-}): UnionAttributePlan {
-  const existing = input.attributes ?? ''
-  const added: string[] = []
-  const skipped: UnionAttributePlan['skipped'] = []
-
-  for (const path of input.asBuiltPaths) {
-    const driver = existingMergeDriver(existing, path)
-    if (driver === null) added.push(path)
-    else if (driver === 'union') skipped.push({ path, reason: 'already-union' })
-    else if ((BUILT_IN_MERGE_DRIVERS as readonly string[]).includes(driver))
-      skipped.push({ path, reason: 'builtin-driver' })
-    else skipped.push({ path, reason: 'custom-driver' })
+export function mergeRulesAcross(files: readonly AttributesFile[], logPath: string): MergeRule[] {
+  const found: MergeRule[] = []
+  for (const file of orderedShallowestFirst(files)) {
+    const dir = posix.dirname(file.path)
+    const prefix = dir === '.' ? '' : `${dir}/`
+    if (!logPath.startsWith(prefix)) continue
+    found.push(...mergeRulesFor(file.content, logPath.slice(prefix.length), file.path))
   }
-
-  if (added.length === 0) return { action: 'noop', content: '', added, skipped }
-
-  const lines = added.map(unionAttributeLine)
-  if (input.attributes === null || existing.trim().length === 0) {
-    return { action: 'write', content: [...HEADER, ...lines, ''].join('\n'), added, skipped }
-  }
-
-  // Append. The existing content may or may not end in a newline, and getting
-  // that wrong welds the first new rule onto whatever the last line was —
-  // producing a pattern that matches nothing, silently.
-  const base = existing.endsWith('\n') ? existing : `${existing}\n`
-  return { action: 'write', content: `${base}\n${HEADER.join('\n')}\n${lines.join('\n')}\n`, added, skipped }
+  return found
 }
 
-/** Filesystem seam. Tests inject a stub; production passes real fs calls. */
-export interface UnionAttributeProbe {
-  /** File contents, or `null` when the file does not exist. */
-  read(path: string): Promise<string | null>
-  /** Whether `path` exists. */
-  exists(path: string): Promise<boolean>
-  /** Write `content` to `path`, creating it if needed. */
-  write(path: string, content: string): Promise<void>
+/** Shallowest directory first — the order git applies attributes files in. */
+function orderedShallowestFirst(files: readonly AttributesFile[]): AttributesFile[] {
+  const depth = (p: string) => p.split('/').length
+  return [...files].sort((a, b) => depth(a.path) - depth(b.path) || a.path.localeCompare(b.path))
 }
 
-/** What `ensureUnionAttribute` did, for logging by the caller. */
-export interface EnsureUnionAttributeResult {
-  /** True when `.gitattributes` was written. */
-  changed: boolean
-  added: string[]
-  skipped: UnionAttributePlan['skipped']
+// ---------------------------------------------------------------------------
+// Ask git. Everything above reads text; everything below asks the authority.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every attributes file that can possibly affect `paths`, repo-relative.
+ *
+ * git consults `.gitattributes` in the directory of the path being matched and
+ * in each of its ANCESTORS up to the top level, and nowhere else. So the set of
+ * files that can reach `docs/AS_BUILT.md` is exactly `.gitattributes` and
+ * `docs/.gitattributes` — bounded, and provably complete without walking the
+ * tree. (A repo-wide `git ls-files` over every `.gitattributes` would also work
+ * and would additionally collect files that cannot match anything being asked
+ * about; this is the same answer, smaller.)
+ */
+export function relevantAttributesPaths(paths: readonly string[]): string[] {
+  const out = new Set<string>()
+  for (const path of paths) {
+    const segments = path.split('/')
+    // Drop the filename; every remaining prefix is a directory that can hold one.
+    segments.pop()
+    out.add('.gitattributes')
+    let dir = ''
+    for (const segment of segments) {
+      dir = dir === '' ? segment : `${dir}/${segment}`
+      out.add(`${dir}/.gitattributes`)
+    }
+  }
+  return orderedShallowestFirst([...out].map((path) => ({ path, content: '' }))).map((f) => f.path)
 }
 
 /**
- * Idempotently ensure a governed repo's append-only logs are union-merged.
+ * The attributes files a FRESH CLONE of `repoRoot` would get, for the subset
+ * that can affect `paths`.
  *
- * Only ever ADDS a rule for a log that is actually present and has no merge
- * rule of its own, so a second call on the same repo writes nothing. Callers
- * treat a throw as non-fatal: a build must not fail because a convenience
- * convention could not be applied.
+ * In a git repository the content comes from the COMMITTED TREE
+ * ({@link clonedTreeish}), not from disk and not from the index, and that
+ * distinction is the point twice over:
+ *
+ *   - an UNTRACKED `docs/.gitattributes` sitting in someone's working tree
+ *     changes what THEIR git answers and reaches no clone at all;
+ *   - a STAGED-but-uncommitted `.gitattributes` reaches no clone either, and
+ *     reading it is a measured false PASS. On git 2.50.1, against a repo whose
+ *     committed `.gitattributes` says `# the union line was deleted` with the
+ *     union line staged on top: `git clone` of that repo answers
+ *     `docs/AS_BUILT.md: merge: unspecified`, while the gate reading the index
+ *     printed "✅ governed-repo attributes OK" and exited 0.
+ *
+ * A file absent from that tree is simply absent here.
+ *
+ * Outside a repository — a governed tree checked before it is one, and the
+ * fixtures the gate's own tests build — it falls back to reading the same paths
+ * from disk, because there is no committed tree to prefer and "what is on disk"
+ * is the only available reading of "what would travel".
+ *
+ * The tree is used ONLY when `repoRoot` is the repository's TOP LEVEL. A tree
+ * path is always spelled from the top level, so for a governed tree nested
+ * inside a larger repo `git show HEAD:docs/.gitattributes` would return some
+ * OTHER directory's file — a confident answer to a different question, which is
+ * the failure this whole module exists to stop. Nested trees read from disk.
+ *
+ * ⚠️ THESE READS CARRY THE SAME ISOLATION AS THE PROBE, and they must. The
+ * probe downstream was isolated while the reads that FEED it were not, so
+ * `GIT_DIR` (or `GIT_INDEX_FILE` + `GIT_OBJECT_DIRECTORY`) pointing at another
+ * repository handed a healthy repo's `.gitattributes` to a probe that then
+ * correctly answered `union` — about the wrong repository. Measured end to end
+ * on git 2.50.1: exit 0, "✅ governed-repo attributes OK", over a repo whose
+ * union line had been deleted. Isolating only the last step in a chain isolates
+ * nothing.
  */
-export async function ensureUnionAttribute(
+export function collectTrackedAttributesFiles(
   repoRoot: string,
-  probe: UnionAttributeProbe,
-  candidates: readonly string[] = AS_BUILT_CANDIDATES,
-): Promise<EnsureUnionAttributeResult> {
-  const present: string[] = []
-  for (const candidate of candidates) {
-    if (await probe.exists(`${repoRoot}/${candidate}`)) present.push(candidate)
+  paths: readonly string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): AttributesFile[] {
+  const candidates = relevantAttributesPaths(paths)
+  const env = checkAttrEnv(baseEnv)
+  const treeish = clonedTreeish(repoRoot, env)
+  const found: AttributesFile[] = []
+
+  for (const path of candidates) {
+    let content: string | null = null
+    if (treeish !== null) {
+      try {
+        content = execFileSync('git', ['-C', repoRoot, 'show', `${treeish}:${path}`], {
+          encoding: 'utf8',
+          env,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        })
+      } catch {
+        content = null // not committed — it reaches no clone
+      }
+    } else {
+      const onDisk = join(repoRoot, path)
+      content = existsSync(onDisk) ? readFileSync(onDisk, 'utf8') : null
+    }
+    if (content !== null) found.push({ path, content })
   }
-
-  const attributesPath = `${repoRoot}/.gitattributes`
-  const plan = planUnionAttribute({
-    attributes: await probe.read(attributesPath),
-    asBuiltPaths: present,
-  })
-
-  if (plan.action === 'noop') return { changed: false, added: [], skipped: plan.skipped }
-  await probe.write(attributesPath, plan.content)
-  return { changed: true, added: plan.added, skipped: plan.skipped }
+  return found
 }
 
-/** Production probe over the real filesystem. */
-export function defaultUnionAttributeProbe(): UnionAttributeProbe {
-  return {
-    read: async (path) => {
-      const file = Bun.file(path)
-      return (await file.exists()) ? await file.text() : null
-    },
-    exists: (path) => Bun.file(path).exists(),
-    write: async (path, content) => {
-      await Bun.write(path, content)
-    },
+/**
+ * Which of {@link AS_BUILT_CANDIDATES} this repo actually keeps — read the same
+ * way the attributes are.
+ *
+ * Presence used to be a plain disk check while the rule was read from the
+ * index, and the two disagreeing is a real failure: an UNTRACKED `AS-BUILT.md`
+ * left in a working tree made the gate demand a rule for a file that reaches no
+ * clone, failing a repo whose tracked floor was perfect. Loud rather than
+ * silent, but still wrong, and the fix is to ask one question of one source.
+ *
+ * That source is the COMMITTED TREE, for the same reason the attributes are:
+ * `git ls-files` also lists a log that is merely STAGED, which reaches no clone
+ * and has no floor to be missing. Measured on git 2.50.1, a repo with
+ * `AS_BUILT.md` added but not committed: `ls-files` lists it, `ls-tree -r HEAD`
+ * does not, and the clone has no such file.
+ *
+ * Outside a repository (a governed tree checked before it is one, and the
+ * gate's own fixtures) there is no tree, so disk is the only reading of "what
+ * would travel".
+ */
+export function presentAsBuiltLogs(
+  repoRoot: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return clonedTreeContains(repoRoot, AS_BUILT_CANDIDATES, baseEnv)
+}
+
+/**
+ * Which of `candidates` a FRESH CLONE of `repoRoot` would actually contain.
+ *
+ * The same reading `presentAsBuiltLogs` needs for the log, factored out because
+ * the gate needs it for `SPEC.md` too: a spec that is committed but not checked
+ * out (sparse checkout) is still a governed repo, and answering that from disk
+ * alone turns the entire gate off with an exit 0.
+ */
+export function clonedTreeContains(
+  repoRoot: string,
+  candidates: readonly string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const env = checkAttrEnv(baseEnv)
+  const treeish = clonedTreeish(repoRoot, env)
+  if (treeish !== null) {
+    try {
+      // `''` is git's spelling for the index, and `ls-tree` has no such form —
+      // an unborn HEAD is the one case that must ask `ls-files` instead.
+      const argv =
+        treeish === ''
+          ? ['-C', repoRoot, 'ls-files', '-z', '--', ...candidates]
+          : ['-C', repoRoot, 'ls-tree', '-r', '-z', '--name-only', treeish, '--', ...candidates]
+      const stdout = execFileSync('git', argv, {
+        encoding: 'utf8',
+        env,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      const tracked = new Set(stdout.split('\0').filter((p) => p.length > 0))
+      return candidates.filter((c) => tracked.has(c))
+    } catch (cause) {
+      // FAIL CLOSED. Returning `[]` here made the caller print "no append-only
+      // build log found — nothing to enforce" and exit 0, so any failure to read
+      // the tree of a governed repo read as a clean bill of health. Every other
+      // error path in this module fails closed; this one was the exception, and
+      // it was the exception on the branch where being wrong is silent.
+      throw new Error(
+        `could not read the committed tree of ${repoRoot} — refusing to report "nothing to enforce" over a repository that could not be read`,
+        { cause },
+      )
+    }
   }
+  return candidates.filter((c) => existsSync(join(repoRoot, c)))
+}
+
+/**
+ * The treeish whose content a FRESH CLONE of `repoRoot` would get, or `null`
+ * when `repoRoot` is not a repository top level and disk is the only reading.
+ *
+ * `HEAD` in every ordinary case — a clone gets the committed tree, and neither
+ * the working tree nor the index travels with it.
+ *
+ * The empty string — git's spelling for the INDEX in `git show :<path>` — ONLY
+ * when the repository has no commits at all. There is nothing to clone from an
+ * unborn HEAD, so the choice there is between the index and refusing to answer;
+ * the index is what the first commit will contain, and the alternative is a
+ * gate that silently reports "no build log found" and exits 0 over a repo it
+ * has simply declined to read. Measured on git 2.50.1: `git rev-parse --verify
+ * --quiet HEAD` exits 1 in a freshly `init`ed repo, and `ls-tree -r HEAD` there
+ * is `fatal: Not a valid object name HEAD`.
+ */
+function clonedTreeish(repoRoot: string, env: NodeJS.ProcessEnv): string | null {
+  if (!isRepositoryTopLevel(repoRoot, env)) return null
+  try {
+    execFileSync('git', ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'], {
+      env,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return 'HEAD'
+  } catch {
+    return ''
+  }
+}
+
+/** Is `dir` the TOP LEVEL of a git repository (not merely inside one)? */
+function isRepositoryTopLevel(dir: string, env: NodeJS.ProcessEnv): boolean {
+  try {
+    const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      env,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (top.length === 0) return false
+    // realpath both sides: macOS hands out /var/... paths that resolve to
+    // /private/var/..., so a raw string compare calls the top level "nested".
+    return realpathSync(top) === realpathSync(dir)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Values PINNED on every probe git process, so `git check-attr` answers from
+ * the repository in front of it.
+ *
+ * Measured on git 2.50.1: with a global `core.attributesFile` naming a driver
+ * for `docs/AS_BUILT.md`, a repo whose own `.gitattributes` says nothing about
+ * that path resolves to the GLOBAL file's driver. So without this pin, one
+ * maintainer's machine can answer "yes, union" for a repo that tracks no such
+ * rule — a false PASS that travels nowhere and reproduces on nobody else's
+ * machine. With the pin, the same probe reports `unspecified`.
+ *
+ * `GIT_NO_REPLACE_OBJECTS` is here for the same reason one level down: a local
+ * `refs/replace/<sha>` rewrites what OBJECT READS return, so `git show
+ * HEAD:.gitattributes` can hand back a blob the commit does not contain.
+ * Measured on git 2.50.1, in a repo whose committed `.gitattributes` is
+ * `# broken, no union rule`, with that blob replaced by a healthy one:
+ *
+ *     $ git show HEAD:.gitattributes
+ *     docs/AS_BUILT.md merge=union            ← the replacement
+ *     $ GIT_NO_REPLACE_OBJECTS=1 git show HEAD:.gitattributes
+ *     # broken, no union rule                 ← the commit's real content
+ *     $ git clone … && cat clone/.gitattributes
+ *     # broken, no union rule                 ← what every clone gets
+ *
+ * `git clone` does not carry `refs/replace/*` (and neither does
+ * `actions/checkout`), so the replacement is exactly a local reading that
+ * travels nowhere — the same class as a machine-global attributes file, and the
+ * same false PASS.
+ */
+export const CHECK_ATTR_ISOLATION_ENV = {
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_ATTR_NOSYSTEM: '1',
+  GIT_NO_REPLACE_OBJECTS: '1',
+} as const
+
+/**
+ * Command-line pin applied to every `git check-attr` this module runs.
+ *
+ * Pinning `GIT_CONFIG_GLOBAL=/dev/null` is NOT enough, because git's global
+ * attributes file has a DEFAULT that needs no config to exist:
+ * `$XDG_CONFIG_HOME/git/attributes`, falling back to `~/.config/git/attributes`.
+ * Measured on git 2.50.1 (Apple Git-155), against a governed repo whose tracked
+ * `.gitattributes` carries no rule for the log: with that XDG file saying
+ * `docs/AS_BUILT.md merge=union`, the gate exited 0 and printed
+ * "✅ governed-repo attributes OK" over a deleted floor.
+ *
+ * `-c` outranks every config FILE, including a repo-local one, and that second
+ * half does more work than it looks like. `GIT_TEMPLATE_DIR` (or
+ * `init.templateDir`) naming a template whose `config` sets
+ * `core.attributesFile` gives the probe's scratch repo that setting in its own
+ * config at `init` time, where no environment pin can reach it — measured, also
+ * end to end, as the same false PASS. An earlier draft of this fix answered
+ * that with an empty `--template=` plus stripping `GIT_TEMPLATE_DIR`; both were
+ * then removed, because mutating them away leaves every test green. This one
+ * line already covers it, and a second mechanism that no test can distinguish
+ * from its absence is not a defence, it is something to maintain.
+ */
+export const CHECK_ATTR_ARGV_PIN = ['-c', 'core.attributesFile=/dev/null'] as const
+
+/**
+ * Pinned on the THROWAWAY PROBE only, never on the reading of this clone.
+ *
+ * `git init` probes the filesystem and writes `core.ignorecase = true` into the
+ * new repo's own config on a case-insensitive one, which every macOS `$TMPDIR`
+ * is. Attribute patterns are then matched case-insensitively, so a rule whose
+ * path is spelled in the wrong case matches anyway — in the scratch repo, and
+ * nowhere a Linux CI runner or a case-sensitive clone would agree. Measured on
+ * git 2.50.1 (Apple Git-155), scratch repo under `$TMPDIR`, `.gitattributes` =
+ * `docs/as_built.md merge=union`:
+ *
+ *     $ git config --get core.ignorecase                       → true
+ *     $ git check-attr merge -- docs/AS_BUILT.md               → merge: union
+ *     $ git -c core.ignorecase=false check-attr …              → merge: unspecified
+ *
+ * So without this the gate passes a wrong-case rule on a maintainer's Mac and
+ * fails it in CI — the floor claim is about every clone, and the strictest
+ * clone is the one that has to hold. `-c` outranks the config `init` wrote.
+ *
+ * Deliberately NOT part of {@link CHECK_ATTR_ARGV_PIN}: that pin is also applied
+ * to {@link localEffectiveMergeDrivers}, which reports what THIS clone really
+ * does, and forcing case-sensitivity there would make it describe a repository
+ * the developer is not using.
+ */
+export const PROBE_CASE_SENSITIVITY_PIN = ['-c', 'core.ignorecase=false'] as const
+
+/**
+ * Variables REMOVED from every probe git process. Pinning the three above is
+ * not enough, and each of these was measured defeating them on git 2.50.1, from
+ * an attributes-free scratch repo whose control answer is `unspecified`:
+ *
+ *   - `GIT_CONFIG_PARAMETERS="'core.attributesFile=…'"` → `poisoned`. This is
+ *     exactly what `git -c` exports to every child process, hook and alias, so
+ *     it is present for free in a whole class of callers.
+ *   - `GIT_CONFIG_COUNT=1` + `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` →
+ *     `poisoned`. Same mechanism, the numbered spelling.
+ *   - `GIT_DIR` pointing at another repo → that repo's
+ *     `info/attributes` answered, `-C <scratch>` notwithstanding.
+ *   - `GIT_ATTR_SOURCE=HEAD` → attributes read from a TREE rather than the
+ *     working file that was just written, so the probe answers about the wrong
+ *     content entirely.
+ *
+ * The gate's CI step runs from a clean runner env where none of these are set,
+ * but this repo already runs `scripts/ci` gates from git hooks — where git has
+ * exported `GIT_DIR` and friends into the environment itself — and the failure
+ * mode is a silent PASS, so the isolation is made real rather than assumed.
+ *
+ * `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` are numbered and therefore
+ * unbounded; {@link checkAttrEnv} strips them by shape.
+ */
+export const CHECK_ATTR_STRIPPED_ENV = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_COUNT',
+  'GIT_ATTR_SOURCE',
+] as const
+
+/**
+ * `base` with everything that can redirect git's idea of "which repository" or
+ * "which config" removed, then the pins applied.
+ *
+ * Exported so the isolation itself is testable: a test hands in an env that
+ * WOULD poison the answer and asserts it does not, with an unpinned control
+ * proving the poison was real.
+ */
+export function checkAttrEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base }
+  for (const key of CHECK_ATTR_STRIPPED_ENV) delete env[key]
+  for (const key of Object.keys(env)) {
+    if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key)) delete env[key]
+  }
+  return { ...env, ...CHECK_ATTR_ISOLATION_ENV }
+}
+
+/**
+ * Parse `git check-attr -z merge -- <paths>` output.
+ *
+ * The `-z` stream is a flat run of NUL-terminated fields, three per path:
+ * `<path>\0merge\0<value>\0`. `unspecified` becomes `null` so callers do not
+ * have to know git's spelling for "no rule".
+ */
+export function parseCheckAttrZ(stdout: string): Map<string, string | null> {
+  const out = new Map<string, string | null>()
+  const fields = stdout.split('\0')
+  // The trailing NUL leaves an empty final element; triples are exact otherwise.
+  for (let i = 0; i + 2 < fields.length; i += 3) {
+    const path = fields[i]
+    const value = fields[i + 2]
+    if (path === undefined || value === undefined) continue
+    out.set(path, value === 'unspecified' ? null : value)
+  }
+  return out
+}
+
+/**
+ * What merge driver do the TRACKED attributes files assign to each path —
+ * according to git, and as a FRESH CLONE would see it?
+ *
+ * Asks git rather than re-deriving its precedence, because re-deriving it is
+ * what let a `.gitattributes` carrying `docs/AS_BUILT.md merge=union` followed
+ * by `docs/AS_BUILT.md merge=as-built-log` report a healthy union floor while
+ * git resolved `as-built-log`.
+ *
+ * The question is asked in a THROWAWAY repository seeded with the FULL
+ * directory layout of `attributesFiles`, and both halves of that are load-
+ * bearing:
+ *
+ *   - ALL the files, not just the root one. Measured on git 2.50.1: a root
+ *     `docs/AS_BUILT.md merge=union` plus a tracked `docs/.gitattributes`
+ *     saying `AS_BUILT.md merge=binary` resolves to `binary`, in the repo and
+ *     in a fresh clone of it. Seeding only the root file answers `union` — a
+ *     PASS over exactly the override this gate exists to catch.
+ *   - Thrown away, rather than asking the real clone. The local clone may carry
+ *     `$GIT_COMMON_DIR/info/attributes`, which is exactly where
+ *     `scripts/install-merge-drivers.sh` binds the entry-aware driver,
+ *     deliberately, because untracked outranks tracked. Asking the real clone
+ *     would report `as-built-log` on every machine that ran the installer and
+ *     answer a different question than the one being gated.
+ *
+ * The scratch repo's own `$GIT_DIR/info/attributes` is removed after `init` in
+ * case a machine's `init.templateDir` ships one, and {@link checkAttrEnv} keeps
+ * the caller's global/system config and repo redirection out of the answer.
+ *
+ * So this returns the floor every FRESH CLONE gets — measured, by cloning.
+ * Whether THIS clone additionally has an upgrade installed is a separate
+ * question with a separate function: {@link localEffectiveMergeDrivers}.
+ */
+export function resolveTrackedMergeDrivers(input: {
+  attributesFiles: readonly AttributesFile[]
+  paths: readonly string[]
+  /**
+   * Contents to place in the scratch repo's `$GIT_DIR/info/attributes`, which
+   * outranks every tracked file.
+   *
+   * Used to ATTRIBUTE a divergence rather than assume one: re-asking with this
+   * clone's real overlay layered on top answers "is the overlay what explains
+   * the difference", and it answers it the same way the verdict is decided —
+   * by git — so a wildcard rule in the overlay is credited correctly where a
+   * substring check would have called it unexplained.
+   */
+  overlay?: string | null
+  /**
+   * Environment the probe's git processes inherit. Defaults to this process's.
+   * Explicit so the isolation itself is testable. (Bun's `execFileSync` uses the
+   * env snapshot taken at process start when `env` is omitted, so mutating
+   * `process.env` inside a test reaches nothing — which is exactly how an
+   * isolation test can pass while isolating nothing.)
+   */
+  env?: NodeJS.ProcessEnv
+}): Map<string, string | null> {
+  if (input.paths.length === 0) return new Map()
+
+  const env = checkAttrEnv(input.env ?? process.env)
+  const scratch = mkdtempSync(join(tmpdir(), 'neutron-attrs-'))
+  try {
+    execFileSync('git', ['init', '-q', scratch], { env, stdio: 'pipe' })
+    const overlayPath = join(scratch, '.git', 'info', 'attributes')
+    rmSync(overlayPath, { force: true })
+    if (input.overlay != null) {
+      mkdirSync(dirname(overlayPath), { recursive: true })
+      writeFileSync(overlayPath, input.overlay)
+    }
+    for (const file of input.attributesFiles) {
+      const target = join(scratch, file.path)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, file.content)
+    }
+    // check-attr does NOT require the paths to exist on disk (measured), so the
+    // scratch tree stays empty apart from the attributes files themselves.
+    const stdout = execFileSync(
+      'git',
+      [
+        ...CHECK_ATTR_ARGV_PIN,
+        ...PROBE_CASE_SENSITIVITY_PIN,
+        '-C',
+        scratch,
+        'check-attr',
+        '-z',
+        'merge',
+        '--',
+        ...input.paths,
+      ],
+      { env, encoding: 'utf8' },
+    )
+    return parseCheckAttrZ(stdout)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+/**
+ * What merge driver does THIS clone actually use for each path — overlays and
+ * all?
+ *
+ * Informational only, and it must stay that way: a clone that ran
+ * `scripts/install-merge-drivers.sh` legitimately answers `as-built-log` here
+ * while its tracked floor is intact, so a gate keying on this would fail every
+ * machine that took the recommended upgrade.
+ *
+ * Returns `null` when `repoRoot` is not a git repository — a governed tree can
+ * be checked before it is a repo (the CI script accepts any directory), and
+ * "not a repo" is not a finding.
+ *
+ * "This clone" means THIS REPOSITORY — its tracked files plus its untracked
+ * `$GIT_COMMON_DIR/info/attributes` — and deliberately not the machine around
+ * it. The same isolation the verdict uses is applied here, for two reasons: an
+ * ambient `GIT_DIR` would make this sentence describe a different repository
+ * entirely, and the note this feeds exists to attribute a divergence to the
+ * repo's own overlay, which a machine-global attributes file would only ever
+ * confuse it about.
+ */
+export function localEffectiveMergeDrivers(
+  repoRoot: string,
+  paths: readonly string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Map<string, string | null> | null {
+  if (paths.length === 0) return new Map()
+  try {
+    const stdout = execFileSync(
+      'git',
+      [...CHECK_ATTR_ARGV_PIN, '-C', repoRoot, 'check-attr', '-z', 'merge', '--', ...paths],
+      { encoding: 'utf8', env: checkAttrEnv(baseEnv), stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+    return parseCheckAttrZ(stdout)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * What `merge.<driver>.*` config this clone actually has — BOTH keys, because
+ * which of them is missing changes what git does, and the three states have
+ * three different outcomes.
+ *
+ * MEASURED on git 2.50.1 (Apple Git-155), same repo, same two-branch
+ * conflicting merge on a path bound to `merge=as-built-log`:
+ *
+ *   - `.driver` set (with or without `.name`) → exit 0, the driver ran.
+ *   - `.name` set, `.driver` UNSET → `fatal: custom merge driver as-built-log
+ *     lacks command line.` (exit 128) — no merge at all.
+ *   - NEITHER set → an ordinary text merge: exit 1, `CONFLICT (content)`,
+ *     markers. Not fatal, just not union.
+ *
+ * A diagnostic must therefore ask for both. Reporting the exit-128 abort for the
+ * neither-set case is the same shape of false claim about git that this whole
+ * change exists to remove — and it is the one I nearly shipped here.
+ */
+export function mergeDriverConfig(
+  repoRoot: string,
+  driver: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): { driver: string | null; name: string | null } {
+  const env = checkAttrEnv(baseEnv)
+  const read = (key: string): string | null => {
+    try {
+      const out = execFileSync('git', ['-C', repoRoot, 'config', '--get', `merge.${driver}.${key}`], {
+        encoding: 'utf8',
+        env,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+      return out.length > 0 ? out : null
+    } catch {
+      // `config --get` exits 1 when the key is unset — that is the answer, not
+      // an error, and it is the half-installed case this exists to name.
+      return null
+    }
+  }
+  return { driver: read('driver'), name: read('name') }
+}
+
+/**
+ * The UNTRACKED `$GIT_COMMON_DIR/info/attributes` of this clone, or `null` when
+ * there is no repo or no such file.
+ *
+ * Read so that a divergence between this clone's answer and the tracked floor
+ * can be ATTRIBUTED rather than assumed. The note used to say "this clone
+ * additionally resolves, via an untracked overlay" for any divergence at all,
+ * which named a file that might not exist and described a broken floor as a
+ * harmless local upgrade.
+ */
+export function untrackedOverlayAttributes(
+  repoRoot: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): { path: string; content: string } | null {
+  let common: string
+  try {
+    common = execFileSync('git', ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      encoding: 'utf8',
+      env: checkAttrEnv(baseEnv),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return null
+  }
+  if (common.length === 0) return null
+  const path = join(common, 'info', 'attributes')
+  if (!existsSync(path)) return null
+  return { path, content: readFileSync(path, 'utf8') }
 }

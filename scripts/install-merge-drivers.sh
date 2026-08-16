@@ -16,16 +16,30 @@
 #   2. `docs/AS_BUILT.md merge=as-built-log` in `$GIT_COMMON_DIR/info/attributes` — the binding
 #      from the path to that command.
 #
-# Half (2) deliberately does NOT live in a tracked `.gitattributes`. git treats an attribute naming
-# a driver that is not configured as FATAL, not as a fallback:
+# Half (2) deliberately does NOT live in a tracked `.gitattributes`. MEASURED on git 2.50.1
+# (Apple Git-155), a fresh repo with `log.txt merge=as-built-log` and two branches editing the same
+# region:
 #
-#     fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+#   - no `merge.as-built-log.*` config at all → NOT fatal. git falls back to the ordinary text
+#     merge: exit 1, `CONFLICT (content)`, conflict markers.
+#   - `merge.as-built-log.name` set with no `.driver` → THAT is the fatal one:
+#         fatal: custom merge driver as-built-log lacks command line.   (exit 128)
+#   - both `.name` and `.driver` set → exit 0, the driver's output.
 #
-# — for `git merge` and for the `git apply --3way` the publisher uses. Committing the attribute
-# would therefore break every fresh clone, every outside contributor and CI on any merge touching
-# this file, until each of them ran this script. Keeping it untracked means the attribute and its
-# driver arrive together or not at all; a clone that never runs this behaves exactly as it does
-# today. Same rule `install-git-hooks.sh` applies to the leak gate and its denylist.
+# An earlier revision of this comment claimed exit 128 for the FIRST case as well. It does not
+# happen, and the true behaviour is the better argument anyway: `docs/AS_BUILT.md merge=union` IS
+# tracked, and it is the floor every clone gets. A committed `merge=as-built-log` line would
+# OVERRIDE that union floor with a driver nobody has configured, so every clone that had not run
+# this script would quietly go back to conflicting on the log — the exact regression
+# `scripts/ci/check-governed-repo-attributes.ts` now gates.
+#
+# The SECOND case is why the two config keys go in together or not at all: `.name` without
+# `.driver` IS the exit-128 state, for `git merge` and for the `git apply --3way` the publisher
+# uses. Note the asymmetry — `.driver` without `.name` merges perfectly well (measured, same rig) —
+# which is why the install below writes `.driver` FIRST and checks every step. Keeping the binding
+# untracked means the attribute and its driver arrive together; a clone that never runs this
+# behaves exactly as it does today. Same rule `install-git-hooks.sh` applies to the leak gate and
+# its denylist.
 
 set -uo pipefail
 
@@ -99,13 +113,52 @@ if [ -z "$BUN" ]; then
   exit 2
 fi
 
-git -C "$ROOT" config "merge.$DRIVER_NAME.name" "entry-aware merge for the AS_BUILT log"
-git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$BUN $DRIVER_SCRIPT %O %A %B %L %P"
+# EVERY STEP BELOW IS CHECKED, AND THE ORDER IS THE SAFE ONE.
+#
+# `set -uo pipefail` has no `-e`, so an unchecked failure here used to fall
+# through to `echo "merge drivers: installed"` and exit 0. The dangerous
+# intermediate state is the one the comment at the top of this file names as
+# fatal, and it was reachable in exactly one step: `.name` written, `.driver`
+# not. MEASURED on git 2.50.1 (Apple Git-155), same repo, same two-branch
+# conflicting merge on a path bound to `merge=as-built-log`:
+#
+#   .driver set, .name UNSET  → exit 0, the driver ran, both entries kept.
+#   .name set, .driver UNSET  → fatal: custom merge driver as-built-log lacks
+#                               command line.   (exit 128) — no merge at all.
+#
+# So `.driver` goes in FIRST. An interruption between the two now leaves a
+# WORKING clone rather than a wedged one, and any failure rolls the pair back
+# and exits non-zero instead of printing success over a half-install.
+rollback() {
+  git -C "$ROOT" config --unset "merge.$DRIVER_NAME.driver" 2>/dev/null
+  git -C "$ROOT" config --unset "merge.$DRIVER_NAME.name" 2>/dev/null
+  remove_attr_line
+}
 
-mkdir -p "$(dirname "$ATTRS")"
+fail() {
+  echo "install-merge-drivers: FAILED — $1" >&2
+  echo "                       rolled back; this clone merges $LOG_PATH the default way." >&2
+  rollback
+  exit 1
+}
+
+if ! git -C "$ROOT" config "merge.$DRIVER_NAME.driver" "$BUN $DRIVER_SCRIPT %O %A %B %L %P"; then
+  fail "could not set merge.$DRIVER_NAME.driver"
+fi
+if ! git -C "$ROOT" config "merge.$DRIVER_NAME.name" "entry-aware merge for the AS_BUILT log"; then
+  fail "could not set merge.$DRIVER_NAME.name"
+fi
+
+mkdir -p "$(dirname "$ATTRS")" || fail "could not create $(dirname "$ATTRS")"
 remove_attr_line
-printf '%s\n' "$ATTR_LINE" >> "$ATTRS"
+printf '%s\n' "$ATTR_LINE" >> "$ATTRS" || fail "could not append '$ATTR_LINE' to $ATTRS"
 
+# A first draft ALSO re-read both halves here before printing success — the same
+# pair `--check` reads. It is deleted rather than kept: mutating it away left the
+# whole suite green, because every reachable failure is already caught at the
+# write above, and a second mechanism no test can distinguish from its absence is
+# not a defence, it is something to maintain. (Same call, and the same reason, as
+# the empty-`--template=` dance dropped from the attributes probe.)
 echo "merge drivers: installed"
 echo "       driver → $BUN $DRIVER_SCRIPT %O %A %B %L %P"
 echo "       path   → $ATTR_LINE"

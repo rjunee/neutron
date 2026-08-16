@@ -34,10 +34,13 @@
  * index, so adding an entry whose heading is byte-identical to an existing one (same date AND same
  * title) SHIFTS the indices of the entries below it, and this then reads the addition as an edit
  * of the old entry plus a re-addition of it. Every entry still survives — nothing is dropped, which
- * is the property that actually matters — but their ORDER can come out odd. The real log contains
- * four verbatim-duplicated headings, all historical, so this needs a new entry to collide exactly
- * with an old one to trigger. Keying on a content hash instead would fix it and would break
- * something worse: an ordinary edit to an entry would read as a delete plus an add.
+ * is the property that actually matters — but their ORDER can come out odd. The real log carried
+ * four verbatim-duplicated headings when this driver was written; all four are resolved and
+ * `as-built-heading-uniqueness.ts` (next to this file) now fails a PR that reintroduces one, so
+ * the log holds zero and this limit is unreachable while that gate stands. It is kept because the
+ * gate runs on PRs and this driver runs on merges, so the driver must still behave sanely if one
+ * ever slips past. Keying on a content hash instead would fix it and would break something worse:
+ * an ordinary edit to an entry would read as a delete plus an add.
  */
 
 /** An entry begins at a `## ` heading. `#` (the file title) and `### ` (subsections) do not. */
@@ -54,9 +57,10 @@ const FENCE = /^\s*(```|~~~)/
 export interface LogEntry {
   /**
    * Identity of the entry. The heading line plus an OCCURRENCE INDEX, because the real log
-   * genuinely repeats four headings verbatim (e.g. `## 2026-08-09 — Model usage on the phone`).
-   * Keying on the bare heading would silently fold two distinct entries into one and DELETE
-   * history — the one outcome this file must never produce.
+   * repeated four headings verbatim when this was written (e.g. `## 2026-08-09 — Model usage on
+   * the phone`, whose two bodies were 784 and 2464 chars — different changes, same title). Those
+   * are resolved and gated now, but keying on the bare heading would still silently fold two
+   * distinct entries into one and DELETE history — the one outcome this file must never produce.
    */
   key: string
   /** `YYYY-MM-DD` from the heading, or `''` for the undated subsections. */

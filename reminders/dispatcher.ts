@@ -361,12 +361,41 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
     return result.body
   }
 
+  /**
+   * Say WHICH degrade route fired, on the sink that demonstrably reaches
+   * production logs. The three routes below all collapse into the same
+   * degraded post, and until this line existed the only visible trace of a
+   * failed composition was the downstream `nudge_refused` guard — which fires
+   * only when the degrade body is ALSO over the intent bound, and names the
+   * guard rather than the cause. The per-route `log(...)` lines already
+   * existed but default onto `dispatcherLog.debug` (see the `log` default
+   * above), and the production log level is `info` (`logger/index.ts`
+   * `DEFAULT_LEVEL`), so on a live box they are dropped and three routes are
+   * indistinguishable — a real fired-and-degraded night was undiagnosable from
+   * the journal. One structured `warn` per degrade, `route` discriminating,
+   * carrying NO bytes of the owner's stored intent (the `reason` is the
+   * substrate's error, bounded; the intent never enters it).
+   */
+  function warnDegraded(
+    reminder: Reminder,
+    route: 'no_llm' | 'compose_failed' | 'over_max_body_chars',
+    fields: { reason?: string; composed_chars?: number } = {},
+  ): void {
+    dispatcherLog.warn('nudge_degraded', {
+      reminder: reminder.id,
+      route,
+      ...(fields.reason !== undefined ? { reason: fields.reason.slice(0, 400) } : {}),
+      ...(fields.composed_chars !== undefined ? { composed_chars: fields.composed_chars } : {}),
+    })
+  }
+
   async function compose(
     reminder: Reminder,
     shape: ReminderShape,
     project_id: string,
   ): Promise<string> {
     if (llm === null) {
+      warnDegraded(reminder, 'no_llm')
       return fallbackBody(reminder, shape)
     }
     {
@@ -391,6 +420,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
         max_tokens,
       })
       if (!outcome.ok) {
+        warnDegraded(reminder, 'compose_failed', { reason: outcome.reason })
         log(`reminder ${reminder.id} composed nothing (${outcome.reason}) — using literal fallback`)
         return fallbackBody(reminder, shape)
       }
@@ -399,6 +429,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       // thrown compose: fall through to the bounded degrade. Never post it, and
       // never truncate-and-post (a truncated intent is still the intent).
       if (outcome.text.length > MAX_NUDGE_BODY_CHARS) {
+        warnDegraded(reminder, 'over_max_body_chars', { composed_chars: outcome.text.length })
         log(
           `reminder ${reminder.id} composed ${outcome.text.length} chars, over MAX_NUDGE_BODY_CHARS (${MAX_NUDGE_BODY_CHARS}) — refusing the composed body, using literal fallback`,
         )

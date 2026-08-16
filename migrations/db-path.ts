@@ -33,10 +33,19 @@ import { join } from 'node:path'
  * unit env, so the bare default only ever serves the OSS self-host case.)
  */
 export function resolveNeutronHome(env: NodeJS.ProcessEnv = process.env): string {
+  // WHITESPACE IS UNSET, exactly as the empty string already was. A `length > 0`
+  // guard answers `'   '` as a home, and the caller then resolves
+  // `'   /project.db'` and looks for `'   /.url_slug'` — a real box with a
+  // blank-but-present variable silently gets a different database and an
+  // anonymous identity. `effectiveOwnerHome` (`config/index.ts`) was fixed in
+  // the same change; the two are documented as agreeing about what empty means,
+  // and a review measured them disagreeing on this exact value.
+  // The RETURN stays verbatim (§ "wins verbatim" above) — blank means unset, a
+  // real path is passed through byte-for-byte.
   const explicit = env['NEUTRON_HOME']
-  if (typeof explicit === 'string' && explicit.length > 0) return explicit
+  if (typeof explicit === 'string' && explicit.trim().length > 0) return explicit
   const ownerHome = env['OWNER_HOME']
-  if (typeof ownerHome === 'string' && ownerHome.length > 0) return ownerHome
+  if (typeof ownerHome === 'string' && ownerHome.trim().length > 0) return ownerHome
   return join(homedir(), 'neutron')
 }
 

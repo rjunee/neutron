@@ -343,8 +343,18 @@ export interface ReconcileInstanceScopeOptions {
    * True when the boot slug is the bare `'dev'` FALLBACK — env/config absent,
    * not explicitly set. A fallback identity may never pull rows off an explicit
    * handle.
+   *
+   * REQUIRED, exactly like the explicit path's (`auth/credential-scope-reconcile.ts`
+   * `migrateOrphanedCredentialScope`, whose `provenance` argument carries the
+   * same rationale). It was optional, and the guard below fires only on an
+   * explicit `true` — so `reconcileInstanceScope(db, 'dev', { dbPath })` FAILED
+   * OPEN and moved the live owner's rows onto the anonymous handle. That is the
+   * precise defect this whole change exists to remove, and leaving one of the
+   * two paths able to omit the answer leaves the door it came through open.
+   * Optional provenance on a safety decision is not a default, it is a way to
+   * forget.
    */
-  currentSlugIsFallback?: boolean
+  currentSlugIsFallback: boolean
 }
 
 /** Snapshot filename infix, also the prune predicate. */
@@ -543,7 +553,7 @@ interface LedgerRow {
 export function reconcileInstanceScope(
   db: Database,
   current_slug: string,
-  options: ReconcileInstanceScopeOptions = {},
+  options: ReconcileInstanceScopeOptions,
 ): ScopeReconcileResult {
   return reconcileOnRawDatabase(db, current_slug, options)
 }
@@ -564,7 +574,7 @@ export function reconcileInstanceScope(
 export function reconcileInstanceScopeOnProjectDb(
   db: { raw(): Database },
   current_slug: string,
-  options: ReconcileInstanceScopeOptions = {},
+  options: ReconcileInstanceScopeOptions,
 ): ScopeReconcileResult {
   return reconcileOnRawDatabase(db.raw(), current_slug, options)
 }
