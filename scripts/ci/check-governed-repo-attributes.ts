@@ -56,8 +56,9 @@ const root = process.argv[2] ?? process.cwd()
 // It decides only WHETHER to run; a governed tree that has not committed its
 // spec yet is still one, and the cost of being wrong is running a check that
 // then finds nothing to enforce. What is GATED — the log and the rule reaching
-// it — is read from the index, because only that answers "what does a fresh
-// clone get".
+// it — is read from the COMMITTED TREE, because that is what a fresh clone
+// gets. The index is not: it also holds staged-but-uncommitted work, and
+// reading it printed ✅ over a floor that existed only in one working copy.
 const isGoverned = await Bun.file(`${root}/SPEC.md`).exists()
 if (!isGoverned) {
   console.log(`governed-repo attributes: ${root} has no root SPEC.md — not a governed repo, nothing to enforce`)
@@ -120,7 +121,8 @@ function localNote(): string[] {
   for (const p of unexplained) {
     out.push(`   (this clone resolves ${p} → ${local.get(p) ?? 'unspecified'}, which differs from the`)
     out.push('    tracked floor above and is NOT explained by an untracked overlay — the usual cause is')
-    out.push('    an UNCOMMITTED edit to a .gitattributes, which changes your merges and nobody else\'s.')
+    out.push('    an UNCOMMITTED edit to a .gitattributes (staged or not: neither travels), which')
+    out.push('    changes your merges and nobody else\'s.')
     out.push('    Informational, not gated.)')
   }
   return out

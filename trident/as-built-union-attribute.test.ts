@@ -61,7 +61,7 @@ function scratchRepo(): string {
   return dir
 }
 
-/** Write `files` into `dir` and commit them, so they are in the INDEX. */
+/** Write `files` into `dir` and commit them, so they are in the COMMITTED TREE. */
 function commitFiles(dir: string, files: Record<string, string>): void {
   for (const [path, content] of Object.entries(files)) {
     const target = join(dir, path)
@@ -538,10 +538,33 @@ describe('collectTrackedAttributesFiles isolation (real git, each with an unpinn
 })
 
 describe('presentAsBuiltLogs (real git)', () => {
-  it('reports the logs the INDEX carries', () => {
+  it('reports the logs the COMMITTED TREE carries', () => {
     const repo = scratchRepo()
     commitFiles(repo, { 'SPEC.md': '# spec\n', [LOG]: '# log\n' })
     expect(presentAsBuiltLogs(repo)).toEqual([LOG])
+  })
+
+  it('IGNORES a STAGED-but-uncommitted log, which reaches no clone either', () => {
+    const repo = scratchRepo()
+    commitFiles(repo, { 'SPEC.md': '# spec\n', [LOG]: '# log\n' })
+    writeFileSync(join(repo, 'AS-BUILT.md'), '# staged, never committed\n')
+    execFileSync('git', ['-C', repo, 'add', 'AS-BUILT.md'], { stdio: 'pipe' })
+
+    // Control: `ls-files` lists it, so a presence check reading the index
+    // demands a floor for a file the clone does not have.
+    expect(
+      execFileSync('git', ['-C', repo, 'ls-files', '--', 'AS-BUILT.md'], { encoding: 'utf8' }).trim(),
+    ).toBe('AS-BUILT.md')
+
+    expect(presentAsBuiltLogs(repo)).toEqual([LOG])
+  })
+
+  it('reads the INDEX when HEAD is UNBORN, so a first commit is still gated', () => {
+    const repo = scratchRepo()
+    writeFileSync(join(repo, 'AS-BUILT.md'), '# log\n')
+    execFileSync('git', ['-C', repo, 'add', '-A'], { stdio: 'pipe' })
+    expect(spawnSync('git', ['-C', repo, 'rev-parse', '--verify', '--quiet', 'HEAD']).status).not.toBe(0)
+    expect(presentAsBuiltLogs(repo)).toEqual(['AS-BUILT.md'])
   })
 
   it('IGNORES an untracked log, which reaches no clone', () => {
@@ -630,7 +653,7 @@ describe('checkAttrEnv', () => {
 })
 
 describe('collectTrackedAttributesFiles (real git)', () => {
-  it('collects the root and subdirectory files from the INDEX', () => {
+  it('collects the root and subdirectory files from the COMMITTED TREE', () => {
     const repo = scratchRepo()
     commitFiles(repo, {
       '.gitattributes': `${LOG} merge=union\n`,
@@ -646,7 +669,7 @@ describe('collectTrackedAttributesFiles (real git)', () => {
   it('IGNORES an untracked attributes file, which reaches no clone', () => {
     const repo = scratchRepo()
     commitFiles(repo, { '.gitattributes': `${LOG} merge=union\n`, [LOG]: '# log\n' })
-    // Present on disk, absent from the index.
+    // Present on disk, absent from the committed tree.
     writeFileSync(join(repo, 'docs', '.gitattributes'), 'AS_BUILT.md merge=binary\n')
 
     // Control: this clone's git DOES honour it, which is why "read from disk"
@@ -656,6 +679,36 @@ describe('collectTrackedAttributesFiles (real git)', () => {
     const files = collectTrackedAttributesFiles(repo, [LOG])
     expect(files.map((f) => f.path)).toEqual(['.gitattributes'])
     expect(resolveTrackedMergeDrivers({ attributesFiles: files, paths: [LOG] }).get(LOG)).toBe('union')
+  })
+
+  it('IGNORES a STAGED-but-uncommitted attributes file, which reaches no clone', () => {
+    const repo = scratchRepo()
+    commitFiles(repo, { '.gitattributes': '# the union line was deleted\n', [LOG]: '# log\n' })
+    writeFileSync(join(repo, '.gitattributes'), `${LOG} merge=union\n`)
+    execFileSync('git', ['-C', repo, 'add', '.gitattributes'], { stdio: 'pipe' })
+
+    // Control: the INDEX carries the union line, so a gate reading `:<path>`
+    // sees a floor that is in nobody else's clone.
+    expect(
+      execFileSync('git', ['-C', repo, 'show', ':.gitattributes'], { encoding: 'utf8' }),
+    ).toContain('merge=union')
+
+    expect(collectTrackedAttributesFiles(repo, [LOG])).toEqual([
+      { path: '.gitattributes', content: '# the union line was deleted\n' },
+    ])
+  })
+
+  it('reads the INDEX when HEAD is UNBORN, which is the only tree there could be', () => {
+    const repo = scratchRepo()
+    writeFileSync(join(repo, '.gitattributes'), `${LOG} merge=union\n`)
+    execFileSync('git', ['-C', repo, 'add', '-A'], { stdio: 'pipe' })
+
+    // Control: there is no HEAD to read.
+    expect(spawnSync('git', ['-C', repo, 'rev-parse', '--verify', '--quiet', 'HEAD']).status).not.toBe(0)
+
+    expect(collectTrackedAttributesFiles(repo, [LOG])).toEqual([
+      { path: '.gitattributes', content: `${LOG} merge=union\n` },
+    ])
   })
 
   it('falls back to disk outside a repository', () => {

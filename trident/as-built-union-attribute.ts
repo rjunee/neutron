@@ -222,20 +222,29 @@ export function relevantAttributesPaths(paths: readonly string[]): string[] {
  * The attributes files a FRESH CLONE of `repoRoot` would get, for the subset
  * that can affect `paths`.
  *
- * In a git repository the content comes from the INDEX (`git show :<path>`),
- * not from disk, and that distinction is the point: an UNTRACKED
- * `docs/.gitattributes` sitting in someone's working tree changes what THEIR
- * git answers and reaches no clone at all, so it must not change the verdict.
- * A file that is absent from the index is simply absent here.
+ * In a git repository the content comes from the COMMITTED TREE
+ * ({@link clonedTreeish}), not from disk and not from the index, and that
+ * distinction is the point twice over:
+ *
+ *   - an UNTRACKED `docs/.gitattributes` sitting in someone's working tree
+ *     changes what THEIR git answers and reaches no clone at all;
+ *   - a STAGED-but-uncommitted `.gitattributes` reaches no clone either, and
+ *     reading it is a measured false PASS. On git 2.50.1, against a repo whose
+ *     committed `.gitattributes` says `# the union line was deleted` with the
+ *     union line staged on top: `git clone` of that repo answers
+ *     `docs/AS_BUILT.md: merge: unspecified`, while the gate reading the index
+ *     printed "✅ governed-repo attributes OK" and exited 0.
+ *
+ * A file absent from that tree is simply absent here.
  *
  * Outside a repository — a governed tree checked before it is one, and the
  * fixtures the gate's own tests build — it falls back to reading the same paths
- * from disk, because there is no index to prefer and "what is on disk" is the
- * only available reading of "what would travel".
+ * from disk, because there is no committed tree to prefer and "what is on disk"
+ * is the only available reading of "what would travel".
  *
- * The index is used ONLY when `repoRoot` is the repository's TOP LEVEL. An
- * index path is always spelled from the top level, so for a governed tree
- * nested inside a larger repo `git show :docs/.gitattributes` would return some
+ * The tree is used ONLY when `repoRoot` is the repository's TOP LEVEL. A tree
+ * path is always spelled from the top level, so for a governed tree nested
+ * inside a larger repo `git show HEAD:docs/.gitattributes` would return some
  * OTHER directory's file — a confident answer to a different question, which is
  * the failure this whole module exists to stop. Nested trees read from disk.
  *
@@ -255,20 +264,20 @@ export function collectTrackedAttributesFiles(
 ): AttributesFile[] {
   const candidates = relevantAttributesPaths(paths)
   const env = checkAttrEnv(baseEnv)
-  const fromIndex = isRepositoryTopLevel(repoRoot, env)
+  const treeish = clonedTreeish(repoRoot, env)
   const found: AttributesFile[] = []
 
   for (const path of candidates) {
     let content: string | null = null
-    if (fromIndex) {
+    if (treeish !== null) {
       try {
-        content = execFileSync('git', ['-C', repoRoot, 'show', `:${path}`], {
+        content = execFileSync('git', ['-C', repoRoot, 'show', `${treeish}:${path}`], {
           encoding: 'utf8',
           env,
           stdio: ['ignore', 'pipe', 'ignore'],
         })
       } catch {
-        content = null // not tracked — it reaches no clone
+        content = null // not committed — it reaches no clone
       }
     } else {
       const onDisk = join(repoRoot, path)
@@ -289,8 +298,14 @@ export function collectTrackedAttributesFiles(
  * clone, failing a repo whose tracked floor was perfect. Loud rather than
  * silent, but still wrong, and the fix is to ask one question of one source.
  *
+ * That source is the COMMITTED TREE, for the same reason the attributes are:
+ * `git ls-files` also lists a log that is merely STAGED, which reaches no clone
+ * and has no floor to be missing. Measured on git 2.50.1, a repo with
+ * `AS_BUILT.md` added but not committed: `ls-files` lists it, `ls-tree -r HEAD`
+ * does not, and the clone has no such file.
+ *
  * Outside a repository (a governed tree checked before it is one, and the
- * gate's own fixtures) there is no index, so disk is the only reading of "what
+ * gate's own fixtures) there is no tree, so disk is the only reading of "what
  * would travel".
  */
 export function presentAsBuiltLogs(
@@ -298,9 +313,16 @@ export function presentAsBuiltLogs(
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const env = checkAttrEnv(baseEnv)
-  if (isRepositoryTopLevel(repoRoot, env)) {
+  const treeish = clonedTreeish(repoRoot, env)
+  if (treeish !== null) {
     try {
-      const stdout = execFileSync('git', ['-C', repoRoot, 'ls-files', '-z', '--', ...AS_BUILT_CANDIDATES], {
+      // `''` is git's spelling for the index, and `ls-tree` has no such form —
+      // an unborn HEAD is the one case that must ask `ls-files` instead.
+      const argv =
+        treeish === ''
+          ? ['-C', repoRoot, 'ls-files', '-z', '--', ...AS_BUILT_CANDIDATES]
+          : ['-C', repoRoot, 'ls-tree', '-r', '-z', '--name-only', treeish, '--', ...AS_BUILT_CANDIDATES]
+      const stdout = execFileSync('git', argv, {
         encoding: 'utf8',
         env,
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -312,6 +334,35 @@ export function presentAsBuiltLogs(
     }
   }
   return AS_BUILT_CANDIDATES.filter((c) => existsSync(join(repoRoot, c)))
+}
+
+/**
+ * The treeish whose content a FRESH CLONE of `repoRoot` would get, or `null`
+ * when `repoRoot` is not a repository top level and disk is the only reading.
+ *
+ * `HEAD` in every ordinary case — a clone gets the committed tree, and neither
+ * the working tree nor the index travels with it.
+ *
+ * The empty string — git's spelling for the INDEX in `git show :<path>` — ONLY
+ * when the repository has no commits at all. There is nothing to clone from an
+ * unborn HEAD, so the choice there is between the index and refusing to answer;
+ * the index is what the first commit will contain, and the alternative is a
+ * gate that silently reports "no build log found" and exits 0 over a repo it
+ * has simply declined to read. Measured on git 2.50.1: `git rev-parse --verify
+ * --quiet HEAD` exits 1 in a freshly `init`ed repo, and `ls-tree -r HEAD` there
+ * is `fatal: Not a valid object name HEAD`.
+ */
+function clonedTreeish(repoRoot: string, env: NodeJS.ProcessEnv): string | null {
+  if (!isRepositoryTopLevel(repoRoot, env)) return null
+  try {
+    execFileSync('git', ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', 'HEAD'], {
+      env,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return 'HEAD'
+  } catch {
+    return ''
+  }
 }
 
 /** Is `dir` the TOP LEVEL of a git repository (not merely inside one)? */

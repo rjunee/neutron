@@ -63,10 +63,10 @@ function fixture(opts: {
  * Make `dir` a real repo, COMMIT everything in it, and add the untracked
  * overlay the installer writes.
  *
- * Committing matters: the gate reads attributes from the INDEX in a repo,
- * because an untracked `.gitattributes` reaches no clone and must not count as
- * a floor. A fixture that only wrote the file to disk would be asserting the
- * opposite of the property.
+ * Committing matters: the gate reads attributes from the COMMITTED TREE in a
+ * repo, because neither an untracked nor a merely staged `.gitattributes`
+ * reaches a clone, and neither may count as a floor. A fixture that only wrote
+ * the file to disk would be asserting the opposite of the property.
  */
 function initRepoWithOverlay(dir: string, overlay: string): void {
   execFileSync('git', ['init', '-q', dir], { stdio: 'pipe' })
@@ -153,8 +153,8 @@ describe('check-governed-repo-attributes (subprocess)', () => {
   })
 
   test('an UNTRACKED subdirectory override does NOT fail the gate — it reaches no clone', () => {
-    // The mirror of the case above, and the reason the gate reads the index
-    // rather than the working tree. This clone's own git answers `binary`; a
+    // The mirror of the case above, and the reason the gate reads a committed
+    // tree rather than the working tree. This clone's own git answers `binary`; a
     // fresh clone answers `union`, and the floor is what travels.
     const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
     initRepoWithOverlay(dir, '')
@@ -168,6 +168,108 @@ describe('check-governed-repo-attributes (subprocess)', () => {
 
     const { status } = runGate(dir)
     expect(status).toBe(0)
+  })
+
+  describe('the floor is what is COMMITTED — the index does not travel', () => {
+    /**
+     * Clone `dir` for real and ask the clone. The only unarguable reading of
+     * "what a fresh clone gets" is a fresh clone, so every case below carries
+     * one as its control rather than asserting what git would do.
+     */
+    function cloneResolves(dir: string): string {
+      const target = mkdtempSync(join(tmpdir(), 'governed-attrs-clone-'))
+      created.push(target)
+      rmSync(target, { recursive: true, force: true })
+      execFileSync('git', ['clone', '-q', dir, target], { stdio: 'pipe' })
+      return execFileSync('git', ['-C', target, 'check-attr', 'merge', '--', 'docs/AS_BUILT.md'], {
+        encoding: 'utf8',
+      }).trim()
+    }
+
+    test('FAILS when the union line is only STAGED, never committed', () => {
+      // The reproduction. `git show :<path>` reads the INDEX, which holds staged
+      // work that reaches nobody — so the gate printed ✅ over a floor that
+      // existed in exactly one working copy.
+      const dir = fixture({ attributes: '# the union line was deleted\n' })
+      initRepo(dir)
+      writeFileSync(join(dir, '.gitattributes'), 'docs/AS_BUILT.md merge=union\n')
+      execFileSync('git', ['-C', dir, 'add', '.gitattributes'], { stdio: 'pipe' })
+
+      // Control: the index really does carry the union line...
+      expect(
+        execFileSync('git', ['-C', dir, 'show', ':.gitattributes'], { encoding: 'utf8' }),
+      ).toContain('merge=union')
+      // ...and a real clone really does not get it.
+      expect(cloneResolves(dir)).toBe('docs/AS_BUILT.md: merge: unspecified')
+
+      const { status, out } = runGate(dir)
+      expect(status).toBe(1)
+      expect(out).toContain('unspecified')
+    })
+
+    test('PASSES when the committed floor is intact and a STAGED edit removes it', () => {
+      // The other direction, and the reason this is not just "be stricter":
+      // a gate that failed here would red every developer who is mid-edit on a
+      // file every clone still resolves correctly.
+      const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+      initRepo(dir)
+      writeFileSync(join(dir, '.gitattributes'), '# staged deletion of the union line\n')
+      execFileSync('git', ['-C', dir, 'add', '.gitattributes'], { stdio: 'pipe' })
+
+      // Control: the index has lost the line, the clone has not.
+      expect(
+        execFileSync('git', ['-C', dir, 'show', ':.gitattributes'], { encoding: 'utf8' }),
+      ).not.toContain('merge=union')
+      expect(cloneResolves(dir)).toBe('docs/AS_BUILT.md: merge: union')
+
+      const { status, out } = runGate(dir)
+      expect(status).toBe(0)
+      expect(out).toContain('✅')
+    })
+
+    test('a STAGED-only log is not a log to protect — it reaches no clone', () => {
+      // Presence is read from the same source as the rule, or the two disagree
+      // again in the other direction: the gate demands a floor for a file that
+      // is not in any clone.
+      const dir = fixture({ attributes: 'docs/AS_BUILT.md merge=union\n' })
+      initRepo(dir)
+      writeFileSync(join(dir, 'AS-BUILT.md'), '# staged, never committed\n')
+      execFileSync('git', ['-C', dir, 'add', 'AS-BUILT.md'], { stdio: 'pipe' })
+
+      // Control: the index lists it; the committed tree does not.
+      expect(
+        execFileSync('git', ['-C', dir, 'ls-files', '--', 'AS-BUILT.md'], { encoding: 'utf8' }).trim(),
+      ).toBe('AS-BUILT.md')
+      expect(
+        execFileSync('git', ['-C', dir, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'AS-BUILT.md'], {
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe('')
+
+      const { status, out } = runGate(dir)
+      expect(status).toBe(0)
+      expect(out).not.toContain('AS-BUILT.md → merge=')
+    })
+
+    test('an UNBORN HEAD falls back to the index rather than reporting nothing to enforce', () => {
+      // A repo with no commits has no tree to read, and refusing to answer would
+      // exit 0 with "no append-only build log found" over a repo whose first
+      // commit is about to ship a broken floor. Measured on git 2.50.1:
+      // `rev-parse --verify --quiet HEAD` exits 1 here, and `ls-tree -r HEAD` is
+      // `fatal: Not a valid object name HEAD`.
+      const dir = fixture({ attributes: '# the union line was deleted\n' })
+      execFileSync('git', ['init', '-q', dir], { stdio: 'pipe' })
+      execFileSync('git', ['-C', dir, 'add', '-A'], { stdio: 'pipe' })
+
+      // Control: HEAD really is unborn.
+      expect(
+        spawnSync('git', ['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD']).status,
+      ).not.toBe(0)
+
+      const { status, out } = runGate(dir)
+      expect(status).toBe(1)
+      expect(out).toContain('unspecified')
+    })
   })
 
   test('FAILS when no rule reaches the log at all', () => {

@@ -104,14 +104,14 @@ saying `AS_BUILT.md merge=binary` resolves to `binary` — in the repo AND in a
 fresh clone of it, verified by cloning — while a root-only probe answers `union`
 and the gate prints ✅. The probe now collects `.gitattributes` for the path's
 directory and each ancestor (a bounded, provably complete set), reads them from
-the INDEX rather than the working tree so an uncommitted or untracked file cannot
-manufacture a floor that reaches no clone, and reproduces the directory layout in
-the scratch repo so git applies its own precedence.
+the COMMITTED TREE rather than the working tree so an uncommitted or untracked
+file cannot manufacture a floor that reaches no clone, and reproduces the
+directory layout in the scratch repo so git applies its own precedence.
 
-Reading the index is right only at the repository TOP LEVEL, and getting that
-wrong reintroduces the same bug the fix was for. An index path is always spelled
+Reading a tree is right only at the repository TOP LEVEL, and getting that
+wrong reintroduces the same bug the fix was for. A tree path is always spelled
 from the top level, so for a governed tree nested inside a larger repo
-`git show :docs/.gitattributes` returns the OUTER repo's file — a confident
+`git show HEAD:docs/.gitattributes` returns the OUTER repo's file — a confident
 answer to a different question. The check compares `rev-parse --show-toplevel`
 against the directory being asked about, through `realpathSync` on both sides,
 because macOS hands out `/var/...` paths that resolve to `/private/var/...` and a
@@ -285,6 +285,36 @@ itself a defect — an incomplete escape (`/` and `.` handled, `\` not), which
 CodeQL flags high as `js/incomplete-sanitization` and which had no reason to
 exist, since the thing being matched is a literal. It is a static regex for the
 line SHAPE plus a plain substring for the command.
+
+The last false PASS was one word wide. "Read from the index, because only that
+answers what a fresh clone gets" was written in the gate's own header and is
+false: the index also holds STAGED work, and staged work travels nowhere.
+Measured on git 2.50.1 against a repo whose committed `.gitattributes` reads
+`# the union line was deleted` with `docs/AS_BUILT.md merge=union` staged on top
+— `git clone` of it, then `check-attr` in the clone, answers `unspecified`,
+while the gate printed `✅ governed-repo attributes OK` and exited 0. Every read
+that decides the verdict now names the COMMITTED TREE: `git show HEAD:<path>`
+for the attributes, `git ls-tree -r HEAD` for which logs exist. Presence and rule
+must come from ONE source or they disagree in the other direction too — a
+staged-only `AS-BUILT.md` is listed by `ls-files` and absent from `ls-tree`, so
+reading the index for presence demands a floor for a file no clone has.
+
+The one case with no tree to read is an UNBORN HEAD, and it falls back to the
+index deliberately. `git rev-parse --verify --quiet HEAD` exits 1 in a freshly
+`init`ed repo and `ls-tree -r HEAD` there is `fatal: Not a valid object name
+HEAD`; refusing to answer would print "no append-only build log found" and exit 0
+over a repo whose first commit is about to ship a broken floor, which is a
+silent pass, and silent passes are the thing this gate keeps being fixed for.
+
+Three more mutations, each with its landing proved before the suite was run and
+the unmutated suite green as the control: reverting the attributes read to
+`git show :<path>` reds the staged-only reproduction and its mirror; reverting
+presence to `ls-files` reds the staged-only-log and unborn-HEAD cases; and
+returning `HEAD` for an unborn repo instead of the index reds all three unborn
+cases. The reproduction and its mirror are both there on purpose — a gate that
+also failed a developer mid-edit on a file every clone still resolves correctly
+would be strictness, not correctness, so the committed-floor-intact-with-a-
+staged-deletion case asserts exit 0, with a real `git clone` as its control.
 
 ## 2026-08-16 — two builds can append to this file at once
 
