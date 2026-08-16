@@ -516,15 +516,37 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  *
  * WHAT THE COMMAND DOES NOT COVER, STATED RATHER THAN IMPLIED. It is
  * `--include='*.ts'`, so the claim it bounds is a claim about TYPESCRIPT. The
- * repo has readers of these same three variables in other languages, and they do
- * NOT follow this rule: `install.sh` honours a whitespace-only `NEUTRON_DB_PATH`
- * via `!= ""`, and `neutron-service.sh` / `neutron-backup.sh` resolve the data
- * dir with `[ -n "$DATA_DIR" ]`, which is true for three spaces. So an installer
- * and the server it installs can still disagree about which database exists —
- * the same split, one language over. That is deliberately NOT fixed here: the
- * shell entrypoints are the install / uninstall / backup paths, they are a
- * different blast radius from a resolver, and folding them into a TypeScript
- * change would make this diff unreviewable.
+ * shell entrypoints read these same variables and the grep cannot see them.
+ *
+ * THAT GAP WAS NOT MERELY UNCOVERED — TRIMMING ONE LANGUAGE ALONE BROKE THE
+ * INVARIANT THE OTHER EXISTS TO HOLD, AND THIS DOCBLOCK DESCRIBED THE BREAKAGE
+ * AS PRE-EXISTING. It said an installer and its server "can STILL disagree",
+ * which reads as a condition inherited and declined. It was neither. Before the
+ * trim, `resolveOpenDbPath` used a bare `pinned.length > 0` and `install.sh`
+ * used `!= ""`, so `NEUTRON_DB_PATH='   '` resolved to the literal three spaces
+ * on BOTH sides: wrong, but wrong identically, so install migrated exactly the
+ * file the server opened. Trimming the TypeScript side alone converted a shared
+ * bug into a SPLIT — installer migrates `'   '`, server opens
+ * `<home>/project.db` — and on the uninstall path the same split deletes a file
+ * named three spaces while leaving the real database on disk. "STILL" was the
+ * word doing the damage: it framed a regression this change introduced as a
+ * condition it had merely failed to clean up, which is the same defect the rest
+ * of this docblock exists to record — a claim that does not match its proof.
+ *
+ * So the shell now follows the rule too. `install.sh` / `uninstall.sh` share an
+ * `is_set` helper inside their marked `NEUTRON-SHARED-RESOLVERS` block, and
+ * `neutron-service.sh` / `neutron-backup.sh` carry the same predicate for
+ * `DATA_DIR`. The duplication is REQUIRED, not drift: `install.sh` is fetched
+ * and run standalone (`curl … | sh`), so it cannot source a shared library —
+ * which is why `dotenv_get` is already copied four times.
+ *
+ * The cross-language claim is bounded by a TEST rather than by this paragraph:
+ * `scripts/__tests__/install-uninstall.test.ts` runs the shell resolvers and
+ * `resolveNeutronHome` / `resolveOpenDbPath` on the SAME inputs and compares the
+ * answers, so changing one language alone fails CI. That test is also the one
+ * `install.sh` had been citing BY PATH while it did not exist — the block header
+ * promised "a parity test … asserts the two copies match" and nothing enforced
+ * it, so the twin scripts were free to drift silently. It exists now.
  *
  * It is written down because the alternative is the defect this docblock keeps
  * committing — a claim wider than its proof. Three rounds of that produced three

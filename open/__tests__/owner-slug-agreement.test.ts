@@ -43,6 +43,7 @@ import { resolveNeutronHome, resolveOpenDbPath } from '@neutronai/migrations/db-
 import {
   resolveOwnerHome as listenerResolveOwnerHome,
   resolveRegistryDbPath,
+  resolveRepoRoot,
 } from '@neutronai/gateway/boot-listener-registry.ts'
 import { resolveOwnerHomeFromEnv } from '@neutronai/onboarding/overnight/register.ts'
 
@@ -524,6 +525,28 @@ describe('the boot resolver and the CLI resolver agree', () => {
       // stopped being read".
       expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: '/srv/r.db' } as NodeJS.ProcessEnv)).toBe('/srv/r.db')
       expect(listenerResolveOwnerHome({ OWNER_HOME: '/srv/owner' } as NodeJS.ProcessEnv)).toBe('/srv/owner')
+    })
+
+    it('resolveRepoRoot follows the same rule as its two neighbours in the same file', () => {
+      // `resolveRepoRoot` sat on a bare `length > 0` while `resolveOwnerHome`
+      // and `resolveRegistryDbPath` — both in `gateway/boot-listener-registry.ts`
+      // — were moved onto the trimmed predicate. Scope drawn per-symbol rather
+      // than per-file is how a family of resolvers ends up disagreeing again:
+      // the reason to fix the neighbours applied here verbatim and this one was
+      // simply not enumerated.
+      //
+      // The cost is quiet. A blank `NEUTRON_REPO_ROOT` makes the bundled-Cores
+      // registry walk a directory named three spaces, resolved against whatever
+      // CWD the gateway was started in — so it finds nothing and the boot reads
+      // as "no Cores bundled" instead of as a bad variable.
+      expect(resolveRepoRoot({ NEUTRON_REPO_ROOT: '   ' } as NodeJS.ProcessEnv)).toBe(process.cwd())
+      expect(resolveRepoRoot({ NEUTRON_REPO_ROOT: '' } as NodeJS.ProcessEnv)).toBe(process.cwd())
+      expect(resolveRepoRoot({} as NodeJS.ProcessEnv)).toBe(process.cwd())
+
+      // CONTROL — a real root is still honoured, and still VERBATIM, so a
+      // failure above means the predicate changed rather than the read dying.
+      expect(resolveRepoRoot({ NEUTRON_REPO_ROOT: '/srv/repo' } as NodeJS.ProcessEnv)).toBe('/srv/repo')
+      expect(resolveRepoRoot({ NEUTRON_REPO_ROOT: ' /real/dir ' } as NodeJS.ProcessEnv)).toBe(' /real/dir ')
     })
   })
 
