@@ -372,7 +372,7 @@ describe('plan:next — a clean continuation plans from the committed plan', () 
     // The probe reads ONE file on the branch and nothing else.
     const probe = promptFor(out, 'plan:probe')
     expect(probe).toContain('git show')
-    expect(probe).toContain('IMPLEMENTATION_PLAN.md')
+    expect(probe).toContain('.trident/plans/trident/plan-next-run.md')
     expect(probe).toContain('Do NOT modify anything')
 
     // DOWNSTREAM IS UNTOUCHED: `ralphExecuteNote` still hands Forge the plan body
@@ -380,7 +380,7 @@ describe('plan:next — a clean continuation plans from the committed plan', () 
     const forge = promptFor(out, 'forge:build')
     expect(forge).toContain(COMMITTED_PLAN)
     expect(forge).toContain('Implement ONLY this one task: T2 — the task THIS iteration must pick up')
-    expect(forge).toContain("write IMPLEMENTATION_PLAN.md at the repo root with EXACTLY this body")
+    expect(forge).toContain("write .trident/plans/trident/plan-next-run.md with EXACTLY this body")
 
     // The run completed normally on the cheap planner — not merely "did not crash".
     expect(out.labels).toContain('forge:build')
@@ -773,15 +773,15 @@ describe('plan:next — the probe reads the ref the resume gate judged', () => {
     const out = await run(cleanHandoff(2, { mergeMode: 'pr', prNumber: 42 }))
     const probe = promptFor(out, 'plan:probe')
 
-    expect(probe).toContain('origin/trident/plan-next-run:IMPLEMENTATION_PLAN.md')
+    expect(probe).toContain('origin/trident/plan-next-run:.trident/plans/trident/plan-next-run.md')
   })
 
   test('local mode probes the local ref, which is the authority there', async () => {
     const out = await run(cleanHandoff(2))
     const probe = promptFor(out, 'plan:probe')
 
-    expect(probe).toContain("git show 'trident/plan-next-run:IMPLEMENTATION_PLAN.md'")
-    expect(probe).not.toContain('origin/trident/plan-next-run:IMPLEMENTATION_PLAN.md')
+    expect(probe).toContain("git show 'trident/plan-next-run:.trident/plans/trident/plan-next-run.md'")
+    expect(probe).not.toContain('origin/trident/plan-next-run:.trident/plans/trident/plan-next-run.md')
   })
 
   test('a DEAD plan:next is fatal BEFORE Forge, exactly as a dead plan:fable is', async () => {
