@@ -93,6 +93,16 @@ three spaces, creatable, so an agent handed that prompt writes the owner's entit
 into a junk dir under whatever CWD it started in and nothing errors.
 `trident/agent-prompts.ts` defaults its vars to this function, so the path is live.
 
+**And the claim now stops where the check stops.** The command is
+`--include='*.ts'`, so what it bounds is a claim about TypeScript — the docblock
+says so, and names the readers it does NOT cover: `install.sh` honours a
+whitespace-only `NEUTRON_DB_PATH` via `!= ""`, and `neutron-service.sh` /
+`neutron-backup.sh` resolve the data dir with `[ -n ... ]`, true for three spaces.
+An installer and the server it installs can still disagree, one language over.
+Left unfixed on purpose: those are the install / uninstall / backup entrypoints,
+a different blast radius from a resolver. Written down rather than implied,
+because a claim wider than its proof is the defect this entry is about.
+
 **The guard is the deliverable, not the list.** `open/__tests__/owner-slug-agreement.test.ts`,
 `gbrain-memory/__tests__/gbrain-doctor.test.ts` and `prompts/template.test.ts` drive
 blank and space-padded values through every reader they can import, each with a

@@ -456,8 +456,8 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * the `.url_slug` lookup then ran against a directory named three spaces, found
  * nothing, and a correctly renamed instance resolved to the anonymous fallback
  * again — the same defect as the empty string, one space away from it and past
- * the fix for it. So this predicate trims, and so does every other read of
- * `OWNER_HOME` / `NEUTRON_HOME` / `NEUTRON_DB_PATH` in the repo.
+ * the fix for it. So this predicate trims, and so does every other TYPESCRIPT
+ * read of `OWNER_HOME` / `NEUTRON_HOME` / `NEUTRON_DB_PATH` in the repo.
  *
  * THE SCOPE OF THAT CLAIM IS A GREP, NOT A MEMORY — this sentence has been
  * wrong twice, and both times because it was written from a mental model of
@@ -499,6 +499,23 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`);
  * `DEFAULT_M2_FEEDBACK_PATH` (`onboarding/feedback/m2-week-4-collector.ts`); and
  * `buildPromptVars` (`prompts/template.ts`) — the constant-key one.
+ *
+ * WHAT THE COMMAND DOES NOT COVER, STATED RATHER THAN IMPLIED. It is
+ * `--include='*.ts'`, so the claim it bounds is a claim about TYPESCRIPT. The
+ * repo has readers of these same three variables in other languages, and they do
+ * NOT follow this rule: `install.sh` honours a whitespace-only `NEUTRON_DB_PATH`
+ * via `!= ""`, and `neutron-service.sh` / `neutron-backup.sh` resolve the data
+ * dir with `[ -n "$DATA_DIR" ]`, which is true for three spaces. So an installer
+ * and the server it installs can still disagree about which database exists —
+ * the same split, one language over. That is deliberately NOT fixed here: the
+ * shell entrypoints are the install / uninstall / backup paths, they are a
+ * different blast radius from a resolver, and folding them into a TypeScript
+ * change would make this diff unreviewable.
+ *
+ * It is written down because the alternative is the defect this docblock keeps
+ * committing — a claim wider than its proof. Three rounds of that produced three
+ * rounds of real bugs hiding in the gap; the fix is not a better sweep, it is a
+ * claim that stops at the edge of what was actually checked.
  *
  * The list is documentation. The GUARD is
  * `open/__tests__/owner-slug-agreement.test.ts`, which drives blank values
