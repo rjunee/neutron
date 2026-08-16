@@ -108,6 +108,16 @@ the INDEX rather than the working tree so an uncommitted or untracked file canno
 manufacture a floor that reaches no clone, and reproduces the directory layout in
 the scratch repo so git applies its own precedence.
 
+Reading the index is right only at the repository TOP LEVEL, and getting that
+wrong reintroduces the same bug the fix was for. An index path is always spelled
+from the top level, so for a governed tree nested inside a larger repo
+`git show :docs/.gitattributes` returns the OUTER repo's file — a confident
+answer to a different question. The check compares `rev-parse --show-toplevel`
+against the directory being asked about, through `realpathSync` on both sides,
+because macOS hands out `/var/...` paths that resolve to `/private/var/...` and a
+raw string compare would call the top level "nested" and fall back to disk for
+every temp-dir fixture. Nested trees read from disk.
+
 The isolation itself was asserted rather than real. `GIT_CONFIG_GLOBAL`,
 `GIT_CONFIG_SYSTEM` and `GIT_ATTR_NOSYSTEM` do not close the door: measured on
 git 2.50.1 against an attributes-free repo whose control answer is `unspecified`,
@@ -192,11 +202,11 @@ controls.
 The "checks EVERY log" test was itself vacuous: the candidate ordering made the
 first present log the broken one, so a gate checking only `present[0]` stayed
 green through it. The fixture now makes the FIRST log conformant and a LATER one
-broken, and that mutation now fails. Seven mutations in total, each run with the
+broken, and that mutation now fails. Eight mutations in total, each run with the
 unmutated suite green as the control: root-only attributes collection,
 isolation-strips-nothing, `present[0]`-only, set/unset-as-custom-driver,
-overlay-attributed-by-substring, and deleting the workflow step two ways — every
-one now turns a test red.
+overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo, and
+deleting the workflow step two ways — every one now turns a test red.
 
 ## 2026-08-16 — two builds can append to this file at once
 
