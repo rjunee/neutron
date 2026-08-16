@@ -379,24 +379,63 @@ describe('the installer cannot leave a clone in a state that is worse than no in
     expect(fatal.stderr).toContain('lacks command line')
   }, 30_000)
 
-  test('the configured driver path survives the worktree that installed it', () => {
-    // The config is COMMON to every worktree, so an absolute path into whichever worktree ran the
-    // install is a time bomb: trident installs from a throwaway linked worktree, that worktree is
-    // removed, and every other worktree is left pointing at a script that no longer exists. This
-    // was observed in the real repo — a rebase failed with "Module not found" from a config naming
-    // a deleted `.worktrees/...` path.
+  test('a clone the OLD installer touched is converged, not merely left alone', () => {
+    // Not writing `.name` protects a fresh clone and does nothing for one that already has the key
+    // — and that clone is one `--unset ...driver` away from exit 128. Install has to actively
+    // clear it. Both legacy artefacts of the previous layout are removed: the `.name` config key
+    // and the `info/attributes` line that would otherwise OUTRANK the tracked `.gitattributes`.
+    const { repo } = scenario()
+    const common = run(repo, ['git', 'rev-parse', '--path-format=absolute', '--git-common-dir']).stdout.trim()
+    mkdirSync(join(common, 'info'), { recursive: true })
+    writeFileSync(join(common, 'info', 'attributes'), 'docs/AS_BUILT.md merge=as-built-log\n')
+    git(repo, 'config', 'merge.as-built-log.name', 'left over from the old installer')
+
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    expect(run(repo, ['git', 'config', '--get', 'merge.as-built-log.name']).stdout.trim()).toBe('')
+    expect(readFileSync(join(common, 'info', 'attributes'), 'utf8')).not.toContain('as-built-log')
+  }, 30_000)
+
+  test('installing from a linked worktree leaves NO absolute worktree path in the shared config', () => {
+    // The config is COMMON to every worktree while the checkout is not, so an absolute path into
+    // whichever worktree ran the install is a time bomb: trident installs from a throwaway linked
+    // worktree, that worktree is removed, and every other worktree is left pointing at a script
+    // that no longer exists. Observed in the real repo — a rebase failed with "Module not found"
+    // from a config naming a deleted `.worktrees/...` path.
+    //
+    // The script path is therefore RELATIVE, which git resolves against the working tree the merge
+    // is running in (measured: a driver printing `pwd` reports the linked worktree when the merge
+    // happens there). Anchoring to the MAIN worktree was tried first and only moves the problem —
+    // its path is stable but its CONTENT is not, and a main worktree parked on a commit older than
+    // the driver makes every install fail.
     const { repo } = scenario()
     const linked = join(repo, '.installer-worktree')
     git(repo, 'worktree', 'add', '-q', '--detach', linked, 'main')
 
     expect(run(linked, ['bash', join(linked, 'scripts', 'install-merge-drivers.sh')]).ok).toBe(true)
     const configured = run(repo, ['git', 'config', '--get', 'merge.as-built-log.driver']).stdout.trim()
-    expect(configured).not.toContain('.installer-worktree')
-    expect(configured).toContain(join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
+    expect(configured).not.toContain(linked)
+    expect(configured).not.toContain(repo)
+    expect(configured).toContain('scripts/git/as-built-merge-driver.ts')
 
     // and it still works after that worktree is gone, which is the property that actually matters
     git(repo, 'worktree', 'remove', '--force', linked)
     expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh', '--check']).ok).toBe(true)
+  }, 30_000)
+
+  test('a merge in a linked worktree runs THAT worktree\'s driver, not another tree\'s', () => {
+    // The property the relative path buys, asserted end-to-end rather than inferred from the
+    // config string: the replay worktree the publisher creates is a linked one, and it has to
+    // merge correctly with no other worktree involved.
+    const { repo, forkPoint } = scenario()
+    expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+
+    const { applied, unmerged, worktree } = replay(repo, forkPoint, 'linked-run')
+    expect(applied.ok).toBe(true)
+    expect(unmerged).toEqual([])
+    const merged = readFileSync(join(worktree, 'docs', 'AS_BUILT.md'), 'utf8')
+    expect(merged).toContain('## 2026-08-16 — build one shipped')
+    expect(merged).toContain('## 2026-08-16 — build two shipped')
   }, 30_000)
 
   test('--check reports NOT usable when the configured script has been deleted', () => {

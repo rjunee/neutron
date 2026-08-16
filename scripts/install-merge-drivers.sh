@@ -57,20 +57,30 @@ if [ -z "$COMMON" ]; then
   case "$COMMON" in /*) ;; *) COMMON="$HERE/$COMMON" ;; esac
 fi
 
-# THE DRIVER PATH MUST OUTLIVE THE WORKTREE THAT INSTALLED IT.
+# THE SCRIPT PATH IS RELATIVE, AND THAT IS THE WHOLE FIX.
 #
-# The config we write is COMMON to every worktree, so an absolute path into whichever worktree
+# The config we write is COMMON to every worktree, so an ABSOLUTE path into whichever worktree
 # happened to run the install is a time bomb: trident installs from a throwaway linked worktree,
 # that worktree is removed at the end of the build, and every other worktree is then pointed at a
 # script that no longer exists. Observed in this repo — the config read
 # `.../.worktrees/concurrent-plan-conflict/scripts/git/as-built-merge-driver.ts`, and a later rebase
-# in a different tree failed with "Module not found" and fell back to a conflict.
+# in a different tree failed with `Module not found` and fell back to a conflict.
 #
-# The MAIN worktree is the stable one: `$COMMON` is its `.git`, so its parent is the checkout that
-# lives as long as the clone does. `git rev-parse --git-common-dir` in a bare repo has no parent
-# worktree, but a bare repo has no working tree to merge in either, so it never reaches here.
-MAIN_WORKTREE="$(dirname "$COMMON")"
-DRIVER_SCRIPT="$MAIN_WORKTREE/scripts/git/as-built-merge-driver.ts"
+# Anchoring to the MAIN worktree instead only moves the problem: its PATH is stable but its
+# CONTENT is not, and a main worktree parked on a commit that predates the driver makes every
+# install fail. That is not hypothetical — it is what this repo was in when the relative form was
+# adopted.
+#
+# MEASURED: git runs a merge driver with cwd set to the TOP OF THE WORKING TREE THE MERGE IS
+# HAPPENING IN, linked worktrees included (probed on git 2.50.1 with a driver that printed `pwd`;
+# a merge in the main worktree reported the main worktree, a merge in a linked one reported the
+# linked one). So a relative path resolves, per merge, against the tree being merged — each
+# worktree runs ITS OWN copy at ITS OWN checked-out version, no worktree depends on any other, and
+# removing the installing worktree breaks nothing. A worktree that does not have the file simply
+# fails to launch the driver, which git turns into an ordinary conflict — the safe direction.
+DRIVER_SCRIPT_REL="scripts/git/as-built-merge-driver.ts"
+# The copy in THIS tree, used only for the existence checks below. Never written to the config.
+DRIVER_SCRIPT_LOCAL="$HERE/$DRIVER_SCRIPT_REL"
 
 # LEGACY CLEANUP. An earlier cut of this script wrote the binding into `$COMMON/info/attributes`
 # instead of tracking it. That file OVERRIDES the tracked `.gitattributes`, so a clone that ran the
@@ -103,19 +113,20 @@ if [ "${1:-}" = "--check" ]; then
     echo "merge drivers: NOT installed — merge.$DRIVER_NAME.driver is unset" >&2
     exit 1
   fi
-  # A NONEMPTY VALUE IS NOT A WORKING ONE. The config outlives the worktree that wrote it, so the
-  # script it names can be gone while the key is still set — the exact state that produced "Module
-  # not found" mid-rebase here. Check the file, not just the string.
-  if [ ! -f "$DRIVER_SCRIPT" ]; then
-    echo "merge drivers: NOT usable — configured, but no driver script at $DRIVER_SCRIPT" >&2
+  # A NONEMPTY VALUE IS NOT A WORKING ONE. The config is shared by every worktree while the script
+  # is per-worktree, so the key can be set in a tree that does not have the file — which is the
+  # state that produced `Module not found` mid-rebase here. Check the file, not just the string,
+  # and check it in THIS tree, because this tree is where a merge run here would look.
+  if [ ! -f "$DRIVER_SCRIPT_LOCAL" ]; then
+    echo "merge drivers: NOT usable here — configured, but no driver script at $DRIVER_SCRIPT_LOCAL" >&2
     exit 1
   fi
   echo "merge drivers: installed"
   exit 0
 fi
 
-if [ ! -f "$DRIVER_SCRIPT" ]; then
-  echo "install-merge-drivers: no driver at $DRIVER_SCRIPT" >&2
+if [ ! -f "$DRIVER_SCRIPT_LOCAL" ]; then
+  echo "install-merge-drivers: no driver at $DRIVER_SCRIPT_LOCAL" >&2
   exit 2
 fi
 
@@ -136,9 +147,18 @@ fi
 # word-splits and the driver dies on every merge. `%O %A %B` are substituted by git BEFORE the
 # shell sees the string, so they are quoted here too: git substitutes the temp-file paths it chose,
 # and those live under $TMPDIR, which is itself a path this repo does not control.
-printf -v DRIVER_CMD '%q %q "%%O" "%%A" "%%B" "%%L" "%%P"' "$BUN" "$DRIVER_SCRIPT"
+# `$BUN` is absolute (a machine-stable location, unlike a worktree); the SCRIPT is relative, and
+# resolves against the working tree git runs the merge in.
+printf -v DRIVER_CMD '%q %q "%%O" "%%A" "%%B" "%%L" "%%P"' "$BUN" "$DRIVER_SCRIPT_REL"
 
 git -C "$HERE" config "merge.$DRIVER_NAME.driver" "$DRIVER_CMD"
+
+# CONVERGE A CLONE THE OLD INSTALLER TOUCHED. Not writing `.name` keeps a FRESH clone out of the
+# fatal state, but it does nothing for one that already has the key from a previous install — and
+# that clone is one `--unset merge.as-built-log.driver` away from `lacks command line` (exit 128).
+# Clearing it AFTER `.driver` is written means the pair is never momentarily name-without-driver.
+git -C "$HERE" config --unset "merge.$DRIVER_NAME.name" 2>/dev/null || true
+
 drop_legacy_attr_line
 
 echo "merge drivers: installed"
