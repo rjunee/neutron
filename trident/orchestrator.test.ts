@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -82,6 +82,7 @@ function buildHarness(opts: {
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
+  resolve_active_runs?: () => number
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
 }): Harness {
@@ -123,6 +124,7 @@ function buildHarness(opts: {
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_reflection_context !== undefined)
     o.resolve_reflection_context = opts.resolve_reflection_context
+  if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
@@ -2322,6 +2324,69 @@ describe('orchestrator — RB2 (b) reflection-context threading to build agents'
     // The workflow was fired (an input was captured) with a null reflection context.
     expect(h.inputs).toHaveLength(1)
     expect(h.inputs[0]?.reflection_context ?? null).toBeNull()
+  })
+})
+
+describe('orchestrator — TEST EXECUTION strategy composition at fire time', () => {
+  /** A repo that declares a test script whose runner text names the parallel knob. */
+  function knobRepo(): string {
+    const repo = join(tmp, 'knob-repo')
+    mkdirSync(join(repo, 'scripts'), { recursive: true })
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ scripts: { test: 'bash scripts/run-tests.sh' } }),
+    )
+    writeFileSync(
+      join(repo, 'scripts', 'run-tests.sh'),
+      '#!/usr/bin/env bash\nJOBS="${NEUTRON_TEST_JOBS:-1}"\n',
+    )
+    return repo
+  }
+
+  const approve = () => ({ result: { verdict: 'APPROVE' as const, prNumber: 9, branch: 'feat-x' } })
+
+  test('composes the block from the run’s OWN repo and threads it to the firer', async () => {
+    const h = buildHarness({ plan: approve, resolve_active_runs: () => 2 })
+    const run = await createRun({ repo_path: knobRepo() })
+    await runToTerminal(h, run.id)
+    const strategy = h.inputs[0]?.test_strategy
+    expect(typeof strategy).toBe('string')
+    expect(strategy).toContain('TEST EXECUTION')
+    // The knob is asked for — the whole point of the card. The NUMBER is deliberately
+    // not asserted: it depends on this box's live cores/RAM, and the arithmetic is
+    // already pinned against fixed inputs in test-strategy.test.ts.
+    expect(strategy).toContain('NEUTRON_TEST_JOBS=')
+  })
+
+  test('a THROWING resolve_active_runs still launches, with a strategy (degrades to 1 run)', async () => {
+    // Same never-fails contract as the reflection resolve: a budget that cannot be
+    // computed is a sequential build, never a stuck run.
+    const h = buildHarness({
+      plan: approve,
+      resolve_active_runs: () => {
+        throw new Error('store read boom')
+      },
+    })
+    const run = await createRun({ repo_path: knobRepo() })
+    const terminal = await runToTerminal(h, run.id)
+    expect(terminal.phase).toBe('done')
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]?.test_strategy).toContain('TEST EXECUTION')
+  })
+
+  test('no resolver at all → still a strategy (an idle box is the safe assumption)', async () => {
+    const h = buildHarness({ plan: approve })
+    const run = await createRun({ repo_path: knobRepo() })
+    await runToTerminal(h, run.id)
+    expect(h.inputs[0]?.test_strategy).toContain('TEST EXECUTION')
+  })
+
+  test('a repo that documents nothing still gets a usable block, never a failed launch', async () => {
+    const h = buildHarness({ plan: approve })
+    const run = await createRun({ repo_path: join(tmp, 'no-such-repo-9182') })
+    const terminal = await runToTerminal(h, run.id)
+    expect(terminal.phase).toBe('done')
+    expect(h.inputs[0]?.test_strategy).toContain('TEST EXECUTION')
   })
 })
 

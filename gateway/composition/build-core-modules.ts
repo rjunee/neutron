@@ -70,6 +70,7 @@ import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
   buildFocusScoreRecomputeHandler,
@@ -605,6 +606,17 @@ export function buildCoreModules(
         if (tridentWiring.resolve_reflection_context !== undefined) {
           orchestratorOpts.resolve_reflection_context = tridentWiring.resolve_reflection_context
         }
+        // THE LIVE FAN-OUT the TEST EXECUTION budget divides the box by, when it
+        // exceeds the planned fan-out (`DEFAULT_BUILD_FANOUT`, which is the constant
+        // that carries the guarantee — see `computeTestJobs`). Counts the launching
+        // run's OWN row too, so the divisor is the true number of builds sharing these
+        // cores. Without this line the whole chain is inert (the `resolve_phase_models`
+        // lesson — an unwired producer ships a feature whose every part works and which
+        // as a whole does nothing).
+        //
+        // ONLY THE BUILD PHASES COUNT — see `countActiveBuildRuns`, which is where the
+        // rule and its known over-count live, and which is unit-tested behaviourally.
+        orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome
