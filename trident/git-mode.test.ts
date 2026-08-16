@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  classifyGithubReachability,
   cleanupAfterMerge,
   defaultGitModeProbe,
   detectMergeMode,
@@ -13,8 +14,10 @@ import {
   spawnCapture,
   MAX_AUTH_FAILURE_DETAIL_CHARS,
   PUBLISHER_AUTH_COMMAND,
+  PUBLISHER_REACHABILITY_COMMAND,
   unwiredPublisherCredential,
   type GitModeProbe,
+  type PublisherAuthFailureCause,
   type HostCommandResult,
   type PublisherCredentialSource,
 } from './git-mode.ts'
@@ -204,9 +207,54 @@ describe('detectMergeMode names WHY the publisher could not authenticate', () =>
     expect(msg).toContain('owner-a')
   })
 
+  // EVERY member of the union, enumerated rather than sampled. The predecessor of
+  // this list was one call with `no_credential_available` under the name "every
+  // refusal", so six of the seven causes were unasserted — and a cause added
+  // later (as two were) would have joined them silently.
+  const ALL_CAUSES: readonly PublisherAuthFailureCause[] = [
+    'no_credential_available',
+    'credential_rejected',
+    'credential_verdict_unavailable',
+    'github_rate_limited',
+    'could_not_reach_github',
+    'publisher_cli_unavailable',
+    'probe_failed',
+  ]
+
   test('every refusal keeps the original guard sentence — the gate itself is unchanged', async () => {
-    const msg = await refusal({ authenticated: false, cause: 'no_credential_available' })
-    expect(msg).toContain('refusing to silently weaken the PR merge gate')
+    for (const cause of ALL_CAUSES) {
+      const msg = await refusal({ authenticated: false, cause })
+      expect(msg).toContain('refusing to silently weaken the PR merge gate')
+    }
+  })
+
+  test('every refusal names the handle, the source, and a cause-specific sentence', async () => {
+    // A refusal that does not name the handle sends the reader hunting through
+    // the store by hand; one whose text is the same for every cause is the vague
+    // message this whole change replaced. Both are asserted for ALL seven.
+    const rendered = new Set<string>()
+    for (const cause of ALL_CAUSES) {
+      const msg = await refusal({ authenticated: false, cause, detail: 'the captured detail' })
+      expect(msg).toContain('owner-a')
+      expect(msg).toContain('the instance secrets store')
+      expect(msg).toContain('the captured detail')
+      rendered.add(msg)
+    }
+    expect(rendered.size).toBe(ALL_CAUSES.length)
+  })
+
+  test('ONLY the two causes the owner can act on ask him to touch the credential', async () => {
+    // The costly instruction, enumerated the other way round: every cause that is
+    // a host condition or an honest non-verdict must be free of it.
+    for (const cause of ALL_CAUSES) {
+      const msg = await refusal({ authenticated: false, cause })
+      const asksForRepair =
+        msg.includes('REJECTED') || msg.includes('connect GitHub')
+      expect([cause, asksForRepair]).toEqual([
+        cause,
+        cause === 'credential_rejected' || cause === 'no_credential_available',
+      ])
+    }
   })
 })
 
@@ -880,22 +928,45 @@ describe('spawnCapture flags a timeout only when it caused one', () => {
 // this file used to be a single crafted line, which is not what `gh` prints and
 // is precisely why a first-line-only truncation bug survived a green suite: with
 // a one-line stub, `split('\n')[0]` IS the whole string, so the defect was
-// invisible by construction. The blocks below are copied from `gh version 2.97.0
-// (2026-07-31)` run as `gh auth status --hostname github.com --active`.
+// invisible by construction.
+//
+// PROVENANCE IS NOW STATED PER BLOCK, AND THAT IS A FIX, NOT BOOKKEEPING. This
+// header used to assert that all of the blocks below were "copied from gh
+// version 2.97.0" — and three of them could not have been, because `gh auth
+// status` renders a FIXED failure entry that never contains an HTTP status or a
+// response body (`pkg/cmd/auth/status/status.go` L90-108, v2.97.0), and
+// `Missing required token scopes` is printed only by the SUCCESS entry (L86).
+// A fixture that cannot occur cannot certify a classifier, and the worst of
+// them was the CONTROL asserting that `credential_rejected` still worked. Each
+// block below therefore says MEASURED (with the command that produced it) or
+// CONSTRUCTED (with what it was built from and why it could not be measured).
+//
+// The MEASURED captures were taken on `gh version 2.97.0 (2026-07-31)`, each run
+// with an isolated `GH_CONFIG_DIR` so the host's own login was neither read nor
+// disturbed, as:
+//
+//     env GH_TOKEN=<invalid> GH_CONFIG_DIR=$(mktemp -d) \
+//       gh auth status --hostname github.com --active
+//     env GH_TOKEN=<invalid> GH_CONFIG_DIR=$(mktemp -d) \
+//       gh api --hostname github.com /zen
+//
+// with the transport faults injected via HTTPS_PROXY (a refused port, a
+// non-resolving host, and a blackholed address).
 // ---------------------------------------------------------------------------
 
 /**
  * MEASURED, and the single most important fixture in this file: gh 2.97.0 prints
- * EXACTLY THIS for BOTH
+ * EXACTLY THIS, byte for byte, for ALL FOUR of
  *
- *   • a genuinely invalid token on a working network, and
- *   • a perfectly good token behind a dead proxy (GitHub never reached).
+ *   • a genuinely invalid token on a working network;
+ *   • a dead proxy (connection refused), so GitHub was never reached;
+ *   • a proxy host that does not resolve (DNS failure);
+ *   • a blackholed proxy, so the call hung until it timed out.
  *
- * The two stderr captures were byte-for-byte identical. So this text is not
- * evidence of a bad token — it is evidence that `gh` could not log in, and the
- * cause is undetermined. Note the first line is the bare hostname, which is what
- * the old `split('\n')[0]` rendering kept while discarding all three lines that
- * carry meaning.
+ * So this text is not evidence of a bad token — it is evidence that `gh` could
+ * not log in, and it carries NOTHING about which of the four happened. Note the
+ * first line is the bare hostname, which is what the old `split('\n')[0]`
+ * rendering kept while discarding all three lines that carry meaning.
  */
 const GH_LOGIN_FAILURE_AMBIGUOUS = [
   'github.com',
@@ -905,36 +976,81 @@ const GH_LOGIN_FAILURE_AMBIGUOUS = [
 ].join('\n')
 
 /**
- * A verdict only a live GitHub response can produce: the scope list came back in
- * a response body, so the transport demonstrably worked and the credential was
- * genuinely refused. This is the shape that MUST still read as a rejection.
+ * CONSTRUCTED from `gh`'s SUCCESS entry template (`status.go` L73-89, v2.97.0),
+ * because it needs a token that authenticates but lacks a scope and no such
+ * token was available to measure with. The shape is `gh`'s, not invented: the
+ * `- Token scopes:` and `! Missing required token scopes:` format strings are
+ * present verbatim in the 2.97.0 binary; only the handle and the scope names are
+ * illustrative.
+ *
+ * Its PREDECESSOR was impossible — it opened with the failure entry's
+ * `X Failed to log in …` line and then printed the success entry's scope lines,
+ * a combination `gh`'s renderer cannot produce, since the two are exclusive
+ * branches of one switch. This is the shape that MUST still read as a rejection:
+ * a scope list can only come back in a live response body, so the transport
+ * demonstrably worked and the credential was genuinely refused.
  */
 const GH_REJECTED_MISSING_SCOPE = [
   'github.com',
-  '  X Failed to log in to github.com account owner-a (keyring)',
+  '  ✓ Logged in to github.com account owner-a (keyring)',
   '  - Active account: true',
+  '  - Git operations protocol: https',
+  '  - Token: gho_************',
   "  - Token scopes: 'gist', 'read:org'",
   "  ! Missing required token scopes: 'repo'",
 ].join('\n')
 
-/** GitHub's primary rate limit, which it returns as 403 WITH a valid token. */
-const GH_RATE_LIMIT_PRIMARY = [
+/**
+ * CONSTRUCTED from `gh`'s TIMEOUT entry template (`status.go` L110-117,
+ * v2.97.0), whose format string `"  %s Timeout trying to log in to %s using
+ * token (%s)"` is present verbatim in the 2.97.0 binary. Reproducing a real one
+ * needs a network that hangs for gh's full budget rather than failing; the
+ * blackholed-proxy capture ({@link GH_API_BLACKHOLE_TIMEOUT}) timed out at the
+ * `gh api` layer first, so the entry itself was not observed.
+ */
+const GH_TIMEOUT_ENTRY = [
   'github.com',
-  '  X Failed to log in to github.com using token (GH_TOKEN)',
+  '  X Timeout trying to log in to github.com using token (GH_TOKEN)',
   '  - Active account: true',
-  '  - HTTP 403: API rate limit exceeded for user ID 12345.',
-  '    (https://api.github.com/user)',
 ].join('\n')
 
-/** GitHub's secondary rate limit — also a 403, also with a valid token. */
-const GH_RATE_LIMIT_SECONDARY = [
-  'github.com',
-  '  X Failed to log in to github.com using token (GH_TOKEN)',
-  '  - HTTP 403: You have exceeded a secondary rate limit.',
-  '    Please wait a few minutes before you try again.',
+/** MEASURED (`gh api`, invalid token, network fine): GitHub ANSWERED, and refused. */
+const GH_API_BAD_CREDENTIALS = 'gh: Bad credentials (HTTP 401)'
+
+/** MEASURED (`gh api` through a proxy port that refuses the connection). */
+const GH_API_DEAD_PROXY =
+  'Get "https://api.github.com/zen": proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused'
+
+/**
+ * MEASURED (`gh api` through a proxy host that does not resolve). Two lines, and
+ * neither is in Go's `net` vocabulary — this is `gh`'s own wording, which is why
+ * the Go-shaped transport patterns missed a plain DNS failure entirely.
+ */
+const GH_API_DNS_FAILURE = [
+  'error connecting to no-such-host-xyzzy.invalid',
+  'check your internet connection or https://githubstatus.com',
 ].join('\n')
 
-/** MEASURED: what gh 2.97.0 prints with an empty config dir. */
+/** MEASURED (`gh api` through a blackholed proxy address — the call hung, then timed out). */
+const GH_API_BLACKHOLE_TIMEOUT =
+  'Get "https://api.github.com/zen": proxyconnect tcp: dial tcp 192.0.2.1:8080: i/o timeout'
+
+/**
+ * CONSTRUCTED: GitHub's documented primary rate-limit body placed into the `gh
+ * api` error line whose exact shape WAS measured above ({@link
+ * GH_API_BAD_CREDENTIALS}). Exhausting a real rate limit to capture it was not
+ * a reasonable thing to do to the account. Note WHERE it lives: `gh auth status`
+ * cannot print an HTTP status at all, so a rate limit reaches us as the
+ * ambiguous block plus THIS, on the reachability call.
+ */
+const GH_API_RATE_LIMIT_PRIMARY =
+  'gh: API rate limit exceeded for user ID 12345. (HTTP 403)'
+
+/** CONSTRUCTED the same way: GitHub's secondary rate limit — also a 403, also with a valid token. */
+const GH_API_RATE_LIMIT_SECONDARY =
+  'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)'
+
+/** MEASURED: what gh 2.97.0 prints with an empty config dir and no token. */
 const GH_NO_ACCOUNTS = 'You are not logged into any GitHub hosts. To log in, run: gh auth login'
 
 const storeWithToken: PublisherCredentialSource = {
@@ -961,6 +1077,36 @@ const ghFailsWith =
       }
     }
     return { ok: false, stdout: '', stderr, exit_code }
+  }
+
+/**
+ * A host whose two `gh` surfaces answer DIFFERENTLY — which is the whole point:
+ * `gh auth status` flattens a refusal and a transport failure into one string,
+ * and `gh api` is the second measurement that separates them. `ghFailsWith`
+ * above keeps its meaning (every `gh` call fails identically) and is still the
+ * right double wherever the reachability answer is not what is under test.
+ */
+const ghHost =
+  (surfaces: { status: string; api: string; apiExit?: number; apiTimedOut?: boolean }) =>
+  async (cmd: string[]): Promise<HostCommandResult> => {
+    if (cmd[0] === 'git') {
+      return {
+        ok: true,
+        stdout: 'https://github.com/example-org/example-repo.git',
+        stderr: '',
+        exit_code: 0,
+      }
+    }
+    if (cmd[1] === 'api') {
+      return {
+        ok: false,
+        stdout: '',
+        stderr: surfaces.api,
+        exit_code: surfaces.apiExit ?? 1,
+        ...(surfaces.apiTimedOut === true ? { timed_out: true } : {}),
+      }
+    }
+    return { ok: false, stdout: '', stderr: surfaces.status, exit_code: 1 }
   }
 
 const refusalMessage = async (probe: GitModeProbe): Promise<string> =>
@@ -993,9 +1139,22 @@ describe('a transport failure is never sold to the owner as a bad token', () => 
     expect(looksLikeAmbiguousLoginFailure(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(true)
     expect(looksLikeCredentialRejected(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(false)
     // …and the transport classifier CANNOT rescue it, which is the trap: the
-    // `dial tcp` / `no such host` strings it looks for are emitted only under
-    // `GH_DEBUG`, never in the normal output above.
+    // failure entry `gh` renders is fixed text that never carries the underlying
+    // transport or API error, so `dial tcp` / `no such host` cannot appear in it
+    // at all. Breaking the tie needs a second measurement, not a better regex.
     expect(looksLikeGithubUnreachable(GH_LOGIN_FAILURE_AMBIGUOUS)).toBe(false)
+  })
+
+  test("gh's OWN timeout entry is a transport fact, not an unclassified failure", async () => {
+    // `gh auth status` has a third rendering state, distinct from success and
+    // failure, and it says plainly that GitHub never answered. It used to match
+    // no classifier at all and land in `probe_failed` — the advice was already
+    // "do not rotate", so this was never owner-misdirecting, but the named cause
+    // was wrong and `probe_failed` blames our own probe for the network.
+    const probe = defaultGitModeProbe(storeWithToken, ghFailsWith(GH_TIMEOUT_ENTRY))
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
+    expect(looksLikeGithubUnreachable(GH_TIMEOUT_ENTRY)).toBe(true)
   })
 
   test('CONTROL — a verdict only a live response can produce IS still a rejection', async () => {
@@ -1008,18 +1167,23 @@ describe('a transport failure is never sold to the owner as a bad token', () => 
 })
 
 describe('a rate limit is not a rejection — GitHub returns 403 with a WORKING token', () => {
-  for (const [label, stderr] of [
-    ['primary', GH_RATE_LIMIT_PRIMARY],
-    ['secondary', GH_RATE_LIMIT_SECONDARY],
+  for (const [label, api] of [
+    ['primary', GH_API_RATE_LIMIT_PRIMARY],
+    ['secondary', GH_API_RATE_LIMIT_SECONDARY],
   ] as const) {
+    // Driven through BOTH surfaces, because that is the only way a rate limit can
+    // actually arrive: `gh auth status` renders its fixed failure entry (no HTTP
+    // status anywhere), and the 403 shows up on the reachability call.
+    const host = ghHost({ status: GH_LOGIN_FAILURE_AMBIGUOUS, api })
+
     test(`the ${label} rate limit is \`github_rate_limited\`, not a bad token`, async () => {
-      const probe = defaultGitModeProbe(storeWithToken, ghFailsWith(stderr))
+      const probe = defaultGitModeProbe(storeWithToken, host)
       const res = await probe.publisherAvailable()
       expect(res.authenticated === false && res.cause).toBe('github_rate_limited')
     })
 
     test(`the ${label} refusal says WAIT, and never says rotate`, async () => {
-      const msg = await refusalMessage(defaultGitModeProbe(storeWithToken, ghFailsWith(stderr)))
+      const msg = await refusalMessage(defaultGitModeProbe(storeWithToken, host))
       expect(msg).toContain('rate-limited')
       expect(msg).toContain('Wait for the limit to reset')
       expect(msg).toContain('Do NOT rotate the token')
@@ -1029,16 +1193,172 @@ describe('a rate limit is not a rejection — GitHub returns 403 with a WORKING 
   }
 
   test('the 403 in a rate limit is subtracted from the rejection classifier itself', () => {
-    // The defect was a blanket `/\bhttp 40[13]\b/`. Asserted at the classifier so
-    // it cannot be reintroduced by a caller that skips the probe's ordering.
+    // The first defect here was a blanket `/\bhttp 40[13]\b/`. Asserted at the
+    // classifier so it cannot be reintroduced by a caller that skips the probe's
+    // ordering.
     expect(looksLikeCredentialRejected('HTTP 403: API rate limit exceeded')).toBe(false)
     expect(looksLikeGithubRateLimited('HTTP 403: API rate limit exceeded')).toBe(true)
+    expect(looksLikeCredentialRejected(GH_API_RATE_LIMIT_PRIMARY)).toBe(false)
+    expect(looksLikeCredentialRejected(GH_API_RATE_LIMIT_SECONDARY)).toBe(false)
   })
 
-  test('CONTROL — a 403 that is NOT a rate limit is still a rejection', () => {
+  test('a 403 with NO rejection wording is not a verdict about the credential either', () => {
+    // The round-4 blocker. The rate-limit subtraction only rescued the 403s that
+    // said "rate limit"; every OTHER 403 GitHub returns to a request whose token
+    // it accepted and counted — SAML/SSO authorization, repository resource
+    // restrictions, a bare `Forbidden` — still read as "expired, revoked, or
+    // missing a scope". 401 is the code that means the credential was refused.
+    expect(looksLikeCredentialRejected('HTTP 403: Forbidden')).toBe(false)
+    expect(looksLikeCredentialRejected('gh: Forbidden (HTTP 403)')).toBe(false)
+    expect(looksLikeCredentialRejected('HTTP 401: Bad credentials')).toBe(true)
+    expect(looksLikeCredentialRejected(GH_API_BAD_CREDENTIALS)).toBe(true)
+  })
+
+  test('CONTROL — a 403 whose WORDING is a refusal is still a rejection', () => {
+    // The verdict comes from the phrase, not from the number, so narrowing the
+    // status-code test did not blind the classifier to real 403 refusals.
     expect(
       looksLikeCredentialRejected('HTTP 403: Resource not accessible by personal access token'),
     ).toBe(true)
+    expect(looksLikeCredentialRejected(GH_REJECTED_MISSING_SCOPE)).toBe(true)
+  })
+})
+
+describe('the tie `gh auth status` cannot break is broken by asking GitHub directly', () => {
+  // THE POINT OF THIS SUITE. `gh auth status` prints one fixed block for a
+  // refused token AND for three different transport failures, so on its own it
+  // can only ever produce a non-verdict — which meant a genuinely expired token
+  // was reported as "check your network first", and `credential_rejected` was
+  // unreachable from real `gh` output. `gh api` prints what actually happened.
+  const withReachability = (api: string, opts: { apiExit?: number; apiTimedOut?: boolean } = {}) =>
+    defaultGitModeProbe(
+      storeWithToken,
+      ghHost({ status: GH_LOGIN_FAILURE_AMBIGUOUS, api, ...opts }),
+    )
+
+  test('GitHub ANSWERED with a refusal → `credential_rejected`, and the owner is told to rotate', async () => {
+    const probe = withReachability(GH_API_BAD_CREDENTIALS)
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+    const msg = await refusalMessage(probe)
+    expect(msg).toContain('REJECTED')
+    expect(msg).toContain('expired, revoked, or missing a scope')
+    // The wrong advice for this case, and what round 3 actually said:
+    expect(msg).not.toContain('Check network/DNS/proxy FIRST')
+  })
+
+  for (const [label, api] of [
+    ['a dead proxy', GH_API_DEAD_PROXY],
+    ['a DNS failure', GH_API_DNS_FAILURE],
+    ['a blackholed proxy', GH_API_BLACKHOLE_TIMEOUT],
+  ] as const) {
+    test(`${label} → \`could_not_reach_github\`, never a bad token`, async () => {
+      const probe = withReachability(api)
+      const res = await probe.publisherAvailable()
+      expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
+    })
+
+    test(`${label} tells the owner NOT to rotate`, async () => {
+      const msg = await refusalMessage(withReachability(api))
+      expect(msg).toContain('could not reach GitHub')
+      expect(msg).toContain('Do NOT rotate the token')
+      expect(msg).not.toContain('REJECTED')
+      expect(msg).not.toContain('expired, revoked, or missing a scope')
+    })
+  }
+
+  test('our own watchdog killing the reachability call is unreachable, not a verdict', async () => {
+    const res = await withReachability('', { apiTimedOut: true }).publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
+  })
+
+  test('an unspawnable `gh api` leaves the honest non-verdict standing', async () => {
+    const res = await withReachability('ENOENT', { apiExit: -1 }).publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_verdict_unavailable')
+  })
+
+  test('BOTH measurements mute → the honest non-verdict, still pointing at the network first', async () => {
+    const probe = withReachability('gh: something nobody has classified')
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_verdict_unavailable')
+    const msg = await refusalMessage(probe)
+    expect(msg).toContain('Check network/DNS/proxy FIRST')
+    expect(msg).not.toContain('REJECTED')
+  })
+
+  test('the refusal shows BOTH measurements, so the owner can audit the verdict', async () => {
+    const msg = await refusalMessage(withReachability(GH_API_BAD_CREDENTIALS))
+    expect(msg).toContain('The token in GH_TOKEN is invalid.')
+    expect(msg).toContain('gh api --hostname github.com /zen')
+    expect(msg).toContain('Bad credentials (HTTP 401)')
+  })
+
+  test('the reachability call carries the PUBLISHER credential, not a bare `gh`', async () => {
+    // Same seam as the rest of the probe: if this call ran without the env, it
+    // would answer about a different credential than the one being judged.
+    const seen: { cmd: string[]; env: Record<string, string> | undefined }[] = []
+    const probe = defaultGitModeProbe(storeWithToken, async (cmd, _cwd, extraEnv) => {
+      seen.push({ cmd, env: extraEnv })
+      if (cmd[0] === 'git') {
+        return {
+          ok: true,
+          stdout: 'https://github.com/example-org/example-repo.git',
+          stderr: '',
+          exit_code: 0,
+        }
+      }
+      return {
+        ok: false,
+        stdout: '',
+        stderr: cmd[1] === 'api' ? GH_API_BAD_CREDENTIALS : GH_LOGIN_FAILURE_AMBIGUOUS,
+        exit_code: 1,
+      }
+    })
+    await probe.publisherAvailable()
+    const reachability = seen.filter((c) => c.cmd[1] === 'api')
+    expect(reachability.length).toBe(1)
+    expect(reachability[0]?.cmd).toEqual([...PUBLISHER_REACHABILITY_COMMAND])
+    expect(reachability[0]?.env?.['GH_TOKEN']).toBe('t0k')
+  })
+
+  test('the reachability call is NOT made when `gh auth status` already gave a verdict', async () => {
+    // It costs a round-trip; it is only worth making when the first measurement
+    // was genuinely ambiguous.
+    const cmds: string[][] = []
+    const probe = defaultGitModeProbe(storeWithToken, async (cmd) => {
+      cmds.push(cmd)
+      if (cmd[0] === 'git') {
+        return {
+          ok: true,
+          stdout: 'https://github.com/example-org/example-repo.git',
+          stderr: '',
+          exit_code: 0,
+        }
+      }
+      return { ok: false, stdout: '', stderr: GH_REJECTED_MISSING_SCOPE, exit_code: 1 }
+    })
+    expect((await probe.publisherAvailable()).authenticated).toBe(false)
+    expect(cmds.some((c) => c[1] === 'api')).toBe(false)
+  })
+
+  test('classifyGithubReachability reads the MEASURED shapes, and defaults to inconclusive', () => {
+    const asResult = (stderr: string, over: Partial<HostCommandResult> = {}): HostCommandResult => ({
+      ok: false,
+      stdout: '',
+      stderr,
+      exit_code: 1,
+      ...over,
+    })
+    expect(classifyGithubReachability(asResult(GH_API_BAD_CREDENTIALS))).toBe('refused')
+    expect(classifyGithubReachability(asResult(GH_API_DEAD_PROXY))).toBe('unreachable')
+    expect(classifyGithubReachability(asResult(GH_API_DNS_FAILURE))).toBe('unreachable')
+    expect(classifyGithubReachability(asResult(GH_API_BLACKHOLE_TIMEOUT))).toBe('unreachable')
+    expect(classifyGithubReachability(asResult(GH_API_RATE_LIMIT_PRIMARY))).toBe('rate_limited')
+    expect(classifyGithubReachability(asResult('', { timed_out: true }))).toBe('unreachable')
+    expect(classifyGithubReachability(asResult('ENOENT', { exit_code: -1 }))).toBe('inconclusive')
+    expect(classifyGithubReachability(asResult('who knows'))).toBe('inconclusive')
+    // A 403 with no rejection wording must not sneak a verdict in through here.
+    expect(classifyGithubReachability(asResult('gh: Forbidden (HTTP 403)'))).toBe('inconclusive')
   })
 })
 

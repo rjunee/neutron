@@ -43,8 +43,8 @@ export interface HostCommandResult {
 /**
  * WHY a publisher-authentication failure carries a CAUSE.
  *
- * "the outer publisher cannot authenticate" is equally true of five different
- * situations, and only two of them are the owner's to fix:
+ * "the outer publisher cannot authenticate" is equally true of all seven
+ * situations below, and only two of them are the owner's to fix:
  *
  *   • `no_credential_available` — the credential source was asked and had
  *     nothing, and the host's ambient `gh` could not authenticate either.
@@ -53,12 +53,14 @@ export interface HostCommandResult {
  *   • `credential_rejected`     — GitHub ANSWERED and refused the credential:
  *     expired, revoked, or missing a scope. Requires a verdict only a live
  *     response can produce (see {@link looksLikeCredentialRejected}).
- *   • `credential_verdict_unavailable` — `gh` said it could not log in, in
- *     wording that does NOT distinguish "the token was refused" from "GitHub
- *     was never reached". This is not hedging: MEASURED on gh 2.97.0, a dead
- *     proxy and a genuinely invalid token print byte-identical stderr (see
- *     {@link looksLikeAmbiguousLoginFailure}). Naming it honestly is the whole
- *     point of this taxonomy — the alternative is a confident wrong cause.
+ *   • `credential_verdict_unavailable` — `gh auth status` said it could not log
+ *     in, in wording that does NOT distinguish "the token was refused" from
+ *     "GitHub was never reached", AND the follow-up reachability measurement
+ *     could not break the tie either. This is not hedging: MEASURED on gh
+ *     2.97.0, three different transport failures and a genuinely invalid token
+ *     print byte-identical stderr (see {@link looksLikeAmbiguousLoginFailure}).
+ *     It is now the LAST resort rather than the answer, because
+ *     {@link PUBLISHER_REACHABILITY_COMMAND} resolves the common cases.
  *   • `github_rate_limited`     — GitHub answered with a rate limit. That answer
  *     is returned WITH a working credential, so it is evidence the token is
  *     FINE, and the only action is to wait.
@@ -73,7 +75,7 @@ export interface HostCommandResult {
  *     secrets store could not be opened), or `gh` failed in a way that says
  *     nothing about the credential. Nothing was learned about the credential.
  *
- * The SIXTH cause — "the probe was never handed a credential and so asked a
+ * One further cause — "the probe was never handed a credential and so asked a
  * bare `gh` about ambient state" — is deliberately absent from this list. It
  * is now unrepresentable: `defaultGitModeProbe` REQUIRES a
  * {@link PublisherCredentialSource}, so no probe can be built that has no
@@ -209,8 +211,12 @@ export interface GitModeProbe {
 export const MAX_AUTH_FAILURE_DETAIL_CHARS = 600
 
 /**
- * Render the captured `gh` output into the one-line refusal WITHOUT discarding
- * any of it.
+ * Render the captured `gh` output into the one-line refusal without discarding
+ * any DIAGNOSTIC LINE. Lines are flattened, never selected between; only the
+ * total length is bounded, by {@link MAX_AUTH_FAILURE_DETAIL_CHARS}, so an
+ * unbounded `err.message` cannot become a wall of text. That cap is the one
+ * thing here that can drop characters, and it drops them from the END of an
+ * already-complete rendering rather than choosing a line to keep.
  *
  * WHY THIS IS NOT `split('\n')[0]`, which is what it replaced. `gh auth
  * status`'s failure output is MULTI-LINE and its first line is the bare
@@ -267,7 +273,8 @@ export function describePublisherAuthFailure(
       return (
         `\`gh auth status\` could not log in for ${who}, but its wording does not say ` +
         `WHETHER the credential was refused or GitHub was never reached — measured on ` +
-        `gh 2.97.0, a dead proxy and a genuinely invalid token print identical output. ` +
+        `gh 2.97.0, three transport failures and a genuinely invalid token print identical ` +
+        `output — and the follow-up reachability check could not settle it either. ` +
         `Check network/DNS/proxy FIRST; rotate the token only once the network is known ` +
         `good${detail}`
       )
@@ -355,16 +362,6 @@ export type EnvCapableHostRunner = (
 ) => Promise<HostCommandResult>
 
 /**
- * Whether `gh`'s output describes a failure to REACH GitHub rather than a
- * verdict about the credential.
- *
- * Deliberately conservative: an unrecognised failure falls through to the
- * credential reading, which is the pre-existing behaviour, so this can only
- * move cases OUT of the "rotate your token" advice and never into it. The
- * patterns are Go's `net`/`http` surface (which is what `gh` prints) plus
- * GitHub's own 5xx.
- */
-/**
  * The exact `gh` invocation the probe makes, and WHY it carries two flags.
  *
  * MEASURED ROOT CAUSE OF THE REPORTED REFUSAL (reproduced on the host, gh 2.97.0):
@@ -420,6 +417,18 @@ export const PUBLISHER_AUTH_COMMAND: readonly string[] = [
  * fabricate `Bad credentials` or a scope list, because there was no response to
  * carry them.
  *
+ * WHY 401 COUNTS AND A BARE 403 DOES NOT — the round-4 fix. This used to test
+ * `/\bhttp 40[13]\b/`, and 403 is simply not a statement about the credential:
+ * GitHub returns it, TO A REQUEST WHOSE TOKEN IT ACCEPTED AND COUNTED, for the
+ * primary rate limit, the secondary rate limit, SAML/SSO authorization, and
+ * repository resource restrictions. So a bare `HTTP 403: Forbidden` carrying no
+ * rejection wording told the owner his working token was "expired, revoked, or
+ * missing a scope" — and the rate-limit subtraction below only rescued the 403s
+ * that happened to say "rate limit". 401 is the code that means the credential
+ * was not accepted, and it stays. A 403 still reads as a refusal when the SAME
+ * output carries a phrase that says so (`resource not accessible by`, a scope
+ * list), because then the verdict comes from the wording, not from the number.
+ *
  * A rate limit is explicitly NOT a refusal even though GitHub returns it as
  * `403` — it is returned WITH a valid credential, so it is excluded before
  * anything else is considered.
@@ -428,7 +437,7 @@ export function looksLikeCredentialRejected(text: string): boolean {
   const t = text.toLowerCase()
   if (t.length === 0) return false
   // A rate-limited 403 arrives with a WORKING token. It must never be read as a
-  // refusal, so it is subtracted before the 40x test below can see it.
+  // refusal, so it is subtracted before anything below can see it.
   if (looksLikeGithubRateLimited(t)) return false
   return (
     t.includes('bad credentials') ||
@@ -437,9 +446,14 @@ export function looksLikeCredentialRejected(text: string): boolean {
     // "missing required scopes" — the optional word is why this is a regex and
     // not an `includes`, which silently missed gh's own wording.
     /missing required (token )?scopes/.test(t) ||
+    // GraphQL's scope refusal, which GitHub returns as a 403. It was previously
+    // caught only ACCIDENTALLY, by the blanket status-code test — so narrowing
+    // that test to 401 required naming the wording that actually makes it a
+    // verdict, or a real scope refusal would have become unclassified.
+    t.includes('has not been granted the required scopes') ||
     t.includes('insufficient oauth scopes') ||
     t.includes('resource not accessible by') ||
-    /\bhttp 40[13]\b/.test(t)
+    /\bhttp 401\b/.test(t)
   )
 }
 
@@ -470,28 +484,36 @@ export function looksLikeGithubRateLimited(text: string): boolean {
  * refused credential from a network that never carried the question.
  *
  * THIS IS A MEASUREMENT, NOT A HEDGE. On gh 2.97.0, run against `github.com`
- * with `--active`, these two situations produce BYTE-IDENTICAL stderr:
+ * with `--active`, FOUR different situations produce BYTE-IDENTICAL stderr —
+ * one credential fault and three transport faults:
  *
  *   • a genuinely invalid token, network fine;
- *   • a perfectly good token behind a dead proxy, so GitHub was never reached.
+ *   • a dead proxy (connection refused), so GitHub was never reached;
+ *   • a proxy host that does not resolve (DNS failure);
+ *   • a blackholed proxy, so the call hung until it timed out.
  *
- * Both print:
+ * All four print exactly:
  *
  *     github.com
  *       X Failed to log in to github.com using token (GH_TOKEN)
  *       - Active account: true
  *       - The token in GH_TOKEN is invalid.
  *
- * The `dial tcp` / `no such host` strings {@link looksLikeGithubUnreachable}
- * looks for appear only under `GH_DEBUG`, so that classifier cannot rescue the
- * transport case from normal output, and `is invalid` matched the REJECTION
- * classifier — which is how a network outage came to tell the owner his token
- * was bad.
+ * That is structural, not incidental: `gh auth status` renders a fixed failure
+ * entry and NEVER prints the underlying API or transport error
+ * (`pkg/cmd/auth/status/status.go` L90-108 in v2.97.0). So the `dial tcp` /
+ * `no such host` strings {@link looksLikeGithubUnreachable} looks for cannot
+ * appear here to rescue the transport case, while `is invalid` matched the
+ * REJECTION classifier — which is how a network outage came to tell the owner
+ * his token was bad.
  *
- * There is no signal here that separates them, so the honest answer is that
- * there is no verdict. `credential_verdict_unavailable` says exactly that and
- * points at the network first; guessing "rotate your token" is wrong about half
- * the time and expensive in the half it is wrong.
+ * THE COROLLARY THAT MADE THIS A DEFECT IN ITS OWN RIGHT. Because that entry
+ * never carries GitHub's answer, `credential_rejected` was UNREACHABLE from real
+ * `gh auth status` output: a genuinely expired token printed the block above and
+ * was reported as "we could not tell — check your network first". Both halves of
+ * the misdirection have the same root, and one more measurement fixes both — see
+ * {@link PUBLISHER_REACHABILITY_COMMAND}. This predicate therefore no longer
+ * SELECTS a cause; it selects the need for that second measurement.
  */
 export function looksLikeAmbiguousLoginFailure(text: string): boolean {
   const t = text.toLowerCase()
@@ -501,6 +523,72 @@ export function looksLikeAmbiguousLoginFailure(text: string): boolean {
     t.includes('is invalid') ||
     t.includes('invalid token')
   )
+}
+
+/**
+ * The tie-breaker: the one extra question that separates "GitHub refused this
+ * credential" from "GitHub never answered".
+ *
+ * WHY A SECOND CALL EXISTS AT ALL. `gh auth status` flattens both into one fixed
+ * string ({@link looksLikeAmbiguousLoginFailure}), so no amount of parsing of
+ * ITS output can recover the difference — the information is not in there. `gh
+ * api` does not flatten: it prints GitHub's own response, or the transport error
+ * verbatim. MEASURED on gh 2.97.0 with an isolated `GH_CONFIG_DIR`, same binary,
+ * same environment, same proxy handling, where `gh auth status` printed the
+ * identical block for all four:
+ *
+ *     invalid token, network fine   → `gh: Bad credentials (HTTP 401)`
+ *     dead proxy                    → `Get "https://api.github.com/zen":
+ *                                      proxyconnect tcp: dial tcp 127.0.0.1:1:
+ *                                      connect: connection refused`
+ *     proxy host does not resolve   → `error connecting to <host>` /
+ *                                      `check your internet connection`
+ *     blackholed proxy              → `proxyconnect tcp: … i/o timeout`
+ *
+ * SAME TOOL, DELIBERATELY. A reachability check written with `fetch` or `curl`
+ * would answer about a DIFFERENT network path — its own proxy handling, its own
+ * DNS — and could report "GitHub is reachable" for a host on which `gh` cannot
+ * reach it, converting a transport outage into "your token was rejected", which
+ * is the exact misdirection this whole change exists to remove. `/zen` is the
+ * cheapest authenticated endpoint GitHub publishes and its body is discarded;
+ * only the failure shape is read.
+ *
+ * COST: one extra `gh` invocation, only on the ambiguous branch of an
+ * already-failing probe. The success path is untouched.
+ */
+export const PUBLISHER_REACHABILITY_COMMAND: readonly string[] = [
+  'gh',
+  'api',
+  '--hostname',
+  'github.com',
+  '/zen',
+]
+
+/** What the reachability measurement established about the ambiguous failure. */
+export type GithubReachability = 'refused' | 'unreachable' | 'rate_limited' | 'inconclusive'
+
+/**
+ * Read the reachability measurement. `'inconclusive'` is a real answer and the
+ * default: an unrecognised result must leave the honest non-verdict standing
+ * rather than manufacture the expensive one.
+ */
+export function classifyGithubReachability(res: HostCommandResult): GithubReachability {
+  // Our own watchdog killed it, or `gh` could not be run — nothing was learned
+  // about reachability, so nothing may be concluded about the credential.
+  if (res.timed_out === true) return 'unreachable'
+  if (res.exit_code === -1) return 'inconclusive'
+  const output = `${res.stderr}\n${res.stdout}`
+  // Transport first: a host that cannot be reached cannot have refused anything.
+  if (looksLikeGithubUnreachable(output)) return 'unreachable'
+  // Then the rate limit, which is a 403 carried by an ACCEPTED credential and so
+  // must be subtracted before any 4xx reading.
+  if (looksLikeGithubRateLimited(output)) return 'rate_limited'
+  if (looksLikeCredentialRejected(output)) return 'refused'
+  // `gh api` succeeded, or failed in a way we do not recognise. A success here is
+  // genuinely strange — the credential worked for the API but not for `gh auth
+  // status` — and inventing a verdict from strangeness is what this module is
+  // being fixed for.
+  return 'inconclusive'
 }
 
 /**
@@ -530,6 +618,28 @@ export function looksLikeNoGithubAuth(text: string): boolean {
   )
 }
 
+/**
+ * Whether `gh`'s output describes a failure to REACH GitHub rather than a
+ * verdict about the credential.
+ *
+ * Deliberately conservative: an unrecognised failure does NOT come here, so this
+ * can only move cases OUT of the "rotate your token" advice and never into it.
+ * The patterns are Go's `net`/`http` surface (which is what `gh` prints under
+ * `gh api`) plus GitHub's own 5xx, plus two `gh`-authored wordings MEASURED on
+ * 2.97.0 rather than inferred:
+ *
+ *   • `error connecting to <host>` / `check your internet connection` — what
+ *     `gh api` prints when the proxy host does not resolve. Neither string is in
+ *     Go's `net` vocabulary, so the Go-shaped patterns alone missed a plain DNS
+ *     failure entirely, and it fell through to the unclassified branch.
+ *   • `timeout trying to log in` — `gh auth status`'s OWN third rendering state,
+ *     distinct from its success and failure entries (`pkg/cmd/auth/status/
+ *     status.go` L110-117 in v2.97.0; the format string
+ *     `"  %s Timeout trying to log in to %s using token (%s)"` is also present
+ *     verbatim in the 2.97.0 binary). It says GitHub never answered, so it is a
+ *     transport fact; it used to reach the unclassified branch and be reported
+ *     as `probe_failed`.
+ */
 export function looksLikeGithubUnreachable(text: string): boolean {
   const t = text.toLowerCase()
   if (t.length === 0) return false
@@ -544,6 +654,9 @@ export function looksLikeGithubUnreachable(text: string): boolean {
     t.includes('tls handshake timeout') ||
     t.includes('proxyconnect') ||
     t.includes('temporary failure in name resolution') ||
+    t.includes('error connecting to') ||
+    t.includes('check your internet connection') ||
+    t.includes('timeout trying to log in') ||
     /\bhttp 5\d\d\b/.test(t)
   )
 }
@@ -720,14 +833,43 @@ export function defaultGitModeProbe(
           detail: describeWhichCredential(token, res.stderr),
         }
       }
-      // GitHub may never have answered at all: `gh` prints the same "failed to
-      // log in / token is invalid" text for a refused token and for a network it
-      // could not cross. Say so rather than picking the expensive guess.
+      // `gh auth status` prints the SAME fixed block for a refused token and for
+      // a network it could not cross, so its output cannot settle this. ASK A
+      // SECOND QUESTION rather than guess — or, as round 3 did, rather than
+      // report every genuinely expired token as "we could not tell".
       if (looksLikeAmbiguousLoginFailure(output)) {
-        return {
-          authenticated: false,
-          cause: 'credential_verdict_unavailable',
-          detail: describeWhichCredential(token, res.stderr),
+        const reach = await run([...PUBLISHER_REACHABILITY_COMMAND], undefined, env)
+        const evidence =
+          `\`${PUBLISHER_REACHABILITY_COMMAND.join(' ')}\` was then run to tell a refusal ` +
+          `apart from an unreachable GitHub, and answered: ${reach.stderr}`
+        switch (classifyGithubReachability(reach)) {
+          case 'refused':
+            // GitHub ANSWERED, and its answer was a refusal. That is the positive
+            // evidence `gh auth status` structurally cannot supply.
+            return {
+              authenticated: false,
+              cause: 'credential_rejected',
+              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
+            }
+          case 'unreachable':
+            return {
+              authenticated: false,
+              cause: 'could_not_reach_github',
+              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
+            }
+          case 'rate_limited':
+            return {
+              authenticated: false,
+              cause: 'github_rate_limited',
+              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
+            }
+          case 'inconclusive':
+            // Both measurements came back mute. The honest non-verdict stands.
+            return {
+              authenticated: false,
+              cause: 'credential_verdict_unavailable',
+              detail: `${describeWhichCredential(token, res.stderr)} — ${evidence}`,
+            }
         }
       }
       // `gh` failed for a reason we cannot classify. Nothing was learned about

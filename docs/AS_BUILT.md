@@ -392,6 +392,69 @@ touching this change. Note the shard partition is NOT comparable across the two 
 this branch declares 1,300 test files to main's 1,299, which shifts the assignment, so
 the comparison was made per-file.
 
+ROUND 4 — the taxonomy was right and three of its verdicts were still wrong, because
+`gh auth status` cannot answer the question the classifier was asking it. Measured on
+this host against `gh version 2.97.0 (2026-07-31)`, each run with an isolated
+`GH_CONFIG_DIR` so the host's own login was neither read nor disturbed: an invalid token,
+a proxy that refuses the connection, a proxy host that does not resolve, and a blackholed
+proxy ALL print the identical four lines, ending `- The token in GH_TOKEN is invalid.`
+That is structural rather than incidental — `gh` renders a fixed failure entry and never
+prints the underlying API or transport error (`pkg/cmd/auth/status/status.go` L90-108 in
+v2.97.0), and `Missing required token scopes` is printed only by the SUCCESS entry (L86).
+
+Two consequences, opposite in direction and identical in root. A network outage matched
+`is invalid` and was sold to the owner as a bad token; and `credential_rejected` was
+UNREACHABLE from real output, so a genuinely expired token was reported as "we could not
+tell — check your network first". No regex over that output can fix either, because the
+distinguishing information is not in it. So the probe now asks a SECOND question on the
+ambiguous branch only — `PUBLISHER_REACHABILITY_COMMAND` (`gh api --hostname github.com
+/zen`) — which does not flatten: measured, it answers `gh: Bad credentials (HTTP 401)`
+for the refusal, `proxyconnect tcp … connection refused` for the dead proxy, `error
+connecting to <host>` / `check your internet connection` for the DNS failure, and
+`proxyconnect tcp … i/o timeout` for the blackhole. Same binary, same env, same proxy
+handling, deliberately: a `fetch`/`curl` reachability check would answer about a
+different network path and could convert a transport outage into "your token was
+rejected". `credential_verdict_unavailable` survives as the last resort when both
+measurements are mute, which is the honest answer rather than the default one
+(`trident/git-mode.ts` `classifyGithubReachability`).
+
+Also in this round: the blanket `/\bhttp 40[13]\b/` narrowed to `401`, because GitHub
+returns 403 TO A REQUEST WHOSE TOKEN IT ACCEPTED for both rate limits, SAML/SSO
+authorization and resource restrictions — the rate-limit subtraction only rescued the
+403s that said "rate limit", so a bare `HTTP 403: Forbidden` still read as "expired,
+revoked, or missing a scope". A 403 still reads as a refusal when the WORDING says so,
+which required naming GraphQL's `has not been granted the required scopes` explicitly,
+since the status-code test had been covering it by accident. `gh`'s third rendering
+state (`Timeout trying to log in`, L110-117) now classifies as `could_not_reach_github`
+instead of falling through to `probe_failed`.
+
+The fixtures were the reason none of this was caught: three of them were labelled
+"copied from gh version 2.97.0" and could not have been — the rejection CONTROL certifying
+that `credential_rejected` still worked mixed the failure entry's header with the success
+entry's scope lines, and both rate-limit blocks embedded an HTTP status into a block that
+structurally cannot carry one. Every fixture now states MEASURED (with the command that
+produced it) or CONSTRUCTED (with what it was built from and why it could not be
+measured). The rate-limit cases moved onto the reachability surface, where a 403 can
+actually arrive. `every refusal keeps the original guard sentence` now iterates all seven
+members of `PublisherAuthFailureCause` rather than sampling one, joined by two more
+enumerations: every cause names the handle/source/detail and renders a DISTINCT sentence,
+and only the two causes the owner can act on mention repairing the credential.
+
+Verification: `trident/git-mode.test.ts` 84 pass / 0 fail (254 assertions), up from 66;
+`trident/git-mode-credential-seam.test.ts` 5 pass / 0 fail, still asserting through the
+token-store seam that a stored token with no ambient login resolves to `'pr'`.
+`bash scripts/ci/typecheck-all.sh` → 51/51 tsconfigs pass; `bash scripts/ci/lint.sh` → all
+gates 0 findings. The leak gate's finding SET was differenced against untouched `main` at
+`f99d6d49` rather than counted: zero new findings (main reports more, not fewer). Eight
+mutation proofs, each reverted after: re-widening to `40[13]` reddens 2; deleting the
+reachability call reddens 15; guessing `refused` when it is mute reddens 4; letting a rate
+limit say REJECTED reddens 3; collapsing two causes onto one message reddens 2; dropping
+the TIMEOUT entry reddens 1; dropping the scope-list verdict reddens 5 — confirming the
+corrected CONTROL fixture still bites. Across the whole `trident/` directory 17 tests fail
+and 16 are identical on untouched `main`; the residue is flaky rather than differential,
+reproduced by running the same two files three times on unchanged code and getting three
+different failing subsets — all real-`git`/network shell tests, none touching this change.
+
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 
 The gate carried `['test', 'lint', 'typecheck']` — THIS repository's job names — frozen
