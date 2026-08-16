@@ -4,7 +4,7 @@
  *
  * The measured outage: `NEUTRON_INSTANCE_SLUG` was unset while `NEUTRON_HOME`
  * was inherited, so the reconciler resolved the documented `'dev'` fallback,
- * pointed it at the LIVE tenant database, and moved all fifteen credential rows
+ * pointed it at the LIVE instance database, and moved all fifteen credential rows
  * `juno → dev`. Seven minutes later a normal boot moved them back. The owner
  * pressed ▶ inside that window and the gateway — frozen on the handle `juno` —
  * read zero secrets and reported "GitHub origin detected but the outer publisher

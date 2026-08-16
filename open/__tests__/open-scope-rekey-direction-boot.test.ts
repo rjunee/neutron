@@ -15,7 +15,7 @@
  *
  * ── THE OUTAGE, IN ONE SEQUENCE ────────────────────────────────────────────
  * `NEUTRON_INSTANCE_SLUG` was unset while `NEUTRON_HOME` was inherited, so the
- * documented `'dev'` fallback was pointed at the LIVE tenant database and moved
+ * documented `'dev'` fallback was pointed at the LIVE instance database and moved
  * all fifteen credential rows `juno → dev` (snapshot `…pre-rekey-1786735643069`,
  * 19:27). Seven minutes later a normal boot moved them back
  * (`…pre-rekey-1786736040922`, 19:34). The owner pressed ▶ inside that window
