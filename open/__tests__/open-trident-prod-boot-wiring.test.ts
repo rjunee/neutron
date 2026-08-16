@@ -210,18 +210,27 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(board.get('owner', item.id)?.linked_run_id).toBe(res.ok ? res.run.id : '')
     expect(board.get('owner', item.id)?.status).toBe('in_progress')
 
-    // THE MERGE-MODE PROBE IS CREDENTIALED AT THE COMPOSITION ROOT.
+    // THE MERGE-MODE PROBE REACHED BY `work_board_start` IS CREDENTIALED.
     //
-    // Anti "built-but-not-wired", and the specific regression that refused every
-    // board build: the probe used to be built with NO credential and ask a bare
-    // `gh auth status` about the gateway's own environment — which holds no
-    // `GH_TOKEN` by design, so it truthfully answered "not authenticated" and
-    // `detectMergeMode` refused. `resolveMergeMode` is now REQUIRED on the
-    // dispatch deps (a type-level guarantee that no call site can fall back),
-    // and the credential source the composer builds is asserted here to be the
-    // live secrets store rather than the "nothing wired" placeholder.
-    expect(typeof tbd.resolveMergeMode).toBe('function')
+    // Anti "built-but-not-wired". Round 1 of this fix asserted only
+    // `typeof tbd.resolveMergeMode === 'function'`, which the PRE-FIX composer
+    // also satisfied — the assertion could not fail, so it guarded nothing. The
+    // dispatch seam now carries the PROBE, whose `publisher` names the credential
+    // it will consult, so the wiring is inspectable at the exact seam
+    // `work_board_start` runs through (build-core-modules registers the tool
+    // surface from this same object).
+    expect(tbd.merge_mode_probe.publisher.owner_handle).toBe('owner')
+    expect(tbd.merge_mode_probe.publisher.source).toBe('the instance secrets store')
+    // …and specifically NOT the "nothing was wired here" placeholder, which is
+    // what an unwired composition would have produced.
+    expect(tbd.merge_mode_probe.publisher.owner_handle).not.toBe('unknown')
+
     const publisherCredential = composition.onboarding_overnight_cron!.publisher_credential
+    // The board seam and the overnight seam resolve the SAME credential — one
+    // connection in chat serves both. Identity, not shape: two separately-built
+    // sources with equal fields would pass a field comparison while drifting.
+    expect(tbd.merge_mode_probe.publisher.owner_handle).toBe(publisherCredential.owner_handle)
+    expect(tbd.merge_mode_probe.publisher.source).toBe(publisherCredential.source)
     expect(publisherCredential.owner_handle).toBe('owner')
     expect(publisherCredential.source).toBe('the instance secrets store')
     // Nothing connected yet → empty, and reported as empty.

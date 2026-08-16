@@ -2059,8 +2059,12 @@ export function buildOpenGraphComposer(
       load: tridentGithubEnv,
     }
     const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
+    // ONE probe object, shared by `/code`, the HTTP ▶ route and the agent-native
+    // board seam. Shared rather than re-derived so a wiring test can assert the
+    // credential the board seam closes over by identity, not by `typeof`.
+    const tridentMergeModeProbe = defaultGitModeProbe(tridentPublisherCredential)
     const resolveTridentMergeMode = (repoPath: string) =>
-      detectMergeMode(repoPath, defaultGitModeProbe(tridentPublisherCredential))
+      detectMergeMode(repoPath, tridentMergeModeProbe)
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
         // No credential → no substrate → the tick loop can never advance a run
@@ -6339,7 +6343,7 @@ export function buildOpenGraphComposer(
               work_board: workBoardStore,
               repo_path: owner_home,
               channel_kind: 'app_socket' as const,
-              resolveMergeMode: resolveTridentMergeMode,
+              merge_mode_probe: tridentMergeModeProbe,
               // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.

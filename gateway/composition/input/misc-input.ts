@@ -321,12 +321,15 @@ export interface MiscCompositionInput {
     repo_path: string
     resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
     /**
-     * Resolve the repo's merge mode. REQUIRED — the composer owns the GitHub
-     * credential, so it owns this resolver. Optional here once meant the tool
-     * surface fell through to an uncredentialed `gh auth status` probe and
-     * refused every build (`trident/board-dispatch.ts`).
+     * The merge-mode PROBE, REQUIRED. The composer owns the GitHub credential,
+     * so it owns this. Optional here once meant the tool surface fell through to
+     * an uncredentialed `gh auth status` probe (`trident/board-dispatch.ts`).
+     *
+     * A probe rather than a `(repo_path) => MergeMode` function on purpose: the
+     * probe carries `publisher`, so which credential this seam closes over is
+     * assertable at the boot-wiring test instead of merely being a function.
      */
-    resolveMergeMode: (repo_path: string) => Promise<import('@neutronai/trident/store.ts').MergeMode>
+    merge_mode_probe: import('@neutronai/trident/git-mode.ts').GitModeProbe
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number

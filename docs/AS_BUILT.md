@@ -181,52 +181,87 @@ was tempting to call it flaky. The discriminator was never the shard: it was whe
 built inside a loaded chunk at all.
 ## 2026-08-15 — the publisher auth probe asked an un-credentialed CLI whether it was credentialed
 
-Every board-dispatched build was refused at creation with `could not prepare the build
-workspace for "<project>": GitHub origin detected but the outer publisher cannot
-authenticate; refusing to silently weaken the PR merge gate`. The refusal was correct
-and stays (`trident/git-mode.ts` `detectMergeMode`) — selecting local mode there would
-drop the PR and CI gates. It fired while a valid credential existed.
+A build was refused at creation with `could not prepare the build workspace for
+"<project>": GitHub origin detected but the outer publisher cannot authenticate;
+refusing to silently weaken the PR merge gate`. The refusal is correct and stays
+(`trident/git-mode.ts` `detectMergeMode`) — selecting local mode there would drop the PR
+and CI gates. It fired while a valid credential existed, and it did not say why.
 
-`defaultGitModeProbe` defaulted its runner to a plain `spawnCapture` and its
-`publisherAvailable` was `run(['gh','auth','status']).ok`. The gateway process holds no
-`GH_TOKEN` by design: the credential arrives PER SPAWN via `setGithubSpawnEnvResolver`
-(`open/composer.ts:997`). So a caller that did not inject a credentialed runner probed a
-bare CLI and got a truthful "not authenticated" about an environment that structurally
-cannot be authenticated. Two callers took that default — `trident/board-dispatch.ts` and
-`buildOvernightTridentSeam` (`onboarding/overnight/register.ts`) — while the three
-composer wiring sites did pass a credentialed runner. An OPTIONAL default is what
-produced the bug, so the fix removes the option rather than fixing the two callers.
+WHAT WAS ACTUALLY MEASURED, because the first draft of this entry overclaimed and the
+overclaim is the more useful record. It said "every board-dispatched build was refused
+because the probe was uncredentialed". That is false: at `bb90794b`, `open/composer.ts`
+already passed a credentialed `resolveMergeMode` into `trident_build_dispatch`, which is
+the seam `work_board_start` runs through (`gateway/composition/build-core-modules.ts:241`
+→ `trident/work-board-build-tool.ts`). The uncredentialed `defaultGitModeProbe()` default
+was taken by `onboarding/overnight/register.ts` and by `board-dispatch.ts`'s own `??`
+fallback, which production did not reach. Two distinct paths produce the identical
+refusal, and only naming both explains the symptom:
+
+  1. NO CREDENTIAL AT ALL. `defaultGitModeProbe` defaulted its runner to a plain
+     `spawnCapture` and asked `gh auth status` about the gateway's own environment. The
+     gateway holds no `GH_TOKEN` by design — it arrives PER SPAWN via
+     `setGithubSpawnEnvResolver` (`open/composer.ts:1002`) — so the answer was a truthful
+     "not authenticated" about a process that structurally cannot be.
+  2. A CREDENTIALED RUNNER THAT RESOLVED TO NOTHING. When the token lookup missed (the
+     row filed under a different handle), `githubProcessEnv(null)` returned `{}`,
+     `spawnCapture` omits `env` entirely for an empty extra-env, and the credentialed
+     runner degraded silently into exactly the same bare `gh auth status` — reported to
+     the owner as an authentication failure rather than as "not connected".
 
 `defaultGitModeProbe(credential, run?)` now REQUIRES a `PublisherCredentialSource`
-(`{owner_handle, source, load()}`) and resolves the credential FIRST, so "nothing stored"
-is reported as itself instead of being laundered through the CLI into an indistinguishable
-authentication failure; the capability call then runs UNDER that credential, so a host
-with no ambient login still answers yes. `resolveMergeMode` became required on
-`BoardBoundBuildDeps`, `TridentBuildToolDeps`, `TridentCodeContext` and the
-`trident_build_dispatch` composition input, so the fallback is unrepresentable at compile
-time rather than merely unused; the overnight seam takes an explicit probe and
-`buildOvernightEngineHandler` an explicit `publisher_credential`. A composition with
-nothing to give uses `unwiredPublisherCredential(handle)`, which reports emptiness as
-emptiness and never reads ambient state.
+(`{owner_handle, source, load()}`, `trident/git-mode.ts:312`), so path 1 is
+unrepresentable rather than merely unused, and the probe always knows whose credential it
+asked for — which closes path 2, because "the lookup returned nothing" is now a distinct
+answer instead of an indistinguishable one. `open/composer.ts:2061` builds ONE probe,
+shared by `/code`, the HTTP route, the agent-native board seam
+(`open/composer.ts:6326`) and the overnight seam (`open/composer.ts:6130`).
 
-The refusal now names WHICH of four causes and under WHICH owner handle the lookup was
-made — `no_credential_available` ("not an expired token"), `credential_rejected`
-(expired/revoked/scope, with the CLI's own first line), `publisher_cli_unavailable`
-(spawn failure, exit -1 — a different fact from a rejected token), `probe_failed` (the
-probe threw). The fifth cause, "the probe was never handed a credential", is absent
-because it can no longer occur.
+The board seam takes the PROBE, not a resolver function: `merge_mode_probe: GitModeProbe`
+replaced `resolveMergeMode: (path) => Promise<MergeMode>` on `TridentBuildToolDeps` and on
+the `trident_build_dispatch` composition input. An opaque function satisfies its type with
+or without a credential, so a wiring test could only assert `typeof … === 'function'` —
+which the buggy composition also passed. A probe carries `publisher`, so which credential
+the seam closes over is assertable. A composition with nothing to give uses
+`unwiredPublisherCredential()` (`trident/git-mode.ts:140`), which takes no handle: its one
+caller had none and was passing the PROJECT SLUG, so the refusal named an identity that
+was never looked up.
 
-Guards: `trident/git-mode-credential-seam.test.ts` drives a REAL `SecretsStore` on a temp
-db through the composer's exact construction and asserts a stored token makes the probe
-available on a host with no ambient login (with a control that the token reached the call),
-that an empty store refuses without asking the host at all, and that a credential connected
-AFTER composition takes effect with no restart. `process.env` is never mutated — setting
-`GH_TOKEN` on the test process would exercise the ambient read being removed and would pass
-for the broken code too. `open/__tests__/open-trident-prod-boot-wiring.test.ts` asserts the
-composer wires the live secrets store rather than the unwired placeholder. Mutation-tested
-in three directions, each with a control proving the mutation landed: restoring the ambient
-probe reddens 7, stripping the cause from the refusal reddens 7, collapsing the
-unrunnable-CLI cause reddens 1.
+THE PROBE IS A MIRROR OF THE PUBLISHER, NOT A STRICTER GATE IN FRONT OF IT. It runs the
+same command in the same environment the publisher will use, including when that
+environment is empty. An earlier revision short-circuited an empty store straight to
+`no_credential_available` without asking anything, which would have started refusing every
+host where the owner had run `gh auth login` and never connected GitHub in-app — hosts
+that publish fine, because the publisher inherits that session. That traded the original
+false negative for a new one.
+
+The refusal names WHICH of five causes and under WHICH owner handle the lookup was made:
+`no_credential_available` (nothing stored AND no ambient session — "not an expired
+token"), `credential_rejected` (expired/revoked/scope), `could_not_reach_github`,
+`publisher_cli_unavailable` (spawn failure, exit -1), `probe_failed`. `gh auth status`
+makes a live API round-trip, so DNS failure, an offline host, a proxy and a GitHub 5xx all
+exit non-zero with a good token; so does our own 60s watchdog kill, which is why
+`spawnCapture` now records `timed_out` (`trident/git-mode.ts:473`) — the exit code alone
+cannot distinguish a kill from a verdict. Every one of those used to render as "your token
+was REJECTED — expired, revoked, or missing a scope", sending the owner to rotate a
+working credential during an outage. `looksLikeGithubUnreachable`
+(`trident/git-mode.ts:272`) is deliberately conservative: an unrecognised failure falls
+through to the credential reading, so it can only move cases OUT of that advice.
+
+Guards. `trident/git-mode-credential-seam.test.ts` drives a REAL `SecretsStore` on a temp
+db through the composer's exact construction: a stored token makes the probe available on
+a host with no ambient login (control: the token reached the call), an EMPTY store on a
+host that IS logged in stays available (control: the store was empty and the host was
+consulted with an empty env), an empty store on a host with no session refuses by name,
+and a credential connected AFTER composition takes effect with no restart. `process.env`
+is never mutated — setting `GH_TOKEN` on the test process would exercise the ambient read
+being removed and would pass for the broken code too. `open/__tests__/open-trident-prod-
+boot-wiring.test.ts` asserts the probe reachable from `work_board_start` names the live
+secrets store and not the unwired placeholder. Mutation-tested against a green control of
+42/42 on `trident/git-mode.test.ts` + `trident/git-mode-credential-seam.test.ts`:
+restoring the ambient probe reddens 7, stripping the cause from the refusal reddens 8,
+collapsing `could_not_reach_github` into `credential_rejected` reddens 3, and re-adding
+the empty-store short-circuit reddens 7. The board seam's credentialing needs no mutation
+test: handing it anything but a `GitModeProbe` no longer compiles.
 
 ## 2026-08-15 — the readiness gate asks the base branch which checks are required
 

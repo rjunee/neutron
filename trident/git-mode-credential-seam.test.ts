@@ -5,8 +5,8 @@
  * bare `gh auth status` and report whatever ambient login state the calling
  * process happened to have. The gateway process holds no `GH_TOKEN` — the
  * credential is injected PER SPAWN — so the probe truthfully answered "not
- * authenticated" about an environment that structurally cannot be, and every
- * board-dispatched build was refused with "the outer publisher cannot
+ * authenticated" about an environment that structurally cannot be, and a build
+ * on a GitHub-backed repo was refused with "the outer publisher cannot
  * authenticate" while a valid token sat in the secrets store.
  *
  * So these run against a REAL `SecretsStore` on a temp database and build the
@@ -89,7 +89,7 @@ function hostWithNoAmbientLogin(seen: { envs: (Record<string, string> | undefine
     extraEnv?: Record<string, string>,
   ): Promise<HostCommandResult> => {
     if (cmd[0] === 'git') {
-      return { ok: true, stdout: 'https://github.com/rjunee/neutron.git', stderr: '', exit_code: 0 }
+      return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
     }
     seen.envs.push(extraEnv)
     const token = extraEnv?.['GH_TOKEN'] ?? ''
@@ -126,6 +126,7 @@ test('CONTROL — the SAME host with an empty store refuses, naming the cause an
     expect(await probe.publisherAvailable()).toEqual({
       authenticated: false,
       cause: 'no_credential_available',
+      detail: 'You are not logged into any GitHub hosts.',
     })
     let msg = ''
     try {
@@ -141,9 +142,13 @@ test('CONTROL — the SAME host with an empty store refuses, naming the cause an
     expect(msg).toContain(OWNER)
     expect(msg).toContain('the instance secrets store')
   })
-  // An empty store is answered FROM the store — the host is never asked whether
-  // it happens to be logged in.
-  expect(seen.envs.length).toBe(0)
+  // The host WAS asked, carrying the empty environment the publisher would
+  // carry — the probe is a faithful mirror of the publisher, not a stricter
+  // gate in front of it (`git-mode.test.ts` > "the probe is never stricter than
+  // the publisher it speaks for"). What makes this `no_credential_available`
+  // rather than `credential_rejected` is that there was no token to reject.
+  expect(seen.envs.length).toBeGreaterThan(0)
+  expect(seen.envs.every((e) => e !== undefined && Object.keys(e).length === 0)).toBe(true)
 })
 
 test('a credential connected AFTER the probe was built takes effect with no restart', async () => {
@@ -155,6 +160,7 @@ test('a credential connected AFTER the probe was built takes effect with no rest
     expect(await probe.publisherAvailable()).toEqual({
       authenticated: false,
       cause: 'no_credential_available',
+      detail: 'You are not logged into any GitHub hosts.',
     })
 
     await storeGitHubToken(store, asOwnerHandle(OWNER), TOKEN)
@@ -164,6 +170,39 @@ test('a credential connected AFTER the probe was built takes effect with no rest
   })
 })
 
+test('an empty store on a host that IS logged in stays available — the probe never out-strictens the publisher', async () => {
+  const seen = { envs: [] as (Record<string, string> | undefined)[] }
+  await withStore(async (store) => {
+    // Nothing connected in-app, but the host ran `gh auth login` at some point.
+    // The publisher inherits that session (an empty extra-env makes `spawnCapture`
+    // omit `env` entirely), so publishing WORKS on this box today — and a probe
+    // that refused it would break a working install in the name of fixing one.
+    const probe = defaultGitModeProbe(
+      credentialFromStore(store),
+      async (cmd, _cwd, extraEnv): Promise<HostCommandResult> => {
+        if (cmd[0] === 'git') {
+          return {
+            ok: true,
+            stdout: 'https://github.com/example-org/example-repo.git',
+            stderr: '',
+            exit_code: 0,
+          }
+        }
+        seen.envs.push(extraEnv)
+        return { ok: true, stdout: 'Logged in to github.com', stderr: '', exit_code: 0 }
+      },
+    )
+    expect(await readGitHubToken(store, asOwnerHandle(OWNER))).toBeNull()
+    expect(await probe.publisherAvailable()).toEqual({ authenticated: true })
+    expect(await detectMergeMode('/repo', probe)).toBe('pr')
+  })
+  // CONTROL that this measured the intended path: the store really was empty
+  // (asserted above) AND the host really was consulted, with the same empty
+  // environment the publisher would carry.
+  expect(seen.envs.length).toBeGreaterThan(0)
+  expect(seen.envs.every((e) => e !== undefined && Object.keys(e).length === 0)).toBe(true)
+})
+
 test('a token the host rejects is reported as rejected, never as missing', async () => {
   await withStore(async (store) => {
     await storeGitHubToken(store, asOwnerHandle(OWNER), TOKEN)
@@ -171,7 +210,7 @@ test('a token the host rejects is reported as rejected, never as missing', async
       credentialFromStore(store),
       async (cmd): Promise<HostCommandResult> => {
         if (cmd[0] === 'git') {
-          return { ok: true, stdout: 'https://github.com/rjunee/neutron.git', stderr: '', exit_code: 0 }
+          return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
         }
         return { ok: false, stdout: '', stderr: 'HTTP 401: Bad credentials', exit_code: 1 }
       },

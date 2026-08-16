@@ -4,6 +4,8 @@ import {
   defaultGitModeProbe,
   detectMergeMode,
   isGithubRemoteUrl,
+  looksLikeGithubUnreachable,
+  spawnCapture,
   unwiredPublisherCredential,
   type GitModeProbe,
   type HostCommandResult,
@@ -50,9 +52,9 @@ function makeRun(overrides: Partial<TridentRun> = {}): TridentRun {
 
 describe('isGithubRemoteUrl', () => {
   test('matches https + ssh GitHub remotes', () => {
-    expect(isGithubRemoteUrl('https://github.com/rjunee/neutron.git')).toBe(true)
-    expect(isGithubRemoteUrl('git@github.com:rjunee/neutron.git')).toBe(true)
-    expect(isGithubRemoteUrl('ssh://git@github.com/rjunee/neutron.git')).toBe(true)
+    expect(isGithubRemoteUrl('https://github.com/example-org/example-repo.git')).toBe(true)
+    expect(isGithubRemoteUrl('git@github.com:example-org/example-repo.git')).toBe(true)
+    expect(isGithubRemoteUrl('ssh://git@github.com/example-org/example-repo.git')).toBe(true)
   })
 
   test('rejects non-GitHub + empty remotes', () => {
@@ -211,7 +213,7 @@ describe('defaultGitModeProbe (injected runner)', () => {
 
   test('detects a github origin via the git runner', async () => {
     const probe = defaultGitModeProbe(storedCredential('t0k'), async (cmd) => {
-      if (cmd[0] === 'git') return ok('https://github.com/rjunee/neutron.git')
+      if (cmd[0] === 'git') return ok('https://github.com/example-org/example-repo.git')
       return ok('logged in')
     })
     expect(await probe.hasGithubOrigin('/repo')).toBe(true)
@@ -230,12 +232,13 @@ describe('defaultGitModeProbe (injected runner)', () => {
 
   test('publisher authentication missing on a GitHub repo fails loudly', async () => {
     const probe = defaultGitModeProbe(storedCredential(null), async (cmd) => {
-      if (cmd[0] === 'git') return ok('git@github.com:rjunee/neutron.git')
+      if (cmd[0] === 'git') return ok('git@github.com:example-org/example-repo.git')
       return fail()
     })
     expect(await probe.publisherAvailable()).toEqual({
       authenticated: false,
       cause: 'no_credential_available',
+      detail: 'no',
     })
     await expect(detectMergeMode('/repo', probe)).rejects.toThrow('outer publisher cannot authenticate')
   })
@@ -263,7 +266,7 @@ describe('a stored credential beats an un-logged-in ambient CLI', () => {
       extraEnv?: Record<string, string>,
     ): Promise<HostCommandResult> => {
       if (cmd[0] === 'git') {
-        return { ok: true, stdout: 'https://github.com/rjunee/neutron.git', stderr: '', exit_code: 0 }
+        return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
       }
       seen.envs.push(extraEnv)
       const token = extraEnv?.['GH_TOKEN'] ?? ''
@@ -300,10 +303,13 @@ describe('a stored credential beats an un-logged-in ambient CLI', () => {
     expect(await probe.publisherAvailable()).toEqual({
       authenticated: false,
       cause: 'no_credential_available',
+      detail: 'You are not logged into any GitHub hosts.',
     })
-    // …and it never asked the host at all: "nothing stored" is answered from the
-    // store, never laundered through a question about ambient state.
-    expect(seen.envs.length).toBe(0)
+    // It DID ask the host, carrying the empty environment the publisher would
+    // carry — see the ambient-parity suite below for why asking is mandatory.
+    // What makes the answer `no_credential_available` rather than
+    // `credential_rejected` is that there was no token to reject.
+    expect(seen.envs).toEqual([{}])
   })
 
   test('a token the host rejects is `credential_rejected`, never `no_credential_available`', async () => {
@@ -315,7 +321,7 @@ describe('a stored credential beats an un-logged-in ambient CLI', () => {
       },
       async (cmd): Promise<HostCommandResult> => {
         if (cmd[0] === 'git') {
-          return { ok: true, stdout: 'https://github.com/rjunee/neutron.git', stderr: '', exit_code: 0 }
+          return { ok: true, stdout: 'https://github.com/example-org/example-repo.git', stderr: '', exit_code: 0 }
         }
         return { ok: false, stdout: '', stderr: 'HTTP 401: Bad credentials', exit_code: 1 }
       },
@@ -350,24 +356,252 @@ describe('a stored credential beats an un-logged-in ambient CLI', () => {
 })
 
 describe('unwiredPublisherCredential', () => {
-  test('reports emptiness AS emptiness and never consults the host', async () => {
-    let hostCalls = 0
-    const probe = defaultGitModeProbe(unwiredPublisherCredential('owner-a'), async (cmd) => {
-      hostCalls += 1
+  test('names no handle, because no lookup ran — it never renders a project slug as an owner', async () => {
+    const src = unwiredPublisherCredential()
+    expect(src.owner_handle).toBe('unknown')
+    expect(await src.load()).toEqual({})
+    // The regression this closes: the only caller had no handle to give and
+    // passed the PROJECT SLUG, so the refusal read `owner handle "<slug>"` and
+    // sent the reader to check a row that was never consulted. The function now
+    // takes no argument at all, so that misuse does not typecheck.
+    expect(unwiredPublisherCredential.length).toBe(0)
+  })
+
+  test('an unwired composition on a host with no ambient login refuses BY NAME', async () => {
+    const probe = defaultGitModeProbe(unwiredPublisherCredential(), async (cmd) => {
       if (cmd[0] === 'git') {
-        return { ok: true, stdout: 'https://github.com/rjunee/neutron.git', stderr: '', exit_code: 0 }
+        return {
+          ok: true,
+          stdout: 'https://github.com/example-org/example-repo.git',
+          stderr: '',
+          exit_code: 0,
+        }
       }
-      // Reaching here means the "unwired" source asked about ambient state — the bug.
-      return { ok: true, stdout: 'authenticated', stderr: '', exit_code: 0 }
+      return { ok: false, stdout: '', stderr: 'You are not logged into any GitHub hosts.', exit_code: 1 }
     })
     expect(await probe.publisherAvailable()).toEqual({
       authenticated: false,
       cause: 'no_credential_available',
+      detail: 'You are not logged into any GitHub hosts.',
     })
-    expect(hostCalls).toBe(0)
-    await expect(detectMergeMode('/repo', probe)).rejects.toThrow(
-      'no credential source was wired into this composition',
+    const msg = await detectMergeMode('/repo', probe).then(
+      () => '',
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
     )
+    expect(msg).toContain('no credential source was wired into this composition')
+    expect(msg).toContain('unknown')
+  })
+})
+
+/**
+ * AMBIENT PARITY — the probe must not be STRICTER than the publisher it speaks for.
+ *
+ * The publisher spawns `{ ...process.env, ...env }` and omits `env` entirely
+ * when it is empty (`spawnCapture`), so on a host where the owner ran
+ * `gh auth login` and never connected GitHub in-app, publishing WORKS today.
+ * Round 1 of this fix short-circuited an empty store straight to
+ * `no_credential_available` without asking anything, which would have started
+ * refusing exactly that host — trading the original false negative for a new
+ * one. The probe therefore always runs the same command in the same environment
+ * the publisher will use.
+ *
+ * Asserted through the credential seam; `process.env` is never touched.
+ */
+describe('the probe is never stricter than the publisher it speaks for', () => {
+  /** A host whose AMBIENT publisher CLI is logged in, and which knows no store. */
+  const hostWithAmbientLogin =
+    (seen: { envs: (Record<string, string> | undefined)[] }) =>
+    async (
+      cmd: string[],
+      _cwd?: string,
+      extraEnv?: Record<string, string>,
+    ): Promise<HostCommandResult> => {
+      if (cmd[0] === 'git') {
+        return {
+          ok: true,
+          stdout: 'https://github.com/example-org/example-repo.git',
+          stderr: '',
+          exit_code: 0,
+        }
+      }
+      seen.envs.push(extraEnv)
+      return {
+        ok: true,
+        stdout: 'Logged in to github.com account example-owner',
+        stderr: '',
+        exit_code: 0,
+      }
+    }
+
+  test('empty store + ambient login → available, and the mode is pr', async () => {
+    const seen = { envs: [] as (Record<string, string> | undefined)[] }
+    const probe = defaultGitModeProbe(
+      { owner_handle: 'owner-a', source: 'a fake token store', load: async () => ({}) },
+      hostWithAmbientLogin(seen),
+    )
+    expect(await probe.publisherAvailable()).toEqual({ authenticated: true })
+    expect(await detectMergeMode('/repo', probe)).toBe('pr')
+    // CONTROL proving the mutation landed: the probe really did reach the host,
+    // and really did carry the empty environment the publisher would carry — so
+    // this passes for the same reason the publisher would succeed, not by luck.
+    expect(seen.envs.length).toBeGreaterThan(0)
+    expect(seen.envs.every((e) => e !== undefined && Object.keys(e).length === 0)).toBe(true)
+  })
+
+  test('CONTROL — the SAME empty store on a host with NO ambient login still refuses', async () => {
+    const probe = defaultGitModeProbe(
+      { owner_handle: 'owner-a', source: 'a fake token store', load: async () => ({}) },
+      async (cmd): Promise<HostCommandResult> => {
+        if (cmd[0] === 'git') {
+          return {
+            ok: true,
+            stdout: 'https://github.com/example-org/example-repo.git',
+            stderr: '',
+            exit_code: 0,
+          }
+        }
+        return { ok: false, stdout: '', stderr: 'You are not logged into any GitHub hosts.', exit_code: 1 }
+      },
+    )
+    expect((await probe.publisherAvailable()).authenticated).toBe(false)
+    await expect(detectMergeMode('/repo', probe)).rejects.toThrow('refusing to silently weaken')
+  })
+})
+
+/**
+ * A HOST FAILURE IS NOT A VERDICT ON THE TOKEN.
+ *
+ * `gh auth status` makes a live API round-trip, so DNS failure, an offline host,
+ * a proxy, a GitHub 5xx and our own 60s watchdog kill all exit non-zero with a
+ * perfectly good credential. Round 1 mapped every non-(-1) non-zero exit to
+ * `credential_rejected`, whose refusal text tells the owner the token is expired
+ * or revoked — sending him to rotate a working credential during an outage.
+ */
+describe('unreachable GitHub is reported as unreachable, not as a bad token', () => {
+  const withToken: PublisherCredentialSource = {
+    owner_handle: 'owner-a',
+    source: 'a fake token store',
+    load: async () => ({ GH_TOKEN: 't0k' }),
+  }
+  const ghFails =
+    (res: Omit<HostCommandResult, 'ok'>) =>
+    async (cmd: string[]): Promise<HostCommandResult> => {
+      if (cmd[0] === 'git') {
+        return {
+          ok: true,
+          stdout: 'https://github.com/example-org/example-repo.git',
+          stderr: '',
+          exit_code: 0,
+        }
+      }
+      return { ok: false, ...res }
+    }
+
+  test('a DNS failure is `could_not_reach_github`', async () => {
+    const probe = defaultGitModeProbe(
+      withToken,
+      ghFails({ stdout: '', stderr: 'dial tcp: lookup api.github.com: no such host', exit_code: 1 }),
+    )
+    expect(await probe.publisherAvailable()).toEqual({
+      authenticated: false,
+      cause: 'could_not_reach_github',
+      detail: 'dial tcp: lookup api.github.com: no such host',
+    })
+  })
+
+  test('a GitHub 5xx is `could_not_reach_github`', async () => {
+    const probe = defaultGitModeProbe(
+      withToken,
+      ghFails({ stdout: '', stderr: 'HTTP 503: Service Unavailable', exit_code: 1 }),
+    )
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
+  })
+
+  test('OUR OWN watchdog kill is `could_not_reach_github`, though the exit code looks ordinary', async () => {
+    const probe = defaultGitModeProbe(
+      withToken,
+      ghFails({ stdout: '', stderr: '', exit_code: 143, timed_out: true }),
+    )
+    expect(await probe.publisherAvailable()).toEqual({
+      authenticated: false,
+      cause: 'could_not_reach_github',
+      detail: 'timed out after 60s',
+    })
+  })
+
+  test('CONTROL — a genuine 401 on the SAME shape is still `credential_rejected`', async () => {
+    const probe = defaultGitModeProbe(
+      withToken,
+      ghFails({ stdout: '', stderr: 'HTTP 401: Bad credentials', exit_code: 1 }),
+    )
+    // Proves the branches above NARROW rather than swallow: an exit code of 1
+    // carrying a credential verdict still reaches the owner as one.
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+  })
+
+  test('CONTROL — an unrecognised failure falls through to the credential reading', async () => {
+    const probe = defaultGitModeProbe(withToken, ghFails({ stdout: '', stderr: 'weird', exit_code: 1 }))
+    const res = await probe.publisherAvailable()
+    expect(res.authenticated === false && res.cause).toBe('credential_rejected')
+  })
+
+  test('the refusal text tells the owner NOT to rotate the token', async () => {
+    const msg = await detectMergeMode('/repo', {
+      publisher: { owner_handle: 'owner-a', source: 'the instance secrets store' },
+      hasGithubOrigin: async () => true,
+      publisherAvailable: async () => ({
+        authenticated: false,
+        cause: 'could_not_reach_github',
+        detail: 'i/o timeout',
+      }),
+    }).then(
+      () => '',
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    )
+    expect(msg).toContain('could not reach GitHub')
+    expect(msg).toContain('Do NOT rotate the token')
+    expect(msg).toContain('owner-a')
+    expect(msg).not.toContain('REJECTED')
+    expect(msg).not.toContain('no GitHub credential is stored')
+  })
+})
+
+describe('looksLikeGithubUnreachable', () => {
+  test('recognises the transport failures the publisher CLI actually prints', () => {
+    for (const line of [
+      'dial tcp 140.82.113.5:443: connect: connection refused',
+      'Get "https://api.github.com/": context deadline exceeded',
+      'net/http: TLS handshake timeout',
+      'lookup api.github.com: no such host',
+      'HTTP 502: Bad Gateway',
+      'proxyconnect tcp: dial tcp: i/o timeout',
+    ]) {
+      expect(looksLikeGithubUnreachable(line)).toBe(true)
+    }
+  })
+
+  test('CONTROL — credential verdicts and empty output are NOT transport failures', () => {
+    for (const line of [
+      '',
+      'HTTP 401: Bad credentials',
+      'HTTP 403: Resource not accessible by personal access token',
+      'You are not logged into any GitHub hosts.',
+    ]) {
+      expect(looksLikeGithubUnreachable(line)).toBe(false)
+    }
+  })
+})
+
+describe('spawnCapture flags a timeout only when it caused one', () => {
+  test('a fast command carries no `timed_out`', async () => {
+    const res = await spawnCapture(['true'])
+    expect(res.ok).toBe(true)
+    // The flag is the ONLY thing distinguishing our kill from an ordinary
+    // non-zero exit, so a spuriously-set one would relabel every real
+    // credential rejection as a network problem.
+    expect(res.timed_out).toBeUndefined()
   })
 })
 

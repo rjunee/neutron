@@ -893,10 +893,11 @@ export function buildCoreModules(
           // is injected per spawn). A composer that supplied no overnight config
           // gets the honest "nothing wired" source, which refuses a GitHub-backed
           // overnight build by NAME instead of asking a bare `gh` and getting a
-          // truthful answer about the wrong process.
+          // truthful answer about the wrong process. It is given no handle
+          // deliberately: the project slug is not an owner handle, and passing it
+          // here made the refusal name an identity that was never looked up.
           publisher_credential:
-            overnightCfg?.publisher_credential ??
-            unwiredPublisherCredential(input.project_slug),
+            overnightCfg?.publisher_credential ?? unwiredPublisherCredential(),
           ...(overnightCfg?.deliver !== undefined ? { deliver: overnightCfg.deliver } : {}),
           // The composer's topic beats the onboarding-row read (ISSUES #443 —
           // on Open that row never carries one, so the brief was skipped).
