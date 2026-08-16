@@ -250,6 +250,61 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
 }
 
 /**
+ * Normalize the substrate's two home-shaped inputs ONCE, so the child's working
+ * directory and the supervision home cannot disagree about the same value.
+ *
+ * BLANK IS UNSET on both slots — the rule `effectiveOwnerHome`
+ * (`config/index.ts`) documents for this family of home values. `??` falls
+ * through on `undefined` but not on `''` / `'   '`, so before this each slot
+ * mishandled a blank in its OWN way:
+ *
+ *   - `cwd` was forwarded verbatim. `persistent/pool.ts` records
+ *     `options.cwd ?? process.cwd()`, so the blank survived into the session
+ *     record, and `persistent/supervision.ts` refuses a respawn whose
+ *     `existsSync(record.cwd)` is false — every crash recovery declined with
+ *     `invalid-cwd`, silently, for the life of the process.
+ *   - the supervision home derived the REPL registry + state dir relative to
+ *     the process CWD, splitting supervision off the instance it supervises.
+ *
+ * A blank `cwd` therefore resolves to UNSET rather than to a substitute: the
+ * caller said nothing, so the pool's own documented default (`process.cwd()`)
+ * applies, which is a directory that exists. The supervision home keeps its own
+ * documented fallback chain (`cwd`, then `NEUTRON_HOME`).
+ *
+ * WHEN BOTH ARE BLANK, SUPERVISION IS OFF, DELIBERATELY. `home: undefined`
+ * skips the whole supervision block — registry, respawns, watchdog, heartbeat —
+ * because there is nowhere to put a per-instance registry, and inventing one
+ * under whatever CWD systemd chose is how two instances end up sharing a
+ * registry that names neither. The REPL still runs; only recovery is absent.
+ * That direction is pinned in
+ * `runtime/adapters/claude-code/__tests__/repl-home-normalization.test.ts` so it
+ * is a decision rather than an accident.
+ *
+ * Exported for that test. Every in-repo production caller supplies a real `cwd`
+ * (`open/composer.ts` resolves it through `resolveNeutronHome` before passing
+ * it), so the blank arms are hardening against a future caller, not a live
+ * defect — stated plainly here because an unreachable branch that reads as a
+ * bug fix is its own kind of wrong docblock.
+ */
+export function resolveReplCwdAndHome(input: {
+  cwd?: string | undefined
+  env: NodeJS.ProcessEnv
+}): { cwd?: string; home?: string } {
+  const blankIsUnset = (v: string | undefined): string | undefined =>
+    typeof v === 'string' && v.trim().length > 0 ? v : undefined
+  const cwd = blankIsUnset(input.cwd)
+  const home = cwd ?? blankIsUnset(input.env['NEUTRON_HOME'])
+  const out: { cwd?: string; home?: string } = {}
+  // The RETURN is verbatim on both — a path whose blankness is only
+  // leading/trailing is a REAL path (legal in POSIX) and is passed through
+  // byte-for-byte, the same predicate-trims/return-verbatim split every sibling
+  // in this family documents.
+  if (cwd !== undefined) out.cwd = cwd
+  if (home !== undefined) out.home = home
+  return out
+}
+
+/**
  * Construct the Claude Code substrate. UNCONDITIONALLY builds the persistent
  * interactive-REPL substrate — there is no env toggle and no fallback (the
  * `NEUTRON_PERSISTENT_REPL` flag + the legacy per-turn `claude -p` path were
@@ -263,7 +318,16 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   const p: PersistentReplSubstrateOptions = {
     substrate_instance_id: options.substrate_instance_id,
   }
-  if (options.cwd !== undefined) p.cwd = options.cwd
+  // NORMALIZED ONCE, USED FOR BOTH SLOTS — see {@link resolveReplCwdAndHome}.
+  // An earlier revision of this change trimmed only the supervision home and
+  // still forwarded `options.cwd` raw, which is the worse half of the pair:
+  // `persistent/pool.ts` records `options.cwd ?? process.cwd()` (a blank is not
+  // `undefined`, so `??` keeps it) and `persistent/supervision.ts` then refuses
+  // every respawn with `invalid-cwd` because `existsSync('   ')` is false.
+  // Crash recovery would fail CLOSED and silently, on exactly the malformed
+  // input class this change exists to neutralise.
+  const resolved = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
+  if (resolved.cwd !== undefined) p.cwd = resolved.cwd
   if (options.claude_bin !== undefined) p.claude_bin = options.claude_bin
   if (options.skip_permissions !== undefined) p.skip_permissions = options.skip_permissions
   if (options.env !== undefined) p.env = options.env
@@ -315,19 +379,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →
   // `--resume` respawn) + heartbeat run once per registry.
-  // BLANK IS UNSET on both slots — the rule `effectiveOwnerHome`
-  // (`config/index.ts`) documents for this family of home values. `??` falls
-  // through on `undefined` but not on `''`/`'   '`, so unfixed a blank
-  // `NEUTRON_HOME` derived the REPL registry + state dir relative to the
-  // process CWD, silently splitting supervision off the instance it supervises.
-  const fromCwd = options.cwd
-  const fromEnv = process.env['NEUTRON_HOME']
-  const home =
-    typeof fromCwd === 'string' && fromCwd.trim().length > 0
-      ? fromCwd
-      : typeof fromEnv === 'string' && fromEnv.trim().length > 0
-        ? fromEnv
-        : undefined
+  const home = resolved.home
   if (home !== undefined) {
     const paths = deriveReplSupervisionPaths(home)
     // Create the state dir up-front: registry-lock opens `<dir>/.registry.lock`

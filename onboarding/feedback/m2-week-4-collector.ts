@@ -37,22 +37,36 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
  * destination without configuration. The `M2_FEEDBACK_PATH` env override lets
  * tests and custom installs redirect. One append per response.
  */
-export const DEFAULT_M2_FEEDBACK_PATH = join(
+export function resolveM2FeedbackPath(env: NodeJS.ProcessEnv = process.env): string {
   // BLANK IS UNSET. `??` falls through on `undefined` but NOT on `''` or `'   '`
   // — the exact `??`-vs-blank mechanism `effectiveOwnerHome` (`config/index.ts`)
   // documents as the origin defect, on the same variable. Unfixed,
   // `NEUTRON_HOME=''` resolved this to the RELATIVE `feedback/m2-week-4.md`
   // (wherever systemd started the process) and `'   '` to a directory named
   // three spaces, so the owner's feedback landed somewhere no reader looks.
-  blankIsUnset(process.env.NEUTRON_HOME) ?? process.cwd(),
-  'feedback',
-  'm2-week-4.md',
-)
-
-/** A blank env value is unset, not a path — see {@link DEFAULT_M2_FEEDBACK_PATH}. */
-function blankIsUnset(value: string | undefined): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+  const home = env['NEUTRON_HOME']
+  const base = typeof home === 'string' && home.trim().length > 0 ? home : process.cwd()
+  // The RETURN is verbatim — a path whose blankness is only leading/trailing is
+  // a real POSIX directory and keeps its bytes.
+  return join(base, 'feedback', 'm2-week-4.md')
 }
+
+/**
+ * The module-level default, frozen at import.
+ *
+ * EXTRACTED INTO {@link resolveM2FeedbackPath} SO A TEST CAN DRIVE IT. A
+ * constant computed from `process.env` at import time is unobservable: the trim
+ * above was asserted by a comment and pinned by nothing, and a review confirmed
+ * reverting it left every suite green. Pinned now in
+ * `onboarding/feedback/__tests__/m2-week-4-collector.test.ts`.
+ *
+ * REACHABILITY, STATED: `M2FeedbackCollector` is exported from
+ * `onboarding/index.ts` but has no non-test instantiation in this tree, so this
+ * is a published-surface fix rather than a live one. Said plainly because the
+ * alternative is a docblock that reads like a bug report for a bug no caller can
+ * currently hit.
+ */
+export const DEFAULT_M2_FEEDBACK_PATH = resolveM2FeedbackPath()
 
 export type M2ResponseKind = SeanEllisResponsePayload['response']
 

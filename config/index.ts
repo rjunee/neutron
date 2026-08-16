@@ -495,10 +495,24 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * (`onboarding/overnight/register.ts`); `resolveStatePath`
  * (`gbrain-memory/gbrain-doctor.ts`); the env shim's fill predicate
  * (`open/server.ts`); `main`'s `--home` guard (`scripts/email-accounts.ts`);
- * the REPL supervision home (`runtime/adapters/claude-code/index.ts`);
+ * `resolveReplCwdAndHome` (`runtime/adapters/claude-code/index.ts`);
  * `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`);
- * `DEFAULT_M2_FEEDBACK_PATH` (`onboarding/feedback/m2-week-4-collector.ts`); and
+ * `resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`); and
  * `buildPromptVars` (`prompts/template.ts`) — the constant-key one.
+ *
+ * WHICH OF THEM A LIVE PATH REACHES, because "brought onto the rule" and "fixed
+ * a reachable defect" are different claims and this docblock has already been
+ * burned by conflating two things that sounded alike. Reachable today:
+ * `resolveNeutronHome`, `resolveOpenDbPath`, `resolveOwnerHome`,
+ * `resolveOwnerHomeFromEnv`, `resolveStatePath`, the env shim pair, and
+ * `buildPromptVars` (via `trident/agent-prompts.ts`). Published surfaces with no
+ * in-tree invocation — `resolveRegistryDbPath` (re-exported at
+ * `gateway/index.ts` and `gateway/composer-contract.ts`, both re-exports, no
+ * caller) and `resolveM2FeedbackPath` (its collector has no non-test
+ * instantiation). Defensive on a live path whose only current callers pass a
+ * real value: `resolveReplCwdAndHome` and `resolveSkillsDir`. Consistency across
+ * a family is the point either way, but the unreachable ones are hardening, not
+ * bug fixes, and saying so is cheaper than the next reviewer re-deriving it.
  *
  * WHAT THE COMMAND DOES NOT COVER, STATED RATHER THAN IMPLIED. It is
  * `--include='*.ts'`, so the claim it bounds is a claim about TYPESCRIPT. The

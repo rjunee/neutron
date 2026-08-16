@@ -489,17 +489,29 @@ async function loadConventionsForResolver(input: {
   }
 }
 
-function resolveSkillsDir(input: {
+/**
+ * Where the owner's `skills/conventions/*.md` live.
+ *
+ * BLANK IS UNSET ON BOTH SLOTS — the rule `effectiveOwnerHome`
+ * (`config/index.ts`) documents for this same family of home values.
+ * `length > 0` accepted `'   '`, and `??` falls through on `undefined` but NOT
+ * on `''`: unfixed, `NEUTRON_HOME=''` resolved the skills dir to
+ * `/owners/<handle>/skills` — the FILESYSTEM ROOT, not the install — instead of
+ * the documented `/srv/neutron` default.
+ *
+ * EXPORTED FOR THE GUARD, not for callers. Production reaches it through
+ * `loadConventionsForResolver` in this file, whose own callers all pass a real
+ * `owner_data_dir`; a review found the trim above asserted by a docblock and
+ * pinned by nothing, which is the defect this whole branch is about.
+ * `gateway/wiring/__tests__/build-phase-spec-resolver.test.ts` now drives it
+ * directly, because reaching it through the resolver would mean mocking the
+ * skills loader to observe one string.
+ */
+export function resolveSkillsDir(input: {
   owner_data_dir: string | undefined
   owner_handle: string
   env: NodeJS.ProcessEnv
 }): string {
-  // BLANK IS UNSET ON BOTH SLOTS — the rule `effectiveOwnerHome`
-  // (`config/index.ts`) documents for this same family of home values.
-  // `length > 0` accepted `'   '`, and `??` falls through on `undefined` but NOT
-  // on `''`: unfixed, `NEUTRON_HOME=''` resolved the skills dir to
-  // `/owners/<handle>/skills` — the FILESYSTEM ROOT, not the install — instead
-  // of the documented `/srv/neutron` default.
   if (input.owner_data_dir !== undefined && input.owner_data_dir.trim().length > 0) {
     return `${trimTrailingSlash(input.owner_data_dir)}/skills`
   }

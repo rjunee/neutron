@@ -313,7 +313,15 @@ describe('the boot resolver and the CLI resolver agree', () => {
       expect(effectiveOwnerHome(resolveBootConfig(pinned))).toBe(home)
     })
 
-    it('EVERY reader of OWNER_HOME agrees a blank one is unset — not just the two this branch touched', () => {
+    // NAMED FOR WHAT IT CHECKS, WHICH IS FOUR RESOLVERS — not "every reader".
+    // The earlier name claimed universal coverage of every `OWNER_HOME` reader
+    // while the body exercises the four this package can import; the CLI guard
+    // (`scripts/email-accounts.ts`), `buildPromptVars` (`prompts/template.ts`)
+    // and the shim's fill predicate are pinned in their own suites. A test whose
+    // name is wider than its body is the same defect as a docblock whose claim is
+    // wider than its grep — which is the defect this entire branch is about, so
+    // it does not get to survive inside the fix for it.
+    it('the four OWNER_HOME resolvers this package imports agree a blank one is unset', () => {
       // THE DOCBLOCK CLAIMED THIS AND IT WAS NOT TRUE. `config/index.ts`
       // asserts "every sibling identity read in this repo trims", and a review
       // found two that did not: `resolveOwnerHome`
@@ -453,6 +461,23 @@ describe('the boot resolver and the CLI resolver agree', () => {
         applyEnvShim(env, envShimFromBootConfig(resolveBootConfig(env)))
         expect(env['OWNER_HOME']).toBe(home)
       }
+
+      // …AND THE OTHER KEY THE SHIM WRITES. `envShimFromBootConfig` fills
+      // `NEUTRON_DB_PATH` as well as `OWNER_HOME`, so widening this predicate
+      // changed that key's behaviour too and only one of the two was asserted.
+      // A blank db path is now an empty slot and gets the derived
+      // `<home>/project.db`, which is the value the migration runner and the
+      // booting server must agree on — the same one-variable-two-answers split,
+      // on the read that decides which database exists.
+      for (const blank of ['', '   ', '\t\n']) {
+        const env = { NEUTRON_HOME: home, NEUTRON_DB_PATH: blank } as NodeJS.ProcessEnv
+        applyEnvShim(env, envShimFromBootConfig(resolveBootConfig(env)))
+        expect(env['NEUTRON_DB_PATH']).toBe(join(home, 'project.db'))
+      }
+      // CONTROL — an operator-pinned db path is still never clobbered.
+      const pinnedDb = { NEUTRON_HOME: home, NEUTRON_DB_PATH: '/srv/pin/x.db' } as NodeJS.ProcessEnv
+      applyEnvShim(pinnedDb, envShimFromBootConfig(resolveBootConfig(pinnedDb)))
+      expect(pinnedDb['NEUTRON_DB_PATH']).toBe('/srv/pin/x.db')
       // …and an ABSENT slot is filled too, which is the case that always worked
       // and must keep working.
       const absent = { NEUTRON_HOME: home } as NodeJS.ProcessEnv
