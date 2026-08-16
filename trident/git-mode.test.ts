@@ -1268,13 +1268,21 @@ describe('the tie `gh auth status` cannot break is broken by asking GitHub direc
   }
 
   test('our own watchdog killing the reachability call is unreachable, not a verdict', async () => {
-    const res = await withReachability('', { apiTimedOut: true }).publisherAvailable()
+    const probe = withReachability('', { apiTimedOut: true })
+    const res = await probe.publisherAvailable()
     expect(res.authenticated === false && res.cause).toBe('could_not_reach_github')
+    // A silent `gh` must not render as `answered: ` with nothing after it, which
+    // reads as evidence LOST rather than evidence absent.
+    const msg = await refusalMessage(probe)
+    expect(msg).toContain('killed by our own')
+    expect(msg).not.toContain('and answered:')
   })
 
   test('an unspawnable `gh api` leaves the honest non-verdict standing', async () => {
-    const res = await withReachability('ENOENT', { apiExit: -1 }).publisherAvailable()
+    const probe = withReachability('', { apiExit: -1 })
+    const res = await probe.publisherAvailable()
     expect(res.authenticated === false && res.cause).toBe('credential_verdict_unavailable')
+    expect(await refusalMessage(probe)).toContain('without printing anything')
   })
 
   test('BOTH measurements mute → the honest non-verdict, still pointing at the network first', async () => {

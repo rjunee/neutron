@@ -839,9 +839,17 @@ export function defaultGitModeProbe(
       // report every genuinely expired token as "we could not tell".
       if (looksLikeAmbiguousLoginFailure(output)) {
         const reach = await run([...PUBLISHER_REACHABILITY_COMMAND], undefined, env)
+        // A killed or silent `gh` leaves no stderr, and `answered: ` with nothing
+        // after it reads as though the evidence were lost rather than absent.
+        const answer =
+          reach.stderr.trim().length > 0
+            ? `answered: ${reach.stderr}`
+            : reach.timed_out === true
+              ? `was killed by our own ${DEFAULT_HOST_COMMAND_TIMEOUT_MS / 1000}s watchdog before it answered`
+              : `exited ${reach.exit_code} without printing anything`
         const evidence =
           `\`${PUBLISHER_REACHABILITY_COMMAND.join(' ')}\` was then run to tell a refusal ` +
-          `apart from an unreachable GitHub, and answered: ${reach.stderr}`
+          `apart from an unreachable GitHub, and ${answer}`
         switch (classifyGithubReachability(reach)) {
           case 'refused':
             // GitHub ANSWERED, and its answer was a refusal. That is the positive
