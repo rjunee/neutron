@@ -584,23 +584,41 @@ test('the guard STILL REFUSES an unexplained row — no false negative', () => {
   )
   expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build/)
 
-  // WHAT DOES *NOT* HOLD, stated positively so nobody re-adds it as an assertion: an
-  // entry whose `version` is wrong still acknowledges the row. The match is on the
-  // NAME — specifically, on the ledger recording that name at an ordinal other than
-  // the one this build assigns it, which is what an orphan like `alpha` is. Requiring
-  // the (version, name) PAIR is what made a shipped acknowledgement go inert on the
-  // boot after a rekey collapsed the row it named (see CASE 8 in
-  // ordinal-identity.test.ts): the collapse keeps the earliest-applied row and drops
-  // the others, which sit at a different ordinal by definition. The ordinal is kept on
-  // the entry as the context it always was — it records the number the row was written
-  // under and is printed in the refusal — and it is not a key. The sibling test below
-  // pins the other edge, where the name alone would be too wide.
+  // AN ENTRY WHOSE `version` IS WRONG DOES NOT ACKNOWLEDGE THE ROW, and the reason is
+  // the fleet rather than this database. `repairs.json` ships to every instance, so an
+  // entry is one instance's history that all of them evaluate — and two databases can
+  // legitimately record one unmerged branch migration at DIFFERENT ordinals, each having
+  // run its own build of that branch. Matching an orphan on the name alone therefore let
+  // a shipped entry speak on a database it was never written about, where its `file_name`
+  // marked a genuinely pending migration as applied: the `ALTER`s never ran, no row was
+  // recorded, and the boot exited zero. CASE 8c in `ordinal-identity.test.ts` reproduces
+  // that against a second database and reads the missing columns back out.
+  //
+  // THE ORDINAL A STALE `version` WAS FEARED TO LOSE IS CARRIED BY `_migration_repairs`
+  // instead — an entry that has already activated HERE stays active here whatever the
+  // ledger comes to look like (CASE 8, CASE 8b), and one that never activated here has
+  // no history here to speak about. So the narrowing costs nothing the durable trigger
+  // does not already hold, and it FAILS LOUD: the row stays unexplained, the boot
+  // refuses, and the refusal prints a fresh entry carrying the ordinal this database
+  // actually recorded.
   writeFileSync(
     join(b, 'repairs.json'),
     JSON.stringify([{ version: 9, recorded_name: 'alpha', file_name: '', note: 'other', date: '2026-08-16' }]),
   )
-  // `file_name` is "", so the entry acknowledges the row ALONE and suppresses nothing:
-  // both migrations this build contains then apply.
+  const staleOrdinal = messageOf(() => applyMigrations(db, b))
+  expect(staleOrdinal).toContain('NO migration file in this build')
+  expect(printedRepairsEntries(staleOrdinal)).toEqual([
+    expect.objectContaining({ version: 1, recorded_name: 'alpha' }),
+  ])
+  expect(db.query("SELECT 1 FROM _migrations WHERE name = 'beta'").get()).toBeNull()
+
+  // With the ordinal the message just gave, the entry speaks. `file_name` is "", so it
+  // acknowledges the row ALONE and suppresses nothing: both migrations this build
+  // contains then apply.
+  writeFileSync(
+    join(b, 'repairs.json'),
+    JSON.stringify([{ version: 1, recorded_name: 'alpha', file_name: '', note: 'other', date: '2026-08-16' }]),
+  )
   expect(applyMigrations(db, b)).toEqual({ applied: [1, 2], skipped: [] })
 
   // And the recorded row is untouched through all of it.
