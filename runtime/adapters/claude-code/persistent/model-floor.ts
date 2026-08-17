@@ -104,6 +104,7 @@ const NON_TIER_TOKENS = new Set([
   'apac',
   'bedrock',
   'claude',
+  'databricks',
   'eu',
   'global',
   'models',
@@ -111,6 +112,30 @@ const NON_TIER_TOKENS = new Set([
   'us',
   'vertex',
 ])
+
+/**
+ * Anthropic's TIER NAMES — and yes, this is an enumeration, sitting two lines
+ * under a comment about the danger of enumerations. The distinction is which one
+ * you are forced to keep up with.
+ *
+ * A cross-model review found the hole that made this necessary. Databricks
+ * publishes `databricks-claude-haiku-4-5` / `databricks-claude-opus-4-5`, and
+ * with BOTH aliases pointed at that form (`NEUTRON_FAST_MODEL` +
+ * `NEUTRON_BEST_MODEL`, `runtime/models.ts:52`/`:106`) the positional scan
+ * returned `databricks` for the fast family AND `databricks` for the best — the
+ * two tiers collapsed onto one token, every rank came out equal, and the floor
+ * went INERT. Reproduced before fixing, and note the shape: the request itself
+ * was still ranked correctly by {@link tierRankOf}'s token scan; it was deriving
+ * the ALIAS's family that broke, which the token scan cannot protect.
+ *
+ * So a KNOWN tier word anywhere in an id wins over position. The trade is
+ * deliberate: cloud vendors mint routing prefixes continuously (this one was
+ * missed), whereas Anthropic has shipped three tier names in five years. The
+ * ORDER is still read off the aliases, so a generation bump cannot invert it —
+ * only the NAMES are listed here, and a name this build has not heard of still
+ * falls through to the positional scan below.
+ */
+const TIER_WORDS = new Set(['haiku', 'sonnet', 'opus'])
 
 /**
  * The family token of a model id — the part naming the TIER rather than the
@@ -121,15 +146,21 @@ const NON_TIER_TOKENS = new Set([
  * (Vertex) and the bare CLI alias `haiku`. That last one is the point a literal
  * id set always misses: `--model haiku` is a real thing the CLI accepts.
  *
- * MECHANISM: lowercase, split on every non-alphanumeric boundary, then return
- * the first token that is neither a {@link NON_TIER_TOKENS} vendor word nor a
- * bare number (a bare number is a generation or a `YYYYMMDD` snapshot, never a
- * tier). An id with no such token — `claude-2.1` — yields `''`, which
- * {@link tierRankOf} ranks at the frontier along with everything else it does
- * not recognise.
+ * MECHANISM, in two passes. FIRST a {@link TIER_WORDS} name found ANYWHERE wins,
+ * so no vendor prefix — enumerated or not — can hide a tier
+ * (`databricks-claude-haiku-4-5` → `haiku`). SECOND, for a tier name this build
+ * has never heard of, fall back to position: the first token that is neither a
+ * {@link NON_TIER_TOKENS} vendor word nor a bare number (a bare number is a
+ * generation or a `YYYYMMDD` snapshot, never a tier). An id with no such token —
+ * `claude-2.1` — yields `''`, which {@link tierRankOf} ranks at the frontier
+ * along with everything else it does not recognise.
  */
 export function familyOf(model: string): string {
-  for (const token of model.toLowerCase().split(/[^a-z0-9]+/)) {
+  const tokens = model.toLowerCase().split(/[^a-z0-9]+/)
+  for (const token of tokens) {
+    if (TIER_WORDS.has(token)) return token
+  }
+  for (const token of tokens) {
     if (token === '') continue
     if (NON_TIER_TOKENS.has(token)) continue
     if (/^\d+$/.test(token)) continue
@@ -285,19 +316,26 @@ export interface ModelFloorNotice {
  *
  * DELIBERATELY UNLATCHED, unlike the three notices above it. Those latch because
  * their upstream condition PERSISTS — a rate-limit banner sits in the pane for
- * an hour and would re-fire on every scan. A clamp cannot repeat for the same
- * cause: it rewrites the offending row with the floored value in the same breath
- * (see `spawn.ts`), so a SECOND clamp means something re-poisoned the row, which
- * is a live re-poisoner and the single most important thing to say out loud.
- * Suppressing the repeat would rebuild the silence this whole file is here for.
+ * an hour and would re-fire on every scan. On the SUCCEEDING path a clamp cannot
+ * repeat for the same cause, because the same call's return value is written
+ * back to the row (`spawn.ts`), so a later clamp means something re-poisoned it
+ * — a live re-poisoner, and the single most important thing to say out loud.
+ * Suppressing that repeat would rebuild the silence this whole file is here for.
  *
- * The obvious objection — a respawn loop turning that into a bubble storm — is
- * answered by the loops themselves rather than by hope. The channel-wedge retry
- * is hard-capped at `MAX_FLEET_RESPAWNS = 2` (`channel-unbound-respawn.ts:23`;
- * then one operator alert and auto-recovery stops), and the supervision respawn
- * cap is `RESPAWN_CAP_MAX = 3` (`signatures.ts:173`; then the row is `capped_at`
- * and stops respawning at all). A wedging session on a poisoned row is therefore
- * a handful of notices with a hard ceiling, and every one of them is true.
+ * ⚠️ THAT REASONING DOES NOT HOLD ON A FAILED SPAWN, and an earlier revision of
+ * this docblock asserted it unconditionally — a cross-model review disproved it
+ * and the correction is kept here rather than quietly dropped. The registry write
+ * happens only after the post-spawn readiness assertion (`spawn.ts:631`), while a
+ * channel-wedged attempt throws before it (`spawn.ts:573`), so the bounded
+ * respawn loop re-enters with the row STILL poisoned and one bad row produces
+ * three identical notices, not one. Reproduced, not reasoned.
+ *
+ * It stays unlatched anyway, on volume rather than on the false claim: the
+ * repeats are hard-capped at both levels — `MAX_FLEET_RESPAWNS = 2`
+ * (`channel-unbound-respawn.ts:23`, then one operator alert and auto-recovery
+ * stops) and `RESPAWN_CAP_MAX = 3` (`signatures.ts:173`, after which the row is
+ * `capped_at` and stops respawning at all). A handful of true notices with a hard
+ * ceiling beats a latch that could swallow a genuine second degradation.
  *
  * A sink throw is swallowed: a visibility notice must never fail a spawn.
  *

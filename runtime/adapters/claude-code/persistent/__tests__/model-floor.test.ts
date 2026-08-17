@@ -160,6 +160,42 @@ describe('resolveModelFloor — the decision', () => {
     expect(resolveModelFloor({ requested: 'my-proxy.internal/v3/claude-opus-6', enabled: true }).clamped).toBe(false)
   })
 
+  it('a TIER WORD beats a vendor prefix, so two aliases cannot collapse onto one family', () => {
+    // CROSS-MODEL REVIEW, and the sharpest finding of the round. Databricks
+    // publishes `databricks-claude-haiku-4-5` / `databricks-claude-opus-4-5`. The
+    // positional scan returned `databricks` for BOTH, so an instance with both
+    // aliases pointed at that form derived the same family for the fast tier and
+    // the best tier — every rank came out equal and the floor went INERT.
+    //
+    // Note WHICH half broke, because it is the half a token scan cannot save: the
+    // requested id was still ranked correctly (the tokens contain `haiku`); it was
+    // deriving the ALIAS's family that collapsed. That is why the fix is in
+    // `familyOf` — a known tier word anywhere wins over position — rather than
+    // another entry on the vendor list, which is the enumeration that missed it.
+    expect(familyOf('databricks-claude-haiku-4-5')).toBe('haiku')
+    expect(familyOf('databricks-claude-opus-4-5')).toBe('opus')
+    // The two families are DISTINCT, which is the property that was actually lost.
+    expect(familyOf('databricks-claude-haiku-4-5')).not.toBe(
+      familyOf('databricks-claude-opus-4-5'),
+    )
+
+    // ⚠️ THE ASSERTIONS ABOVE DO NOT ISOLATE THE FIX, and a mutation run proved
+    // it: the vendor list also gained `databricks`, so deleting the tier-word
+    // pass left them all green. Two mechanisms closing the same instance is
+    // exactly how a class fix gets mistaken for done. So the load-bearing case is
+    // a vendor prefix that is NOT on the list and never will be — which is the
+    // whole reason the tier-word pass exists.
+    expect(familyOf('acme-gateway-claude-haiku-4-5')).toBe('haiku')
+    expect(familyOf('acme-gateway-claude-opus-5')).toBe('opus')
+    expect(familyOf('acme-gateway-claude-haiku-4-5')).not.toBe(
+      familyOf('acme-gateway-claude-opus-5'),
+    )
+
+    // …and an unheard-of tier still falls back to position rather than matching
+    // nothing, so the second pass stays live for a name this build predates.
+    expect(familyOf('databricks-claude-quasar-9')).toBe('quasar')
+  })
+
   it('an id naming no tier at all yields an empty family, and still ranks frontier', () => {
     // The precondition behind `tierRankOf`'s two empty-string refusals: a
     // tier-less id yields `''`, and a padded id splits to an empty token. Match
