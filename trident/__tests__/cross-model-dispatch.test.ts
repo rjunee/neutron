@@ -30,7 +30,11 @@ import { fileURLToPath } from 'node:url'
 
 import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 
-import { buildWorkflowArgs, CODEX_BUILD_SCRIPT_PATH } from '../inner-loop.ts'
+import {
+  buildWorkflowArgs,
+  CODEX_BUILD_SCRIPT_PATH,
+  CODEX_REVIEW_SCRIPT_PATH,
+} from '../inner-loop.ts'
 import { TRIDENT_PHASES } from '../phase-models.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -1299,6 +1303,52 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // NO reviewer was paid to read an unbuilt branch, and nothing re-Forged on Claude.
     expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
     expect(captured.filter((c) => String(c.label).startsWith('forge:fix-round-'))).toEqual([])
+  })
+})
+
+describe('THE REVIEW RUNS THROUGH THE HARNESS CODEX WRAPPER', () => {
+  test('the review wrapper resolves from the harness install, never the repo being reviewed', async () => {
+    expect(CODEX_REVIEW_SCRIPT_PATH).toBe(
+      fileURLToPath(new URL('../codex-review.sh', import.meta.url)),
+    )
+    expect(existsSync(CODEX_REVIEW_SCRIPT_PATH)).toBe(true)
+    const prompt = promptFor((await runWorkflow(productionArgs(null))).captured, 'argus:codex')
+    expect(prompt).not.toContain('/repo/trident/codex-review.sh')
+  })
+
+  test('a review in a repo with NO trident/ directory resolves and runs the wrapper', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-no-trident-'))
+    try {
+      const initialized = spawnSync('git', ['init'], { cwd: dir, encoding: 'utf8' })
+      expect(initialized.status).toBe(0)
+      const { captured } = await runWorkflow(productionArgs(null, { repo_path: dir }))
+      const prompt = promptFor(captured, 'argus:codex')
+      const match = /bash '([^']*codex-review\.sh)'/.exec(prompt)
+      expect(match).not.toBeNull()
+      const wrapper = match![1]!
+      expect(existsSync(wrapper)).toBe(true)
+      expect(wrapper.startsWith(`${dir}/`)).toBe(false)
+
+      const ran = spawnSync('/bin/bash', [wrapper, 'main'], {
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? '' },
+        encoding: 'utf8',
+      })
+      expect(ran.status).toBe(10)
+      expect(ran.stderr).toContain('NOT_CONNECTED')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a configured codex review seat with no threaded codexReviewScript fails closed by name', async () => {
+    const args = productionArgs(null)
+    delete args['codexReviewScript']
+    const { result, captured, logs } = await runWorkflow(args)
+    expect(logs.some((line) => line.includes('codexReviewScript'))).toBe(true)
+    expect(captured.filter((c) => c.label === 'argus:codex')).toEqual([])
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(result['blockKind']).toBe('infra-only')
   })
 })
 
