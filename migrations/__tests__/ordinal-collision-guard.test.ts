@@ -75,6 +75,160 @@ test('a migration recorded at ANOTHER ordinal is skipped, not re-applied', () =>
   expect(db.query("SELECT version FROM _migrations WHERE name = 'alpha'").get()).toEqual({ version: 1 })
 })
 
+test('a NEW file whose bytes duplicate an applied one REFUSES instead of skipping itself', () => {
+  // THE SILENT-SKIP THE HASH WIDENING OPENED. `beta` is a new, distinctly-named,
+  // perfectly ordinary migration that happens to be byte-identical to `alpha`, which
+  // already ran. Widening on the hash alone answered "already applied" — so beta never
+  // ran, was never recorded, and the boot reported success with beta under `skipped`.
+  // That is the ordinal bug's own failure mode reached through its fix.
+  //
+  // IT TAKES TWO BOOTS, and that is why the shape is easy to miss. In a SINGLE boot
+  // both files are pending (the ledger is read once, before anything applies), so both
+  // run and the second throws `duplicate column name` — loud, and not this bug. The
+  // silent version needs alpha recorded by an EARLIER boot, which is exactly what
+  // happens when the duplicate is added later.
+  const body = 'ALTER TABLE t ADD COLUMN b TEXT;'
+  const db = new Database(':memory:')
+  db.exec('CREATE TABLE t (id TEXT)')
+  expect(applyMigrations(db, tree('one', { '0001_alpha.sql': body }))).toEqual({
+    applied: [1],
+    skipped: [],
+  })
+
+  const two = tree('two', { '0001_alpha.sql': body, '0002_beta.sql': body })
+  let message = ''
+  try {
+    applyMigrations(db, two)
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+  // It refuses, and it names BOTH sides — neither is actionable alone.
+  expect(message).toContain('0002_beta.sql')
+  expect(message).toContain('recorded as "alpha"')
+  expect(message).toContain('they never run at all')
+  // Nothing was written, and beta is still not in the ledger.
+  expect(db.query("SELECT 1 FROM _migrations WHERE name = 'beta'").get()).toBeNull()
+
+  // CONTROL, and it has to be able to fail for the reason under test: the SAME two-boot
+  // sequence with beta's bytes merely differing by a comment applies normally. So the
+  // refusal is the byte-identity, not "a second file arrived on a later boot" — which
+  // would have made the assertion above pass for a reason that has nothing to do with
+  // this guard.
+  const control = new Database(':memory:')
+  control.exec('CREATE TABLE t (id TEXT)')
+  applyMigrations(control, tree('c-one', { '0001_alpha.sql': body }))
+  expect(
+    applyMigrations(
+      control,
+      tree('c-two', {
+        '0001_alpha.sql': body,
+        '0002_beta.sql': `-- a different migration that happens to touch the same table\n${body.replace(' b ', ' c ')}`,
+      }),
+    ),
+  ).toEqual({ applied: [2], skipped: [1] })
+})
+
+test('a RENAMED migration is still recognised by its bytes — the widening the guard must keep', () => {
+  // The other side of the test above, and the reason the guard is scoped to owners
+  // rather than refusing every byte match. `alpha` was renamed to `alpha_renamed` in
+  // the tree; nothing here is named `alpha` any more, so the row recording those bytes
+  // is a row no file accounts for, and the bytes ARE the evidence this migration has
+  // run. It must skip, not re-apply and not refuse.
+  const body = 'CREATE TABLE t1 (id INTEGER);'
+  const db = new Database(':memory:')
+  applyMigrations(db, tree('was', { '0001_alpha.sql': body }))
+  expect(applyMigrations(db, tree('now', { '0002_alpha_renamed.sql': body }))).toEqual({
+    applied: [],
+    skipped: [2],
+  })
+  // And the original row is untouched — no rename, no renumber.
+  expect(db.query('SELECT version, name FROM _migrations').all()).toEqual([
+    { version: 1, name: 'alpha' },
+  ])
+})
+
+test('a hash mismatch under a matching name is REPORTED and still boots', () => {
+  // The decision this must not break: a hash mismatch is recorded and reported, NEVER
+  // enforced (migrations/README.md). Already-applied files are edited in place for
+  // benign reasons and a gate would turn each one into a crash loop. So the boot
+  // succeeds and the migration stays skipped.
+  //
+  // What is fixed is the SILENCE. A migration amended during review and renumbered by
+  // the merge reads as applied, its added statements never run, and nothing was said
+  // while both hashes were in hand.
+  const db = new Database(':memory:')
+  applyMigrations(db, tree('was', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' }))
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(' '))
+  try {
+    // Same name, same ordinal, different bytes — the benign in-place-edit shape.
+    expect(
+      applyMigrations(db, tree('edited', { '0001_alpha.sql': '-- reflowed\nCREATE TABLE t1 (id INTEGER);' })),
+    ).toEqual({ applied: [], skipped: [1] })
+  } finally {
+    console.warn = original
+  }
+
+  const drift = warnings.filter((line) => line.includes('migration_content_drift'))
+  expect(drift).toHaveLength(1)
+  expect(drift[0]).toContain('migration=alpha')
+  expect(drift[0]).toContain('enforced=false')
+  // Same ordinal, so it is NOT flagged as the shape an in-place edit cannot produce.
+  expect(drift[0]).toContain('renumbered=false')
+})
+
+test('bytes AND ordinal both moving is called out as the shape an edit cannot produce', () => {
+  // The discriminating half of the notice. A benign in-place edit keeps its filename,
+  // so a changed number beside changed bytes means the file that ran is not the file on
+  // disk — the amended-during-review-then-renumbered case. It is a field rather than
+  // prose so it can be grepped for, and it still does not refuse.
+  const db = new Database(':memory:')
+  applyMigrations(db, tree('was', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' }))
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(' '))
+  try {
+    expect(
+      applyMigrations(
+        db,
+        tree('amended', { '0007_alpha.sql': 'CREATE TABLE t1 (id INTEGER);\nCREATE TABLE t2 (id INTEGER);' }),
+      ),
+    ).toEqual({ applied: [], skipped: [7] })
+  } finally {
+    console.warn = original
+  }
+
+  const drift = warnings.filter((line) => line.includes('migration_content_drift'))
+  expect(drift).toHaveLength(1)
+  expect(drift[0]).toContain('renumbered=true')
+  expect(drift[0]).toContain('recorded_ordinal=1')
+  expect(drift[0]).toContain('on_disk=0007_alpha.sql')
+  // The point of the warning: those added statements really did not run.
+  expect(tableExists(db, 't2')).toBe(false)
+})
+
+test('a steady-state boot says nothing — the notice is silent when nothing drifted', () => {
+  // The control for both tests above. Without it, an assertion that a warning appeared
+  // cannot distinguish "the notice works" from "the notice fires on every boot", which
+  // would make it noise an operator learns to ignore.
+  const db = new Database(':memory:')
+  const dir = tree('steady', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' })
+  applyMigrations(db, dir)
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(' '))
+  try {
+    expect(applyMigrations(db, dir)).toEqual({ applied: [], skipped: [1] })
+  } finally {
+    console.warn = original
+  }
+  expect(warnings.filter((line) => line.includes('migration_content_drift'))).toEqual([])
+})
+
 test('an acknowledged repair suppresses its named migration, audits, and never rewrites', () => {
   // The live ordinal-122 shape: a migration whose schema change was applied BY HAND
   // and never recorded, beside a ledger row naming something else entirely. The

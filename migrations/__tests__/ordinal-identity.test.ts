@@ -200,7 +200,20 @@ const MERGED_ORDINAL = 130
 function versionKeyedRunner(
   db: Database,
   dir: string,
-  options: { provenance: boolean; appliedAt: number },
+  options: {
+    provenance: boolean
+    appliedAt: number
+    /**
+     * What the release recorded for `applied_by_commit` / `tree_provenance`.
+     *
+     * `null` is a REAL SHAPE, not a convenience: a tarball or container install has no
+     * git metadata, so the runner records the hash and leaves both of these NULL (see
+     * `NO_BUILD_IDENTITY` and `migration-provenance.test.ts`). CASE 5c needs it,
+     * because a row with a hash and no commit is what makes an independent
+     * column-by-column collapse observable.
+     */
+    commit?: string | null
+  },
 ): void {
   db.exec('PRAGMA foreign_keys = ON')
   db.exec(`CREATE TABLE IF NOT EXISTS _migrations (
@@ -233,8 +246,8 @@ function versionKeyedRunner(
           migration.name,
           options.appliedAt,
           migrationContentHash(migration.sql),
-          'c'.repeat(40),
-          'tracked-in-deployed-tree',
+          options.commit === undefined ? 'c'.repeat(40) : options.commit,
+          options.commit === null ? null : 'tracked-in-deployed-tree',
         ],
       )
     } else {
@@ -659,6 +672,79 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
 
   // Idempotent: the collapsed ledger is a fixed point.
   expect(applyMigrations(db).applied).toEqual([])
+  db.close()
+})
+
+test('CASE 5c — the collapse adopts provenance from ONE row, never a column at a time', () => {
+  // WHAT CASE 5 ABOVE CANNOT SEE. There, the surviving row has NO provenance at all, so
+  // filling the three columns independently and adopting the donor's triple whole
+  // produce the same answer — the test passes either way and says nothing about which
+  // rule is implemented.
+  //
+  // This is the shape that separates them. Release 1 was a TARBALL install: the runner
+  // records the content hash and leaves `applied_by_commit` NULL, because there is no
+  // git metadata to read (`migration-provenance.test.ts` pins that behaviour). Release 2
+  // was a git checkout and recorded both. So the EARLIEST row — the one that wins
+  // identity — has a hash and no commit, while the row that loses has a commit.
+  //
+  // Filling each column from whichever row happens to have it therefore emits release
+  // 1's hash beside release 2's commit: a tuple NEITHER ROW EVER HAD, asserting that
+  // those bytes were applied by a build that did not apply them. These three columns
+  // exist so a later investigation can trust them, and a fabricated row is worse than a
+  // NULL — it cannot be told apart from a true one.
+  const db = new Database(join(tmp, 'donor.db'), { create: true })
+  versionKeyedRunner(
+    db,
+    treeWithoutPendingFile([[RENUMBERED_FILE, `0${BRANCH_ORDINAL}_${RENUMBERED_NAME}.sql`]]),
+    { provenance: true, appliedAt: 1_700_000_000, commit: null },
+  )
+  versionKeyedRunner(db, treeWithoutPendingFile(), {
+    provenance: true,
+    appliedAt: 1_760_000_000,
+    commit: 'd'.repeat(40),
+  })
+
+  // THE PRECONDITION, MEASURED: two rows, one name; the earlier has a hash and no
+  // commit, the later has both.
+  const before = db
+    .query<
+      { version: number; content_sha256: string | null; applied_by_commit: string | null },
+      [string]
+    >(
+      'SELECT version, content_sha256, applied_by_commit FROM _migrations WHERE name = ? ORDER BY applied_at',
+    )
+    .all(RENUMBERED_NAME)
+  expect(before).toHaveLength(2)
+  expect(before[0]?.version).toBe(BRANCH_ORDINAL)
+  expect(before[0]?.content_sha256).toMatch(/^[0-9a-f]{64}$/)
+  expect(before[0]?.applied_by_commit).toBeNull()
+  expect(before[1]?.applied_by_commit).toBe('d'.repeat(40))
+
+  expect(applyMigrations(db).applied).toEqual([127, 131])
+
+  const after = db
+    .query<
+      {
+        version: number
+        content_sha256: string | null
+        applied_by_commit: string | null
+        tree_provenance: string | null
+      },
+      [string]
+    >(
+      'SELECT version, content_sha256, applied_by_commit, tree_provenance FROM _migrations WHERE name = ?',
+    )
+    .all(RENUMBERED_NAME)
+  expect(after).toHaveLength(1)
+  expect(after[0]?.version).toBe(BRANCH_ORDINAL)
+  // Its own hash was kept, so nothing forensic was lost.
+  expect(after[0]?.content_sha256).toBe(before[0]?.content_sha256 as string)
+  // THE DISCRIMINATING ASSERTIONS. The winner recorded its own provenance, so NOTHING is
+  // adopted — the commit stays NULL rather than borrowing release 2's, and
+  // `tree_provenance` stays NULL with it. Independent per-column filling makes both of
+  // these fail, and only these.
+  expect(after[0]?.applied_by_commit).toBeNull()
+  expect(after[0]?.tree_provenance).toBeNull()
   db.close()
 })
 

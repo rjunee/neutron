@@ -372,6 +372,60 @@ test('a migration already recorded is not re-refused when a stray copy of it lin
   expect(applyMigrations(db, now)).toEqual({ applied: [], skipped: [1] })
 })
 
+test('a stray sharing a NAME with a tracked file is named as untracked, with its remedy', () => {
+  // THE MESSAGE THE OPERATOR USED TO GET WAS THE BARE TWO-FILENAMES LINE, and the
+  // docblock on the check claimed that could not happen — that "an untracked stray
+  // sharing a slug with a tracked file is refused by the untracked guard anyway". That
+  // path was unreachable in two independent ways, which is why the claim survived
+  // review: the name check ran BEFORE the tree was ever resolved, and a shared name is
+  // exactly what makes both files read as already-applied, so nothing is pending and the
+  // untracked loop reaches nobody. The operator was told two files collide and never
+  // that one of them is not tracked, nor that deleting it is the fix.
+  const db = new Database(':memory:')
+  const dir = checkout('name-collision', {
+    files: { '0001_alpha.sql': ALPHA, '0009_alpha.sql': ALPHA },
+    tracked: ['0001_alpha.sql'],
+  })
+
+  let message = ''
+  try {
+    applyMigrations(db, dir)
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+  // Still refuses, and still names both files — that half was never wrong.
+  expect(message).toContain('Migration name collision on "alpha"')
+  expect(message).toContain('0001_alpha.sql')
+  // THE DISCRIMINATING PART: it says WHICH file is untracked, and what to do.
+  expect(message).toContain("NOT TRACKED by git's index")
+  expect(message).toContain('0009_alpha.sql')
+  expect(message).toContain('DELETING it clears this outright')
+  // And it steers away from the wrong tool, as the untracked refusal does.
+  expect(message).toContain('Do NOT reach for migrations/repairs.json')
+  // Nothing was written: this is decided before the first write like every other guard.
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = '_migrations'").get()).toBeNull()
+
+  // CONTROL, able to fail for the reason under test: when BOTH files are tracked this is
+  // a duplicate somebody committed, not a stray, and the untracked section must be
+  // ABSENT. Without this, the assertions above would also pass if the section were
+  // printed unconditionally — which would send an operator hunting for a stray that does
+  // not exist.
+  const both = new Database(':memory:')
+  const committed = checkout('both-tracked', {
+    files: { '0001_alpha.sql': ALPHA, '0009_alpha.sql': ALPHA },
+    tracked: ['0001_alpha.sql', '0009_alpha.sql'],
+  })
+  let controlMessage = ''
+  try {
+    applyMigrations(both, committed)
+  } catch (err) {
+    controlMessage = err instanceof Error ? err.message : String(err)
+  }
+  expect(controlMessage).toContain('Migration name collision on "alpha"')
+  expect(controlMessage).not.toContain('NOT TRACKED')
+  expect(controlMessage).not.toContain('DELETING it')
+})
+
 // ------------------------------------------------ 3. unverifiable is recorded
 
 test('a tree with NO git metadata still boots, and records that provenance was not established', () => {
