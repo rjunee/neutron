@@ -172,9 +172,10 @@ const {
   // invokes the script instead of transcribing raw SQL. Threaded from the
   // launcher (buildWorkflowArgs) like dbPath; a legacy caller that doesn't
   // thread it falls back to the repo-of-record copy (same precedent as
-  // codex-review.sh below).
+  // worktree-cleanup.sh below).
   checkpointScript = null,
   codexBuildScript = null,
+  codexReviewScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
   // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
   // script (dirty → preserve, clean → plain remove) rather than an LLM told to
@@ -279,6 +280,12 @@ const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
 // a missing arg fails closed by name in forgeAgent.
 const codexBuildSh =
   typeof codexBuildScript === 'string' && codexBuildScript.length > 0 ? codexBuildScript : null
+
+// NO repoPath fallback, deliberately — resolving the review wrapper from the repo being
+// reviewed is the same defect #355 fixed for the build (Open worked by coincidence,
+// everything else 127'd or drifted); a missing arg fails closed by name in codexReviewerPrompt.
+const codexReviewSh =
+  typeof codexReviewScript === 'string' && codexReviewScript.length > 0 ? codexReviewScript : null
 
 // Resolved worktree-cleanup script path (#541) — the deterministic replacement
 // for the force-removing cleanup agent. Same repoPath fallback as above.
@@ -4692,7 +4699,12 @@ function codexReviewerPrompt(diffFile) {
   const errFile = opts.adversarial === true || opts.lane
     ? `/tmp/trident-codex-${lane}-${uniq}.err`
     : `/tmp/trident-codex-${uniq}.err`
-  const script = `${repoPath}/trident/codex-review.sh`
+  if (codexReviewSh === null) {
+    throw new Error(
+      `${lane} review is routed to the codex wrapper but the launcher did not thread codexReviewScript (the harness review wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
+    )
+  }
+  const script = codexReviewSh
   const envPrefix = opts.adversarial === true
     ? `${ADVERSARIAL_CODEX_ENV_PREFIX}NEUTRON_CODEX_REVIEW_RUBRIC=${shSingleQuote(`You are ARGUS-ADVERSARIAL (independent, read-only). Independently try to REFUTE the change: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do not substitute the generic second-opinion rubric.`)} `
     : opts.envPrefix || ''

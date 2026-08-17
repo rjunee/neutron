@@ -520,7 +520,10 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
 
   test('the codex reviewer runs trident/codex-review.sh SYNCHRONOUSLY with per-project CODEX_HOME (never backgrounded)', () => {
     expect(SRC).toContain('function codexReviewerPrompt(diffFile)')
-    expect(SRC).toContain('/trident/codex-review.sh')
+    expect(SRC).toContain('const codexReviewSh =')
+    expect(SRC).toContain('codexReviewScript = null')
+    // The repoPath resolution IS the defect — its absence is the fix.
+    expect(SRC).not.toContain('${repoPath}/trident/codex-review.sh')
     expect(SRC).toContain('CODEX_HOME=')
     expect(SRC).toContain('do NOT background it')
     // Codex reviews the SAME diff FILE Forge wrote — NOT `git diff` in repoPath
@@ -595,6 +598,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'slug',
       'runId',
       'codexHome',
+      'codexReviewSh',
       'baseBranch',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
@@ -606,9 +610,18 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'CODEX_ENV_PREFIX',
       [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
-    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '', "CODEX_REVIEW_MODEL='gpt-5.6-sol' ")(
-      '/tmp/some-diff.diff',
-    )
+    return factory(
+      '/repo',
+      'the-slug',
+      runId,
+      '/codex-home',
+      '/harness/trident/codex-review.sh',
+      'main',
+      '',
+      '',
+      '',
+      "CODEX_REVIEW_MODEL='gpt-5.6-sol' ",
+    )('/tmp/some-diff.diff')
   }
 
   /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */
