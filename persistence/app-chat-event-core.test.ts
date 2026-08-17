@@ -126,14 +126,20 @@ describe('AppChatEventLogCore — row-shaped replay window', () => {
 })
 
 describe('AppChatEventLogCore — the newest-first window does not regress the scan', () => {
-  /** Plan rows for the statement the production path prepares. */
-  const planOf = (table: string, columns: string): string =>
-    db
+  /** Plan rows for the statement the production path prepares. `bounded` selects
+   *  the BACKWARDS-page variant (`AND seq < ?`), which is on the resume path now
+   *  that a client walks older history — so both strings are measured here rather
+   *  than one measured and the other assumed. */
+  const planOf = (table: string, columns: string, bounded = false): string => {
+    const sql = rowReplaySql(table, columns, bounded)
+    const params: number[] = bounded ? [0, 1_000, 4] : [0, 4]
+    return db
       .raw()
-      .prepare(`EXPLAIN QUERY PLAN ${rowReplaySql(table, columns)}`)
-      .all(TOPIC, 0, 4)
+      .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+      .all(TOPIC, ...params)
       .map((r) => String((r as { detail?: unknown }).detail ?? ''))
       .join(' | ')
+  }
 
   it('walks the (topic_id, seq) primary key backwards, with no sort at all', () => {
     seed(10)
@@ -162,6 +168,23 @@ describe('AppChatEventLogCore — the newest-first window does not regress the s
     expect(plan).toContain('idx_app_chat_edits_topic_seq')
     expect(plan).not.toContain('SCAN app_chat_edits')
     expect(plan).not.toContain('TEMP B-TREE')
+  })
+
+  it('walks the same index, still with no sort, when the page is bounded ABOVE too', () => {
+    // The backwards page adds `AND seq < ?`, which only narrows the same index
+    // range — it must not turn the read into a scan or a sort. Asserted for both
+    // row-shaped tables, because the message table's index is a PRIMARY KEY and the
+    // edits table's is an ordinary one, and the planner is entitled to differ.
+    seed(10)
+    const messagePlan = planOf('app_chat_messages', 'seq, message_id', true)
+    expect(messagePlan).toContain('SEARCH app_chat_messages USING INDEX')
+    expect(messagePlan).not.toContain('SCAN app_chat_messages')
+    expect(messagePlan).not.toContain('TEMP B-TREE')
+
+    const editPlan = planOf('app_chat_edits', 'message_id, seq', true)
+    expect(editPlan).toContain('SEARCH app_chat_edits USING INDEX')
+    expect(editPlan).not.toContain('SCAN app_chat_edits')
+    expect(editPlan).not.toContain('TEMP B-TREE')
   })
 
   it('reads at most `limit` rows however long the backlog past the cursor is', () => {

@@ -44,16 +44,31 @@ export interface AppWsInboundUserMessage {
 /**
  * Chat-sync foundation (Phase 1) — gap-fill request. A reconnecting (or
  * second) device sends `{ v:1, type:'resume', after_seq:N }` and the surface
- * replays `WHERE topic_id = ? AND seq > N ORDER BY seq` from the durable
+ * replays the newest page of `WHERE topic_id = ? AND seq > N` from the durable
  * message log so the client fills the gap it missed while the socket was
- * down. `after_seq:0` replays the whole transcript (bounded by the server's
- * replay page size).
+ * down. `after_seq:0` asks for the whole transcript, bounded to the server's
+ * replay page size (`DEFAULT_REPLAY_LIMIT`).
+ *
+ * A page-sized answer is not the whole answer, and the pair of bounds is what
+ * makes the rest reachable. When the server fills a page it follows the replay
+ * with {@link AppWsOutboundHistoryGap}; the client then sends a BACKWARDS
+ * request — `{ after_seq:0, before_seq:<the gap's older_than> }` — and receives
+ * the newest page below that seq. Repeating that walks the transcript to its
+ * beginning, one bounded page per round trip.
  */
 export interface AppWsInboundResume {
   v: 1
   type: 'resume'
   /** Highest server `seq` the client has already applied locally. */
   after_seq: number
+  /**
+   * EXCLUSIVE upper bound: replay the newest page STRICTLY BELOW this seq.
+   * Absent on an ordinary forward resume (unbounded above — the tail of the
+   * transcript). Present only on a backwards request, where it carries either a
+   * {@link AppWsOutboundHistoryGap}'s `older_than` or the client's own oldest
+   * applied seq, which is how a client resumes the walk on a later socket open.
+   */
+  before_seq?: number
 }
 
 /**
@@ -596,8 +611,38 @@ export interface AppWsOutboundActivityEvent {
   ts: number
 }
 
+/**
+ * Chat-sync — the replay TRUNCATION signal, sent to the requesting socket after a
+ * `resume` whose message page came back FULL. `older_than` is the lowest `seq`
+ * that page delivered: rows below it were not sent, and the client fetches them
+ * by sending `{ type:'resume', after_seq:0, before_seq:older_than }`.
+ *
+ * WHY THE WIRE NEEDS THIS AT ALL. A bounded replay used to be silent about being
+ * bounded: the client applied a page, advanced its forward cursor past everything
+ * the page had skipped, and had no way to learn that a range was missing — the
+ * transcript simply began mid-conversation, with no seam and no marker. The
+ * server is the only party that knows the page was capped, so it is the party
+ * that has to say so.
+ *
+ * A full page does not PROVE older rows exist (a topic holding exactly one page
+ * says the same thing as one holding a page and a half). That costs at most one
+ * empty round trip at the exact boundary, and the alternative — a second
+ * existence query per resume — costs one every time.
+ *
+ * Clients that do not understand this frame ignore it and behave exactly as
+ * before; nothing else on the wire changes.
+ */
+export interface AppWsOutboundHistoryGap {
+  v: 1
+  type: 'history_gap'
+  /** Lowest `seq` the replay delivered; older rows were omitted. */
+  older_than: number
+  ts: number
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
+  | AppWsOutboundHistoryGap
   | AppWsOutboundUserMessageEcho
   | AppWsOutboundAgentMessage
   | AppWsOutboundAgentMessagePartial

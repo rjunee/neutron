@@ -2,20 +2,28 @@
  * The resume-path regression that shipped to the owner: a long chat rendered its
  * OLDEST messages and stopped ~630 short of the present.
  *
- * `resume` fires exactly ONCE per socket open (`SyncEngine`'s per-open guard, sent
- * from `chat-core/web-session.ts` and `app/lib/chat-core/mobile-session.ts`
- * `resumeAndFlush`), the adapter answers it with ONE bounded query, and the cursor
- * the client sends is its MAX applied seq — which that query advances. So which END
- * of the backlog the query takes is the whole behaviour: on a 1130-message topic
+ * The adapter answers one `resume` with ONE bounded query, and the cursor the client
+ * sends is its MAX applied seq — which that query advances. So which END of the
+ * backlog the query takes is the whole behaviour: on a 1130-message topic
  * `ORDER BY seq ASC LIMIT 500` delivered seq 1..500, and the remaining 630 arrived
- * only across two further app restarts, one screenful at a time.
+ * only across further app restarts, one screenful at a time. The window is now the
+ * NEWEST `DEFAULT_REPLAY_LIMIT` rows, re-sorted ascending.
  *
- * The window is now the NEWEST `DEFAULT_REPLAY_LIMIT` rows, re-sorted ascending.
- * These tests are at the ADAPTER level on purpose — two of the properties that
+ * AN EARLIER VERSION OF THIS HEADER SAID `resume` FIRES "exactly ONCE per socket
+ * open (`SyncEngine`'s per-open guard)". Both halves were wrong: `SyncEngine` holds
+ * no such guard (the only one is `resumedThisOpen` in `chat-core/web-session.ts`),
+ * and `MobileChatSession.catchUp` re-resumes on an already-open socket every time
+ * the app foregrounds or a push lands (`app/lib/chat-core/use-mobile-chat.ts`). The
+ * error mattered: repeated forward resumes off an ASCENDING window eventually
+ * covered a long transcript, so the newest window is the first shape that could
+ * strand a middle range for good — which is why it now reports a full page as
+ * `older_than` and takes a `before_seq` to fetch the range below it.
+ *
+ * These tests are at the ADAPTER level on purpose — three of the properties that
  * matter are not visible in the store: that a resume costs exactly ONE query (no
- * unbounded drain), and that the message window and the edit window cover the same
- * messages, so a capped replay cannot deliver a deleted message without its
- * tombstone.
+ * unbounded drain), that the message window and the edit window cover the same
+ * messages (so a capped replay cannot deliver a deleted message without its
+ * tombstone), and that repeating the request converges on the whole transcript.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -128,7 +136,8 @@ const idsOf = (envelopes: ReadonlyArray<AppWsOutbound>): string[] =>
 describe('AppWsAdapter.replayAfter — the bounded window is the NEWEST messages', () => {
   it('delivers the newest 500 of an over-long topic, ascending, on a cold resume', async () => {
     seedRows(BACKLOG)
-    const replay = await adapterOn(new AppChatStore({ db })).replayAfter(CHANNEL_TOPIC, 0)
+    const replay = (await adapterOn(new AppChatStore({ db })).replayAfter(CHANNEL_TOPIC, 0))
+      .envelopes
 
     // Same COUNT as the buggy build; the other end of the transcript.
     expect(replay).toHaveLength(DEFAULT_REPLAY_LIMIT)
@@ -151,7 +160,7 @@ describe('AppWsAdapter.replayAfter — the bounded window is the NEWEST messages
     // halves of this at once: seq 1 comes back and seq BACKLOG disappears.
     seedRows(BACKLOG)
     const seqs = new Set(
-      seqsOf(await adapterOn(new AppChatStore({ db })).replayAfter(CHANNEL_TOPIC, 0)),
+      seqsOf((await adapterOn(new AppChatStore({ db })).replayAfter(CHANNEL_TOPIC, 0)).envelopes),
     )
 
     expect(seqs.has(1)).toBe(false)
@@ -168,9 +177,12 @@ describe('AppWsAdapter.replayAfter — the bounded window is the NEWEST messages
     seedRows(BACKLOG)
     const calls: Array<[string, number]> = []
     const store = new AppChatStore({ db })
-    const replay = await adapterOn(
-      countingLog(store, (t, after) => calls.push([t, after])),
-    ).replayAfter(CHANNEL_TOPIC, 0)
+    const replay = (
+      await adapterOn(countingLog(store, (t, after) => calls.push([t, after]))).replayAfter(
+        CHANNEL_TOPIC,
+        0,
+      )
+    ).envelopes
 
     expect(calls).toEqual([[CHANNEL_TOPIC, 0]])
     expect(replay).toHaveLength(DEFAULT_REPLAY_LIMIT)
@@ -183,9 +195,15 @@ describe('AppWsAdapter.replayAfter — the bounded window is the NEWEST messages
     // reordering or a payload change, not just a different length.
     seedRows(12)
     const store = new AppChatStore({ db })
-    const replay = await adapterOn(store).replayAfter(CHANNEL_TOPIC, 0)
-    const everything = await adapterOn(unboundedLog(store)).replayAfter(CHANNEL_TOPIC, 0)
+    const page = await adapterOn(store).replayAfter(CHANNEL_TOPIC, 0)
+    const replay = page.envelopes
+    const everything = (await adapterOn(unboundedLog(store)).replayAfter(CHANNEL_TOPIC, 0))
+      .envelopes
 
+    // …and it reports NO truncation, so a 12-message topic's wire trace gains no
+    // `history_gap` and the client sends no backwards request. This is the half of
+    // the control that pins the new signal to the over-long case only.
+    expect(page.older_than).toBeNull()
     expect(replay).toEqual(everything)
     expect(seqsOf(replay)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
     expect(replay[0]).toMatchObject({ type: 'user_message', seq: 1, body: 'msg-1' })
@@ -196,13 +214,22 @@ describe('AppWsAdapter.replayAfter — the bounded window is the NEWEST messages
     // The contract this change is not trying to touch: a warm client whose gap is
     // smaller than the window gets precisely its gap, no more and no less.
     seedRows(BACKLOG)
-    const replay = await adapterOn(new AppChatStore({ db })).replayAfter(CHANNEL_TOPIC, 900)
+    const page = await adapterOn(new AppChatStore({ db })).replayAfter(CHANNEL_TOPIC, 900)
 
-    expect(seqsOf(replay)).toEqual(Array.from({ length: BACKLOG - 900 }, (_, i) => 901 + i))
+    expect(seqsOf(page.envelopes)).toEqual(
+      Array.from({ length: BACKLOG - 900 }, (_, i) => 901 + i),
+    )
+    // A gap smaller than the window is a COMPLETE answer, so it must not claim
+    // there is older history to fetch — otherwise every ordinary reconnect would
+    // start a pointless backwards walk.
+    expect(page.older_than).toBeNull()
   })
 
   it('replays nothing, with no durable log wired', async () => {
-    expect(await adapterOn(undefined).replayAfter(CHANNEL_TOPIC, 0)).toEqual([])
+    expect(await adapterOn(undefined).replayAfter(CHANNEL_TOPIC, 0)).toEqual({
+      envelopes: [],
+      older_than: null,
+    })
   })
 })
 
@@ -228,7 +255,7 @@ describe('AppWsAdapter — the edit window covers the message window', () => {
     expect(deleted.size).toBe(DEFAULT_REPLAY_LIMIT + 1)
 
     const adapter = adapterOn(new AppChatStore({ db }), true)
-    const messages = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const messages = (await adapter.replayAfter(CHANNEL_TOPIC, 0)).envelopes
     const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
 
     const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
@@ -253,5 +280,164 @@ describe('AppWsAdapter — the edit window covers the message window', () => {
     // that wide holds every edit row for them. Shrinking the edit limit below the
     // message limit silently reintroduces the leak above.
     expect(DEFAULT_EDIT_REPLAY_LIMIT).toBeGreaterThanOrEqual(DEFAULT_REPLAY_LIMIT)
+  })
+})
+
+describe('AppWsAdapter.replayAfter — the omitted OLDER range is reachable', () => {
+  it('reports the page floor when it capped, and nothing when it did not', async () => {
+    // The signal itself. `older_than` is the lowest seq the page delivered, which
+    // is exactly the bound the next request needs — and it is null on a page that
+    // was not full, so a complete answer never triggers a walk.
+    seedRows(BACKLOG)
+    const adapter = adapterOn(new AppChatStore({ db }))
+
+    const first = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    expect(first.older_than).toBe(WINDOW_START)
+    expect(seqsOf(first.envelopes)[0]).toBe(WINDOW_START)
+
+    // Asking below that bound returns the page below it — the rows the first page
+    // skipped, which under a forward-only cursor were unreachable for good.
+    const second = await adapter.replayAfter(CHANNEL_TOPIC, 0, WINDOW_START)
+    expect(seqsOf(second.envelopes).at(-1)).toBe(WINDOW_START - 1)
+    expect(second.envelopes).toHaveLength(DEFAULT_REPLAY_LIMIT)
+    expect(second.older_than).toBe(WINDOW_START - DEFAULT_REPLAY_LIMIT)
+  })
+
+  it('converges on the COMPLETE transcript across repeated bounded pages', async () => {
+    // THE ACCEPTANCE PROPERTY. A topic with more unreplayed rows than the limit is
+    // delivered in full by repeating the request, and no page is ever bigger than
+    // the limit — the two halves that were in tension before ("complete" versus
+    // "bounded") now hold at the same time.
+    //
+    // MUTATION-PROVED: drop `before_seq` from `AppChatEventLogCore.rowsAfter` (or
+    // hard-code `older_than: null` in `replayAfter`) and this test does not merely
+    // fail — it either repeats the same newest page forever or stops after one,
+    // which is precisely the permanent hole this exists to prevent.
+    seedRows(BACKLOG)
+    const adapter = adapterOn(new AppChatStore({ db }))
+
+    const seen: number[] = []
+    const pageSizes: number[] = []
+    let before: number | undefined = undefined
+    for (let round = 0; round < 20; round++) {
+      const page = await adapter.replayAfter(CHANNEL_TOPIC, 0, before)
+      const seqs = seqsOf(page.envelopes)
+      pageSizes.push(seqs.length)
+      seen.push(...seqs)
+      if (page.older_than === null) break
+      // Liveness: the bound must STRICTLY descend, or the walk is not a walk.
+      if (before !== undefined) expect(page.older_than).toBeLessThan(before)
+      before = page.older_than
+    }
+
+    // Complete: every seq exactly once.
+    expect(new Set(seen).size).toBe(BACKLOG)
+    expect(seen.sort((a, b) => a - b)).toEqual(Array.from({ length: BACKLOG }, (_, i) => i + 1))
+    // Bounded: no page exceeded the limit, and it took the arithmetic minimum
+    // number of pages — three, not one per message.
+    expect(Math.max(...pageSizes)).toBeLessThanOrEqual(DEFAULT_REPLAY_LIMIT)
+    expect(pageSizes.length).toBe(Math.ceil(BACKLOG / DEFAULT_REPLAY_LIMIT))
+  })
+
+  it('carries each backwards page its OWN tombstones', async () => {
+    // The alignment argument applies to a backwards page too, and it is the half
+    // that is easy to get wrong: bound the messages and not the edits and the
+    // client receives an OLD page of messages against the NEWEST page of edit
+    // state, so every deleted message in that page arrives with its original body.
+    // MUTATION-PROVED: drop the `before_seq` argument in `replayEditsAfter` and the
+    // leaked list below fills with the whole backwards page.
+    seedRows(BACKLOG)
+    const deleted = tombstone(1, BACKLOG)
+    expect(deleted.size).toBe(BACKLOG)
+
+    const adapter = adapterOn(new AppChatStore({ db }), true)
+    const first = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const second = await adapter.replayAfter(CHANNEL_TOPIC, 0, first.older_than ?? undefined)
+    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0, first.older_than ?? undefined)
+
+    const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
+    const leaked = idsOf(second.envelopes).filter((id) => !tombstoned.has(id))
+    expect(leaked).toEqual([])
+    expect(second.envelopes.length).toBe(DEFAULT_REPLAY_LIMIT)
+  })
+})
+
+describe('AppChatEditStore — an edit is scoped to ITS OWN topic', () => {
+  /** A message in a DIFFERENT topic, with a seq far above this topic's range —
+   *  the shape that made an alien row sort newest in a descending window. */
+  const seedForeignMessage = (topic_id: string, message_id: string, seq: number): void => {
+    db.raw()
+      .prepare(
+        `INSERT INTO app_chat_messages (topic_id, seq, message_id, role, body, created_at)
+           VALUES (?, ?, ?, 'user', ?, ?)`,
+      )
+      .run(topic_id, seq, message_id, 'foreign', seq)
+  }
+
+  it('refuses an edit naming another topic’s message', async () => {
+    // The lookup that resolves a message's seq + role used to be
+    // `WHERE message_id = ?` with no topic, so this call SUCCEEDED and wrote a row
+    // under THIS topic carrying the other topic's seq.
+    seedRows(4)
+    seedForeignMessage('app:kim', 'k1', 5_000)
+    const edits = new AppChatEditStore({ db })
+
+    await expect(
+      edits.record({
+        topic_id: CHANNEL_TOPIC,
+        message_id: 'k1',
+        editor_device_id: 'dev-1',
+        action: 'delete',
+        body: '',
+        at: 10,
+      }),
+    ).rejects.toThrow(/message not found/)
+
+    // …and nothing was written, so the delete cannot be MISFILED here either. The
+    // owner's delete belongs to the other topic and must not silently land in this
+    // one, where it would tombstone nothing the owner can see.
+    expect(await edits.aggregatesAfter(CHANNEL_TOPIC, 0)).toEqual([])
+  })
+
+  it('does not let a cross-topic edit evict a tombstone, so deleted content stays deleted', async () => {
+    // THE PRIVACY PROPERTY. The edit replay is a capped DESCENDING window, so an
+    // alien row carrying another topic's (much higher) seq sorts NEWEST and pushes
+    // a real tombstone out of the page. The message log is an immutable overlay
+    // (migration 0087), so the evicted message is then delivered with its ORIGINAL
+    // BODY and no tombstone: deleted content replays to the client.
+    //
+    // MUTATION-PROVED: revert `AppChatEventLogCore.lookupMessage` to
+    // `WHERE message_id = ?` and `leaked` becomes one message id — the oldest
+    // tombstone in the window, resurrected, exactly as the descending window
+    // predicts.
+    seedRows(BACKLOG)
+    const deleted = tombstone(WINDOW_START, BACKLOG)
+    expect(deleted.size).toBe(DEFAULT_EDIT_REPLAY_LIMIT) // the window is exactly full
+    seedForeignMessage('app:kim', 'k1', 5_000)
+
+    const editStore = new AppChatEditStore({ db })
+    // Swallowed on purpose: the fix makes this throw, and the point of the test is
+    // what the REPLAY looks like either way. Asserting only the throw would pass
+    // against a build that wrote the row and lost the tombstone silently.
+    await editStore
+      .record({
+        topic_id: CHANNEL_TOPIC,
+        message_id: 'k1',
+        editor_device_id: 'dev-1',
+        action: 'delete',
+        body: '',
+        at: 10,
+      })
+      .catch(() => {})
+
+    const adapter = adapterOn(new AppChatStore({ db }), true)
+    const messages = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
+
+    const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
+    const leaked = idsOf(messages.envelopes).filter((id) => deleted.has(id) && !tombstoned.has(id))
+    expect(leaked).toEqual([])
+    // And no foreign message id rides along in this topic's edit replay.
+    expect(edits.map((e) => e.message_id)).not.toContain('k1')
   })
 })

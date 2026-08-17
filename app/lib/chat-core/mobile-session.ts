@@ -42,8 +42,10 @@ import {
   normalizePromptResolved,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
+  parseHistoryGap,
   parseSessionReadyMaxSeq,
   prefixedRandomId,
+  MAX_HISTORY_BACKFILL_ROUNDS,
   SendQueue,
   SyncEngine,
   type ChatMessage,
@@ -136,6 +138,13 @@ export class MobileChatSession {
   /** W5 GAP-4 — per-message (client_msg_id → handle) ack-deadline timers. A row
    *  that never gets its echo flips `sent` → `failed` when its timer fires. */
   private readonly ackTimers = new Map<string, unknown>();
+  /** Backwards-walk state, reset by every resume: how many pages of older history
+   *  this catch-up has asked for, and the lowest `before_seq` it asked from. The
+   *  count is the ceiling ({@link MAX_HISTORY_BACKFILL_ROUNDS}); the floor is the
+   *  liveness guard — a `history_gap` that does not STRICTLY descend is ignored, so
+   *  a server that repeated itself could not spin this client. */
+  private backfillRounds = 0;
+  private backfillFloor: number | null = null;
   private readonly ackTimeoutMs: number;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
@@ -376,6 +385,14 @@ export class MobileChatSession {
       await this.resumeAndFlush();
       return;
     }
+    // The server admitting its replay was TRUNCATED: rows below `older_than` were
+    // not sent. Ask for the page below it — this is the only path by which a
+    // transcript longer than one replay page ever completes on this device.
+    const historyGap = parseHistoryGap(data);
+    if (historyGap !== null) {
+      this.requestHistoryBackfill(historyGap);
+      return;
+    }
     // A matched slash command (/note, /remind, /cal, /skills, …) is answered with
     // a single `chat_command_result` and NO `agent_message` — without this the
     // command's confirmation/output is silently dropped. Render it as an agent
@@ -466,6 +483,33 @@ export class MobileChatSession {
     }, this.topic_id);
     this.armAckTimersFor(flushed);
     if (flushed.length > 0) this.emitChange();
+    // LAST, behind the queue drain: history is never more urgent than the owner's
+    // undelivered sends. A fresh budget per forward resume — and on mobile that
+    // means per foreground and per foregrounded push, since `catchUp` re-drives
+    // this on an already-open socket — then one backwards request if this device's
+    // own oldest applied seq shows history below it. The server can only report a
+    // gap for a page it just sent, so without this local test a walk that ran out
+    // of budget could never be picked up later.
+    this.backfillRounds = 0;
+    this.backfillFloor = null;
+    const backfillFrom = await this.engine.backfillFrom(this.topic_id);
+    if (backfillFrom !== null) this.requestHistoryBackfill(backfillFrom);
+  }
+
+  /**
+   * Ask for the page of history below `before_seq` — one round of the backwards
+   * walk. Refuses to run past {@link MAX_HISTORY_BACKFILL_ROUNDS} rounds, and
+   * refuses any bound that does not strictly descend, so the walk always
+   * terminates. A send that fails (socket gone) is not retried here: the next
+   * resume restarts the walk from the on-device store.
+   */
+  private requestHistoryBackfill(before_seq: number): void {
+    if (before_seq <= 1) return;
+    if (this.backfillRounds >= MAX_HISTORY_BACKFILL_ROUNDS) return;
+    if (this.backfillFloor !== null && before_seq >= this.backfillFloor) return;
+    this.backfillFloor = before_seq;
+    this.backfillRounds += 1;
+    this.ws.send(this.engine.backfillRequest(before_seq));
   }
 
   private async flush(): Promise<void> {

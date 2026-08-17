@@ -43,6 +43,7 @@ export type {
   AppWsInboundPresence,
   AppWsOutbound,
   AppWsOutboundSessionReady,
+  AppWsOutboundHistoryGap,
   AppWsOutboundUserMessageEcho,
   AppWsOutboundAgentMessageOption,
   AppWsOutboundAgentMessageDocRef,
@@ -126,7 +127,16 @@ export function decodeAppWsResume(raw: unknown): AppWsInboundResume | null {
   if (e['type'] !== 'resume') return null
   const raw_after = e['after_seq']
   if (typeof raw_after !== 'number' || !Number.isFinite(raw_after)) return null
-  return { v: 1, type: 'resume', after_seq: Math.max(0, Math.trunc(raw_after)) }
+  const out: AppWsInboundResume = { v: 1, type: 'resume', after_seq: Math.max(0, Math.trunc(raw_after)) }
+  // The BACKWARDS bound (see `AppWsInboundResume.before_seq`). Clamped the same
+  // way as the cursor so a malformed value can't drive a negative/fractional
+  // query; a non-number is simply DROPPED rather than rejecting the frame, so an
+  // older client's plain forward resume keeps working byte for byte.
+  const raw_before = e['before_seq']
+  if (typeof raw_before === 'number' && Number.isFinite(raw_before)) {
+    out.before_seq = Math.max(0, Math.trunc(raw_before))
+  }
+  return out
 }
 
 /**

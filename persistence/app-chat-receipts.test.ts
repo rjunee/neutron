@@ -321,40 +321,77 @@ describe('AppChatReceiptStore — aggregatesAfter bounded scan + continuation (r
     expect(new Set(ids).size).toBe(10)
   })
 
-  it('pages by MESSAGE IDENTITY, not raw seq: colliding seqs across messages neither drop a message nor report a premature null cursor', async () => {
-    // Two messages living in DIFFERENT topics each get seq 1 (seq is monotonic
-    // PER TOPIC). Their receipts are recorded under a THIRD topic — the store
-    // resolves seq from the globally-keyed message log, so both rows land under
-    // `COLLIDE` carrying seq 1. A raw-seq cursor would see ONE distinct seq,
-    // fold both into a page capped at 1 message (dropping the second), and
-    // report `null` (claiming done). The identity cursor must page correctly.
-    const COLLIDE = 'app:collide'
+  it('honours the EXCLUSIVE before_seq bound, so a backwards page does not re-drain the topic', async () => {
+    // The message replay walks BACKWARDS a page at a time (`resume.before_seq`);
+    // per-message state has to follow the same range. Without the bound each page
+    // of the walk drains receipts for the WHOLE topic — correct, and O(topic) per
+    // page. With it, a page pays for its own range only.
+    //
+    // MUTATION-PROVED: drop `before_seq` in `AppChatReceiptStore.aggregatesAfter`
+    // and the first assertion returns all six messages instead of the two in range.
+    for (let i = 1; i <= 6; i++) {
+      const id = `m${i}`
+      await appendMessage(id)
+      await receipts.record({ topic_id: TOPIC, message_id: id, device_id: 'devA', state: 'read', at: i })
+    }
+
+    // (2, 5) — strictly between, both ends excluded.
+    const bounded = await receipts.aggregatesAfter(TOPIC, 2, 100, 5)
+    expect(bounded.map((a) => a.message_id)).toEqual(['m3', 'm4'])
+
+    // The page form takes the same bound, and reports itself DONE inside it rather
+    // than handing back a cursor that would walk past the ceiling.
+    const page = await receipts.aggregatesAfterPage(TOPIC, 2, 100, undefined, 5)
+    expect(page.aggregates.map((a) => a.message_id)).toEqual(['m3', 'm4'])
+    expect(page.next_cursor).toBeNull()
+
+    // Absent bound = the pre-existing unbounded-above query. This is the control:
+    // every forward resume passes nothing, and nothing about it may change.
+    const unbounded = await receipts.aggregatesAfter(TOPIC, 2, 100)
+    expect(unbounded.map((a) => a.message_id)).toEqual(['m3', 'm4', 'm5', 'm6'])
+  })
+
+  it('a row naming a message this topic does not hold is INERT: seq 0, never in a replay page', async () => {
+    // WHAT THIS TEST USED TO BE, and why it changed. It built two messages in
+    // DIFFERENT topics (each seq 1, since seq is monotonic per topic), recorded
+    // their receipts under a THIRD topic, and asserted the page cursor coped with
+    // the two rows COLLIDING on seq 1 — which they did, because the store resolved
+    // seq through an unscoped `WHERE message_id = ?`.
+    //
+    // That resolution was the defect, not the fixture. A seq borrowed from another
+    // topic is an arbitrary number in this topic's ordering, and in the edits log —
+    // same core, same descending window — a borrowed HIGH seq sorted newest and
+    // evicted a real tombstone from a capped replay, delivering a deleted message
+    // with its original body. The lookup is topic-scoped now
+    // (`AppChatEventLogCore.lookupMessage`), so this fixture can no longer produce
+    // a collision at all, and the property worth pinning is what it produces
+    // instead: a row for a message this topic does not hold resolves to seq 0 and
+    // stays OUT of every replay window, because replay is `seq > after_seq` and the
+    // lowest cursor is 0.
+    //
+    // The page cursor is still the composite `(seq, message_id)`. It is now
+    // defence-in-depth rather than load-bearing — `app_chat_messages` is keyed
+    // `(topic_id, seq)`, so two messages in one topic cannot share a replayable
+    // seq — and the exact-boundary paging tests above are what cover it.
+    const FOREIGN = 'app:foreign'
     await messages.append({ topic_id: 'app:topicA', message_id: 'mA', role: 'user', body: 'x', created_at: 1 }) // seq 1 in A
     await messages.append({ topic_id: 'app:topicB', message_id: 'mB', role: 'user', body: 'x', created_at: 1 }) // seq 1 in B
-    await receipts.record({ topic_id: COLLIDE, message_id: 'mA', device_id: 'devA', state: 'read', at: 1 })
-    await receipts.record({ topic_id: COLLIDE, message_id: 'mB', device_id: 'devB', state: 'read', at: 2 })
+    await receipts.record({ topic_id: FOREIGN, message_id: 'mA', device_id: 'devA', state: 'read', at: 1 })
+    await receipts.record({ topic_id: FOREIGN, message_id: 'mB', device_id: 'devB', state: 'read', at: 2 })
 
-    // Both rows share seq 1 under COLLIDE — the pathological collision.
-    const bothSeqs = (await receipts.aggregatesAfter(COLLIDE, 0, 100)).map((a) => a.seq)
-    expect(bothSeqs).toEqual([1, 1])
+    // Recorded, and readable point-wise — the row is not lost, it is unordered.
+    const all = await receipts.aggregatesAfter(FOREIGN, 0, 100)
+    expect(all).toEqual([])
 
-    const page1 = await receipts.aggregatesAfterPage(COLLIDE, 0, 1)
-    // At most `limit` DISTINCT messages, and NOT a premature done-signal.
-    expect(page1.aggregates).toHaveLength(1)
-    expect(page1.next_cursor).not.toBeNull()
+    // MUTATION-PROVED: revert `lookupMessage` to `WHERE message_id = ?` and both
+    // rows come back carrying topic A's and topic B's seq 1 — a foreign ordering
+    // key inside this topic's replay window.
+    const page = await receipts.aggregatesAfterPage(FOREIGN, 0, 1)
+    expect(page.aggregates).toEqual([])
+    expect(page.next_cursor).toBeNull()
 
-    const page2 = await receipts.aggregatesAfterPage(
-      COLLIDE,
-      page1.next_cursor!.seq,
-      1,
-      page1.next_cursor!.message_id,
-    )
-    expect(page2.aggregates).toHaveLength(1)
-    expect(page2.next_cursor).toBeNull()
-
-    // The two pages together cover BOTH messages exactly once — nothing dropped,
-    // nothing double-counted.
-    const seen = [...page1.aggregates, ...page2.aggregates].map((a) => a.message_id).sort()
-    expect(seen).toEqual(['mA', 'mB'])
+    // And the messages' OWN topics are unaffected: nothing was written there, so a
+    // receipt filed against the wrong topic cannot silently decorate the right one.
+    expect(await receipts.aggregatesAfter('app:topicA', 0, 100)).toEqual([])
   })
 })
