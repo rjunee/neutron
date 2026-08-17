@@ -62,8 +62,50 @@ export function loadMigrations(dir: string = HERE): Migration[] {
     })
 }
 
-export function migrationNameMismatch(recorded: string, file: string): boolean {
-  return recorded !== file
+/** A ledger reduced to the two things that identify a migration. */
+export interface LedgerIdentity {
+  /** Every `name` the ledger records. */
+  readonly names: ReadonlySet<string>
+  /** Every non-NULL `content_sha256` the ledger records. */
+  readonly hashes: ReadonlySet<string>
+}
+
+/**
+ * Whether the ledger already records this migration — BY IDENTITY, NOT BY ORDINAL.
+ *
+ * THE ORDINAL IS A FILENAME PREFIX, NOT AN IDENTITY. It fixes apply ORDER and
+ * nothing else, and it is allocated by whoever writes the file — so across a
+ * fleet, two DIFFERENT migrations legitimately occupy one ordinal (two branches
+ * both number theirs 0125; whichever merges second is renumbered, while an
+ * instance that already ran the first keeps the old number), and one migration
+ * legitimately occupies DIFFERENT ordinals on different instances (it merged at a
+ * number other than the one it was written at). Asking "has this run?" of the
+ * ordinal therefore asks a question the ordinal cannot answer, and gets it wrong
+ * in both directions: a migration reads as APPLIED when a different one consumed
+ * its number — so its `ALTER`s never run and the schema silently lacks them,
+ * which is ordinals 122, 124 and 125 on the live instance — and reads as PENDING
+ * when the same migration already ran under another number.
+ *
+ * The identity is the NAME, the `<slug>` half of `NNNN_<slug>.sql`. That is what
+ * `_migrations.name` has always stored, what the README has always called "the
+ * identity the runner compares", and what this repository has always kept unique
+ * (`assertUniqueMigrationNames` now pins it rather than assuming it).
+ *
+ * `content_sha256` is a SECOND, name-independent identity, and it is used here
+ * only to WIDEN the answer: a migration whose exact bytes are already recorded
+ * has run, whatever it was called at the time. It is never used to NARROW one —
+ * a recorded hash that differs from the file on disk is not treated as unapplied
+ * and not treated as corruption. See README § "`content_sha256` is recorded and
+ * reported, not enforced": already-applied files are edited in place for benign
+ * reasons (a comment, a reflow) and turning the hash into a gate converts every
+ * one of those into a crash loop. That decision predates this change and stands.
+ *
+ * The name is checked FIRST so a steady-state boot hashes nothing at all.
+ */
+export function migrationIsRecorded(migration: Migration, ledger: LedgerIdentity): boolean {
+  if (ledger.names.has(migration.name)) return true
+  if (ledger.hashes.size === 0) return false
+  return ledger.hashes.has(migrationContentHash(migration.sql))
 }
 
 function loadMigrationRepairs(dir: string): MigrationRepair[] {
@@ -74,54 +116,75 @@ function loadMigrationRepairs(dir: string): MigrationRepair[] {
   return repairs as MigrationRepair[]
 }
 
-function repairKey(version: number, recordedName: string, fileName: string): string {
-  return `${version}\0${recordedName}\0${fileName}`
+/**
+ * A repair identifies the LEDGER ROW it acknowledges: ordinal plus recorded name.
+ *
+ * It deliberately does NOT include `file_name`. A repair says two things, and both
+ * are about the row rather than about whatever file happens to sit at that ordinal
+ * in this build: the row is an acknowledged orphan, and the migration named by
+ * `file_name` is already applied on this instance (see `activeRepairs`). Keying on
+ * the ordinal + recorded name keeps both shipped entries matching unchanged, and
+ * stops a repair from silently ceasing to apply the next time a merge renumbers
+ * the file that used to collide with it.
+ */
+function repairKey(version: number, recordedName: string): string {
+  return `${version}\0${recordedName}`
 }
 
 /**
- * The `repairs.json` entry that would acknowledge this exact mismatch.
+ * The `repairs.json` entry that would acknowledge this exact ledger row.
  *
- * READ THE FIELD NAME CAREFULLY: `file_name` holds the migration's NAME (the
- * `<slug>` half of `NNNN_<slug>.sql`), NOT the file's name on disk. That is
- * what `repairKey` compares — it is called with `migration.name`, and the
- * shipped entries in `repairs.json` carry slugs (`trident_checkpoint_head`,
- * for the file `0122_trident_checkpoint_head.sql`). "Correcting" this to the
- * real filename would silently stop every entry from ever matching, and the
- * failure would be invisible: the ledger would look repaired while the runner
- * kept refusing to boot. This builder exists so the operator never has to
- * infer the convention from the key function — and so the two cannot drift.
+ * READ THE FIELD NAMES CAREFULLY. `recorded_name` is the name in the ledger — the
+ * row being acknowledged. `file_name` holds a migration's NAME (the `<slug>` half
+ * of `NNNN_<slug>.sql`), NOT a filename on disk, and it names the migration this
+ * instance already has: the shipped entries carry slugs (`trident_checkpoint_head`,
+ * for the file `0122_trident_checkpoint_head.sql`). "Correcting" either to a real
+ * filename stops the entry matching, and the failure is invisible: the ledger looks
+ * repaired while the runner keeps refusing to boot. This builder exists so the
+ * operator never has to infer the convention from the key function.
+ *
+ * `file_name` is left for the operator to fill because only they can answer it —
+ * the runner knows which row it cannot explain, but not which of this build's
+ * migrations (if any) that row's schema change corresponds to. Naming one is what
+ * suppresses re-applying it; leaving it as the placeholder acknowledges the row
+ * alone, which is the right answer when the orphan corresponds to nothing here.
  */
 function repairsEntryFor(
   version: number,
   recordedName: string,
-  migrationName: string,
   today: string,
 ): Record<string, unknown> {
   return {
     version,
     recorded_name: recordedName,
-    file_name: migrationName,
+    file_name:
+      'REPLACE THIS — the <slug> of the migration in THIS build that is already applied, or "" if none is.',
     note: 'REPLACE THIS — what you verified by hand, and why the live schema already matches this code.',
     date: today,
   }
 }
 
 /**
- * A blank reads as a value, so absence is spelled out — and the two REASONS a
- * field can be absent are spelled out separately, because they send the reader
- * to different places. A row with no hash at all was written before provenance
- * existed and nothing more can be learned from it. A row that has a hash but no
- * commit was written by a build that carried no git metadata (a tarball or
- * container install), and the hash still identifies the file exactly.
+ * A blank reads as a value, so absence is spelled out — and each REASON a field can
+ * be absent is spelled out separately, because they send the reader to different
+ * places. A row that has a hash but no commit was written by a build that carried
+ * no git metadata (a tarball or container install), and the hash still identifies
+ * the file exactly.
+ *
+ * There is deliberately no "row predates provenance" string here any more. A row
+ * with no `content_sha256` never reaches either message: the unexplained-row guard
+ * adjudicates only rows carrying a hash (see `formatUnexplainedLedgerRows` for why
+ * that is required rather than lenient), and the untracked message prints only the
+ * occupying row's name and timestamp. A constant for an unreachable state reads as
+ * documentation of a mode the code cannot enter.
  */
-const PREDATES_PROVENANCE = '(not recorded — row predates migration provenance)'
 const NO_BUILD_IDENTITY = '(not discoverable — the build carried no git metadata)'
 /**
  * A row from a build that recorded the commit but not yet the tree verdict — the
- * window between the two changes. Distinguished from the two above for the same
- * reason they are distinguished from each other: it sends the reader somewhere
- * else, namely "this row's file was never checked against the tree, and nothing
- * more can be learned about it now".
+ * window between the two changes. Distinguished from the one above for the same
+ * reason it is distinguished at all: it sends the reader somewhere else, namely
+ * "this row's file was never checked against the tree, and nothing more can be
+ * learned about it now".
  */
 const PREDATES_TREE_VERIFICATION = '(not recorded — row predates deployed-tree verification)'
 
@@ -179,55 +242,96 @@ function formatAppliedAt(appliedAt: number): string {
 }
 
 /**
- * The thrown message for a name mismatch.
+ * The thrown message for a ledger row THIS BUILD CANNOT EXPLAIN.
  *
- * The refusal itself is unchanged and deliberately fail-closed (see the call
- * site). What changed is that recovery no longer requires reverse-engineering
- * `repairKey` from source: the message prints what is on disk against what was
- * recorded — including the provenance of the build that wrote the row, which
- * is the question the original incident could not answer — and then the exact
- * JSON to paste into `migrations/repairs.json`.
+ * WHAT REPLACED WHAT, and why the replacement is narrower rather than weaker. The
+ * refusal this supersedes fired when the file at ordinal N carried a different
+ * name than the row at ordinal N. That comparison is now known to be wrong in both
+ * directions (see `migrationIsRecorded`) and, worse, unfixable in the direction
+ * that matters: on the live instance the mismatching file's columns were genuinely
+ * absent, so the only remedies the message could offer — acknowledge the row, or
+ * renumber the file — either left the schema broken or broke every instance where
+ * the file HAD applied. Identity reconciliation removes the question entirely: a
+ * migration whose name and bytes are both absent from the ledger simply applies.
+ *
+ * What survives is the half that is still a real danger signal, restated against
+ * identity: a row recording a migration NO file in this build corresponds to. That
+ * says an unknown migration ran against this database — a branch migration that
+ * never merged, or a build that no longer exists — so the schema may carry changes
+ * this code does not know about, and the next migration to touch the same table can
+ * fail in ways nothing on disk explains. It is exactly how ordinals 122, 124 and
+ * 125 came to exist. Fail closed, name the row, and print the entry that resolves
+ * it.
+ *
+ * ONLY ROWS CARRYING A `content_sha256` REACH HERE, and that gate is not a
+ * softening — without it this change would brick the fleet. Migration FILES have
+ * been deleted from this repository on purpose: `0059_syndication_events` went with
+ * the content-sync mesh rip and `0064`–`0068` went in the A2 migration collapse
+ * (see `runner.test.ts`, which pins the resulting ordinal gaps). Every instance
+ * alive before those removals therefore carries rows naming migrations this build
+ * legitimately no longer contains — orphans by construction, on the oldest and most
+ * valuable databases. All of them predate provenance and carry no hash.
+ *
+ * A row with no hash also cannot be ADJUDICATED. The README states what is true of
+ * it: nothing more can be learned. Refusing on it would be a boot outage whose only
+ * evidence is a NULL, leaving the operator nothing to verify and no move except
+ * pasting the entry unread — a ritual, not a check. So the guard refuses where it
+ * HAS identity evidence and stays silent where it has none, and it strengthens by
+ * itself as rows gain provenance. It is still strictly stronger than the guard it
+ * replaces, which could not see these rows AT ALL: that one only ever compared a
+ * row against the one file sharing its ordinal.
+ *
+ * EVERY unexplained row is reported at once, not just the first. An operator
+ * recovering from this needs one hand-verification pass and one edit, not one
+ * refused boot per row.
  */
-function formatNameMismatch(
-  migration: Migration,
-  recorded: RecordedMigration,
+function formatUnexplainedLedgerRows(
+  unexplained: ReadonlyArray<RecordedMigration>,
   today: string,
 ): string {
-  const entry = repairsEntryFor(migration.version, recorded.name, migration.name, today)
-  const indented = JSON.stringify(entry, null, 2)
+  const entries = JSON.stringify(
+    unexplained.map((row) => repairsEntryFor(row.version, row.name, today)),
+    null,
+    2,
+  )
     .split('\n')
     .map((line) => `    ${line}`)
     .join('\n')
-  const appliedAt = formatAppliedAt(recorded.applied_at)
+  const plural = unexplained.length === 1 ? '' : 's'
   return [
-    `Migration version ${migration.version} was recorded as "${recorded.name}" but this code contains "${migration.name}". ` +
-      'The schema may not match this code.',
+    `The _migrations ledger records ${unexplained.length} migration${plural} that NO migration file in ` +
+      'this build corresponds to — neither by name nor by content hash. An unknown migration ran ' +
+      'against this database, so the schema may not match this code.',
+    ...unexplained.flatMap((recorded) => [
+      '',
+      `  recorded "${recorded.name}"`,
+      `    ordinal ${recorded.version}`,
+      `    applied ${formatAppliedAt(recorded.applied_at)}`,
+      `    sha256  ${recorded.content_sha256 ?? ''}`,
+      `    build   ${recorded.applied_by_commit ?? NO_BUILD_IDENTITY}`,
+      // Whether the row's file was ever established as part of the tree that
+      // applied it. On the incidents this work is about, that is THE question — the
+      // offending rows named migrations no deployed commit ever contained.
+      `    tree    ${recorded.tree_provenance ?? PREDATES_TREE_VERIFICATION}`,
+    ]),
     '',
-    '  on disk',
-    `    file    ${migration.fileName}`,
-    `    sha256  ${migrationContentHash(migration.sql)}`,
-    '  recorded',
-    `    name    ${recorded.name}`,
-    `    applied ${appliedAt}`,
-    `    sha256  ${recorded.content_sha256 ?? PREDATES_PROVENANCE}`,
-    `    build   ${
-      recorded.applied_by_commit ??
-      (recorded.content_sha256 === null ? PREDATES_PROVENANCE : NO_BUILD_IDENTITY)
-    }`,
-    // Whether the row's file was ever established as part of the tree that
-    // applied it. On the incident this work is about, that is THE question — the
-    // offending row named a migration no deployed commit ever contained.
-    `    tree    ${
-      recorded.tree_provenance ??
-      (recorded.content_sha256 === null ? PREDATES_PROVENANCE : PREDATES_TREE_VERIFICATION)
-    }`,
+    'NOTHING HAS BEEN APPLIED and nothing has been written — no migration ran, no _migrations row',
+    'was written, the ledger was neither created nor reshaped, and no repair was acknowledged.',
     '',
-    'Resolve ONLY with a hand-verified entry in migrations/repairs.json. Confirm by hand that the',
-    'live schema already matches this code, then append this entry (replacing the note):',
+    'The likely cause is a migration from an UNMERGED BRANCH that was applied to this database. Its',
+    'schema change is present here and is described nowhere in this build.',
     '',
-    indented,
+    'Resolve ONLY with hand-verified entries in migrations/repairs.json. Establish by hand what each',
+    "migration did to this database (`PRAGMA table_info(<table>)`, with a column you KNOW exists as a",
+    'positive control so an empty result proves absence rather than a typo), then append these:',
     '',
-    'Never rename the recorded row and never auto-apply the migration.',
+    entries,
+    '',
+    'Set each `file_name` to the <slug> of the migration in THIS build that the row turns out to have',
+    'already applied — that suppresses re-applying it — or to "" when the orphan corresponds to',
+    'nothing here, which acknowledges the row alone.',
+    '',
+    'Never rename or delete a recorded row. It is the incident record.',
   ].join('\n')
 }
 
@@ -258,11 +362,13 @@ function formatNameMismatch(
  * checkout — which is the failure being prevented. The remedy says both, because
  * "COMMIT it" alone describes a stricter check than the one that just fired.
  *
- * `recorded` is the row already at this ordinal, when there is one. Then the file
- * ALSO reads as a name mismatch, and that is the presentation the last outage
- * arrived in — with a remedy (a `repairs.json` entry) that would acknowledge a
- * row against a file the repository does not track. This refusal takes
- * precedence, and says why.
+ * `recorded` is the row already sitting at this ordinal, when there is one. It is
+ * CONTEXT, not a second finding: since the runner reconciles by identity, an
+ * occupied ordinal is no longer a refusal of its own, and the file here is refused
+ * for being untracked whatever else shares its number. Printing the occupant is
+ * still worth it — the last outage arrived looking exactly like this, and an
+ * operator who sees only "not tracked" while the ordinal is also taken will go
+ * looking for a second problem that is not there.
  */
 function formatUntrackedMigration(
   migration: Migration,
@@ -300,11 +406,12 @@ function formatUntrackedMigration(
       ? []
       : [
           '',
-          `Ordinal ${migration.version} is ALREADY recorded, under the name "${recorded.name}", so this file also`,
-          'reads as a name mismatch — which is the shape the last outage was reported in. Do not resolve',
-          'it that way: a migrations/repairs.json entry here would acknowledge a row against a file this',
+          `Ordinal ${migration.version} is ALREADY recorded, under the name "${recorded.name}" — which is the shape`,
+          'the last outage was reported in. That is CONTEXT, not a second problem: the runner reconciles',
+          'by migration identity, not by ordinal, so a shared ordinal is not itself a fault. Do not reach',
+          'for migrations/repairs.json here — an entry would acknowledge a row against a file this',
           'repository does not track, which is the disease rather than the cure. Deleting the stray',
-          'clears the mismatch outright.',
+          'clears this outright.',
         ]),
     '',
     'Resolve by ONE of:',
@@ -331,14 +438,116 @@ const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['tree_provenance', 'TEXT'],
 ]
 
-/** The columns `_migrations` currently carries, by name. */
-function ledgerColumns(db: Database): Set<string> {
+/** The columns a table currently carries, by name. */
+function tableColumns(db: Database, table: string): Set<string> {
   return new Set(
     db
-      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('_migrations')")
-      .all()
+      .query<{ name: string }, [string]>('SELECT name FROM pragma_table_info(?)')
+      .all(table)
       .map((r) => r.name),
   )
+}
+
+/**
+ * Whether `_migrations` is still keyed on `version` — i.e. predates the move to
+ * name-keyed identity and cannot yet hold two migrations that share an ordinal.
+ */
+function ledgerIsVersionKeyed(db: Database): boolean {
+  return db
+    .query<{ name: string; pk: number }, []>("SELECT name, pk FROM pragma_table_info('_migrations')")
+    .all()
+    .some((column) => column.name === 'version' && column.pk > 0)
+}
+
+/**
+ * The ledger's own DDL. Kept as one string so the table a rekey builds is
+ * byte-identical to the one a fresh install creates, and so the schema snapshot
+ * has exactly one thing to track.
+ *
+ * `name` IS THE PRIMARY KEY AND `version` IS PLAIN DATA. That inversion is the
+ * whole fix. `version` used to be the key, which asserted that an ordinal
+ * identifies a migration — it does not (see `migrationIsRecorded`), and the
+ * assertion was load-bearing in the worst way: on an instance where a branch
+ * migration had consumed ordinal 125, the merged migration numbered 0125 could not
+ * be recorded at all, because its own ordinal was taken by a row for something
+ * else. There was no correct value to write. Every candidate was a lie about one
+ * field or another — a surrogate ordinal in a column named `version`, or a rewrite
+ * of a row that is an incident record. Keying on the name removes the conflict
+ * instead of choosing which field to falsify: two rows may now share a `version`,
+ * which is simply true of a fleet where two migrations were both written as 0125.
+ */
+function ledgerDdl(table: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${table} (
+       version INTEGER NOT NULL,
+       name TEXT NOT NULL PRIMARY KEY,
+       applied_at REAL NOT NULL
+     )`
+}
+
+/** Bring a ledger table up to the current provenance columns. Idempotent. */
+function addProvenanceColumns(db: Database, table: string): void {
+  const present = tableColumns(db, table)
+  for (const [column, type] of PROVENANCE_COLUMNS) {
+    if (present.has(column)) continue
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+    } catch (err) {
+      // Check-then-ALTER is not atomic. If two processes boot at once on the
+      // first run after an upgrade, both can read the column as absent and the
+      // loser gets "duplicate column name". The post-state is what matters and
+      // it is correct, so re-read rather than take down a boot over a race we
+      // won either way. Anything else still throws — this widens nothing.
+      if (!tableColumns(db, table).has(column)) throw err
+    }
+  }
+}
+
+/** Where the old rows live for the duration of a rekey. */
+const LEDGER_LEGACY_TABLE = '_migrations_version_keyed'
+
+/**
+ * Move the ledger's primary key from `version` to `name`, preserving every row.
+ *
+ * ONE TRANSACTION, and the rename happens FIRST so the surviving `_migrations` is
+ * created by `ledgerDdl` directly rather than by `ALTER TABLE ... RENAME TO` —
+ * which rewrites `sqlite_master` with the table name quoted and would leave a
+ * rekeyed instance's schema text subtly different from a fresh install's for no
+ * reason. Either the whole swap lands or the database is untouched.
+ *
+ * A DUPLICATE NAME IN THE OLD LEDGER FAILS THE COPY, AND THAT IS CORRECT. Two rows
+ * recording the same migration name means the ledger cannot say what has run —
+ * genuine corruption, not a shape to migrate — so the transaction rolls back and
+ * boot refuses with the constraint SQLite raised. Silently collapsing the pair
+ * would discard the evidence and leave a database nobody can reason about.
+ *
+ * CONCURRENT REKEY IS SAFE. `BEGIN IMMEDIATE` takes the write lock up front, so a
+ * second process racing the same upgrade gets SQLITE_BUSY rather than a half-built
+ * table — and `nexus-store.ts` already classifies busy as the init race it retries,
+ * where the retry finds the ledger rekeyed and does nothing.
+ */
+function rekeyLedgerOnName(db: Database): void {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.exec(`DROP TABLE IF EXISTS ${LEDGER_LEGACY_TABLE}`)
+    db.exec(`ALTER TABLE _migrations RENAME TO ${LEDGER_LEGACY_TABLE}`)
+    db.exec(ledgerDdl('_migrations'))
+    addProvenanceColumns(db, '_migrations')
+    const columns = 'version, name, applied_at, content_sha256, applied_by_commit, tree_provenance'
+    db.exec(
+      `INSERT INTO _migrations (${columns}) SELECT ${columns} FROM ${LEDGER_LEGACY_TABLE}`,
+    )
+    db.exec(`DROP TABLE ${LEDGER_LEGACY_TABLE}`)
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw new Error(
+      'The _migrations ledger could not be rekeyed from its ordinal onto the migration name, and ' +
+        'the database is unchanged. The most likely cause is two rows recording the same migration ' +
+        'name, which means the ledger cannot say what has run. SQLite reported: ' +
+        (err instanceof Error ? err.message : String(err)),
+      { cause: err },
+    )
+  }
 }
 
 /** Whether `_migrations` exists yet. A fresh database has no ledger at all. */
@@ -358,26 +567,51 @@ function ledgerExists(db: Database): boolean {
  * which is also the honest value. A database that has never been migrated has no
  * table, which reads as an empty ledger.
  *
- * This exists so that DECIDING costs no write. Both refusals — a name mismatch
- * and an untracked file — read the ledger and can then refuse having touched
- * nothing whatsoever, including on a fresh database where `CREATE TABLE` would
- * otherwise have been the one write standing between the message's claim and the
- * truth.
+ * This exists so that DECIDING costs no write. Both refusals — an unexplained
+ * ledger row and an untracked file — read the ledger and can then refuse having
+ * touched nothing whatsoever, including on a fresh database where `CREATE TABLE`
+ * would otherwise have been the one write standing between the message's claim and
+ * the truth.
  */
-function readLedger(db: Database): Map<number, RecordedMigration> {
-  if (!ledgerExists(db)) return new Map()
-  const present = ledgerColumns(db)
+function readLedger(db: Database): Ledger {
+  if (!ledgerExists(db)) return buildLedger([])
+  const present = tableColumns(db, '_migrations')
   const provenance = PROVENANCE_COLUMNS.map(([column]) =>
     present.has(column) ? column : `NULL AS ${column}`,
   ).join(', ')
-  return new Map(
+  return buildLedger(
     db
       .query<RecordedMigration, []>(
         `SELECT version, name, applied_at, ${provenance} FROM _migrations`,
       )
-      .all()
-      .map((r) => [r.version, r] as const),
+      .all(),
   )
+}
+
+/**
+ * Every view of the ledger the runner needs, derived once.
+ *
+ * `byVersion` IS FOR MESSAGES ONLY, and it is first-write-wins because it has to
+ * be: a rekeyed ledger may hold two rows at one ordinal, so there is no such thing
+ * as "the row at ordinal N" any more. No decision reads it — the moment one did,
+ * the ordinal would be back to being an identity.
+ */
+interface Ledger extends LedgerIdentity {
+  readonly rows: ReadonlyArray<RecordedMigration>
+  readonly byVersion: ReadonlyMap<number, RecordedMigration>
+}
+
+function buildLedger(rows: RecordedMigration[]): Ledger {
+  const byVersion = new Map<number, RecordedMigration>()
+  for (const row of rows) if (!byVersion.has(row.version)) byVersion.set(row.version, row)
+  return {
+    rows,
+    names: new Set(rows.map((r) => r.name)),
+    hashes: new Set(
+      rows.map((r) => r.content_sha256).filter((h): h is string => h !== null && h.length > 0),
+    ),
+    byVersion,
+  }
 }
 
 /**
@@ -398,33 +632,25 @@ function readLedger(db: Database): Map<number, RecordedMigration> {
  * about. Bootstrapping here means row one of a brand-new database carries its
  * provenance; `migration-provenance.test.ts` pins that directly.
  *
- * The contract is unchanged in substance: additive, forward-only, idempotent.
- * Columns are only ever added, never dropped or renamed, and re-running is a
- * no-op because `pragma_table_info` is consulted first (SQLite has no
- * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+ * Forward-only and idempotent, and re-running is a no-op because
+ * `pragma_table_info` is consulted first (SQLite has no
+ * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`). Columns are only ever added, never
+ * dropped or renamed. The one non-additive step is `rekeyLedgerOnName`, which moves
+ * the PRIMARY KEY off `version` and onto `name`; it preserves every row and every
+ * column value, and it is not optional — a ledger keyed on the ordinal physically
+ * cannot record a migration whose ordinal another migration already spent, which is
+ * the state that took the live instance down.
  */
 function ensureLedgerShape(db: Database): void {
-  db.exec(
-    `CREATE TABLE IF NOT EXISTS _migrations (
-       version INTEGER PRIMARY KEY,
-       name TEXT NOT NULL,
-       applied_at REAL NOT NULL
-     )`,
-  )
-  const present = ledgerColumns(db)
-  for (const [column, type] of PROVENANCE_COLUMNS) {
-    if (present.has(column)) continue
-    try {
-      db.exec(`ALTER TABLE _migrations ADD COLUMN ${column} ${type}`)
-    } catch (err) {
-      // Check-then-ALTER is not atomic. If two processes boot at once on the
-      // first run after an upgrade, both can read the column as absent and the
-      // loser gets "duplicate column name". The post-state is what matters and
-      // it is correct, so re-read rather than take down a boot over a race we
-      // won either way. Anything else still throws — this widens nothing.
-      if (!ledgerColumns(db).has(column)) throw err
-    }
-  }
+  const existed = ledgerExists(db)
+  db.exec(ledgerDdl('_migrations'))
+  addProvenanceColumns(db, '_migrations')
+  // The rekey runs only for a ledger that predates name-keying, and only on this
+  // path — the one that is about to write a row. A steady-state boot never reshapes
+  // the ledger, so an instance stays version-keyed until its next pending migration
+  // and reads work either way (identity comes from `name` and `content_sha256`,
+  // neither of which the key affects).
+  if (existed && ledgerIsVersionKeyed(db)) rekeyLedgerOnName(db)
 }
 
 /**
@@ -436,9 +662,7 @@ function ensureLedgerShape(db: Database): void {
  * about any of them could be established.
  *
  * The caller passes NULL when nothing is pending, which is also the only case
- * where no row is written. That is not "unknown" — it is "no run happened". Note
- * the tree can be resolved for a name mismatch with nothing pending at all; the
- * verdict then describes no row and the call site drops it.
+ * where no row is written. That is not "unknown" — it is "no run happened".
  */
 function treeProvenanceOf(tree: DeployedTree | null): string | null {
   if (tree === null) return null
@@ -487,6 +711,32 @@ function assertUniqueMigrationOrdinals(
 }
 
 /**
+ * Refuse two files claiming one migration NAME.
+ *
+ * The name is the ledger's identity and its primary key, so two files sharing a
+ * slug are indistinguishable once recorded: whichever applied first makes the other
+ * read as already-applied forever, and its statements never run. That is the same
+ * silent-missing-schema failure the ordinal used to cause, one level over.
+ *
+ * Unconditional, unlike the ordinal check — it needs no tree verdict, because an
+ * untracked stray sharing a slug with a tracked file is refused by the untracked
+ * guard anyway, and a duplicate slug is a mistake in this repository either way.
+ */
+function assertUniqueMigrationNames(migrations: Migration[]): void {
+  const byName = new Map<string, Migration>()
+  for (const migration of migrations) {
+    const previous = byName.get(migration.name)
+    if (previous) {
+      throw new Error(
+        `Migration name collision on "${migration.name}": ${previous.fileName} and ${migration.fileName}. ` +
+          'The migration name is the ledger identity and must be unique across the tree.',
+      )
+    }
+    byName.set(migration.name, migration)
+  }
+}
+
+/**
  * Apply a per-project-scoped migration tree (e.g. `migrations/comments/`)
  * against a sidecar DB. Identical mechanics to `applyMigrations` —
  * preamble PRAGMA hoisting, per-migration BEGIN/COMMIT atomicity, the
@@ -531,13 +781,34 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // gets it asserted here before any work. The bootstrap SQL also sets it for direct sqlite CLI
   // runs; both paths are required.
   db.exec('PRAGMA foreign_keys = ON')
-  const seen = readLedger(db)
+  const ledger = readLedger(db)
   const migrations = loadMigrations(dir)
-  const repairs = new Map(
-    loadMigrationRepairs(dir).map((repair) => [
-      repairKey(repair.version, repair.recorded_name, repair.file_name),
-      repair,
-    ]),
+  assertUniqueMigrationNames(migrations)
+  /**
+   * The repairs that SPEAK on this database, and nothing else.
+   *
+   * An entry only takes effect when the row it names is actually present — an
+   * ordinal carrying exactly that recorded name. This is the property that keeps
+   * `repairs.json` inert on every instance it is not about, a FRESH INSTALL above
+   * all: entry 122 says `trident_checkpoint_head` is already applied on the one
+   * instance where it was applied by hand, and on a new database that migration
+   * must obviously run. Gating on the row's presence is what distinguishes the two,
+   * and it is the same trigger condition the ordinal-based version had.
+   */
+  const activeRepairs = loadMigrationRepairs(dir).filter((repair) =>
+    ledger.rows.some(
+      (row) => row.version === repair.version && row.name === repair.recorded_name,
+    ),
+  )
+  // WHAT AN ACTIVE REPAIR ASSERTS, in two independent halves — the shipped entries
+  // need both. (1) The migration named by `file_name` is ALREADY APPLIED here, hand
+  // verified, so it must not run: on the live instance ordinal 122's schema change
+  // was applied by hand and never recorded, so identity reconciliation would
+  // otherwise re-run its `ALTER`s and fail on duplicate columns. (2) The row itself
+  // is an acknowledged orphan, so the refusal below stays silent about it.
+  const repairedNames = new Set(activeRepairs.map((repair) => repair.file_name))
+  const acknowledgedRows = new Set(
+    activeRepairs.map((repair) => repairKey(repair.version, repair.recorded_name)),
   )
 
   // EVERY REFUSAL IS DECIDED BEFORE THE FIRST WRITE, and the whole block below is
@@ -549,34 +820,27 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // so in as many words. It also keeps `applyMigrations` a pure READ for a
   // fully-migrated database, which is what makes opening a backup read-only to
   // inspect it work.
-  const pendingMigrations = migrations.filter((m) => !seen.has(m.version))
+  //
+  // PENDING IS DECIDED BY IDENTITY, NOT BY ORDINAL — the change this whole file
+  // turns on. See `migrationIsRecorded`.
+  const pendingMigrations = migrations.filter(
+    (m) => !repairedNames.has(m.name) && !migrationIsRecorded(m, ledger),
+  )
+  const pendingNames = new Set(pendingMigrations.map((m) => m.name))
   const pending = pendingMigrations.length > 0
-  // A MISMATCH NEEDS THE TREE VERDICT TOO. Until this was true, an untracked
-  // stray landing on an ordinal that is ALREADY recorded surfaced as a name
-  // mismatch — whose remedy is a `repairs.json` entry naming a file the tree does
-  // not track, which the sibling message correctly calls the disease. That was
-  // not hypothetical: it is how ordinals 122 and 124 presented on the live
-  // instance, and it is why the remedy applied there was the harder one.
-  const mismatched = migrations.some((m) => {
-    const recorded = seen.get(m.version)
-    return recorded !== undefined && migrationNameMismatch(recorded.name, m.name)
-  })
-  // Both provenance reads happen ONCE per run, and only when there is something
-  // to decide, so a steady-state boot (every migration recorded, no mismatch) does
-  // no filesystem work at all. `dir` is the search origin: for the instance tree
-  // that walks up to the checkout's `.git`, and for a sidecar tree
-  // (`migrations/comments`) it finds the same one.
-  const decidable = pending || mismatched
-  const deployedCommit = decidable ? resolveDeployedCommit(process.env, dir) : null
-  const tree = decidable ? resolveDeployedTree(dir) : null
+  // Both provenance reads happen ONCE per run, and only when something is pending,
+  // so a steady-state boot does no filesystem work at all. `dir` is the search
+  // origin: for the instance tree that walks up to the checkout's `.git`, and for a
+  // sidecar tree (`migrations/comments`) it finds the same one.
+  const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
+  const tree = pending ? resolveDeployedTree(dir) : null
   // The tracked-file list, or null when there is none to compare against. A
   // `null` here is "cannot verify" and refuses nothing — see `resolveDeployedTree`.
   const verified = tree !== null && tree.kind === 'verified' ? tree : null
   // AFTER the tree verdict, not before it, so a stray colliding with a tracked
-  // file is diagnosed as the stray it is. A collision always makes the run
-  // decidable — one of the two files is either pending or mismatched against the
-  // recorded name — so the verdict above is never null for the reason that matters
-  // here. See the function for the argument.
+  // file is diagnosed as the stray it is. A collision always leaves at least one of
+  // the two files pending — a stray was never recorded — so the verdict above is
+  // never null for the reason that matters here. See the function for the argument.
   assertUniqueMigrationOrdinals(migrations, verified)
   /**
    * The tree verdict WHEN IT REFUSES this file, else null.
@@ -589,47 +853,51 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   const refusesFile = (m: Migration): typeof verified =>
     verified !== null && !verified.tracked.has(m.fileName) ? verified : null
 
-  const acknowledged = new Map<number, MigrationRepair>()
   const today = new Date().toISOString().slice(0, 10)
-  for (const migration of migrations) {
-    // A file that is present but untracked is not a migration this build
-    // contains, and applying it writes a permanent ledger row for something that
-    // will not exist after the next checkout. Fail closed, name the file.
+  // A pending file that is present but untracked is not a migration this build
+  // contains, and applying it writes a permanent ledger row for something that will
+  // not exist after the next checkout. Fail closed, name the file. ONLY PENDING
+  // files are checked: a migration already recorded is already permanent, and
+  // refusing forever over a stray applied long ago would be an outage with no
+  // remedy. This guard's job is to stop the silent APPLY, the only moment damage is
+  // done. The row sharing the ordinal, if any, is passed for context only.
+  for (const migration of pendingMigrations) {
     const untracked = refusesFile(migration)
-    const recorded = seen.get(migration.version)
-    if (recorded === undefined) {
-      // PENDING. Only pending files can be refused for being untracked: a row
-      // already recorded is already permanent, and refusing forever over a stray
-      // applied long ago would be a boot outage with no remedy. This guard's job
-      // is to stop the silent APPLY, which is the only moment damage is done.
-      if (untracked !== null) {
-        throw new Error(formatUntrackedMigration(migration, untracked, deployedCommit, null))
-      }
-      continue
+    if (untracked !== null) {
+      throw new Error(
+        formatUntrackedMigration(
+          migration,
+          untracked,
+          deployedCommit,
+          ledger.byVersion.get(migration.version) ?? null,
+        ),
+      )
     }
-    if (!migrationNameMismatch(recorded.name, migration.name)) continue
-    const repair = repairs.get(repairKey(migration.version, recorded.name, migration.name))
-    if (repair) {
-      // An acknowledged repair wins even over the untracked verdict. The entry is
-      // an explicit, hand-verified operator decision about this exact ordinal, and
-      // overriding it would turn a documented recovery into an outage with no
-      // remedy — which is the failure mode every rule here is written against.
-      acknowledged.set(migration.version, repair)
-      continue
-    }
-    // Fail closed either way; what improved is WHICH diagnosis is given. An
-    // untracked file at a recorded ordinal is the stray, not a rename, and its
-    // remedy is deletion rather than a repairs entry.
-    throw new Error(
-      untracked !== null
-        ? formatUntrackedMigration(migration, untracked, deployedCommit, recorded)
-        : formatNameMismatch(migration, recorded, today),
+  }
+  // THE REMAINING FAIL-CLOSED GUARD, restated against identity: a recorded
+  // migration that NO file in this build corresponds to. Hashes are computed lazily
+  // and only for the rows that survive the name check, so a healthy boot hashes
+  // nothing. See `formatUnexplainedLedgerRow` for why only rows carrying a
+  // `content_sha256` are adjudicated, and why that is narrower rather than weaker.
+  const fileNames = new Set(migrations.map((m) => m.name))
+  const candidateRows = ledger.rows.filter(
+    (row) =>
+      row.content_sha256 !== null &&
+      row.content_sha256.length > 0 &&
+      !fileNames.has(row.name) &&
+      !acknowledgedRows.has(repairKey(row.version, row.name)),
+  )
+  if (candidateRows.length > 0) {
+    const fileHashes = new Set(migrations.map((m) => migrationContentHash(m.sql)))
+    const unexplained = candidateRows.filter(
+      (row) => row.content_sha256 === null || !fileHashes.has(row.content_sha256),
     )
+    if (unexplained.length > 0) throw new Error(formatUnexplainedLedgerRows(unexplained, today))
   }
 
   // ---- Past this line, and not before it, the database is written to. ----
 
-  if (acknowledged.size > 0) {
+  if (activeRepairs.length > 0) {
     db.exec(
       `CREATE TABLE IF NOT EXISTS _migration_repairs (
          version INTEGER NOT NULL,
@@ -641,7 +909,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
        )`,
     )
   }
-  for (const repair of acknowledged.values()) {
+  for (const repair of activeRepairs) {
     db.run(
       `INSERT OR IGNORE INTO _migration_repairs
        (version, recorded_name, file_name, note, acknowledged_at) VALUES (?, ?, ?, ?, ?)`,
@@ -651,8 +919,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   const applied: number[] = []
   const skipped: number[] = []
   // NULL when nothing is pending, which is also the only case where no row is
-  // written — see `treeProvenanceOf`. The tree may have been resolved for a
-  // mismatch alone, and that verdict describes no row.
+  // written — see `treeProvenanceOf`.
   const treeProvenance = pending ? treeProvenanceOf(tree) : null
   // The ledger is created and reshaped HERE, on the path that is about to write a
   // row, and nowhere earlier — which is the whole reason it is read
@@ -664,7 +931,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // it. Nothing pending, nothing written.
   if (pending) ensureLedgerShape(db)
   for (const m of migrations) {
-    if (seen.has(m.version)) {
+    if (!pendingNames.has(m.name)) {
       skipped.push(m.version)
       continue
     }

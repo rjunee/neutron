@@ -26,18 +26,20 @@ function tableExists(db: Database, name: string): boolean {
   return db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) !== null
 }
 
-test('a recorded version under a different name refuses and preserves its record', () => {
+test('a recorded migration this build does not contain refuses and preserves its record', () => {
   const db = new Database(':memory:')
   const a = tree('a', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' })
   const b = tree('b', { '0001_beta.sql': 'CREATE TABLE t2 (id INTEGER);' })
   applyMigrations(db, a)
 
-  expect(() => applyMigrations(db, b)).toThrow(/1.*alpha.*beta|1.*beta.*alpha/)
+  // Not because the two share ordinal 1 — that is irrelevant now — but because
+  // `alpha` ran here and tree `b` describes it nowhere.
+  expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build/)
   expect(tableExists(db, 't2')).toBe(false)
   expect(db.query('SELECT version, name FROM _migrations').all()).toEqual([{ version: 1, name: 'alpha' }])
 })
 
-test('mismatch refusal applies no later migrations', () => {
+test('the unexplained-row refusal applies no later migrations', () => {
   const db = new Database(':memory:')
   const a = tree('a', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' })
   const b = tree('b', {
@@ -58,7 +60,25 @@ test('same-name re-run skips without throwing', () => {
   expect(applyMigrations(db, a)).toEqual({ applied: [], skipped: [1] })
 })
 
-test('an acknowledged mismatch is skipped, audited, and never rewritten', () => {
+test('a migration recorded at ANOTHER ordinal is skipped, not re-applied', () => {
+  // The renumber case, which the ordinal-keyed runner got wrong in the harmless
+  // direction and then in the harmful one: `alpha` merged at 0002 after running here
+  // as 0001. Re-running it would fail on the duplicate table.
+  const db = new Database(':memory:')
+  applyMigrations(db, tree('before', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' }))
+  const after = tree('after', {
+    '0002_alpha.sql': 'CREATE TABLE t1 (id INTEGER);',
+    '0003_gamma.sql': 'CREATE TABLE t3 (id INTEGER);',
+  })
+  expect(applyMigrations(db, after)).toEqual({ applied: [3], skipped: [2] })
+  // The original row keeps the ordinal it was written with. Nothing is renumbered.
+  expect(db.query("SELECT version FROM _migrations WHERE name = 'alpha'").get()).toEqual({ version: 1 })
+})
+
+test('an acknowledged repair suppresses its named migration, audits, and never rewrites', () => {
+  // The live ordinal-122 shape: a migration whose schema change was applied BY HAND
+  // and never recorded, beside a ledger row naming something else entirely. The
+  // entry's `file_name` is what stops the hand-applied migration running again.
   const db = new Database(':memory:')
   const a = tree('a', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' })
   const b = tree('b', {
@@ -74,6 +94,33 @@ test('an acknowledged mismatch is skipped, audited, and never rewritten', () => 
   expect(db.query('SELECT version, recorded_name, file_name, note FROM _migration_repairs').all()).toEqual([
     { version: 1, recorded_name: 'alpha', file_name: 'beta', note: 'verified' },
   ])
+})
+
+test('a repair whose row is absent stays inert — a fresh install applies everything', () => {
+  // THE PROPERTY THAT MAKES `repairs.json` SAFE TO SHIP IN A PUBLIC REPOSITORY.
+  // Entry 122 says `trident_checkpoint_head` is already applied on the one instance
+  // where it was applied by hand; on every new database that migration must run.
+  const db = new Database(':memory:')
+  const dir = tree('fresh', {
+    '0001_beta.sql': 'CREATE TABLE t2 (id INTEGER);',
+    'repairs.json': JSON.stringify([{ version: 1, recorded_name: 'alpha', file_name: 'beta', note: 'v', date: '2026-08-16' }]),
+  })
+  expect(applyMigrations(db, dir)).toEqual({ applied: [1], skipped: [] })
+  expect(tableExists(db, 't2')).toBe(true)
+  expect(tableExists(db, '_migration_repairs')).toBe(false)
+})
+
+test('two files sharing a migration NAME refuse, naming both', () => {
+  // The name is the ledger identity, so a duplicate slug makes one of the two read
+  // as already-applied forever and its statements never run — the same silent
+  // missing-schema failure the ordinal used to cause, one level over.
+  const db = new Database(':memory:')
+  const dir = tree('dupname', {
+    '0001_same.sql': 'CREATE TABLE a (id INTEGER);',
+    '0002_same.sql': 'CREATE TABLE b (id INTEGER);',
+  })
+  expect(() => applyMigrations(db, dir)).toThrow(/name collision on "same".*0001_same\.sql.*0002_same\.sql/s)
+  expect(db.query('SELECT name FROM sqlite_master').all()).toEqual([])
 })
 
 test('duplicate ordinals name both files and apply nothing', () => {

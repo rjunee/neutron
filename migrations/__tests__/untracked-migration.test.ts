@@ -535,9 +535,11 @@ test('a sidecar migration tree is resolved against its own directory, not the ro
 
 // -------------------------------------- 4. the existing refusal still refuses
 
-test('the name-mismatch refusal STILL FIRES, in a tracked tree and in an unverifiable one', () => {
-  // Hardening one guard must not create a false negative in the other. Both
-  // trees below carry a genuine mismatch and both must throw, applying nothing.
+test('the unexplained-row refusal STILL FIRES, in a tracked tree and in an unverifiable one', () => {
+  // Hardening one guard must not create a false negative in the other. Both trees
+  // below leave `alpha` recorded and undescribed, and both must throw, applying
+  // nothing — including where the tree cannot be verified at all, because this
+  // refusal reads the ledger and not the checkout.
   for (const label of ['tracked', 'unverifiable'] as const) {
     const db = new Database(':memory:')
     const was =
@@ -550,20 +552,22 @@ test('the name-mismatch refusal STILL FIRES, in a tracked tree and in an unverif
       label === 'tracked'
         ? checkout(`now-${label}`, { files: { '0001_beta.sql': BETA }, tracked: ['0001_beta.sql'] })
         : bareTree(`now-${label}`, { '0001_beta.sql': BETA })
-    expect(() => applyMigrations(db, now), label).toThrow(/Migration version 1 was recorded as "alpha"/)
+    expect(() => applyMigrations(db, now), label).toThrow(
+      /NO migration file in this build corresponds to/,
+    )
     expect(tableExists(db, 'beta'), label).toBe(false)
     // Still self-diagnosing: the repairs entry it prints is still there.
     expect(messageOf(() => applyMigrations(db, now))).toContain('"recorded_name": "alpha"')
   }
 })
 
-test('the mismatch message reports what the recorded row established about the tree', () => {
+test('the unexplained-row message reports what the recorded row established about the tree', () => {
   // The forensic question the incident could not answer: was the row's file part
   // of the tree that applied it? Three states, three different messages.
   const db = new Database(':memory:')
   applyMigrations(db, checkout('m-was', { files: { '0001_alpha.sql': ALPHA }, tracked: ['0001_alpha.sql'] }))
   const now = checkout('m-now', { files: { '0001_beta.sql': BETA }, tracked: ['0001_beta.sql'] })
-  expect(sections(messageOf(() => applyMigrations(db, now)))['recorded']?.['tree']).toBe(
+  expect(sections(messageOf(() => applyMigrations(db, now)))['recorded "alpha"']?.['tree']).toBe(
     'tracked-in-index',
   )
 
@@ -571,13 +575,13 @@ test('the mismatch message reports what the recorded row established about the t
   applyMigrations(unverified, bareTree('u-was', { '0001_alpha.sql': ALPHA }))
   expect(
     sections(messageOf(() => applyMigrations(unverified, bareTree('u-now', { '0001_beta.sql': BETA }))))[
-      'recorded'
+      'recorded "alpha"'
     ]?.['tree'],
   ).toBe('unverifiable:no-git-metadata')
 
   // A row written by the build that recorded a commit but not yet a tree verdict
-  // says exactly that, rather than printing a blank or claiming it predates all
-  // provenance — two absences that send the reader to different places.
+  // says exactly that, rather than printing a blank. Note the row still carries a
+  // `content_sha256` — that is what makes it adjudicable at all.
   const legacy = new Database(':memory:')
   legacy.exec(`CREATE TABLE _migrations (
      version INTEGER PRIMARY KEY,
@@ -591,17 +595,16 @@ test('the mismatch message reports what the recorded row established about the t
     ['alpha', 1_700_000_000, migrationContentHash(ALPHA)],
   )
   const message = messageOf(() => applyMigrations(legacy, bareTree('l-now', { '0001_beta.sql': BETA })))
-  expect(sections(message)['recorded']?.['tree']).toBe(
+  expect(sections(message)['recorded "alpha"']?.['tree']).toBe(
     '(not recorded — row predates deployed-tree verification)',
   )
 })
 
-test('an untracked stray at an ALREADY-RECORDED ordinal is diagnosed as the stray, not a rename', () => {
-  // The presentation the last outage actually arrived in. Both refusals fire on the
-  // same file, and the mismatch used to win — sending the operator to a
-  // repairs.json entry naming a file this tree does not track, which the sibling
-  // message correctly calls the disease. It is also the harder remedy: deleting the
-  // stray clears the mismatch outright.
+test('an untracked stray at an ALREADY-RECORDED ordinal is diagnosed as the stray', () => {
+  // The presentation the last outage actually arrived in. The ordinal being occupied
+  // is no longer a refusal of its own, so there is only one finding left here — but
+  // the message must still SAY what shares the number, or an operator who sees a
+  // taken ordinal alongside "not tracked" goes hunting a second problem.
   const db = new Database(':memory:')
   const applied = checkout('recorded-was', {
     files: { '0001_alpha.sql': ALPHA },
@@ -618,21 +621,22 @@ test('an untracked stray at an ALREADY-RECORDED ordinal is diagnosed as the stra
   expect(message).toContain('NOT part of the deployed tree')
   expect(message).toContain('0001_beta.sql')
   expect(message).not.toContain('"recorded_name"') // no repairs.json entry to paste
-  // It still tells the operator what the mismatch they would otherwise have seen is.
+  // It still names the row that shares the ordinal, as context.
   expect(message).toContain('Ordinal 1 is ALREADY recorded, under the name "alpha"')
   expect(sections(message)['recorded']).toEqual({ name: 'alpha', applied: expect.any(String) })
   expect(tableExists(db, 'beta')).toBe(false)
 
-  // CONTROL: the same recorded mismatch with the file TRACKED is still a name
-  // mismatch, with the repairs entry to paste. So the reclassification is the
-  // tree verdict, not the untracked message swallowing every mismatch.
+  // CONTROL: with the SAME ledger and the file TRACKED, the untracked refusal must
+  // fall silent and the other one speak — so the reclassification is the tree
+  // verdict, not the untracked message swallowing everything at a taken ordinal.
   const tracked = checkout('recorded-now-tracked', {
     files: { '0001_beta.sql': BETA },
     tracked: ['0001_beta.sql'],
   })
-  const mismatch = messageOf(() => applyMigrations(db, tracked))
-  expect(mismatch).toContain('Migration version 1 was recorded as "alpha"')
-  expect(mismatch).toContain('"recorded_name": "alpha"')
+  const unexplained = messageOf(() => applyMigrations(db, tracked))
+  expect(unexplained).toContain('NO migration file in this build corresponds to')
+  expect(unexplained).not.toContain('NOT part of the deployed tree')
+  expect(unexplained).toContain('"recorded_name": "alpha"')
 })
 
 test('an acknowledged repair still wins over the untracked verdict', () => {

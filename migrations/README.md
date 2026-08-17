@@ -21,12 +21,31 @@ SQLite schema migrations for Neutron's per-instance SQLite database. Forward-onl
 
 `NNNN_<slug>.sql`
 
-- `NNNN` — 4-digit zero-padded version (`0001`, `0002`, ..., `9999`). Re-using a number is a permanent contract violation; once a version is in `_migrations` somewhere in the wild, that number is consumed forever.
-- `<slug>` — `lower_snake_case` describing the change. Should be short enough to fit on a `git log --oneline` line but specific enough to grep ten months later.
+- `NNNN` — 4-digit zero-padded version (`0001`, `0002`, ..., `9999`). It fixes apply ORDER, and that is all it is for. **It is not an identity** — see "The ordinal is not an identity" below — so re-using one is untidy rather than fatal, and a merge that renumbers a migration is a non-event.
+- `<slug>` — `lower_snake_case` describing the change. Should be short enough to fit on a `git log --oneline` line but specific enough to grep ten months later. **This is the identity, and it must be unique across the tree** — the runner refuses two files sharing a slug, because the ledger could not tell them apart.
 
 The runner enforces the regex `^\d{4}_.+\.sql$`. Files that don't match are silently ignored — keep stray notes / `.bak` files out of the directory.
 
 A file that DOES match and is **not tracked by git** is a different matter: the runner refuses to boot rather than apply it (see "When the runner refuses: an untracked file" below). Until it was committed, a stray `NNNN_*.sql` was applied at boot and recorded in `_migrations` permanently, then vanished with the next checkout — leaving a ledger row naming a migration the repository never contained.
+
+## The ordinal is not an identity
+
+**The runner decides "has this migration run?" from the migration's NAME, never from its ordinal.** That distinction is the difference between a boot and a three-hour outage, and it was learned the hard way three times (ordinals 122, 124 and 125 on the live instance).
+
+The ordinal is allocated by whoever writes the file, so across a fleet it means different things on different databases:
+
+- **Two different migrations legitimately occupy one ordinal.** Two branches both number theirs `0125`. Whichever merges second is renumbered — but an instance that already ran the first keeps `125` recorded under the first one's name. The merged `0125` then has a number that is already spent *on that database only*.
+- **One migration legitimately occupies different ordinals.** It ran on an instance as `0125` from a branch and merged as `0124`.
+
+Keying on the ordinal answers a question the ordinal cannot answer, and gets it wrong in both directions. It reports a migration as **applied** when a different one consumed its number — so its statements never run and the schema silently lacks them, which is exactly what happened to `0125_code_trident_runs_base_sha` — and as **pending** when the same migration already ran under another number, which re-runs it and crashes on `duplicate column name`.
+
+So:
+
+- `_migrations.name` is the **primary key**. `version` is data, and two rows may share one — which is simply true of a fleet where two migrations were both written as `0125`.
+- A ledger from before this change is keyed on `version`; the runner rekeys it in place, preserving every row, on the first boot that has something to apply (`rekeyLedgerOnName`). Nothing pending, nothing reshaped.
+- `content_sha256` is a **second, name-independent identity** and is used only to *widen* the answer: a migration whose exact bytes are already recorded has run, whatever it was called then. It never narrows one — see "recorded and reported, not enforced" below.
+- Two files sharing a slug are refused, because the name is the key.
+- **Renumbering a migration to dodge a collision is not a fix and is not needed.** It repairs the instance where the ordinal was spent and breaks every instance where the migration already applied (measured: `duplicate column name: base_sha`). Under identity reconciliation neither instance notices.
 
 ## The `_migrations` ledger
 
@@ -36,8 +55,8 @@ A steady-state boot — every migration already recorded, nothing pending — do
 
 | column | meaning |
 | --- | --- |
-| `version` | the 4-digit ordinal |
-| `name` | the `<slug>` half of the filename. **This is the identity the runner compares.** |
+| `version` | the ordinal this instance applied it under. Data, not a key — see above |
+| `name` | the `<slug>` half of the filename. **This is the identity, and the PRIMARY KEY.** |
 | `applied_at` | unix seconds, as a REAL |
 | `content_sha256` | SHA-256 of the migration file's bytes, as applied |
 | `applied_by_commit` | the deployed commit SHA, or NULL |
@@ -47,7 +66,7 @@ The last three answer *which build wrote this row*. A live instance once crash-l
 
 All three are nullable, and NULL is a real answer, not a defect:
 
-- **`content_sha256` is NULL** on rows written before provenance shipped. Nothing more can be learned about them.
+- **`content_sha256` is NULL** on rows written before provenance shipped. Nothing more can be learned about them — which is why the unexplained-row refusal below adjudicates only rows that HAVE one. Migration files really do get deleted here on purpose (`0059_syndication_events` with the content-sync mesh rip, `0064`–`0068` in the A2 collapse), so every long-lived database carries rows naming migrations this tree no longer contains, all of them hashless. Refusing on those would take down the oldest instances in the fleet over evidence that is a NULL.
 - **`applied_by_commit` is NULL** when the build had no discoverable identity. Neutron Open is self-hostable, so an install may be an unpacked tarball, a zip, or a `COPY` into a container image with no `.git` and no `git` on PATH. The runner reads git metadata as plain files and never spawns a subprocess (a subprocess on the boot path can hang); when there is nothing to read it records NULL rather than a fabricated value. It also refuses to read a `.git` this tree does not own — an install unpacked inside somebody else's checkout would otherwise record *that* repository's HEAD, which is well-formed, plausible and wrong. **Set `NEUTRON_COMMIT_SHA` when packaging a build without git metadata** (or when installing inside another repository) and provenance stays answerable for exactly the install shapes that would otherwise have none.
 - **`tree_provenance` is `unverifiable:<reason>`** when the checkout's tracking of the file could not be established, and the reason names why: `no-git-metadata` (a tarball, zip or image install), `directory-not-tracked` (the migration directory itself is not part of any checkout — copied into `node_modules/`, staged in a build directory), `no-index` / `unreadable-index` / `unsupported-index-version` / `split-index` / `sparse-index` (an index shape the runner does not decode), `index-checksum-mismatch` (the index failed its own trailing SHA-1 — corruption, or a repository shape the reader misunderstands), `index-hash-skipped` (`index.skipHash`, which `feature.manyFiles` enables, so git wrote no hash and nothing on disk proves the index is intact), `outside-deployed-tree` (not reachable today — the total-function guard on `resolveDeployedTree`'s own invariant that the checkout root it found is an ancestor of the migration directory; listed so the contract below is complete rather than nearly complete). **The prefix is the contract:** anything that is not exactly `tracked-in-index` is unverified, so a reader never has to enumerate the reasons. This is deliberately not the same state as verified — an install that cannot check is not an install with nothing to check, and the row says which it was.
 
@@ -63,15 +82,15 @@ Verifying against HEAD's tree instead would mean reading commit and tree *object
 
 **The residual has one concrete shape worth naming: a build lane that runs `git add -A`.** Staging alone satisfies this check, so on a machine where something stages the whole worktree before boot, a stray `.sql` is staged along with everything else and then reads as tracked. The guard does not close that case, and the row does not pretend otherwise — `tracked-in-index` says the index, and only the index, is what was checked. Closing it would need HEAD-tree verification, which is the trade rejected above. What the guard does close is the case every one of these incidents actually took: a file nothing ever told git about at all.
 
-**`content_sha256` is recorded and reported, not enforced.** The runner compares *names* and refuses on a mismatch; it does not compare the recorded hash against the file on disk. That is a decision, not an omission. Migrations are forward-only and already-applied files are edited in place from time to time for entirely benign reasons — a comment, a reflow, a typo in a string literal — none of which change the schema that landed. Turning the hash into a boot gate would convert every one of those into a crash loop resolvable only through `repairs.json`, and the failure it would catch (a *different* migration silently occupying an applied ordinal) already produces a name mismatch in every case where the slug differs. So the hash's job is forensic: it is printed in the refusal below, and it is what lets an operator tell "the same migration, renamed" from "a genuinely different migration that claimed this ordinal" — the question the incident that motivated these columns could not answer.
+**`content_sha256` is recorded and reported, not enforced.** The runner never refuses because a recorded hash differs from the file on disk. That is a decision, not an omission. Migrations are forward-only and already-applied files are edited in place from time to time for entirely benign reasons — a comment, a reflow, a typo in a string literal — none of which change the schema that landed. Turning the hash into a boot gate would convert every one of those into a crash loop resolvable only through `repairs.json`. So the hash is used in exactly two ways, both of them safe: as a *second identity* that can only ever mark a migration as already applied (never as pending), and forensically, printed in the refusals below — it is what lets an operator tell "the same migration, renamed" from "a genuinely different migration", the question the incident that motivated these columns could not answer.
 
 ### Reading the ledger
 
-**Deciding costs no write — every refusal, without exception.** `_migrations` is *created* on the path that is about to insert a row and on no other, the provenance columns are added there too, and the ledger is read tolerantly of both its absence and its older shapes. A boot that ends in any of the three refusals (a duplicate ordinal, a name mismatch, an untracked file) leaves the database byte-for-byte as it found it — the guard whose job is to change nothing does not first mutate the schema of the database it just declared untrustworthy. `applyMigrations` against a fully-migrated database is a pure read, which is what makes opening a backup read-only to inspect it work.
+**Deciding costs no write — every refusal, without exception.** `_migrations` is *created* on the path that is about to insert a row and on no other, the provenance columns are added there too, the rekey happens there and nowhere else, and the ledger is read tolerantly of both its absence and its older shapes. A boot that ends in any of the four refusals (a duplicate ordinal, a duplicate name, an unexplained ledger row, an untracked file) leaves the database byte-for-byte as it found it — the guard whose job is to change nothing does not first mutate the schema of the database it just declared untrustworthy. `applyMigrations` against a fully-migrated database is a pure read, which is what makes opening a backup read-only to inspect it work.
 
 That ordering is load-bearing rather than tidy, and it was not always right: the acknowledged-repair write below used to run *before* the untracked check, so on any instance carrying acknowledged repairs — this repository ships two — the refusal's claim that nothing had been written was false, in precisely the incident-recovery state where an operator reads it.
 
-One write is worth knowing about before pointing a read-only connection at a live database: when `repairs.json` carries an entry that matches a mismatch in this ledger, the runner records the acknowledgement in `_migration_repairs`. It happens on the acknowledged-repair path only, whether or not anything is pending, and only *after* every refusal has been decided. A database whose ledger has no acknowledged repairs opens read-only cleanly; one that does needs a writable copy (or an unmatched `repairs.json`) to inspect.
+One write is worth knowing about before pointing a read-only connection at a live database: when `repairs.json` carries an entry whose row is present in this ledger, the runner records the acknowledgement in `_migration_repairs`. It happens on the acknowledged-repair path only, whether or not anything is pending, and only *after* every refusal has been decided. A database whose ledger has no acknowledged repairs opens read-only cleanly; one that does needs a writable copy (or an unmatched `repairs.json`) to inspect.
 
 ## When the runner refuses: an untracked file
 
@@ -82,23 +101,31 @@ Resolve it by deciding what the file is:
 - a **stray** — a scratch copy, an editor artifact, a leftover from another branch, something another process wrote into the directory → **delete it**. The database is unchanged, so nothing else is needed.
 - a **real migration** → **`git add` *and* commit it**, then boot again. Both halves matter: staging is what satisfies the check (it reads the index), and only the commit makes the file outlive the next checkout — which is the failure being prevented.
 
-`repairs.json` is not the tool for this and the message says so: those entries acknowledge a name mismatch on a row whose file the tree *does* contain. Recording a row for a file the repository does not contain is the disease, not the cure.
+`repairs.json` is not the tool for this and the message says so: those entries acknowledge a ledger row, not a file. Recording a row for a file the repository does not contain is the disease, not the cure.
 
-**When the ordinal is already recorded, this refusal takes precedence over the name mismatch** — and that combination is not hypothetical: it is how ordinals 122 and 124 presented on the live instance. A stray landing on a recorded ordinal reads as a rename, whose remedy would be a `repairs.json` entry naming a file the tree does not track. The runner now diagnoses it as the stray it is, tells you what the mismatch would have been, and points at deletion, which clears both at once. An *acknowledged* repair still wins: that entry is an explicit hand-verified decision about one ordinal, and overriding it would turn a documented recovery into an outage with no remedy.
+**When the ordinal is already recorded, the message names the occupying row as CONTEXT** — because that combination is how ordinals 122 and 124 presented on the live instance, and an operator who sees a taken ordinal beside a bare "not tracked" goes hunting a second problem. There is no second problem: a shared ordinal is not a fault, so there is one finding here and one remedy, deletion. An *acknowledged* repair still wins over the untracked verdict: that entry is an explicit hand-verified decision, and overriding it would turn a documented recovery into an outage with no remedy.
 
 **It takes precedence over the duplicate-ordinal refusal too, and for the same reason.** A stray does not always arrive at a free ordinal — on the live instance it landed on one a real migration already owned, which trips the collision check first and reports "two files claim version N". That message sends you hunting a duplicate you never committed, while the actual remedy goes unsaid. So when the tree can tell the two apart, the collision check stands aside and the untracked refusal speaks instead. Two *tracked* files at one ordinal is a genuine mistake in this repository and still reports as a collision, naming both files; so does a collision on an install where the tree cannot be verified at all. Fail-closed in every case — what changes is only which remedy you are handed.
 
 The check runs only where it can be answered: the checkout's own `.git` index, read as a plain file (no subprocess — `git` may not be installed, and a subprocess on the boot path can hang). Where that is unavailable the runner applies the migration and records `tree_provenance = unverifiable:<reason>` instead, which is why the guard can be fail-closed without breaking tarball, zip or container installs. Only **pending** migrations are checked for the refusal: a row that is already recorded is already permanent, and refusing forever over a file applied long ago would be an outage with no remedy.
 
-## When the runner refuses: `repairs.json`
+## When the runner refuses: an unexplained ledger row
 
-If a version is recorded under one name and this code contains another, `applyMigrations` **throws and applies nothing**. That is deliberate and fail-closed: the schema may not match the code, and the runner will not guess, auto-apply, or rename the recorded row.
+If the ledger records a migration that **no file in this build corresponds to** — neither by name nor by content hash — `applyMigrations` **throws and applies nothing**. An unknown migration ran against this database, so the schema may carry changes this code does not describe, and the next migration to touch the same table can fail in a way nothing on disk explains. It is exactly how ordinals 122, 124 and 125 came to exist. The runner will not guess, auto-apply, or rename the recorded row.
 
-The thrown message is self-diagnosing. It prints what is on disk (file + hash) against what was recorded (name, timestamp, hash, build), and then the exact `repairs.json` entry that resolves it. Copy that entry, **replace the `note` with what you actually verified**, and append it to `migrations/repairs.json`.
+**Only rows carrying a `content_sha256` are adjudicated.** A row without one predates provenance and cannot be checked against anything — and, because migration files are deliberately deleted here from time to time, every long-lived database has some. Refusing on those would be a boot outage whose evidence is a NULL. The guard refuses where it *has* identity evidence, stays silent where it has none, and strengthens by itself as rows gain provenance.
 
-Verify by hand *before* writing the entry — an entry is an assertion that the live schema already matches this code. Check that the migration's objects are really present (`PRAGMA table_info(<table>)`, and include a column you know exists as a positive control, so an empty result proves absence rather than a mistyped query).
+The thrown message is self-diagnosing. It lists **every** unexplained row (one hand-verification pass, one edit — not one refused boot per row) with its ordinal, timestamp, hash and build, and then the exact `repairs.json` entries that resolve them.
 
-One trap worth naming: the entry's **`file_name` field holds the migration's slug, not the filename on disk** — `trident_checkpoint_head`, not `0122_trident_checkpoint_head.sql`. That is what the runner keys on. "Correcting" it to the real filename stops the entry matching, and the failure is invisible: the ledger looks repaired while the runner keeps refusing to boot.
+Verify by hand *before* writing an entry. Establish what that migration did to this database (`PRAGMA table_info(<table>)`, and include a column you know exists as a positive control, so an empty result proves absence rather than a mistyped query). Then:
+
+- set **`file_name`** to the slug of the migration in *this* build that the row turns out to have already applied — that suppresses re-applying it, which is what keeps an instance whose schema change was applied by hand from running it a second time (ordinal 122's entry does exactly this);
+- or set it to `""` when the orphan corresponds to nothing here, which acknowledges the row alone.
+
+Two traps worth naming:
+
+- **`file_name` holds a migration's slug, not a filename on disk** — `trident_checkpoint_head`, not `0122_trident_checkpoint_head.sql`. "Correcting" it stops the entry doing its job, and the failure is invisible.
+- **An entry only takes effect where its row exists.** `version` + `recorded_name` must match a real row, which is what keeps these entries inert on every other instance — a fresh install must still run migration 0122, and it does.
 
 Entries are permanent incident records. They are never rewritten or removed.
 

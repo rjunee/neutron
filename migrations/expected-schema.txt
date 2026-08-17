@@ -398,8 +398,8 @@ CREATE INDEX wow_events_project_action
 
 [table] _migrations (tbl=_migrations)
 CREATE TABLE _migrations (
-       version INTEGER PRIMARY KEY,
-       name TEXT NOT NULL,
+       version INTEGER NOT NULL,
+       name TEXT NOT NULL PRIMARY KEY,
        applied_at REAL NOT NULL
      , content_sha256 TEXT, applied_by_commit TEXT, tree_provenance TEXT)
 

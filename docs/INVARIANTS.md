@@ -104,26 +104,40 @@ with cross-references noted inline.
     Protects: **P1** (ProjectDb API widening).
 17. Migration runner: PRAGMA preamble hoisted out of the per-migration transaction;
     `PRAGMA foreign_keys=ON` re-asserted in a `finally`; per-migration BEGIN/COMMIT atomicity;
-    migration version numbers are never renumbered or backfilled. `migrations/runner.ts`
+    migration version numbers are never renumbered or backfilled, and **the runner decides
+    "has this run?" from the migration's NAME, never from its ordinal** (`migrationIsRecorded`;
+    `_migrations` is keyed on `name`, `version` is data and two rows may share one). Keying on the
+    ordinal is what took the live instance down three times: a migration whose number a branch
+    migration had spent read as applied, so its `ALTER`s never ran and the schema silently lacked
+    them. Renumbering to dodge a collision is not the fix — it repairs the instance where the
+    ordinal was spent and breaks every instance where the migration already applied. `migrations/runner.ts`
     (`applyMigrations`' apply loop, `splitPragmaPreamble`) — cited by function rather than by line,
     because the previous line anchor had drifted off the code it named.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
-    Three refusals in that runner are fail-closed and must stay so: a duplicate ordinal
-    (`assertUniqueMigrationOrdinals`), a recorded name that differs from the file on disk
-    (`migrationNameMismatch`, resolvable only via a hand-verified `migrations/repairs.json` entry),
-    and a pending migration file the deployed checkout does not track (`formatUntrackedMigration` in
-    `migrations/runner.ts`, on the verdict from `resolveDeployedTree` in `migrations/provenance.ts`).
-    **All three decide before ANY write** — `_migrations` is created, and repairs are acknowledged,
-    only after the last refusal has been passed, which is what makes the untracked message's claim
-    that nothing was written true.
-    The untracked refusal takes PRECEDENCE over the other two when the tree can tell a stray from a
-    real file, and that is a diagnosis rule, not a weakening: all three still throw before any write.
-    A stray landing on an ordinal that is already recorded reads as a name mismatch, and one landing
-    beside a tracked file at the same ordinal reads as a duplicate ordinal — both send the operator
-    to the wrong remedy (a `repairs.json` entry, or a duplicate they never committed) when the real
-    one is to delete the stray. So `assertUniqueMigrationOrdinals` takes the tree verdict and stands
-    aside when one side of a collision is untracked. Two TRACKED files at one ordinal, and any
+    Four refusals in that runner are fail-closed and must stay so: a duplicate ordinal
+    (`assertUniqueMigrationOrdinals`), a duplicate migration NAME (`assertUniqueMigrationNames` —
+    the name is the ledger key, so two files sharing a slug make one read as applied forever), a
+    recorded migration NO file in this build corresponds to by name or by content hash
+    (`formatUnexplainedLedgerRows`, resolvable only via a hand-verified `migrations/repairs.json`
+    entry), and a pending migration file the deployed checkout does not track
+    (`formatUntrackedMigration` in `migrations/runner.ts`, on the verdict from `resolveDeployedTree`
+    in `migrations/provenance.ts`).
+    **All four decide before ANY write** — `_migrations` is created, rekeyed, and repairs are
+    acknowledged, only after the last refusal has been passed, which is what makes the untracked
+    message's claim that nothing was written true.
+    The unexplained-row refusal adjudicates ONLY rows carrying a `content_sha256`, and that gate is
+    load-bearing rather than lenient: migration files are deliberately deleted here (`0059`,
+    `0064`–`0068`), so every long-lived database holds hashless rows naming migrations this tree no
+    longer contains, and refusing on them would take down the oldest instances in the fleet over
+    evidence that is a NULL. A recorded hash is never used to REFUSE a file — only ever to mark one
+    as already applied (see the README's "recorded and reported, not enforced").
+    The untracked refusal takes PRECEDENCE over the collision check when the tree can tell a stray
+    from a real file, and that is a diagnosis rule, not a weakening: all four still throw before any
+    write. A stray landing beside a tracked file at the same ordinal reads as a duplicate ordinal,
+    which sends the operator hunting a duplicate they never committed when the real remedy is to
+    delete the stray. So `assertUniqueMigrationOrdinals` takes the tree verdict and stands aside
+    when one side of a collision is untracked. Two TRACKED files at one ordinal, and any
     collision on an install where the tree cannot be verified, still report as a duplicate ordinal. Where tracking cannot be established (no git metadata, an index
     shape the reader does not decode, an index that fails its own checksum or carries none, a
     migration directory git does not track at all) the runner applies and records

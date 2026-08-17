@@ -371,8 +371,19 @@ test('bootstrapping the columns is idempotent across repeated runs', () => {
 
 // -------------------------------------------------- the self-diagnosing error
 
-/** The mismatch the incident produced: version 1 recorded as alpha, code has beta. */
-function mismatch(): { db: Database; b: string } {
+/**
+ * A ledger carrying a migration the build does not contain: `alpha` was applied
+ * from one tree, and the tree now on disk knows only `beta` and `gamma`.
+ *
+ * This used to be described as "the mismatch": version 1 recorded as alpha while
+ * the code has beta. The ORDINAL coincidence is no longer what makes it a problem —
+ * `beta` simply applies, because the ledger has never seen it. What is left, and
+ * what these tests pin, is that `alpha` itself is a migration this build cannot
+ * explain: it ran here, its schema change is present, and nothing on disk describes
+ * it. `alpha` was applied by the runner, so it carries a `content_sha256` and is
+ * therefore adjudicable.
+ */
+function unexplainedRow(): { db: Database; b: string } {
   const db = new Database(':memory:')
   applyMigrations(db, tree('was', { '0001_alpha.sql': ALPHA }))
   return { db, b: tree('now', { '0001_beta.sql': BETA, '0002_gamma.sql': GAMMA }) }
@@ -420,31 +431,49 @@ function sections(message: string): Record<string, Record<string, string>> {
  * data. The entry is emitted as a 4-space-indented JSON block, so read exactly
  * that block.
  */
-function printedRepairsEntry(message: string): Record<string, unknown> {
+function printedRepairsEntries(message: string): Array<Record<string, unknown>> {
   const lines = message.split('\n')
-  const start = lines.findIndex((l) => /^ {4}\{$/.test(l))
-  const end = lines.findIndex((l, i) => i > start && /^ {4}\}$/.test(l))
+  const start = lines.findIndex((l) => /^ {4}\[$/.test(l))
+  const end = lines.findIndex((l, i) => i > start && /^ {4}\]$/.test(l))
   if (start === -1 || end === -1) throw new Error('no indented JSON block in the message')
   const json = lines
     .slice(start, end + 1)
     .map((l) => l.slice(4))
     .join('\n')
-  return JSON.parse(json) as Record<string, unknown>
+  return JSON.parse(json) as Array<Record<string, unknown>>
 }
 
-test('the mismatch message prints what is on disk against what was recorded', () => {
-  const { db, b } = mismatch()
-  const parsed = sections(messageOf(() => applyMigrations(db, b)))
+/** A ledger with the provenance columns and one hand-written row. */
+function ledgerWith(
+  db: Database,
+  row: { name: string; applied_at: number; content_sha256: string | null },
+): void {
+  db.exec(`CREATE TABLE _migrations (
+     version INTEGER NOT NULL,
+     name TEXT NOT NULL PRIMARY KEY,
+     applied_at REAL NOT NULL,
+     content_sha256 TEXT,
+     applied_by_commit TEXT,
+     tree_provenance TEXT
+   )`)
+  db.run(
+    'INSERT INTO _migrations (version, name, applied_at, content_sha256) VALUES (1, ?, ?, ?)',
+    [row.name, row.applied_at, row.content_sha256],
+  )
+}
 
-  // Each value under the heading it belongs to. Swapping the two hashes, or
-  // dropping a label, fails here.
-  expect(parsed['on disk']).toEqual({
-    file: '0001_beta.sql',
-    sha256: migrationContentHash(BETA),
-  })
-  expect(parsed['recorded']?.['name']).toBe('alpha')
-  expect(parsed['recorded']?.['sha256']).toBe(migrationContentHash(ALPHA))
-  expect(parsed['recorded']?.['applied']).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+test('the unexplained-row message prints what was recorded, and names the row', () => {
+  const { db, b } = unexplainedRow()
+  const message = messageOf(() => applyMigrations(db, b))
+  const parsed = sections(message)
+
+  // Each value under the heading it belongs to. Dropping a label, or filing the
+  // recorded hash anywhere else, fails here.
+  expect(parsed['recorded "alpha"']?.['ordinal']).toBe('1')
+  expect(parsed['recorded "alpha"']?.['sha256']).toBe(migrationContentHash(ALPHA))
+  expect(parsed['recorded "alpha"']?.['applied']).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  // And it says what it means, so nobody reads it as an ordinal complaint.
+  expect(message).toContain('NO migration file in this build corresponds to')
 })
 
 test('a recorded commit is printed as the build, and is the one the row carries', () => {
@@ -458,134 +487,177 @@ test('a recorded commit is printed as the build, and is the one the row carries'
 
   const now = tree('built-now', { '0001_beta.sql': BETA })
   const parsed = sections(messageOf(() => applyMigrations(db, now)))
-  expect(parsed['recorded']?.['build']).toBe(SHA)
-  expect(parsed['recorded']?.['sha256']).toBe(migrationContentHash(ALPHA))
+  expect(parsed['recorded "alpha"']?.['build']).toBe(SHA)
+  expect(parsed['recorded "alpha"']?.['sha256']).toBe(migrationContentHash(ALPHA))
 })
 
-test('a row that predates provenance says so, instead of printing a blank', () => {
+test('a row that predates provenance is TOLERATED, not refused', () => {
+  // THE PROPERTY THAT KEEPS THIS CHANGE DEPLOYABLE. Migration files really have
+  // been deleted from this repository — 0059 with the content-sync mesh rip, and
+  // 0064–0068 in the A2 collapse — so every long-lived instance carries rows naming
+  // migrations the build no longer contains. All of them predate provenance and
+  // have no hash. Adjudicating them would refuse the oldest databases in the fleet
+  // over evidence that is a NULL, with nothing for the operator to verify.
   const db = new Database(':memory:')
   db.exec(`CREATE TABLE _migrations (
      version INTEGER PRIMARY KEY,
      name TEXT NOT NULL,
      applied_at REAL NOT NULL
    )`)
-  db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (1, ?, ?)', ['alpha', 1_700_000_000])
+  db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (1, ?, ?)', ['deleted_long_ago', 1_700_000_000])
 
-  const message = messageOf(() => applyMigrations(db, tree('now', { '0001_beta.sql': BETA })))
-  expect(message).toContain('predates migration provenance')
-  expect(message).toContain('2023-11-14') // applied_at, rendered as a real timestamp
-  expect(message).not.toContain('no git metadata')
+  // Boots, and the migration the build DOES have applies — sharing the ordinal with
+  // that row is not a fault, because the ordinal is not an identity.
+  expect(applyMigrations(db, tree('now', { '0001_beta.sql': BETA }))).toEqual({
+    applied: [1],
+    skipped: [],
+  })
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).not.toBeNull()
+  // The old row was neither rewritten nor removed.
+  expect(
+    db.query("SELECT version FROM _migrations WHERE name = 'deleted_long_ago'").get(),
+  ).toEqual({ version: 1 })
 })
 
-test('a row with a hash but no commit is reported as an unidentifiable BUILD, not a missing row', () => {
-  // Two different absences that send the reader to different places. A tarball
-  // install records the hash and no commit; saying that row "predates
-  // provenance" would be a message describing a state the data contradicts.
-  const { db, b } = mismatch()
+test('a row with a hash but no commit is reported as an unidentifiable BUILD, not a blank', () => {
+  // A tarball install records the hash and no commit, and the message must say
+  // which absence this is rather than printing an empty field.
+  const { db, b } = unexplainedRow()
   const message = messageOf(() => applyMigrations(db, b))
 
   expect(message).toContain(migrationContentHash(ALPHA))
   expect(message).toContain('the build carried no git metadata')
-  expect(message).not.toContain('predates migration provenance')
 })
 
-test('the entry printed in the message is the entry that resolves the mismatch', () => {
-  // The whole point of the change: recovery must not require reverse-engineering
-  // repairKey() from source. So take the JSON the runner printed, paste it in
-  // unmodified, and the same tree must boot.
-  const { db, b } = mismatch()
+test('the entries printed in the message are the entries that resolve the refusal', () => {
+  // Recovery must not require reverse-engineering repairKey() from source. So take
+  // the JSON the runner printed, paste it in, and the same tree must boot.
+  const { db, b } = unexplainedRow()
   const message = messageOf(() => applyMigrations(db, b))
 
-  const entry = printedRepairsEntry(message)
-  expect(entry).toMatchObject({ version: 1, recorded_name: 'alpha', file_name: 'beta' })
-  expect(typeof entry['note']).toBe('string')
-  expect(typeof entry['date']).toBe('string')
+  const entries = printedRepairsEntries(message)
+  expect(entries).toHaveLength(1)
+  expect(entries[0]).toMatchObject({ version: 1, recorded_name: 'alpha' })
+  expect(typeof entries[0]?.['file_name']).toBe('string')
+  expect(typeof entries[0]?.['note']).toBe('string')
+  expect(typeof entries[0]?.['date']).toBe('string')
 
-  writeFileSync(join(b, 'repairs.json'), JSON.stringify([entry], null, 2))
-  expect(applyMigrations(db, b)).toEqual({ applied: [2], skipped: [1] })
-  // Fail-closed semantics intact: acknowledged, never applied, never renamed.
-  expect(db.query('SELECT name FROM _migrations WHERE version = 1').get()).toEqual({ name: 'alpha' })
-  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+  writeFileSync(join(b, 'repairs.json'), JSON.stringify(entries, null, 2))
+  // The orphan is acknowledged, and the two migrations this build DOES contain then
+  // apply — which is the substantive difference from the ordinal-keyed runner, where
+  // acknowledging the row also suppressed the file that shared its number.
+  expect(applyMigrations(db, b)).toEqual({ applied: [1, 2], skipped: [] })
+  // Fail-closed semantics intact: the row was acknowledged, never renamed.
+  expect(db.query("SELECT version FROM _migrations WHERE name = 'alpha'").get()).toEqual({
+    version: 1,
+  })
 })
 
-test('the guard STILL REFUSES a genuine mismatch — no false negative', () => {
-  // The hardening must not soften the check it hardens. Every one of these is
-  // a real mismatch and every one must throw and apply nothing.
-  const { db, b } = mismatch()
-  expect(() => applyMigrations(db, b)).toThrow(/Migration version 1 was recorded as "alpha"/)
+test('every unexplained row is reported at once, so one pass resolves them all', () => {
+  // Otherwise recovery is one refused boot per row, and the operator learns about
+  // the second orphan only after fixing the first.
+  const db = new Database(':memory:')
+  applyMigrations(db, tree('two-was', { '0001_alpha.sql': ALPHA, '0002_gamma.sql': GAMMA }))
+  const now = tree('two-now', { '0001_beta.sql': BETA })
+
+  const message = messageOf(() => applyMigrations(db, now))
+  expect(message).toContain('records 2 migrations that NO migration file')
+  expect(printedRepairsEntries(message)).toEqual([
+    expect.objectContaining({ version: 1, recorded_name: 'alpha' }),
+    expect.objectContaining({ version: 2, recorded_name: 'gamma' }),
+  ])
+})
+
+test('the guard STILL REFUSES an unexplained row — no false negative', () => {
+  // Identity reconciliation must not have softened the fail-closed half. Every one
+  // of these leaves the row unexplained and every one must throw, applying nothing.
+  const { db, b } = unexplainedRow()
+  expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build corresponds to/)
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't3'").get()).toBeNull()
-  expect(db.query('SELECT version FROM _migrations WHERE version = 2').get()).toBeNull()
+  expect(db.query("SELECT 1 FROM _migrations WHERE name = 'beta'").get()).toBeNull()
 
-  // An entry for a DIFFERENT mismatch must not launder this one.
+  // An entry naming a DIFFERENT recorded row must not launder this one.
   writeFileSync(
     join(b, 'repairs.json'),
-    JSON.stringify([{ version: 1, recorded_name: 'alpha', file_name: 'delta', note: 'other', date: '2026-08-16' }]),
+    JSON.stringify([{ version: 1, recorded_name: 'delta', file_name: '', note: 'other', date: '2026-08-16' }]),
   )
-  expect(() => applyMigrations(db, b)).toThrow(/recorded as "alpha"/)
+  expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build/)
 
-  // Nor an entry for a different version.
+  // Nor an entry at a different ordinal.
   writeFileSync(
     join(b, 'repairs.json'),
-    JSON.stringify([{ version: 9, recorded_name: 'alpha', file_name: 'beta', note: 'other', date: '2026-08-16' }]),
+    JSON.stringify([{ version: 9, recorded_name: 'alpha', file_name: '', note: 'other', date: '2026-08-16' }]),
   )
-  expect(() => applyMigrations(db, b)).toThrow(/recorded as "alpha"/)
+  expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build/)
 
   // And the recorded row is untouched through all of it.
-  expect(db.query('SELECT name FROM _migrations WHERE version = 1').get()).toEqual({ name: 'alpha' })
+  expect(db.query("SELECT version FROM _migrations WHERE name = 'alpha'").get()).toEqual({
+    version: 1,
+  })
 })
 
 test('an applied_at outside the Date range prints the raw value instead of destroying the message', () => {
   // `Number.isFinite` passes a value like 9e12 seconds, and `new Date(x*1000)`
   // then throws RangeError out of `toISOString()`. That replaces the entire
-  // self-diagnosing message — version, names, hashes, repairs entry — with a
-  // bare RangeError, leaving the operator worse off than before this work.
+  // self-diagnosing message — names, hashes, repairs entries — with a bare
+  // RangeError, leaving the operator worse off than before this work.
   // NaN is not in this list because it cannot reach the reader: SQLite binds it
   // as NULL and `applied_at` is NOT NULL, so the INSERT is what fails.
   for (const appliedAt of [9e12, 1e300, -1e300, Number.POSITIVE_INFINITY]) {
     const db = new Database(':memory:')
-    db.exec(`CREATE TABLE _migrations (
-       version INTEGER PRIMARY KEY,
-       name TEXT NOT NULL,
-       applied_at REAL NOT NULL
-     )`)
-    db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (1, ?, ?)', ['alpha', appliedAt])
+    ledgerWith(db, { name: 'alpha', applied_at: appliedAt, content_sha256: migrationContentHash(ALPHA) })
 
     const message = messageOf(() => applyMigrations(db, tree(`wide-${appliedAt}`, { '0001_beta.sql': BETA })))
-    expect(message).toContain('Migration version 1 was recorded as "alpha"')
-    expect(sections(message)['on disk']?.['sha256']).toBe(migrationContentHash(BETA))
-    expect(printedRepairsEntry(message)).toMatchObject({ version: 1, recorded_name: 'alpha', file_name: 'beta' })
+    expect(message).toContain('NO migration file in this build corresponds to')
+    // Either total-function answer is fine; what must never happen is a RangeError
+    // instead of a message. Infinity is not finite so it reads "(unknown)"; a merely
+    // out-of-range finite value prints itself, because a nonsense timestamp is
+    // forensic evidence and must not be swallowed.
+    expect(sections(message)['recorded "alpha"']?.['applied']).toMatch(
+      /out of range — recorded as|\(unknown\)/,
+    )
+    expect(printedRepairsEntries(message)).toEqual([
+      expect.objectContaining({ version: 1, recorded_name: 'alpha' }),
+    ])
   }
 
   // The boundary itself is a real timestamp and is still rendered as one.
   const db = new Database(':memory:')
-  db.exec('CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at REAL NOT NULL)')
-  db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (1, ?, ?)', ['alpha', 8.64e12])
+  ledgerWith(db, { name: 'alpha', applied_at: 8.64e12, content_sha256: migrationContentHash(ALPHA) })
   const parsed = sections(messageOf(() => applyMigrations(db, tree('edge', { '0001_beta.sql': BETA }))))
-  expect(parsed['recorded']?.['applied']).toBe(new Date(8.64e15).toISOString())
+  expect(parsed['recorded "alpha"']?.['applied']).toBe(new Date(8.64e15).toISOString())
 })
 
 test('the refusal changes nothing — not even the shape of the ledger', () => {
   // A guard whose job is to change nothing must not have reshaped the schema of
   // the database it just declared untrustworthy. Reading the ledger has to cost
-  // no write, or the refusal path mutates on its way out.
+  // no write, or the refusal path mutates on its way out — and after this change
+  // that includes NOT rekeying it, which is the one non-additive step the runner
+  // has. The ledger here is version-keyed, so a rekey would be visible.
   const db = new Database(':memory:')
   db.exec(`CREATE TABLE _migrations (
      version INTEGER PRIMARY KEY,
      name TEXT NOT NULL,
-     applied_at REAL NOT NULL
+     applied_at REAL NOT NULL,
+     content_sha256 TEXT
    )`)
   db.exec('CREATE TABLE t1 (id INTEGER)')
-  db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (1, ?, ?)', ['alpha', 1_700_000_000])
+  db.run(
+    'INSERT INTO _migrations (version, name, applied_at, content_sha256) VALUES (1, ?, ?, ?)',
+    ['alpha', 1_700_000_000, migrationContentHash(ALPHA)],
+  )
   const before = db.query("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()
 
-  expect(() => applyMigrations(db, tree('refused', { '0001_beta.sql': BETA }))).toThrow(/recorded as "alpha"/)
+  expect(() => applyMigrations(db, tree('refused', { '0001_beta.sql': BETA }))).toThrow(
+    /NO migration file in this build/,
+  )
 
   expect(db.query("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()).toEqual(before)
   const columns = (db.query("SELECT name FROM pragma_table_info('_migrations')").all() as Array<{ name: string }>)
     .map((c) => c.name)
-  expect(columns).not.toContain('content_sha256')
   expect(columns).not.toContain('applied_by_commit')
+  expect(columns).not.toContain('tree_provenance')
 })
 
 test('a fully migrated database can still be opened read-only and checked', () => {
