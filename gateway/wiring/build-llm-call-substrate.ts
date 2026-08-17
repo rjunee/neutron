@@ -60,6 +60,7 @@ import {
   reportSuccess,
   selectCredential,
   type CredentialPool,
+  type FailureOrigin,
 } from '@neutronai/runtime/credential-pool.ts'
 import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -249,6 +250,33 @@ export interface BuildLlmCallSubstrateInput {
    *  Also the instance+role discriminator the persistent substrate folds into its
    *  warm-pool key (S3 §2). */
   substrate_instance_id: string
+  /**
+   * WHOSE turns this substrate serves, for credential-pool failure accounting.
+   * Defaults to `'interactive'` — a person is waiting — which is the behaviour
+   * every existing call site had and keeps.
+   *
+   * `'background'` marks a timer-driven lane (today: the proactive nudge/ritual
+   * compose substrate, `cc-nudge-*`). Two things change, and ONLY for failures:
+   *
+   *   1. The strike is not counted toward the pool's `MAX_CONSECUTIVE_FAILURES`
+   *      park (`runtime/credential-pool.ts` `reportFailure`, `origin`).
+   *   2. An INFERRED cooldown is not reported at all. The mapper turns "retryable,
+   *      no HTTP status" into a 429 — a guess, and on this lane usually a wrong one
+   *      (a crashed REPL child, a wedged channel, a compose that timed out). An
+   *      interactive turn keeps that guess because a person is blocked and backing
+   *      off is the safer error. A background turn has nobody blocked, so guessing
+   *      only costs the owner his next chat turn.
+   *
+   * A REAL provider status still cools the credential on either lane: a 429/402/401
+   * the provider actually returned is back-pressure, not an inference.
+   *
+   * WHY THIS EXISTS: on 2026-08-17 five nudge composes failed on a live instance
+   * with no quota condition at all, parked the box's ONE credential for an hour, and
+   * the owner's every chat turn then died instantly with "all Anthropic credentials
+   * are in cooldown (429/402/401)". The pool failed closed in the one direction that
+   * silences the product.
+   */
+  credential_failure_lane?: FailureOrigin
   /** Optional cwd override threaded to `createClaudeCodeSubstrateAuto` (defaults to process.cwd()). */
   cwd?: string
   /**
@@ -618,6 +646,9 @@ export function buildLlmCallSubstrate(
   // (user, project) turns keep separate upstream sessions — mirroring the CC
   // warm-pool key dimensions.
   const openaiSessions: OpenAiSessionLedger = new Map()
+  // Credential-pool failure accounting for every turn this substrate serves.
+  // Absent ⇒ `'interactive'`, which is what every pre-existing call site meant.
+  const failureLane: FailureOrigin = input.credential_failure_lane ?? 'interactive'
   return {
     start(spec: AgentSpec): SessionHandle {
       // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
@@ -655,6 +686,7 @@ export function buildLlmCallSubstrate(
           config: input.openai,
           sessionLedger: openaiSessions,
           sessionKey,
+          failureLane,
           ...(scopeProjectId !== undefined ? { projectId: scopeProjectId } : {}),
         })
       }
@@ -958,15 +990,23 @@ export function buildLlmCallSubstrate(
               // is mapped by CODE so, e.g., a caller-cancelled `aborted` turn is
               // never mis-cooled as a 401 just because its prose says `HTTP 401`.
               let cooldownStatus: number | null
+              // Whether `cooldownStatus` came from the PROVIDER (a status it
+              // actually returned) or from `mapStatusForPoolCooldown`'s
+              // retryable→429 GUESS. A background lane discards the guess — see
+              // `credential_failure_lane`.
+              let cooldownFromProvider = false
               if (stampedCode !== undefined) {
                 if (stampedCode === 'aborted') {
                   // Caller cancellation — never a credential fault; no cooldown.
                   cooldownStatus = null
                 } else if (stampedCode === 'rate_limited') {
                   cooldownStatus = 429
+                  cooldownFromProvider = true
                 } else if (stampedCode === 'http_status') {
                   // The numeric status lives in the `HTTP <n>:` message prefix.
-                  cooldownStatus = mapStatusForPoolCooldown(parseHttpStatusFromMessage(ev.message), ev.retryable)
+                  const parsed = parseHttpStatusFromMessage(ev.message)
+                  cooldownStatus = mapStatusForPoolCooldown(parsed, ev.retryable)
+                  cooldownFromProvider = parsed !== null
                 } else {
                   // Every OTHER stamped class is NOT a fault of the SELECTED
                   // credential: `aborted` is a caller cancel; `all_cooldown` /
@@ -982,17 +1022,21 @@ export function buildLlmCallSubstrate(
                 const httpStatus = parseHttpStatusFromMessage(ev.message)
                 if (httpStatus !== null) {
                   cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
+                  cooldownFromProvider = true
                 } else if (detectCliAuthFailure(ev.message)) {
                   cooldownStatus = 401
+                  cooldownFromProvider = true
                 } else {
                   cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
                 }
               }
-              if (cooldownStatus !== null) {
+              // A background lane discards an INFERRED cooldown entirely (see
+              // `credential_failure_lane`); a real provider status still cools.
+              if (cooldownStatus !== null && (cooldownFromProvider || failureLane === 'interactive')) {
                 if (ev.retry_after_ms !== undefined) {
-                  reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
+                  reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms, failureLane)
                 } else {
-                  reportFailure(pool, cred.id, cooldownStatus)
+                  reportFailure(pool, cred.id, cooldownStatus, undefined, failureLane)
                 }
               }
             }
@@ -1097,8 +1141,14 @@ export function startOpenAiFamilySession(args: {
   /** Active project id for THIS turn — bound into the MCP resolver so
    *  project-scoped tools dispatch with the correct scope (audit High). */
   projectId?: string
+  /** Credential-pool failure accounting lane — see
+   *  {@link BuildLlmCallSubstrateInput.credential_failure_lane}. Absent ⇒
+   *  `'interactive'`. Only the strike counter differs here: this path already
+   *  cools exclusively on real provider statuses. */
+  failureLane?: FailureOrigin
 }): SessionHandle {
   const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey, projectId } = args
+  const failureLane: FailureOrigin = args.failureLane ?? 'interactive'
   let innerHandle: SessionHandle | null = null
   let cancelled = false
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -1313,9 +1363,9 @@ export function startOpenAiFamilySession(args: {
           const cooldownStatus = openAiCredentialCooldownForEvent(ev)
           if (cooldownStatus !== null) {
             if (ev.retry_after_ms !== undefined) {
-              reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
+              reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms, failureLane)
             } else {
-              reportFailure(pool, cred.id, cooldownStatus)
+              reportFailure(pool, cred.id, cooldownStatus, undefined, failureLane)
             }
           }
         }

@@ -14,8 +14,15 @@
  *   - `prewarmReady` NEVER rejects and is NOT awaited at boot; `prewarmSettled`
  *     is exposed as a LIVE reference (`prewarmSettledRef.settled`) the `.then`
  *     flips, so the composer's cold-window elevation reads the live value.
- *   - Only `cc-agent-*` sets `enableToolBridge: true`. `cc-llm-*`,
- *     `cc-trident-*` (ephemeral), and `cc-trident-fire-*` deliberately omit it.
+ *   - `enableToolBridge: true` on the OWNER-FACING conversational pair only —
+ *     `cc-agent-*` (live chat) and `cc-nudge-*` (background proactive compose,
+ *     where a RITUAL runs and needs Core tools per ISSUES #504). `cc-llm-*`,
+ *     `cc-compose-*`, `cc-trident-*` (ephemeral) and `cc-trident-fire-*`
+ *     deliberately omit it.
+ *   - `cc-nudge-*` MUST keep an instance id distinct from `cc-agent-*` — that
+ *     distinctness is the whole fix for a fired reminder tearing down the owner's
+ *     warm chat child. Its GRANTS are deliberately identical to the chat lane;
+ *     only the SESSION is separate.
  *   - `cc-trident-fire-*` stays WARM per repo cwd (Map cache, non-ephemeral).
  *   - The `substrateFactory` test-seam is threaded verbatim via the
  *     `...(substrateFactory !== undefined ? { substrateFactory } : {})` spread.
@@ -56,6 +63,16 @@ export interface WiredSubstrates {
    * Returns null when LLM-less (no conversational provider available).
    */
   makeComposeSubstrate: (project_id: string) => Substrate | null
+  /**
+   * BACKGROUND PROACTIVE-COMPOSE substrate (`cc-nudge-*`). The ONE REPL every
+   * timer-driven composition runs on — a fired reminder/ritual and the work-board
+   * wakeup. DISTINCT pool-key namespace from `cc-agent-*` (live chat), so an
+   * aborted / timed-out / crashed background compose can never evict, poison or
+   * respawn the warm child the owner is talking to. Same GRANTS as the chat lane
+   * (a ritual runs here — ISSUES #504); only the session is separate. Null when
+   * LLM-less.
+   */
+  reminderComposeSubstrate: Substrate | null
   /** Per-worktree ephemeral factory: `(prefix) => (cwd) => Substrate`. */
   makeEphemeralSubstrate: (instance_prefix: string) => (cwd: string) => Substrate
   /** Warm per-repo-cwd trident-fire factory (memoized, non-ephemeral). */
@@ -335,6 +352,72 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
 
+  // BACKGROUND PROACTIVE-COMPOSE substrate (`cc-nudge-*`).
+  //
+  // THE INCIDENT (live instance, 2026-08-17): a reminder came due, its compose
+  // aborted on the substrate, and the next three journal lines were the warm chat
+  // child being evicted as "abandon-poisoned" and the owner's next chat turn dying
+  // with `persistent-repl: REPL process exited`. He could not send a single message
+  // until the service was restarted. The cause was ownership, not the abort: the
+  // fire-time composer ran on `liveAgentSubstrate` — the very REPL the owner talks
+  // to — so every way a background compose can end badly (timeout abort, crashed
+  // child, a `--tools` or model mismatch tripping the reuse guard) reached into his
+  // session and tore it down.
+  //
+  // A DEDICATED REPL IS THE ONLY FIX THAT HOLDS. Matching the live-chat `--tools`
+  // surface and the live-chat model — the two patches that came before — only made
+  // the two lanes look identical enough to share a session; they could not make an
+  // aborted turn stop poisoning the session it was aborted on. The persistent pool
+  // keys on (instance, user, project, credential), so a DISTINCT instance id is
+  // what actually buys separate children. `cc-compose-*` above already earned this
+  // lesson for per-project composition (#419 B1); this is the same fix for the
+  // timer-driven lane.
+  //
+  // Callers: the fired-reminder/ritual dispatcher and the work-board wakeup, both
+  // through `buildSubstrateReminderLlm`. They keep passing the live-chat tool
+  // surface — not to match the chat session any more, but because a ritual composes
+  // on this seam and its approval prompt names capabilities (`WebSearch`) that only
+  // exist if the surface carries them. It is still ONE constant surface, so the
+  // reuse guard never thrashes this child either.
+  //
+  // THIS IS AN ISOLATION FIX, NOT A DOWNGRADE — the GRANTS stay identical to the
+  // chat lane on purpose. `PROFILE_WARM_CHAT` + `enableToolBridge: true` + the same
+  // conversational provider config, because a RITUAL composes here and ISSUES #504
+  // settled exactly this question: the previous design ran rituals on a locked-down
+  // `cc-ritual-*` REPL with no tool bridge, the morning brief could not read the
+  // owner's calendar (`mcp__neutron__calendar_list` validated and then failed), and
+  // he rejected it outright — *"The morning brief should just be a regular reminder
+  // in the general chat, with access to everything general has access to."*
+  // Tightening the profile here would rebuild that sandbox under a new name and
+  // re-break the same feature. The security boundary for this lane is the APPROVAL
+  // GATE (`reminders/ritual-fire.ts`), which is unchanged.
+  //
+  // WHAT IS DELIBERATELY DIFFERENT: the instance id (the whole point), the
+  // credential-failure lane, and the owner-facing notice/delivery sinks — which are
+  // omitted, so a failed background compose cannot push a banner or a recovered
+  // reply into his chat. That is a reduction in NOISE, not in capability.
+  const reminderComposeSubstrate =
+    conversationalAvailable
+      ? buildLlmCallSubstrate({
+          ...anthropicPoolArg,
+          substrate_instance_id: `cc-nudge-${owner_handle}`,
+          cwd: owner_home,
+          owner_handle,
+          user_id: OWNER_USER_ID,
+          project_slug,
+          profile: PROFILE_WARM_CHAT,
+          enableToolBridge: true,
+          // BACKGROUND LANE — a failure here must not park the shared credential
+          // pool against the owner's INTERACTIVE turns. See
+          // `gateway/wiring/build-llm-call-substrate.ts` `credential_failure_lane`.
+          credential_failure_lane: 'background',
+          // Same provider config as the live chat, tool manifest included — the
+          // OpenAI-path equivalent of `enableToolBridge` (capability parity).
+          ...liveAgentProvider,
+          ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+        })
+      : null
+
   // Foundational Trident build-agent runner (Forge / Argus) — the `/code
   // <task>` autonomous build loop, on the CC-subprocess substrate.
   //
@@ -449,6 +532,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     llmCallSubstrate,
     liveAgentSubstrate,
     makeComposeSubstrate,
+    reminderComposeSubstrate,
     makeEphemeralSubstrate,
     makeWarmFireSubstrate,
     prewarmReady,

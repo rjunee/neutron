@@ -42,7 +42,14 @@ export const COOLDOWN_429_MS = 60_000
 export const COOLDOWN_402_MS = 30 * 60_000
 export const COOLDOWN_401_MS = 5 * 60_000
 export const MAX_CONSECUTIVE_FAILURES = 5
-const CONSECUTIVE_COOLDOWN_MS = 60 * 60_000
+export const CONSECUTIVE_COOLDOWN_MS = 60 * 60_000
+
+/**
+ * WHOSE turn produced a failure report. `'background'` marks a timer-driven lane
+ * with nobody waiting on it (proactive nudge composition); everything else is
+ * `'interactive'`. See {@link reportFailure} for what it changes and why.
+ */
+export type FailureOrigin = 'interactive' | 'background'
 
 export interface PooledCredential {
   /** Stable identifier (e.g. `anthropic-key-1`). MUST be unique within a pool. */
@@ -213,16 +220,44 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
  * `retry_after_ms` (parsed from upstream `retry-after` header) overrides the
  * default 429 cooldown — adapters MUST honor it so we play nice with provider
  * back-pressure signals.
+ *
+ * `origin` says WHOSE turn failed, and it changes only the STRIKE COUNTER:
+ *
+ *   - `'interactive'` (default) — a person is waiting on this turn. Unchanged
+ *     behaviour: count the strike, and park the credential for
+ *     {@link CONSECUTIVE_COOLDOWN_MS} once it reaches
+ *     {@link MAX_CONSECUTIVE_FAILURES}.
+ *   - `'background'` — a timer-driven lane (proactive nudge composition). The
+ *     per-status cooldown still applies, because a real 429/402/401 is the
+ *     provider's own back-pressure and ignoring it would be rude and useless.
+ *     But the strike is NOT counted, so a background lane can never trip the
+ *     hour-long park.
+ *
+ * WHY THE ASYMMETRY (incident, live instance 2026-08-17). This counter is
+ * PER-CREDENTIAL but the consequence is POOL-WIDE on a single-credential box —
+ * which every Open install is. Five reminder-compose failures in a row, none of
+ * them a quota condition, parked the one credential for an hour, and from then
+ * on EVERY owner chat turn failed instantly with "all Anthropic credentials are
+ * in cooldown (429/402/401)". The product went silent because a nudge failed
+ * five times, and the message named a cause that was not true.
+ *
+ * The strike counter exists to stop us hammering a credential that is silently
+ * broken. A background lane is the WRONG detector for that: nobody is waiting on
+ * it, it retries on its own schedule, and any condition it could discover will be
+ * rediscovered — immediately, authoritatively, with a real status — by the next
+ * interactive turn, which cools the credential itself. So the counter keeps its
+ * job and loses the only input that could weaponise it against the owner.
  */
 export function reportFailure(
   pool: CredentialPool,
   id: string,
   status: number,
   retry_after_ms?: number,
+  origin: FailureOrigin = 'interactive',
 ): void {
   const c = pool.credentials.find((x) => x.id === id)
   if (!c) return
-  c.consecutive_failures++
+  if (origin === 'interactive') c.consecutive_failures++
   const now = Date.now()
   if (status === 429) {
     c.cooldown_until = now + (retry_after_ms ?? COOLDOWN_429_MS)

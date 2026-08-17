@@ -24,6 +24,60 @@ needed. Until this change deploys, the currently deployed harness still resolves
 from `repoPath`, so Enterprise builds can fail with the named 127/deferred outcome
 during the accepted window between workaround removal and deployment. Nothing
 under `/opt/neutron-managed` was changed or copied.
+## 2026-08-16 — a fired reminder gets its own REPL, and a background failure stops silencing chat
+
+Two defects, one outage. Three consecutive journal lines from a live instance at
+2026-08-17T01:56:11Z: a reminder's compose aborted
+(`route=compose_failed reason="SubstrateCallError: cc-llm-call: aborted"`), the
+warm chat session was evicted as abandon-poisoned, and the owner's next chat turn
+died with `persistent-repl: REPL process exited`. He could not send a message
+until the service was restarted.
+
+**Defect 1 — composition ran on the owner's chat REPL.** `open/composer.ts` wired
+the reminder dispatcher's `llm` onto `liveAgentSubstrate`, and the work-board
+wakeup onto the same substrate through the same wrapper. The persistent pool keys
+on `substrate_instance_id` first (`persistent/pool.ts` `poolKeyFor`), so composing
+on `cc-agent-*` meant composing on his session. The abort path cancels the handle
+(`runtime/collect-tokens.ts`, `keepAliveExempt: true`), cancelling an unsettled
+turn poisons the session (`persistent/pool.ts:678`), and the next dispatch evicts
+and respawns it (`persistent/spawn.ts:862-866`).
+
+The two prior patches at that call site — passing the live-chat `--tools` surface,
+then the live-chat model — were both attempts to make SHARING the session safe.
+They stop an eviction caused by a mismatch; nothing stops an eviction caused by a
+failure. The #340 entry directly below closed with the actual answer ("it needs its
+own substrate") and this is it: `cc-nudge-*` (`open/wiring/substrates.ts`), a warm
+background REPL on `PROFILE_ISOLATED_COMPOSE` — no tool bridge, no GitHub
+credential, none of the owner-facing notice/delivery sinks. Both timer-driven
+callers move onto it. The `--tools` surface stays `LIVE_AGENT_TOOL_NAMES`, now for
+capability rather than session-matching: a ritual composes on this seam and cannot
+apply its own surface, so its approval prompt's promise of web egress is only true
+if the surface carries it.
+
+**Defect 2 — a background failure locked out interactive traffic.** The substrate
+maps "retryable, no HTTP status" to 429 (`mapStatusForPoolCooldown`), so a crashed
+REPL child read as a quota condition. Five of those reached
+`MAX_CONSECUTIVE_FAILURES` and parked the box's ONE credential for
+`CONSECUTIVE_COOLDOWN_MS`; every subsequent owner turn then failed instantly with
+"all Anthropic credentials are in cooldown (429/402/401)" — naming a cause that was
+not true. The decision taken: a background lane may not contribute to a pool-wide
+counter that gates the owner's chat at all. `reportFailure` gains an `origin`
+(`runtime/credential-pool.ts`); `'background'` skips the strike counter, and the
+substrate additionally declines to report an INFERRED cooldown on that lane
+(`credential_failure_lane` in `gateway/wiring/build-llm-call-substrate.ts`,
+threaded through the OpenAI path too). A REAL provider status still cools on either
+lane. Rationale: nobody is blocked on a background turn, it retries on its own
+schedule, and any condition it could discover is rediscovered immediately and
+authoritatively by the next interactive turn — while the cost of the old behaviour
+was total product silence.
+
+Regression tests: `open/__tests__/background-compose-never-disturbs-chat.test.ts`
+models the warm pool with the real `poolKeyFor` and the real poison rule (an
+aborted compose must leave the chat child at generation 1) and pins the composer
+wiring; `gateway/wiring/__tests__/background-lane-never-locks-out-owner.test.ts`
+drives dead-REPL failures through both lanes with interactive CONTROLS on every
+assertion. Both were mutation-tested: collapsing the nudge instance id back onto
+`cc-agent-*` fails 3 of 5, and reverting the `origin` guard fails 2 of 5.
 
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 

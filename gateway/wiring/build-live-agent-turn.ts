@@ -367,9 +367,13 @@ export const LIVE_AGENT_TOOL_NAMES = [
  * PROPERTY OF THE SESSION, not of this one caller, and every other turn that
  * composes on the same warm session must present the identical surface or the
  * reuse guard evicts and respawns the child
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). The fired-reminder
- * dispatcher composes on this very substrate, so the composer threads this
- * constant into it rather than letting it default to a narrower list.
+ * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`).
+ *
+ * It is ALSO the surface the composer threads into the background proactive-compose
+ * lane (`cc-nudge-*`: the fired-reminder dispatcher + the work-board wakeup). That
+ * lane runs on its OWN child now, so it is no longer about matching this session —
+ * it is that a ritual composes there and cannot apply its own surface, so the web
+ * egress its approval prompt names exists only if this list carries it.
  */
 const DEFAULT_TOOL_NAMES = LIVE_AGENT_TOOL_NAMES
 
