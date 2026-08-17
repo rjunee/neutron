@@ -183,8 +183,12 @@ export function classifyMigration(
   if (ledger.hashOwners.size === 0) return 'pending'
   const owners = ledger.hashOwners.get(migrationContentHash(migration.sql))
   if (owners === undefined) return 'pending'
-  for (const owner of owners) if (!treeNames.has(owner)) return 'recorded-by-content'
-  return 'duplicates-an-applied-file'
+  // ANY owner still present in this tree makes the evidence ambiguous, so the safe
+  // verdict is the refusal. Returning on the FIRST ABSENT owner reported a new
+  // same-byte migration as already recorded and skipped it silently — the failure you
+  // cannot see. `recorded-by-content` is sound only when EVERY owner is gone.
+  for (const owner of owners) if (treeNames.has(owner)) return 'duplicates-an-applied-file'
+  return 'recorded-by-content'
 }
 
 function loadMigrationRepairs(dir: string): MigrationRepair[] {
@@ -1070,11 +1074,17 @@ function assertUniqueMigrationOrdinals(
 ): void {
   const untracked = (m: Migration): boolean =>
     verified !== null && !verified.tracked.has(m.fileName)
+  // A TOLERATED STRAY IS NOT A PARTY TO A COLLISION, so it is dropped BEFORE the
+  // comparison rather than excused during it. Excusing it during the walk let the stray
+  // occupy the `byVersion` slot whenever it sorted first, and then every tracked file
+  // sharing that ordinal compared against the stray and was excused too — so two
+  // TRACKED files could both apply with no refusal at all. Filtering first means the map
+  // only ever holds tracked files, and two of those at one ordinal always throw.
   const byVersion = new Map<number, Migration>()
   for (const migration of migrations) {
+    if (untracked(migration)) continue
     const previous = byVersion.get(migration.version)
     if (previous) {
-      if (untracked(previous) || untracked(migration)) continue
       throw new Error(
         `Migration ordinal collision at version ${migration.version}: ${previous.fileName} and ${migration.fileName}`,
       )
@@ -1261,7 +1271,8 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
    * whether the ledger's record of a name is what a normal apply of THIS build would
    * have written, and a mismatch is precisely the incident these entries describe.
    *
-   * The `version` field is kept on the entry as CONTEXT rather than as a key: it
+   * WHETHER `version` IS PART OF THE MATCH DEPENDS ON THE NAME — see the predicate
+   * below. For an orphan `recorded_name` it is CONTEXT rather than a key: it
    * records the ordinal the row was written under, it is printed in the refusal
    * message that emits these entries, and it is still written into
    * `_migration_repairs` as part of the audit trail. An entry whose `version` has gone
@@ -1270,11 +1281,23 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
    */
   const treeOrdinalByName = new Map(migrations.map((m) => [m.name, m.version] as const))
   const activeRepairs = loadMigrationRepairs(dir).filter((repair) =>
-    ledger.rows.some(
-      (row) =>
-        row.name === repair.recorded_name &&
-        row.version !== treeOrdinalByName.get(repair.recorded_name),
-    ),
+    ledger.rows.some((row) => {
+      if (row.name !== repair.recorded_name) return false
+      const treeOrdinal = treeOrdinalByName.get(repair.recorded_name)
+      // ORPHAN NAME: the name IS the identity and no ordinal can narrow it. Every entry
+      // this runner mints is orphan-named by construction — `repairsEntryFor` is called
+      // from exactly one place (the unexplained-row refusal) whose candidates require
+      // `!treeNames.has(row.name)` — so matching on name alone is what carries an entry
+      // through a collapse that moved which ordinal the row is recorded at. That is why
+      // no absorbed-ordinal state has to be persisted anywhere.
+      if (treeOrdinal === undefined) return true
+      // TREE-FILE NAME: this build ships a migration of that name, so the recorded
+      // ordinal is the ONLY thing separating the incident row from legitimate renumber
+      // drift. Both conjuncts are load-bearing: the first refuses to speak about a row
+      // the entry was never written about, and the second refuses to treat a row sitting
+      // exactly where a normal apply would have written it as an incident at all.
+      return row.version === repair.version && row.version !== treeOrdinal
+    }),
   )
   // WHAT AN ACTIVE REPAIR ASSERTS, in two independent halves — the shipped entries
   // need both. (1) The migration named by `file_name` is ALREADY APPLIED here, hand

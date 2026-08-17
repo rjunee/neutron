@@ -311,3 +311,44 @@ test('sidecar trees without a repairs ledger remain unaffected', () => {
   const db = new Database(':memory:')
   expect(() => applyProjectScopedMigrations(db, join(import.meta.dir, '..', 'comments'))).not.toThrow()
 })
+
+/**
+ * THE REPAIR PREDICATE, for a `recorded_name` THIS BUILD SHIPS AS A FILE.
+ *
+ * Fails without the exact-ordinal conjunct. Under a name-only or
+ * ordinal-differs-from-tree rule, an entry written about ordinal 5 activates on this
+ * ledger's row at ordinal 1 purely because the tree now numbers `alpha` 2 — and
+ * silently drops `beta`, a migration the entry was never about, on an instance that
+ * merely renumbered. Renumbering is explicitly legitimate here, so this is a healthy
+ * database being quietly denied a migration.
+ */
+test('a repair naming a tree file stays inert on a row it was not written about', () => {
+  const db = new Database(':memory:')
+  const first = tree('renumber-before', { '0001_alpha.sql': 'CREATE TABLE t1 (id INTEGER);' })
+  applyMigrations(db, first)
+  expect(db.query('SELECT version, name FROM _migrations').all()).toEqual([
+    { version: 1, name: 'alpha' },
+  ])
+
+  // The same migration, legitimately renumbered, alongside one the repair never names.
+  const after = tree('renumber-after', {
+    '0002_alpha.sql': 'CREATE TABLE t1 (id INTEGER);',
+    '0003_beta.sql': 'CREATE TABLE t2 (id INTEGER);',
+  })
+  writeFileSync(
+    join(after, 'repairs.json'),
+    JSON.stringify([
+      { version: 5, recorded_name: 'alpha', file_name: 'beta', note: 'other', date: '2026-08-17' },
+    ]),
+  )
+
+  const result = applyMigrations(db, after)
+
+  // The entry names ordinal 5; the row sits at 1. It says nothing about this database.
+  expect(result.applied).toContain(3)
+  expect(tableExists(db, 't2')).toBe(true)
+  // And nothing was acknowledged, because nothing was repaired.
+  expect(
+    db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='_migration_repairs'").get(),
+  ).toBeNull()
+})
