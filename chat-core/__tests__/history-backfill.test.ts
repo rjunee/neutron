@@ -358,4 +358,67 @@ describe('history backfill — a capped replay converges on the whole transcript
     expect(await seqsIn(store)).toEqual(Array.from({ length: PAGE * 2 }, (_, i) => i + 1))
     expect(sockets[0]!.backwards()).toEqual([])
   })
+
+  it('STILL walks when the page it was just sent is what opened the hole', async () => {
+    // The trap in the guard above, and the reason it is not a bare "was I whole?"
+    // test. A device that WAS contiguous can acquire an interior hole from the very
+    // page it is reacting to: holding an old prefix of a topic that has since grown
+    // by more than one page, its forward resume returns the NEWEST page, which does
+    // not join on. `historyWholeAtResume` is true — it was true, before the page —
+    // so a guard without the cursor term would refuse the walk and defer the hole to
+    // the next open.
+    //
+    // MUTATION-PROVED: drop the `historyGap <= this.resumeCursor + 1` term from
+    // `WebChatSession`'s gap handler, so the guard is `historyWholeAtResume` alone,
+    // and the store is left holding the prefix plus the newest page with the middle
+    // missing.
+    const { session, sockets, store } = setup()
+    const total = PAGE * 5
+    for (const seq of [1, 2, 3]) {
+      await store.upsert({
+        topic_id: TOPIC,
+        // The SERVER's ids, because this device really did receive these rows from
+        // this topic — seeding a private id would make the re-delivery a second row
+        // and the assertion would fail on duplicates rather than on the property.
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+    // Contiguous down to 1 at resume time — the precondition the guard keys on.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1)
+
+    session.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+    await pump(sockets[0]!, total)
+
+    // It DID walk, on THIS open, and the walk reached below the forward page's floor
+    // rather than stopping at it. (The round budget still bounds one open, so the
+    // oldest slice is left for the next one — that is the pre-existing convergence
+    // contract, not this guard.)
+    expect(sockets[0]!.backwards().length).toBeGreaterThan(0)
+    const afterFirst = await seqsIn(store)
+    expect(afterFirst.length).toBeGreaterThan(3 + PAGE)
+    expect(afterFirst).toContain(total - PAGE * 3)
+
+    // And it converges: a second open closes the remainder, which is only possible
+    // because the store-side contiguity test sees the hole.
+    sockets.at(-1)!.fireClose()
+    session.setActive(false)
+    session.setActive(true)
+    const next = sockets.at(-1)!
+    next.open()
+    next.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+    await pump(next, total)
+    expect(await seqsIn(store)).toEqual(Array.from({ length: total }, (_, i) => i + 1))
+  })
 })

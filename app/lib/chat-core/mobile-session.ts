@@ -145,9 +145,13 @@ export class MobileChatSession {
    *  a server that repeated itself could not spin this client. */
   private backfillRounds = 0;
   private backfillFloor: number | null = null;
-  /** Set per forward resume: this device's transcript is contiguous down to seq 1, so
-   *  no backwards page can tell it anything. See `requestHistoryBackfill`. */
-  private historyComplete = false;
+  /** Set per forward resume, BEFORE any response frame: this device's transcript was
+   *  contiguous down to seq 1 at that moment. Paired with {@link resumeCursor} to
+   *  decide whether a `history_gap` names a range this device is missing. */
+  private historyWholeAtResume = false;
+  /** The `after_seq` this open's forward resume was sent with — the top of the run
+   *  {@link historyWholeAtResume} describes. */
+  private resumeCursor = 0;
   private readonly ackTimeoutMs: number;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
@@ -406,17 +410,31 @@ export class MobileChatSession {
     // not sent. Ask for the page below — this is the only path by which a transcript
     // longer than one replay page ever completes on this device.
     //
-    // THE FRAME'S SEQ IS TAKEN AT FACE VALUE, and it must be: this handler cannot ask
-    // the store where its own history stops being whole, because the frames of the
-    // page that precedes this one may not be applied yet. `chat-core/ws-client.ts`
-    // dispatches each frame without awaiting the previous one, so a store read here
-    // sees an arbitrary prefix of the page — and the failure is the dangerous
-    // direction, since a floor read too high DECLINES a walk this device needs.
-    // Whether the walk is needed at all is decided ONCE per open, before any response
-    // can arrive, in `resumeAndFlush`; see `requestHistoryBackfill`.
+    // ANSWERED WITH ARITHMETIC, NOT WITH A STORE READ. `older_than` means the SERVER's
+    // page came back full, which is not the same claim as "rows remain below it" for
+    // THIS device: one holding 1..500 of 1000 resumed at 500, was sent 501..1000 with
+    // `older_than: 501`, and used to ask for the page below 501 — 500 rows it already
+    // held, re-driven on every foreground, since `catchUp` re-resumes over an
+    // already-open socket.
+    //
+    // The test is `older_than <= resumeCursor + 1`: the page STARTS where this
+    // device's run ended, so it joins on and leaves no hole. It cannot be answered by
+    // reading the store here — `chat-core/ws-client.ts` dispatches frames without
+    // awaiting the previous one, so a read sees an arbitrary prefix of the page this
+    // frame is about, and it fails in the direction that DECLINES a walk the device
+    // needs. Both operands are therefore captured in `resumeAndFlush`, before any
+    // response can arrive.
+    //
+    // AND THE CURSOR TERM IS NOT DECORATION: a device that was whole can acquire a
+    // hole from the very page it is reacting to. Holding 1..100 of a topic grown to
+    // 2000, it is sent the newest page 1501..2000 and is now holey — `older_than`
+    // (1501) is far above its cursor (100), so the walk runs on THIS open. A bare
+    // "was I whole?" guard would have deferred it to the next one.
     const historyGap = parseHistoryGap(data);
     if (historyGap !== null) {
-      this.requestHistoryBackfill(historyGap);
+      if (!(this.historyWholeAtResume && historyGap <= this.resumeCursor + 1)) {
+        this.requestHistoryBackfill(historyGap);
+      }
       return;
     }
     // A matched slash command (/note, /remind, /cal, /skills, …) is answered with
@@ -525,12 +543,15 @@ export class MobileChatSession {
     // for again (`chat-core/sync-engine.ts` `backfillFrom`).
     this.backfillRounds = 0;
     this.backfillFloor = null;
+    // Both are read HERE, before any response frame can arrive, and cached for the
+    // open — the `history_gap` handler cannot safely re-derive either of them
+    // (`chat-core/ws-client.ts` dispatches frames without awaiting the previous one,
+    // so a store read there sees an arbitrary prefix of the page it is reacting to).
+    // `backfillFrom` is null both for an EMPTY store and for a transcript that is
+    // already whole, and only the second one is a reason to refuse a backwards page.
+    this.resumeCursor = resume.after_seq;
     const backfillFrom = await this.engine.backfillFrom(this.topic_id);
-    // Decided HERE and cached for the open, because the `history_gap` handler cannot
-    // safely re-derive it: `backfillFrom` is null both for an empty store and for a
-    // transcript that is already whole, and only the second one means "refuse every
-    // backwards page this open".
-    this.historyComplete =
+    this.historyWholeAtResume =
       backfillFrom === null && (await this.store.lastSeenSeq(this.topic_id)) > 0;
     if (backfillFrom !== null) this.requestHistoryBackfill(backfillFrom);
   }
@@ -542,16 +563,10 @@ export class MobileChatSession {
    * terminates. A send that fails (socket gone) is not retried here: the next
    * resume restarts the walk from the on-device store.
    *
-   * ALSO REFUSES OUTRIGHT WHEN THIS DEVICE'S TRANSCRIPT IS ALREADY WHOLE, which is
-   * what stops a truthful `history_gap` from buying a page the device holds. The
-   * server sets `older_than` whenever its page came back FULL, which is not the same
-   * as "rows remain below it" for THIS device: one holding 1..500 of 1000 resumes at
-   * 500, is sent 501..1000 with `older_than: 501`, and used to ask for the page below
-   * 501 — 500 rows it already had, re-downloaded on every mobile foreground, since
-   * `catchUp` re-resumes over an already-open socket.
+   * Whether a `history_gap` is worth answering at all is decided by its handler, not
+   * here — that decision needs the frame's `older_than`.
    */
   private requestHistoryBackfill(before_seq: number): void {
-    if (this.historyComplete) return;
     if (before_seq <= 1) return;
     if (this.backfillRounds >= MAX_HISTORY_BACKFILL_ROUNDS) return;
     if (this.backfillFloor !== null && before_seq >= this.backfillFloor) return;
