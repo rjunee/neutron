@@ -27,7 +27,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -36,6 +36,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -79,6 +80,12 @@ interface RunOpts {
   leftoverBranch?: boolean
   /** Check the leftover branch out in a second worktree, making it unbindable here. */
   holdLeftoverBranch?: boolean
+  /** Keep a process whose cwd is the holder alive while the wrapper runs. */
+  liveHolder?: boolean
+  /** Delete the holder directory while leaving its stale worktree admin entry. */
+  holderDirDeleted?: boolean
+  /** Leave observable uncommitted evidence in the holder. */
+  holderDirt?: boolean
   /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
   checkpointExit?: number
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
@@ -388,6 +395,15 @@ exit 1
   if (opts.holdLeftoverBranch === true) {
     if (opts.leftoverBranch !== true) git('branch', branch)
     git('worktree', 'add', join(dir, 'holder'), branch)
+    if (opts.holderDirt === true) {
+      writeFileSync(join(dir, 'holder', 'post-mortem.txt'), 'evidence\n')
+    }
+  }
+  const liveHolder = opts.holdLeftoverBranch === true && opts.liveHolder === true
+    ? spawn('sleep', ['300'], { cwd: join(dir, 'holder'), stdio: 'ignore' })
+    : undefined
+  if (opts.holdLeftoverBranch === true && opts.holderDirDeleted === true) {
+    rmSync(join(dir, 'holder'), { recursive: true, force: true })
   }
   if (opts.pushUrl !== undefined) git('remote', 'set-url', '--push', 'origin', opts.pushUrl)
   if (opts.credentialHelper === true) {
@@ -469,12 +485,18 @@ exit 1
       : opts.base === undefined
         ? [SCRIPT, branch]
         : [SCRIPT, branch, opts.base]
-  const res = spawnSync(BASH, argv, {
-    cwd: dir,
-    encoding: 'utf8',
-    env,
-    ...(opts.spawnTimeoutMs === undefined ? {} : { timeout: opts.spawnTimeoutMs }),
-  })
+  const res = (() => {
+    try {
+      return spawnSync(BASH, argv, {
+        cwd: dir,
+        encoding: 'utf8',
+        env,
+        ...(opts.spawnTimeoutMs === undefined ? {} : { timeout: opts.spawnTimeoutMs }),
+      })
+    } finally {
+      liveHolder?.kill()
+    }
+  })()
   const readOr = (name: string): string => {
     try {
       return readFileSync(join(dir, name), 'utf8')
@@ -553,11 +575,41 @@ describe("the wrapper BINDS the worktree to the run's branch — the binding is 
     expect(ancestor.status).toBe(0)
   })
 
-  test('an unbindable branch defers before codex receives the brief', () => {
-    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+  test('a branch held by a DEAD round-0 worktree is RECLAIMED — detached in place, then built', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, holderDirt: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const holder = join(r.dir, 'holder')
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    const holderBranch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: holder, encoding: 'utf8' }).stdout.trim()
+    const worktrees = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: r.dir, encoding: 'utf8' }).stdout
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('CODEX_BUILD_BRANCH_RECLAIMED')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(readFileSync(join(holder, 'post-mortem.txt'), 'utf8')).toBe('evidence\n')
+    expect(holderBranch).toBe('HEAD')
+    expect(worktrees).toContain(`worktree ${realpathSync(holder)}`)
+  })
+
+  test.skipIf(process.platform !== 'linux')('a branch held by a LIVE worktree is still refused, before any token is spent', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, liveHolder: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const holder = join(r.dir, 'holder')
+    const holderBranch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: holder, encoding: 'utf8' }).stdout.trim()
     expect(r.status).toBe(3)
     expect(r.stderr).toContain('CODEX_BUILD_BRANCH_UNBOUND')
+    expect(r.stderr).toContain('LIVE')
+    expect(r.stderr).toContain(holder)
     expect(r.codexStdin).toBe('')
+    expect(holderBranch).toBe('trident/a-run')
+  })
+
+  test('a holder whose directory is GONE is pruned, not fatal', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, holderDirDeleted: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(r.stderr).not.toContain('CODEX_BUILD_BRANCH_UNBOUND')
   })
 })
 

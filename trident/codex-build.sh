@@ -508,6 +508,69 @@ has_origin() {
   git config --get remote.origin.url >/dev/null 2>&1
 }
 
+# Print the position and path of the first OTHER worktree holding this branch.
+# Git documents the first porcelain entry as the shared main working tree; callers
+# need that position so they can refuse to detach it.
+branch_holder() {
+  local want worktree_real
+  want="refs/heads/$1"
+  worktree_real="$(pwd -P)"
+  git worktree list --porcelain | awk \
+    -v want="$want" -v worktree="$WORKTREE" -v worktree_real="$worktree_real" '
+      /^worktree / { path = substr($0, 10); n++; next }
+      /^branch / {
+        if (substr($0, 8) == want && path != worktree && path != worktree_real) {
+          print n " " path
+          exit
+        }
+      }
+    '
+}
+
+# Return 0 when a process cwd is in the holder, 1 when none is provable, and 2 when
+# liveness cannot be verified. Unverifiable REFUSES: a wrong detach puts two rounds
+# on one branch, while a wrong refusal costs only the deferral we already have today.
+holder_is_live() {
+  local holder holder_real out p cwd line
+  holder="$1"
+  holder_real="$(cd "$holder" 2>/dev/null && pwd -P || printf '%s' "$holder")"
+
+  if [ -d /proc ]; then
+    for p in /proc/[0-9]*/cwd; do
+      cwd="$(readlink "$p" 2>/dev/null)" || continue
+      case "$cwd" in
+        "$holder"|"$holder"/*|"$holder_real"|"$holder_real"/*) return 0 ;;
+      esac
+    done
+    return 1
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    out="${TMPDIR:-/tmp}/trident-codex-build-lsof.$$"
+    if ! bounded "$out" 10 lsof -Fn -d cwd; then
+      rm -f "$out"
+      return 2
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        n*)
+          cwd="${line#n}"
+          case "$cwd" in
+            "$holder"|"$holder"/*|"$holder_real"|"$holder_real"/*)
+              rm -f "$out"
+              return 0
+              ;;
+          esac
+          ;;
+      esac
+    done < "$out"
+    rm -f "$out"
+    return 1
+  fi
+
+  return 2
+}
+
 # Is this a `pr`-mode run? See THE MERGE MODE DECIDES WHAT MUST BE TRUE in the header:
 # the remote baseline, the push-credential precheck and the PR probe are all `pr`-only,
 # and keying them on `has_origin` instead is what wedged local-mode runs on any clone
@@ -789,6 +852,9 @@ fi
 # tokens. This is the measured d5c1e219 incident: a worktree-wf_ auto branch plus a
 # leftover local run branch made the prompt's `git switch -c` collide, and the build
 # committed on the branch the run could not merge.
+# Runs c5c5fb4a/ad6ac515 exposed the other collision: a dead prior-round holder. Detach
+# it in place, never destroy it; the accepted probe/detach race can only admit this
+# run's earlier round, whose plausible writers the immediately preceding probe checked.
 LAUNCH_HEAD_BEFORE_BIND="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
 if [ -n "$BRANCH" ]; then
   current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
@@ -797,10 +863,59 @@ if [ -n "$BRANCH" ]; then
     rm -f "$bind_err"
     if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
       if ! git switch "$BRANCH" 2>"$bind_err"; then
-        bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
-        rm -f "$bind_err"
-        echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
-        exit 3
+        bind_n=1
+        bind_ok=0
+        while [ "$bind_n" -le 3 ]; do
+          entry="$(branch_holder "$BRANCH")"
+          [ -n "$entry" ] || break
+          holder_index="${entry%% *}"
+          holder="${entry#* }"
+
+          if [ "$holder_index" -eq 1 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in the SHARED main checkout '${holder}' — refusing to detach the operator's own worktree. DEFERRED before any tokens were spent." >&2
+            exit 3
+          fi
+
+          if [ ! -d "$holder" ]; then
+            git worktree prune >/dev/null 2>&1
+            if git switch "$BRANCH" 2>"$bind_err"; then
+              bind_ok=1
+              break
+            fi
+            bind_n=$((bind_n + 1))
+            continue
+          fi
+
+          holder_is_live "$holder"
+          holder_live=$?
+          if [ "$holder_live" -eq 0 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in worktree '${holder}' and a LIVE process is standing in it — refusing to detach a live worktree; that is how two rounds end up committing to one branch. DEFERRED before any tokens were spent." >&2
+            exit 3
+          elif [ "$holder_live" -eq 2 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in worktree '${holder}' and this host offers no way to prove nothing live is standing in it (no /proc, no usable lsof) — refusing to detach on a guess. DEFERRED before any tokens were spent." >&2
+            exit 3
+          fi
+
+          if ! git -C "$holder" checkout --detach 2>"$bind_err"; then
+            break
+          fi
+          echo "CODEX_BUILD_BRANCH_RECLAIMED: worktree '${holder}' held '${BRANCH}' with no live process standing in it — detached it in place (files preserved for post-mortem) and freed the branch. Nothing was killed and nothing was deleted." >&2
+          if git switch "$BRANCH" 2>"$bind_err"; then
+            bind_ok=1
+            break
+          fi
+          bind_n=$((bind_n + 1))
+        done
+
+        if [ "$bind_ok" -ne 1 ]; then
+          bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+          rm -f "$bind_err"
+          echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+          exit 3
+        fi
       fi
     elif is_pr_mode && has_origin; then
       _tip="$(remote_tip "$BRANCH" 3)"
