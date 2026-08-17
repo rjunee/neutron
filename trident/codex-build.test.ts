@@ -41,7 +41,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -635,6 +635,71 @@ describe('artifact-time checkpoint', () => {
     const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 1, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('CODEX_BUILD_CHECKPOINT_FAILED')
+  })
+})
+
+describe('build-child environment — a build can migrate only its own worktree home', () => {
+  const inherited = {
+    NEUTRON_HOME: '/fake/live/home',
+    OWNER_HOME: '/fake/owner',
+    NEUTRON_DB_PATH: '/fake/live.db',
+    NEUTRON_BUILD_CHILD_ENV_PROBE: 'inherited',
+  }
+
+  function parsedEnv(raw: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const line of raw.trim().split('\n')) {
+      const split = line.indexOf('=')
+      if (split > 0) out[line.slice(0, split)] = line.slice(split + 1)
+    }
+    return out
+  }
+
+  test.each([
+    ['the fake-build composition site', true],
+    ['the real codex composition site', false],
+  ])('%s scopes inherited live selectors to the isolated worktree', (_label, fakeBuild) => {
+    const parentEnv = { ...inherited }
+    const parentBefore = { ...parentEnv }
+    const processBefore = {
+      NEUTRON_HOME: process.env['NEUTRON_HOME'],
+      OWNER_HOME: process.env['OWNER_HOME'],
+      NEUTRON_DB_PATH: process.env['NEUTRON_DB_PATH'],
+    }
+    const captured = 'build-child-env.txt'
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        ...parentEnv,
+        ...(fakeBuild
+          ? { NEUTRON_CODEX_BUILD_EXEC_CMD: `env > "$HOME/${captured}"; ${FAKE_BUILD}` }
+          : {}),
+      },
+    })
+
+    expect(r.status).toBe(0)
+    const childEnv = parsedEnv(
+      fakeBuild ? readFileSync(join(r.dir, captured), 'utf8') : r.codexEnv,
+    )
+    const worktree = r.trailer['NEUTRON_CODEX_BUILD_WORKTREE']!
+    const childHome = join(worktree, '.neutron-home')
+    expect(childEnv['NEUTRON_HOME']).toBe(childHome)
+    expect(relative(worktree, childEnv['NEUTRON_HOME']!)).toBe('.neutron-home')
+    expect(existsSync(childHome)).toBe(true)
+    expect(readFileSync(join(childHome, '.gitignore'), 'utf8')).toBe('*\n')
+    expect(
+      spawnSync('git', ['check-ignore', join(childHome, 'project.db')], { cwd: worktree }).status,
+    ).toBe(0)
+    expect('OWNER_HOME' in childEnv).toBe(false)
+    expect('NEUTRON_DB_PATH' in childEnv).toBe(false)
+    expect(childEnv['NEUTRON_BUILD_CHILD_ENV_PROBE']).toBe('inherited')
+    expect(parentEnv).toEqual(parentBefore)
+    expect({
+      NEUTRON_HOME: process.env['NEUTRON_HOME'],
+      OWNER_HOME: process.env['OWNER_HOME'],
+      NEUTRON_DB_PATH: process.env['NEUTRON_DB_PATH'],
+    }).toEqual(processBefore)
   })
 })
 /**

@@ -407,11 +407,30 @@ MERGE_MODE='pr'
 [ "${3:-}" = 'local' ] && MERGE_MODE='local'
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
+BUILD_DATA_HOME="${WORKTREE}/.neutron-home"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
 # local branch tip, and the remote branch tip — one per line. Populated just before
 # the launch below. A head found in this set is not this build's commit, whatever the
 # transcript says. See the header for the re-entry case that needs all three.
 PRE_EXISTING_HEADS=''
+
+# Compose the environment for EVERY spawned build child at the dispatch boundary.
+# The wrapper itself may inherit the gateway's live data-home selectors; copying those
+# into an unreviewed build is the incident this boundary closes. The child gets a home
+# inside ITS OWN isolated worktree, created immediately before launch, while the
+# wrapper's environment remains untouched. `env -u` removes the two fallback keys as
+# properties — an empty value would still be an inherited selector to future readers.
+run_build_child() {
+  # The data home is deliberately untracked runtime state. Its own ignore file keeps
+  # the database/ownership marker from making every otherwise-clean disposable
+  # worktree look dirty to worktree-cleanup.sh.
+  if ! mkdir -p "$BUILD_DATA_HOME" || ! printf '*\n' > "$BUILD_DATA_HOME/.gitignore"; then
+    echo "CODEX_BUILD_DATA_HOME_FAILED: could not create the isolated build data home at $BUILD_DATA_HOME. DEFERRED." >&2
+    return 1
+  fi
+  env -u OWNER_HOME -u NEUTRON_DB_PATH -u GH_TOKEN -u GITHUB_TOKEN \
+    NEUTRON_HOME="$BUILD_DATA_HOME" "$@"
+}
 
 # A full-length lowercase-hex sha, or the empty string. Charset AND length, because
 # `git rev-parse --verify HEAD` in a repo with no commits echoes the literal `HEAD`
@@ -1020,7 +1039,7 @@ fi
 # a credential the thing it stands in for cannot see, and would "prove" a publish path
 # that does not exist in production.
 if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
-  if <"$BRIEF_FILE" env -u GH_TOKEN -u GITHUB_TOKEN sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
+  if <"$BRIEF_FILE" run_build_child sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
     emit_trailer ok
     exit 0
   fi
@@ -1097,7 +1116,7 @@ fi
 # reading its own `/proc/self/environ`. Both, because the exclude covers the whole
 # family (`GH_ENTERPRISE_TOKEN`, anything added later) and this covers the two that
 # matter absolutely.
-if <"$BRIEF_FILE" env -u GH_TOKEN -u GITHUB_TOKEN \
+if <"$BRIEF_FILE" run_build_child \
   codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
   emit_trailer ok
   exit 0
