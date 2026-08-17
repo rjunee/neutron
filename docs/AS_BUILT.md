@@ -67,6 +67,34 @@ Several stale hunks were deliberately dropped. The PR's `index.ts` and `types.ts
 
 This docs round also re-derived the `stuck_agent` Scope block for the 30-minute chat window. The ordering is now explicit: on chat turns its 15-minute in-flight alert precedes both the 30-minute silence trip and the 45-minute ceiling, while it remains alert-only and does not abandon the running turn.
 
+## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
+
+`reconcile_stranded` now checks both committed and uncommitted work before concluding that a
+failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
+tracked-and-untracked tree through a private temporary index, retains the live index as a second
+parent when `stash create` can read it, and anchors the resulting commit at
+`refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
+A live index lock or unmerged index can make that optional index-parent probe fail; capture then
+continues through the private index, preserves the working-tree version plus untracked files, and
+records the omitted-parent warning instead of abandoning the entire snapshot.
+A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
+their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
+inspection when a live run in the same project and repository owns a reused branch. Prunable
+worktree entries are skipped so they cannot suppress stash evidence.
+
+Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
+outcomes make no remote mutation, while a run with both committed and dirty work publishes the
+commit and records both dispositions. Recovery refs are create-only: reconciliation consults the
+run-scoped ref even when a prior store write lost its marker, reconstructs the original counts from
+the anchored commit, and never moves that ref to a later worktree state. A failed capture writes no
+success marker but persists its bounded diagnostic in `failure_reason`, so both live terminal
+delivery and the boot sweep expose it; it never blocks a commit that appears later. Real-git
+falsification tests prove staged-only, untracked nested, and tracked work behind a live index lock
+are recoverable, the dirty worktree and HEAD remain byte-identical, retry after a lost store write
+keeps the first snapshot, stale/crafted
+stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
+cause while exposing the local recovery ref.
+
 ## 2026-08-19 — three ratchet guards silently re-shallowed the shared checkout
 
 This was the recurrence of card `01M03CH91WA6X87XG8CS5K4H84`, not a second
@@ -115,34 +143,6 @@ stale worktrees carry old guard copies until their branches rebase. They can
 temporarily recreate `.git/shallow` even though main has killed the writer. The
 dispatch chokepoint in `ensureProjectBuildWorkspace` therefore still needs its own
 probe-and-unshallow self-heal before any lane is allowed to use the shared checkout.
-
-## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
-
-`reconcile_stranded` now checks both committed and uncommitted work before concluding that a
-failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
-tracked-and-untracked tree through a private temporary index, retains the live index as a second
-parent when `stash create` can read it, and anchors the resulting commit at
-`refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
-A live index lock or unmerged index can make that optional index-parent probe fail; capture then
-continues through the private index, preserves the working-tree version plus untracked files, and
-records the omitted-parent warning instead of abandoning the entire snapshot.
-A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
-their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
-inspection when a live run in the same project and repository owns a reused branch. Prunable
-worktree entries are skipped so they cannot suppress stash evidence.
-
-Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
-outcomes make no remote mutation, while a run with both committed and dirty work publishes the
-commit and records both dispositions. Recovery refs are create-only: reconciliation consults the
-run-scoped ref even when a prior store write lost its marker, reconstructs the original counts from
-the anchored commit, and never moves that ref to a later worktree state. A failed capture writes no
-success marker but persists its bounded diagnostic in `failure_reason`, so both live terminal
-delivery and the boot sweep expose it; it never blocks a commit that appears later. Real-git
-falsification tests prove staged-only, untracked nested, and tracked work behind a live index lock
-are recoverable, the dirty worktree and HEAD remain byte-identical, retry after a lost store write
-keeps the first snapshot, stale/crafted
-stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
-cause while exposing the local recovery ref.
 
 ## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
 
@@ -600,6 +600,66 @@ suite. Merge-time validation was `bash -n` clean,
 `trident/inner-workflow-assembly.test.ts` 55/55. The in-file ARBITRATION comment
 in `trident/codex-build.sh` carries the same rationale.
 
+## 2026-08-17 — a released work item names the parked run it was taken from
+
+Landed via PR #PR_NUMBER_PLACEHOLDER.
+
+Follows #341, which stopped the wakeup deferring to runs that had stopped moving.
+Three findings from that PR's review round landed after it merged, so they are
+their own entry.
+
+THE PROMPT STILL SAID THE OLD THING. Releasing an item from a parked run changed
+what a released item IS, and one sentence did not move with it: the wakeup turn was
+told its items had "no live background run". True of an unbound item, false of one
+released by the no-advance timer — there the run row and the binding both still
+exist, and only the judgement that it drives has lapsed. An agent told the run does
+not exist reasonably dispatches a new one, which is the double-drive the release was
+bounded to avoid, and which `migrations/0120_trident_slug_unique_only_live.sql`
+would refuse anyway: its unique index is scoped to non-terminal phases, so the
+parked run still holds the slug. The item now carries that run through selection
+(`WakeupWorkItem.stalled_run`), the prompt names it and its phase, and the turn is
+told to reap it rather than race it. An unreadable stamp prints as unreadable
+instead of as "0m", which would have read as just-moved.
+
+THE RELEASE WAS SILENT — the same defect #341 opens with, one level in. A deferral
+and a release are the two outcomes of one decision and only the deferral was written
+down, so the thing the change exists to do, taking an item back from a parked run,
+was the one transition invisible in the log. `wakeup_released_stalled_run` now emits
+the verdict's own reason token, which is what separates a corrupt-clock release from
+an ordinary unbound item; before, both were the same silence. Counted
+unconditionally, so the per-run rate limit costs volume and never the fact.
+
+AND THE COMPLETION GUARD'S PIN HAD QUIETLY STOPPED PINNING. Its test rebuilt its own
+copy of `isRunLive`, so it would have stayed green through precisely the revert it
+exists to catch. The predicate is now `isRunLiveForCompletion`, exported beside the
+verdict it must disagree with, and asserted at the composer's call site too —
+sharing a symbol pins the rule, not the wiring, and the wiring was the half that
+mattered.
+
+Smaller, same shape: the failure-streak prune keyed on wakeable work rather than on
+a project entry that exists only to report deferrals, so a stale streak no longer
+misjudges the first real failure after a build ends; and a past-threshold
+counterexample for a reaper-reachable `running` row, which the suite had asserted
+only at the reaper boundary.
+
+## 2026-08-17 — a failed Trident run now asks git whether the build survived
+
+The outer orchestrator now performs git-truth salvage before committing every
+new PR-mode terminal failure: when the run's local branch exists and is ahead of
+base, the existing outer-loop publisher pushes the commit and opens or reuses its
+PR. The outcome remains honestly `failed`; the original `failure_reason` is
+preserved with an appended salvage note and PR number. A missing branch, a branch
+with no commits ahead, an already-published run, or a failed publishing attempt is
+left untouched.
+
+Gateway startup now also lists the newest failed PR-mode rows and reconciles each
+one independently after the Trident loop starts. The production module exposes
+the fire-and-forget promise as `stranded_sweep`, and a real-git composition test
+proves that removing this wiring prevents the branch publication. This startup
+sweep recovers the eleven already-stranded branches at next boot without moving
+their rows out of `failed` or introducing publishing credentials into the inner
+loop.
+
 ## 2026-08-17 — the "red" T5 sweeper was never red: landing eeecad9d on main
 
 A clean-room checkout at `eeecad9d` measured 78/78 host-deploy tests passing. The
@@ -619,24 +679,6 @@ Verification must always begin with `bun install --frozen-lockfile` in the workt
 so every workspace link comes from that checkout. A missing `@neutronai/*` module or
 an older workspace package is an environment failure to repair before interpreting
 test results.
-
-## 2026-08-17 — a failed Trident run now asks git whether the build survived
-
-The outer orchestrator now performs git-truth salvage before committing every
-new PR-mode terminal failure: when the run's local branch exists and is ahead of
-base, the existing outer-loop publisher pushes the commit and opens or reuses its
-PR. The outcome remains honestly `failed`; the original `failure_reason` is
-preserved with an appended salvage note and PR number. A missing branch, a branch
-with no commits ahead, an already-published run, or a failed publishing attempt is
-left untouched.
-
-Gateway startup now also lists the newest failed PR-mode rows and reconciles each
-one independently after the Trident loop starts. The production module exposes
-the fire-and-forget promise as `stranded_sweep`, and a real-git composition test
-proves that removing this wiring prevents the branch publication. This startup
-sweep recovers the eleven already-stranded branches at next boot without moving
-their rows out of `failed` or introducing publishing credentials into the inner
-loop.
 
 ## 2026-08-17 — the arrival proof is repaired to the post-merge contract (PR #377)
 
@@ -3005,62 +3047,6 @@ part, empty part, corrupted part. Nothing on the EMITTING side changed —
 `inner-workflow.mjs` still sends the inline env — so this is the wrapper's half of the
 contract, landed first, for a workflow change to aim at.
 
-## 2026-08-16 — trimming one language alone split the installer from the server
-
-Landed via PR #338.
-
-Follow-up to PR #333, which is already merged. PR #333 moved `resolveOpenDbPath`
-(`migrations/db-path.ts:81`) onto a trimmed predicate and left `install.sh` on
-`!= ""`. Before it, BOTH sides honoured a whitespace-only `NEUTRON_DB_PATH`
-verbatim — `pinned.length > 0` at `migrations/db-path.ts:67` in `5bc6ee3d`, that
-PR's own merge parent. Wrong, but wrong IDENTICALLY, so install migrated exactly
-the file the server opened.
-
-TRIMMING ONE SIDE CONVERTED A SHARED BUG INTO A DIVERGENCE. With
-`NEUTRON_DB_PATH='   '` the installer resolved the literal three spaces
-(`install.sh:445`) while the server resolved `<home>/project.db`
-(`migrations/db-path.ts:81`). `install.sh:440-441` states the invariant that
-breaks, verbatim: "This MUST match the server so install migrates — and uninstall
-removes — the exact same DB file the server reads". `install.sh:1461` migrates
-that path; `uninstall.sh:512` removes it, so on the teardown path the split
-deletes a file named three spaces and LEAVES THE REAL DATABASE ON DISK.
-
-The `config/index.ts` docblock recorded this as a condition it had declined to
-clean up — an installer and its server "can STILL disagree", "deliberately NOT
-fixed here". The word STILL was doing the damage: it framed a regression that
-change introduced as one inherited from before it, which is precisely the defect
-the rest of that docblock exists to record — a claim wider than its proof, now in
-the paragraph disclaiming scope rather than in the paragraph making the claim.
-
-The shell now follows the same blank-is-unset rule. `install.sh` / `uninstall.sh`
-share an `is_set` helper inside their marked `NEUTRON-SHARED-RESOLVERS` block;
-`neutron-service.sh` / `neutron-backup.sh` carry the same predicate for
-`DATA_DIR`, which is written into the launchd plist and systemd unit and is what
-the backup timer commits. `resolveRepoRoot`
-(`gateway/boot-listener-registry.ts:361`) was the last `length > 0` in a file
-whose other two resolvers had already been trimmed — a blank `NEUTRON_REPO_ROOT`
-made the bundled-Cores registry walk a directory named three spaces and read as
-"no Cores installed". The duplication across four scripts is REQUIRED, not drift:
-`install.sh` is fetched and run standalone, so it cannot source a shared library,
-which is why `dotenv_get` is already copied four times.
-
-`scripts/__tests__/install-uninstall.test.ts` IS THE TEST `install.sh:396` HAD
-BEEN CITING BY THAT EXACT PATH, AND IT DID NOT EXIST. The block header promised
-"a parity test … asserts the two copies match, so install and uninstall always
-resolve the SAME data dir + DB file" and nothing enforced it — an aspirational
-docblock rather than a stale one, dangerous because it is specific enough that
-the next editor of one twin trusts CI to catch a drift in the other. It runs the
-shell resolvers and the TypeScript resolvers on the SAME inputs and compares the
-answers, so changing one language alone now fails.
-
-Mutation-tested, each with a control proving the mutation landed: reverting the
-shell trim reddens four arms including the cross-language one; drifting ONLY
-`uninstall.sh` reddens exactly one — the parity arm, which nothing else can see,
-and it guards the path that deletes data; untrimming `resolveRepoRoot` reddens
-the new arm; untrimming `resolveNeutronHome` reddens PR #333's own rewritten
-assertion plus two new arms, which confirms that assertion does exercise the axis
-it names.
-
 ## 2026-08-16 — the citation guard counted citations instead of covering them
 
 Landed via PR #353.
@@ -3117,6 +3103,62 @@ shadow.
 The four installer items in the originating brief were re-verified against the
 merged code and were already fixed there, so this change does not touch the
 installer.
+
+## 2026-08-16 — trimming one language alone split the installer from the server
+
+Landed via PR #338.
+
+Follow-up to PR #333, which is already merged. PR #333 moved `resolveOpenDbPath`
+(`migrations/db-path.ts:81`) onto a trimmed predicate and left `install.sh` on
+`!= ""`. Before it, BOTH sides honoured a whitespace-only `NEUTRON_DB_PATH`
+verbatim — `pinned.length > 0` at `migrations/db-path.ts:67` in `5bc6ee3d`, that
+PR's own merge parent. Wrong, but wrong IDENTICALLY, so install migrated exactly
+the file the server opened.
+
+TRIMMING ONE SIDE CONVERTED A SHARED BUG INTO A DIVERGENCE. With
+`NEUTRON_DB_PATH='   '` the installer resolved the literal three spaces
+(`install.sh:445`) while the server resolved `<home>/project.db`
+(`migrations/db-path.ts:81`). `install.sh:440-441` states the invariant that
+breaks, verbatim: "This MUST match the server so install migrates — and uninstall
+removes — the exact same DB file the server reads". `install.sh:1461` migrates
+that path; `uninstall.sh:512` removes it, so on the teardown path the split
+deletes a file named three spaces and LEAVES THE REAL DATABASE ON DISK.
+
+The `config/index.ts` docblock recorded this as a condition it had declined to
+clean up — an installer and its server "can STILL disagree", "deliberately NOT
+fixed here". The word STILL was doing the damage: it framed a regression that
+change introduced as one inherited from before it, which is precisely the defect
+the rest of that docblock exists to record — a claim wider than its proof, now in
+the paragraph disclaiming scope rather than in the paragraph making the claim.
+
+The shell now follows the same blank-is-unset rule. `install.sh` / `uninstall.sh`
+share an `is_set` helper inside their marked `NEUTRON-SHARED-RESOLVERS` block;
+`neutron-service.sh` / `neutron-backup.sh` carry the same predicate for
+`DATA_DIR`, which is written into the launchd plist and systemd unit and is what
+the backup timer commits. `resolveRepoRoot`
+(`gateway/boot-listener-registry.ts:361`) was the last `length > 0` in a file
+whose other two resolvers had already been trimmed — a blank `NEUTRON_REPO_ROOT`
+made the bundled-Cores registry walk a directory named three spaces and read as
+"no Cores installed". The duplication across four scripts is REQUIRED, not drift:
+`install.sh` is fetched and run standalone, so it cannot source a shared library,
+which is why `dotenv_get` is already copied four times.
+
+`scripts/__tests__/install-uninstall.test.ts` IS THE TEST `install.sh:396` HAD
+BEEN CITING BY THAT EXACT PATH, AND IT DID NOT EXIST. The block header promised
+"a parity test … asserts the two copies match, so install and uninstall always
+resolve the SAME data dir + DB file" and nothing enforced it — an aspirational
+docblock rather than a stale one, dangerous because it is specific enough that
+the next editor of one twin trusts CI to catch a drift in the other. It runs the
+shell resolvers and the TypeScript resolvers on the SAME inputs and compares the
+answers, so changing one language alone now fails.
+
+Mutation-tested, each with a control proving the mutation landed: reverting the
+shell trim reddens four arms including the cross-language one; drifting ONLY
+`uninstall.sh` reddens exactly one — the parity arm, which nothing else can see,
+and it guards the path that deletes data; untrimming `resolveRepoRoot` reddens
+the new arm; untrimming `resolveNeutronHome` reddens PR #333's own rewritten
+assertion plus two new arms, which confirms that assertion does exercise the axis
+it names.
 
 ## 2026-08-16 — a deferral and a rejection no longer share a label
 
