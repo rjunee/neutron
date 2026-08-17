@@ -835,3 +835,73 @@ describe('a durable post notifies even when a live socket took it', () => {
     expect(trace.marked).toEqual([])
   })
 })
+
+// ── notify: 'suppress' — the explicit quiet lane for high-frequency producers ─
+//
+// The work-wakeup loop posts a progress report every ~5 minutes all night. The
+// durable row + live push ARE the product; a device buzz per tick (~96 banners
+// a night) is a product bug. `notify: 'suppress'` is the envelope's explicit
+// opt-out: it silences ONLY the buzz. The controls below are the mutation
+// tests: the same posts without the field must still buzz, or the seam's
+// standing rule ("a durable post notifies") has been broken rather than
+// narrowly excepted.
+describe("deliver notify: 'suppress' — quiet posts keep their row and their push", () => {
+  function recordingNotify(): { notify: () => Promise<boolean>; count: () => number } {
+    let n = 0
+    return {
+      notify: async (): Promise<boolean> => {
+        n += 1
+        return true
+      },
+      count: () => n,
+    }
+  }
+
+  it("a suppressed 'inert' post persists + live-pushes but NEVER buzzes", async () => {
+    const { store, trace } = fakeButtonStore()
+    const p = recordingPush(trace)
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: p.push, notify: n.notify })
+
+    const r = await deliver('app:owner:acme', {
+      body: 'Wakeup: pushed the fix branch; next, CI.',
+      durability: 'inert',
+      notify: 'suppress',
+    })
+
+    expect(r.persisted).toBe(true)
+    expect(trace.inerts).toHaveLength(1) // durable history row written
+    expect(p.app).toHaveLength(1) // live socket push still happened
+    expect(n.count()).toBe(0) // and the buzz did not
+  })
+
+  it("CONTROL — the identical 'inert' post WITHOUT the field still buzzes (the exception is opt-in, not a new default)", async () => {
+    const { store, trace } = fakeButtonStore()
+    const p = recordingPush(trace)
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: p.push, notify: n.notify })
+
+    await deliver('app:owner:acme', {
+      body: 'Wakeup: pushed the fix branch; next, CI.',
+      durability: 'inert',
+    })
+
+    expect(n.count()).toBe(1)
+  })
+
+  it("a suppressed 'reply' post cannot stamp delivered_at on the strength of a buzz that never happened", async () => {
+    const { store, trace } = fakeButtonStore()
+    const n = recordingNotify()
+    // No push targets: nothing live-delivers, nothing notifies ⇒ nothing stamps.
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+
+    await deliver('app:owner', { body: 'quiet reply', durability: 'reply', notify: 'suppress' })
+    expect(n.count()).toBe(0)
+    expect(trace.marked).toEqual([])
+
+    // CONTROL — the same post un-suppressed notifies AND stamps.
+    await deliver('app:owner', { body: 'loud reply', durability: 'reply' })
+    expect(n.count()).toBe(1)
+    expect(trace.marked).toEqual(['reply-1'])
+  })
+})

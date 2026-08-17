@@ -5,6 +5,25 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 export interface MiscCompositionInput {
   db: ProjectDb
   project_slug: string
+  /**
+   * True when {@link project_slug} is the bare FALLBACK — nothing configured it,
+   * so the process does not actually know who it is.
+   *
+   * It travels WITH the slug rather than being re-derived downstream because a
+   * fallback `'dev'` and a configured `'dev'` are the same string and opposite
+   * situations; only the resolver can tell them apart, and only at boot. The
+   * credential surfaces refuse to move rows onto an unnamed process, which is a
+   * decision they cannot make from the handle alone.
+   *
+   * OPTIONAL, and ABSENT MEANS FALLBACK. "This composition did not say where its
+   * handle came from" and "this process does not know who it is" are the same
+   * statement, so the wiring reads `undefined` as anonymous and the credential
+   * surfaces refuse. That keeps a composer that forgets it FAIL-CLOSED — loudly
+   * unable to migrate — instead of silently doing the unguarded thing, which is
+   * the failure this whole guard exists for. It also spares every composition
+   * test from asserting a provenance it does not care about.
+   */
+  slug_is_fallback?: boolean
   // LOOKING FOR `push_dispatcher`? It was DELETED on 2026-08-09, along with the
   // `ReminderTickLoop.on_fired` hook it fed. It composed a native notification
   // from the reminder ROW, and the row is the wrong source — a ritual's stored
@@ -76,6 +95,16 @@ export interface MiscCompositionInput {
      * the call in try/catch so a hook error never un-terminates a finished run.
      */
     on_run_terminal?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
+    /**
+     * #335 wiring — the terminal-build WAKE observer. Runs in the tick loop's
+     * composeTerminalHook chain for EVERY terminal run, after board reconcile +
+     * on_run_terminal. The composer wires buildTerminalBuildWakeObserver here —
+     * the SAME value it registers at both terminate() chokepoints — so a
+     * loop-reaped, a cancelled, and a codegen-cancelled build all wake the agent
+     * through one chain (§F6a). Claim-first (`agent_waked_at` single writer), so
+     * a second site observing the same row composes no duplicate turn.
+     */
+    on_terminal_wake?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
     /**
      * M1 UX REDESIGN — the LIVE-PROGRESS observer (see
      * `trident/tick.ts` `TridentTransitionHook`). Fired once per tick for every
@@ -171,6 +200,14 @@ export interface MiscCompositionInput {
      * nowhere on the wiring is a knob no operator has. Absent → the 2 s default.
      */
     watch_interval_ms?: number
+    /**
+     * PULL half of launcher-death detection: an EXTERNAL per-run probe of
+     * whether the recorded launcher generation (`workflow_run_id`) is still a
+     * live process. Three-valued (`alive`/`dead`/`unknown`): only positive
+     * `dead` evidence acts. Absent means no `trident-liveness` loop and preserves
+     * prior behaviour byte-for-byte. The trident module owns the durable latch.
+     */
+    probe_launcher_alive?: import('@neutronai/trident/tick.ts').TridentLivenessProbe
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
@@ -301,6 +338,26 @@ export interface MiscCompositionInput {
      * silent until the turn's single reply() lands. Omitted → no post.
      */
     chat_ack?: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck
+    /**
+     * Derived-inline-activity batch dep for `work_board_list` — mirrors the HTTP
+     * surface's `derive_inline_active` dep (T3), so the agent reads the SAME
+     * evidence truth the clients do. Display-only: ONE O(1) evidence read per
+     * call, never a write, and it never gates, denies or delays a tool call.
+     * Omitted ⇒ raw stored-flag passthrough (unchanged behaviour).
+     */
+    derive_inline_active?: (
+      items: import('@neutronai/work-board/store.ts').WorkBoardItem[],
+      project_id: string,
+    ) => import('@neutronai/work-board/store.ts').WorkBoardItem[]
+    /**
+     * The composer-built card-removal chokepoint (cancel a live bound run →
+     * dispose the card's `plans/` doc by reason → hard-delete the row) — the
+     * SAME instance the HTTP DELETE behind the UI's X uses. When supplied, the
+     * `work_board_remove` agent tool registers, so an agent removal and a human
+     * removal share one path. Omitted → the tool is absent (legacy boots
+     * unchanged).
+     */
+    removal?: import('@neutronai/work-board/removal.ts').WorkBoardRemovalService
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the
@@ -320,7 +377,16 @@ export interface MiscCompositionInput {
      *  `<home>/Projects/<slug>/code` workspace under it (see `board-dispatch.ts`). */
     repo_path: string
     resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-    resolveMergeMode?: (repo_path: string) => Promise<import('@neutronai/trident/store.ts').MergeMode>
+    /**
+     * The merge-mode PROBE, REQUIRED. The composer owns the GitHub credential,
+     * so it owns this. Optional here once meant the tool surface fell through to
+     * an uncredentialed `gh auth status` probe (`trident/board-dispatch.ts`).
+     *
+     * A probe rather than a `(repo_path) => MergeMode` function on purpose: the
+     * probe carries `publisher`, so which credential this seam closes over is
+     * assertable at the boot-wiring test instead of merely being a function.
+     */
+    merge_mode_probe: import('@neutronai/trident/git-mode.ts').GitModeProbe
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number

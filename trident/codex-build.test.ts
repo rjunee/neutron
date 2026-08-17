@@ -27,14 +27,16 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -72,6 +74,20 @@ const briefIntegrity = loadBriefIntegrity()
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
 
 interface RunOpts {
+  /** Branch used by `git init -b`; defaults to the wrapper argv branch. */
+  initBranch?: string
+  /** Create the wrapper argv branch at the base commit while remaining on initBranch. */
+  leftoverBranch?: boolean
+  /** Check the leftover branch out in a second worktree, making it unbindable here. */
+  holdLeftoverBranch?: boolean
+  /** Keep a process whose cwd is the holder alive while the wrapper runs. */
+  liveHolder?: boolean
+  /** Delete the holder directory while leaving its stale worktree admin entry. */
+  holderDirDeleted?: boolean
+  /** Leave observable uncommitted evidence in the holder. */
+  holderDirt?: boolean
+  /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
+  checkpointExit?: number
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Don't set CODEX_HOME at all. */
@@ -82,6 +98,8 @@ interface RunOpts {
   brief?: string | null
   /** Raw brief parts written to disk and handed to the wrapper as an ordered manifest. */
   briefParts?: string[]
+  /** Per-part receipts. Undefined → aligned receipts for briefParts; null → unset. */
+  partIntegrity?: string[] | null
   /** Replace this part's manifest entry with a path that does not exist. */
   missingBriefPartIndex?: number
   /** Insert a blank manifest line after this part index. */
@@ -197,6 +215,7 @@ interface RunOpts {
 const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n'
 
 interface RunResult {
+  checkpointArgs: string
   status: number | null
   /** The signal the harness killed the wrapper with, or null if it exited by itself. */
   signal: NodeJS.Signals | null
@@ -368,7 +387,7 @@ exit 1
     const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
     if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
   }
-  git('init', '-q', '-b', branch, ...(opts.objectFormat === undefined ? [] : ['--object-format', opts.objectFormat]))
+  git('init', '-q', '-b', opts.initBranch ?? branch, ...(opts.objectFormat === undefined ? [] : ['--object-format', opts.objectFormat]))
   git('config', 'user.email', 'build@localhost')
   git('config', 'user.name', 'build')
   let baseHead = ''
@@ -382,6 +401,20 @@ exit 1
     const bare = join(dir, 'origin.git')
     spawnSync('git', ['init', '-q', '--bare', bare])
     git('remote', 'add', 'origin', bare)
+  }
+  if (opts.leftoverBranch === true) git('branch', branch)
+  if (opts.holdLeftoverBranch === true) {
+    if (opts.leftoverBranch !== true) git('branch', branch)
+    git('worktree', 'add', join(dir, 'holder'), branch)
+    if (opts.holderDirt === true) {
+      writeFileSync(join(dir, 'holder', 'post-mortem.txt'), 'evidence\n')
+    }
+  }
+  const liveHolder = opts.holdLeftoverBranch === true && opts.liveHolder === true
+    ? spawn('sleep', ['300'], { cwd: join(dir, 'holder'), stdio: 'ignore' })
+    : undefined
+  if (opts.holdLeftoverBranch === true && opts.holderDirDeleted === true) {
+    rmSync(join(dir, 'holder'), { recursive: true, force: true })
   }
   if (opts.pushUrl !== undefined) git('remote', 'set-url', '--push', 'origin', opts.pushUrl)
   if (opts.credentialHelper === true) {
@@ -400,6 +433,16 @@ exit 1
     NEUTRON_CODEX_AUTH_RETRY_DELAY: '0',
     ...(opts.env ?? {}),
   }
+  if (opts.checkpointExit !== undefined) {
+    const checkpoint = join(dir, 'checkpoint-stub.sh')
+    writeFileSync(checkpoint, `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\nexit ${opts.checkpointExit}\n`)
+    chmodSync(checkpoint, 0o755)
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT'] = checkpoint
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = '/tmp/run.db'
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = 'run-123'
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_NAME'] = 'forge-done'
+  }
+  Object.assign(env, opts.env ?? {})
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
   const brief = opts.briefParts === undefined
     ? (opts.brief === undefined ? DEFAULT_BRIEF : opts.brief)
@@ -425,6 +468,12 @@ exit 1
       env['NEUTRON_CODEX_BUILD_BRIEF_PARTS'] = partPaths.join('\n')
     }
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = join(dir, 'build.brief')
+    const partIntegrity = opts.partIntegrity === undefined
+      ? opts.briefParts.map(briefIntegrity)
+      : opts.partIntegrity
+    if (partIntegrity !== null) {
+      env['NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY'] = partIntegrity.join('\n')
+    }
   } else if (typeof brief === 'string') {
     // `!== null` let `undefined` through: the caller may omit the brief entirely, and
     // `writeFileSync` would then be handed undefined. Narrowing on the type rather than
@@ -455,7 +504,7 @@ exit 1
   // — so the default path here is the production path, and the wrapper's perl
   // recomputation is checked against the JS one on every single case in this file.
   const integrity = opts.integrity === undefined
-    ? briefIntegrity(opts.briefParts?.join('') ?? brief ?? '')
+    ? (opts.briefParts === undefined ? briefIntegrity(brief ?? '') : null)
     : opts.integrity
   if (integrity !== null) env['NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY'] = integrity
   const diff = opts.diff === undefined ? 'diff --git a/x b/x\n+change\n' : opts.diff
@@ -475,12 +524,18 @@ exit 1
       : opts.base === undefined
         ? [SCRIPT, branch]
         : [SCRIPT, branch, opts.base]
-  const res = spawnSync(BASH, argv, {
-    cwd: dir,
-    encoding: 'utf8',
-    env,
-    ...(opts.spawnTimeoutMs === undefined ? {} : { timeout: opts.spawnTimeoutMs }),
-  })
+  const res = (() => {
+    try {
+      return spawnSync(BASH, argv, {
+        cwd: dir,
+        encoding: 'utf8',
+        env,
+        ...(opts.spawnTimeoutMs === undefined ? {} : { timeout: opts.spawnTimeoutMs }),
+      })
+    } finally {
+      liveHolder?.kill()
+    }
+  })()
   const readOr = (name: string): string => {
     try {
       return readFileSync(join(dir, name), 'utf8')
@@ -490,6 +545,7 @@ exit 1
   }
   const trailerRaw = readOr('build.trailer')
   return {
+    checkpointArgs: readOr('checkpoint-args.txt'),
     status: res.status,
     /** Non-null when the harness had to KILL the wrapper — i.e. it did not finish. */
     signal: res.signal ?? null,
@@ -534,6 +590,92 @@ const FAKE_BUILD_NO_DIFF = `cat >/dev/null; ${NARRATE}; echo built >> built.txt;
 /** A build that RUNS and edits but never commits — the case that must report nothing. */
 const FAKE_NO_COMMIT = `cat >/dev/null; ${NARRATE}; echo edited > built.txt`
 const FAKE_FAIL = `cat >/dev/null; ${NARRATE}; echo "boom" >&2; exit 7`
+
+describe("the wrapper BINDS the worktree to the run's branch — the binding is measured setup, not the model's job", () => {
+  test('a fresh auto-named worktree branch is bound before the build commits', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+  })
+
+  test('the measured leftover-local-branch incident re-enters and advances that branch', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', leftoverBranch: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', r.baseHead, 'refs/heads/trident/a-run'], { cwd: r.dir })
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(ancestor.status).toBe(0)
+  })
+
+  test('a branch held by a DEAD round-0 worktree is RECLAIMED — detached in place, then built', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, holderDirt: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const holder = join(r.dir, 'holder')
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    const holderBranch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: holder, encoding: 'utf8' }).stdout.trim()
+    const worktrees = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: r.dir, encoding: 'utf8' }).stdout
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('CODEX_BUILD_BRANCH_RECLAIMED')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(readFileSync(join(holder, 'post-mortem.txt'), 'utf8')).toBe('evidence\n')
+    expect(holderBranch).toBe('HEAD')
+    expect(worktrees).toContain(`worktree ${realpathSync(holder)}`)
+  })
+
+  test.skipIf(process.platform !== 'linux')('a branch held by a LIVE worktree is still refused, before any token is spent', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, liveHolder: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const holder = join(r.dir, 'holder')
+    const holderBranch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: holder, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_BRANCH_UNBOUND')
+    expect(r.stderr).toContain('LIVE')
+    expect(r.stderr).toContain(holder)
+    expect(r.codexStdin).toBe('')
+    expect(holderBranch).toBe('trident/a-run')
+  })
+
+  test('a holder whose directory is GONE is pruned, not fatal', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, holderDirDeleted: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(r.stderr).not.toContain('CODEX_BUILD_BRANCH_UNBOUND')
+  })
+})
+
+describe('artifact-time checkpoint', () => {
+  test('records the measured HEAD after commit and diff', () => {
+    const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    expect(r.status).toBe(0)
+    expect(r.checkpointArgs.trim().split('\n')).toEqual([
+      '/tmp/run.db', 'run-123', 'inner_checkpoint', 'forge-done', 'inner_checkpoint_head', r.head,
+    ])
+  })
+
+  test('does not run unless all four values are present', () => {
+    const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 0, env: {
+      NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD,
+      NEUTRON_CODEX_BUILD_CHECKPOINT_NAME: '',
+    } })
+    expect(r.status).toBe(0)
+    expect(r.checkpointArgs).toBe('')
+  })
+
+  test('checkpoint failure cannot fail the build', () => {
+    const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 1, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('CODEX_BUILD_CHECKPOINT_FAILED')
+  })
+})
 /**
  * A build that behaves like a REAL codex build now does: it commits and writes its
  * diff, and it does NOT push and does NOT open a PR — because it cannot.
@@ -894,13 +1036,14 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexStdin).toBe(parts.join(''))
   })
 
-  test('a corrupted part is refused by the unchanged whole-brief receipt', () => {
+  test('a part altered after its receipt was taken is refused', () => {
     const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
     const corrupted = [...intended]
     corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
-    const res = success(corrupted, { integrity: briefIntegrity(intended.join('')) })
+    const res = success(corrupted, { partIntegrity: intended.map(briefIntegrity) })
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+    expect(res.stderr).toContain('brief-part-1.txt')
     expect(res.codexArgv).toBe('')
   })
 
@@ -918,12 +1061,24 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexArgv).toBe('')
   })
 
-  test('part order is enforced by the whole-brief receipt', () => {
+  test('part order is enforced by aligned receipts', () => {
     const intended = ['first\n', 'second\n']
-    const res = success([...intended].reverse(), { integrity: briefIntegrity(intended.join('')) })
+    const res = success([...intended].reverse(), { partIntegrity: intended.map(briefIntegrity) })
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     expect(res.codexArgv).toBe('')
+  })
+
+  test('parts without per-part integrity are refused', () => {
+    const res = success(['head\n', 'middle\n'], { partIntegrity: null })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_NO_BRIEF_INTEGRITY')
+  })
+
+  test('fewer receipts than parts are refused', () => {
+    const res = success(['head\n', 'middle\n'], { partIntegrity: [briefIntegrity('head\n')] })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_NO_BRIEF_INTEGRITY')
   })
 
   test('the legacy pre-written brief path builds exactly as before', () => {
@@ -1057,18 +1212,95 @@ describe('codex build brief — the part list arrives as a launcher-written mani
   })
 
   test('a corrupted part behind a valid receipt is refused through the FILE path', () => {
+    // "A valid receipt" under the surviving (per-part, #321) implementation means
+    // receipts taken from the parts the workflow COMPOSED, while the files on disk
+    // were altered afterwards. The manifest is transport, not trust: the corrupted
+    // part must be refused by the same per-part gate the inline path faces.
     const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
     const corrupted = [...intended]
     corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
     const res = refused({
       briefParts: corrupted,
       briefPartsFile: true,
-      integrity: briefIntegrity(intended.join('')),
+      partIntegrity: intended.map(briefIntegrity),
     })
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     expect(res.codexStdin).toBe('')
   })
+})
+
+/**
+ * TRANSPORT SYMMETRY, pinned case by case. The manifest FILE is a way to CARRY the
+ * ordered part list, never a second entry point with weaker checks: for every refusal
+ * the inline env can raise, the same input through the manifest must produce the SAME
+ * verdict and the SAME marker. A future third transport that resolves into
+ * `$BRIEF_PARTS` upstream of the receipt gate inherits this table; one that bypasses
+ * the gate will fail it.
+ */
+describe('inline and manifest transports agree on every refusal', () => {
+  const intended = ['contract\n', 'the middle segment, long enough to matter\n', 'coda\n']
+  const corrupted = [...intended]
+  corrupted[1] = 'the middle segment, truncated'
+  const cases: Array<{ name: string; marker: string; opts: Partial<RunOpts> }> = [
+    {
+      name: 'a missing part',
+      marker: 'CODEX_BUILD_BRIEF_PART_MISSING',
+      opts: { briefParts: intended, missingBriefPartIndex: 1 },
+    },
+    {
+      name: 'an empty part',
+      marker: 'CODEX_BUILD_BRIEF_PART_MISSING',
+      opts: { briefParts: ['head\n', '', 'coda\n'] },
+    },
+    {
+      name: 'a part altered after its receipt was taken',
+      marker: 'CODEX_BUILD_BRIEF_PART_CORRUPT',
+      opts: { briefParts: corrupted, partIntegrity: intended.map(briefIntegrity) },
+    },
+    {
+      name: 'parts reordered against their receipts',
+      marker: 'CODEX_BUILD_BRIEF_PART_CORRUPT',
+      opts: { briefParts: [...intended].reverse(), partIntegrity: intended.map(briefIntegrity) },
+    },
+    {
+      name: 'no per-part receipts at all',
+      marker: 'CODEX_BUILD_NO_BRIEF_INTEGRITY',
+      opts: { briefParts: intended, partIntegrity: null },
+    },
+    {
+      name: 'fewer receipts than parts',
+      marker: 'CODEX_BUILD_NO_BRIEF_INTEGRITY',
+      opts: { briefParts: intended, partIntegrity: [briefIntegrity(intended[0]!)] },
+    },
+    {
+      name: 'more receipts than parts',
+      marker: 'CODEX_BUILD_NO_BRIEF_INTEGRITY',
+      opts: {
+        briefParts: intended,
+        partIntegrity: [...intended.map(briefIntegrity), briefIntegrity('a fourth receipt\n')],
+      },
+    },
+  ]
+  for (const c of cases) {
+    test(`${c.name}: the same verdict through both transports`, () => {
+      const base = {
+        authed: true,
+        codexLoginExit: 0,
+        env: { NEUTRON_CODEX_BUILD_EXEC_CMD: RECORDING_FAKE_BUILD },
+      }
+      const inline = run({ ...base, ...c.opts })
+      const viaManifest = run({ ...base, ...c.opts, briefPartsFile: true })
+      // The inline verdict is the reference: refused, before the seam ran.
+      expect(inline.status).toBe(3)
+      expect(inline.stderr).toContain(c.marker)
+      expect(inline.codexStdin).toBe('')
+      // And the manifest transport is REQUIRED to match it, marker and all.
+      expect(viaManifest.status).toBe(inline.status)
+      expect(viaManifest.stderr).toContain(c.marker)
+      expect(viaManifest.codexStdin).toBe('')
+    })
+  }
 })
 
 describe('the BRIEF is what codex is asked to build', () => {
@@ -1123,6 +1355,31 @@ describe('the BRIEF is what codex is asked to build', () => {
     })
     expect(pinned.codexArgv).toContain('--model\ngpt-5.6-terra')
     expect(pinned.codexArgv).not.toContain('gpt-5.6-sol')
+  })
+
+  test('the reasoning effort is PINNED, and overridable through CODEX_BUILD_EFFORT', () => {
+    // Unpinned, the CLI default for this tier is `none` — the forge built with reasoning
+    // DISABLED until this was pinned. Buying the flagship model and then leaving the
+    // effort to the default is the same silent downgrade the model pin above prevents.
+    const dflt = run({ authed: true, codexLoginExit: 0 })
+    expect(dflt.codexArgv).toContain('model_reasoning_effort=xhigh')
+
+    const pinned = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { CODEX_BUILD_EFFORT: 'high' },
+    })
+    expect(pinned.codexArgv).toContain('model_reasoning_effort=high')
+    expect(pinned.codexArgv).not.toContain('model_reasoning_effort=xhigh')
+  })
+
+  test('an explicitly EMPTY CODEX_BUILD_EFFORT falls back to the CLI default', () => {
+    const { codexArgv } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { CODEX_BUILD_EFFORT: '' },
+    })
+    expect(codexArgv).not.toContain('model_reasoning_effort')
   })
 
   test('an explicitly EMPTY CODEX_BUILD_MODEL falls back to the CLI default', () => {
@@ -1555,10 +1812,9 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     // …and the trailer says it produced nothing, which is the truth.
     expect(second.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
     expect(second.trailerRaw).not.toContain(roundOne)
-    // It took three asks to establish the baseline, and the witness was never reached
-    // (there is no head of our own to witness) — so this is the baseline's retry being
-    // measured, not the witness's.
-    expect(probes()).toBe(3)
+    // It took three asks to bind at the remote tip, then one to capture that bound tip
+    // in the baseline. The witness was never reached because there is no new head.
+    expect(probes()).toBe(4)
   })
 
   test('a baseline probe that NEVER answers DEFERS the build instead of starting it blind', () => {
@@ -1778,5 +2034,63 @@ describe('THE TRANSCRIPT CANNOT FORGE A TRAILER — the two live in different pl
     expect(r.status).toBe(0)
     expect(r.trailerRaw).not.toContain(FABRICATED)
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
+  })
+})
+
+describe('atomic trailer publication', () => {
+  const expectCompleteTrailer = (raw: string): void => {
+    const lines = raw.trimEnd().split('\n')
+    expect(lines).toHaveLength(6)
+    expect(lines[0]).toStartWith('NEUTRON_CODEX_BUILD_BRANCH=')
+    expect(lines[5]).toStartWith('NEUTRON_CODEX_BUILD_WORKTREE=')
+  }
+
+  test('a trailer planted by the build itself is atomically replaced, leaving no temp residue', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        NEUTRON_CODEX_BUILD_EXEC_CMD:
+          `${FAKE_BUILD}; printf 'NEUTRON_CODEX_BUILD_HEAD=attacker-junk\\n' > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"`,
+      },
+    })
+    expect(r.status).toBe(0)
+    expectCompleteTrailer(r.trailerRaw)
+    expect(r.trailerRaw).not.toContain('attacker-junk')
+    expect(readdirSync(r.dir).some((entry) => /^build\.trailer\.tmp\./.test(entry))).toBe(false)
+  })
+
+  test('a concurrent reader never observes a partial trailer', async () => {
+    const observer =
+      `sh -c 'i=0; while [ $i -lt 600 ]; do if [ -s "$NEUTRON_CODEX_BUILD_TRAILER_FILE" ]; then cat "$NEUTRON_CODEX_BUILD_TRAILER_FILE" > "$HOME/observed.trailer"; exit 0; fi; sleep 0.05; i=$((i+1)); done' >/dev/null 2>&1 &`
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD}; ${observer}` },
+    })
+    expect(r.status).toBe(0)
+    const observed = join(r.dir, 'observed.trailer')
+    for (let i = 0; i < 200 && !existsSync(observed); i++) await Bun.sleep(50)
+    expect(existsSync(observed)).toBe(true)
+    const observedRaw = readFileSync(observed, 'utf8')
+    expect(observedRaw).toBe(r.trailerRaw)
+    expectCompleteTrailer(observedRaw)
+  }, 15_000)
+
+  test('the failed-build path also publishes atomically', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD}; exit 1` },
+    })
+    expect(r.status).toBe(5)
+    expectCompleteTrailer(r.trailerRaw)
+    expect(readdirSync(r.dir).some((entry) => /^build\.trailer\.tmp\./.test(entry))).toBe(false)
+  })
+
+  test('the script publishes only by renaming a fully-written temp file', () => {
+    expect(SCRIPT_TEXT).toContain('mv -f "$TRAILER_TMP" "$TRAILER_FILE"')
+    expect(SCRIPT_TEXT).not.toContain('> "$TRAILER_FILE"')
+    expect(SCRIPT_TEXT).toContain('rm -f "$TRAILER_TMP" "$TRAILER_FILE"')
   })
 })

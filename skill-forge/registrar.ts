@@ -26,7 +26,28 @@ import { join } from 'node:path'
 import { renderSkillPack } from './distiller.ts'
 import type { SkillDraft } from './types.ts'
 
-/** Mirror of `build-phase-spec-resolver.ts:resolveSkillsDir` (owner_data_dir form). */
+/**
+ * Append `skills/` to an ALREADY-RESOLVED owner data dir.
+ *
+ * NOT A MIRROR, THOUGH IT SAID IT WAS. This previously described itself as a
+ * "mirror of `build-phase-spec-resolver.ts:resolveSkillsDir` (owner_data_dir
+ * form)", and when that function was brought onto the "blank is unset" rule this
+ * copy stayed on the old one — a self-declared mirror that had stopped
+ * mirroring, which is precisely the stale-claim failure the change was about.
+ * The claim is narrowed rather than the code widened, because the two are not
+ * the same function: the upstream owns a FALLBACK CHAIN (blank data dir ->
+ * `NEUTRON_HOME` -> `/srv/neutron`, keyed by owner handle) and this form has
+ * nowhere to fall through to. Adding a trim here would turn `'   '` into
+ * `'/skills'` — the filesystem root — which is worse than the junk path it
+ * replaces.
+ *
+ * So the contract is on the CALLER: pass a resolved, non-blank dir. Nothing in
+ * this tree calls it — `registerSkillFile` below takes an already-built
+ * `skillsDir` from `forge.ts` rather than going through here, and the re-export
+ * at `skill-forge/index.ts` has no in-tree consumer either. It is a published
+ * surface with no live path, which is the honest reason it is documented rather
+ * than changed.
+ */
 export function resolveSkillsDir(ownerDataDir: string): string {
   const trimmed = ownerDataDir.endsWith('/') ? ownerDataDir.slice(0, -1) : ownerDataDir
   return `${trimmed}/skills`

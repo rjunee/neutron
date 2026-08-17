@@ -57,6 +57,41 @@ describe('resolveListenPort', () => {
   test('accepts port 0 (random)', () => {
     expect(resolveListenPort([], {}, 0)).toBe(0)
   })
+
+  // TWO ANSWERS FOR ONE BLANK, on an EXPORTED surface. `''` fell through to the
+  // default; `'   '` threw `invalid NEUTRON_PORT`. `boot()` shields production
+  // (it passes `String(config.port)`, already validated), so this is consistency
+  // on a published surface rather than a live fix — stated in the docblock and
+  // repeated here so the pin is not mistaken for a bug regression test.
+  test('a blank env NEUTRON_PORT is unset on BOTH forms — empty and whitespace-only', () => {
+    for (const blank of ['', ' ', '   ', '\t', '\n', '\t\n ']) {
+      expect(resolveListenPort([], { NEUTRON_PORT: blank })).toBe(7_800)
+    }
+    // CONTROL — a real env value still wins over the default, so "blank is
+    // unset" did not become "the env is ignored".
+    expect(resolveListenPort([], { NEUTRON_PORT: '8000' })).toBe(8_000)
+    // CONTROL — a blank never becomes 0. `Number.parseInt('   ', 10)` is NaN
+    // here (unlike `Number('   ')`, which is 0 and is the trap the config knob
+    // guards), and 0 is a MEANINGFUL port in this tree: it requests a random
+    // one and disables the in-use check below (`port !== 0`).
+    expect(resolveListenPort([], { NEUTRON_PORT: '   ' })).not.toBe(0)
+  })
+
+  test('an explicit --port with a blank value stays a REFUSAL, not a default', () => {
+    // THE DELIBERATE ASYMMETRY. An absent env var means "the operator said
+    // nothing"; `--port=` means "the operator passed the flag and then said
+    // nothing", which is a mistake worth surfacing — the same split
+    // `scripts/email-accounts.ts` makes for a blank `--home`. Pinned so a later
+    // sweep that "makes the two halves consistent" has to argue with a test
+    // instead of silently defaulting a malformed CLI invocation.
+    for (const blank of ['--port=', '--port= ', '--port=   ', '--port=\t']) {
+      expect(() => resolveListenPort([blank], {})).toThrow(/invalid --port/)
+    }
+    // CONTROL — a real flag still parses, and `--port=0` is still a legal
+    // random-port request, so the refusal is about blankness only.
+    expect(resolveListenPort(['--port=9100'], {})).toBe(9_100)
+    expect(resolveListenPort(['--port=0'], {})).toBe(0)
+  })
 })
 
 describe('resolveOwnerSlug — Argus r1 file-based override', () => {

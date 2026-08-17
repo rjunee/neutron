@@ -308,6 +308,9 @@ describe('Open overnight morning-brief delivery wiring (ISSUES #443)', () => {
 
       const wired = buildOvernightEngineHandler({
         db,
+        // The composition supplies the publisher credential; assert it is there
+        // rather than substituting a stub, so an unwired composer fails here.
+        publisher_credential: cfg!.publisher_credential,
         deliver: cfg!.deliver!,
         general_topic_id: cfg!.general_topic_id!,
         now: () => reporterTime,
@@ -331,6 +334,9 @@ describe('Open overnight morning-brief delivery wiring (ISSUES #443)', () => {
       // is what a deliver-only fix would have shipped.
       const topicless = buildOvernightEngineHandler({
         db,
+        // The composition supplies the publisher credential; assert it is there
+        // rather than substituting a stub, so an unwired composer fails here.
+        publisher_credential: cfg!.publisher_credential,
         deliver: cfg!.deliver!,
         now: () => reporterTime,
         listOptedInProjects: () => [],

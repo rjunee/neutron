@@ -7,44 +7,26 @@ import {
   STALLED_WARN_MS,
 } from './run-progress.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 const T0 = Date.parse('2026-07-02T00:00:00Z')
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'demo',
     project_slug: 'owner',
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/demo',
-    pr: null,
     merge_mode: 'pr',
     subagent_run_id: 'wf-1',
-    subagent_status: 'running',
     repo_path: '/repo',
-    worktree: null,
     task: 'build a thing',
-    chat_id: null,
-    thread_id: null,
     channel_kind: 'app_socket',
-    failure_reason: null,
     workflow_run_id: 'wf-1',
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-07-02T00:00:00Z',
     last_advanced_at: '2026-07-02T00:00:00Z',
-    harvested_at: null,
-    crash_recoveries: 0,
     ...over,
-  }
+  })
 }
 
 describe('deriveRunProgress — phase/checkpoint → label', () => {

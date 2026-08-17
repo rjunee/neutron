@@ -398,10 +398,10 @@ CREATE INDEX wow_events_project_action
 
 [table] _migrations (tbl=_migrations)
 CREATE TABLE _migrations (
-       version INTEGER PRIMARY KEY,
-       name TEXT NOT NULL,
+       version INTEGER NOT NULL,
+       name TEXT NOT NULL PRIMARY KEY,
        applied_at REAL NOT NULL
-     )
+     , content_sha256 TEXT, applied_by_commit TEXT, tree_provenance TEXT)
 
 [table] api_keys (tbl=api_keys)
 CREATE TABLE api_keys (
@@ -551,7 +551,7 @@ CREATE TABLE "code_subagent_registry" (
 ) STRICT
 
 [table] code_trident_runs (tbl=code_trident_runs)
-CREATE TABLE code_trident_runs (
+CREATE TABLE "code_trident_runs" (
     id                  TEXT PRIMARY KEY NOT NULL,
     slug                TEXT NOT NULL,
     project_slug        TEXT NOT NULL,
@@ -582,11 +582,27 @@ CREATE TABLE code_trident_runs (
     chat_id             TEXT,
     thread_id           TEXT,
     failure_reason      TEXT,
-    started_at          TEXT NOT NULL,                  -- ISO-8601 UTC
-    last_advanced_at    TEXT NOT NULL                   -- ISO-8601 UTC
-, channel_kind TEXT NOT NULL DEFAULT 'telegram'
-        CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')), workflow_run_id TEXT, inner_checkpoint TEXT, inner_verdict TEXT
-        CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')), inner_result TEXT, harvested_at INTEGER, inner_checkpoint_head TEXT, inner_checkpoint_findings TEXT, crash_recoveries INTEGER) STRICT
+    started_at          TEXT NOT NULL,
+    last_advanced_at    TEXT NOT NULL,
+    channel_kind        TEXT NOT NULL DEFAULT 'telegram'
+                            CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')),
+    workflow_run_id     TEXT,
+    inner_checkpoint    TEXT,
+    inner_verdict       TEXT
+                            CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')),
+    inner_result        TEXT,
+    harvested_at        INTEGER,
+    inner_checkpoint_head     TEXT,
+    inner_checkpoint_findings TEXT,
+    crash_recoveries    INTEGER,
+    reviewed_head       TEXT,
+    bound_pr            INTEGER,
+    fenced_paths        TEXT,
+    base_sha            TEXT,
+    base_behind         INTEGER,
+    infra_retries       INTEGER,
+    agent_waked_at      INTEGER
+) STRICT
 
 [table] connect_guest_invites (tbl=connect_guest_invites)
 CREATE TABLE connect_guest_invites (
@@ -1467,7 +1483,7 @@ CREATE TABLE "work_board_items" (
     project_slug    TEXT NOT NULL,
     title           TEXT NOT NULL,                  -- ONE line (stripped + capped at the store)
     status          TEXT NOT NULL DEFAULT 'upcoming'
-                        CHECK (status IN ('upcoming', 'in_progress', 'done', 'failed')),
+                        CHECK (status IN ('upcoming', 'in_progress', 'done', 'failed', 'archived')),
     sort_order      INTEGER NOT NULL,
     design_doc_ref  TEXT,
     inline_active   INTEGER NOT NULL DEFAULT 0
@@ -1475,9 +1491,10 @@ CREATE TABLE "work_board_items" (
     linked_run_id   TEXT,
     created_at      TEXT NOT NULL,                  -- ISO-8601 UTC
     updated_at      TEXT NOT NULL,                  -- ISO-8601 UTC
-    completed_at    TEXT                            -- ISO-8601 UTC; NULL until status='done'
-, task_type TEXT NOT NULL DEFAULT 'build'
-        CHECK (task_type IN ('build', 'research'))) STRICT
+    completed_at    TEXT,                           -- ISO-8601 UTC; NULL until status='done' (NEVER stamped for 'archived')
+    task_type       TEXT NOT NULL DEFAULT 'build'   -- 0105 — the ▶ routing discriminator
+                        CHECK (task_type IN ('build', 'research'))
+) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

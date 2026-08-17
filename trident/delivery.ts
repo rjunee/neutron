@@ -164,7 +164,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
-  // THE SUPERVISOR DIED REPEATEDLY (gateway restarts) AND THE RECOVERY BUDGET RAN OUT.
+  // THE SUPERVISOR DIED REPEATEDLY AND THE RECOVERY BUDGET RAN OUT.
   // Checked EARLY and by its own token, because this reason deliberately EMBEDS the
   // latched launcher-crash text — whatever the substrate said — and that text is not
   // ours to keyword-proof. Left further down it would be captured by the branches
@@ -175,7 +175,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     return {
       klass: 'infra',
       summary:
-        'The build supervisor was killed repeatedly (gateway restarts), and I stopped relaunching after ' +
+        'The build supervisor died repeatedly, and I stopped relaunching after ' +
         'the recovery budget ran out. The work so far is saved on its branch.',
       input_needed: `${saved} ${retry}`,
     }
@@ -331,7 +331,8 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
 
   switch (run.phase) {
     case 'done': {
-      const prRef = run.merge_mode === 'pr' && run.pr !== null ? ` (PR #${run.pr})` : ''
+      // pr === 0 is the no-PR sentinel — never render "PR #0" (card 01M01HGAWHA1KBK7CXXHC4R6RH; fixed here first, do not re-fix there).
+      const prRef = run.merge_mode === 'pr' && run.pr !== null && run.pr > 0 ? ` (PR #${run.pr})` : ''
       return { text: `✅ ${title} — merged and deployed.${prRef}` }
     }
     case 'failed': {
@@ -341,7 +342,7 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       // resolver), so a run reaching here is genuinely unrecoverable.
       const interp = interpretFailure(run)
       const trail =
-        run.merge_mode === 'pr' && run.pr !== null
+        run.merge_mode === 'pr' && run.pr !== null && run.pr > 0
           ? `\nPR #${run.pr} left open for review.`
           : ''
       return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }

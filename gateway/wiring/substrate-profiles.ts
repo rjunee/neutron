@@ -108,6 +108,30 @@ export interface SubstrateProfile {
    */
   readonly github_credential: boolean
   /**
+   * Whether a spawn on this profile is OWNER-FACING CONVERSATIONAL, and so must
+   * never come up on a model below the frontier tier — threaded to
+   * `ClaudeCodeSubstrateOptions.frontier_model_floor` and enforced at the
+   * persistent substrate's single spawn chokepoint
+   * (`runtime/adapters/claude-code/persistent/model-floor.ts`).
+   *
+   * WHY IT IS ON THE PROFILE. A spawn's model is resolved as
+   * `record.model ?? getBestModel()`, so a REPL registry row OVERRIDES the best
+   * model, and `spawn.ts` writes the row back with whatever it spawned on — one
+   * bad value is permanent. The owner's project chat ran a full day on Haiku
+   * twice; a hand-edit of the row held for a few hours and it came back. We never
+   * found the writer, so the fix is a floor rather than a patch at one writer.
+   *
+   * ⚠️ IT IS A TRUST-CLASS DECISION, NOT A QUALITY PREFERENCE, and that is why
+   * it is REQUIRED with no default — the same reasoning as `github_credential`
+   * directly above. Several profiles run on `FAST_MODEL` DELIBERATELY (scribe
+   * extraction, reflection/correction judging, phase-prompt rephrasing): they are
+   * latency- and quota-shaped work where Haiku-class quality is the right call,
+   * and a floor there would be a regression, not a fix. Deciding per profile
+   * means the answer is stated once, next to the trust class it belongs to,
+   * instead of being inferred from an instance-id prefix at a spawn site.
+   */
+  readonly frontier_model_floor: boolean
+  /**
    * RESERVED (Phase B) — CC permission mode. `undefined` today; NOT applied by
    * the factory yet (see file header). Reserving it here means Phase B flips a
    * constant, not the factory + 8 sites.
@@ -161,6 +185,10 @@ export const PROFILE_TOOLLESS_UTILITY: SubstrateProfile = {
   skip_permissions: true,
   // scribe / reflection do no git work at all — a credential here would be reach without a use.
   github_credential: false,
+  // FAST_MODEL here is the DESIGN, not a degradation: extraction and judging are
+  // high-frequency, latency-shaped, schema-constrained work. A floor would be a
+  // quota and latency regression on the memory lane for no quality the owner reads.
+  frontier_model_floor: false,
 }
 
 /**
@@ -169,12 +197,22 @@ export const PROFILE_TOOLLESS_UTILITY: SubstrateProfile = {
  * `PROFILE_UNTRUSTED_IMPORT` even though identical now: the redesign keeps the
  * owner's chat grant while tightening the untrusted-import one.
  *
- * Site: `open/wiring/substrates.ts` (`cc-agent-*` liveAgentSubstrate).
+ * Sites: `open/wiring/substrates.ts` — `cc-agent-*` (liveAgentSubstrate) and
+ * `cc-nudge-*` (reminderComposeSubstrate, the background proactive-compose lane).
+ * The second site is a SESSION split, not a trust split: a fired ritual composes
+ * there and ISSUES #504 settled that it must have "access to everything general
+ * has access to", so it shares this profile deliberately. What it does NOT share
+ * is the pool key — see that file for the outage that forced the split.
  */
 export const PROFILE_WARM_CHAT: SubstrateProfile = {
   skip_permissions: true,
   // the owner's own chat. `gh pr list` and `git` in its Bash are the point.
   github_credential: true,
+  // THE ONE PROFILE THAT SETS THIS, and now the two substrates that share it. It
+  // is the surface the owner builds on, it is the surface the Haiku regression
+  // landed on twice in one day, and it is the only one where a lower tier is never
+  // a legitimate choice.
+  frontier_model_floor: true,
 }
 
 /**
@@ -187,6 +225,9 @@ export const PROFILE_PHASE_SPEC: SubstrateProfile = {
   skip_permissions: true,
   // its input is user-controlled onboarding text — a prompt-injection surface.
   github_credential: false,
+  // rephrasing a phase prompt that already has a static fallback, under a 3s
+  // conversational tier. Fast is the requirement; a floor would spend the budget.
+  frontier_model_floor: false,
 }
 
 /**
@@ -205,6 +246,9 @@ export const PROFILE_ISOLATED_COMPOSE: SubstrateProfile = {
   skip_permissions: true,
   // composes from imported project docs, which are attacker-influenced content.
   github_credential: false,
+  // its callers pass their own model explicitly per composition; this profile does
+  // not host the owner's live conversation, so it keeps per-call model choice.
+  frontier_model_floor: false,
 }
 
 /**
@@ -219,6 +263,9 @@ export const PROFILE_UNTRUSTED_IMPORT: SubstrateProfile = {
   skip_permissions: true,
   // imported chat history is the prompt-injection surface this profile is named for.
   github_credential: false,
+  // bulk synthesis over imported history — the callers pick the tier per pass
+  // (BEST with a SONNET Pass-2 fallback, P2-v2 S21). A floor would break that.
+  frontier_model_floor: false,
 }
 
 /**
@@ -233,6 +280,9 @@ export const PROFILE_EPHEMERAL: SubstrateProfile = {
   skip_permissions: true,
   // disposable Trident / agent-dispatch builds: they commit and push.
   github_credential: true,
+  // agent dispatch is explicitly model-parameterised (a brief names its model);
+  // clamping it would silently overrule a caller's deliberate choice.
+  frontier_model_floor: false,
 }
 
 /**
@@ -284,6 +334,9 @@ export const PROFILE_WARM_FIRE: SubstrateProfile = {
   // owner's instance 2026-08-15, where every enterprise dispatch built, committed
   // and then failed, burning a full Forge round each time.
   github_credential: true,
+  // the workflow routes its own steps per model (`plan:fable` and friends resolve
+  // from `runtime/models.ts`); the launcher must not overrule them.
+  frontier_model_floor: false,
   // 30min of silence. Deliberately BELOW the 45min absolute ceiling so the
   // ceiling stays the terminal authority and this window can never make a turn
   // immortal, and far above any plausible silent-thinking stretch.

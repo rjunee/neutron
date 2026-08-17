@@ -295,11 +295,11 @@ describe('connect → codex-review.sh sees CONNECTED (exit 0)', () => {
     const svc = newService()
     await svc.connect(OWNER, subscriptionAuth())
 
-    // Mock codex: `login status` → exit 0 (authed); `exec -` → exit 0 (review OK).
+    // Mock codex: `login status` → exit 0 (authed); `exec -` → a real review body.
     const bin = join(tmp, 'bin')
     mkdirSync(bin, { recursive: true })
     const mock = join(bin, 'codex')
-    writeFileSync(mock, '#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit 0; fi\nexit 0\n')
+    writeFileSync(mock, '#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit 0; fi\necho "mock codex review body"\necho "VERDICT: APPROVE"\nexit 0\n')
     chmodSync(mock, 0o755)
     const diffFile = join(tmp, 'forge.diff')
     writeFileSync(diffFile, 'diff --git a/x b/x\n+change\n')

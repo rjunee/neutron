@@ -16,43 +16,25 @@ import {
   type OutboundSink,
 } from './delivery.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
-import type { MergeMode, TridentPhase, TridentRun } from './store.ts'
+import type { TridentPhase, TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 function runWith(overrides: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'add-flag',
     project_slug: 'proj-1',
     phase: 'done',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/add-flag',
-    pr: null,
-    merge_mode: 'local' as MergeMode,
     subagent_run_id: null,
     subagent_status: 'completed',
     repo_path: '/repo',
-    worktree: null,
     task: 'add a feature flag',
     chat_id: '12345',
     thread_id: '678',
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
-    started_at: '2026-01-01T00:00:00.000Z',
     last_advanced_at: '2026-01-01T01:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
     ...overrides,
-  }
+  })
 }
 
 /** A recording outbound sink — captures every message the hook sends. */
@@ -70,6 +52,27 @@ function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
 }
 
 describe('composeTerminalDelivery', () => {
+  test('failed PR sentinel does not render PR #0', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'failed', merge_mode: 'pr', pr: 0 }))!.text
+    expect(text).not.toContain('PR #0')
+    expect(text).not.toContain('left open for review')
+  })
+
+  test('failed positive PR renders the review trail', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'failed', merge_mode: 'pr', pr: 57 }))!.text
+    expect(text).toContain('PR #57 left open for review.')
+  })
+
+  test('done PR sentinel does not render PR #0', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 0 }))!.text
+    expect(text).not.toContain('PR #0')
+  })
+
+  test('done positive PR still renders its reference', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 57 }))!.text
+    expect(text).toContain('(PR #57)')
+  })
+
   test('done / pr mode → humanized "merged and deployed", title-forward, keeps the openable PR ref (#361)', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 42 }))
     expect(out).not.toBeNull()

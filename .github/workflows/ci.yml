@@ -183,6 +183,14 @@ jobs:
       # field being MOVED into the unwired allowlist, which deletes the assertion
       # and takes the capability dark with CI green.
       - run: bash scripts/ci/composition-field-ratchet-guard.sh
+      # The append-only build log must resolve to `merge=union` in a FRESH clone,
+      # which is what makes two concurrent PRs stop conflicting on it by
+      # construction. This gate shipped with no workflow step at all — it ran
+      # nowhere, so the property it names was unguarded in exactly the way the
+      # guards above exist to stop. It asks `git check-attr` over the tracked
+      # .gitattributes alone, so a clone carrying the opt-in entry-aware driver
+      # cannot mask a deleted floor.
+      - run: bun scripts/ci/check-governed-repo-attributes.ts .
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:

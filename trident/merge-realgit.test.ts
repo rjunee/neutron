@@ -32,6 +32,7 @@ import {
   TridentMergeError,
 } from './merge.ts'
 import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 const GIT_ID = ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false']
 const created: string[] = []
@@ -80,39 +81,20 @@ async function fakeBuild(repo: string, branch: string, file: string, content: st
 }
 
 function localRun(repo: string, id: string, branch: string): TridentRun {
-  return {
+  return makeTridentRun({
     id,
     slug: branch,
     project_slug: 'proj',
     phase: 'done',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch,
-    pr: null,
-    merge_mode: 'local',
     subagent_run_id: null,
     subagent_status: 'completed',
     repo_path: repo,
     worktree: runWorktreePath(repo, { id, slug: branch }),
     task: `build ${branch}`,
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
     inner_checkpoint: 'argus-approved',
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
     inner_verdict: 'APPROVE',
-    inner_result: null,
-    started_at: '2026-01-01T00:00:00.000Z',
-    last_advanced_at: '2026-01-01T00:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-  }
+  })
 }
 
 async function status(repo: string): Promise<string> {

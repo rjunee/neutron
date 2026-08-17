@@ -454,7 +454,7 @@ describe('app-ws — exactly-one-row-per-device convergence (real client SyncEng
 
     // Device B reconnects and replays from cursor 0 — overlaps everything it
     // already applied live.
-    for (const env of await adapter.replayAfter(TOPIC, 0)) B.inbox.push(env)
+    for (const env of (await adapter.replayAfter(TOPIC, 0)).envelopes) B.inbox.push(env)
     await B.drain()
 
     const aRows = await A.rows()

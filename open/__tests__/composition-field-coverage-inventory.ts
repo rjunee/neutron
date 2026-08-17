@@ -84,12 +84,17 @@ export interface CompositionFieldUnwiredEntry {
  * enough that a probe which composed nothing fails instead of reporting a clean
  * sweep of absences (or, worse, passing vacuously over an empty set).
  */
-export const MIN_EXPECTED_WIRED_FIELDS = 18
+export const MIN_EXPECTED_WIRED_FIELDS = 19
 
 /**
  * SET by the production Open composition. This list may only grow.
  */
 export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
+  {
+    field: 'slug_is_fallback',
+    provides:
+      'the credential surfaces\' direction guard — unset, an explicit migration on a fallback boot claims rows belonging to a configured handle, which is the defect this field exists to close',
+  },
   {
     field: 'agent_dispatch',
     provides:

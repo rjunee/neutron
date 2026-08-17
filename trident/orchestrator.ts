@@ -60,7 +60,10 @@
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createLogger } from '@neutronai/logger'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -79,8 +82,11 @@ import {
 } from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
+import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
+
+const log = createLogger('trident')
 
 export interface TridentStep {
   (run: TridentRun): Promise<AdvanceOutcome>
@@ -164,6 +170,26 @@ export interface BuildTridentOrchestratorOptions {
    */
   resolve_reflection_context?: (run: TridentRun) => string | null
   /**
+   * The count of trident runs currently IN A BUILD PHASE (`forge-init`/`forge-fix`),
+   * INCLUDING the one launching — the live test-running fan-out. Wired from the run
+   * store in `gateway/composition/build-core-modules.ts` (the orchestrator holds no
+   * store; the composer does).
+   *
+   * Consumed by `computeTestJobs` as its RAISE-ONLY term. The bound itself comes from
+   * the CONSTANT `DEFAULT_BUILD_FANOUT`, because a launch-time snapshot cannot bound a
+   * STAGGERED fan-out: the value is frozen into a prompt string, so the run that
+   * launched onto an idle box would keep all the cores for an hour while later runs
+   * divided the same box again (read `computeTestJobs`'s docblock). This count only
+   * shrinks the budget FURTHER, when more builds than planned are genuinely running.
+   *
+   * BEST-EFFORT: a throwing resolver or a non-finite result degrades to 1
+   * (sequential-safe) and NEVER fails the launch. And it must actually be WIRED —
+   * `resolve_phase_models` is the history here: a complete seam whose producer was
+   * missing shipped an inert feature that no test could catch, because every piece
+   * worked in isolation.
+   */
+  resolve_active_runs?: () => number
+  /**
    * Is a Kimi K3 key configured? Called PER LAUNCH so a key added after boot is
    * honoured without a restart. Absent → the Kimi panelist never runs, which is
    * the graceful (never-blocking) path.
@@ -238,6 +264,16 @@ export interface BuildTridentOrchestratorOptions {
    */
   begin_crash_recovery?: (run_id: string) => Promise<TridentRun | null>
   /**
+   * INFRASTRUCTURE RETRY CLAIM — atomically clear a harvested executor/transport
+   * failure and spend one durable `infra_retries` unit. Omitted means legacy
+   * terminal behaviour byte-for-byte; existing callers do not opt in implicitly.
+   */
+  begin_infra_retry?: (run_id: string) => Promise<TridentRun | null>
+  /** Maximum measured infrastructure failures retried for one run. */
+  max_infra_retries?: number
+  /** Best-effort owner/visibility seam, invoked once on durable attempt 1 only. */
+  on_infra_retry?: (run: TridentRun, attempt: number, cause: string) => Promise<void>
+  /**
    * How many launcher crashes on ONE run may be recovered by relaunching before
    * the run is failed terminally. Default {@link DEFAULT_MAX_CRASH_RECOVERIES}.
    *
@@ -270,7 +306,9 @@ export interface BuildTridentOrchestratorOptions {
    * checkpoint (`forge-done`, `argus-*`, `fix-round-N`), so it never trips this;
    * only a genuinely wedged agent() (or a stalled orphan) does. This is
    * deliberately SHORTER than `max_inflight_ms` (the 2h absolute ceiling, kept
-   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (25 min).
+   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (90 min —
+   * `trident/liveness.ts`; this comment said 25 min long after the constant was
+   * raised, which is exactly the kind of drift that makes a reader distrust it).
    */
   no_advance_hang_ms?: number
   /**
@@ -297,6 +335,15 @@ export interface BuildTridentOrchestratorOptions {
  * forever. Tune via `max_crash_recoveries` (exists chiefly for tests).
  */
 export const DEFAULT_MAX_CRASH_RECOVERIES = 3
+
+/**
+ * Infrastructure retry spacing: one minute, five minutes, then fifteen minutes
+ * (long enough at the tail to outlast a token refresh). The retry count is
+ * DERIVED from this schedule so count and duration can never disagree — the
+ * lesson pinned by PR #279's readiness budget.
+ */
+export const INFRA_RETRY_BACKOFF_MS = [60_000, 300_000, 900_000] as const
+export const DEFAULT_MAX_INFRA_RETRIES = INFRA_RETRY_BACKOFF_MS.length
 
 /**
  * RC2 — did the OUTER loop genuinely HARVEST a result into this committed
@@ -434,20 +481,146 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
     : `outer publisher could not ${step} branch ${branch}: ${said}`
 }
 
+/** The publish-failure classes readable from a STORED reason alone (card rbbjj2, acceptance a).
+ *  'publish-credential' is the first member of the auto-retry class list (card 01KZZQ2J9MJFG0PXC8AA6D6EV4);
+ *  'publish-ref-rejected' and 'publish-unknown' must NEVER auto-retry. */
+export type PublishFailureClass = 'publish-credential' | 'publish-ref-rejected' | 'publish-unknown'
+
+export const PUBLISH_CREDENTIAL_CLASS = 'publish-credential' as const
+
+/** Pure, total, case-insensitive. REJECTION EVIDENCE OUTRANKS CREDENTIAL EVIDENCE: a server that
+ *  rejected a ref did authenticate, so mixed evidence is a rejection and stays terminal. Anything
+ *  unrecognised is 'publish-unknown' — conservatism here is what keeps a genuine failure from
+ *  ever entering an auto-retry loop. Matches WORDS only (never bare numbers — a 40-hex sha can
+ *  contain '401'). */
+export function classifyPublishFailure(text: string): PublishFailureClass {
+  const t = text.toLowerCase()
+  const refRejected = ['[rejected]', 'non-fast-forward', 'stale info'].some((p) => t.includes(p))
+  if (refRejected) return 'publish-ref-rejected'
+  const credential = [
+    'could not read username',
+    'could not read password',
+    'authentication failed',
+    'bad credentials',
+    'invalid username or',
+    'terminal prompts disabled',
+    'http basic: access denied',
+  ].some((p) => t.includes(p))
+  if (credential) return 'publish-credential'
+  return 'publish-unknown'
+}
+
+/** A harvested no-APPROVE result is either safe to retry or a genuine outcome. */
+export type InnerFailureClass = 'infrastructure' | 'genuine'
+
+/** Closed executor/transport vocabulary. WORDS only: never match bare status
+ * numbers because an unrelated 40-hex commit id can contain them. */
+export const INFRA_CAUSE_WORDS: readonly string[] = [
+  'deferred',
+  'timed out',
+  'timeout',
+  'econnreset',
+  'econnrefused',
+  'fetch failed',
+  'socket hang up',
+  'bad gateway',
+  'service unavailable',
+  'internal server error',
+  'gateway timeout',
+  'overloaded',
+]
+
+/**
+ * Classify only from measured terminal fields, fail-closed to `genuine`.
+ * `infra-only` explicitly means the code was never judged. Legacy `inner-error`
+ * is retryable only when its measured cause contains the closed transport list.
+ * Real review verdicts (`code`/`review`/`round-lost`), findings-carrying
+ * REQUEST_CHANGES, compile/test failures, provenance rejects, garbled/hang reaps,
+ * and publish failures remain genuine/owned elsewhere.
+ *
+ * Launcher crashes are the third named infrastructure class in this card's
+ * acceptance, but §1a-crash already serves them through `crash_recoveries`.
+ * This classifier deliberately never sees `subagent_status='crashed'`.
+ */
+export function classifyInnerFailure(
+  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'terminal_cause' | 'checkpoint'>,
+): InnerFailureClass {
+  if (result.verdict === 'APPROVE') return 'genuine'
+  const cause = result.terminal_cause
+  if (result.block_kind === 'infra-only' && typeof cause === 'string' && cause.trim() !== '') {
+    return 'infrastructure'
+  }
+  if (
+    result.checkpoint === 'inner-error' &&
+    result.block_kind === null &&
+    typeof cause === 'string' &&
+    cause.trim() !== ''
+  ) {
+    const measured = cause.toLowerCase()
+    if (INFRA_CAUSE_WORDS.some((word) => measured.includes(word))) return 'infrastructure'
+  }
+  return 'genuine'
+}
+
 /**
  * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
- * `=======` is a legitimate markdown heading underline and `|||||||` only appears under diff3,
- * so matching those would fail closed on ordinary prose. Seven of either, then a space or EOL.
+ * these are the labelled markers, which carry a branch name after the run and so end in a space
+ * or a tab. A bare `=======` separator is caught separately by `CONFLICT_SEPARATOR_ADDED` below
+ * (exact-line, and exempt in markdown, where it is a setext underline). `|||||||` remains
+ * unmatched: it only appears under `merge.conflictStyle=diff3`, and catching it is a follow-up.
  *
- * SEVEN OR MORE, not exactly seven. `.gitattributes` can set `conflict-marker-size=32` for a
- * path and git then writes a 32-character marker; an exact-seven pattern rejects it, because its
- * eighth character is another `<` rather than the space the pattern demands. This regex is the
- * ONLY gate standing between a half-resolved staged file and a force-push to the shared branch,
- * so a marker length it cannot see is a marker it waves through. Found by codex cross-model
- * review. The boundary test uses real git with `conflict-marker-size` set, not a hand-written
- * long marker, so it proves git's behaviour rather than the fixture's.
+ * Four or more catches the narrowest marker width this gate deliberately supports as well as
+ * git's default and wider configured markers. Because candidates are paths known to have
+ * conflicted in this replay, an added four-wide labelled run fails closed as residue.
  */
-const CONFLICT_MARKER_ADDED = /^\+(?:<{7,}|>{7,})(?: |\t|$)/
+const CONFLICT_MARKER_ADDED = /^\+(?:<{4,}|>{4,})(?: |\t|\r?$)/
+
+/**
+ * A `git diff --cached -U1` line that ADDS git's bare conflict SEPARATOR. Unlike `<<<<<<<` and
+ * `>>>>>>>`, the separator line git writes carries NO label — it is exactly a run of `=` and
+ * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
+ * indented docstring underline) never matches. Git permits `conflict-marker-size` to narrow the
+ * marker as well as widen it; four is the fail-closed lower bound shared with the outer-marker
+ * scan. Shorter punctuation remains ordinary generated content. `\r?` covers
+ * a CRLF file. This is the residue MOST likely to
+ * survive a sloppy hand-resolution: the outer markers
+ * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
+ * gate entirely.
+ */
+const CONFLICT_SEPARATOR_ADDED = /^\+={4,}\r?$/
+
+/**
+ * Markdown permits an all-`=` Setext H1 underline. Text around it cannot safely corroborate that
+ * interpretation: conflict sides can have the identical title/blank/paragraph shape. The narrow
+ * exemption therefore requires affirmative diff evidence that the resolver added the nonblank
+ * title immediately before the underline, and that the resulting next line is blank or EOF.
+ * Surviving conflict-side content immediately after the separator is therefore refused. Scanning
+ * each candidate separately avoids decoding git-quoted path headers.
+ */
+const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
+
+function stagedDiffAddsConflictMarker(diff: string, path: string): boolean {
+  const lines = diff.split('\n')
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? ''
+    if (CONFLICT_MARKER_ADDED.test(line)) return true
+    if (!CONFLICT_SEPARATOR_ADDED.test(line)) continue
+    if (!SETEXT_UNDERLINE_PATHS.test(path)) return true
+
+    const addedTitle = /^\+(.+)\r?$/.exec(lines[i - 1] ?? '')?.[1] ?? ''
+    if (addedTitle.trim() === '') return true
+
+    // Removed lines do not exist in the staged result. The first context/added line after them is
+    // the line after the underline; a hunk/file boundary means the underline is at EOF.
+    let after = i + 1
+    while ((lines[after] ?? '').startsWith('-') && !lines[after]?.startsWith('---')) after += 1
+    const next = lines[after]
+    const atEof = next === undefined || next === '' || next.startsWith('@@') || next.startsWith('diff --git ')
+    const followedByBlank = next === '+' || next === '+\r' || next === ' ' || next === ' \r'
+    if (!atEof && !followedByBlank) return true
+  }
+  return false
+}
 
 /**
  * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
@@ -486,13 +659,320 @@ export class TridentRebaseConflict extends Error {
   }
 }
 
+/** The path the entry-aware driver is bound to, and the git config name it is bound under. */
+const AS_BUILT_LOG_PATH = 'docs/AS_BUILT.md'
+const AS_BUILT_DRIVER_NAME = 'as-built-log'
+
+/**
+ * The environment variables the merge driver is run WITHOUT.
+ *
+ * `GH_TOKEN` is the owner's credential, the one that publishes every PR; the `GIT_CONFIG_*` triple
+ * is the credential helper that reads it back out (`github/credential.ts` `githubProcessEnv`), so
+ * leaving those behind would hand a child `git` the same access under a different name.
+ * `GITHUB_TOKEN` is not set by this codebase and is unset anyway because CI and developer shells
+ * commonly do set it. A merge driver reads three files and writes one — none of this belongs in it.
+ */
+const CREDENTIAL_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']
+
+/**
+ * THIS INSTALLATION's copy of the merge driver — never the checkout's.
+ *
+ * Walks up from this module rather than joining a fixed `..`, because trident is a workspace
+ * package: depending on whether the resolver hands back the real path or the
+ * `node_modules/@neutronai/trident` symlink, the tree root is one hop up or three. Bounded, and a
+ * `null` return simply means "do not install", which is the same outcome as not calling this.
+ */
+function ownAsBuiltMergeDriver(): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let hop = 0; hop < 8; hop++) {
+    const candidate = join(dir, 'scripts', 'git', 'as-built-merge-driver.ts')
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+/** Single-quote a path for the shell string git stores as `merge.<name>.driver`. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/**
+ * The command git will run for a merge, built so the TARGET CHECKOUT CANNOT INJECT CODE INTO IT.
+ *
+ * ⚠️ GIT RUNS A MERGE DRIVER WITH ITS CWD AT THE TOP OF THE WORKING TREE BEING MERGED, AND BUN
+ * READS `bunfig.toml` FROM ITS CWD. So naming a trusted script is NOT on its own enough: a
+ * `bunfig.toml` committed in the target repository with `preload = ["./anything.ts"]` runs that
+ * file inside our driver process, before a line of our code, every time git merges this path.
+ * That process is a child of the publisher's `run_host`, whose environment carries `GH_TOKEN`
+ * (`open/composer.ts` `makeLazyCredentialedHostRunner` → `github/credential.ts` `githubProcessEnv`),
+ * so the payload reads the owner's credential straight out of `process.env`. Reproduced on bun
+ * 1.3.9: with the preload present the child printed `EXFIL GH_TOKEN=<the value>`; with
+ * `--config=/dev/null` in front of the script it printed nothing and the script still ran. Round 1
+ * closed the "which script runs" hole and left this one open, which is the same class of mistake
+ * one layer down — the interpreter's own configuration is part of what an untrusted checkout
+ * supplies.
+ *
+ * `--config=/dev/null` names an empty TOML file, so the checkout's `bunfig.toml` supplies no
+ * `preload`, no `loader` and no registry override. The driver needs none of that: it reads three
+ * files and writes one. (Scope, stated rather than overclaimed: what was MEASURED is the cwd
+ * `bunfig.toml`, which is the one an untrusted checkout controls. Whether the flag also displaces a
+ * `$HOME/.bunfig.toml` was not measured and nothing here depends on it — `$HOME` on the publisher
+ * host is as trusted as the interpreter itself.)
+ *
+ * …AND `--env-file=/dev/null`, BECAUSE `--config` DOES NOT COVER `.env`. bun auto-loads a `.env`
+ * from its cwd, which under a merge driver is the checked-out repository, and it does so
+ * INDEPENDENTLY of `bunfig.toml` — measured on bun 1.3.9: with `--config=/dev/null` alone, a `.env`
+ * sitting in the cwd still reached `process.env` inside the driver; with `--env-file=/dev/null` in
+ * front of it, it did not. No escalation from that injection was demonstrated (the inherited `PATH`
+ * wins over one supplied this way), so this is closing an input rather than a proven exploit — but
+ * the property this code is FOR is that nothing the checkout ships decides anything inside the
+ * driver process, and an environment it writes is such a thing.
+ *
+ * AND THE CREDENTIAL IS TAKEN OUT OF SCOPE ENTIRELY. `env -u GH_TOKEN …` prefixes the command, so
+ * the owner's token — and the `GIT_CONFIG_*` triple whose credential helper reads it
+ * (`github/credential.ts` `githubProcessEnv`) — is simply not in the environment of a process whose
+ * whole job is to read three files and write one. The isolation above is about what the checkout
+ * can INJECT; this is about what is there to steal if some future injection succeeds anyway. Two
+ * independent controls, because "nothing can get in" is a claim that has already been wrong twice
+ * on this code path.
+ *
+ * `null` when the interpreter is not bun. The driver is a `.ts` module, so nothing else can run it
+ * anyway, and rather than infer that some other interpreter would honour a `--config` flag with the
+ * same meaning, this refuses to install — which leaves the checkout merging the log exactly as it
+ * does today.
+ *
+ * KNOWN LIMIT, AND IT FAILS IN THE SAFE DIRECTION. Both `/dev/null` flags and `/usr/bin/env` are
+ * POSIX paths; a host without them would fail the merge (exit non-zero → git reports a conflict)
+ * rather than merge wrongly. Trident runs on macOS and Linux, where all three exist.
+ */
+function asBuiltDriverCommand(driver: string): string | null {
+  if (basename(process.execPath).replace(/\.exe$/i, '') !== 'bun') return null
+  // An absolute `env`, not a bare one, so the lookup does not depend on a PATH at all. POSIX puts
+  // it at `/usr/bin/env` and both hosts trident runs on have it there; the bare name is a fallback
+  // rather than a guess, and a host with neither fails the merge loudly instead of quietly.
+  const env = existsSync('/usr/bin/env') ? '/usr/bin/env' : 'env'
+  const scrubbed = CREDENTIAL_ENV.map((name) => `-u ${name}`).join(' ')
+  return `${env} ${scrubbed} ${shellQuote(process.execPath)} --config=/dev/null --env-file=/dev/null ${shellQuote(driver)} %O %A %B %L %P`
+}
+
+/**
+ * Bind the entry-aware `docs/AS_BUILT.md` merge driver in a build checkout, where it applies.
+ *
+ * ⚠️ FILE PRESENCE IN THE TARGET CHECKOUT IS NOT AUTHORIZATION, AND NOTHING FROM THE TARGET
+ * CHECKOUT IS EXECUTED HERE. The first cut of this took the presence of
+ * `scripts/install-merge-drivers.sh` as its condition and then ran it: `run_host(['bash',
+ * installer])`. The production `run_host` is `makeLazyCredentialedHostRunner` (`open/composer.ts`),
+ * whose environment carries `GH_TOKEN` (`github/credential.ts` `githubProcessEnv`) — the owner's
+ * credential, the one that publishes every PR. So any repository the publisher checked out that
+ * happened to contain a file at that path got that file EXECUTED on the publisher host with the
+ * token readable from its environment. "We only ever check out our own repositories" is an
+ * assumption about how trident is pointed, not a control over it, and it is not the assumption a
+ * credential should rest on.
+ *
+ * WHAT REPLACES IT. The two halves the installer wrote — the `merge.<name>.driver` config and the
+ * `$GIT_COMMON_DIR/info/attributes` binding — are written directly from here, and the command they
+ * name is THIS installation's `scripts/git/as-built-merge-driver.ts` under the interpreter already
+ * running this process. Nothing under `repoPath` is executed, at install time or at merge time, so
+ * a same-named script in a target repo is inert: it is never read, never run, and never named in
+ * the config. That also closes the second half of the same hole — the old installer configured the
+ * TARGET's driver script, which git would then have run under the same credential on every merge
+ * touching this path.
+ *
+ * …AND NEITHER IS THE INTERPRETER'S CONFIGURATION, WHICH IS THE THIRD WAY IN. Naming a trusted
+ * script is not sufficient while the checkout still supplies the `bunfig.toml` and the `.env` that
+ * script starts under — see `asBuiltDriverCommand`, where the `--config=/dev/null` and
+ * `--env-file=/dev/null` that close those live, with the reproductions. The property to hold onto
+ * is the one this whole docblock is about: NOTHING the target checkout contains — not a script, not
+ * a config, not an environment file, not a `PATH` — decides what RUNS on the publisher host. And
+ * because that property has been stated confidently and been incomplete twice already, the
+ * credential itself is now taken out of the driver's environment as a second, independent control.
+ *
+ * "WHAT RUNS" IS THE EXACT CLAIM, AND IT IS NOT "NOTHING FROM THE CHECKOUT REACHES THE DRIVER".
+ * The word was load-bearing and the sentence above used to lack it, which made it false: git
+ * substitutes `%L` from the merged path's `conflict-marker-size` attribute, and a TRACKED
+ * `.gitattributes` in the checkout sets that. Verified by configuring a driver that does nothing but
+ * print `%L` — a committed `conflict-marker-size=2000000` arrived intact. It selects no code and
+ * executes nothing, but it did size a buffer: the conflict `as-built-merge-driver.ts` constructs
+ * grew from 302 bytes to 6,000,281 on that value, linearly. It is clamped there now
+ * (`MAX_MARKER_SIZE`), on BOTH conflict paths — the first clamp covered only the constructed
+ * conflict and left the delegated one forwarding `%L` to `git merge-file`, which a cross-model
+ * reviewer caught: the exemption rested on the delegated path being byte-for-byte an unconfigured
+ * repo, and without this driver the path is `merge=union`, which never conflicts and writes no
+ * markers at all. So the one checkout-supplied input the driver takes is bounded wherever it lands.
+ * The general lesson is worth more than the fix: an absolute claim about a boundary should be read
+ * against every argument that crosses it, and `%O %A %B %L %P` had five — and an EXEMPTION from a
+ * bound needs its justification checked as hard as the bound itself, because this one was a
+ * confident sentence about behaviour a file in this repository already contradicted.
+ *
+ * ONLY WHERE IT APPLIES. Two conditions, both read as DATA and neither executed: the checkout has
+ * the log, and it carries this log's merge contract (`scripts/git/as-built-log-merge.ts`), which is
+ * what distinguishes a repo using this layout from one that merely has a file by that name. A repo
+ * failing either is left completely untouched, so nothing here imposes one repo's changelog layout
+ * on another (Argus, round 1). Presence still decides APPLICABILITY — but applicability now
+ * authorises only "merge this one path with our own reviewed code, or conflict", which is a
+ * decision an untrusted repo is welcome to make.
+ *
+ * ORDER IS LOAD-BEARING, AND IT IS CHOSEN SO THE FATAL HALF-STATE CANNOT BE REACHED AT ALL.
+ * `merge.<name>.driver` is written FIRST, `merge.<name>.name` — which is only a human-readable
+ * description — second, and the attribute last, skipped entirely unless the driver landed. Measured
+ * on git 2.50.1: a lone `.driver` with NO `.name` merges perfectly (the driver ran, exit 0), while a
+ * lone `.name` with no `.driver` is `fatal: custom merge driver as-built-log lacks command line`,
+ * exit 128. Round 1 wrote `.name` first and rolled it back by hand when `.driver` failed, which
+ * meant the fatal state existed for a moment and its cleanup was a second write that the very
+ * condition causing the failure (a held `config.lock`) would also have blocked. Writing the
+ * load-bearing half first deletes the state instead of cleaning up after it, so there is no
+ * rollback to fail. Attribute-without-driver stays fatal, and driver-without-attribute stays inert,
+ * which is why the attribute is still last. Same rule as the standalone installer, for the same
+ * reason.
+ *
+ * BEST EFFORT, NEVER FATAL. A failure to install leaves the checkout merging exactly as it does
+ * today, which is the same outcome as not calling this at all. Publishing must not be blocked by an
+ * optimisation to publishing.
+ *
+ * WHAT "EXACTLY AS IT DOES TODAY" ACTUALLY IS, IN THIS REPOSITORY, SAID PRECISELY. It is NOT a
+ * conflict: `.gitattributes` carries `docs/AS_BUILT.md merge=union`, which never conflicts and
+ * interleaves the two sides line by line — the failure this driver exists to replace. The attribute
+ * written here lives in `$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE the tracked
+ * `.gitattributes` (measured: with both present, `git check-attr merge -- <path>` reports the
+ * info/attributes value), so a successful install genuinely displaces `union`. An UNSUCCESSFUL one
+ * leaves `union` in charge — worse than a conflict, and the honest floor, which is why it is written
+ * here rather than a nicer sentence about conflict markers. The tracked line stays because deleting
+ * it would hand every fresh clone, outside contributor and CI job the conflict storm it was added to
+ * stop; displacing it where the driver IS installed is the whole mechanism.
+ *
+ * Returns whether the driver is installed and usable afterwards.
+ */
+export async function ensureAsBuiltMergeDriver(
+  run_host: RunHostCommand,
+  repoPath: string,
+): Promise<boolean> {
+  if (!existsSync(join(repoPath, ...AS_BUILT_LOG_PATH.split('/')))) return false
+  if (!existsSync(join(repoPath, 'scripts', 'git', 'as-built-log-merge.ts'))) return false
+
+  const driver = ownAsBuiltMergeDriver()
+  if (driver === null) return false
+
+  // `process.execPath` is the interpreter already running trident, so the driver is reached without
+  // consulting the target checkout's PATH for a `bun` it might supply itself — and `--config` stops
+  // it reading the checkout's `bunfig.toml`. `null` means "not bun": do not install.
+  const command = asBuiltDriverCommand(driver)
+  if (command === null) return false
+
+  try {
+    // THE LOAD-BEARING HALF FIRST. A lone `.driver` is a working driver; a lone `.name` is fatal.
+    const configured = await run_host(
+      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.driver`, command],
+      repoPath,
+    )
+    if (!configured.ok) return false
+    // Cosmetic, and deliberately unchecked: it is what `git config --get-regexp merge.` prints to a
+    // human, and its absence changes nothing about how the merge runs.
+    await run_host(
+      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.name`, 'entry-aware merge for the AS_BUILT log'],
+      repoPath,
+    )
+
+    // The COMMON git dir, not the per-worktree one: a linked worktree reads attributes from the
+    // common one, which is what the publisher's throwaway rebase worktree depends on.
+    //
+    // AND `--path-format=absolute` NEEDS A FALLBACK, because it arrived in git 2.31 and a `git`
+    // that predates it exits non-zero on the flag rather than ignoring it. Returning false there
+    // would be the silent-regression shape this file keeps finding: `merge.<driver>.driver` is
+    // ALREADY written by the time this runs, so a bare `return false` leaves the config half-placed
+    // and the attribute unwritten, and the replay then proceeds under the tracked `merge=union`
+    // while trident reports the driver as unavailable. The shell installer has always had this
+    // fallback (`scripts/install-merge-drivers.sh`); this call site did not.
+    let commonDir = ''
+    const common = await run_host(
+      ['git', '-C', repoPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      repoPath,
+    )
+    if (common.ok) commonDir = common.stdout.trim()
+    else {
+      // AND THE FALLBACK'S ANSWER IS CHECKED, BECAUSE A RELATIVE ONE IS NOT RELATIVE TO WHAT YOU
+      // WOULD GUESS. In a LINKED worktree the common dir is recorded in
+      // `<main>/.git/worktrees/<name>/commondir` as `../..` — relative to THAT file's directory, not
+      // to the working tree. Measured here: modern git normalises the `-C` form to an absolute path
+      // (`/…/neutron-open/.git`) so this branch never runs, but the whole point of this branch is a
+      // git old enough not to have `--path-format`, and resolving `../..` against `repoPath` would
+      // land two levels above the WORKTREE — a real directory, outside the repository, where an
+      // attributes file would be silently inert. So the resolved directory has to prove it is a git
+      // dir before anything is written into it; if it cannot, this returns false and the caller is
+      // exactly where it was. Writing to the wrong place is worse than not writing.
+      const plain = await run_host(['git', '-C', repoPath, 'rev-parse', '--git-common-dir'], repoPath)
+      if (!plain.ok) return false
+      const raw = plain.stdout.trim()
+      if (raw === '') return false
+      const resolved = isAbsolute(raw) ? raw : join(repoPath, raw)
+      if (!existsSync(join(resolved, 'HEAD'))) return false
+      commonDir = resolved
+    }
+    if (commonDir === '') return false
+
+    const attributes = join(commonDir, 'info', 'attributes')
+    const line = `${AS_BUILT_LOG_PATH} merge=${AS_BUILT_DRIVER_NAME}`
+    const existing = existsSync(attributes) ? readFileSync(attributes, 'utf8') : ''
+    if (existing.split('\n').includes(line)) return true
+
+    // Per-process scratch file + rename, because two lanes can reach this on one checkout at the
+    // same moment and a shared scratch path is its own concurrency bug (a racing reader would see
+    // a half-written attributes file). Same construction as the standalone installer.
+    mkdirSync(dirname(attributes), { recursive: true })
+    const scratch = `${attributes}.tmp.${process.pid}`
+    writeFileSync(scratch, existing === '' || existing.endsWith('\n') ? `${existing}${line}\n` : `${existing}\n${line}\n`)
+    renameSync(scratch, attributes)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Heal a shallow checkout before replay. On 2026-08-15 five builds died because a depth-1
+ * checkout cannot `git apply --3way`: the blobs named by the diff's index lines do not exist,
+ * and every failure was misreported as `REBASE CONFLICT … (paths unreadable)`.
+ */
+export async function healShallowCheckout(run_host: RunHostCommand, repoPath: string): Promise<void> {
+  const probe = await run_host(['git', '-C', repoPath, 'rev-parse', '--is-shallow-repository'], repoPath)
+  if (!probe.ok) {
+    throw new Error(publishFailureReason('probe the checkout depth of', repoPath, probe.stderr))
+  }
+  if (probe.stdout.trim() === 'false') return
+  if (probe.stdout.trim() !== 'true') {
+    throw new Error(publishFailureReason('probe the checkout depth of', repoPath, `unexpected answer: ${probe.stdout.trim()}`))
+  }
+
+  const fetch = await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
+  if (fetch.ok) return
+
+  let depth = 'unreadable'
+  let boundary = 'unreadable'
+  try {
+    const measured = await run_host(['git', '-C', repoPath, 'rev-list', '--count', 'HEAD'], repoPath)
+    if (measured.ok && measured.stdout.trim() !== '') depth = measured.stdout.trim()
+  } catch {}
+  try {
+    const path = await run_host(['git', '-C', repoPath, 'rev-parse', '--git-path', 'shallow'], repoPath)
+    if (path.ok && path.stdout.trim() !== '') {
+      const read = await run_host(['cat', path.stdout.trim()], repoPath)
+      if (read.ok && read.stdout.trim() !== '') boundary = read.stdout.trim()
+    }
+  } catch {}
+  throw new Error(
+    `Could not heal shallow checkout ${repoPath} (depth ${depth}, shallow boundary ${boundary}): ${redactPushError(fetch.stderr)}; a shallow checkout cannot 3-way replay — the blobs the diff names do not exist`,
+  )
+}
+
 /**
  * Replay `branch` onto the ls-remote-OBSERVED tip of `base`, shallow-safely.
  *
- * ⚠️ THE SHARED BUILD CHECKOUT IS SHALLOW (governance #574/#571). `.git/shallow` is present, so
- * `merge-base` LIES there: a naive `git rebase` replays the entire history and conflicts on every
- * file. Hence NO `git rebase` here, ever, and never in the shared working tree (other lanes share
- * it). Instead: take the branch's own diff from a source that knows the true merge-base — the
+ * The shared build checkout MAY arrive shallow: install.sh used to clone at depth 1, and hand-made
+ * clones still can. `healShallowCheckout` repairs that defect at entry. Regardless of depth, NO
+ * `git rebase` runs here, ever, and never in the shared working tree: other lanes share it and a
+ * failed rebase there poisons every lane. Instead: take the branch's own diff from its true merge-base — the
  * FORGE (`gh pr diff <n>`, computed server-side against a full history) when a PR exists, or the
  * two-dot `git diff <base>..<branch>` for a first publish — and `git apply --3way` it onto the
  * observed base tip in a THROWAWAY detached worktree. The branch ref then moves by
@@ -517,6 +997,8 @@ export async function rebaseOntoObservedBase(
   /** Optional bounded auto-resolution for a conflicting replay. Absent → a conflict throws. */
   resolve?: { run: TridentRun; resolve_conflict: MergeConflictResolver },
 ): Promise<{ head: string; rebased: boolean; baseSha: string }> {
+  // Heal on use — no install-time fix reaches a hand-made clone, and both 2026-08-15 incidents came from hand-made clones.
+  await healShallowCheckout(run_host, repoPath)
   // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
   //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
   //
@@ -559,8 +1041,8 @@ export async function rebaseOntoObservedBase(
   //     diff base on a shallow checkout that never reaches the fetch below.
   if (contains.ok) return { head: oldHead, rebased: false, baseSha }
 
-  // (d) Make the base tip a real local object. `--no-tags` and NOT `--unshallow`: deepening the
-  //     shared checkout is minutes of network for every lane on this box.
+  // (d) The entry guard already unshallowed the checkout; this fetch only makes the just-observed
+  //     tip local. Keep `--no-tags` because tags are irrelevant to replay.
   const fetchBase = async () => run_host(['git', '-C', repoPath, 'fetch', '--no-tags', 'origin', base], repoPath)
   let fetched = await fetchBase()
   let present = await run_host(['git', '-C', repoPath, 'rev-parse', '--verify', `${baseSha}^{commit}`], repoPath)
@@ -618,8 +1100,8 @@ export async function rebaseOntoObservedBase(
       run_host(['git', '-C', repoPath, 'merge-base', baseSha, `refs/heads/${branch}`], repoPath)
     let forkPoint = await read()
     if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
-      // One bounded deepen, then re-ask. `--unshallow` on an already-complete repo is a cheap
-      // no-op; on a shallow one it is the only thing that can make the fork point exist locally.
+      // Belt-and-braces behind the entry guard: one bounded deepen, then re-ask. Modern git rejects
+      // `--unshallow` on a complete repo; that harmless failure is followed by the decisive re-read.
       await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
       forkPoint = await read()
     }
@@ -685,6 +1167,18 @@ export async function rebaseOntoObservedBase(
   if (!existsSync(diffFile) || readFileSync(diffFile, 'utf8').trim() === '')
     throw new Error('outer publisher refused to rebase an empty diff')
 
+  // (e2) TEACH THIS CHECKOUT TO MERGE THE AS_BUILT LOG BEFORE ANY REPLAY TOUCHES IT.
+  //      The log is newest-first and every build prepends at the same offset under the same three
+  //      header lines, so two concurrent builds conflict on it by construction — three publishes
+  //      died on that file and nothing else on 2026-08-15T23:20Z. The entry-aware driver in
+  //      `scripts/git/as-built-merge-driver.ts` unions whole entries instead, and `git apply
+  //      --3way` below DOES consult it (verified against real git, not assumed). Installed here
+  //      rather than assumed present because the binding lives in `.git/info/attributes`, which is
+  //      untracked by design — see the driver's docblock for why committing it would be fatal.
+  //      This binds THIS installation's driver and runs nothing out of `repoPath`; see the
+  //      docblock on `ensureAsBuiltMergeDriver` for what running the checkout's own script cost.
+  await ensureAsBuiltMergeDriver(run_host, repoPath)
+
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
   //     poison every other lane's build.
   const added = await run_host(
@@ -714,7 +1208,7 @@ export async function rebaseOntoObservedBase(
       // in the costume of another.
       //
       // `-z` + `core.quotePath=false` BECAUSE THIS LIST IS MACHINE-CONSUMED. It becomes the
-      // resolver's `CONFLICTED FILES` and the pathspec of the staged-marker scan below, and git's
+      // resolver's `CONFLICTED FILES` and the literal pathspec of the staged-marker scan below; git's
       // default C-quoting renders `ünicode file.txt` as `"\303\274nicode file.txt"` — a name that
       // opens nothing and matches no pathspec. `-z` emits the raw bytes, NUL-separated.
       const unreadableConflictState = (detail: string): Error =>
@@ -757,26 +1251,21 @@ export async function rebaseOntoObservedBase(
        */
       const stagedMarkerFiles = async (candidates: string[]): Promise<string[]> => {
         if (candidates.length === 0) return []
-        let res
-        try {
-          res = await run_host(
-            ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--', ...candidates],
-            scratchDir,
-          )
-        } catch (err) {
-          throw unreadableConflictState(err instanceof Error ? err.message : String(err))
-        }
-        if (!res.ok) throw unreadableConflictState(res.stderr || 'git diff --cached failed with no output')
         const marked: string[] = []
-        let current: string | null = null
-        for (const line of res.stdout.split('\n')) {
-          const header = /^\+\+\+ (?:b\/)?(.+)$/.exec(line)
-          if (header !== null) {
-            const named = header[1]
-            current = named === undefined || named === '/dev/null' ? null : named
-            continue
+        // Deliberate per-path subprocesses: markdown classification needs the candidate path, and
+        // literal pathspecs avoid parsing quoted diff headers. Conflict sets are normally tiny.
+        for (const candidate of candidates) {
+          let res
+          try {
+            res = await run_host(
+              ['git', '-C', scratchDir, 'diff', '--cached', '-U1', '--', `:(literal)${candidate}`],
+              scratchDir,
+            )
+          } catch (err) {
+            throw unreadableConflictState(err instanceof Error ? err.message : String(err))
           }
-          if (current !== null && CONFLICT_MARKER_ADDED.test(line) && !marked.includes(current)) marked.push(current)
+          if (!res.ok) throw unreadableConflictState(res.stderr || 'git diff --cached failed with no output')
+          if (stagedDiffAddsConflictMarker(res.stdout, candidate)) marked.push(candidate)
         }
         return marked
       }
@@ -1134,6 +1623,32 @@ export function innerTerminalFailureReason(
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
 }
 
+/**
+ * GIT-TRUTH FOR THE CLAIM, NOT ONLY THE BRANCH (card 2026-08-16). A model-relayed
+ * sha that names NO git object is not a disagreement with the real head — there is
+ * only one candidate commit, git's — so it resolves to ABSENT (null), never to a
+ * refusal. Measured: hallucinated claim '924b42906950' (git cat-file: not a valid
+ * object name) refused a good build and stranded 924b4290ea81….
+ * A claim is a sha, never a refname: non-hex input returns null WITHOUT asking git,
+ * so 'HEAD'/branch names cannot resolve by accident (4 = git's minimum abbreviation).
+ * `--end-of-options` keeps hostile-shaped input from being read as a flag.
+ */
+export async function resolveClaimedCommit(
+  run_host: RunHostCommand,
+  repo_path: string,
+  claim: string | null,
+): Promise<string | null> {
+  if (claim === null) return null
+  const c = claim.trim().toLowerCase()
+  if (!/^[0-9a-f]{4,40}$/.test(c)) return null
+  const res = await run_host(
+    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${c}^{commit}`],
+    repo_path,
+  )
+  const oid = res.stdout.trim()
+  return res.ok && /^[0-9a-f]{40}$/.test(oid) ? oid : null
+}
+
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
@@ -1159,6 +1674,9 @@ export function buildTridentOrchestrator(
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
+  const beginInfraRetry = opts.begin_infra_retry
+  const maxInfraRetries = opts.max_infra_retries ?? DEFAULT_MAX_INFRA_RETRIES
+  const onInfraRetry = opts.on_infra_retry
 
   // This-process liveness: run ids whose workflow THIS process fired (and whose
   // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
@@ -1168,9 +1686,19 @@ export function buildTridentOrchestrator(
   // Run ids redispatched in THIS process — the per-process bound on orphan
   // recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
+  // Deliberately in-memory: a restart replaces the failing pool/generation, while
+  // each individual process still bounds launch faults and cannot retry forever.
+  const launchFaults = new Map<string, { count: number; last: string }>()
+  const MAX_LAUNCH_FAULTS = 3
   // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
   // seconds; the build itself runs detached and is NOT tracked here.
   const inflight = new Set<Promise<void>>()
+  /**
+   * Delay only, intentionally in memory: the LOOP BOUND is durable in
+   * `infra_retries`. Losing this map on restart is harmless because the restart
+   * itself supplies delay; it can only make the next eligible retry earlier.
+   */
+  const infraRetryNotBefore = new Map<string, number>()
 
   async function resolveBase(run: TridentRun): Promise<string> {
     if (opts.base_branch !== undefined) return opts.base_branch
@@ -1197,11 +1725,39 @@ export function buildTridentOrchestrator(
     return null
   }
 
+  /** Best-effort, read-only probe for a PR that already reached MERGED while its
+   *  launcher was unavailable. No evidence is never treated as a merge. */
+  async function detectMergedPr(run: TridentRun): Promise<number | null> {
+    if (run.merge_mode !== 'pr') return null
+    try {
+      if (run.pr !== null) {
+        const res = await opts.run_host(
+          ['gh', 'pr', 'view', String(run.pr), '--json', 'state,number', '--jq', '.state'],
+          run.repo_path,
+        )
+        return res.ok && res.stdout.trim() === 'MERGED' ? run.pr : null
+      }
+      const branch = run.branch ?? `trident/${run.slug}`
+      const res = await opts.run_host(
+        ['gh', 'pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number', '--jq', '.[0].number // empty'],
+        run.repo_path,
+      )
+      if (!res.ok) return null
+      const n = parseInt(res.stdout.trim(), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    } catch {
+      return null
+    }
+  }
+
   /**
    * A COMMIT OID IS READ, NOT REPORTED. `claimedHead` is whatever the build SAID it
    * committed — possibly abbreviated, possibly absent. The head that actually gets
    * published is the one git resolves for the branch the inner loop named (a name a
-   * model cannot plausibly mangle). A claim is only ever a CHECK against that.
+   * model cannot plausibly mangle). A claim is only ever a CHECK against that. The
+   * claim is itself resolved through git first (`resolveClaimedCommit`): unresolvable
+   * = ABSENT; only two real, DIFFERENT OIDs refuse, and only after the push, so a
+   * refusal never strands the commit.
    */
   async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
@@ -1218,13 +1774,43 @@ export function buildTridentOrchestrator(
         `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
       )
     }
-    // THE CLAIM IS A CHECK, NEVER THE SOURCE. `startsWith` makes a full 40-char claim an
-    // equality test and a 7-char one a prefix test. A disagreement is a real signal (wrong
-    // branch, wrong worktree) and names BOTH values — neither is silently preferred.
-    if (claimedHead !== null && !resolvedHead.startsWith(claimedHead.toLowerCase())) {
-      throw new Error(
-        `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
+    // THE CLAIM IS A CHECK, NEVER THE SOURCE — and it is RESOLVED before it may check
+    // anything. A claim naming no git object is ABSENT, not a conflict (there is only
+    // one candidate commit: git's). Resolved OIDs are compared for EQUALITY — a prefix
+    // compare is wrong both ways: a hallucinated prefix refused a good build, and a
+    // short sha of the right commit is only honored by resolving it. The refusal
+    // itself is DEFERRED until after the push (see below) so it can never strand the
+    // commit; it remains only for two real, resolvable, DIFFERENT commits.
+    const resolvedClaim = await resolveClaimedCommit(opts.run_host, run.repo_path, claimedHead)
+    const claimConflict = resolvedClaim !== null && resolvedClaim !== resolvedHead
+    // FIX-ROUND ANCESTRY GATE (mandated by the Fable arbitration on #289 vs #318).
+    // A fix round carries the head the review verdict was ABOUT; the head it produced
+    // must DESCEND from it. Run fec4d3aa rebuilt from main with no ancestry of the
+    // reviewed head 4523107b and was silently published as a new PR — this gate makes
+    // that a REFUSAL. Evaluated on the PRE-rebase produced head: the replay below
+    // rewrites shas onto the observed base, so this is the only point where "did the
+    // build abandon the reviewed branch?" is still measurable. `--is-ancestor` passes
+    // on equality, so a legitimate RESUME republishing or continuing the reviewed
+    // head passes with no exemption (the recovery-card interaction).
+    if (run.reviewed_head !== null) {
+      const pin = run.reviewed_head.trim().toLowerCase()
+      if (!/^[0-9a-f]{40}$/.test(pin)) {
+        throw new Error(
+          `fix-round refused: the reviewed-head pin '${run.reviewed_head}' is not a 40-hex commit; refusing to publish ${resolvedHead} unverified`,
+        )
+      }
+      const ancestry = await opts.run_host(
+        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', pin, resolvedHead],
+        run.repo_path,
       )
+      if (!ancestry.ok) {
+        const detail = ancestry.stderr.trim()
+        throw new Error(
+          detail === ''
+            ? `fix-round refused: produced head ${resolvedHead} of branch ${branch} does not descend from the reviewed head ${pin} — the round abandoned the reviewed branch`
+            : `fix-round refused: could not verify that produced head ${resolvedHead} descends from reviewed head ${pin} (${detail}); refusing to publish unverified`,
+        )
+      }
     }
     const runWithRetries = async (command: string[], attempts = 3) => {
       let result = await opts.run_host(command, run.repo_path)
@@ -1250,9 +1836,8 @@ export function buildTridentOrchestrator(
     // conflicting paths and saying plainly that no reviewer judged the code. And a RESOLVED
     // conflict shortcuts nothing — the replay is published and review is re-fired as usual.
     //
-    // SHALLOW (governance #574). The shared build checkout has a `.git/shallow` boundary, where
-    // `merge-base` lies and a naive `git rebase` conflicts on every file. So this is a diff-replay
-    // in a throwaway worktree — never `git rebase`, never the shared working tree.
+    // The replay heals a shallow checkout on entry (`healShallowCheckout`) and still uses a
+    // diff-replay in a throwaway worktree — never `git rebase`, never the shared working tree.
     //
     // The PR probe moves UP so the replay can use `gh pr diff` (a server-side, shallow-immune
     // merge-base); its result is reused by the "open a PR if none" step below, unchanged.
@@ -1326,6 +1911,17 @@ export function buildTridentOrchestrator(
     const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
     if (remoteHead !== headToPublish) {
       throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
+    }
+
+    // THE REFUSAL FIRES ONLY AFTER THE PUSH IS CONFIRMED (defect 2, 2026-08-14: the
+    // throw preceded the push, so a wrong refusal left the commit unreachable —
+    // 924b4290ea81… was stranded). A refusal is about which commit to REVIEW, not
+    // about whether the work may exist: the branch is on origin for inspection; only
+    // the PR / review dispatch is refused.
+    if (claimConflict) {
+      throw new Error(
+        `outer publisher refused: the build reported commit '${claimedHead}' (resolves to '${resolvedClaim}') but branch ${branch} resolved to '${resolvedHead}' before publish — the branch was pushed to origin for inspection; no PR or review was dispatched`,
+      )
     }
 
     let pr = prBefore
@@ -1473,6 +2069,57 @@ export function buildTridentOrchestrator(
       }
     }
 
+    const freshBuild = resume_checkpoint_name === '' && launchRun.branch === null
+    let base_sha: string | null = null
+    let base_behind: number | null = null
+    if (freshBuild && launchRun.merge_mode === 'pr') {
+      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
+      let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      if (!fetched.ok) {
+        await (opts.sleep ?? realSleep)(1000)
+        fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      }
+      if (!fetched.ok) {
+        const detail = redactPushError(fetched.stderr).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: could not fetch origin/${base} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base fetch failed — no fire)`,
+        }
+      }
+      const remoteRef = `refs/remotes/origin/${base}`
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `${remoteRef}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
+        const detail = redactPushError(resolved.stderr || resolved.stdout).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: fetched origin/${base} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base resolve failed — no fire)`,
+        }
+      }
+      base_sha = oid
+      const behind = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `refs/heads/${base}..${remoteRef}`],
+        launchRun.repo_path,
+      )
+      const count = Number.parseInt(behind.stdout.trim(), 10)
+      if (behind.ok && Number.isFinite(count)) base_behind = count
+    } else if (freshBuild && launchRun.merge_mode === 'local') {
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `refs/heads/${base}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (resolved.ok && /^[0-9a-f]{40}$/.test(oid)) base_sha = oid
+    }
+    const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
+
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
       return {
@@ -1490,22 +2137,64 @@ export function buildTridentOrchestrator(
     // leaving the run stuck non-terminal with no dispatch id and retrying every tick
     // (Codex r4 [P1]). Mirror the chat path (`build-live-agent-turn.ts`), which
     // catches `loadContext()` and degrades to no context. Silent degrade to null —
-    // the orchestrator has no logger and surfaces faults via its AdvanceOutcome.
+    // this resolver's failure surfaces only through its best-effort fallback.
     let reflection_context: string | null = null
     if (opts.resolve_reflection_context) {
       try {
-        reflection_context = opts.resolve_reflection_context(launchRun)
+        reflection_context = opts.resolve_reflection_context(pinnedRun)
       } catch {
         reflection_context = null
       }
+    }
+
+    // The TEST EXECUTION block, derived here for the same reason and with the same
+    // never-fails shape as the reflection resolve above: it needs the LIVE run count
+    // (the launcher does not hold one) and the host's core/RAM budget, and a build must
+    // never fail because the strategy could not be derived. Null → the workflow's
+    // contract is byte-identical legacy.
+    let test_strategy: string | null = null
+    // The numbers behind that block, carried into this launch's AdvanceOutcome note so
+    // the divisor and the chosen jobs value are VISIBLE. Round-3 review: a box with
+    // enough parked runs to pin every build at `jobs=1` logged nothing at all and was
+    // indistinguishable from a healthy one.
+    let test_strategy_summary: string | null = null
+    try {
+      let active = 1
+      if (opts.resolve_active_runs) {
+        try {
+          const n = opts.resolve_active_runs()
+          if (Number.isFinite(n) && n >= 1) active = Math.floor(n)
+        } catch {
+          // A store hiccup costs the RAISE-ONLY term, not the whole block, and not the
+          // bound: `computeTestJobs` still divides by the constant fan-out, so a lost
+          // count means "assume the planned fan-out" rather than "assume an idle box".
+          // The build also still gets its stage-1 gate and its full-suite rule. The
+          // outer catch below is the last-resort backstop that keeps ANY failure here
+          // from failing the launch.
+          active = 1
+        }
+      }
+      const budget = readHostBudget()
+      const detail = buildTestStrategyDetail(pinnedRun.repo_path, {
+        cores: budget.cores,
+        active_runs: active,
+        mem_available_bytes: budget.mem_available_bytes,
+        base_branch: base,
+      })
+      test_strategy = detail.block
+      test_strategy_summary = detail.summary
+    } catch {
+      test_strategy = null
+      test_strategy_summary = null
     }
 
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
     const firePromise = fireWorkflow({
-      run: launchRun,
+      run: pinnedRun,
       base_branch: base,
+      ...(base_sha !== null ? { base_sha } : {}),
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
@@ -1520,7 +2209,7 @@ export function buildTridentOrchestrator(
       // shadowing cost on 2026-08-13 and why the fallback cannot resurrect a
       // revoked credential.
       codex_home:
-        (opts.resolve_codex_home ? opts.resolve_codex_home(launchRun) : null) ??
+        (opts.resolve_codex_home ? opts.resolve_codex_home(pinnedRun) : null) ??
         opts.codex_home ??
         null,
       // The credentialed-`gh` runner's store coordinates, so the inner loop's
@@ -1540,6 +2229,9 @@ export function buildTridentOrchestrator(
       // resolver / nothing learned / a
       // read failed.
       reflection_context,
+      // The rendered TEST EXECUTION block (derived best-effort above), spliced by the
+      // workflow into the FORGE build contract only — never the argus review gate.
+      test_strategy,
       // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
       // and OMITS the argument when nothing valid is configured, so an untouched
       // instance produces byte-identical workflow args.
@@ -1567,7 +2259,7 @@ export function buildTridentOrchestrator(
       // The launching turn never settled cleanly — the workflow was NOT fired.
       // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
       return {
-        run: failedRun(run, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
+        run: failedRun(pinnedRun, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
         changed: true,
         waiting: false,
         note: `${run.phase} → failed (fire did not settle)`,
@@ -1576,19 +2268,21 @@ export function buildTridentOrchestrator(
 
     fired.add(run.id)
     const next: TridentRun = {
-      ...launchRun,
+      ...pinnedRun,
       subagent_run_id: id,
       subagent_status: 'running',
       // The exact pooled launcher generation is the crash-ownership token. A
       // legacy/test fire seam without one retains the old observability id.
-      workflow_run_id: outcome.launcher_session_key ?? launchRun.workflow_run_id ?? id,
+      workflow_run_id: outcome.launcher_session_key ?? pinnedRun.workflow_run_id ?? id,
       last_advanced_at: now(),
     }
     return {
       run: next,
       changed: true,
       waiting: true,
-      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}`,
+      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}${
+        test_strategy_summary !== null ? ` [${test_strategy_summary}]` : ''
+      }`,
     }
   }
 
@@ -1789,6 +2483,52 @@ export function buildTridentOrchestrator(
       return refireNextRalphTask(run, result)
     }
 
+    // RUN-LEVEL INFRASTRUCTURE AUTO-RETRY. This sits before the harvest stamp:
+    // nothing was harvested into a terminal decision when the atomic claim wins.
+    // With the seam unwired, legacy callers take the exact existing path below.
+    if (beginInfraRetry !== undefined && classifyInnerFailure(result) === 'infrastructure') {
+      if (run.infra_retries >= maxInfraRetries) {
+        const terminalRun = { ...run, harvested_at: nowMs() }
+        const failed: TridentRun = {
+          ...failedRun(
+            terminalRun,
+            `infrastructure failure persisted after ${maxInfraRetries} automatic retries ` +
+              `(budget ${maxInfraRetries}) — not retrying again. Last measured cause: ${result.terminal_cause}`,
+            true,
+          ),
+          pr: result.pr_number ?? run.pr,
+          branch: result.branch ?? run.branch,
+          inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
+          inner_verdict: 'REQUEST_CHANGES',
+        }
+        return { run: failed, changed: true, waiting: false, note: 'infrastructure retry budget used → failed' }
+      }
+
+      const claimed = await beginInfraRetry(run.id)
+      if (claimed === null) {
+        return { run, changed: false, waiting: true, note: 'infra-retry claim lost — re-read next tick' }
+      }
+      const backoffMs =
+        INFRA_RETRY_BACKOFF_MS[claimed.infra_retries - 1] ?? INFRA_RETRY_BACKOFF_MS.at(-1)!
+      infraRetryNotBefore.set(run.id, Date.parse(now()) + backoffMs)
+      if (claimed.infra_retries === 1 && onInfraRetry !== undefined) {
+        try {
+          await onInfraRetry(claimed, 1, result.terminal_cause ?? '')
+        } catch (err) {
+          log.warn('infra_retry_observer_failed', {
+            run: claimed.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+      return {
+        run: claimed,
+        changed: true,
+        waiting: true,
+        note: `infra failure → auto-retry attempt ${claimed.infra_retries} of ${maxInfraRetries} scheduled`,
+      }
+    }
+
     // RC2 — STAMP the durable outer-harvest marker up front, so EVERY outcome
     // this function returns (done / provenance-reject / exhausted / merge-fail)
     // carries it (they all spread `run`). `applyResult` is reached ONLY on a
@@ -1903,6 +2643,8 @@ export function buildTridentOrchestrator(
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
+      infraRetryNotBefore.delete(run.id)
+      launchFaults.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
@@ -1956,6 +2698,39 @@ export function buildTridentOrchestrator(
       //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
       //     unchanged reap below, byte-stable for legacy callers.
       if (run.subagent_status === 'crashed' && beginCrashRecovery !== undefined) {
+        // MEASURED 2026-08-16 23:21 gateway restart: recovery blindly relaunched
+        // finished PRs #336/#337 and the owner hand-cancelled both. A merged PR is
+        // terminal and outranks the recovery budget, but the claim MUST precede the
+        // return: it clears the crash latch whose save veto would otherwise silently
+        // discard done/completed. The claim spending one recovery unit is harmless
+        // because the run ends terminal. Nothing was harvested, so do NOT stamp
+        // `harvested_at` (applyResult remains its sole writer).
+        const mergedPr = await detectMergedPr(run)
+        if (mergedPr !== null) {
+          const claimed = await beginCrashRecovery(run.id)
+          if (claimed === null) {
+            return { run, changed: false, waiting: true, note: 'crash-recovery claim lost — re-read next tick' }
+          }
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const adopted: TridentRun = {
+            ...claimed,
+            phase: 'done',
+            pr: mergedPr,
+            branch: claimed.branch ?? run.branch,
+            inner_checkpoint: 'pr-merged',
+            inner_verdict: 'APPROVE',
+            subagent_status: 'completed',
+            failure_reason: null,
+            last_advanced_at: now(),
+          }
+          return {
+            run: adopted,
+            changed: true,
+            waiting: false,
+            note: `PR #${mergedPr} already merged — adopted after launcher crash → done (no relaunch)`,
+          }
+        }
         if (run.crash_recoveries >= maxCrashRecoveries) {
           fired.delete(run.id)
           redispatched.delete(run.id)
@@ -1990,7 +2765,33 @@ export function buildTridentOrchestrator(
         redispatched.delete(run.id)
         // CONTINUATION, not a restart: `launch()` folds `inner_checkpoint`/`pr`/`branch`
         // so the workflow resumes on the pushed branch and reuses the PR.
-        return launch(claimed)
+        try {
+          const out = await launch(claimed)
+          launchFaults.delete(run.id)
+          return out
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+          launchFaults.set(run.id, { count, last: msg })
+          if (count < MAX_LAUNCH_FAULTS) {
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+            }
+          }
+          launchFaults.delete(run.id)
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+          return {
+            run: failedRun(run, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (launch kept throwing)`,
+          }
+        }
       }
       // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
       //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes
@@ -2075,7 +2876,49 @@ export function buildTridentOrchestrator(
 
     // (3) Launch-if-needed — the single fire site (null-guarded).
     if (run.subagent_run_id === null) {
-      return launch(run)
+      // The infra-retry backoff is checked BEFORE the launch-fault budget: a run
+      // that is deliberately waiting out a backoff has not attempted a launch, so
+      // it must not consume a fault from the budget that reaps a THROWING launch.
+      const notBefore = infraRetryNotBefore.get(run.id)
+      if (notBefore !== undefined) {
+        const remainingMs = notBefore - Date.parse(now())
+        if (remainingMs > 0) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `infra-retry backoff (${Math.ceil(remainingMs / 1_000)}s remaining)`,
+          }
+        }
+        infraRetryNotBefore.delete(run.id)
+      }
+      try {
+        const out = await launch(run)
+        launchFaults.delete(run.id)
+        return out
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+        launchFaults.set(run.id, { count, last: msg })
+        if (count < MAX_LAUNCH_FAULTS) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+          }
+        }
+        launchFaults.delete(run.id)
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+        return {
+          run: failedRun(run, reason, false),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (launch kept throwing)`,
+        }
+      }
     }
 
     // (4) In flight (fired by THIS process, no result yet). Reap a stalled

@@ -46,6 +46,12 @@ export interface IntegrationsToolsDeps {
   secretsStore: SecretsStore
   project_slug: string
   /**
+   * True when `project_slug` is the bare FALLBACK rather than a configured
+   * handle. The migrate tool refuses in that case; see
+   * `auth/credential-scope-reconcile.ts`.
+   */
+  slug_is_fallback: boolean
+  /**
    * Project DB — threaded so the OAuth-disconnect path can flag every
    * affected Core `install_failed_dependency_missing` via the shared
    * `disconnectOAuth` brain, matching the HTTP/UI disconnect path exactly.
@@ -95,6 +101,7 @@ export function buildIntegrationsTools(
         tokens: deps.tokens,
         secretsStore: deps.secretsStore,
         project_slug: deps.project_slug,
+        slug_is_fallback: deps.slug_is_fallback,
         db: deps.db,
       }),
   }
@@ -235,7 +242,11 @@ export function buildIntegrationsTools(
     capability_required: 'write:project_data',
     approval_policy: 'prompt-user',
     handler: async () =>
-      migrateOrphanedCredentials({ db: deps.db, project_slug: deps.project_slug }),
+      migrateOrphanedCredentials({
+        db: deps.db,
+        project_slug: deps.project_slug,
+        slug_is_fallback: deps.slug_is_fallback,
+      }),
   }
 
   return [listTool, connectTool, disconnectTool, migrateOrphanedTool]
