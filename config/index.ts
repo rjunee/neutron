@@ -500,6 +500,38 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * `resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`); and
  * `buildPromptVars` (`prompts/template.ts`) — the constant-key one.
  *
+ * AND CI RUNS THAT COMMAND, because a proof that only a human can re-run is a
+ * proof nobody re-runs. Rounds 1-4 each failed the same way: the sentence above
+ * outlived the check behind it, and every round discovered that months later
+ * rather than on the PR that broke it. Bounding the claim by a command instead
+ * of a list fixed the WORDING of that failure and not its MECHANISM — a command
+ * in a comment still only fires when a reader chooses to type it, and by then
+ * the claim is already wrong. So the command is now executed as a registry:
+ * `tests/integration/identity-env-readers-registry.test.ts` walks the tree with
+ * these patterns and asserts the set of reader files EXACTLY equals its known
+ * list. It scans the BARE NAME rather than the access forms above, so it is
+ * deliberately BROADER than the command it executes: `env["NEUTRON_HOME"]`,
+ * `` env[`OWNER_HOME`] `` and `const { OWNER_HOME } = env` match none of the
+ * forms in that grep and would otherwise land silently — mirroring the command
+ * exactly would have rebuilt round 3's blind spot inside the guard against
+ * round 3's blind spot. The cost is that a file merely NAMING a variable (an
+ * error string, a schema key, a template placeholder) also registers, which is
+ * one annotated line instead of a hole. A fully computed key (`env[someVar]`)
+ * remains invisible to any textual scan; that is stated there rather than
+ * papered over. ANY new reader — trimmed or not — fails on the PR that adds it,
+ * and a registry row whose file stopped reading the variable fails too, so the
+ * list cannot rot into a description of a tree that no longer exists, the way
+ * rounds 1 and 2 went wrong.
+ *
+ * WHAT IT DOES NOT PROVE, said here so this docblock does not restage its own
+ * defect one layer up: the registry's per-file notes are PROSE and nothing
+ * evaluates them. The guard forces a new reader to be SEEN and described; it
+ * cannot force the description to be true. So it covers COMPLETENESS (which
+ * files are in scope) and never CORRECTNESS (whether a given predicate trims) —
+ * that stays pinned per-reader, mutation-proved, in the suites listed there.
+ * Behaviour was always the covered half; the set of things needing the
+ * behaviour was not.
+ *
  * WHICH OF THEM A LIVE PATH REACHES, because "brought onto the rule" and "fixed
  * a reachable defect" are different claims and this docblock has already been
  * burned by conflating two things that sounded alike. Reachable today:
