@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
-import { AppChatEventLogCore, rowReplaySql } from './app-chat-event-core.ts'
+import { AppChatEventLogCore, rowReplaySql, rowSweepSql } from './app-chat-event-core.ts'
 import { ProjectDb } from './db.ts'
 
 const TOPIC = 'app:sam'
@@ -195,5 +195,74 @@ describe('AppChatEventLogCore — the newest-first window does not regress the s
     seed(400)
     expect(core.aggregatesAfter(TOPIC, 0, 4).map((a) => a.seq)).toEqual([397, 398, 399, 400])
     expect(planOf('app_chat_messages', 'seq, message_id')).not.toContain('TEMP B-TREE')
+  })
+})
+
+describe('AppChatEventLogCore — the UNLIMITED sweep of the range a client holds', () => {
+  /**
+   * The other half of the resume's edit replay. A page answers the range the client
+   * is about to receive; this answers the range it already HOLDS, completely — see
+   * `rowSweepSql` for why a limit there is a starvation budget rather than a bound.
+   */
+  it('returns every row at or below the ceiling, ascending, with no cap', () => {
+    seed(400)
+    const all = core.aggregatesAtOrBelow(TOPIC, 400).map((a) => a.seq)
+    // 400 is far past `defaultReplayLimit` (4 in this fixture) — the point of the
+    // method is that the limit does not apply, so the fixture has to exceed it.
+    expect(all.length).toBe(400)
+    expect(all[0]).toBe(1)
+    expect(all.at(-1)).toBe(400)
+    // Bounded ABOVE by the ceiling, and inclusive of it (the client holds that row).
+    expect(core.aggregatesAtOrBelow(TOPIC, 3).map((a) => a.seq)).toEqual([1, 2, 3])
+    // A cold client's ceiling is 0, which must select nothing rather than everything.
+    expect(core.aggregatesAtOrBelow(TOPIC, 0)).toEqual([])
+    // A negative / non-finite ceiling clamps the same way a cursor does.
+    expect(core.aggregatesAtOrBelow(TOPIC, -5)).toEqual([])
+    expect(core.aggregatesAtOrBelow(TOPIC, Number.NaN)).toEqual([])
+  })
+
+  it('walks the index for it — no sort and no table scan, on both row-shaped tables', () => {
+    // Unlimited in COUNT is not the same as unbounded in COST, and the difference is
+    // the whole reason this shape is acceptable: it is an index range scan already in
+    // the required order. A `TEMP B-TREE` here would mean every resume sorts the
+    // topic's edit rows.
+    seed(50)
+    const planOfSweep = (table: string, columns: string): string =>
+      db
+        .raw()
+        .prepare(`EXPLAIN QUERY PLAN ${rowSweepSql(table, columns)}`)
+        .all(TOPIC, 50)
+        .map((r) => String((r as { detail?: unknown }).detail ?? ''))
+        .join(' | ')
+
+    const messagePlan = planOfSweep('app_chat_messages', 'seq, message_id')
+    expect(messagePlan).toContain('SEARCH app_chat_messages USING INDEX')
+    expect(messagePlan).not.toContain('SCAN app_chat_messages')
+    expect(messagePlan).not.toContain('TEMP B-TREE')
+
+    const editPlan = planOfSweep('app_chat_edits', 'message_id, seq')
+    expect(editPlan).toContain('SEARCH app_chat_edits USING INDEX')
+    expect(editPlan).toContain('idx_app_chat_edits_topic_seq')
+    expect(editPlan).not.toContain('SCAN app_chat_edits')
+    expect(editPlan).not.toContain('TEMP B-TREE')
+  })
+
+  it('REFUSES a message-group log rather than quietly handing back a page', () => {
+    // A receipt/reaction log's `limit` bounds DISTINCT MESSAGES over many rows and its
+    // page boundary is the composite `(seq, message_id)`, so this query is simply not
+    // the right one for it. Throwing is the point: a method whose contract is
+    // "complete" must not have a shape that silently returns a page.
+    const grouped = new AppChatEventLogCore<{ seq: number; message_id: string }, { seq: number }>({
+      db,
+      table: 'app_chat_receipts',
+      columns: 'seq, message_id',
+      defaultReplayLimit: 4,
+      replay: {
+        kind: 'message-group',
+        messageIdOf: (row) => row.message_id,
+        fold: (_message_id, rows) => ({ seq: rows[0]?.seq ?? 0 }),
+      },
+    })
+    expect(() => grouped.aggregatesAtOrBelow(TOPIC, 10)).toThrow('row-shaped only')
   })
 })

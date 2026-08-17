@@ -5911,13 +5911,26 @@ indicator. No feature flags — one live path.
     "hung" reply). A page that came back FULL is reported as `history_gap
     {older_than}`, and the client asks for the page below it with
     `{type:'resume',after_seq:0,before_seq}` — up to
-    `MAX_HISTORY_BACKFILL_ROUNDS` pages per catch-up, restarting from its own
-    oldest applied seq on the next one, so a transcript longer than one page
-    completes instead of keeping a permanent hole. Both halves are needed: the
-    server is the only party that knows a page was capped, and the client is the
-    only party that knows what it already holds.
+    `MAX_HISTORY_BACKFILL_ROUNDS` pages per catch-up, restarting on the next one
+    from the floor of its own newest CONTIGUOUS run (`Store.contiguousFloorSeq`),
+    so a transcript longer than one page completes instead of keeping a permanent
+    hole. CONTIGUITY, not "my oldest applied seq" — a device holding seq 1 with a
+    hole ABOVE it has an oldest seq of 1, so an oldest-row test reads a holey
+    store as complete and the hole is never asked for again. Both halves are
+    needed: the server is the only party that knows a page was capped, and the
+    client is the only party that knows what it already holds — which is also why
+    a device whose transcript IS contiguous ignores a `history_gap` rather than
+    re-buying a page it holds.
   - **#4 receipts / reactions / edits** — persisted + fanned as `receipt_update`
-    / `reaction_update` / `edit_update`, replayed on resume.
+    / `reaction_update` / `edit_update`, replayed on resume. The edit replay is
+    the one that is NOT bounded below by the resume cursor: an edit row carries
+    its MESSAGE's seq, so deleting an old message is a new event at a low seq, and
+    a page-shaped answer to the range a device already holds starves exactly those
+    tombstones — permanently, since the ordering never changes. At or below the
+    cursor the edit state is swept COMPLETELY; above it, it stays the page that
+    aligns with the message page. Receipts and reactions keep the cursor bound: a
+    missing tick or reaction is a stale ornament, not content the owner deleted
+    staying readable.
   - **#4b answered prompts (ISSUES #415 + #419)** — a `button_choice` is CLAIMED
     before it dispatches (`claim_button_prompt` → `ButtonStore.resolve`'s
     `was_new`), so a re-tap never re-runs the agent; and the claim then STAMPS
