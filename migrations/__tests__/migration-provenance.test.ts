@@ -194,6 +194,28 @@ test('an existing ledger is upgraded additively; pre-existing rows stay NULL and
   expect(recorded[1]?.['content_sha256']).toBe(migrationContentHash(GAMMA))
 })
 
+test('a ledger carrying only SOME provenance columns is completed, not rejected', () => {
+  // The state a lost check-then-ALTER race leaves behind, and the state an
+  // interrupted upgrade leaves behind. Each column is considered on its own, so
+  // a half-upgraded ledger boots and finishes the job.
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE _migrations (
+     version INTEGER PRIMARY KEY,
+     name TEXT NOT NULL,
+     applied_at REAL NOT NULL,
+     content_sha256 TEXT
+   )`)
+
+  const dir = tree('partial', { '0001_alpha.sql': ALPHA })
+  expect(applyMigrations(db, dir)).toEqual({ applied: [1], skipped: [] })
+
+  const columns = (db.query("SELECT name FROM pragma_table_info('_migrations')").all() as Array<{ name: string }>)
+    .map((c) => c.name)
+  expect(columns).toContain('content_sha256')
+  expect(columns).toContain('applied_by_commit')
+  expect(rows(db)[0]?.['content_sha256']).toBe(migrationContentHash(ALPHA))
+})
+
 test('bootstrapping the columns is idempotent across repeated runs', () => {
   const db = new Database(':memory:')
   const dir = tree('idem', { '0001_alpha.sql': ALPHA })

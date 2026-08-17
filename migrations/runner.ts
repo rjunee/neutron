@@ -191,15 +191,26 @@ const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
  * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
  */
 function ensureProvenanceColumns(db: Database): void {
-  const present = new Set(
-    db
-      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('_migrations')")
-      .all()
-      .map((r) => r.name),
-  )
+  const columnNames = (): Set<string> =>
+    new Set(
+      db
+        .query<{ name: string }, []>("SELECT name FROM pragma_table_info('_migrations')")
+        .all()
+        .map((r) => r.name),
+    )
+  const present = columnNames()
   for (const [column, type] of PROVENANCE_COLUMNS) {
     if (present.has(column)) continue
-    db.exec(`ALTER TABLE _migrations ADD COLUMN ${column} ${type}`)
+    try {
+      db.exec(`ALTER TABLE _migrations ADD COLUMN ${column} ${type}`)
+    } catch (err) {
+      // Check-then-ALTER is not atomic. If two processes boot at once on the
+      // first run after an upgrade, both can read the column as absent and the
+      // loser gets "duplicate column name". The post-state is what matters and
+      // it is correct, so re-read rather than take down a boot over a race we
+      // won either way. Anything else still throws — this widens nothing.
+      if (!columnNames().has(column)) throw err
+    }
   }
 }
 
