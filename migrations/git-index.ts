@@ -246,10 +246,11 @@ function parse(bytes: Uint8Array): GitIndexRead {
  *
  * TWO DISTINCT ANSWERS, because they mean different things to whoever reads the
  * ledger row that results. A MISMATCH is corruption, or a file this reader has
- * misunderstood (a SHA-256 repository closes its index with 32 bytes, not 20).
- * An ALL-ZERO trailer is git working as configured: `index.skipHash` (which
- * `feature.manyFiles` turns on) deliberately writes no hash, trading integrity
- * checking for speed.
+ * misunderstood — a SHA-256 repository closes its index with 32 bytes, not 20, so
+ * the 20 bytes read as its trailer are the tail of a longer hash and the
+ * byte-wise compare below rejects them. An ALL-ZERO trailer is git working as
+ * configured: `index.skipHash` (which `feature.manyFiles` turns on) deliberately
+ * writes no hash, trading integrity checking for speed.
  *
  * Both are `cannot verify`, and skipHash is the more interesting of the two: the
  * index's paths are almost certainly fine, but nothing on disk PROVES it, and a
@@ -262,8 +263,12 @@ function checkTrailingChecksum(bytes: Uint8Array): GitIndexUnreadable | null {
   const split = bytes.length - CHECKSUM_BYTES
   const trailer = bytes.subarray(split)
   if (trailer.every((b) => b === 0)) return 'index-hash-skipped'
+  // Byte-wise rather than `.equals()`, because `trailer` is a Uint8Array view and
+  // `actual` a Buffer. Both are exactly CHECKSUM_BYTES long here — a SHA-1 digest
+  // is 20 bytes and `trailer` is a subarray of that width — so there is no length
+  // case to test first; a differing width is not reachable and a check for it
+  // would be dead code crediting itself with the SHA-256 rejection this loop makes.
   const actual = createHash('sha1').update(bytes.subarray(0, split)).digest()
-  if (actual.length !== trailer.length) return 'index-checksum-mismatch'
   for (let i = 0; i < trailer.length; i++) {
     if (actual[i] !== trailer[i]) return 'index-checksum-mismatch'
   }
@@ -275,7 +280,14 @@ function signatureAt(bytes: Uint8Array, start: number): string {
   return String.fromCharCode(...bytes.subarray(start, start + 4))
 }
 
+/**
+ * One decoder for the whole walk. This runs once per index ENTRY on the boot path
+ * — a few thousand times in this repository and five figures in a large one — and
+ * a decoder holds no per-call state, so allocating one each time bought nothing.
+ */
+const PATH_DECODER = new TextDecoder('utf-8')
+
 /** A path, which git stores as raw bytes and this tree writes as utf8. */
 function pathBetween(bytes: Uint8Array, start: number, end: number): string {
-  return new TextDecoder('utf-8').decode(bytes.subarray(start, end))
+  return PATH_DECODER.decode(bytes.subarray(start, end))
 }

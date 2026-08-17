@@ -116,7 +116,15 @@ with cross-references noted inline.
     `migrations/runner.ts`, on the verdict from `resolveDeployedTree` in `migrations/provenance.ts`).
     **All three decide before ANY write** — `_migrations` is created, and repairs are acknowledged,
     only after the last refusal has been passed, which is what makes the untracked message's claim
-    that nothing was written true. Where tracking cannot be established (no git metadata, an index
+    that nothing was written true.
+    The untracked refusal takes PRECEDENCE over the other two when the tree can tell a stray from a
+    real file, and that is a diagnosis rule, not a weakening: all three still throw before any write.
+    A stray landing on an ordinal that is already recorded reads as a name mismatch, and one landing
+    beside a tracked file at the same ordinal reads as a duplicate ordinal — both send the operator
+    to the wrong remedy (a `repairs.json` entry, or a duplicate they never committed) when the real
+    one is to delete the stray. So `assertUniqueMigrationOrdinals` takes the tree verdict and stands
+    aside when one side of a collision is untracked. Two TRACKED files at one ordinal, and any
+    collision on an install where the tree cannot be verified, still report as a duplicate ordinal. Where tracking cannot be established (no git metadata, an index
     shape the reader does not decode, an index that fails its own checksum or carries none, a
     migration directory git does not track at all) the runner applies and records
     `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from "not
