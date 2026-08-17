@@ -566,6 +566,78 @@ own reasoning: the one-name-at-two-ordinals shape reaches a HEALTHY instance pre
 that file's body was re-runnable, while a body that could not be re-run failed loudly at that
 boot and never produced the pair.
 
+**A second cross-model review of this PR found three more defects in its own fix, and all
+three are fixed here. Two of them were the SAME defect class as the PR itself, arrived at
+through the fix for it, which is why the review kept being worth running.**
+
+**The hash widening resolved an ambiguity in the unsafe direction.** `classifyMigration`
+returned `recorded-by-content` on the FIRST owner absent from the tree, so when one hash
+had two owner rows and one of them was still a file in this build, a second,
+differently-named, byte-identical migration read as already recorded and was skipped
+silently — the file listed under `skipped` by a boot that exits zero, and its statements
+never run. The `duplicates-an-applied-file` refusal that exists for exactly that state was
+unreachable in it. Inverted: ANY owner still present in the tree makes the evidence
+ambiguous, so `recorded-by-content` is returned only when EVERY owner is gone, which is
+the rename/renumber case the widening was written for.
+
+**A recorded stray could hide a collision between two TRACKED files.**
+`assertUniqueMigrationOrdinals` excused a tolerated untracked file DURING the walk, so
+whenever the stray sorted first it occupied the `byVersion` slot and every tracked file
+sharing that ordinal compared against the stray and was excused too — two tracked files
+at one ordinal applied with no refusal, contradicting the guard's own docblock and the
+`docs/INVARIANTS.md` line describing it. The stray is now dropped BEFORE the comparison,
+so the map only ever holds tracked files and two of those at one ordinal always throw.
+
+**The repair predicate needed to split on whether `recorded_name` is a file in this
+build.** Matching on the name alone over-activates: entry 125's `recorded_name`
+(`code_trident_runs_fix_round_contract`) IS a file here, so a name-only trigger fired on
+any HEALTHY instance that had recorded 0124 and not yet run 0125 — suppressing 0125
+forever on a database the incident was never about, invisibly, because `0131` converges
+the schema either way. Matching on the exact `(version, name)` pair under-activates: the
+collapse drops the drifted row, so an entry naming it went inert on every boot after the
+rekey. So an orphan `recorded_name` matches on the name alone, and a `recorded_name` this
+build ships matches only a row whose ordinal is BOTH the one the entry names and not the
+one this build assigns.
+
+**That split left one state uncovered, and `_migration_repairs` now covers it.** When the
+duplicated name is one this build ships and the surviving row is the one at the tree
+ordinal, the collapse leaves a ledger indistinguishable from a healthy instance's — every
+trace the predicate reads is gone while the instance still needs the entry, so it
+deactivates and the hand-verified migration its `file_name` suppresses re-runs its
+`ALTER`s. `_migration_repairs` is the trace that survives: it is written the moment an
+entry activates, nothing rewrites it, and it is now read back as a second, durable
+trigger. It cannot over-activate, which is the whole reason the ordinal conjunct exists —
+a database that never had the incident never wrote the row, so entry 125 stays inert on a
+fresh install and on a healthy one exactly as before.
+
+**The occupied-scratch refusal reintroduced the false-message class in one sentence.** It
+claimed "nothing has been written — no migration ran, no row was written", but it is
+thrown from inside `rekeyLedgerOnName`, which `applyMigrations` reaches only AFTER it has
+created `_migration_repairs` and inserted this boot's acknowledgements. On exactly the
+instance the message is written for — one carrying repairs, mid-incident — it denied a row
+that was sitting in the database as the operator read it. It now names that row instead of
+denying it, and still states what it can: no migration ran, and the ledger's shape,
+columns and rows are untouched. `docs/INVARIANTS.md` #17 carried the same false claim
+("all six decide before ANY write") and now records the sixth as the exception it is.
+
+Two new cases in `migrations/__tests__/ordinal-identity.test.ts`, each able to fail for
+the reason under test. **CASE 6d — the occupied-scratch refusal names the one row it MAY
+have written, and it is there** drives a boot with an active repair into an occupied
+scratch name, asserts the message no longer contains "no row was written", and then reads
+the acknowledgement row back out of the database the operator would open — while verifying
+everything the message still DOES deny. **CASE 8b — a repair on a TREE-FILE name survives
+the collapse that makes the ledger look healthy** builds the one-name-at-two-ordinals
+ledger where the earlier row sits at the tree ordinal, boots twice, and asserts the
+suppressed migration stays suppressed on boot 2. It carries a control that fails if the
+durable trigger degenerates into "activate on the name": a second entry naming a tree-file
+row this database never acknowledged must never appear in `_migration_repairs`.
+
+Three mutation proofs, re-run at this head rather than carried over. Deleting the
+`alreadyAcknowledged` widening reddens CASE 8b alone (16 pass / 1 fail). Restoring the old
+"no row was written" wording reddens CASE 6d alone (16 / 1). And the fail-closed guard is
+proven not to have been weakened to achieve either: deleting the unexplained-row throw
+still reddens CASE 4 and CASE 4b and nothing else (15 / 2).
+
 ## 2026-08-17 — the ordinal-125 mismatch is acknowledged and 0131 converges both schema paths — the repair that gates deploy xGkufirIQQKW1L
 
 This is the third instance of the #575 incident class: a migration from an

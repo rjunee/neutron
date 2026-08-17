@@ -981,6 +981,88 @@ test('CASE 6c — a rekey that fails AFTER the provenance ALTERs also leaves the
   db.close()
 })
 
+test('CASE 6d — the occupied-scratch refusal names the one row it MAY have written, and it is there', () => {
+  // WHAT THIS PINS IS A SENTENCE, and the sentence used to be false. The refusal for an
+  // occupied scratch name read "nothing has been written — no migration ran, no row was
+  // written". But it is thrown from `rekeyLedgerOnName`, which `applyMigrations` reaches
+  // only AFTER it has created `_migration_repairs` and inserted this boot's
+  // acknowledgements. So on exactly the instance the message is written for — one
+  // carrying repairs, mid-incident — it denied a row that was sitting in the database as
+  // the operator read it. That is the falsity class this whole PR exists to remove,
+  // restated in one message.
+  //
+  // THIS TEST CAN FAIL FOR THE REASON UNDER TEST: it asserts the repairs row EXISTS
+  // after the throw, and that the message does not contain the old denial. Restore
+  // either half of the old wording and it goes red.
+  const ghost = (file: string): string => {
+    const dir = mkdtempSync(join(tmp, 'ghost-'))
+    writeFileSync(join(dir, file), 'CREATE TABLE IF NOT EXISTS ghost (id TEXT PRIMARY KEY);\n')
+    return dir
+  }
+  const build = mkdtempSync(join(tmp, 'build-'))
+  writeFileSync(join(build, '0001_beta.sql'), 'CREATE TABLE IF NOT EXISTS t2 (id INTEGER);\n')
+  writeFileSync(join(build, '0002_gamma.sql'), 'CREATE TABLE IF NOT EXISTS t3 (id INTEGER);\n')
+  writeFileSync(
+    join(build, 'repairs.json'),
+    JSON.stringify([
+      {
+        version: 500,
+        recorded_name: 'ghost',
+        file_name: 'beta',
+        note: 'hand-verified: the branch table is unused, and beta already ran here',
+        date: '2026-08-17',
+      },
+    ]),
+  )
+
+  const db = new Database(join(tmp, 'scratch-occupied-with-repairs.db'), { create: true })
+  versionKeyedRunner(db, ghost('0500_ghost.sql'), {
+    provenance: false,
+    appliedAt: 1_700_000_000,
+  })
+  // Somebody else's table on the rekey's scratch name, so the rekey refuses — AFTER the
+  // acknowledgement has been written.
+  db.exec('CREATE TABLE _migrations_version_keyed (payload TEXT NOT NULL)')
+
+  const ddlBefore = ddlOf(db, '_migrations')
+  const rowsBefore = ledger(db)
+
+  let message = ''
+  try {
+    applyMigrations(db, build)
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+
+  expect(message).toContain('needs that name free')
+  expect(message).toContain('NOTHING HAS BEEN APPLIED')
+  // THE DISCRIMINATING PAIR. The message must name the row it may have written, and must
+  // no longer deny writing one.
+  expect(message).toContain('_migration_repairs')
+  expect(message).not.toContain('no row was written')
+
+  // ...and the claim, verified against the database the operator would open. The
+  // acknowledgement row IS there, exactly as the message now says.
+  expect(
+    db.query('SELECT version, recorded_name, file_name FROM _migration_repairs').all(),
+  ).toEqual([{ version: 500, recorded_name: 'ghost', file_name: 'beta' }])
+  // Everything the message DOES deny is verified too: the ledger's shape, columns and
+  // rows are untouched, and no migration ran.
+  expect(ddlOf(db, '_migrations')).toBe(ddlBefore)
+  for (const column of ['content_sha256', 'applied_by_commit', 'tree_provenance']) {
+    expect(columnsOf(db, '_migrations')).not.toContain(column)
+  }
+  expect(ledger(db)).toEqual(rowsBefore)
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't3'").get()).toBeNull()
+
+  // The remedy the message gives works, and the repair is still doing its job after it.
+  db.exec('ALTER TABLE _migrations_version_keyed RENAME TO operator_kept_this')
+  expect(applyMigrations(db, build)).toEqual({ applied: [2], skipped: [1] })
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+  db.close()
+})
+
 // --------------- 7. a tolerated collision, on the boot AFTER the upgrade worked
 
 /**
@@ -1187,6 +1269,102 @@ test('CASE 8 — a repair naming the row the collapse DROPS keeps acknowledging 
   expect(
     db.query('SELECT version, recorded_name, file_name FROM _migration_repairs').all(),
   ).toEqual([{ version: 501, recorded_name: 'ghost', file_name: 'beta' }])
+  // And it is a fixed point.
+  expect(applyMigrations(db, build).applied).toEqual([])
+  db.close()
+})
+
+test('CASE 8b — a repair on a TREE-FILE name survives the collapse that makes the ledger look healthy', () => {
+  // THE OTHER HALF OF CASE 8, and the one the ordinal conjunct opened. When
+  // `recorded_name` IS a file in this build, the entry activates only on a row whose
+  // ordinal differs from the one this build assigns — that conjunct is what keeps entry
+  // 125 inert on a healthy instance, and it must stay. But a ledger written by the
+  // version-keyed runner can hold that name at BOTH ordinals, and
+  // `collapseLedgerRowsByName` keeps the EARLIEST-applied row. When that is the row
+  // sitting at the tree ordinal, the rekey leaves a ledger indistinguishable from one
+  // that never had the incident — every trace the predicate reads is gone, while the
+  // instance still needs the entry. The entry then goes inert and the hand-verified
+  // migration its `file_name` suppresses re-runs its statements.
+  //
+  // `_migration_repairs` is what remembers: it was written on the boot the entry DID
+  // activate, and nothing rewrites it. THE DISCRIMINATING ASSERTION is boot 2 —
+  // delete the acknowledgement widening in `applyMigrations` and `beta` re-applies here
+  // and nothing else in this file notices.
+  const gammaAt = (file: string): string => {
+    const dir = mkdtempSync(join(tmp, 'gamma-'))
+    writeFileSync(join(dir, file), 'CREATE TABLE IF NOT EXISTS t3 (id INTEGER);\n')
+    return dir
+  }
+  const build = mkdtempSync(join(tmp, 'build-'))
+  writeFileSync(join(build, '0001_beta.sql'), 'CREATE TABLE IF NOT EXISTS t2 (id INTEGER);\n')
+  writeFileSync(join(build, '0002_gamma.sql'), 'CREATE TABLE IF NOT EXISTS t3 (id INTEGER);\n')
+  writeFileSync(join(build, '0003_delta.sql'), 'CREATE TABLE IF NOT EXISTS t4 (id INTEGER);\n')
+  // The entry names ordinal 7 — the drifted row, which is the one the refusal message
+  // would have printed, and the one the collapse is about to drop.
+  writeFileSync(
+    join(build, 'repairs.json'),
+    JSON.stringify([
+      {
+        version: 7,
+        recorded_name: 'gamma',
+        file_name: 'beta',
+        note: 'hand-verified: beta already ran here, and gamma was recorded twice by two branch builds',
+        date: '2026-08-17',
+      },
+      // THE CONTROL, and it can fail for the reason under test. This entry names a
+      // tree-file `recorded_name` too, and after boot 1 the ledger records that name —
+      // so a widening that had degenerated into "activate on the name" would fire it.
+      // Its ordinal matches what this build assigns `delta`, so the ledger predicate is
+      // false, and this database never acknowledged it, so the durable path is false
+      // too. It must therefore never appear in `_migration_repairs`.
+      {
+        version: 99,
+        recorded_name: 'delta',
+        file_name: 'epsilon',
+        note: 'inert here: delta sits exactly where this build numbers it',
+        date: '2026-08-17',
+      },
+    ]),
+  )
+
+  const db = new Database(join(tmp, 'tree-file-repair.db'), { create: true })
+  // Release 1 numbered gamma 0002 — the ordinal this build also assigns it — and release
+  // 2 numbered it 0007. Ordinal-keyed dedup recorded it twice. The EARLIER row is the one
+  // at the tree ordinal, so the collapse keeps it and drops the drifted one.
+  versionKeyedRunner(db, gammaAt('0002_gamma.sql'), {
+    provenance: false,
+    appliedAt: 1_700_000_000,
+  })
+  versionKeyedRunner(db, gammaAt('0007_gamma.sql'), {
+    provenance: true,
+    appliedAt: 1_760_000_000,
+  })
+  // THE PRECONDITION, MEASURED: one name, two ordinals, one of them the tree's.
+  expect(ledger(db)).toEqual([
+    { version: 2, name: 'gamma' },
+    { version: 7, name: 'gamma' },
+  ])
+
+  // Boot 1 — the rekey boot. Row 7 is still visible, so the entry activates: `beta` is
+  // suppressed, `delta` applies, and the collapse drops row 7.
+  expect(applyMigrations(db, build)).toEqual({ applied: [3], skipped: [1, 2] })
+  expect(ledger(db)).toEqual([
+    { version: 2, name: 'gamma' },
+    { version: 3, name: 'delta' },
+  ])
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+
+  // BOOT 2 — the discriminating one. The ledger now looks exactly like a healthy
+  // instance's, so the ledger predicate says nothing. The acknowledgement does.
+  const boot2 = applyMigrations(db, build)
+  expect(boot2.skipped).toContain(1)
+  expect(boot2.applied).not.toContain(1)
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+  // THE CONTROL, read back: the second entry never activated, so the widening is not
+  // "activate on the name" — see the entry itself for why it is discriminating.
+  expect(
+    db.query('SELECT version, recorded_name, file_name FROM _migration_repairs').all(),
+  ).toEqual([{ version: 7, recorded_name: 'gamma', file_name: 'beta' }])
   // And it is a fixed point.
   expect(applyMigrations(db, build).applied).toEqual([])
   db.close()
