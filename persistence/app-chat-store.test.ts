@@ -84,8 +84,9 @@ describe('AppChatStore — resume replay (WHERE seq > N ORDER BY seq)', () => {
     }
     expect((await store.replayAfter(TOPIC, -10)).map((r) => r.seq)).toEqual([1, 2, 3, 4])
     expect((await store.replayAfter(TOPIC, 2.9)).map((r) => r.seq)).toEqual([3, 4]) // trunc, not round
-    // A capped page is the NEWEST `limit`, ascending — not the oldest.
-    expect((await store.replayAfter(TOPIC, 0, 2)).map((r) => r.seq)).toEqual([3, 4])
+    // One page is the OLDEST `limit` past the cursor — a PREFIX, so the last
+    // row's seq is a valid cursor for the rest (see the drain-convergence suite).
+    expect((await store.replayAfter(TOPIC, 0, 2)).map((r) => r.seq)).toEqual([1, 2])
     expect((await store.replayAfter(TOPIC, 0, Number.NaN)).map((r) => r.seq)).toEqual([1, 2, 3, 4]) // falls back to default
   })
 
@@ -327,18 +328,25 @@ describe('AppChatStore — the voice-note transcript is DURABLE', () => {
 })
 
 /**
- * A long chat used to open on its OLDEST messages and stop short of the present:
- * the client's only history request is `resume {after_seq: lastSeenSeq}` (0 on a
- * cold store), it fires exactly once per socket open, and the replay took the
- * FIRST `DEFAULT_REPLAY_LIMIT` rows after the cursor. Every message past 500 was
- * dropped with no truncation signal, so the transcript never caught up. Reported
- * live on a 1130-message topic — it showed old messages and ended ~630 short.
+ * A long chat opened on its OLDEST messages and stopped short of the present. The
+ * client's only history request is `resume {after_seq: lastSeenSeq}` (0 on a cold
+ * store) and it fires exactly ONCE per socket open, so a replay capped at
+ * `DEFAULT_REPLAY_LIMIT` handed the device 500 messages and stopped. Reported live
+ * on a 1130-message topic: it showed old messages and ended ~630 short.
  *
- * The window is now the NEWEST `limit`. Still lossy when capped (the gap moves to
- * the middle), but the recent end of the conversation is the end that has to be
- * there.
+ * The property that makes the fix possible is asserted here: ONE PAGE IS A PREFIX.
+ * The page is the OLDEST `limit` rows past the cursor, so the last row's `seq` is
+ * a valid cursor for the remainder and repeated calls CONVERGE on the whole
+ * backlog, in order, losing nothing. `AppWsAdapter.replayAfter` does exactly that
+ * loop, which is what makes one socket open enough.
+ *
+ * This is deliberately NOT fixed by returning the newest page instead. That reads
+ * better in a single call and is worse: the cursor would jump to the topic max and
+ * every earlier message would become permanently unreachable, because a resume
+ * cursor only moves forward. The convergence test below is the one that tells the
+ * two apart — a newest-page window makes it collect 500 of 1130 and stop.
  */
-describe('AppChatStore — a capped replay keeps the NEWEST page (regression)', () => {
+describe('AppChatStore — one replay page is a PREFIX, so paging converges', () => {
   const seed = async (count: number): Promise<void> => {
     for (let i = 1; i <= count; i++) {
       await store.append({
@@ -348,58 +356,107 @@ describe('AppChatStore — a capped replay keeps the NEWEST page (regression)', 
     }
   }
 
-  it('replays the newest DEFAULT_REPLAY_LIMIT of an over-long topic, ascending', async () => {
-    await seed(DEFAULT_REPLAY_LIMIT + 130) // 630, the shape of the live report
-    const replay = await store.replayAfter(TOPIC, 0)
+  /** The drain a paging caller performs: page, advance to the last row's seq,
+   *  repeat until a page comes back empty. Mirrors `AppWsAdapter.replayAfter`. */
+  const drain = async (from = 0, limit?: number): Promise<number[]> => {
+    const seqs: number[] = []
+    let cursor = from
+    for (let guard = 0; guard < 100; guard++) {
+      const page = await store.replayAfter(TOPIC, cursor, limit)
+      if (page.length === 0) return seqs
+      for (const r of page) seqs.push(r.seq)
+      const last = page[page.length - 1]!
+      if (last.seq <= cursor) return seqs
+      cursor = last.seq
+    }
+    throw new Error('drain did not terminate')
+  }
 
-    expect(replay).toHaveLength(DEFAULT_REPLAY_LIMIT)
-    // The last message in the topic MUST be the last message replayed. This is
-    // the assertion the old `ORDER BY seq ASC` fails: it returned seq 1..500 and
-    // ended 130 short of the present.
-    expect(replay[replay.length - 1]!.seq).toBe(DEFAULT_REPLAY_LIMIT + 130)
-    expect(replay[replay.length - 1]!.body).toBe(`msg-${DEFAULT_REPLAY_LIMIT + 130}`)
-    expect(replay[0]!.seq).toBe(131)
-    // Contiguous and ASCENDING — the reverse walk is undone before it ships.
-    expect(replay.map((r) => r.seq)).toEqual(
-      Array.from({ length: DEFAULT_REPLAY_LIMIT }, (_, i) => 131 + i),
+  it('a page is the OLDEST rows past the cursor, and the page advances the cursor', async () => {
+    await seed(DEFAULT_REPLAY_LIMIT + 630) // 1130, the live report's exact shape
+    const first = await store.replayAfter(TOPIC, 0)
+
+    expect(first).toHaveLength(DEFAULT_REPLAY_LIMIT)
+    expect(first.map((r) => r.seq)).toEqual(
+      Array.from({ length: DEFAULT_REPLAY_LIMIT }, (_, i) => i + 1),
     )
+    // Load-bearing: the omitted remainder is reachable FROM this page's last row.
+    // Under a newest-page window this cursor would be 1130 and seq 1..630 would be
+    // unreachable for the life of the store.
+    const second = await store.replayAfter(TOPIC, first[first.length - 1]!.seq)
+    expect(second[0]!.seq).toBe(DEFAULT_REPLAY_LIMIT + 1)
   })
 
-  it('is a byte-identical no-op for a topic that fits inside the limit', async () => {
-    // The control for the test above: below the threshold both orderings return
-    // the same rows, which is what keeps the ordinary gap-fill contract intact.
+  it('draining converges on the WHOLE 1130-message backlog, in order, exactly once', async () => {
+    const total = DEFAULT_REPLAY_LIMIT + 630
+    await seed(total)
+
+    const seqs = await drain()
+
+    // Complete: nothing dropped. A newest-page window collects 500 and stops here.
+    expect(seqs).toHaveLength(total)
+    expect(seqs).toEqual(Array.from({ length: total }, (_, i) => i + 1))
+    // And no duplicates from the page boundaries (length + set size together).
+    expect(new Set(seqs).size).toBe(total)
+    // Three pages of 500, 500, 130 — the drain is doing real paging, not one call.
+    expect(Math.ceil(total / DEFAULT_REPLAY_LIMIT)).toBe(3)
+  })
+
+  it('converges from a non-zero cursor too, without re-sending what the client has', async () => {
+    await seed(DEFAULT_REPLAY_LIMIT + 630)
+    const seqs = await drain(700)
+    expect(seqs[0]).toBe(701)
+    expect(seqs[seqs.length - 1]).toBe(DEFAULT_REPLAY_LIMIT + 630)
+    expect(seqs).toEqual(Array.from({ length: 430 }, (_, i) => 701 + i))
+  })
+
+  it('converges on a tiny limit, where almost every call is a page boundary', async () => {
+    await seed(11)
+    // limit 2 → six pages, the last one short. Exercises the boundary repeatedly.
+    expect(await drain(0, 2)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+  })
+
+  it('a topic inside the limit replays COMPLETE rows, every field, in one page', async () => {
+    // The control: at or below the threshold one page is the whole transcript, so
+    // this pins full row payloads — every row, not just the first — and would go
+    // red on any corruption of a later row, not only of the head.
     await seed(DEFAULT_REPLAY_LIMIT)
     const replay = await store.replayAfter(TOPIC, 0)
 
     expect(replay).toHaveLength(DEFAULT_REPLAY_LIMIT)
-    expect(replay.map((r) => r.seq)).toEqual(
-      Array.from({ length: DEFAULT_REPLAY_LIMIT }, (_, i) => i + 1),
+    expect(replay).toEqual(
+      Array.from({ length: DEFAULT_REPLAY_LIMIT }, (_, i) => ({
+        topic_id: TOPIC,
+        seq: i + 1,
+        message_id: `m${i + 1}`,
+        role: (i + 1) % 2 === 0 ? 'agent' : 'user',
+        body: `msg-${i + 1}`,
+        client_msg_id: null,
+        project_id: null,
+        attachments: null,
+        meta: null,
+        transcript: null,
+        created_at: i + 1,
+      })),
     )
-    expect(replay[0]).toEqual({
-      topic_id: TOPIC, seq: 1, message_id: 'm1', role: 'user', body: 'msg-1',
-      client_msg_id: null, project_id: null, attachments: null, meta: null,
-      transcript: null, created_at: 1,
-    })
   })
 
-  // CONTROL — the uncapped gap-fill contract this change must NOT touch. Green
-  // under both orderings by construction (every remainder here fits the limit),
-  // so if it ever fails, the change broke ordinary resume rather than the cap.
+  // CONTROL — the ordinary gap-fill contract this change must NOT touch.
   it('still gap-fills forward from a non-zero cursor', async () => {
     await seed(12)
     expect((await store.replayAfter(TOPIC, 9)).map((r) => r.seq)).toEqual([10, 11, 12])
     expect((await store.replayAfter(TOPIC, 0)).map((r) => r.seq)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     ])
-    // Cursor at the head: nothing to replay.
+    // Cursor at the head: nothing to replay, so a drain terminates immediately.
     expect(await store.replayAfter(TOPIC, 12)).toEqual([])
-    // Cursor past the head: still nothing, no wrap-around from the reverse walk.
+    // Cursor past the head: still nothing, and no wrap-around.
     expect(await store.replayAfter(TOPIC, 99)).toEqual([])
   })
 
-  it('caps from a non-zero cursor to the newest page, not the oldest', async () => {
+  it('caps from a non-zero cursor to the oldest page past it, not the newest', async () => {
     await seed(12)
-    expect((await store.replayAfter(TOPIC, 4, 3)).map((r) => r.seq)).toEqual([10, 11, 12])
+    expect((await store.replayAfter(TOPIC, 4, 3)).map((r) => r.seq)).toEqual([5, 6, 7])
   })
 
   it('leaves other topics untouched', async () => {

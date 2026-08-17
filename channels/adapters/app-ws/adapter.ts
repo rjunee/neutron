@@ -910,16 +910,52 @@ export class AppWsAdapter implements ChannelAdapter {
    * gap without re-broadcasting to other devices. Returns `[]` when no durable
    * log is wired.
    *
-   * NOT necessarily every message: the store bounds one replay to
-   * `DEFAULT_REPLAY_LIMIT` and, past that, returns the NEWEST page — so a topic
-   * with a longer backlog than the limit lands on the requesting device missing
-   * a MIDDLE span, with the newest messages present. `resume` is sent once per
-   * socket open and nothing pages the remainder.
+   * EVERY message after the cursor, drained page-by-page. `replayAfter` on the
+   * store bounds ONE page to `DEFAULT_REPLAY_LIMIT` rows (so no single query
+   * materializes an unbounded transcript), and that page is the OLDEST rows after
+   * the cursor — a prefix — so advancing to the last row's `seq` and asking again
+   * walks the whole backlog in order. Same drain the receipt and reaction replays
+   * already do ({@link replayReceiptsAfter}, {@link replayReactionsAfter}); this
+   * is the one replay on the resume path that did not, and a long chat paid for
+   * it: a 1130-message topic sent 500 envelopes and stopped, so the device
+   * rendered the OLDEST 500 and ended ~630 short of the present with no signal
+   * that anything was missing.
+   *
+   * `resume` fires once per socket open, so a single page per open only converged
+   * across repeated reconnects — a transcript that catches up one screenful per
+   * app restart is indistinguishable from a broken one. Draining here converges
+   * in ONE open.
+   *
+   * The loop stops on an empty page, and defensively on a page whose last `seq`
+   * failed to advance past the cursor we asked from (a malformed store would
+   * otherwise spin forever and hang reconnect).
+   *
+   * COST, stated rather than hidden: each SQL page stays bounded, but the
+   * returned array is O(messages after the cursor), so a very long topic makes a
+   * cold resume proportionally large. That is the same profile the receipt and
+   * reaction drains beside it already have, and it is the honest one — the
+   * alternative is dropping messages the owner has no way to ask for again.
+   * Trading it back for a bounded window needs a client affordance to fetch older
+   * history on demand (a "load earlier" request the wire has no shape for yet),
+   * not a silent cap here.
    */
   async replayAfter(channel_topic_id: string, after_seq: number): Promise<AppWsOutbound[]> {
-    if (this.chat_log === undefined) return []
-    const rows = await this.chat_log.replayAfter(channel_topic_id, after_seq)
-    return rows.map((r) => appChatRowToEnvelope(r))
+    const log = this.chat_log
+    if (log === undefined) return []
+    const out: AppWsOutbound[] = []
+    let seq = after_seq
+    for (;;) {
+      const rows = await log.replayAfter(channel_topic_id, seq)
+      if (rows.length === 0) break
+      for (const row of rows) out.push(appChatRowToEnvelope(row))
+      const last = rows[rows.length - 1]
+      if (last === undefined || last.seq <= seq) {
+        wsLog.warn('message_replay_cursor_stalled', { topic: channel_topic_id, seq })
+        break
+      }
+      seq = last.seq
+    }
+    return out
   }
 
   /** Chat-sync foundation — highest persisted seq for a topic (0 when none /

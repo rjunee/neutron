@@ -105,10 +105,16 @@ export interface AppChatMessageLog {
    */
   append(input: AppChatAppendInput): Promise<AppChatAppendResult>
   /**
-   * Replay messages after `after_seq` for a topic, ascending by seq, bounded by
-   * `limit` (default {@link DEFAULT_REPLAY_LIMIT}). `after_seq <= 0` (or a cold
-   * client) returns the whole transcript when it fits within `limit`, and its
-   * NEWEST `limit` messages when it does not.
+   * Replay ONE PAGE of messages after `after_seq` for a topic, ascending by seq:
+   * the OLDEST `limit` rows past the cursor (default
+   * {@link DEFAULT_REPLAY_LIMIT}). `after_seq <= 0` (or a cold client) returns
+   * the whole transcript when it fits within `limit`, and its oldest `limit`
+   * messages when it does not.
+   *
+   * A caller holding a longer backlog than one page MUST call again from the last
+   * returned row's `seq` until a page comes back empty — the page is a prefix, so
+   * that converges on the whole transcript in order. `AppWsAdapter.replayAfter`
+   * is the caller that does this on the resume path.
    */
   replayAfter(topic_id: string, after_seq: number, limit?: number): Promise<AppChatRow[]>
   /** Highest seq persisted for a topic, or 0 when the topic has no messages. */
@@ -143,19 +149,25 @@ export interface AppChatMessageLog {
 }
 
 /**
- * Default replay page size — bounds a single resume so a long-offline client
- * can't pull an unbounded transcript in one frame burst.
+ * Default replay page size — bounds ONE PAGE, so no single query materializes an
+ * unbounded transcript. It does NOT bound one resume: `AppWsAdapter.replayAfter`
+ * pages forward from the last row's `seq` until a page comes back empty, so a
+ * backlog longer than this arrives complete and in order, one bounded query at a
+ * time. Raising this number changes how many round trips a cold resume costs and
+ * nothing else — it is not a lever on transcript completeness.
  *
- * A topic with more than this many messages after the cursor replays the
- * NEWEST 500 (`AppChatEventLogCore.rowsAfterNewest`), and the rest is SKIPPED,
- * not paged: `resume` fires once per socket open, and there is no wire signal
- * for "older messages exist above this". Raising this number is not the fix for
- * a truncated transcript — it only moves the threshold.
- *
- * (An earlier version of this comment claimed "the client re-issues resume from
- * the new high-water mark to page the rest." No client ever did. It described an
- * intended design, not the code, and it is what made the ordering bug read as
- * harmless for as long as it did.)
+ * A PREVIOUS VERSION of this comment said "the client re-issues resume from the
+ * new high-water mark to page the rest", and that half-truth cost real messages.
+ * The client does re-issue: `SyncEngine.resumeRequest` reads
+ * `store.lastSeenSeq(topic)` (the MAX applied seq — `chat-core/store.ts`
+ * `lastSeenSeq`) and both sessions send it on every open
+ * (`chat-core/web-session.ts` / `app/lib/chat-core/mobile-session.ts`
+ * `resumeAndFlush`). What it does NOT do is re-issue WITHIN an open — resume
+ * fires exactly once per socket (`SyncEngine`'s per-open guard), so before the
+ * server-side drain a 1130-message topic advanced 500 messages per app restart
+ * and the owner saw a transcript that stopped ~630 short of the present. Paging
+ * that is technically convergent but takes three reconnects is not the same
+ * thing as paging, and writing it as though it were is what let the gap sit.
  */
 export const DEFAULT_REPLAY_LIMIT = 500
 

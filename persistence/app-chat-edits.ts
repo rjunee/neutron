@@ -103,9 +103,15 @@ export interface AppChatEditLog {
    * Edit aggregates for edited/deleted messages whose seq is greater than
    * `after_seq`, ascending by seq. Used to replay edit state to a reconnecting
    * device after the message replay. Bounded by `limit` messages (default
-   * {@link DEFAULT_EDIT_REPLAY_LIMIT}); past that bound it returns the NEWEST
-   * `limit`, matching the message replay's window so the edits a device receives
-   * cover the messages it received.
+   * {@link DEFAULT_EDIT_REPLAY_LIMIT}) — the OLDEST `limit` past the cursor.
+   *
+   * KNOWN GAP, pre-existing and deliberately not changed here: unlike the message
+   * replay, this one is NOT drained page-by-page by its caller
+   * (`AppWsAdapter.replayEditsAfter` makes a single call), so a topic with more
+   * than `limit` edited messages after the cursor replays edit state for the
+   * oldest of them and silently omits the rest. The consequence is cosmetic where
+   * a dropped message is not (an un-struck deleted bubble, a missing "edited"
+   * marker), which is why it is recorded rather than fixed in the same change.
    */
   aggregatesAfter(
     topic_id: string,

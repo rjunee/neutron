@@ -3,9 +3,9 @@
  * reach: the `row`-shaped branch of `aggregatesAfterPage`. Neither row-shaped
  * store (messages, edits) exposes `aggregatesAfterPage`, so that branch has no
  * caller in the tree — and its docblock promises output IDENTICAL to
- * `aggregatesAfter`'s. Without a test, the two copies of the replay window were
- * free to drift, which is exactly how the capped page ends up ordered one way in
- * one method and the other way in the other.
+ * `aggregatesAfter`'s. The two used to be hand-copied SQL, free to drift; they now
+ * share one private helper, and these tests pin the agreement so a future edit to
+ * one cannot quietly change only one replay window.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -54,13 +54,37 @@ const seed = (count: number): void => {
 }
 
 describe('AppChatEventLogCore — row-shaped replay window', () => {
-  it('caps aggregatesAfterPage to the NEWEST rows, ascending, with a null cursor', () => {
+  it('caps a page to the OLDEST rows past the cursor, ascending', () => {
+    seed(10)
+    expect(core.aggregatesAfterPage(TOPIC, 0, 4).aggregates.map((a) => a.seq)).toEqual([1, 2, 3, 4])
+  })
+
+  it('a capped page is a PREFIX, so paging from its last seq reaches the remainder', () => {
+    seed(10)
+    // The property the resume drain depends on: page, take the last seq, page
+    // again — and arrive at the whole backlog with nothing skipped or repeated.
+    const seqs: number[] = []
+    let cursor = 0
+    for (let guard = 0; guard < 20; guard++) {
+      const page = core.aggregatesAfterPage(TOPIC, cursor, 4).aggregates
+      if (page.length === 0) break
+      for (const a of page) seqs.push(a.seq)
+      const last = page[page.length - 1]!
+      if (last.seq <= cursor) break
+      cursor = last.seq
+    }
+    expect(seqs).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+  })
+
+  it('reports next_cursor null even when capped — complete PAGE, not drained backlog', () => {
     seed(10)
     const page = core.aggregatesAfterPage(TOPIC, 0, 4)
-    expect(page.aggregates.map((a) => a.seq)).toEqual([7, 8, 9, 10])
-    // A row-shaped log's omitted rows lie BEFORE its page, and this cursor only
-    // walks forward — so there is genuinely no continuation to hand back.
+    expect(page.aggregates).toHaveLength(4)
+    // Documented exception on `AggregatesPage.next_cursor`: for a row-shaped log
+    // null means "this page is complete". Six rows remain, and they are reachable
+    // via the plain seq cursor (asserted above) rather than through this field.
     expect(page.next_cursor).toBeNull()
+    expect(core.aggregatesAfter(TOPIC, 4, 4).map((a) => a.seq)).toEqual([5, 6, 7, 8])
   })
 
   it('agrees with aggregatesAfter exactly — capped and uncapped', () => {
@@ -81,8 +105,8 @@ describe('AppChatEventLogCore — row-shaped replay window', () => {
 
   it('falls back to the store default limit on a non-finite limit', () => {
     seed(10)
-    // defaultReplayLimit is 4 here, and the newest four are 7..10.
-    expect(core.aggregatesAfter(TOPIC, 0, Number.NaN).map((a) => a.seq)).toEqual([7, 8, 9, 10])
+    // defaultReplayLimit is 4 here, and the oldest four past 0 are 1..4.
+    expect(core.aggregatesAfter(TOPIC, 0, Number.NaN).map((a) => a.seq)).toEqual([1, 2, 3, 4])
   })
 
   it('returns everything, ascending, when the backlog fits the limit', () => {
