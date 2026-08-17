@@ -2,6 +2,14 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the arrival proof follows the emitted per-part receipt contract
+
+The card branch now carries the #313/main arbitration, and its arrival proof measures
+the assembled brief against the aligned `NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY`
+receipts that the workflow emits since #321. Parts-mode run commands omit the
+whole-brief receipt by design; asserting that retired token was the one way the
+arrival suite could go red against an otherwise healthy transport.
+
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
 The outer publisher refused to publish when origin's branch ref already equalled the

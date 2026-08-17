@@ -7,9 +7,9 @@
  * correlated back. Both were RE-MEASURED against main before this suite was
  * written and NEITHER reproduces when the transport the workflow actually emits is
  * executed verbatim — the parts arrive, the assembled brief matches the prompt's
- * own receipt at the codex seam, and the exit/trailer files land at the run-id-keyed
- * paths. Saying that honestly matters more than shipping a fix for a bug that is
- * not there.
+ * own per-part receipts at the codex seam, and the exit/trailer files land at the
+ * run-id-keyed paths. Saying that honestly matters more than shipping a fix for a
+ * bug that is not there.
  *
  * What WAS missing is the measurement that would have said so. No suite executed
  * the workflow-EMITTED run command and then read the CHILD's environment:
@@ -89,7 +89,7 @@ async function emitForgeBuildPrompt(
   const agent = async (prompt: string, o?: { label?: string }): Promise<unknown> => {
     const label = o?.label
     captured.push({ label, prompt })
-    if (String(label).startsWith('head-probe-round-built-')) return { head: 'a'.repeat(40) }
+    if (String(label).startsWith('head-probe-round-')) return { head: 'a'.repeat(40) }
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       return {
         codexStatus: 'connected',
@@ -106,6 +106,18 @@ async function emitForgeBuildPrompt(
     }
     if (label === 'argus:claude' || label === 'argus:adversarial' || label === 'argus:synthesis') {
       return { verdict: 'APPROVE', findings: [] }
+    }
+    if (label === 'plan:fable') {
+      return {
+        implementationPlan: '- [ ] the one task',
+        topTask: 'the one task',
+        executionSpec: 'TARGET FILES: x.ts',
+        complexity: 'reasoning',
+        remainingTasks: 0,
+      }
+    }
+    if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
+      return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
     }
     if (String(label).startsWith('argus:codex')) {
       return { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
@@ -132,6 +144,8 @@ async function emitForgeBuildPrompt(
     runId,
     resumeCheckpoint: null,
     codexHome,
+    codexBuildScript: join(REPO_ROOT, 'trident', 'codex-build.sh'),
+    codexReviewScript: join(REPO_ROOT, 'trident', 'codex-review.sh'),
     kimiConfigured: false,
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
@@ -295,7 +309,8 @@ describe('codex build dispatch — the brief ARRIVES at the child and the run id
       const io = mkTemp('trident-arrival-io-')
       const envDump = join(io, 'env.dump')
       const stdinDump = join(io, 'stdin.dump')
-      await launch(extractRunCommand(prompt), {
+      const command = extractRunCommand(prompt)
+      await launch(command, {
         worktree: makeWorktree(),
         stubBin: makeStubBin(),
         envDump,
@@ -328,12 +343,19 @@ describe('codex build dispatch — the brief ARRIVES at the child and the run id
       for (const p of partsList) expect(existsSync(p)).toBe(true)
 
       // (d) THE BUILD IS NOT BLIND: what landed on the seam's stdin is the whole
-      // brief, and it measures to the prompt's OWN receipt.
+      // brief assembled from the files measured by the prompt's OWN per-part receipts.
       const stdin = readFileSync(stdinDump, 'utf8')
       expect(stdin).toContain('ARRIVAL_MARKER_77')
-      const receipt = /NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY='([^']*)'/.exec(prompt)?.[1]
-      expect(receipt).toBeTruthy()
-      expect(briefIntegrity(stdin)).toBe(String(receipt))
+      expect(command).toContain('NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=')
+      expect(command).not.toContain(' NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
+      const receipts = (
+        /NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY='([^']*)'/.exec(command)?.[1] ?? ''
+      ).split('\n')
+      expect(receipts.length).toBe(3)
+      expect(stdin).toBe(partsList.map((p) => readFileSync(p, 'utf8')).join(''))
+      for (let i = 0; i < partsList.length; i++) {
+        expect(briefIntegrity(readFileSync(partsList[i], 'utf8'))).toBe(receipts[i])
+      }
 
       // (e) The routed model reached the child, and the scrub held on the seam path.
       expect(dump).toContain('CODEX_BUILD_MODEL=gpt-5-codex')
