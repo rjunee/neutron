@@ -996,8 +996,8 @@ count, and floors a negative at zero.
 strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
 pair left every existing test green (the review counted 124 across four suites; that is
 its measurement, and what is re-measured here is that the revert is now red), because
-reaching that branch needs a standing park LONGER than the hour — which only a `retry-after` produces — while the
-owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
+reaching that branch needs a standing park LONGER than the hour — which only a
+`retry-after` produces — while the owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
 says wait two hours, in-flight turns fail their way to the threshold, and the strike
 park would then release the credential 60 minutes into a 120-minute window the
 provider asked for, relabelled. Now covered with its control (with nothing standing,
@@ -1022,6 +1022,7 @@ append-only and a correction that edits history is how a sibling's entry gets lo
 No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
 — a bounded park, a discarded bogus header value, and coverage for two branches that
 had none.
+
 ## 2026-08-16 — "done" is refused on the write path, not on one of its doors
 
 A review of the stalled-driver wakeup change (#341) reproduced the 2026-08-11 incident on a store that already carried the guard. `WorkBoardStore.complete()` refused to mark an item done while its bound run was live, but `complete()` was never the only door: `update()` accepts the full status enum, and the `work_board_update` agent tool hands a model's `status` straight to it. Patching `{status:'done'}` walked past the check and stamped `completed_at` mid-build — the same false claim, through the other door.
