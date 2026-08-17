@@ -84,6 +84,66 @@ reddens 3 of 14; unsetting the chat profile's floor reddens 3; leaking the floor
 onto the memory lane reddens 4; dropping the factory forward reddens 1. That
 last one is not hypothetical — `appendSystemPromptFile` was lost at exactly that
 seam once, proven at the factory-input layer while the real factory dropped it.
+## 2026-08-16 — the identity-trim claim was true and unexecuted, so CI now runs it
+
+#333's review panel was still running when the PR merged, so its findings were
+re-verified here against `main` rather than inherited. **All five were already
+closed by #333 itself before it landed, and the entry below says so with the
+mutation evidence rather than repeating them as open.** What the re-audit found
+instead is one level up, and it is the reason the same defect recurred four
+times.
+
+**The audit, measured rather than asserted.** Every behaviour-changing predicate
+#333 touched was independently mutation-tested against a GREEN BASELINE control
+(139 pass / 0 fail across the nine suites before any mutation): 12 predicates
+across 9 readers — `resolveOpenDbPath` and both arms of `resolveNeutronHome`
+(`migrations/db-path.ts`), all three tiers of `resolveRegistryDbPath`
+(`gateway/boot-listener-registry.ts`), `applyEnvShim` (`open/server.ts`), both
+predicates in `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`),
+`resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`),
+`resolveReplCwdAndHome` (`runtime/adapters/claude-code/index.ts`), the `--home`
+guard (`scripts/email-accounts.ts`), `buildPromptVars` (`prompts/template.ts`)
+and the return-verbatim half of `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts`). Reverting each one turns its suite RED. The
+sentence "each trim was mutation-proved" is therefore TRUE as written, and it
+stays; the two reachability claims settle the same way —
+`resolveRegistryDbPath` is named only by two `export {}` statements
+(`gateway/index.ts`, `gateway/composer-contract.ts`) with no in-tree caller, and
+the REPL blank-`cwd` arm is genuinely unreachable because `open/composer.ts:855`
+derives its `cwd` from `resolveNeutronHome`, which cannot return blank, and
+passes it at `:1295`.
+
+**The defect that IS still live: the claim's proof was a command nothing ran.**
+`config/index.ts` bounds its "every TypeScript read treats blank as unset" claim
+with a re-runnable grep, which was the right instinct and fixed the WORDING of
+the failure rather than its MECHANISM. A command in a comment fires only when a
+reader chooses to type it, and by then the claim is already wrong — which is
+precisely how rounds 1-4 went: round 1 named three untrimmed siblings as
+trimming, round 2 called a seven-item list exhaustive while naming a file that
+contained no `trim()` at all, round 3's pattern could not match the constant-key
+reader, round 4 claimed a mutation proof for four sites pinned by nothing. Four
+rounds, one mechanism, each discovered months late. So the command is now
+EXECUTED: `tests/integration/identity-env-readers-registry.test.ts` walks the
+tree with those patterns and asserts the reader set exactly equals its
+registry — in both directions, so a new untrimmed reader fails on the PR that
+adds it AND a row whose file stopped reading the variable fails too, which is
+the rot that produced rounds 1 and 2. Mutation-proved four ways, each with a
+control proving the mutation landed: a new unregistered reader → RED naming the
+file; a deleted row → RED; a row for a non-reader → RED in the `stale`
+direction; and neutering the walker → RED on the anti-vacuity control, which is
+the failure a set-equality guard silently hides when it compares two empty
+lists.
+
+**A pin that lives only in a distant file is indistinguishable from no pin.**
+`gateway/__tests__/resolve-registry-db-path.test.ts` advertises itself as
+pinning "all four resolution tiers" and covered `''` but never whitespace; the
+whitespace pin lived in `open/__tests__/owner-slug-agreement.test.ts`. Reverting
+all three trims left the registry's OWN suite green, and this audit's first pass
+read that green as "unpinned" and nearly filed it as a blocker — a false
+negative caused by scoping the check to the file the code lives in, which is
+where anyone would look. The whitespace cases plus per-tier controls and a
+space-padded real-path case now live beside the tiers they govern; all three
+arms fail there under mutation.
 
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 
