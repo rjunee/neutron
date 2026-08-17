@@ -180,6 +180,24 @@ export function resolveOwnerRegistryRow(input: {
  *
  * NaN / non-integer / out-of-range values throw at boot — better to brick
  * loudly here than let systemd Restart-loop a misconfigured unit.
+ *
+ * A BLANK `NEUTRON_PORT` IS UNSET, and this is CONSISTENCY ON A PUBLISHED
+ * SURFACE RATHER THAN A LIVE FIX — said plainly, because a trim on a value no
+ * live path reads is a no-op dressed as a bug fix. `boot()` does not feed this
+ * branch the operator's string: it passes `String(config.port)` from the already
+ * validated config (`gateway/index.ts`, the `resolveListenPort(process.argv, {
+ * NEUTRON_PORT: … })` call), so in production this env value is either absent or
+ * canonical and the blank arm is unreachable. `optionalIntKnob`
+ * (`config/index.ts`) is the predicate an operator's environment actually hits,
+ * and that is where the reachable defect was. What this arm does own is being a
+ * SECOND answer for the same variable on an exported surface: `''` fell through
+ * to the default while `'   '` threw, so a direct caller could get two answers
+ * from one blank. Both are now the default.
+ *
+ * `--port=` is deliberately NOT on that rule: an explicit flag with a blank
+ * value stays a loud refusal, because the caller passed the flag and said
+ * nothing — the same split `scripts/email-accounts.ts` makes for a blank
+ * `--home`. Both directions are pinned in `gateway/listener.test.ts`.
  */
 export function resolveListenPort(
   argv: ReadonlyArray<string>,
@@ -198,7 +216,7 @@ export function resolveListenPort(
     }
   }
   const fromEnv = env['NEUTRON_PORT']
-  if (fromEnv !== undefined && fromEnv !== '') {
+  if (fromEnv !== undefined && fromEnv.trim() !== '') {
     const parsed = Number.parseInt(fromEnv, 10)
     if (Number.isNaN(parsed) || String(parsed) !== fromEnv.trim()) {
       throw new Error(`invalid NEUTRON_PORT=${fromEnv}: not an integer`)
