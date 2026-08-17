@@ -329,6 +329,14 @@ export function resolveDeployedTree(dir: string): DeployedTree {
     if (gitDir === null) return unverifiable('no-git-metadata')
     const index = readGitIndex(gitDir)
     if (!index.ok) return unverifiable(index.reason)
+    // NOT REACHABLE TODAY, and kept deliberately. `findCheckoutRoot` walks UP from
+    // `dir`, so the root it returns is always a textual ancestor and `dirPrefixIn`
+    // always answers — this is the total-function guard on that invariant, not a
+    // path any caller can currently take. It stays because the alternative if the
+    // invariant ever breaks is a prefix computed from an unrelated root, which
+    // would silently mark tracked files untracked and refuse a correct boot; that
+    // failure is much worse than an unverifiable row. `README.md` lists the reason
+    // with the same caveat so the ledger's contract stays complete.
     const dirPrefix = dirPrefixIn(root, dir)
     if (dirPrefix === null) return unverifiable('outside-deployed-tree')
 

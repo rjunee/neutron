@@ -42,7 +42,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '../runner.ts'
+import { applyMigrations, loadMigrations } from '../runner.ts'
 import { migrationContentHash, resolveDeployedTree } from '../provenance.ts'
 import { parseGitIndex } from '../git-index.ts'
 import { encodeIndex } from './git-index-fixture.ts'
@@ -677,20 +677,87 @@ test('the column is added additively; a pre-existing row stays NULL and still bo
   expect(rows(db)[1]?.['tree_provenance']).toBe('unverifiable:no-git-metadata')
 })
 
+// ------------------------------------- a stray that collides with a real ordinal
+
+/**
+ * The shape ordinals 122 and 124 actually took on the live instance: a stray did
+ * not arrive at a FREE ordinal, it landed on one a real migration already owned.
+ * That trips the ordinal-collision guard first, and the collision message sends
+ * the operator hunting a duplicate they never committed while the real remedy —
+ * delete the stray — goes unsaid. Fail-closed either way; the diagnosis is the
+ * whole value.
+ */
+test('a stray colliding with a tracked file is diagnosed as the stray, not as a collision', () => {
+  const dir = checkout('collide', {
+    files: { '0001_alpha.sql': ALPHA, '0001_stray.sql': STRAY },
+    tracked: ['0001_alpha.sql'],
+  })
+  const message = messageOf(() => applyMigrations(new Database(':memory:'), dir))
+  expect(message).toContain('0001_stray.sql')
+  expect(message).toMatch(/NOT part of the deployed tree/)
+  // The point of the change: the WRONG diagnosis is gone, not merely outranked.
+  expect(message).not.toMatch(/ordinal collision/)
+})
+
+test('THE CONTROL — two TRACKED files at one ordinal still report the collision', () => {
+  // Without this, the test above passes just as well against a guard that stopped
+  // checking ordinal collisions altogether — which would be a real regression, since
+  // two committed files at one ordinal is a mistake in this repository and naming
+  // both is the only useful message for it.
+  const dir = checkout('collide-both-tracked', {
+    files: { '0001_alpha.sql': ALPHA, '0001_beta.sql': BETA },
+    tracked: ['0001_alpha.sql', '0001_beta.sql'],
+  })
+  const message = messageOf(() => applyMigrations(new Database(':memory:'), dir))
+  expect(message).toContain('Migration ordinal collision at version 1')
+  expect(message).toContain('0001_alpha.sql')
+  expect(message).toContain('0001_beta.sql')
+})
+
+test('THE CONTROL — with no git metadata a collision still reports the collision', () => {
+  // The deferral is bought with the tree verdict, so where there is none the old
+  // message must survive untouched. An install that cannot check is not an install
+  // that stops checking what it can.
+  const dir = bareTree('collide-bare', { '0001_alpha.sql': ALPHA, '0001_beta.sql': BETA })
+  expect(messageOf(() => applyMigrations(new Database(':memory:'), dir))).toContain(
+    'Migration ordinal collision at version 1',
+  )
+})
+
 // ------------------------------------------------ the parser's own ground truth
 
 /**
- * Say out loud that a control did not run.
+ * Say out loud that a control did not run — and FAIL where it should have.
  *
  * A control that returns early reads as a pass, which is this repository's own
  * rule-7 trap: the tool could not answer and the silence looked like an answer.
- * These two controls legitimately cannot run everywhere (a source export has no
- * `.git`; a machine may have no `git` on PATH), so they may not be hard failures —
- * but a skipped control must be VISIBLE in the output rather than indistinguishable
- * from a verified one.
+ * The controls that call this legitimately cannot run everywhere — a source
+ * export has no `.git`, and a machine may have no `git` on PATH — so on such a
+ * machine the skip is a warning, VISIBLE in the output rather than
+ * indistinguishable from a verified run.
+ *
+ * IN CI IT IS A HARD FAILURE, and that is the half that was missing. A warning is
+ * only a signal if something reads it, and nothing reads CI's stdout on a green
+ * run; a control that quietly stopped executing would have looked exactly like a
+ * control that passed, for as long as it took someone to notice. CI checks out
+ * with real git metadata and a real `git` binary (`actions/checkout`), so a skip
+ * there is not an unsupported machine — it is the control not running, which is
+ * the one thing a control may never do silently. This is what makes the guard's
+ * own coverage assertable instead of advisory.
+ *
+ * Keyed on `CI`, which every CI provider sets and no developer machine does. It
+ * gates nothing in the product and adds no second code path to it — this is the
+ * test suite deciding how loudly to complain about its own environment.
  */
 function controlDidNotRun(name: string, why: string): void {
-  console.warn(`CONTROL DID NOT EXECUTE — ${name}: ${why}. Fixtures still cover the logic.`)
+  const what = `CONTROL DID NOT EXECUTE — ${name}: ${why}`
+  const ci = process.env['CI']
+  if (ci !== undefined && ci !== '' && ci !== 'false' && ci !== '0') {
+    throw new Error(
+      `${what}. CI has a real checkout and a real git, so this is a broken control, not an unsupported machine.`,
+    )
+  }
+  console.warn(`${what}. Fixtures still cover the logic.`)
 }
 
 test('THE CONTROL — the parser agrees with git ls-files on this repository', () => {
@@ -809,10 +876,34 @@ test("this repository's own migration files are all tracked", () => {
     return
   }
 
-  const tree = resolveDeployedTree(join(REPO_ROOT, 'migrations'))
+  const migrationsDir = join(REPO_ROOT, 'migrations')
+  const tree = resolveDeployedTree(migrationsDir)
   expect(tree.kind).toBe('verified')
   if (tree.kind !== 'verified') return
   expect(tree.dirPrefix).toBe('migrations/')
   expect(tree.tracked.has('runner.ts')).toBe(true)
-  expect(tree.tracked.has('0001_initial_schema.sql')).toBe(true)
+
+  // THE INVARIANT, ENUMERATED — and this is the assertion that can actually FAIL
+  // on the defect. Naming one or two files by hand proved only that the resolver
+  // answers about this tree; it could not fail on the real shape of the incident,
+  // which is ONE untracked `NNNN_*.sql` among the many files here. Without the
+  // enumeration below, an untracked migration committed to this repository passes
+  // CI and first announces itself as a production boot refusal — the guard
+  // catching us in the field instead of at review time.
+  //
+  // The set comes from `loadMigrations`, the PRODUCTION loader, rather than from a
+  // second copy of its filename pattern: the question this test has to ask is
+  // "is every file the runner would APPLY tracked", so asking the runner is the
+  // only phrasing that cannot drift away from it.
+  const willApply = loadMigrations(migrationsDir).map((m) => m.fileName)
+
+  // Two controls, because the filter that follows is satisfied by doing nothing.
+  // An enumeration that found no files, or a `tracked` set that contained every
+  // string, would both leave it green while checking nothing at all.
+  expect(willApply.length).toBeGreaterThan(50)
+  expect(willApply).toContain('0001_initial_schema.sql')
+  expect(tree.tracked.has('9999_no_such_migration.sql')).toBe(false)
+
+  // Listed, not counted: a failure has to name the file to be actionable.
+  expect(willApply.filter((f) => !tree.tracked.has(f))).toEqual([])
 })

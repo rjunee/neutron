@@ -339,6 +339,15 @@ export interface MiscCompositionInput {
       items: import('@neutronai/work-board/store.ts').WorkBoardItem[],
       project_id: string,
     ) => import('@neutronai/work-board/store.ts').WorkBoardItem[]
+    /**
+     * The composer-built card-removal chokepoint (cancel a live bound run →
+     * dispose the card's `plans/` doc by reason → hard-delete the row) — the
+     * SAME instance the HTTP DELETE behind the UI's X uses. When supplied, the
+     * `work_board_remove` agent tool registers, so an agent removal and a human
+     * removal share one path. Omitted → the tool is absent (legacy boots
+     * unchanged).
+     */
+    removal?: import('@neutronai/work-board/removal.ts').WorkBoardRemovalService
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the

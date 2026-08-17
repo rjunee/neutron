@@ -460,7 +460,9 @@ export interface AppWsOutboundEditUpdate {
 export interface AppWsWorkBoardItem {
   id: string
   title: string
-  status: 'upcoming' | 'in_progress' | 'done' | 'failed'
+  /** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
+   *  and NEVER counted as completed — it is not a quieter `done`. */
+  status: 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived'
   sort_order: number
   design_doc_ref: string | null
   inline_active: boolean

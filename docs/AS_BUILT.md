@@ -338,6 +338,64 @@ the name, and is detected in TSX` — while the other **18** in the file stay
 green, which is the control proving the mutation was targeted and the fixture is
 not vacuous. Restored and re-run green.
 
+## 2026-08-17 — the untracked-migration guard had no test that could fail on an untracked migration
+
+Landed via PR #380.
+
+#374's guard is correct and this changed nothing about what it refuses. What it
+fixed is that the guard's own coverage of THIS repository could not fail on the
+defect: the test named "this repository's own migration files are all tracked"
+asserted `kind`, `dirPrefix` and two files chosen by hand, and never enumerated
+the migration files. One untracked `NNNN_*.sql` among the ~124 in that directory
+would have passed CI and surfaced first as a production boot refusal — the guard
+catching us in the field rather than at review time.
+
+Proved by mutation rather than argued. With an untracked `0124_mutation_probe.sql`
+planted in `migrations/`, every assertion the old test made still PASSED —
+`verified`, `dirPrefix`, `runner.ts` and `0001_initial_schema.sql` tracked — and
+only the new enumeration failed, naming the file. The set comes from
+`loadMigrations`, the production loader, not a second copy of its
+`^\d{4}_.+\.sql$` filter: the question is whether every file the runner would
+APPLY is tracked, so asking the runner is the only phrasing that cannot drift
+from it. Two controls keep the filter from passing vacuously, since an empty
+enumeration and a `tracked` set containing everything would both read as green.
+
+A CONTROL THAT CANNOT RUN NOW FAILS IN CI. `controlDidNotRun` warned and
+returned, so two real-git controls read as green while executing nothing. Half
+the original argument holds — a source export has no `.git`, a machine may have
+no `git` — and the half that does not is that a warning is a signal: nothing
+reads a green run's stdout, so a control that quietly stopped executing was
+indistinguishable from one that passed. CI has a real checkout and a real git, so
+a skip there is now a hard failure; elsewhere it still warns and passes. Verified
+both directions by mutating `REPO_ROOT` to a nonexistent path: `CI` unset → 23
+pass / 0 fail with two warnings; `CI=true` → 21 pass / 2 fail, each naming its
+control. Against the real tree with `CI=true`, 124 pass and zero skips.
+
+A STRAY COLLIDING WITH A TRACKED ORDINAL IS DIAGNOSED AS THE STRAY.
+`assertUniqueMigrationOrdinals` ran before the tree verdict existed, so a stray
+landing on an ordinal a real migration already owned — which is how 122 and 124
+actually presented — reported "two files claim version N" and sent the operator
+hunting a duplicate they never committed. Same failure #374 fixed for the
+name-mismatch path, one guard to the left. It now takes the tree verdict and
+stands aside when one side is untracked; two TRACKED files at one ordinal, and
+any collision where the tree cannot be verified, still report the collision.
+Fail-closed throughout, and there is no path to two rows at one version.
+
+Three comments that described intent rather than code, the rule-3a shape: a dead
+checksum-length compare credited with the SHA-256 rejection the byte-wise compare
+one line later actually makes; `outside-deployed-tree` reading as a live path
+when `findCheckoutRoot`'s ancestry guarantee makes it unreachable (kept as the
+total-function guard, now labelled as one, and added to README's reason-string
+contract, which had omitted it); and a `TextDecoder` allocated per index entry on
+the boot path, now hoisted. README also names the residual outright: a build lane
+running `git add -A` stages a stray with everything else, and staging alone
+satisfies this check — which is why the row says `tracked-in-index` and claims
+nothing about a commit. `docs/INVARIANTS.md` moved with the precedence change.
+
+Round 2's codex cross-model review was deferred and no kimi reviewer was
+attached, so this landed without that pass; recorded here rather than left in a
+review thread.
+
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
 Landed via PR #370.
@@ -5612,6 +5670,148 @@ phrased strictly as measurements rather than an asserted cause, per #240. And
 harvest-before-reap is preserved: a crashed row that already carries a terminal
 `inner_result` still harvests on the next tick, with zero relaunches spent.
 
+## 2026-08-14 — Work Board card removal runs through one chokepoint
+
+`work-board/removal.ts` is now the only implementation of "remove a card".
+`WorkBoardRemovalService.remove(scope, docs_project_id, item_id, { reason,
+plan_doc? })` performs a fixed sequence: resolve the card in scope, cancel a live
+bound run, dispose the card's plan doc, then hard-delete the row. The HTTP
+`DELETE /api/app/projects/<id>/work-board/<item_id>` — the UI's X — was rewired
+through it and the inline cancel logic was removed from `handleDelete`; the
+composer at `open/composer.ts` constructs one service and passes it in, so the
+agent tool (T2) can ride the same object.
+
+Cancellation stays first because deleting the row first orphans the work: a
+trident build keeps running headless, an Atlas research subprocess is never
+stopped. The moved logic is behaviour-identical to the old inline block,
+including the §F6a `terminate()` routing that fires the terminal-observer chain
+and the Codex-r3 rule that a lost atomic transition reports no `cancelled_run`.
+The DELETE response still carries `deleted` and `cancelled_run` unchanged.
+
+Removal now takes a reason. `?reason=shipped|cancelled|moved` defaults to
+`cancelled`, which is what the X has always meant. The card's own `plans/` doc is
+MOVED to `plans/<reason>/<basename>` via `DocStore.moveDoc`, so it stays under the
+docs root and remains readable in the Documents tab. Only an in-app ref under
+`plans/` is touched — an `https:` ref or a doc elsewhere in the vault is left
+alone, because relocating an owner-authored doc is not part of removing a card.
+A doc is destroyed by exactly one path, the explicit `?plan_doc=delete`; every
+failure (including `doc_destination_exists`) logs and reports
+`disposition: 'left_in_place'` and never falls through to a delete. The layering
+holds: `work-board` gained no trident dependency — the run access, the
+`is_terminal_phase` predicate and the doc store are all structural parameters.
+
+Tests pin the order, not just the membership: `work-board/removal.test.ts` drives
+every stub through one shared event array and asserts the sequence equals
+`['terminate', 'delete']`. `work-board/store.test.ts` and the full existing
+`gateway/http/work-board-surface.test.ts` delete cases pass unmodified, which is
+the behaviour-preservation proof for the refactor.
+
+Mutation checks (each applied to `removal.ts`, then restored):
+
+| Mutant | Result |
+| --- | --- |
+| `skip-cancellation`: never call `cancelBoundRun` | RED — order test saw `['delete']`; 4 tests failed |
+| `delete-first`: hard-delete before cancelling | RED — order test saw `['delete', 'terminate']`; 10 tests failed |
+
+## 2026-08-14 — a shelved Work Board card is not a shipped one
+
+Migration `0122_work_board_items_archived_status.sql` widens the `work_board_items`
+status CHECK to a fifth lane, `archived` — owner-facing "Shelved". SQLite cannot
+alter a CHECK on a STRICT table, so the migration copies 0097's rebuild
+(CREATE new → INSERT SELECT → DROP → RENAME → recreate both indexes), carrying
+0105's `task_type` column forward unchanged; the regenerated
+`migrations/expected-schema.txt` differs only in that CHECK and the rebuild's
+formatting.
+
+The lane exists because `done` was the only lever for taking a card off the board.
+Asked on 2026-08-14 to drop four deprioritised email cards, the agent had to mark
+them done, and four unshipped items read as shipped. `archived` splits the two
+claims apart: done means it happened and stamps `completed_at`; archived means it
+is parked and stamps nothing. `WorkBoardStore.listActive`, `listAllActive`, and
+`reorder`'s lane query all move from `status != 'done'` to
+`status NOT IN ('done','archived')`, which also removes shelved cards from the
+per-turn prompt fragment (it rides `listActive`). A new `listArchived` orders by
+`updated_at`, and `list()` returns active → archived → completed so both clients
+can bucket three ways off one snapshot.
+
+Shelving is refused while the card's bound run is live. A shelf-write asserts the
+work is parked, which is false while the build is still running, so `update()`
+throws `WorkBoardRunStillLiveError` before any write — the same guard, and the
+same reasoning, as `complete()`. The refusal is an answer rather than a crash on
+every surface: `work_board_update` returns `{ok:false}` carrying the message, and
+PATCH returns 409 `run_still_live`. `archived` is client-writable in both the
+agent tool's `STATUS_VALUES` and the HTTP `VALID_STATUSES`; `failed` deliberately
+stays out of both, since only the terminal reconcile writes it.
+
+Both clients render shelved cards in their own collapsed "Shelved · N" section,
+separate from Done. `splitBoard` returns a third bucket rather than folding
+archived into either neighbour — folding it into `completed` would report parked
+work as progress, and the old `status !== 'done'` bucketing would have resurrected
+it in the active lane the server had already excluded it from. Shelved rows carry
+the neutral upcoming dot and no "Merged · <date>" line, because there is no
+`completed_at` to show. Advancing a shelved card un-shelves it: `nextStatus`
+returns `upcoming`, and the store re-appends it to the end of the active lane so
+its stale `sort_order` cannot collide with the renumbered lane. The project rail's
+attention scan and the composer's open-item probe both exclude archived, so a card
+the owner already parked cannot hold the rail red.
+
+Acceptance (b) is pinned mutant-red in `work-board/store.test.ts`: widening
+`listCompleted` to `status IN ('done','archived')` turns three tests RED, and
+stamping `completed_at` on the archive transition turns three RED. The refusal is
+pinned at all three layers (`store.test.ts`, `agent-tool.test.ts`,
+`work-board-surface.test.ts`), the surface test still asserts `status:'failed'` is
+a 400, and `app/__tests__/work-board-helpers.test.ts` asserts an archived item
+lands in neither `active` nor `completed` and leaves the Done count at its
+pre-shelving value.
+
+## 2026-08-14 — the agent can remove a Work Board card, through the human's path
+
+`work_board_remove` is registered on the agent tool surface. It takes the item
+`id`, a required `reason` (`shipped` | `cancelled` | `moved`, each value
+described in the schema so the model picks honestly) and an optional
+`delete_plan_doc` boolean. It calls `WorkBoardRemovalService.remove` — the SAME
+instance `open/composer.ts` builds and hands the HTTP surface behind the UI's X.
+There is no second removal implementation and the handler never touches
+`store.delete` directly, so run-cancellation, doc disposition and the hard row
+delete cannot drift between the human path and the agent path.
+
+Why it exists: the agent's only removal lever was `work_board_complete`, so
+taking four deprioritised cards off the board on 2026-08-14 marked four unshipped
+items `done`. The tool description says this out loud — remove is NOT complete,
+never mark unshipped work `done` just to clear it.
+
+Registration is gated on a wired `opts.removal`. A boot that does not supply one
+registers the same five tools as before, in the same order, and
+`registry.get('work_board_remove')` is undefined; the returned names array gains
+`work_board_remove` only when the chokepoint is present. The wiring runs
+composer → `misc-input.ts` `work_board.removal` → `build-core-modules.ts`, spelled
+exactly like the existing `spec_doc` / `chat_ack` threading.
+
+Scope handling mirrors `work_board_add`: the BOARD is keyed by
+`workBoardScopeKey(ctx.project_slug, ctx.project_id)` and the DOCS project id is
+`ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID` — the two arguments stay
+separate, which is the conflation hazard documented in `spec-doc-service.ts`.
+`project_slug` is never an agent-supplied argument.
+
+The tool reports what happened rather than just `ok`: `cancelled_run` when a
+cancellation actually landed, and `plan_doc` with its `disposition` and the new
+`to` path under `plans/<reason>/`. `delete_plan_doc: true` is the only input that
+can produce `disposition: 'deleted'`.
+
+The acceptance's named test is pinned through the AGENT surface, not just the
+service: `work-board/agent-tool.test.ts` creates a real card, binds a live run
+with `store.bindRun`, calls the tool handler, and asserts the shared event array
+contains BOTH `terminate` and `delete` with `terminate` first. Skipping
+cancellation drops `terminate` and deleting first inverts the indices, so both
+mutants go RED. `store.delete` is wrapped, not faked, so the ordering is observed
+against the real row delete. A follow-up `work_board_list` through the same
+registry proves the card is really gone; unknown id, an out-of-enum reason and a
+missing reason all return `{ ok: false, error }` with no throw and no side effect.
+
+One drive-by: `gateway/http/work-board-surface.test.ts` declared its `plan_doc`
+body type without `path` while asserting on it, which `tsc -p gateway` rejected.
+The annotation now matches the response.
+
 ## 2026-08-14 — inline activity is derived from evidence; the stored flag is a hint
 
 A Work Board card's `inline_active` used to be a promise the agent had to both make
@@ -5877,7 +6077,6 @@ Rows in `secrets` and `project_credentials` are keyed by the frozen owner handle
 The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately. **Superseded in one respect by the 2026-08-16 entry: this description omits the fallback exception, and did so because the exception did not exist yet — an explicit migration onto a FALLBACK boot handle is now refused outright, on every surface.**
 
 Tests in `auth/__tests__/credential-scope-reconcile.test.ts`, `gateway/__tests__/boot-credential-scope.test.ts`, `gateway/cores/__tests__/integrations-orphaned.test.ts`, and `gateway/cores/__tests__/integrations-migrate-orphaned.test.ts` pin the acceptance: the unambiguous move reads the token back with unchanged ciphertext bytes plus an audit row; the rotation-hazard case asserts on the decrypted value that the fresh credential survives; a real `boot()` never exits non-zero; a positive control succeeds under the correct handle so deleting the migration turns the suite red; and no secret material reaches logs, status output, or the audit payload. `reminders.project_slug` carries the same stale slug but is a read-filter, not a crypto scope, with no slug-bearing UNIQUE key and hence no rotation hazard; its drop-or-sweep is recorded as a follow-up decision, rows untouched.
-
 ## 2026-08-14 — review-round readiness is checked before reviewer spend
 
 `trident/inner-workflow.mjs` now refuses to dispatch a review panel when GitHub
@@ -6018,6 +6217,19 @@ Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
 tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
 after its expected red run.
 
+## Integrations surface scope declaration (ISSUES #572)
+
+`gateway/http/cores-integrations-surface.ts` now declares in its response that
+the enumerated credential slots belong to bundled Cores. The web client in
+`landing/chat-react/IntegrationsTab.tsx` renders that server-provided scope.
+`gateway/__tests__/cores-integrations-surface.test.ts` uses a connected GitHub
+credential to prove the partial view is explicit, existing Core slots remain,
+and secret plaintext never enters the response. No credential store or registry
+was added; the change makes the existing view boundary legible.
+
+Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
+tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
+after its expected red run.
 ## 2026-08-14 — host deploy resolves remote refs against the remote
 
 `open/host-deploy.ts:544` now resolves a deploy target through a distinct
@@ -13702,6 +13914,39 @@ fails (ahead of any newer draft text). An in-flight send claim prevents two
 Enter presses from reusing the same staged attachment URLs before the first
 upload/send clears them.
 
+## Mid-turn message injection (#516)
+
+The web composer keeps Send enabled while the agent is typing. A second message
+for the same topic bypasses the completed-turn chain and is posted immediately to
+the persistent REPL dev-channel as additional context for the active turn. It
+reuses the active turn id without advancing fallback reply-correlation state, so
+the running turn's eventual reply remains correlated normally. If no active turn
+exists at the injection instant, the message falls back to the existing ordered
+turn path instead of being dropped.
+
+Mutation-named tests pin all three boundaries: the gateway test fails if the
+second send is queued until completion, the persistent-REPL test asserts the
+additional `/message` reached the wire before the first reply, and the React test
+fails if the composer is disabled while streaming or IME composition Enter is
+submitted. General chat uses the same `general` route key for registration and
+lookup. A successful dev-channel delivery stays successful if the turn settles
+while its response is returning, preventing a duplicate queued turn; failed
+delivery leaves Retry text and attachment state untouched. Injection is offered
+only while exactly one turn is active: a queued turn, Retry, seed, reconnect, or
+button-prompt answer always follows the normal ordered path. Injected history is
+stamped with the inbound observation time so a racing agent reply cannot render
+before it; attachment-only sends persist their inbound reference while resolved
+local paths remain confined to the REPL payload. Active-turn routes include the
+non-secret credential identity and refuse ambiguous credential-rotation matches.
+Typing refcounts have a fail-safe beyond the turn's forty-five-minute absolute
+ceiling that clears a lost `end`, fans the matching ephemeral end frame, and
+refreshes the rail working state instead of wedging that topic until restart.
+The composer clears the
+submitted text before awaiting the send, then restores it only when delivery
+fails (ahead of any newer draft text). An in-flight send claim prevents two
+Enter presses from reusing the same staged attachment URLs before the first
+upload/send clears them.
+
 ## 2026-08-03 — a credential set inside one project no longer changes every project
 
 Branch `fix/credential-scope-boundary`. Changed:
@@ -13854,6 +14099,60 @@ what the code does. Self-healing re-registration is a separate change.
 No schema change, no feature flag. Gateway + app code.
 
 ### Wall-clock timing assertions in tests — triaged, mostly removed (ISSUES #438)
+
+**What changed.** A sweep of every test assertion that compares REAL elapsed wall
+time against a threshold. These red when the machine is loaded, which is exactly
+when CI is busiest, and a gate that reddens for a reason unrelated to the change
+under review is a gate people learn to merge past. 16 live assertions were found
+across 10 files (the swept grep also matches a comment in
+`gateway/comments/__tests__/anchor-walker.test.ts:1230`, which documents the
+earlier removal this change generalises).
+
+**The rule applied, in order.** (1) If a deterministic assertion already covered
+the same contract, the timing bound was DELETED. (2) Otherwise, if the contract
+could be restated as an ordering or a discriminant, it was CONVERTED. (3) Only
+where neither applied was a bound KEPT, and then with a comment naming the
+regression it catches and a measured margin. Nothing was bulk-widened; exactly
+one number in the tree changed, and it changed to zero numbers by deletion.
+
+**Outcome: 9 deleted, 4 converted, 3 kept.** The conversions are the interesting
+half. `onboarding/synthesis/__tests__/synthesis-session.test.ts` now asserts
+WHICH wedge detector fired by reading the distinct failure messages off the
+injectable `logFailure` sink, instead of inferring it from a stopwatch — strictly
+stronger, because the old bound would also have passed on the wrong detector
+firing early. `open/__tests__/open-app-ws-durable-chatlog.test.ts` samples the
+agent-reply frame count at the instant the HTTP response lands, so
+"returned before the turn finished" is an ordering that load cannot reorder
+rather than a 500 ms budget. `open/__tests__/onboarding-warm-conversational.test.ts`
+sets the pre-warm cap an hour out so the pre-warm is the only thing that can
+resolve the gate, making the test's own completion the proof.
+
+**Two premises corrected while doing it.** The health-probe test in
+`runtime/adapters/claude-code/persistent/__tests__/repl-supervision.test.ts`
+described a server that "never resolves", but `Bun.serve` defaults to a 10 s
+request idle timeout — so it DID answer, and with the probe deadline stripped the
+test still passed in 12.2 s. It now sets `idleTimeout: 0`, which is what makes
+the deadline's absence observable at all. And the bound in
+`tests/integration/profile-pic-pipeline.test.ts` allowed 60 s while the test runs
+under CI's 15 s per-test timeout — it could never have failed.
+
+**The three kept bounds, and why.** Two in
+`runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts`
+are LOWER bounds that are the only thing distinguishing the inactivity watchdog
+from the absolute ceiling — both deliberately emit the same error
+(`pool.ts:605`) — and load moves a lower bound away from its threshold. The
+`app/__tests__/transcript-warmer.test.ts` bound is the only guard separating a
+gate-driven abandon from the 6 s open deadline, and measured 8 ms against a
+3000 ms budget under 2x CPU oversubscription. The
+`onboarding/profile-pic/__tests__/storage.test.ts` bound discriminates a
+synchronous return from a 5 s fallback wait and measured 0-1 ms against 100 ms
+under the same load.
+
+**Every deletion was mutation-tested**: the guarding behaviour was broken in the
+real source and the surviving assertions were shown to still red. Tests only —
+no source file changed, no schema change, no feature flag.
+
+## Wall-clock timing assertions in tests — triaged, mostly removed (ISSUES #438)
 
 **What changed.** A sweep of every test assertion that compares REAL elapsed wall
 time against a threshold. These red when the machine is loaded, which is exactly
@@ -17382,6 +17681,267 @@ below.
   9/0.
 
 ### M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 5. Audio voice notes (MP3/M4A/WAV) upload on
+the SAME chat surface as images + PDF, transcribed at upload-complete by a new
+OpenAI-compatible Whisper client, with the transcript injected into the dispatched
+prompt AND appended to the scribe text (voice → text → gbrain parity). NO FEATURE
+FLAGS — transcription is gated only by `OPENAI_API_KEY` presence (credential config).
+
+- **Whisper client.** New `gateway/transcription/openai-transcription.ts` —
+  `createOpenAiTranscriptionClient` POSTs multipart `{base}/v1/audio/transcriptions`
+  (default base `https://api.openai.com`, model `whisper-1`, injectable `fetch_impl` +
+  `timeout_ms`). Typed `TranscribeResult` with an error taxonomy
+  (`http_error`/`network_error`/`timeout`/`bad_response`); NEVER throws, no logging
+  inside the client, no retries (v1). `audioFilenameFor` maps the canonical MIME to a
+  Whisper-recognized filename extension (`voice.mp3`/`voice.m4a`/`voice.wav`).
+- **Upload surface.** `gateway/http/app-upload-surface.ts` — widened
+  `CHAT_UPLOAD_MIME_WHITELIST` / `EXT_FROM_MIME` / `URL_PATH_RE` ext-group /
+  `mimeFromExt` to audio (`.txt` DELIBERATELY excluded from the GET ext-group so the
+  transcript sidecar is never servable). New optional `transcribeAudio` seam;
+  handleUpload transcribes an audio blob and writes a content-addressed `<hash>.txt`
+  sidecar (atomic tmp+rename, idempotent — sidecar-exists ⇒ the API is NOT re-called;
+  ASR failure NEVER fails the upload). `resolveChatAttachmentLocalPath` widened to
+  return `transcript` for audio (sidecar read; null when absent), field omitted for
+  non-audio.
+- **Turn injection.** `gateway/wiring/build-live-agent-turn.ts` `buildAttachmentsFragment`
+  embeds an audio attachment's transcript inline (capped 4000 chars with a truncation
+  marker); keyless/failed ASR → the graceful "transcription unavailable — set
+  OPENAI_API_KEY" note. Splice sites + `turn.user_text` untouched.
+- **Scribe threading.** `open/wiring/app-ws.ts` — new `attachmentTranscript` deps seam;
+  the receiver appends resolved transcripts to the `scribeOnUserTurn` text only
+  (`user_text` stays unmutated). Composer wires it over `resolveChatAttachmentLocalPath`;
+  `open/composer.ts` builds the `transcribeAudio` seam from `OPENAI_API_KEY` (keyless ⇒
+  no seam, audio still uploads without a transcript).
+- **Clients.** Web accept attr + `ACCEPTED_ATTACHMENT_TYPES` (+ alias forms) + 🎵 chip
+  (`message-adapter.ts` `isAudioAttachmentUrl`); native Expo picker mime array +
+  `mimeToExt` audio cases + 🎵 chip (`attachment-url.ts` predicate).
+- Verified: `bunx tsc --noEmit` exit 0. Tests:
+  `gateway/transcription/__tests__/openai-transcription.test.ts` 7/0;
+  `gateway/__tests__/app-upload-surface.test.ts` 30/0 (incl. artifact-on-disk sidecar +
+  idempotency call-count + keyless-no-sidecar + `.txt`-unreachable);
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts` 11/0;
+  `open/__tests__/open-wiring-app-ws.test.ts` 20/0 (scribe transcript threading);
+  `app/__tests__/upload-client.test.ts` 12/0;
+  `landing/chat-react/__tests__/message-adapter.test.ts` 12/0.
+
+## M2 P0 parity — input modalities task 1: attachment→agent threading + PDF documents (2026-07-21)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 1. Attachments (including images) never reached
+the agent — `open/wiring/app-ws.ts` read `adapter_metadata.attachments` and dropped
+them (its own comment admitted the deeper wiring was a follow-up); `gateway/wiring/
+build-live-agent-turn.ts` had zero attachment handling. This builds the threading AND
+adds PDF as an accepted chat-upload type. **Images are fixed as a side effect** — they
+now reach the agent for the first time.
+
+- **`gateway/http/app-upload-surface.ts`** — `IMAGE_MIME_WHITELIST` → `CHAT_UPLOAD_MIME_WHITELIST`
+  (+`application/pdf`; SVG still excluded); `EXT_FROM_MIME` (+`pdf`), `URL_PATH_RE`
+  (`…(png|jpg|gif|webp|pdf)`), `mimeFromExt` (+`pdf`). All existing hardening
+  (Content-Length pre-check, 10 MiB cap, declared-vs-sniffed cross-check,
+  content-addressed storage, per-user GET auth) untouched. NEW exported
+  `resolveChatAttachmentLocalPath(owner_home, url)` — pure, syscall-free URL→local-path
+  map using the SAME `URL_PATH_RE` (relative OR absolute URL; null for non-matching).
+- **`gateway/http/chat-sender-registry.ts`** — `LiveAgentTurnRequest` gains
+  `attachments?: ReadonlyArray<string>` (prompt-only; never mutates `user_text`).
+- **`gateway/wiring/build-live-agent-turn.ts`** — `BuildLiveAgentTurnInput` gains
+  `resolveAttachment?`; new exported `buildAttachmentsFragment(...)` formats a
+  `<user_attachments>` block of resolved absolute paths + MIME + a "Read them" line;
+  injected on the WARM splice (before the user message) AND the COLD
+  `composeFirstTurnPrompt` (before the user message). Unresolvable URL → skipped + warn.
+- **`open/wiring/app-ws.ts`** — sanitizes `adapter_metadata.attachments` to non-empty
+  strings and passes `attachments` into the `appWsChatTurn({...})` call.
+- **`open/composer.ts`** — threads `resolveAttachment: (url) => resolveChatAttachmentLocalPath(owner_home, url)`
+  into `buildLiveAgentTurn`.
+- **Clients** — web: `uploads.ts` `ACCEPTED_IMAGE_TYPES` → `ACCEPTED_ATTACHMENT_TYPES`
+  (+pdf); `ChatApp.tsx` file-input `accept` (+`application/pdf,.pdf`), aria-label
+  "Attach file…", `AttachmentImage` non-image → downloadable file chip;
+  `message-adapter.ts` routes every attachment through the authed renderer
+  (`isImageAttachmentUrl` decides img vs chip). Expo: `app/lib/upload-client.ts`
+  `mimeToExt` (+pdf, exported for test).
+- **Tests** — `gateway/__tests__/app-upload-surface.test.ts` (PDF accept/spoof/serve+ETag
+  + `resolveChatAttachmentLocalPath` units); `gateway/wiring/__tests__/build-live-agent-turn-attachments.test.ts`
+  (NEW: cold+warm embed the resolved path, `user_text` unpolluted, unresolvable skipped,
+  no-attachments/no-resolver → no block); `gateway/__tests__/m2-chat-upload-attach-production-composer.test.ts`
+  (PDF variant threads onto `adapter_metadata.attachments`); web `uploads.test.ts` /
+  `message-adapter.test.ts` updated; `app/__tests__/upload-client.test.ts` `mimeToExt` unit.
+- Suites: scoped gateway + wiring + open + client tests green; `tsc -p tsconfig.json` clean.
+- OUT OF SCOPE (later tasks): voice-note transcription (task 2), `/status` + `/reset`
+  chat commands (task 3), office formats beyond PDF, SVG, the import-ZIP path.
+
+### Round-2 hardening (Argus review, 2026-07-21)
+
+- **`landing/chat-react/ChatApp.tsx` — `attachmentBasename` no longer throws on a
+  poisoned URL.** It runs during render for every non-image chip; a malformed
+  percent-escape (`report%ZZ.pdf`) made `decodeURIComponent` throw `URIError`,
+  tripping `ChatErrorBoundary` and blanking the whole chat view — and, since the
+  URL persists in history, it recurred on every reload. Now `try/catch` falls back
+  to the raw segment. Exported + unit-tested (`__tests__/attachment-basename.test.ts`).
+- **`gateway/http/app-upload-surface.ts` — `resolveChatAttachmentLocalPath` hardened.**
+  `URL_PATH_RE`'s user_id class matched a dot-only segment (`.` / `..`); now rejected
+  outright (`/^\.+$/`) rather than relying on the hex64-filename bound. Added an
+  `existsSync` gate so a resolvable-but-missing blob path is never injected into the
+  agent prompt. New units cover both.
+- **`gateway/wiring/build-live-agent-turn.ts` — Retry re-injects the ORIGINAL
+  attachments.** A freeze-timeout Retry (`RETRY_TURN_VALUE`) recovered only
+  `lastUserText`, silently dropping the doc/image. New `lastAttachments` map recorded
+  alongside `lastUserText`; the recovered turn re-binds `attachments` too. Tests (f)/(g)
+  in `build-live-agent-turn-attachments.test.ts` prove the retried prompt re-embeds the
+  path (and injects no block when the original had none).
+
+### Round-3 hardening (Argus review round-2, 2026-07-21)
+
+- **BLOCKER — mobile PDFs no longer paint as broken images.** The Expo bubble
+  routed EVERY attachment URL through `AuthedAttachmentImage` (a pure RN `<Image>`),
+  so a PDF (newly uploadable on mobile in M2) rendered as a broken thumbnail with no
+  open affordance — unlike the web file chip. Now `AuthedAttachmentImage` branches on
+  `isImageAttachmentUrl(url)`: a non-image renders as `AuthedAttachmentFile`, a
+  tappable `📎 <basename>` chip that opens the document (non-authed URLs open
+  directly; our bearer-authed `/api/app/upload/…` URLs are fetched WITH the bearer
+  then opened — RN-web via an object URL in a new tab, native via a base64 data URL
+  handed to `WebBrowser`). Two new plain-TS helpers in `app/lib/attachment-url.ts`
+  (`isImageAttachmentUrl`, `attachmentBasename`, both unit-tested, mirroring the web
+  client's) drive the branch. This is the mobile analogue of the web file chip; it
+  also settles the app side of the "non-image routed as image content-part" semantic
+  (the web `message-adapter` note) — the renderer, not the content-part type, decides.
+- **`gateway/http/app-upload-surface.ts` — served blobs pin their type.** The GET 200
+  now sets `X-Content-Type-Options: nosniff` + `Content-Disposition: inline` so a
+  browser never MIME-sniffs a served document into an executable content-type
+  (defense-in-depth atop the existing bearer + user-id match; matters now that PDFs
+  are served inline). Asserted in the PDF-serve test.
+- **`open/wiring/app-ws.ts` — inbound attachment list is deduped + bounded.** New
+  exported `sanitizeInboundAttachments(raw)` keeps only non-empty strings, DEDUPS, and
+  CAPS at `MAX_INBOUND_ATTACHMENTS` (16) — each survivor drives a downstream
+  `existsSync` + `<user_attachments>` prompt line, so a buggy/hostile client can't
+  fan out unboundedly. Replaces the inline filter at the receiver; unit-tested.
+- **`app/components/ChatSyncSurface.tsx` — native picker mirrors the server whitelist.**
+  `DocumentPicker.getDocumentAsync` moved from `type: '*/*'` to the images+PDF+ZIP
+  whitelist so the OS picker greys out unsupported files up front instead of letting a
+  pick sail through to a raw 415.
+- **Real-resolver integration test** (`build-live-agent-turn-attachments-real-resolver.test.ts`):
+  seeds a real blob on disk, resolves its URL with the SHIPPED
+  `resolveChatAttachmentLocalPath`, and asserts `buildAttachmentsFragment` embeds the
+  on-disk path + MIME (and drops a missing blob) — closing the "stub-only resolver"
+  coverage gap through the production seam.
+- Suites: `app/__tests__/attachment-authed-source.test.ts`, `gateway/__tests__/app-upload-surface.test.ts`,
+  `gateway/wiring/__tests__/build-live-agent-turn-attachments-real-resolver.test.ts`,
+  `open/__tests__/open-wiring-app-ws.test.ts` green; `tsc` clean (root + `app/`).
+- NOT changed (documented-acceptable, single-owner posture): `resolveChatAttachmentLocalPath`
+  cross-`user_id` read (one owner; contained by `existsSync` + per-tenant process
+  isolation) and the web `message-adapter` routing non-images as `type:'image'` content
+  parts (assistant-ui exposes only text|image parts here; the renderer branches on the
+  URL, so it is correct in practice).
+
+### CI-green hotfix (PR #428, task 2) — de-pollute process-global react/react-native test mocks
+
+- The canonical `test` job went RED across `a235eea3..141d2c1c` (3 consecutive runs). The
+  two new app test files (`app/__tests__/authed-attachment-image-hooks.test.tsx`,
+  `app/__tests__/authed-attachment-file-open.test.tsx`) registered process-global NARROW
+  `mock.module` payloads for `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` /
+  `react-native`. Bun module mocks are process-global and survive across files, so in the
+  shared-process CI chunk (`scripts/run-tests.sh`, 75-file chunks) they poisoned later
+  files — `SyntaxError: Export named 'useReducer' not found` (docs-mutations-race) and
+  `Export named 'Linking' not found` (docs-panes-render), plus `forwardRef is not a
+  function` from react-textarea-autosize in the landing suites.
+- FIRST ATTEMPT (superset + delegate-to-real react mock) fixed the SyntaxErrors but HUNG
+  the CI `test` job (>90 min, never completing). Root cause: a `mock.module('react', …)`
+  is process-global in bun and silently replaces `import * as RealReact from 'react'` in
+  EVERY later file of the same chunk — including `docs-mutations-race` /
+  `diagnostics-pane-render`, which deliberately use REAL react via an injected HookRuntime.
+  Even a faithful superset defeats their design and deadlocked chunk 0 (agent-dispatch +
+  app files together). Every other test file in the repo AVOIDS mocking react for exactly
+  this reason (the "process-global" warnings in `docs-mutations-race.test.ts:52` etc.).
+- FINAL FIX (test hygiene only — zero production or assertion changes): ELIMINATE the
+  `react` / `react/jsx-runtime` / `react/jsx-dev-runtime` module mocks entirely from both
+  files; use REAL react + real jsx. Only `react-native` stays a module mock (bun can't
+  parse its Flow source) — kept as a SUPERSET (`Linking` / `useWindowDimensions` /
+  `ScrollView` / `TextInput` / `ActivityIndicator` / `Modal`) so it never collides with the
+  sibling docs suites' react-native mocks — plus the `expo-*` stubs (so the real expo
+  modules never drag unparseable react-native internals into the process).
+  `AuthedAttachmentImage` is a hook-free dispatcher, so it runs directly against real react
+  (a regression re-adding a hook throws "Invalid hook call" and fails the test loudly).
+  `AuthedAttachmentFile` calls `useState`, so `pressChip` installs a minimal hook
+  dispatcher on react's current-dispatcher slot
+  (`__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.H`) around the
+  SYNCHRONOUS component call only, then restores it — scoped to this file, no module mock,
+  no cross-file pollution.
+- Verified locally with gbrain on PATH: the exact CI chunk 0 (7 agent-dispatch + 68 app
+  files, the set that hung) now runs 861 pass / 0 fail and EXITS in <1s; both target suites
+  green (image 4/0, file 5/0); the 12 branch-changed files in ONE bun process 125/0;
+  `bash scripts/ci/typecheck-all.sh` exit 0 (51 tsconfigs).
+
+### Round-2 findings fix (Argus review round-1 on PR #428, 2026-07-22)
+
+- **BLOCKER — native non-authed `data:`/`file:`/`content:` attachments no longer open
+  silently-fail.** The file-chip `open()` handler's `bearer === undefined` branch
+  (`app/components/AuthedAttachmentImage.tsx`) handed the raw URI straight to
+  `WebBrowser.openBrowserAsync` on native — but SFSafariViewController / Chrome Custom
+  Tabs reject a non-http(s) INITIAL url, so a `file://`/`content://` (optimistic /
+  failed-send local doc bubble — `attachment-url.ts:141-149`) or `data:` URI opened to
+  nothing, contradicting the file's own r2-BLOCKER invariant. Fixed with a new
+  `openNonAuthedNative(uri, name)` helper: an `http(s)` URL still opens in the in-app
+  browser; a `data:` URL is materialized to a cache file (`materializeDataUrlToCache`)
+  and a local `file:`/`content:` URL is shared as-is — both routed through
+  `Sharing.shareAsync` (the same OS-share path the AUTHED native branch already uses),
+  with the rare `!isAvailableAsync()` emulator fallback. Web behavior unchanged (still
+  navigates the synchronously-opened tab). Four new regression tests in
+  `app/__tests__/authed-attachment-file-open.test.tsx` assert: local `file://` shared
+  as-is (never WebBrowser), `data:` materialized-then-shared (never a data: URL to
+  WebBrowser), and `http(s)` still opens in WebBrowser.
+- **Test hygiene (findings 2 + 3, no production change).** The two attachment test files'
+  `react-native` superset mocks now also export `FlatList` / `KeyboardAvoidingView` /
+  `TouchableOpacity` (per the sibling-superset convention, so they can never collide with
+  a docs-suite RN mock in a shared CI chunk). Removed the vacuous `const useStateCalls = 0;
+  expect(...).toBe(0)` always-pass counters from `authed-attachment-image-hooks.test.tsx`;
+  the real guard was always the element-TYPE assertions plus the real-react "Invalid hook
+  call" throw — the flip test now asserts the exact image/file type sequence across the
+  recycle instead of a tautology.
+- Verified: both target suites 12/0; the full `app/__tests__/` dir in ONE bun process
+  872/0 (the CI-pollution scenario, clean); `tsc --noEmit -p app/tsconfig.json` exit 0.
+
+## M2 P0 parity — input modalities task 3 (partial): `/status` chat command (2026-07-22)
+
+Scope: `IMPLEMENTATION_PLAN.md` task 3, the `/status` half of the narrow Neutron
+chat commands (`/status` + `/reset`; NOT the the legacy harness topic-lifecycle vocabulary).
+`/reset` is intentionally NOT shipped this iteration — see the mechanism finding
+below.
+
+- **`/status` — deterministic instance snapshot.** New `buildStatusChatCommandFilter`
+  (`gateway/boot-chat-command-filters.ts`, re-exported through the
+  `gateway/boot-helpers.ts` / `composer-contract.ts` barrel) implements the
+  `ChatCommandFilter` contract. `/status` (exact-command word boundary — `/statusfoo`
+  falls through to the LLM, K8 grammar precedent) replies with a formatted snapshot:
+  active project, current model (`getBestModel()`), pending-reminder count, active
+  work-board items, active Trident builds. Pure READ — no mutation, no LLM dispatch.
+- **Wiring — one command path, both surfaces.** Chained in `open/composer.ts` into the
+  SAME `buildChainedChatCommandFilter([...])` the web onboarding chat AND the app-ws
+  chat share (appended after the cores chain + skill-forge). The snapshot is an
+  injected thunk; because the source stores (projects reader / reminder store /
+  work-board / Trident run store) are constructed LATER in the composer closure, the
+  reader is threaded through a `late<T>` two-phase holder (`statusSnapshotHolder`) and
+  BOUND right after `workBoardStore` exists. Each source read is best-effort (degrades
+  to 0 rather than bricking the command). Filter stays store-free → unit-testable.
+- **Tests.** `gateway/__tests__/status-command-wiring.test.ts` (9/0): reply TEXT carries
+  every snapshot field value (behavior, not a `toHaveBeenCalled` gap-test); `project_id`
+  threaded / omitted correctly; leading-whitespace + trailing-arg tolerance; `/statusfoo`
+  + `/statuses` fall through and NEVER run the snapshot thunk; chain-composition proof
+  that `/status` is reached after earlier filters disclaim (the real composer shape).
+- **`/reset` DEFERRED — verified spec/mechanism mismatch.** The plan named
+  `respawnSupervisedSession` as the `/reset` actuation for "fresh agent context; durable
+  chat history stays". VERIFIED against the code this is WRONG:
+  `runtime/adapters/claude-code/persistent/session-respawn.ts:24` — "respawn ALWAYS
+  resumes — never a fresh spawn"; `respawnSupervisedSession` (`supervision.ts:59`) →
+  `respawnReplSession(..., true)` → `planRespawn` `--resume`s the SAME transcript,
+  PRESERVING context. It cannot deliver a context reset. Shipping `/reset` on that
+  primitive would be a no-op-that-looks-like-it-works (banned pattern). The correct
+  primitive is the `/clear` PTY reset (`CONTEXT_RESET_COMMAND`, `pool.ts:380`, already
+  used for the import warm-session per-turn reset) or a fresh (non-resume) respawn; plus
+  a credential-identity-agnostic way to target the live session key (the pool key folds
+  `cred.id`, unknown to the filter). Re-scoped in `IMPLEMENTATION_PLAN.md` for a
+  follow-up iteration on the corrected mechanism.
+- Verified: `bunx tsc --noEmit` exit 0; `gateway/__tests__/status-command-wiring.test.ts`
+  9/0.
+
+## M2 P0 parity — input modalities task 5: voice notes (audio upload + Whisper ASR) (2026-07-22)
 
 Scope: `IMPLEMENTATION_PLAN.md` task 5. Audio voice notes (MP3/M4A/WAV) upload on
 the SAME chat surface as images + PDF, transcribed at upload-complete by a new
@@ -22100,6 +22660,359 @@ typed as `Pick<SecretsStore, 'get'>`, and the probe is composed through
 `defaultGitModeProbe`. The loadEnv catch deliberately degrades to `{}` because
 a throwing origin probe becomes silent `local`, removing the PR gate.
 
+## Hobby projects + one-time agentic per-project kickoff (2026-07-01)
+
+**Problem.** Two gaps in what onboarding produces on a fresh install: (1) the
+interview asks about outside-work interests/hobbies but those answers materialized
+NOTHING (only work/primary projects became real projects); (2) each materialized
+project's opening was a static one-liner ("want me to X?") with no real agentic
+work — no drafted doc, no deadline offer.
+
+**PART A — hobbies materialize as projects.** Hobby answers land in
+`phase_state.non_work_interests` (`{name, cadence_hint?}`, written by the
+post-turn extractor) and `import_result.inferred_interests` (`{name, basis?}`) —
+fields `resolveProjects` in `build-onboarding-finalize.ts` never read, so hobbies
+reached persona-gen (USER/SOUL.md) but never a `projects` row / on-disk
+`Projects/<id>/` repo. Added `collectInterestProjects` as a THIRD union source
+(after import-proposed + interview-named work projects), mapping each interest to
+`CapturedProject{name, rationale?, is_interest:true}` (rationale carried from an
+import interest's `basis`). The existing `seen`/`dropped` dedup makes the superset
+safe: a work project of the same name wins the slug dedup; a curation-dropped
+hobby is excluded. The materializer is source-agnostic (identical repo + doc set
+for hobby and work); `is_interest` only steers the kickoff. Added `is_interest?`
+to `CapturedProject` (`onboarding/wow-moment/action-types.ts`).
+
+**PART B — one-time agentic kickoff.** `emitProjectOpenings` now first asks a
+`ProjectKickoff` (`gateway/wiring/build-project-kickoff.ts`) for a
+richer opening, behind a HARD data-sufficiency gate ("better nothing than a bad
+job"). Best-fit action per project:
+- `draft-doc` (rich work): compose a real starting plan via the new
+  `build-project-kickoff-composer.ts` (same CC-substrate discipline as
+  `build-project-doc-composer.ts` — `getBestModel`, AbortController budget,
+  throw-on-empty), write it create-if-missing under `Projects/<id>/docs/starting-plan.md`,
+  present a tappable `[Starting plan](docs:/<id>/starting-plan.md)` marker, and
+  re-index the project page to GBrain recall via `buildProjectPageIndexer`.
+- `deadline-offer` (work with a real upcoming `import_result.proposed_tasks`
+  deadline related to the project by name/topic, within a 60-day window): name the
+  deadline(s) and OFFER a reminder — never auto-created; the live agent's
+  `reminders_create` handles an accept.
+- `interest-research` (rich hobby): light starting-notes doc, same write+link+index.
+- `interest-questions` (thin hobby): deterministic engaging questions (a hobby's
+  meaty opening, never a bad artifact).
+- `null` (thin work): fall back to the deterministic `buildDeterministicProjectOpening`.
+
+**One-time, no recurring machinery.** The kickoff runs inside finalize's single
+per-project opening pass and emits under the SAME `onboarding_opening:<project_id>`
+durable dedupe key as the deterministic opening, so it fills the ONE opening slot
+and the on-connect recovery (`open/composer.ts:ensureProjectOpeningOnEntry`)
+collapses onto it — no double-post. NO cadence / cooldown / on-enter refresh /
+setting. Any doc-compose failure degrades to `null` (work) or engaging questions
+(hobby), never a half-baked doc. The full wow `ActionRunner`/dispatcher is NOT
+reused (it is a batch button-prompt path with a channel adapter + cron the
+one-time plain-emit finalize has no surface for); the kickoff reuses its
+trigger/gate CONTRACT plus `ProjectDocComposer`, `runtime/doc-links.ts`, and the
+project-page indexer. `MaterializedProject` now threads `is_interest` + the
+materializer's `MaterializeOutcome` (previously discarded) so the gate can read
+`slice_chunk_count`/`summary_written`.
+
+**Wiring.** `open/composer.ts` builds `projectKickoff` from the onboarding
+Anthropic client (kickoff composer) + `buildProjectPageIndexer` (GBrain syncHook)
+and passes it into `buildOnboardingFinalize` (optional dep; omitted on the LLM-less
+path).
+
+**Tests.** `gateway/wiring/__tests__/build-project-kickoff.test.ts`
+(gate picks meaty-vs-prompt; draft-doc writes + presents a valid `docs:/` marker +
+indexes; create-if-missing never clobbers; deadline offer names only related
+upcoming deadlines and is offer-only; overdue/far-future excluded; thin hobby →
+questions; rich hobby → research doc; compose failure degrades correctly).
+`build-onboarding-finalize.test.ts` (hobby materialization from
+`non_work_interests` + `inferred_interests`; hobby/work same-name dedup; dropped
+hobby excluded; kickoff body emitted under the single opening dedupe slot with the
+deterministic fallback for declined projects).
+
+---
+
+## M1 UX REDESIGN — backend data contracts (PR-1, 2026-07-02)
+
+First redesign PR: the two design-independent backend contracts the redesigned
+Work pane + project rail consume. NO feature flag, one code path, NO visual
+change (PR-2+ build the UI on top of these).
+
+### A. Per-run inner-step (`step_label`) + a live push that retires the 15 s poll
+
+**Problem.** The outer `code_trident_runs.phase` sits at `forge-init` the WHOLE
+inner build, and NOTHING pushed the inner workflow's checkpoint advances — the
+web Work Board fell back to a 15 s poll (`WorkBoardTab.tsx`) to notice
+building→reviewing→fixing, so a live build "looked frozen".
+
+**`step_label` derivation (`trident/run-progress.ts`).** New exported
+`deriveStepLabel(phase, inner_checkpoint)` + a `step_label: RunStepLabel` field on
+`RunProgress` (`building|reviewing|fixing|merging|done|failed`). It REUSES the
+`inner_checkpoint` the inner workflow already re-stamps at each phase boundary
+(`checkpoint()` in `inner-workflow.mjs`); because checkpoints are END-of-phase
+markers, each maps to the phase the run is CURRENTLY in — `forge-done`→reviewing,
+`argus-request-changes`→fixing, `fix-round-N`→reviewing, `argus-approved`→merging,
+terminal phases win. No new DB column (the spec's sanctioned "reuse the existing
+RunProgress shape" path). Mirrored client-side in `work-board-client.ts` with a
+`stepLabelFromPhase` fallback for a legacy/absent wire value.
+
+**The live fan (`trident/tick.ts`).** New `TridentTransitionHook` +
+`on_transition` option on `TridentTickLoop`. The loop re-loads every non-terminal
+run each tick and, when a run's progress signature
+(`phase|inner_checkpoint|round|pr|last_advanced_at`) differs from what it last saw
+(a checkpoint advance, a launch, or a terminal transition), fires `on_transition`.
+This is the ONLY place that can fan on the inner workflow's behalf — the workflow
+runs detached and can only `sqlite3`-write, never reach the app-ws registry. The
+fan is best-effort (own try/catch), signature-deduped (quiet when idle), and drops
+a run's signature once terminal (no unbounded map growth). Plumbed
+composer→`misc-input.ts` (`on_run_transition`)→`build-core-modules.ts`
+(→`on_transition`).
+
+**Composer wiring (`open/composer.ts`).** The `work_board_changed` fan is
+extracted to a named `fanWorkBoardChanged(scopeKey)` shared by the store's
+`onChange` AND the run-transition hook. `on_run_transition(run)` fans
+`fanWorkBoardChanged(run.project_slug)` (a board-bound run's `project_slug` IS its
+item's board scope key) + `emitProjectsChangedIfChanged`. `WorkBoardTab.tsx`'s
+15 s poll is retained as a FALLBACK only (dropped-frame resilience + the
+elapsed/stall clock).
+
+### B. Per-project rail fields (`activity` / `preview` / `preview_from` / `live_runs`)
+
+`readProjectRows` (`open/composer.ts`) — feeding both the `projects_changed` frame
+and the page bootstrap — now derives four per-project fields:
+
+- **`activity`** (`idle`/`working`/`attention`) — `working` = a live chat turn
+  (tracked at the `agent_typing` start/end seam via `activeChatProjects`) ∪ any
+  board item bound to a live non-terminal run ∪ any `inline_active` item;
+  `attention` (WINS over working) = any not-done item whose bound run is `failed` ∪
+  any live run stalled past the display threshold.
+- **`preview` / `preview_from`** — the project's last chat message
+  (`app_chat_messages`), markdown-stripped + server-truncated to ~90 chars, plus
+  the sender (`user`/`agent`) for a `You: ` prefix.
+- **`live_runs`** — count of the project's live bound runs (Work-tab badge / pane
+  toggle count).
+
+The precedence + truncation are a PURE, unit-tested module (`open/project-rail.ts`:
+`deriveProjectActivity`, `truncatePreview`, `stripMarkdownForPreview`). The chat
+turn also fans `projects_changed` at the typing seam (diff-gated). Frame type
+extended in `channels/adapters/app-ws/envelope.ts`; client parses the fields in
+`controller.ts` into the `ProjectTab` type (`config.ts`), all optional on the wire
+for back-compat.
+
+**Tests.** `trident/run-progress.test.ts` (step_label for every checkpoint + the
+full building→reviewing→fixing→reviewing→merging→done arc); `trident/tick.test.ts`
+(on_transition fires on first-observation + each checkpoint advance + terminal,
+never on a no-op; a throwing fan never aborts the tick); `open/project-rail.test.ts`
+(activity precedence incl. attention-wins; preview markdown-strip + truncation).
+`tsc` clean (root + `trident` + `landing/chat-react` leaf); leak-gate SILENT.
+
+**Cross-model review fixes (Codex, 2 × P2).** (1) *Stalled runs now fan a rail
+refresh* — `progressSignature` (`trident/tick.ts`) includes a `stalled` boolean
+(off an injectable clock vs `STALLED_WARN_MS`), so the ONE moment a live run ages
+past the display-stall threshold flips the signature and fires `on_transition`
+(→ rail `attention`); it flips at most once per stall, so no per-tick churn. (2)
+*Failed builds stay surfaced as attention* — a failed run is auto-detached from
+its item on terminal reconcile, so the bound-item check alone was fleeting;
+`readProjectRailExtras` now also reads `TridentRunStore.latestByProjectScope` — if
+the scope's most-recent run is `failed` and the project still has a not-done item,
+`attention` persists until a fresh run supersedes it. Tests added for both (tick
+stall-crossing fan; `store.latestByProjectScope` scoping).
+
+---
+
+## Work-Board project-scope fix — agent tools + trident builds scope to the ACTIVE project (P0)
+
+**Symptom (reproduced on the box 2026-07-02).** Chatting inside a NAMED project
+(e.g. "Tabs"), the agent created Work items + kicked trident builds, but BOTH the
+`work_board_items` rows AND the `code_trident_runs` rows came out under the
+owner/instance slug (the General bucket) instead of the project — so they were
+invisible in the project's Work tab and mis-filed onto General. Every agent-started
+work item / build from a named project landed on General.
+
+**Trace (the ACTUAL path the builds took).** The two candidate items were AGENT-
+created, so the path is the agent-native MCP tool path — NOT the `/code` filter
+(which is defined in `gateway/boot-helpers.ts` but **never constructed** in Open —
+not a live path) and NOT the HTTP ▶ route (`gateway/http/work-board-surface.ts`,
+which already derives `scope = workBoardScopeKey(resolved.project_slug, <URL
+project_id>)` correctly). The drop point, step by step:
+
+1. Agent calls `work_board_add` / `work_board_dispatch_build` over the native-MCP
+   bridge → the spawned `claude`'s tools-bridge POSTs `/tool-call` to the warm-REPL
+   sink (`persistent-repl-substrate.ts`).
+2. The sink dispatched `replToolBridge.dispatch({tool_name, args, call_id})` with **no
+   active project** — the warm REPL is topic-agnostic (documented Codex r1 [P2]: it
+   binds `topic_id:null`), so there was no per-turn project on the call.
+3. `McpServer.dispatch` → `currentTopicContextOrSystem(call_id, this.project_slug)`:
+   no bound `TopicContext` ⇒ system shape with `project_slug = this.project_slug` (the
+   **instance slug**).
+4. The `work_board_*` handlers (`work-board/agent-tool.ts`) + the trident build tools
+   (`trident/work-board-build-tool.ts`) passed that `ctx.project_slug` straight to the
+   store / `dispatchBoardBoundBuild`. Via `workBoardScopeKey(owner_slug, /* empty */)`
+   → `owner_slug` = the **General board**. ⇐ **exact drop point.**
+
+**Fix — thread the active project end-to-end.** The warm conversational REPL is keyed
+per-project (`poolKeyFor` folds `metering_context.project_id`), so a session serves
+exactly one project scope for its lifetime:
+
+- `ReplSession.projectId` is stamped from `options.project_id` at spawn; the
+  `/tool-call` sink looks the session up by `session_id` (the tools-bridge already
+  POSTs it) and threads `project_id` into `replToolBridge.dispatch({… project_id})`.
+- `ReplToolBridge.dispatch` + `McpServer.dispatch` gained an optional `project_id`;
+  `currentTopicContextOrSystem` returns it (preferring a bound `TopicContext`'s own
+  `project_id` on the `resolveBound` path). New field
+  `ToolCallContext.project_id` (the ACTIVE project; NULL = General/system).
+- `work_board_*` (`work-board/agent-tool.ts`) and `work_board_dispatch_build` /
+  `work_board_start` (`trident/work-board-build-tool.ts`) now resolve their scope via
+  `workBoardScopeKey(ctx.project_slug, ctx.project_id)`, threaded to every store call,
+  the board `get`/`attachRun`, `resolve_task`, and the created `code_trident_runs` row.
+- The per-turn **injected** `<work_board>` block is scoped the same way
+  (`build-live-agent-turn.ts` passes `turn.project_id`; composer `workBoardSnapshot`
+  wraps `workBoardScopeKey`), so the board the agent re-grounds on == the board its
+  writes land on. (`availableServicesSnapshot` already did this; the work board didn't.)
+
+General (no active project / `'general'`) still scope-keys to the owner slug — the
+"pre-existing rows map to General" behaviour (`work-board/store.ts:120-153`) is
+preserved. One code path, no feature flags.
+
+**Spec-conformance.** SPEC (#179): every project has its own board keyed by scope-key;
+agent + build writes scope to the active project. CURRENT (before): agent
+`work_board_*` + build-dispatch tools fell back to the instance/General slug. GAP:
+active `project_id` not threaded into the agent tools + run creation. THIS PR: threads
+it via the per-project session scope so named-project work scopes correctly; injected
+board matches. OUT: General's Work *view* (UI tab, see below); redesign geometry.
+
+**General's Work view — deferred (stated per spec).** General IS a first-class board
+bucket (`owner_slug`) and the HTTP surface serves it, but the web tab-set builder
+(`landing/chat-react/ProjectShell.tsx`, `if (isGeneral)` at ~L325) excludes the Work
+tab for General. That file is owned by the parallel redesign PR that turns the desktop
+Work tab into a slide-out; adding a General Work tab here would collide with it and be
+immediately obsoleted. Deferred to that PR with an actionable note (drop the
+`isGeneral` Work exclusion so General gets the same Work surface). No backend blocker —
+General's board is already reachable.
+
+**Tests.** `work-board/agent-tool.test.ts` (add/list/update/complete scope to the
+active project; General regression guard; cross-scope write is a no-op).
+`trident/work-board-build-tool.test.ts` (a build in project "acme" scope-keys the run
+`project_slug` + board `get`/`attachRun` + `resolve_task` to acme; General → owner
+slug). `mcp/server.test.ts` (dispatch binds bound-context `project_id`; threads the
+caller `project_id` with no bound context; null otherwise). `tool-bridge.test.ts` (a
+`/tool-call` from a session spawned under project "acme" threads `project_id:'acme'`
+into dispatch; an unknown session → null). `tsc` clean (root + `trident`); leak-gate
+SILENT.
+
+**Cross-model review fix (Codex, 1 × P2).** *`dispatch_agent` now scopes to the
+active project too.* The agent-native `dispatch_agent` tool is also board-bound, but
+its `DispatchService` looked the `board_item_id` up (+ `attachRun`/`clearRun`) under
+the service's own owner `project_slug` — so after this PR moved `work_board_add` onto
+the active project, an agent that created/listed an item in project X and then
+`dispatch_agent`'d against it would 404 as `unknown_board_item`. Threaded a
+`DispatchRequest.board_scope` (defaults to the owner slug) through
+`dispatch → launch → report`; the tool sets it to
+`workBoardScopeKey(ctx.project_slug, ctx.project_id)`. Tests: `agent-dispatch/
+service.test.ts` (board get/attach/clear all key on the threaded scope; default =
+owner slug), `agent-dispatch/surface.test.ts` (the tool builds the req with the
+active-project `board_scope`). The dormant `/dispatch` *chat command* is not wired in
+Open (like `/code`); it keeps the owner-slug default, unchanged.
+
+## UX Batch-4 (#347/#348/#349/#350) — mobile/web-mobile chat-react polish (2026-07-03)
+
+Four fixes from the owner's live dogfood, all in the responsive web chat-react client
+(no feature flags, one code path, both light+dark + desktop preserved).
+
+**#347 — the cold-start "Waking up…" pill duplicated + persisted as a timestamped
+bubble.** The pill is a single-slot `systemNotice` rendered as a centered
+ephemeral pill *outside* the message list, so duplicates/bubbles came from two
+races, now closed on three sides:
+1. `landing/chat-react/controller.ts` — a `replyStartedThisTurn` latch (set on the
+   first stream token AND on a durable agent reply, reset on each `send()`). Once
+   a real reply has started, a LATE cold-start ack frame is DROPPED instead of
+   re-arming the pill below the answer.
+2. `controller.ts` `computeVm` — durable rows whose body matches `isColdStartAck`
+   are filtered out of the bubble list entirely, so a legacy/leaked persisted ack
+   can never hydrate as a timestamped/avatar agent bubble (the sync engine
+   persists a durable `agent_message` even though `onFrame` also shows it as a
+   pill — that double-render was the bug).
+3. `gateway/wiring/build-llm-call-substrate.ts` + `build-live-agent-turn.ts`
+   — `collectTokensToString` takes an optional `onFirstToken` callback; the live
+   turn passes `clearAckTimer` so the delayed cold-start ack is cancelled the
+   moment the first reply token streams (not only at turn-settle).
+Tests: `controller.test.ts` (late-ack dropped + fresh turn re-opens the pill;
+durable ack never a bubble); substrate suite green.
+
+**#350 — mobile tab-bar overhaul.** `landing/chat-react/ProjectShell.tsx` +
+`chat-react.html`:
+- Mobile (`<1024px`, the complement of the JS `min-width:1024px` desktop gate)
+  stacks `.car-topbar` into a column: the workspace title on its own line, the
+  tab band on the row below. Desktop keeps the single row.
+- The cycling `<ThemeToggle/>` was removed from the top bar on ALL viewports; a
+  labeled 3-way `ThemeControl` (System/Light/Dark segmented radiogroup, new export
+  in `ThemeToggle.tsx`) now lives in General → Admin → **Appearance**
+  (`IntegrationsTab.tsx`).
+- Overflowing tabs collapse into a right-aligned "⋯" menu instead of
+  `overflow-x: auto` scrolling. New `tab-overflow.tsx`: pure `computeVisibleCount`
+  (unit-tested), a `useTabOverflow` measurement hook (hidden mirror row +
+  `ResizeObserver`), and an accessible `OverflowMenu` (button `aria-haspopup`/
+  `aria-expanded`; `role=menu`/`menuitem`; Esc + outside-click close; focus the
+  first item on open, return focus on close; Arrow/Home/End navigation).
+Tests: `tab-overflow.test.ts`. Browser-verified at 390×844: title stacked, no
+viewport h-scroll (`.car-app { overflow:hidden }` clips the mirror), ⋯ lists the
+overflow tabs, theme control flips `data-theme` + persists.
+
+**#348 — mobile Work tab pulses blue while a build runs.** `.car-tab-workpulse`
+(new keyframe, `--phase-build-*` tokens, reduced-motion → static tint) is applied
+to the `workboard` tab button only when `!isDesktop && summarize(items).running>0`.
+
+**#349 — mobile "job starting" top drawer.** New `work-activity.tsx`:
+`useWorkActivity` subscribes once to the active scope's `onWorkBoardChanged`,
+seeds silently on the first frame, and announces a RISING running count as
+`justStarted`; `JobStartDrawer` (mounted first child of `.car-app`, mobile-only)
+slides down (`--ease-out`, reduced-motion → no slide), auto-retracts after ~3s,
+and swipe-up / ✕ dismisses. Tests: `work-activity.test.tsx` (itemRunning; seed vs
+announce; per-project filter; drawer render/auto-close/✕). Browser-verified visual.
+
+**#375 — K10: public root `SPEC.md` + Ralph governed mode (world-class refactor
+window CLOSED).** The refactor window (`docs/plans/2026-07-02-world-class-refactor-plan.md`)
+is complete. K10 introduces the public master `SPEC.md` (governance preamble,
+Architecture §2.1-2.8, § Phases → Steps, immutable Decisions Log), removes it from
+leak-gate `FORBIDDEN_EXACT` (inverting the RT1 tripwire), repoints the 11
+`TODO(K10)` comments, and lifts the window's `resolveRalph=false` override so
+`detectRalphMode` governs trident builds whose workspace is a checkout of this
+tree (NOT arbitrary user-project `/code`, which build in a fresh SPEC-less
+`Projects/<slug>/code` workspace). **Window tail shipped this session:** the
+perfect-recall lane (RB1 #361 memory-index / RB2 #363 reflection re-splice / RB3
+#369 reflect-cron / RB4 #366 temporal-invalidation, RC1-3 Nexus), the naming lane
+(N1 #362 OwnerHandle brand, N2/N3 #367 `internal_handle`→`owner_handle`, N4
+#370/#372 `project_slug`→`owner_slug` instance-sense, N5 #368 dir-hygiene, N6 #371
+ChannelKind data-migration, N7 #364 ghost-refs, N8 #365 codename glossary), plus
+F5/F6/F8/O2-O8/S1-3/X5/X6/W2/W3a and Managed M4/M5/M6. **Owner-adjudicated
+decisions:** MG-3 = KEEP (OSS-split composer seam, INVARIANTS #96); N3-credential =
+DEFERRED (no live renaming owners → the credential-loss incident can't fire;
+INVARIANTS #107). Frozen boundaries (`project_slug` in SQL columns / JWT+healthz
+wire keys / `ResolvedAuth` types / published Cores SDK / project-sense work-board)
+are intentional, documented.
+
+**#377–#392 — post-window audit punch-list + closeout.** A fresh-eyes audit certified
+the window production-solid; its punch-list was fixed: **#377** fail-closed owner-bearer
+gate on BOTH upload handlers (single-shot + chunked) for wide binds (a hole in the
+S1/S2 fail-closed guarantee — unauthenticated ZIP write on `0.0.0.0`); **#378** wired
+`readOwnerTimezone` into the nudge cron (ISSUES #40 read side); **#387** a discriminating
+sender-registry propagate regression (INVARIANTS #36/#70; the old test was
+non-discriminating); **#388** repointed the 15 importers of the one-release `core-sdk`
+shim to `@neutronai/cores-sdk/manifest` + deleted the shim package (52→51 tsconfigs);
+**#391** docs reconciliation (plan §17 + STATUS ledgers → git ground truth,
+window-CLOSED banner, SPEC §2.2 completed, stale SYSTEM-OVERVIEW/INVARIANTS/AGENTS
+pointers + dangling §N citations fixed); **#392** owner-timezone WRITE path closing
+ISSUES #40 end-to-end — web + mobile detect the IANA zone (`Intl…timeZone`) and thread
+it on every app-ws connect (initial + project-switch + reconnect); the server sanitizes
+(trim/64-cap/IANA-validate), gates the persist on the OWNER identity (`user_id ===
+OWNER_USER_ID` — a shared-project guest cannot rewrite the owner's zone), and writes via
+`writeOwnerTimezone` only on change. Deferred (tracked as GitHub issues #379–#389): the
+dead-code cleanup (two careful attempts each hit a dead-but-INTENTIONALLY-RETAINED
+landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster is reserved
+for a queued plan — so an aggressive sweep is contraindicated here) + the known
+engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
+second fresh-eyes certification audit followed this closeout.
+
 ## 2026-08-17 — a short cooldown was releasing a credential the owner's lane had benched
 
 Landed via PR #356.
@@ -22328,3 +23241,10 @@ again, now WITH checksum verification active (3093 = 3093, zero missing, zero ex
 parser agreeing on a wrong hash would pass every hand-built fixture and reject every
 real index on earth. `bun test migrations/` 120 pass / 0 fail. The four mutants kill
 four scenarios, one each.
+| Mutant | Result |
+| --- | --- |
+| M1 `remote-target-resolution`: target uses local `revParse` | RED — remote-ahead request returned `up_to_date` |
+| M2 `remote-ref-fetch`: skip the fetch | RED — remote-ahead request returned `up_to_date` and fetch-call assertion failed |
+| M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
+| M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
+| M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |

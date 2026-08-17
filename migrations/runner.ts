@@ -447,11 +447,37 @@ function treeProvenanceOf(tree: DeployedTree | null): string | null {
     : unverifiedTreeProvenance(tree.reason)
 }
 
-function assertUniqueMigrationOrdinals(migrations: Migration[]): void {
+/**
+ * Refuse two files claiming one ordinal — unless the tree can say one of them is
+ * a stray, in which case stand aside for the better diagnosis.
+ *
+ * WHY THIS TAKES THE TREE VERDICT. Two tracked files at one ordinal is a mistake
+ * IN THIS REPOSITORY, and naming both files is the right message for it. But a
+ * tracked `0124_real.sql` beside an untracked `0124_stray.sql` is not that — it is
+ * the incident class, and the collision message sends the operator looking for a
+ * duplicate they did not commit while the actual remedy (delete the stray, or
+ * commit it) goes unsaid. Ordinals 122 and 124 on the live instance were exactly a
+ * stray landing on an occupied ordinal, so this is the shape that has already cost
+ * real downtime, not a hypothetical one.
+ *
+ * So when the tree is verified and one side of the collision is untracked, this
+ * defers and lets the refusal loop below speak — it names the file and gives that
+ * remedy. Fail-closed either way, and unchanged where the tree cannot tell them
+ * apart (`verified` null): what changes is only which remedy the operator is
+ * handed. Deferring cannot mean "apply it": the loop refuses every untracked
+ * pending file, which is why standing aside here is safe.
+ */
+function assertUniqueMigrationOrdinals(
+  migrations: Migration[],
+  verified: { readonly tracked: ReadonlySet<string> } | null,
+): void {
+  const untracked = (m: Migration): boolean =>
+    verified !== null && !verified.tracked.has(m.fileName)
   const byVersion = new Map<number, Migration>()
   for (const migration of migrations) {
     const previous = byVersion.get(migration.version)
     if (previous) {
+      if (untracked(previous) || untracked(migration)) continue
       throw new Error(
         `Migration ordinal collision at version ${migration.version}: ${previous.fileName} and ${migration.fileName}`,
       )
@@ -507,7 +533,6 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   db.exec('PRAGMA foreign_keys = ON')
   const seen = readLedger(db)
   const migrations = loadMigrations(dir)
-  assertUniqueMigrationOrdinals(migrations)
   const repairs = new Map(
     loadMigrationRepairs(dir).map((repair) => [
       repairKey(repair.version, repair.recorded_name, repair.file_name),
@@ -547,6 +572,12 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // The tracked-file list, or null when there is none to compare against. A
   // `null` here is "cannot verify" and refuses nothing — see `resolveDeployedTree`.
   const verified = tree !== null && tree.kind === 'verified' ? tree : null
+  // AFTER the tree verdict, not before it, so a stray colliding with a tracked
+  // file is diagnosed as the stray it is. A collision always makes the run
+  // decidable — one of the two files is either pending or mismatched against the
+  // recorded name — so the verdict above is never null for the reason that matters
+  // here. See the function for the argument.
+  assertUniqueMigrationOrdinals(migrations, verified)
   /**
    * The tree verdict WHEN IT REFUSES this file, else null.
    *
