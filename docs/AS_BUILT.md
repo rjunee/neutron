@@ -2,6 +2,24 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
+
+The outer publisher refused to publish when origin's branch ref already equalled the
+commit the build produced — `outer publisher refused: branch … is already at … on origin
+— the build left no new commits to publish` — and the run was recorded `failed`. Three
+occurrences on 2026-08-17 across both repos (enterprise run `26ed32c1`, open run
+`88efe1ca` — the deploy-blocker card, whose PR #391 was open and mergeable with the
+complete fix — and the `95fcfb91` near-miss): in every one the work was finished and on
+origin, and the natural relaunch would have rebuilt already-published work.
+
+`publishBuiltCommit` (`trident/orchestrator.ts`) now asks `remoteAlreadyAtPublishHead`
+against the POST-rebase head: the remote already holding exactly the head to publish
+skips the lease push as a no-op SUCCESS — the publish resolves to that commit and
+continues to the PR/review handoff, and the transition note records that the push was a
+no-op because the ref was already correct. The genuine "nothing was built" outcome keeps
+its guard where it belongs: the empty base-to-head diff refusal. A remote at the
+PRE-rebase tip while the replay produced a new head still takes the real lease push.
+
 ## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
 
 Landed via PR #388.
