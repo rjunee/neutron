@@ -30,7 +30,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
@@ -67,8 +67,8 @@ afterEach(() => {
 
 /** File a key under the `kimi` service exactly as the settings pane does. */
 async function storeKimiKeyInSettings(value: string): Promise<void> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const secrets = new SecretsStore({ data_dir: process.env['NEUTRON_HOME']!, db })
   const creds = new ProjectCredentialStore(db, { crypto: secrets })
   await creds.set(asOwnerHandle(SLUG), {
@@ -80,8 +80,8 @@ async function storeKimiKeyInSettings(value: string): Promise<void> {
 }
 
 async function resolverFromComposer(): Promise<() => boolean> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composition = await buildOpenGraphComposer({ env: process.env })({
     db,
     project_slug: SLUG,

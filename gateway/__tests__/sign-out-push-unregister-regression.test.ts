@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { DevicePushTokenStore } from '../push/store.ts'
 import {
@@ -52,8 +52,8 @@ interface Harness {
 
 async function startGateway(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-signout-push-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const store = new DevicePushTokenStore(db)
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
   const surface = createAppDevicesSurface({ store, auth })

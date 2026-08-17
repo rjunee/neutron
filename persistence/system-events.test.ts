@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from './db.ts'
 import {
   SystemEventsStore,
@@ -20,8 +20,8 @@ let store: SystemEventsStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'system-events-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   store = new SystemEventsStore({ db })
 })
 
@@ -292,8 +292,8 @@ describe('SystemEventsStore — drain flushes fire-and-forget writes', () => {
   it('a REAL store write failure never produces an unhandled rejection', async () => {
     // Throwaway DB/store local to this test so closing it doesn't collide with
     // the shared afterEach teardown of `db`.
+    seedMigratedDb(join(tmp, 'fail.db'))
     const failDb = ProjectDb.open(join(tmp, 'fail.db'))
-    applyMigrations(failDb.raw())
     const failStore = new SystemEventsStore({ db: failDb })
 
     const unhandled: unknown[] = []

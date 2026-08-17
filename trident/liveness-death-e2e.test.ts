@@ -6,7 +6,7 @@ import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import {
@@ -30,8 +30,8 @@ let board: WorkBoardStore
 
 beforeEach(() => {
   scratchpad = mkdtempSync(join(tmpdir(), 'trident-liveness-death-e2e-'))
+  seedMigratedDb(join(scratchpad, 'project.db'))
   db = ProjectDb.open(join(scratchpad, 'project.db'))
-  applyMigrations(db.raw())
   store = new TridentRunStore(db)
   board = new WorkBoardStore(db, {
     isRunLive: (id) => {

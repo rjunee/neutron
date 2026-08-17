@@ -49,7 +49,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -117,8 +117,8 @@ function completedResult(): ImportResult {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-s15-cron-boot-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   buttonStore = new ButtonStore({ db })
   stateStore = new SqliteOnboardingStateStore({ db })
   transcript = new TranscriptWriter({

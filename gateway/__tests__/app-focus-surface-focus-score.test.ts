@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
@@ -49,8 +49,8 @@ interface Harness {
 
 async function startGateway(now: () => number = () => Date.now()): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-focus-score-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const tasks = new TaskStore(db)
   const reminders = new ReminderStore(db)
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })

@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -289,8 +289,8 @@ async function bootAndInspect(
     captured.push(opts)
     return { start: () => cannedHandle(opts.substrate_instance_id) }
   }
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
   // Only compose the CompositionInput — we deliberately do NOT stand up the
   // production graph (HTTP server + cron schedulers), so this characterization

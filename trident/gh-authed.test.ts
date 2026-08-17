@@ -18,9 +18,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { storeGitHubToken } from '@neutronai/github/credential.ts'
 import { runGhAuthed } from './gh-authed.ts'
@@ -45,9 +44,7 @@ beforeEach(() => {
   mkdirSync(stubBin, { recursive: true })
   mkdirSync(fakeHome, { recursive: true })
   dbPath = join(workdir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
 
   // The capture file lives OUTSIDE the temp tree the "never written to disk"
   // assertion sweeps, because it is the one place the token is deliberately

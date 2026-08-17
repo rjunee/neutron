@@ -32,7 +32,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { buildImportUploadHandler } from '../upload/import-upload-handler.ts'
@@ -82,8 +82,8 @@ function makeMultipart(bytes: Uint8Array, name: string): FormData {
 
 async function startHarness(): Promise<Harness> {
   const owner_home = mkdtempSync(join(tmpdir(), 'neutron-m2-zip-prod-'))
+  seedMigratedDb(join(owner_home, 'owner.db'))
   const db = ProjectDb.open(join(owner_home, 'owner.db'))
-  applyMigrations(db.raw())
   const engineCalls: EngineCall[] = []
   let topicMissingCount = 0
 

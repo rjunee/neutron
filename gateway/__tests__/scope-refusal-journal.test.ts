@@ -19,7 +19,7 @@
 
 import { expect, test } from 'bun:test'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import {
   SystemEventsStore,
   type PersistedSystemEvent,
@@ -39,8 +39,8 @@ import {
 const FALLBACK = 'dev'
 
 function freshDb(): ProjectDb {
+  seedMigratedDb(':memory:')
   const db = ProjectDb.open(':memory:')
-  applyMigrations(db.raw())
   return db
 }
 

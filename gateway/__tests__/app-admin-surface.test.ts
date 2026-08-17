@@ -25,7 +25,7 @@ import { join } from 'node:path'
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { MemoryStore } from '@neutronai/gbrain-memory/memory-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   createAppAdminSurface,
@@ -73,8 +73,8 @@ interface StartOptions {
 async function startGateway(opts: StartOptions = {}): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-admin-'))
   const owner_home = join(tmp, 'owner_home')
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const coresStore = new CoreInstallationsStore({ db })
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
   const restartSpy = { calls: 0 }
@@ -166,8 +166,8 @@ describe('app-admin — auth + project isolation', () => {
     await h.close()
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-admin-mis-'))
     const owner_home = join(tmp, 'owner_home')
+    seedMigratedDb(join(tmp, 'owner.db'))
     const db = ProjectDb.open(join(tmp, 'owner.db'))
-    applyMigrations(db.raw())
     const otherAuth = createAppWsAuthResolver({ project_slug: OTHER_OWNER, bypass: true })
     const surface = createAppAdminSurface({
       auth: otherAuth,

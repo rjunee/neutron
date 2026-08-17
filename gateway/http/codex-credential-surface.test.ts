@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -48,8 +48,8 @@ function req(method: string, path: string, body?: unknown, withAuth = true): Req
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'codex-surface-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')
