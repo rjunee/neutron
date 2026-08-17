@@ -538,7 +538,7 @@ describe("the wrapper BINDS the worktree to the run's branch — the binding is 
     expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
-    expect(branchHead).toBe(r.trailer['NEUTRON_CODEX_BUILD_HEAD'])
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
   })
 
   test('the measured leftover-local-branch incident re-enters and advances that branch', () => {
@@ -549,7 +549,7 @@ describe("the wrapper BINDS the worktree to the run's branch — the binding is 
     expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
-    expect(branchHead).toBe(r.trailer['NEUTRON_CODEX_BUILD_HEAD'])
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
     expect(ancestor.status).toBe(0)
   })
 
