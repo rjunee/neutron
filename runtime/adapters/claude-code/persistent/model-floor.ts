@@ -179,16 +179,26 @@ export const FRONTIER_RANK = Number.MAX_SAFE_INTEGER
  * whatever `FAST_MODEL`'s family is, rank 1 is whatever `SONNET_MODEL`'s is, and
  * everything else ranks above both.
  *
- * THIS DOES NOT USE {@link familyOf}'S POSITION, and the difference is the point.
- * `familyOf` answers "which tier does this id NAME", positionally, which is what
- * the alias constants and a human reader want. The FLOOR needs a stronger
- * question — "can a lower tier be hiding anywhere in this string" — because the
- * vendor-word list `familyOf` skips is an ENUMERATION, and an enumeration is a
- * list of the prefixes someone remembered. One unlisted routing segment
- * (`bedrock/us-east-1/claude-3-5-haiku`) would make `familyOf` return that
- * segment, rank the id at the frontier and let the fast tier through — the exact
- * class of miss this round is fixing, one level up. So the rank scans EVERY
- * token, and a lower-tier family found anywhere wins.
+ * THIS ASKS A DIFFERENT QUESTION THAN {@link familyOf}, and keeps asking it even
+ * though `familyOf` now answers most of it. `familyOf` answers "which tier does
+ * this id NAME" — a known tier word anywhere, else the first non-vendor,
+ * non-numeric token. The FLOOR asks the blunter "can a lower tier be hiding
+ * anywhere in this string", and it does not go through `familyOf`'s single answer
+ * to get there.
+ *
+ * That is redundant for a KNOWN tier and deliberately kept, because the two
+ * mechanisms fail on different inputs. `familyOf`'s positional fallback is
+ * guarded by a vendor-word ENUMERATION — a list of the prefixes someone
+ * remembered — so a tier name NOT in `TIER_WORDS`, behind a prefix NOT on the
+ * vendor list, resolves to the prefix. A rank taken from that single answer would
+ * put the id at the frontier and let it through. Scanning every token means only
+ * ONE of the two has to be right.
+ *
+ * (This docblock previously illustrated the point with
+ * `bedrock/us-east-1/claude-3-5-haiku`, which the tier-word pass now resolves
+ * correctly — the example went stale the moment `familyOf` improved. Left noted
+ * rather than silently swapped: a comment that describes behaviour the code
+ * stopped having is the failure mode this file keeps running into.)
  *
  * The cost is a possible false CLAMP on an id that merely contains a tier word,
  * which spends more money on a better model. The failure this file exists to
