@@ -9,10 +9,11 @@
  * a trident run that is genuinely driving it — the trident tick is already that
  * item's wakeup driver, and waking it here too would double-drive one piece of
  * work from two schedulers. `runDrivingVerdict` (`trident/run-driving.ts`) answers
- * "genuinely driving" — and answers it from the ROW where it can (terminal phase,
- * no dispatch ever recorded, no usable `last_advanced_at`), falling back to the
- * reaper's own `NO_ADVANCE_HANG_MS` timer only for the cases those leave open.
- * `phase` alone is never the answer; that was the bug.
+ * "genuinely driving": a terminal phase and an unusable `last_advanced_at` are
+ * decided from the ROW, and everything else falls to a no-advance timer pitched
+ * DELIBERATELY ABOVE the reaper's own threshold (`WAKEUP_STAND_DOWN_MS`) so the
+ * reaper always answers first for any run it can reach. `phase` alone is never the
+ * answer; that was the bug.
  *
  * WHY THE OLD `!isTerminalPhase(run.phase)` TEST WAS THE BUG, measured on the
  * owner's instance the night the wakeup shipped: three `in_progress` items were
@@ -23,10 +24,11 @@
  * AND THE PEER COULD NOT RESCUE THEM, which is why the fix belongs on this side.
  * Both trident reap paths — the 90-min hang watchdog and the 2-h inflight ceiling
  * — sit inside `if (run.subagent_run_id !== null || run.subagent_status ===
- * 'crashed')` (`orchestrator.ts:2427`, `:2529`, `:2573`). A run that never
+ * 'crashed')` (`orchestrator.ts:2429`, `:2530`, `:2573`). A run that never
  * obtained a dispatch id is reachable by neither, and a reaper fix would in any
  * case run on the very loop whose stall this is compensating for. A backstop must
- * not depend on the liveness of the thing it backs up.
+ * not depend on the liveness of the thing it backs up. Those unreachable runs are
+ * exactly what the timer above the reaper's threshold is left deciding.
  *
  * THE SKIP IS REPORTED, NOT SWALLOWED. Deferred items are returned on the project
  * entry (`WakeupProjectWork.deferred`) so `runWorkWakeupSweep` can log one line
@@ -95,6 +97,7 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
       if (verdict.driving) {
         ensure(item.project_slug).deferred.push({
           title: item.title,
+          item_id: item.id,
           run_id: run.id,
           phase: run.phase,
           since_advance_ms: verdict.since_advance_ms,

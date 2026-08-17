@@ -100,15 +100,22 @@ export const WAKEUP_FAILURE_POST_CADENCE = 6
 export const WAKEUP_BLOCKED_PREFIX = 'BLOCKED:'
 
 /**
- * Re-log a STANDING deferral at most this often, per (project, run). A deferral
- * is a per-tick decision, so logging every one of them would write 288 lines a
- * day per item for as long as the build runs — a volume that stops being a
- * signal. The window is edge-friendly rather than edge-triggered: a NEW run id
- * has no window and logs on the first sweep that defers to it, so the interesting
- * transition is never delayed, while the same run repeats every half hour instead
- * of every five minutes. Half an hour is chosen against the reader, not the
- * writer: it is short enough that "is anything progressing?" is answerable from a
- * glance at the tail, and long enough that the answer is not buried in itself.
+ * Re-log a STANDING deferral at most this often, PER ITEM. A deferral is a
+ * per-tick decision, so logging every one of them would write 288 lines a day per
+ * item for as long as the build runs — a volume that stops being a signal. The
+ * window is edge-friendly rather than edge-triggered: a newly deferred item has no
+ * window and logs on the first sweep that defers it, so the interesting transition
+ * is never delayed, while a standing deferral repeats every half hour instead of
+ * every five minutes. Half an hour is chosen against the reader, not the writer:
+ * short enough that "is anything progressing?" is answerable from a glance at the
+ * tail, long enough that the answer is not buried in itself.
+ *
+ * PER ITEM, NOT PER RUN, and the distinction is the whole point of the line. One
+ * trident run can drive several board items; keying the window on the run made the
+ * SECOND and third items on that run silent — the sweep would report three
+ * deferrals in its counters and name one of them, which is the same partial
+ * invisibility this logging exists to remove. The item is the thing the owner is
+ * asking about, so the item is the key.
  */
 export const WAKEUP_DEFERRAL_LOG_WINDOW_MS = 30 * 60_000
 
@@ -125,6 +132,8 @@ export interface WakeupWorkItem {
  */
 export interface WakeupDeferredItem {
   title: string
+  /** The `work_board_items.id` — the deferral log's rate-limit key. */
+  item_id: string
   /** The `code_trident_runs.id` the item is bound to. */
   run_id: string
   /** That run's phase, verbatim (`forge-init`, `argus`, …). */
@@ -252,6 +261,7 @@ export function buildWakeupPrompt(input: {
 export async function runWorkWakeupSweep(
   deps: WorkWakeupDeps,
   failureStreaks: Map<string, number>,
+  deferralLog: Map<string, number> = new Map(),
 ): Promise<WakeupSweepResult> {
   const now = deps.now ?? ((): number => Date.now())
   const grace = deps.owner_grace_ms ?? WORK_WAKEUP_OWNER_GRACE_MS
@@ -265,6 +275,20 @@ export async function runWorkWakeupSweep(
   for (const key of [...failureStreaks.keys()]) {
     if (!liveKeys.has(key)) failureStreaks.delete(key)
   }
+  // THE SAME PRUNE, FOR THE SAME REASON, ON THE DEFERRAL WINDOWS. This window is
+  // owned by the loop rather than taken from `log.rateLimited`, whose state is a
+  // module-global map pruned only by `resetLoggerStateForTests`
+  // (`logger/index.ts:237-247`). Every other caller of that helper keys it on a
+  // bounded vocabulary; a board item id is not one — it is fresh per item, for as
+  // long as the process lives. Owning the map keeps the keyspace bounded by what
+  // is CURRENTLY deferred, which is the same discipline the streak map fifteen
+  // lines up already follows.
+  const deferredKeys = new Set(
+    projects.flatMap((p) => p.deferred.map((d) => `${p.project_key}:${d.item_id}`)),
+  )
+  for (const key of [...deferralLog.keys()]) {
+    if (!deferredKeys.has(key)) deferralLog.delete(key)
+  }
 
   for (const project of projects) {
     // SAY WHAT WAS WITHHELD, BEFORE ANY GATE. A deferral is a decision to leave a
@@ -272,21 +296,28 @@ export async function runWorkWakeupSweep(
     // that knows. Logged at INFO (not debug, unlike the owner-active gate) because
     // this is the line that answers "is anything actually progressing?" — it names
     // the run and how long since it last moved, so a parked driver is legible as a
-    // parked driver rather than as an empty board. Rate-limited per (project, run)
-    // so a long build says so periodically instead of 288 times a day; the COUNT
-    // in `WakeupSweepResult` is unconditional, so the rate limit costs volume and
-    // never costs the fact.
+    // parked driver rather than as an empty board. Rate-limited PER ITEM so a long
+    // build says so periodically instead of 288 times a day; the COUNT in
+    // `WakeupSweepResult` is unconditional and is logged every tick by
+    // `buildWorkWakeupLoop`, so the rate limit costs volume and never costs the
+    // fact — an operator reading the summary sees three deferrals even on a tick
+    // where all three per-item lines are inside their window.
     for (const d of project.deferred) {
       result.deferred_to_run += 1
-      log
-        .rateLimited(`deferred:${project.project_key}:${d.run_id}`, WAKEUP_DEFERRAL_LOG_WINDOW_MS)
-        .info('wakeup_deferred_to_live_run', {
-          project: project.project_key,
-          item: bound(d.title, 140),
-          run_id: d.run_id,
-          phase: d.phase,
-          since_advance_ms: d.since_advance_ms,
-        })
+      const logKey = `${project.project_key}:${d.item_id}`
+      const lastLoggedAt = deferralLog.get(logKey)
+      if (lastLoggedAt !== undefined && now() - lastLoggedAt < WAKEUP_DEFERRAL_LOG_WINDOW_MS) {
+        continue
+      }
+      deferralLog.set(logKey, now())
+      log.info('wakeup_deferred_to_live_run', {
+        project: project.project_key,
+        item: bound(d.title, 140),
+        item_id: d.item_id,
+        run_id: d.run_id,
+        phase: d.phase,
+        since_advance_ms: d.since_advance_ms,
+      })
     }
     if (project.items.length === 0) continue
 
@@ -391,11 +422,30 @@ export interface WorkWakeupLoop {
  */
 export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
   const failureStreaks = new Map<string, number>()
+  const deferralLog = new Map<string, number>()
   const loop = new SupervisedLoop({
     name: 'work-wakeup',
     intervalMs: deps.interval_ms ?? WORK_WAKEUP_INTERVAL_MS,
     tick: async (): Promise<void> => {
-      await runWorkWakeupSweep(deps, failureStreaks)
+      const result = await runWorkWakeupSweep(deps, failureStreaks, deferralLog)
+      // THE SWEEP'S OWN COUNTERS NEEDED A READER. `WakeupSweepResult` was returned
+      // and then dropped on the floor by this — its only production caller — so
+      // the claim that a rate-limited per-item line "never costs the fact" was
+      // true of a number nothing printed. That is an aspirational docblock, and
+      // the repo has a rule about those. One line per tick, at INFO when there is
+      // anything at all to say, is what makes the fact reachable.
+      //
+      // A fully idle tick stays SILENT: on a box with no outstanding work this
+      // loop runs 288 times a day and a summary of zeros would drown the ticks
+      // that mean something.
+      if (result.woke > 0 || result.failed > 0 || result.deferred_to_run > 0 || result.skipped_active > 0) {
+        log.info('wakeup_sweep', {
+          woke: result.woke,
+          failed: result.failed,
+          deferred_to_run: result.deferred_to_run,
+          skipped_owner_active: result.skipped_active,
+        })
+      }
     },
   })
   return { loop, describe: (): LoopDescriptor => loop.describe() }

@@ -34,6 +34,7 @@ function project(over: Partial<WakeupProjectWork> = {}): WakeupProjectWork {
 function deferral(over: Partial<WakeupDeferredItem> = {}): WakeupDeferredItem {
   return {
     title: 'Ship the importer',
+    item_id: 'item-1',
     run_id: 'run-1',
     phase: 'forge-init',
     since_advance_ms: 120_000,
@@ -47,7 +48,7 @@ function deferral(over: Partial<WakeupDeferredItem> = {}): WakeupDeferredItem {
  * seam); the level is pinned so the assertion does not depend on the ambient
  * `NEUTRON_LOG_LEVEL`.
  */
-function captureInfo(): { matching(event: string): string[]; restore(): void } {
+function captureInfo(): { matching(event: string): string[]; clear(): void; restore(): void } {
   const lines: string[] = []
   const originalLog = console.log
   const originalLevel = process.env['NEUTRON_LOG_LEVEL']
@@ -57,6 +58,10 @@ function captureInfo(): { matching(event: string): string[]; restore(): void } {
   }
   return {
     matching: (event: string): string[] => lines.filter((l) => l.includes(event)),
+    /** Drop what has been captured so far — for asserting on a LATER tick alone. */
+    clear: (): void => {
+      lines.length = 0
+    },
     restore: (): void => {
       console.log = originalLog
       if (originalLevel === undefined) delete process.env['NEUTRON_LOG_LEVEL']
@@ -177,15 +182,16 @@ describe('runWorkWakeupSweep — the wake path', () => {
   })
 
   test('a STANDING deferral is rate-limited, but the COUNT is never suppressed', async () => {
-    // 288 lines a day per item is not a signal. The window is per (project, run),
-    // so the first sweep speaks and the repeats inside the window stay quiet —
-    // while `deferred_to_run` still counts every one, so nothing is lost.
+    // 288 lines a day per item is not a signal. The window is per ITEM, so the
+    // first sweep speaks and the repeats inside the window stay quiet — while
+    // `deferred_to_run` still counts every one, so nothing is lost.
     resetLoggerStateForTests()
     const lines = captureInfo()
+    const deferralLog = new Map<string, number>()
     try {
       const h = harness({ projects: [project({ items: [], deferred: [deferral()] })] })
-      const first = await runWorkWakeupSweep(h.deps, new Map())
-      const second = await runWorkWakeupSweep(h.deps, new Map())
+      const first = await runWorkWakeupSweep(h.deps, new Map(), deferralLog)
+      const second = await runWorkWakeupSweep(h.deps, new Map(), deferralLog)
       expect(first.deferred_to_run).toBe(1)
       expect(second.deferred_to_run).toBe(1)
     } finally {
@@ -194,7 +200,12 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(lines.matching('wakeup_deferred_to_live_run')).toHaveLength(1)
   })
 
-  test('a DIFFERENT run defers under its own window, so a new stall is never delayed', async () => {
+  test('TWO ITEMS SHARING ONE RUN each get their own line — the run is not the unit', async () => {
+    // The window used to be keyed on (project, run). One trident run can drive
+    // several board items, so the second and third items on a shared run were
+    // SILENT: the counters said three deferrals and the log named one. A review
+    // caught that the test which claimed to cover this quietly used distinct run
+    // ids, so it never met the collision. These share `run-1` deliberately.
     resetLoggerStateForTests()
     const lines = captureInfo()
     try {
@@ -202,15 +213,45 @@ describe('runWorkWakeupSweep — the wake path', () => {
         projects: [
           project({
             items: [],
-            deferred: [deferral(), deferral({ run_id: 'run-2', phase: 'argus' })],
+            deferred: [
+              deferral({ item_id: 'item-1', title: 'Ship the importer' }),
+              deferral({ item_id: 'item-2', title: 'Wire the reaper' }),
+            ],
           }),
         ],
       })
-      await runWorkWakeupSweep(h.deps, new Map())
+      const result = await runWorkWakeupSweep(h.deps, new Map(), new Map())
+      expect(result.deferred_to_run).toBe(2)
     } finally {
       lines.restore()
     }
-    expect(lines.matching('wakeup_deferred_to_live_run')).toHaveLength(2)
+    const deferrals = lines.matching('wakeup_deferred_to_live_run')
+    expect(deferrals).toHaveLength(2)
+    expect(deferrals[0]).toContain('Ship the importer')
+    expect(deferrals[1]).toContain('Wire the reaper')
+  })
+
+  test('the deferral window map is PRUNED to what is currently deferred', async () => {
+    // The window is owned by the loop rather than taken from `log.rateLimited`,
+    // whose module-global map is never pruned in production
+    // (`logger/index.ts:237-247`). A board item id is a fresh key per item, so
+    // without this prune the map is the first unbounded keyspace in it.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    const deferralLog = new Map<string, number>()
+    try {
+      const withDeferral = harness({
+        projects: [project({ items: [], deferred: [deferral({ item_id: 'gone-soon' })] })],
+      })
+      await runWorkWakeupSweep(withDeferral.deps, new Map(), deferralLog)
+      expect(deferralLog.size).toBe(1)
+
+      const withoutDeferral = harness({ projects: [project({ items: [], deferred: [] })] })
+      await runWorkWakeupSweep(withoutDeferral.deps, new Map(), deferralLog)
+      expect(deferralLog.size).toBe(0)
+    } finally {
+      lines.restore()
+    }
   })
 
   test('OBSERVABILITY — every deferral writes a line naming the run and its phase', async () => {
@@ -225,12 +266,18 @@ describe('runWorkWakeupSweep — the wake path', () => {
             items: [],
             deferred: [
               deferral(),
-              deferral({ title: 'Wire the reaper', run_id: 'run-2', phase: 'argus', since_advance_ms: 30_000 }),
+              deferral({
+                item_id: 'item-2',
+                title: 'Wire the reaper',
+                run_id: 'run-2',
+                phase: 'argus',
+                since_advance_ms: 30_000,
+              }),
             ],
           }),
         ],
       })
-      await runWorkWakeupSweep(h.deps, new Map())
+      await runWorkWakeupSweep(h.deps, new Map(), new Map())
     } finally {
       lines.restore()
     }
@@ -376,5 +423,50 @@ describe('buildWorkWakeupLoop', () => {
     const result = await wakeup.loop.runOnce()
     expect(result.ran).toBe(true)
     expect(h.posts).toHaveLength(1)
+  })
+
+  test('THE COUNTERS REACH AN OPERATOR: the loop logs the sweep summary it used to discard', async () => {
+    // `WakeupSweepResult` was returned and dropped by this, its only production
+    // caller — so the claim that a rate-limited per-item line "never costs the
+    // fact" was true of a number nothing printed. An aspirational docblock. The
+    // summary is what makes the deferral count reachable even on a tick where
+    // every per-item line is inside its window.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    try {
+      const h = harness({
+        projects: [
+          project({
+            items: [],
+            deferred: [deferral({ item_id: 'a' }), deferral({ item_id: 'b' })],
+          }),
+        ],
+      })
+      const wakeup = buildWorkWakeupLoop(h.deps)
+      // Twice: the second tick's per-item lines are suppressed by the window, and
+      // the summary must STILL report both deferrals.
+      await wakeup.loop.runOnce()
+      lines.clear()
+      await wakeup.loop.runOnce()
+    } finally {
+      lines.restore()
+    }
+    expect(lines.matching('wakeup_deferred_to_live_run')).toHaveLength(0)
+    const summaries = lines.matching('wakeup_sweep')
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toContain('deferred_to_run=2')
+  })
+
+  test('a fully idle tick stays silent — 288 summaries of zeros a day is not a signal', async () => {
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    try {
+      const h = harness({ projects: [] })
+      const wakeup = buildWorkWakeupLoop(h.deps)
+      await wakeup.loop.runOnce()
+    } finally {
+      lines.restore()
+    }
+    expect(lines.matching('wakeup_sweep')).toHaveLength(0)
   })
 })

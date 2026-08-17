@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { NO_ADVANCE_HANG_MS } from '@neutronai/trident/liveness.ts'
+import { WAKEUP_STAND_DOWN_MS } from '@neutronai/trident/run-driving.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import type { WorkBoardItem } from '@neutronai/work-board/store.ts'
 
@@ -113,6 +114,7 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
     expect(out[0]?.deferred).toEqual([
       {
         title: 'Ship the importer',
+        item_id: 'item-1',
         run_id: 'run-1',
         phase: 'forge-init',
         since_advance_ms: 5 * 60_000,
@@ -120,11 +122,15 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
     ])
   })
 
-  test('a long build stays withheld right up to the reaper threshold', () => {
+  test('a long build is STILL withheld past the reaper threshold — that moment belongs to the reaper', () => {
+    // The blocker in the first cut: at `NO_ADVANCE_HANG_MS` a healthy long Forge
+    // step was woken while it worked, because `last_advanced_at` is stale by
+    // construction mid-phase. This run carries a dispatch id, so the reaper
+    // (`orchestrator.ts:2530`) decides it — and the wakeup stands down past that.
     const out = select({
       items: [item({ linked_run_id: 'run-1' })],
       runs: [run()],
-      now_ms: T0 + NO_ADVANCE_HANG_MS,
+      now_ms: T0 + NO_ADVANCE_HANG_MS + 1,
     })
     expect(out[0]?.items).toEqual([])
     expect(out[0]?.deferred).toHaveLength(1)
@@ -137,7 +143,7 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
     const out = select({
       items: [item({ linked_run_id: 'run-1' })],
       runs: [run({ phase: 'forge-init' })],
-      now_ms: T0 + NO_ADVANCE_HANG_MS + 1,
+      now_ms: T0 + WAKEUP_STAND_DOWN_MS + 1,
     })
     expect(out).toHaveLength(1)
     expect(out[0]?.items.map((i) => i.title)).toEqual(['Ship the importer'])
@@ -184,13 +190,27 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
     expect(out[0]?.deferred).toEqual([])
   })
 
-  test('a run parked at forge-init that NEVER launched is wakeable within minutes, not hours', () => {
-    // The reported shape. It needs no timer to resolve: the row itself says no
-    // dispatch was ever recorded.
+  test('a run whose LAUNCH IS IN FLIGHT is not woken on the strength of its empty dispatch columns', () => {
+    // An earlier cut read null/null past the 3-min settle budget as proof that no
+    // workflow existed, and woke the item within minutes. But those columns are
+    // written only after the fire settles (`orchestrator.ts:2064-2073`) and the
+    // settle timer's cancellation is unbounded (`inner-loop.ts:772-786`), so this
+    // row shape is routinely a LIVE launch — and waking it is the double-drive
+    // Property 1 exists to prevent. It stays withheld until the ordinary timer.
     const out = select({
       items: [item({ linked_run_id: 'run-1' })],
       runs: [run({ subagent_run_id: null, subagent_status: null })],
       now_ms: T0 + 10 * 60_000,
+    })
+    expect(out[0]?.items).toEqual([])
+    expect(out[0]?.deferred).toHaveLength(1)
+  })
+
+  test('but a run with no dispatch id is still released by the timer — no reaper can reach it', () => {
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ subagent_run_id: null, subagent_status: null })],
+      now_ms: T0 + WAKEUP_STAND_DOWN_MS + 1,
     })
     expect(out[0]?.items).toHaveLength(1)
     expect(out[0]?.deferred).toEqual([])

@@ -2,172 +2,61 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
-## 2026-08-16 — the wakeup asks the ROW first, and only then the timer
-
-Landed via PR #341.
-
-A cross-model review of the change above (recorded on that PR) found the first
-cut still failing INVISIBLE in three places — the exact direction it exists to
-remove — and the fixes are worth recording separately because two of them were
-positions this repo had already reasoned itself into once.
-
-A `linked_run_id` naming ANOTHER project's run was read as this item's driver.
-`TridentRunStore.get` is keyed on the id alone, so a stale cross-project link to a
-healthy run suppressed the item for as long as that run lived. `runProgressForItem`
-already carries exactly this defensive check (`trident/run-progress.ts:217-219`)
-and the new selector had simply not copied it.
-
-An unparseable — or future — `last_advanced_at` was read as "just advanced", and
-the reason given was symmetry with the reaper (`orchestrator.ts:2380-2388`). THE
-SYMMETRY WAS THE ERROR, and it is the more interesting of the two: the same
-conservatism means opposite things to the two consumers. The reaper's caution
-protects work from being killed; here it hid a work item from the only autonomy
-mechanism forever, and the reaper — reading the same 0 — never recovered it
-either. Consistency with a neighbour is not a virtue when the neighbour fails in
-the other direction. No reading now stands the run down.
-
-The 90-minute timer was also being asked FIRST, where the row often answers with
-certainty. A clean fire writes `subagent_run_id` and `subagent_status='running'`
-together (`orchestrator.ts:2064-2073`) and a fire that does not settle fails the
-run outright (`:2053-2062`), so a non-terminal run carrying NEITHER has no
-recorded workflow to collide with — decidable in minutes against
-`DEFAULT_SETTLE_TIMEOUT_MS` rather than in hours against a threshold. That is the
-reported shape exactly: a run parked at `forge-init` that never launched. A
-crashed launcher is deliberately excluded from this, because a dead launcher is
-not a dead build (`orchestrator.ts:2419-2426`); those keep the conservative timer.
-The verdict now reads terminal → no-usable-reading → never-launched → timer, most
-certain to least.
-
-The deferral log was rate-limited per (project, run) at 30 minutes: at the
-five-minute cadence it was 288 lines a day per item, which is a volume that stops
-being a signal. A new run still logs on the first sweep that defers to it, and the
-COUNT in `WakeupSweepResult` is never suppressed, so the rate limit costs volume
-and never costs the fact.
-
-One docblock claim was withdrawn rather than defended. Matching the reaper's
-threshold buys AGREEMENT about when a run stops looking alive; it does not buy
-mutual exclusion, because the reaper only applies to a run with a dispatch id
-(`orchestrator.ts:2529`) and reaping writes a `failed` row rather than terminating
-the detached workflow (`:1817`). The residual — a healthy build genuinely running
-past the threshold with no checkpoint — is now stated in the module instead of
-implied away, and it needs the mid-phase heartbeat tracked in ISSUES #534, not a
-different constant.
-
-Five mutation tests, each with a control proving the mutation landed and the
-remaining tests still passing: restoring the unconditional skip (5 red), removing
-the never-launched rule (2 red), restoring the corrupt-stamp reading (3 red),
-dropping the cross-project scope check (1 red), and collapsing the log rate-limit
-key (2 red). The 14 failures in a whole-`trident/` local run are byte-identical on
-an untouched `origin/main` checkout (`worktree-cleanup-sh` and `merge-realgit`,
-both real-`git` suites this diff does not touch).
-## 2026-08-16 — a fired reminder was rewriting the owner's chat down to the fast tier
-
-Landed via PR #340.
-
-The owner's project chat answered on Haiku twice in one day. He reported it both
-times; a hand-repointed registry record held for hours and then reverted, which is
-what made it look like an environment default rather than a write.
-
-It was a write. `open/composer.ts` wires the reminder dispatcher onto
-`liveAgentSubstrate` — the owner's WARM chat REPL, by design, so "a reminder fires
-into the normal session" is literally true. The call site already passes
-`tool_names: LIVE_AGENT_TOOL_NAMES` verbatim for exactly this reason, with a
-comment explaining that a differing `--tools` surface EVICTS AND RESPAWNS the warm
-child. **The model is the same class of shared session property and was missed.**
-`reminders/dispatcher.ts` resolves `const model = input.model ?? FAST_MODEL`, the
-composer passed no `model`, and the persistent pool writes the spawned model back
-into the session's registry record — where `record?.model ?? getBestModel()` lets
-it OVERRIDE the best model rather than fall back to it. So every fired reminder
-left the owner's next chat turn on Haiku, durably across restarts.
-
-Measured on the live instance: of 26 session records exactly one held
-`claude-haiku-4-5-…` — the `cc-agent-*` session of the project whose reminders had
-fired — while every other session, including that same project's `cc-compose-*`
-lane, held an Opus id.
-
-The fix is one key, `model: getBestModel()`. Note the ritual lane two fields down
-already passed `resolve_ritual_model: getBestModel` "so it tracks the chat agent's
-model instead of pinning a stale id" — the same lesson, learned once and not
-carried across. A cheaper tier for reminder composition is still available, but it
-needs its own substrate: it cannot be taken out of the session the owner is
-talking to.
-
-Typecheck differenced against untouched main rather than counted: all 51 tsconfigs
-fail identically on both trees in this checkout (missing type libs in a partial
-install), zero introduced.
-
 ## 2026-08-16 — a stalled driver is not a driver, and a silent skip is going quiet
 
 Landed via PR #341.
 
-The overnight work-wakeup loop shipped hours earlier and then stopped after a
-single firing. It was not broken; it was standing down, forever, in favour of
-peers that had stopped working.
+The overnight autonomy loop shipped hours earlier and then stopped. Measured on
+the owner's instance: `work-wakeup` was registered and alive, fired exactly ONCE
+in three hours, and had three `in_progress` board items it never touched. His
+words: "I can't tell if it's actually autonomously progressing work."
 
-The wakeup's work list withheld any `in_progress` board item whose
-`linked_run_id` named a run that was not in a terminal phase, on the reasoning
-that the trident tick was already that item's driver
-(`open/composer.ts:5840-5852`, pre-change). The reasoning is right and the test
-for it was wrong: the outer `phase` stays `forge-init` for the WHOLE inner
-Forge→Argus→fix workflow — relied on at `trident/run-progress.ts:12-18`, and
-enforced at `trident/orchestrator.ts:2392` where only a terminal transition moves
-it. So `!isTerminalPhase(phase)` is equally true of a run building hard and of a
-run parked for hours, and the guard deferred to both. Every board item bound to a
-parked run became invisible to the only autonomy mechanism, and the `continue`
-wrote nothing anywhere, so the disappearance left no trace to find.
+It was deferring to a driver that was not driving. The selector skipped any item
+whose `linked_run_id` pointed at a run that was not in a terminal phase, on the
+correct-sounding reasoning that the trident tick already drives such an item.
+But `phase` is not progress: in the EXEC model the outer phase stays `forge-init`
+for the whole inner Forge-Argus-fix workflow, so "non-terminal" is equally true of
+a build working hard and of one parked since 22:31Z. All three items were bound to
+runs in the second state. The wakeup stood down for peers that had stopped, and
+because the skip wrote no line anywhere, the loop looked idle rather than blocked.
 
-THE DECISION, and why it landed on the wakeup rather than in run reaping — the
-brief left that open and the code closed it. Both trident reap paths are gated on
-a dispatch id: the 90-minute hang watchdog (`trident/orchestrator.ts:2529`) and
-the 2-hour inflight ceiling (`:2573`) both sit inside
-`if (run.subagent_run_id !== null || run.subagent_status === 'crashed')`
-(`:2427`). A run that never obtained a dispatch id is reachable by neither. So a
-reaper-side fix would need a new never-launched case AND would run on the very
-loop whose stall it was compensating for — a backstop that depends on the
-liveness of the thing it backs up is not a backstop. The side that is
-demonstrably still ticking stops deferring unconditionally instead; nothing about
-reaping is weakened.
+`trident/run-driving.ts` now answers "is this run still driving?" from
+`last_advanced_at` — the field the hang watchdog and the board's stall display
+already key on — and every consumer asks the same function.
 
-The mechanism is `trident/run-driving.ts` — `runDrivingVerdict(run, now_ms,
-no_advance_hang_ms?)` → `{ driving, reason, since_advance_ms }`, consumed by
-`gateway/proactive/work-wakeup-selection.ts` (the composer closure moved into a
-module so the policy could be tested at all). The signal is `last_advanced_at`,
-verified on its write sites rather than trusted for its name: re-stamped by
-`TridentRunStore.update` (`trident/store.ts:650`) on every outer transition and
-by `trident/checkpoint.sh:196` on every inner-workflow phase boundary. `round`
-was rejected for the same reason it is documented as unreliable at
-`run-progress.ts:145-159` — pinned at 1 for a whole build.
+TWO THINGS A REVIEW CHANGED, both of which had been reasoned into the first cut
+and both of which failed toward double-driving rather than toward silence:
 
-The THRESHOLD is `NO_ADVANCE_HANG_MS` (`trident/liveness.ts:70`), deliberately
-the reaper's own number and not the 30-minute display threshold
-`STALLED_WARN_MS`. That identity is the design: while a run is young enough for
-the reaper to trust it the wakeup stands down, and the moment it is old enough
-for the reaper to call it hung the wakeup takes the item — there is no window
-where the two disagree, so nothing new can double-drive a healthy build. In the
-ordinary case the reaper wins the race and flips the run terminal, which is a
-stronger not-driving answer; this only bites where the reaper structurally cannot
-act. `STALLED_WARN_MS` was rejected on the evidence in its own docblock
-(`liveness.ts:16-31`): it is a DISPLAY threshold that had already been raised
-from 10 min because it fired on healthy builds, and a false positive that costs a
-scary label is not a false positive that may cost a second agent inside a live
-build.
+A null `subagent_run_id` plus a null `subagent_status` past the 3-minute settle
+budget was read as proof that no workflow was ever fired, so the item could be
+released in minutes instead of hours. IT RACED THE LAUNCH IT WAS MEANT TO OUTLIVE.
+Those columns are written only after the fire settles, and the settle timer
+triggers a cancellation that is itself unbounded — the fire keeps draining events
+after `cancel()`. A launch genuinely in flight presents exactly that row shape. No
+finite bound on the window can be read off the row, so the rule is gone rather
+than retuned.
 
-The silence was treated as a second defect rather than a symptom. Deferrals are
-returned on the project entry and `runWorkWakeupSweep` logs one line each, BEFORE
-any gate, at INFO — `wakeup_deferred_to_live_run project=… item=… run_id=…
-phase=… since_advance_ms=…`, the shape of the loop's existing diagnostics. A
-project whose items are ALL deferred still yields an entry, so "everything is
-being built" is legible instead of reading as an empty board.
+The no-advance timer used the reaper's own threshold, on the argument that sharing
+one number meant the two mechanisms could never disagree. At that number a healthy
+long build — whose `last_advanced_at` is stale by construction mid-phase — was
+declared not-driving while it worked. The threshold now sits a deliberate margin
+ABOVE the reaper's, which is stronger than agreement: for any run the reaper can
+reach it has already flipped the row terminal before this timer is consulted, so
+the answer comes from a FACT and the timer is left deciding only the runs no
+reaper can reach. Those are exactly the incident's runs, which carry no dispatch
+id and are therefore reachable by neither reap path.
 
-Each safety property was mutation-tested with a control proving the mutation
-landed (the marker grepped present, and the untouched tests still passing so a
-red could not be an import error): restoring the unconditional skip turns 4 tests
-red including the three-parked-runs regression; making the verdict never defer
-turns 7 red including the long-healthy-build cases; renaming the emitted event
-turns the observability test red. `bash scripts/ci/lint.sh` exit 0;
-`typecheck-all.sh` 50/51 with the one `app/tsconfig.json` failure reproduced
-identically on an untouched `origin/main` checkout in the same environment
-(absent `@types/node`, and nothing under `app/` is touched here).
+`isRunLive` moved onto the same verdict. It was still the phase test, and every
+item this change newly wakes is by construction bound to a non-terminal run — so
+the completion guard would have refused precisely the work that had just been made
+reachable. Woken, worked, and then impossible to close.
+
+The silence is fixed as its own defect: a deferral now writes a line naming the
+item, the run and how long since it moved, rate-limited per ITEM rather than per
+run (one run can drive several items, and keying on the run made the second and
+third silent), and the sweep's counters are logged every tick — they were being
+returned and dropped by their only production caller, which made the claim that
+the rate limit "never costs the fact" true of a number nothing printed.
 
 ## 2026-08-16 — a stored record could pull the owner's chat below the best model
 
@@ -251,6 +140,13 @@ reddens 3 of 14; unsetting the chat profile's floor reddens 3; leaking the floor
 onto the memory lane reddens 4; dropping the factory forward reddens 1. That
 last one is not hypothetical — `appendSystemPromptFile` was lost at exactly that
 seam once, proven at the factory-input layer while the real factory dropped it.
+
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
+
+The entry-aware merge driver now retains both different entries added concurrently under the same
+heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
+while keeping the log's heading-uniqueness invariant. Unit and real-git tests pin union, dedupe,
+suffix collision handling, intact history, and conflict-free merging.
 
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 
@@ -20393,3 +20289,39 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
+
+## 2026-08-16 — a fired reminder was rewriting the owner's chat down to the fast tier
+
+Landed via PR #340.
+
+The owner's project chat answered on Haiku twice in one day. He reported it both
+times; a hand-repointed registry record held for hours and then reverted, which is
+what made it look like an environment default rather than a write.
+
+It was a write. `open/composer.ts` wires the reminder dispatcher onto
+`liveAgentSubstrate` — the owner's WARM chat REPL, by design, so "a reminder fires
+into the normal session" is literally true. The call site already passes
+`tool_names: LIVE_AGENT_TOOL_NAMES` verbatim for exactly this reason, with a
+comment explaining that a differing `--tools` surface EVICTS AND RESPAWNS the warm
+child. **The model is the same class of shared session property and was missed.**
+`reminders/dispatcher.ts` resolves `const model = input.model ?? FAST_MODEL`, the
+composer passed no `model`, and the persistent pool writes the spawned model back
+into the session's registry record — where `record?.model ?? getBestModel()` lets
+it OVERRIDE the best model rather than fall back to it. So every fired reminder
+left the owner's next chat turn on Haiku, durably across restarts.
+
+Measured on the live instance: of 26 session records exactly one held
+`claude-haiku-4-5-…` — the `cc-agent-*` session of the project whose reminders had
+fired — while every other session, including that same project's `cc-compose-*`
+lane, held an Opus id.
+
+The fix is one key, `model: getBestModel()`. Note the ritual lane two fields down
+already passed `resolve_ritual_model: getBestModel` "so it tracks the chat agent's
+model instead of pinning a stale id" — the same lesson, learned once and not
+carried across. A cheaper tier for reminder composition is still available, but it
+needs its own substrate: it cannot be taken out of the session the owner is
+talking to.
+
+Typecheck differenced against untouched main rather than counted: all 51 tsconfigs
+fail identically on both trees in this checkout (missing type libs in a partial
+install), zero introduced.

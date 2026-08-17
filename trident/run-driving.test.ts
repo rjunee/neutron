@@ -1,10 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 
 import { DEFAULT_SETTLE_TIMEOUT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
-import { FUTURE_STAMP_TOLERANCE_MS, runDrivingVerdict } from './run-driving.ts'
+import {
+  FUTURE_STAMP_TOLERANCE_MS,
+  runDrivingVerdict,
+  WAKEUP_REAP_MARGIN_MS,
+  WAKEUP_STAND_DOWN_MS,
+} from './run-driving.ts'
 import type { TridentRun } from './store.ts'
 
 const T0 = Date.parse('2026-08-14T21:35:47Z')
+
+/** The trident sweep cadence the reap margin has to cover (`tick.ts:344`). */
+const TICK_INTERVAL_MS = 90_000
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
   return {
@@ -22,7 +30,7 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     merge_mode: 'pr',
     // A LAUNCHED run is the realistic default: a clean fire writes both columns
     // in one update (`orchestrator.ts:2064-2073`). Tests that want the
-    // never-launched shape null them explicitly.
+    // not-yet-launched shape null them explicitly.
     subagent_run_id: 'wf-1',
     subagent_status: 'running',
     repo_path: '/repo',
@@ -49,27 +57,75 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
   }
 }
 
-describe('runDrivingVerdict', () => {
-  test('a run that advanced moments ago is driving', () => {
-    const v = runDrivingVerdict(run(), T0 + 60_000)
-    expect(v).toEqual({ driving: true, reason: 'advancing', since_advance_ms: 60_000 })
+describe('runDrivingVerdict — the threshold ordering that makes the timer safe', () => {
+  test('the stand-down threshold is STRICTLY above the reaper, by more than a sweep', () => {
+    // This is the safety property, asserted on the constants themselves rather
+    // than only on behaviour: the reaper (`orchestrator.ts:2530`) must always get
+    // to answer for a run it can reach before this timer is consulted, and it
+    // notices on a 90 s sweep (`tick.ts:344`).
+    expect(WAKEUP_STAND_DOWN_MS).toBeGreaterThan(NO_ADVANCE_HANG_MS)
+    expect(WAKEUP_REAP_MARGIN_MS).toBeGreaterThan(TICK_INTERVAL_MS)
+    expect(WAKEUP_STAND_DOWN_MS).toBe(NO_ADVANCE_HANG_MS + WAKEUP_REAP_MARGIN_MS)
   })
 
-  test('a LONG-RUNNING but still-advancing build is driving right up to the threshold', () => {
-    // The exact boundary: the reaper reaps STRICTLY past the threshold, and so
-    // does this — one shared number, one shared comparison.
-    const v = runDrivingVerdict(run(), T0 + NO_ADVANCE_HANG_MS)
+  test('PROPERTY 1 — a build the reaper can reach still SUPPRESSES the wakeup at the reaper threshold', () => {
+    // The blocker the first cut shipped: at exactly `NO_ADVANCE_HANG_MS` a HEALTHY
+    // long Forge step — `last_advanced_at` is stale by construction mid-phase
+    // (`liveness.ts:46-59`) — was declared not-driving and the item was woken
+    // while the build worked. It has a dispatch id, so the reaper owns this
+    // moment; the wakeup must not.
+    const live = run({ subagent_run_id: 'wf-1', subagent_status: 'running' })
+    const v = runDrivingVerdict(live, T0 + NO_ADVANCE_HANG_MS + 1)
     expect(v.driving).toBe(true)
     expect(v.reason).toBe('advancing')
   })
 
-  test('a NON-TERMINAL run parked past the hang threshold is NOT driving', () => {
-    // The live shape: phase never left `forge-init`, so the old
-    // `!isTerminalPhase(phase)` test called this a driver forever.
-    const v = runDrivingVerdict(run({ phase: 'forge-init' }), T0 + NO_ADVANCE_HANG_MS + 1)
+  test('PROPERTY 1 — a launch still IN FLIGHT is never read as "no workflow exists"', () => {
+    // The other blocker. `subagent_run_id`/`subagent_status` are written only
+    // AFTER the fire settles (`orchestrator.ts:2064-2073`), and the settle timer
+    // (3 min, `liveness.ts:115`) triggers a cancellation that is itself unbounded
+    // — the fire keeps draining `handle.events` after `cancel()`
+    // (`inner-loop.ts:772-786`). So a null/null row past the settle budget is
+    // routinely a LIVE launch, and treating it as proof of no workflow invited a
+    // second dispatch onto it. Nothing may stand this run down on those columns.
+    const launching = run({ subagent_run_id: null, subagent_status: null })
+    for (const t of [
+      DEFAULT_SETTLE_TIMEOUT_MS,
+      DEFAULT_SETTLE_TIMEOUT_MS + 1,
+      DEFAULT_SETTLE_TIMEOUT_MS * 10,
+      NO_ADVANCE_HANG_MS,
+    ]) {
+      const v = runDrivingVerdict(launching, T0 + t)
+      expect(v.driving).toBe(true)
+      expect(v.reason).toBe('advancing')
+    }
+  })
+
+  test('PROPERTY 2 — a run that stopped advancing stops suppressing, so the item is never invisible forever', () => {
+    // The reported incident: parked at `forge-init`, non-terminal, not moving.
+    const parked = run({ phase: 'forge-init' })
+    expect(runDrivingVerdict(parked, T0 + WAKEUP_STAND_DOWN_MS).driving).toBe(true)
+    const v = runDrivingVerdict(parked, T0 + WAKEUP_STAND_DOWN_MS + 1)
     expect(v.driving).toBe(false)
     expect(v.reason).toBe('no-advance')
-    expect(v.since_advance_ms).toBe(NO_ADVANCE_HANG_MS + 1)
+    expect(v.since_advance_ms).toBe(WAKEUP_STAND_DOWN_MS + 1)
+  })
+
+  test('PROPERTY 2 — a run the reaper CANNOT reach is still released by the timer', () => {
+    // Both reap paths require a dispatch id or a crashed launcher
+    // (`orchestrator.ts:2429`, `:2530`). A run that never obtained one is
+    // reachable by neither, so this timer is the only thing that frees its item.
+    const unreachable = run({ subagent_run_id: null, subagent_status: null })
+    const v = runDrivingVerdict(unreachable, T0 + WAKEUP_STAND_DOWN_MS + 1)
+    expect(v.driving).toBe(false)
+    expect(v.reason).toBe('no-advance')
+  })
+})
+
+describe('runDrivingVerdict', () => {
+  test('a run that advanced moments ago is driving', () => {
+    const v = runDrivingVerdict(run(), T0 + 60_000)
+    expect(v).toEqual({ driving: true, reason: 'advancing', since_advance_ms: 60_000 })
   })
 
   test('every terminal phase is not driving, however recently it moved', () => {
@@ -78,6 +134,15 @@ describe('runDrivingVerdict', () => {
       expect(v.driving).toBe(false)
       expect(v.reason).toBe('terminal')
     }
+  })
+
+  test('a terminal phase wins even past the stand-down threshold — a fact beats a timer', () => {
+    // This is the ordering paying off: by the time the timer would speak, a
+    // reaper-reachable run has already been flipped, and THIS is the branch that
+    // answers for it.
+    const reaped = run({ phase: 'failed' })
+    const v = runDrivingVerdict(reaped, T0 + WAKEUP_STAND_DOWN_MS + 1)
+    expect(v.reason).toBe('terminal')
   })
 
   test('an unparseable last_advanced_at is NOT a reading, so the run stands down', () => {
@@ -99,22 +164,11 @@ describe('runDrivingVerdict', () => {
     expect(v).toEqual({ driving: true, reason: 'advancing', since_advance_ms: 0 })
   })
 
-  test('a run with NO recorded dispatch stands down after the launch settle budget', () => {
-    // A clean fire writes both columns together (`orchestrator.ts:2064-2073`), so
-    // neither being set past the settle budget means no workflow exists to
-    // collide with. This is a FACT about the row, not a liveness guess.
-    const never = run({ subagent_run_id: null, subagent_status: null })
-    expect(runDrivingVerdict(never, T0 + DEFAULT_SETTLE_TIMEOUT_MS).driving).toBe(true)
-    const v = runDrivingVerdict(never, T0 + DEFAULT_SETTLE_TIMEOUT_MS + 1)
-    expect(v.driving).toBe(false)
-    expect(v.reason).toBe('never-launched')
-  })
-
   test('a CRASHED launcher keeps the conservative timer — its build may still be detached', () => {
     // `orchestrator.ts:2419-2426`: a dead launcher is not a dead build.
     const crashed = run({ subagent_run_id: null, subagent_status: 'crashed' })
-    expect(runDrivingVerdict(crashed, T0 + DEFAULT_SETTLE_TIMEOUT_MS + 1).driving).toBe(true)
-    expect(runDrivingVerdict(crashed, T0 + NO_ADVANCE_HANG_MS + 1).reason).toBe('no-advance')
+    expect(runDrivingVerdict(crashed, T0 + NO_ADVANCE_HANG_MS + 1).driving).toBe(true)
+    expect(runDrivingVerdict(crashed, T0 + WAKEUP_STAND_DOWN_MS + 1).reason).toBe('no-advance')
   })
 
   test('a clock behind the stamp never yields a negative elapsed', () => {

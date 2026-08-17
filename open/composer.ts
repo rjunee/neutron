@@ -494,6 +494,7 @@ import {
   workBoardScopeKey,
   type WorkBoardItem,
 } from '@neutronai/work-board/store.ts'
+import { runDrivingVerdict } from '@neutronai/trident/run-driving.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import {
@@ -3975,12 +3976,21 @@ export function buildOpenGraphComposer(
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
       // SAFETY INVARIANT — nothing may mark an item done while its build runs.
       // `boardRunStore` is the same store the tick loop reconciles from, so this
-      // reads the one authoritative phase. A run that has VANISHED (get → null)
+      // reads the one authoritative row. A run that has VANISHED (get → null)
       // counts as not-live: it cannot be reconciled either, so refusing forever
       // would strand the card. See `WorkBoardStoreOptions.isRunLive`.
+      //
+      // "LIVE" IS THE SAME MEASURED QUESTION THE WAKEUP ASKS, and it has to be,
+      // or the two halves of this change contradict each other. The wakeup now
+      // takes an item whose run stopped advancing (`work-wakeup-selection.ts`);
+      // every such item is by construction still bound to a NON-TERMINAL run, so
+      // a phase-only test here would refuse the completion of exactly the items
+      // the wakeup just handed to an agent — work made reachable and then made
+      // impossible to close. One definition, `runDrivingVerdict`, for both.
       isRunLive: (run_id: string): boolean => {
         const run = boardRunStore.get(run_id)
-        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+        if (run === null || run === undefined) return false
+        return runDrivingVerdict(run, Date.now()).driving
       },
     })
     // M2 task 3 — bind the `/status` snapshot reader now that every source store
