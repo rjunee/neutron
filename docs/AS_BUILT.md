@@ -325,7 +325,9 @@ its cwd-forward case all survive. `bun test` on that file reports 14 pass, which
 is the same number arrived at independently.
 
 **ONE NIT CLOSED, AND THE FIRST ATTEMPT AT CLOSING IT WAS THIS ENTRY'S OWN
-SUBJECT FOR THE THIRD TIME.** The supervision-off report in
+SUBJECT FOR THE THIRD TIME** — landed via PR #383, a follow-up, because #351
+merged while this round was still running and its merged head carried the first
+attempt without the correction. The supervision-off report in
 `runtime/adapters/claude-code/index.ts` derived `neutron_home` from its own second
 `process.env` lookup while the DECISION came from `resolveReplCwdAndHome` — a
 report naming a condition it did not itself measure. The first fix hoisted
