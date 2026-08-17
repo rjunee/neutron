@@ -76,6 +76,27 @@ function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
 }
 
 describe('composeTerminalDelivery', () => {
+  test('failed PR sentinel does not render PR #0', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'failed', merge_mode: 'pr', pr: 0 }))!.text
+    expect(text).not.toContain('PR #0')
+    expect(text).not.toContain('left open for review')
+  })
+
+  test('failed positive PR renders the review trail', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'failed', merge_mode: 'pr', pr: 57 }))!.text
+    expect(text).toContain('PR #57 left open for review.')
+  })
+
+  test('done PR sentinel does not render PR #0', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 0 }))!.text
+    expect(text).not.toContain('PR #0')
+  })
+
+  test('done positive PR still renders its reference', () => {
+    const text = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 57 }))!.text
+    expect(text).toContain('(PR #57)')
+  })
+
   test('done / pr mode → humanized "merged and deployed", title-forward, keeps the openable PR ref (#361)', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 42 }))
     expect(out).not.toBeNull()

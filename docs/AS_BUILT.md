@@ -2,6 +2,105 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
+
+Landed via PR #370.
+
+Owner-reported, live, on his primary working chat: it opened on old messages and
+ended ~630 short of the present.
+
+The client's only history request is `{type:'resume', after_seq}` where `after_seq`
+is `MAX(applied seq)` — 0 on a cold store (`chat-core/sync-engine.ts`
+`resumeRequest`). The surface answers it with one `adapter.replayAfter` call
+(`gateway/http/app-ws-surface.ts:878`), resume fires exactly once per socket open,
+and the store's window was `WHERE topic_id = ? AND seq > ? ORDER BY seq ASC LIMIT
+?` with `DEFAULT_REPLAY_LIMIT = 500`. On a 1130-row topic that is seq 1..500 and
+silence. Two other topics on that instance held 280 and 251 rows, under the limit,
+and rendered completely — which is why it read as one broken chat rather than a
+broken replay.
+
+Fixed by reversing which END of the backlog the window takes:
+`persistence/app-chat-event-core.ts` `rowsAfter` now reads `ORDER BY seq DESC LIMIT
+?` and reverses the (at most `limit`) rows in memory, so a capped replay is the
+NEWEST rows after the cursor, still delivered ascending. That one query is shared
+by both row-shaped logs — messages and edits — so the two windows cannot drift
+apart; they were hand-copied SQL before this change.
+
+The reversal happens in JS because the obvious SQL form was measured, not assumed.
+Wrapping the select in `SELECT * FROM (...) ORDER BY seq ASC` planned as `USE TEMP
+B-TREE FOR ORDER BY`, re-sorting the page SQLite had just read in index order. The
+shipped form plans as `SEARCH ... USING INDEX` with no sort at all, on both tables
+(`sqlite_autoindex_app_chat_messages_1` from migration 0079, and
+`idx_app_chat_edits_topic_seq` from migration 0087), so the LIMIT terminates the
+read. `persistence/app-chat-event-core.test.ts` asserts those plans against
+`rowReplaySql` — the exact string the production path prepares, exported for that
+reason so the assertion cannot go stale against a re-worded query.
+
+`DEFAULT_REPLAY_LIMIT` is UNCHANGED, and deliberately so. Raising it makes the
+symptom vanish today (1130 is under any larger cap) while leaving the inverted
+ordering in place, so it re-fires with the identical symptom at the new threshold.
+With the direction fixed the constant needs no change at all.
+
+A bounded window is NOT drained, and that is a decision with a measured cost on
+each side. An earlier round of this change made the adapter page forward until a
+page came back empty, which delivers the whole transcript and makes one cold resume
+O(messages after the cursor) in rows, JSON bytes and adapter memory — per topic,
+multiplied by the scopes `app/lib/chat-core/transcript-warmer.ts` warms at app
+foreground, on cellular, with no server-side ceiling. Review measured 7.72 MB of
+JSON per cold resume on a 20k-row topic. The ceiling is back, and
+`replay-newest-window.test.ts` pins a cold resume at exactly ONE store query however
+long the backlog is.
+
+The edit replay is what makes a bounded window safe rather than merely cheaper, and
+this is the part the drain got wrong. Because `rowsAfter` is shared, the edit window
+is also the NEWEST `DEFAULT_EDIT_REPLAY_LIMIT` rows — and an edit row carries its
+MESSAGE's seq, so the two windows cover the same messages by a counting argument: at
+most `DEFAULT_REPLAY_LIMIT` messages sit at or above the message window's lowest
+seq, hence at most that many edit rows do, hence an equally-wide edit window
+contains all of them. A message in a capped replay therefore always arrives with its
+tombstone. The combination the drain produced — every message, paired with an
+un-drained OLDEST-first 500-row edit window — did the opposite: review reproduced a
+deleted message at seq 1130 replayed with its original body and no tombstone. That
+docblock had called the edit gap "cosmetic"; it was not, and the word is gone. The
+constant relation is now a stated correctness constraint on
+`AppChatEditLog.aggregatesAfter` with a test on it.
+
+Aspirational docblocks corrected rather than left. `DEFAULT_REPLAY_LIMIT`'s original
+comment claimed the client "re-issues resume from the new high-water mark to page the
+rest" — true ACROSS opens, false WITHIN one, and no code paged. The client does
+re-issue `lastSeenSeq` on every open (`chat-core/web-session.ts`,
+`app/lib/chat-core/mobile-session.ts` `resumeAndFlush`), so the transcript advanced
+500 messages per app restart; paging that takes three reconnects is not paging. The
+`row`-shaped `next_cursor: null` contract now says plainly that for a row log the
+null carries no information at all, because a newest-first window has no
+continuation. A store test named "after_seq=0 replays the whole transcript" seeded
+two rows and could never have proved that; it is renamed to the claim it actually
+makes.
+
+Mutation-proved by observed execution. Reverting `rowsAfter` to `ORDER BY seq ASC`
+reddens 13 tests across `persistence/` and `channels/adapters/app-ws/` — including
+the cold-1130 window, the omitted-oldest direction assertion, the
+non-recoverability pin, and the newest-message-arrives case. Narrowing
+`DEFAULT_EDIT_REPLAY_LIMIT` to 400 reddens the tombstone-coverage test with 100
+leaked message ids, each a deleted message delivered with its original body.
+Re-adding the drain loop reddens the one-query test and only that one — with a
+newest-first window a drain terminates on its second empty page, so the regression
+it causes is cost, not content, and the suite says so rather than claiming broader
+coverage. Controls green throughout and direction-insensitive by design: byte-
+identical full-object comparisons against an unbounded read below the limit, at
+exactly the limit, and for a warm gap smaller than the window; cursor at and past
+the head; topic isolation; no-durable-log instance.
+
+Honest about what this does NOT fix. Above one window the replay converts "missing
+the newest 630" into "missing a middle 630": the client's cursor advances past the
+rows the window skipped, a resume cursor only moves forward, and there is no seam
+marker in the UI. That is the right trade — the owner needs recent messages — and it
+is lossy, so it is asserted by a test named for it and written into
+`docs/SYSTEM-OVERVIEW.md` beside the "load earlier" gap rather than described as
+complete. Closing it needs a backfill primitive the wire has no shape for yet
+(`{type:'history', before_seq}` + a client affordance), which stays the next thing to
+build and is explicitly not faked with a bigger constant.
+
 ## 2026-08-17 — the blank-is-unset sweep never reached the port knob, where a blank coerces to zero and the invite advertises it
 
 Landed via PR #373.
@@ -5177,6 +5276,148 @@ phrased strictly as measurements rather than an asserted cause, per #240. And
 harvest-before-reap is preserved: a crashed row that already carries a terminal
 `inner_result` still harvests on the next tick, with zero relaunches spent.
 
+## 2026-08-14 — Work Board card removal runs through one chokepoint
+
+`work-board/removal.ts` is now the only implementation of "remove a card".
+`WorkBoardRemovalService.remove(scope, docs_project_id, item_id, { reason,
+plan_doc? })` performs a fixed sequence: resolve the card in scope, cancel a live
+bound run, dispose the card's plan doc, then hard-delete the row. The HTTP
+`DELETE /api/app/projects/<id>/work-board/<item_id>` — the UI's X — was rewired
+through it and the inline cancel logic was removed from `handleDelete`; the
+composer at `open/composer.ts` constructs one service and passes it in, so the
+agent tool (T2) can ride the same object.
+
+Cancellation stays first because deleting the row first orphans the work: a
+trident build keeps running headless, an Atlas research subprocess is never
+stopped. The moved logic is behaviour-identical to the old inline block,
+including the §F6a `terminate()` routing that fires the terminal-observer chain
+and the Codex-r3 rule that a lost atomic transition reports no `cancelled_run`.
+The DELETE response still carries `deleted` and `cancelled_run` unchanged.
+
+Removal now takes a reason. `?reason=shipped|cancelled|moved` defaults to
+`cancelled`, which is what the X has always meant. The card's own `plans/` doc is
+MOVED to `plans/<reason>/<basename>` via `DocStore.moveDoc`, so it stays under the
+docs root and remains readable in the Documents tab. Only an in-app ref under
+`plans/` is touched — an `https:` ref or a doc elsewhere in the vault is left
+alone, because relocating an owner-authored doc is not part of removing a card.
+A doc is destroyed by exactly one path, the explicit `?plan_doc=delete`; every
+failure (including `doc_destination_exists`) logs and reports
+`disposition: 'left_in_place'` and never falls through to a delete. The layering
+holds: `work-board` gained no trident dependency — the run access, the
+`is_terminal_phase` predicate and the doc store are all structural parameters.
+
+Tests pin the order, not just the membership: `work-board/removal.test.ts` drives
+every stub through one shared event array and asserts the sequence equals
+`['terminate', 'delete']`. `work-board/store.test.ts` and the full existing
+`gateway/http/work-board-surface.test.ts` delete cases pass unmodified, which is
+the behaviour-preservation proof for the refactor.
+
+Mutation checks (each applied to `removal.ts`, then restored):
+
+| Mutant | Result |
+| --- | --- |
+| `skip-cancellation`: never call `cancelBoundRun` | RED — order test saw `['delete']`; 4 tests failed |
+| `delete-first`: hard-delete before cancelling | RED — order test saw `['delete', 'terminate']`; 10 tests failed |
+
+## 2026-08-14 — a shelved Work Board card is not a shipped one
+
+Migration `0122_work_board_items_archived_status.sql` widens the `work_board_items`
+status CHECK to a fifth lane, `archived` — owner-facing "Shelved". SQLite cannot
+alter a CHECK on a STRICT table, so the migration copies 0097's rebuild
+(CREATE new → INSERT SELECT → DROP → RENAME → recreate both indexes), carrying
+0105's `task_type` column forward unchanged; the regenerated
+`migrations/expected-schema.txt` differs only in that CHECK and the rebuild's
+formatting.
+
+The lane exists because `done` was the only lever for taking a card off the board.
+Asked on 2026-08-14 to drop four deprioritised email cards, the agent had to mark
+them done, and four unshipped items read as shipped. `archived` splits the two
+claims apart: done means it happened and stamps `completed_at`; archived means it
+is parked and stamps nothing. `WorkBoardStore.listActive`, `listAllActive`, and
+`reorder`'s lane query all move from `status != 'done'` to
+`status NOT IN ('done','archived')`, which also removes shelved cards from the
+per-turn prompt fragment (it rides `listActive`). A new `listArchived` orders by
+`updated_at`, and `list()` returns active → archived → completed so both clients
+can bucket three ways off one snapshot.
+
+Shelving is refused while the card's bound run is live. A shelf-write asserts the
+work is parked, which is false while the build is still running, so `update()`
+throws `WorkBoardRunStillLiveError` before any write — the same guard, and the
+same reasoning, as `complete()`. The refusal is an answer rather than a crash on
+every surface: `work_board_update` returns `{ok:false}` carrying the message, and
+PATCH returns 409 `run_still_live`. `archived` is client-writable in both the
+agent tool's `STATUS_VALUES` and the HTTP `VALID_STATUSES`; `failed` deliberately
+stays out of both, since only the terminal reconcile writes it.
+
+Both clients render shelved cards in their own collapsed "Shelved · N" section,
+separate from Done. `splitBoard` returns a third bucket rather than folding
+archived into either neighbour — folding it into `completed` would report parked
+work as progress, and the old `status !== 'done'` bucketing would have resurrected
+it in the active lane the server had already excluded it from. Shelved rows carry
+the neutral upcoming dot and no "Merged · <date>" line, because there is no
+`completed_at` to show. Advancing a shelved card un-shelves it: `nextStatus`
+returns `upcoming`, and the store re-appends it to the end of the active lane so
+its stale `sort_order` cannot collide with the renumbered lane. The project rail's
+attention scan and the composer's open-item probe both exclude archived, so a card
+the owner already parked cannot hold the rail red.
+
+Acceptance (b) is pinned mutant-red in `work-board/store.test.ts`: widening
+`listCompleted` to `status IN ('done','archived')` turns three tests RED, and
+stamping `completed_at` on the archive transition turns three RED. The refusal is
+pinned at all three layers (`store.test.ts`, `agent-tool.test.ts`,
+`work-board-surface.test.ts`), the surface test still asserts `status:'failed'` is
+a 400, and `app/__tests__/work-board-helpers.test.ts` asserts an archived item
+lands in neither `active` nor `completed` and leaves the Done count at its
+pre-shelving value.
+
+## 2026-08-14 — the agent can remove a Work Board card, through the human's path
+
+`work_board_remove` is registered on the agent tool surface. It takes the item
+`id`, a required `reason` (`shipped` | `cancelled` | `moved`, each value
+described in the schema so the model picks honestly) and an optional
+`delete_plan_doc` boolean. It calls `WorkBoardRemovalService.remove` — the SAME
+instance `open/composer.ts` builds and hands the HTTP surface behind the UI's X.
+There is no second removal implementation and the handler never touches
+`store.delete` directly, so run-cancellation, doc disposition and the hard row
+delete cannot drift between the human path and the agent path.
+
+Why it exists: the agent's only removal lever was `work_board_complete`, so
+taking four deprioritised cards off the board on 2026-08-14 marked four unshipped
+items `done`. The tool description says this out loud — remove is NOT complete,
+never mark unshipped work `done` just to clear it.
+
+Registration is gated on a wired `opts.removal`. A boot that does not supply one
+registers the same five tools as before, in the same order, and
+`registry.get('work_board_remove')` is undefined; the returned names array gains
+`work_board_remove` only when the chokepoint is present. The wiring runs
+composer → `misc-input.ts` `work_board.removal` → `build-core-modules.ts`, spelled
+exactly like the existing `spec_doc` / `chat_ack` threading.
+
+Scope handling mirrors `work_board_add`: the BOARD is keyed by
+`workBoardScopeKey(ctx.project_slug, ctx.project_id)` and the DOCS project id is
+`ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID` — the two arguments stay
+separate, which is the conflation hazard documented in `spec-doc-service.ts`.
+`project_slug` is never an agent-supplied argument.
+
+The tool reports what happened rather than just `ok`: `cancelled_run` when a
+cancellation actually landed, and `plan_doc` with its `disposition` and the new
+`to` path under `plans/<reason>/`. `delete_plan_doc: true` is the only input that
+can produce `disposition: 'deleted'`.
+
+The acceptance's named test is pinned through the AGENT surface, not just the
+service: `work-board/agent-tool.test.ts` creates a real card, binds a live run
+with `store.bindRun`, calls the tool handler, and asserts the shared event array
+contains BOTH `terminate` and `delete` with `terminate` first. Skipping
+cancellation drops `terminate` and deleting first inverts the indices, so both
+mutants go RED. `store.delete` is wrapped, not faked, so the ordering is observed
+against the real row delete. A follow-up `work_board_list` through the same
+registry proves the card is really gone; unknown id, an out-of-enum reason and a
+missing reason all return `{ ok: false, error }` with no throw and no side effect.
+
+One drive-by: `gateway/http/work-board-surface.test.ts` declared its `plan_doc`
+body type without `path` while asserting on it, which `tsc -p gateway` rejected.
+The annotation now matches the response.
+
 ## 2026-08-14 — inline activity is derived from evidence; the stored flag is a hint
 
 A Work Board card's `inline_active` used to be a promise the agent had to both make
@@ -5442,57 +5683,6 @@ Rows in `secrets` and `project_credentials` are keyed by the frozen owner handle
 The ambiguous leftovers are now legible instead of silent: `buildIntegrationsStatus` (`gateway/cores/integrations.ts`) reports per-slot `orphaned: true` with "scoped to a previous handle" and an `orphaned_credentials` summary, never a bare `connected:false`, and names the way out. That way out is the collision-guarded explicit action `integrations_migrate_orphaned` (prompt-user) and `POST /api/cores/integrations/migrate-orphaned`, one shared brain: rows whose UNIQUE slot is free under the boot handle move, rows that would collide are skipped and counted so the owner resolves them deliberately. **Superseded in one respect by the 2026-08-16 entry: this description omits the fallback exception, and did so because the exception did not exist yet — an explicit migration onto a FALLBACK boot handle is now refused outright, on every surface.**
 
 Tests in `auth/__tests__/credential-scope-reconcile.test.ts`, `gateway/__tests__/boot-credential-scope.test.ts`, `gateway/cores/__tests__/integrations-orphaned.test.ts`, and `gateway/cores/__tests__/integrations-migrate-orphaned.test.ts` pin the acceptance: the unambiguous move reads the token back with unchanged ciphertext bytes plus an audit row; the rotation-hazard case asserts on the decrypted value that the fresh credential survives; a real `boot()` never exits non-zero; a positive control succeeds under the correct handle so deleting the migration turns the suite red; and no secret material reaches logs, status output, or the audit payload. `reminders.project_slug` carries the same stale slug but is a read-filter, not a crypto scope, with no slug-bearing UNIQUE key and hence no rotation hazard; its drop-or-sweep is recorded as a follow-up decision, rows untouched.
-## 2026-08-14 — a shelved Work Board card is not a shipped one
-
-Migration `0122_work_board_items_archived_status.sql` widens the `work_board_items`
-status CHECK to a fifth lane, `archived` — owner-facing "Shelved". SQLite cannot
-alter a CHECK on a STRICT table, so the migration copies 0097's rebuild
-(CREATE new → INSERT SELECT → DROP → RENAME → recreate both indexes), carrying
-0105's `task_type` column forward unchanged; the regenerated
-`migrations/expected-schema.txt` differs only in that CHECK and the rebuild's
-formatting.
-
-The lane exists because `done` was the only lever for taking a card off the board.
-Asked on 2026-08-14 to drop four deprioritised email cards, the agent had to mark
-them done, and four unshipped items read as shipped. `archived` splits the two
-claims apart: done means it happened and stamps `completed_at`; archived means it
-is parked and stamps nothing. `WorkBoardStore.listActive`, `listAllActive`, and
-`reorder`'s lane query all move from `status != 'done'` to
-`status NOT IN ('done','archived')`, which also removes shelved cards from the
-per-turn prompt fragment (it rides `listActive`). A new `listArchived` orders by
-`updated_at`, and `list()` returns active → archived → completed so both clients
-can bucket three ways off one snapshot.
-
-Shelving is refused while the card's bound run is live. A shelf-write asserts the
-work is parked, which is false while the build is still running, so `update()`
-throws `WorkBoardRunStillLiveError` before any write — the same guard, and the
-same reasoning, as `complete()`. The refusal is an answer rather than a crash on
-every surface: `work_board_update` returns `{ok:false}` carrying the message, and
-PATCH returns 409 `run_still_live`. `archived` is client-writable in both the
-agent tool's `STATUS_VALUES` and the HTTP `VALID_STATUSES`; `failed` deliberately
-stays out of both, since only the terminal reconcile writes it.
-
-Both clients render shelved cards in their own collapsed "Shelved · N" section,
-separate from Done. `splitBoard` returns a third bucket rather than folding
-archived into either neighbour — folding it into `completed` would report parked
-work as progress, and the old `status !== 'done'` bucketing would have resurrected
-it in the active lane the server had already excluded it from. Shelved rows carry
-the neutral upcoming dot and no "Merged · <date>" line, because there is no
-`completed_at` to show. Advancing a shelved card un-shelves it: `nextStatus`
-returns `upcoming`, and the store re-appends it to the end of the active lane so
-its stale `sort_order` cannot collide with the renumbered lane. The project rail's
-attention scan and the composer's open-item probe both exclude archived, so a card
-the owner already parked cannot hold the rail red.
-
-Acceptance (b) is pinned mutant-red in `work-board/store.test.ts`: widening
-`listCompleted` to `status IN ('done','archived')` turns three tests RED, and
-stamping `completed_at` on the archive transition turns three RED. The refusal is
-pinned at all three layers (`store.test.ts`, `agent-tool.test.ts`,
-`work-board-surface.test.ts`), the surface test still asserts `status:'failed'` is
-a 400, and `app/__tests__/work-board-helpers.test.ts` asserts an archived item
-lands in neither `active` nor `completed` and leaves the Done count at its
-pre-shelving value.
-
 ## 2026-08-14 — review-round readiness is checked before reviewer spend
 
 `trident/inner-workflow.mjs` now refuses to dispatch a review panel when GitHub
@@ -22664,94 +22854,3 @@ four scenarios, one each.
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
-
-## 2026-08-14 — Work Board card removal runs through one chokepoint
-
-`work-board/removal.ts` is now the only implementation of "remove a card".
-`WorkBoardRemovalService.remove(scope, docs_project_id, item_id, { reason,
-plan_doc? })` performs a fixed sequence: resolve the card in scope, cancel a live
-bound run, dispose the card's plan doc, then hard-delete the row. The HTTP
-`DELETE /api/app/projects/<id>/work-board/<item_id>` — the UI's X — was rewired
-through it and the inline cancel logic was removed from `handleDelete`; the
-composer at `open/composer.ts` constructs one service and passes it in, so the
-agent tool (T2) can ride the same object.
-
-Cancellation stays first because deleting the row first orphans the work: a
-trident build keeps running headless, an Atlas research subprocess is never
-stopped. The moved logic is behaviour-identical to the old inline block,
-including the §F6a `terminate()` routing that fires the terminal-observer chain
-and the Codex-r3 rule that a lost atomic transition reports no `cancelled_run`.
-The DELETE response still carries `deleted` and `cancelled_run` unchanged.
-
-Removal now takes a reason. `?reason=shipped|cancelled|moved` defaults to
-`cancelled`, which is what the X has always meant. The card's own `plans/` doc is
-MOVED to `plans/<reason>/<basename>` via `DocStore.moveDoc`, so it stays under the
-docs root and remains readable in the Documents tab. Only an in-app ref under
-`plans/` is touched — an `https:` ref or a doc elsewhere in the vault is left
-alone, because relocating an owner-authored doc is not part of removing a card.
-A doc is destroyed by exactly one path, the explicit `?plan_doc=delete`; every
-failure (including `doc_destination_exists`) logs and reports
-`disposition: 'left_in_place'` and never falls through to a delete. The layering
-holds: `work-board` gained no trident dependency — the run access, the
-`is_terminal_phase` predicate and the doc store are all structural parameters.
-
-Tests pin the order, not just the membership: `work-board/removal.test.ts` drives
-every stub through one shared event array and asserts the sequence equals
-`['terminate', 'delete']`. `work-board/store.test.ts` and the full existing
-`gateway/http/work-board-surface.test.ts` delete cases pass unmodified, which is
-the behaviour-preservation proof for the refactor.
-
-Mutation checks (each applied to `removal.ts`, then restored):
-
-| Mutant | Result |
-| --- | --- |
-| `skip-cancellation`: never call `cancelBoundRun` | RED — order test saw `['delete']`; 4 tests failed |
-| `delete-first`: hard-delete before cancelling | RED — order test saw `['delete', 'terminate']`; 10 tests failed |
-
-## 2026-08-14 — the agent can remove a Work Board card, through the human's path
-
-`work_board_remove` is registered on the agent tool surface. It takes the item
-`id`, a required `reason` (`shipped` | `cancelled` | `moved`, each value
-described in the schema so the model picks honestly) and an optional
-`delete_plan_doc` boolean. It calls `WorkBoardRemovalService.remove` — the SAME
-instance `open/composer.ts` builds and hands the HTTP surface behind the UI's X.
-There is no second removal implementation and the handler never touches
-`store.delete` directly, so run-cancellation, doc disposition and the hard row
-delete cannot drift between the human path and the agent path.
-
-Why it exists: the agent's only removal lever was `work_board_complete`, so
-taking four deprioritised cards off the board on 2026-08-14 marked four unshipped
-items `done`. The tool description says this out loud — remove is NOT complete,
-never mark unshipped work `done` just to clear it.
-
-Registration is gated on a wired `opts.removal`. A boot that does not supply one
-registers the same five tools as before, in the same order, and
-`registry.get('work_board_remove')` is undefined; the returned names array gains
-`work_board_remove` only when the chokepoint is present. The wiring runs
-composer → `misc-input.ts` `work_board.removal` → `build-core-modules.ts`, spelled
-exactly like the existing `spec_doc` / `chat_ack` threading.
-
-Scope handling mirrors `work_board_add`: the BOARD is keyed by
-`workBoardScopeKey(ctx.project_slug, ctx.project_id)` and the DOCS project id is
-`ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID` — the two arguments stay
-separate, which is the conflation hazard documented in `spec-doc-service.ts`.
-`project_slug` is never an agent-supplied argument.
-
-The tool reports what happened rather than just `ok`: `cancelled_run` when a
-cancellation actually landed, and `plan_doc` with its `disposition` and the new
-`to` path under `plans/<reason>/`. `delete_plan_doc: true` is the only input that
-can produce `disposition: 'deleted'`.
-
-The acceptance's named test is pinned through the AGENT surface, not just the
-service: `work-board/agent-tool.test.ts` creates a real card, binds a live run
-with `store.bindRun`, calls the tool handler, and asserts the shared event array
-contains BOTH `terminate` and `delete` with `terminate` first. Skipping
-cancellation drops `terminate` and deleting first inverts the indices, so both
-mutants go RED. `store.delete` is wrapped, not faked, so the ordering is observed
-against the real row delete. A follow-up `work_board_list` through the same
-registry proves the card is really gone; unknown id, an out-of-enum reason and a
-missing reason all return `{ ok: false, error }` with no throw and no side effect.
-
-One drive-by: `gateway/http/work-board-surface.test.ts` declared its `plan_doc`
-body type without `path` while asserting on it, which `tsc -p gateway` rejected.
-The annotation now matches the response.
