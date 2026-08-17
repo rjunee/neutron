@@ -208,7 +208,9 @@ export async function reviewWithKimi(input: KimiReviewInput): Promise<KimiReview
  * Returns `null` — NOT `''` — when there is no text block, because the two mean
  * different things to the caller and collapsing them is exactly how an
  * answerless 200 becomes a silent approval. `thinking` blocks are skipped: they
- * are not the answer, and a response containing only thinking is the trap.
+ * are not the answer, and a response containing only thinking is the trap. A
+ * whitespace-only answer is an answerless answer — the same class as that
+ * thinking-budget trap.
  */
 export function extractAnswerText(rawBody: string): string | null {
   let parsed: unknown
@@ -223,7 +225,7 @@ export function extractAnswerText(rawBody: string): string | null {
   for (const block of content) {
     if (block === null || typeof block !== 'object') continue
     const b = block as { type?: unknown; text?: unknown }
-    if (b.type === 'text' && typeof b.text === 'string' && b.text.length > 0) {
+    if (b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0) {
       parts.push(b.text)
     }
   }
