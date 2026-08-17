@@ -187,7 +187,13 @@ export interface ModelFloorDecision {
   readonly model: string
   /** True when {@link requested} was refused and replaced by {@link model}. */
   readonly clamped: boolean
-  /** What the caller asked for (the registry record's value, in the live bug). */
+  /** What the caller asked for — the registry record's value, in the live bug.
+   *  On a FLOORED substrate this is the TRIMMED form (and `''` for a non-string
+   *  row), because that is the value the decision was actually made on; on an
+   *  unfloored one it is the input untouched. Said precisely because a field
+   *  documented as "what the caller asked for" that silently differs from the
+   *  input is the kind of name-versus-content drift this file has already been
+   *  bitten by. */
   readonly requested: string
   /** The model the floor holds the session at — the CONFIGURED best. */
   readonly floor: string
@@ -284,6 +290,14 @@ export interface ModelFloorNotice {
  * (see `spawn.ts`), so a SECOND clamp means something re-poisoned the row, which
  * is a live re-poisoner and the single most important thing to say out loud.
  * Suppressing the repeat would rebuild the silence this whole file is here for.
+ *
+ * The obvious objection — a respawn loop turning that into a bubble storm — is
+ * answered by the loops themselves rather than by hope. The channel-wedge retry
+ * is hard-capped at `MAX_FLEET_RESPAWNS = 2` (`channel-unbound-respawn.ts:23`;
+ * then one operator alert and auto-recovery stops), and the supervision respawn
+ * cap is `RESPAWN_CAP_MAX = 3` (`signatures.ts:173`; then the row is `capped_at`
+ * and stops respawning at all). A wedging session on a poisoned row is therefore
+ * a handful of notices with a hard ceiling, and every one of them is true.
  *
  * A sink throw is swallowed: a visibility notice must never fail a spawn.
  *
