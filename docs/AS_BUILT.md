@@ -397,6 +397,8 @@ suite, and was verified by probe instead of being counted as test coverage.
 
 ## 2026-08-16 — a migration row names the build that applied it
 
+Landed via PR #352.
+
 `_migrations` gained two nullable columns, `content_sha256` and `applied_by_commit`, written
 inside each migration's own transaction so a row can never exist without naming what wrote it.
 The commit resolves from `NEUTRON_COMMIT_SHA` first, then from git metadata read as plain files
