@@ -1669,7 +1669,11 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // Run against the cluster at this commit it matches zero words. It also subsumes the
       // same-directory-segment encoding the cross-model reviewer used three rounds ago, which is
       // why that example is now described in words in the docblock instead of typed.
-      const citable = [...cluster, ...anchors.map((a) => a.definedIn)]
+      // `docs/AS_BUILT.md` is in the citable set explicitly because it is the most-cited path in
+      // the cluster — 23 mentions across the three files, more than any anchor target — and it is
+      // neither a cluster file nor an anchor's home, so deriving the set from those two alone left
+      // the single most likely path to be typo'd as the one path a mangle could not be reported on.
+      const citable = [...cluster, ...anchors.map((a) => a.definedIn), 'docs/AS_BUILT.md']
       const flatten = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
       const byLetters = new Map(citable.map((p) => [flatten(p), p]))
       const mangled: string[] = []
