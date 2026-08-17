@@ -1,9 +1,10 @@
 import { Database } from 'bun:sqlite'
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveOpenDbPath } from './db-path.ts'
+import { migrationContentHash, resolveDeployedCommit } from './provenance.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -12,11 +13,29 @@ export interface Migration {
   version: number
   name: string
   sql: string
+  fileName: string
+}
+
+interface MigrationRepair {
+  version: number
+  recorded_name: string
+  file_name: string
+  note: string
+  date: string
 }
 
 export interface ApplyResult {
   applied: number[]
   skipped: number[]
+}
+
+/** One `_migrations` row, as the runner reads it back on the next boot. */
+interface RecordedMigration {
+  version: number
+  name: string
+  applied_at: number
+  content_sha256: string | null
+  applied_by_commit: string | null
 }
 
 export function loadMigrations(dir: string = HERE): Migration[] {
@@ -32,8 +51,233 @@ export function loadMigrations(dir: string = HERE): Migration[] {
         version,
         name,
         sql: readFileSync(join(dir, f), 'utf8'),
+        fileName: f,
       }
     })
+}
+
+export function migrationNameMismatch(recorded: string, file: string): boolean {
+  return recorded !== file
+}
+
+function loadMigrationRepairs(dir: string): MigrationRepair[] {
+  const path = join(dir, 'repairs.json')
+  if (!existsSync(path)) return []
+  const repairs: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (!Array.isArray(repairs)) throw new Error(`${path} must contain a JSON array`)
+  return repairs as MigrationRepair[]
+}
+
+function repairKey(version: number, recordedName: string, fileName: string): string {
+  return `${version}\0${recordedName}\0${fileName}`
+}
+
+/**
+ * The `repairs.json` entry that would acknowledge this exact mismatch.
+ *
+ * READ THE FIELD NAME CAREFULLY: `file_name` holds the migration's NAME (the
+ * `<slug>` half of `NNNN_<slug>.sql`), NOT the file's name on disk. That is
+ * what `repairKey` compares — it is called with `migration.name`, and the
+ * shipped entries in `repairs.json` carry slugs (`trident_checkpoint_head`,
+ * for the file `0122_trident_checkpoint_head.sql`). "Correcting" this to the
+ * real filename would silently stop every entry from ever matching, and the
+ * failure would be invisible: the ledger would look repaired while the runner
+ * kept refusing to boot. This builder exists so the operator never has to
+ * infer the convention from the key function — and so the two cannot drift.
+ */
+function repairsEntryFor(
+  version: number,
+  recordedName: string,
+  migrationName: string,
+  today: string,
+): Record<string, unknown> {
+  return {
+    version,
+    recorded_name: recordedName,
+    file_name: migrationName,
+    note: 'REPLACE THIS — what you verified by hand, and why the live schema already matches this code.',
+    date: today,
+  }
+}
+
+/**
+ * A blank reads as a value, so absence is spelled out — and the two REASONS a
+ * field can be absent are spelled out separately, because they send the reader
+ * to different places. A row with no hash at all was written before provenance
+ * existed and nothing more can be learned from it. A row that has a hash but no
+ * commit was written by a build that carried no git metadata (a tarball or
+ * container install), and the hash still identifies the file exactly.
+ */
+const PREDATES_PROVENANCE = '(not recorded — row predates migration provenance)'
+const NO_BUILD_IDENTITY = '(not discoverable — the build carried no git metadata)'
+
+/**
+ * The largest millisecond offset `new Date(...)` represents; anything beyond it
+ * makes `toISOString()` throw `RangeError`. Per ECMA-262 (Time Values and Time
+ * Range), ±8.64e15 ms — so ±8.64e12 in the seconds `applied_at` stores.
+ */
+const MAX_TIME_VALUE_MS = 8.64e15
+
+/**
+ * Render `applied_at` (unix seconds, REAL) as a timestamp.
+ *
+ * TOTAL BY CONSTRUCTION, and that is the whole point. This runs only while
+ * building the message for a refused boot, so a throw here would replace the
+ * one diagnostic the operator has with a bare `RangeError` — strictly worse
+ * than the message this work set out to improve. `Number.isFinite` alone is not
+ * enough: a corrupt or garbage-wide value is finite and still outside the Date
+ * range. Out-of-range prints the raw number, because a nonsense timestamp is
+ * itself forensic evidence and must not be swallowed.
+ */
+function formatAppliedAt(appliedAt: number): string {
+  if (!Number.isFinite(appliedAt)) return '(unknown)'
+  const ms = appliedAt * 1000
+  if (!Number.isFinite(ms) || Math.abs(ms) > MAX_TIME_VALUE_MS) {
+    return `(out of range — recorded as ${appliedAt})`
+  }
+  return new Date(ms).toISOString()
+}
+
+/**
+ * The thrown message for a name mismatch.
+ *
+ * The refusal itself is unchanged and deliberately fail-closed (see the call
+ * site). What changed is that recovery no longer requires reverse-engineering
+ * `repairKey` from source: the message prints what is on disk against what was
+ * recorded — including the provenance of the build that wrote the row, which
+ * is the question the original incident could not answer — and then the exact
+ * JSON to paste into `migrations/repairs.json`.
+ */
+function formatNameMismatch(
+  migration: Migration,
+  recorded: RecordedMigration,
+  today: string,
+): string {
+  const entry = repairsEntryFor(migration.version, recorded.name, migration.name, today)
+  const indented = JSON.stringify(entry, null, 2)
+    .split('\n')
+    .map((line) => `    ${line}`)
+    .join('\n')
+  const appliedAt = formatAppliedAt(recorded.applied_at)
+  return [
+    `Migration version ${migration.version} was recorded as "${recorded.name}" but this code contains "${migration.name}". ` +
+      'The schema may not match this code.',
+    '',
+    '  on disk',
+    `    file    ${migration.fileName}`,
+    `    sha256  ${migrationContentHash(migration.sql)}`,
+    '  recorded',
+    `    name    ${recorded.name}`,
+    `    applied ${appliedAt}`,
+    `    sha256  ${recorded.content_sha256 ?? PREDATES_PROVENANCE}`,
+    `    build   ${
+      recorded.applied_by_commit ??
+      (recorded.content_sha256 === null ? PREDATES_PROVENANCE : NO_BUILD_IDENTITY)
+    }`,
+    '',
+    'Resolve ONLY with a hand-verified entry in migrations/repairs.json. Confirm by hand that the',
+    'live schema already matches this code, then append this entry (replacing the note):',
+    '',
+    indented,
+    '',
+    'Never rename the recorded row and never auto-apply the migration.',
+  ].join('\n')
+}
+
+/**
+ * Provenance columns on `_migrations`, added additively and forward-only.
+ * Both are nullable: rows written before this shipped are pre-existing and
+ * stay NULL, which is the honest record — nobody knows what build applied
+ * them, and that is exactly the problem this closes going forward.
+ */
+const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ['content_sha256', 'TEXT'],
+  ['applied_by_commit', 'TEXT'],
+]
+
+/** The columns `_migrations` currently carries, by name. */
+function ledgerColumns(db: Database): Set<string> {
+  return new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('_migrations')")
+      .all()
+      .map((r) => r.name),
+  )
+}
+
+/**
+ * Read the ledger without requiring it to have been reshaped first.
+ *
+ * A ledger written before provenance shipped has neither column, so the select
+ * list is built from what is actually there and the rest is selected as NULL —
+ * which is also the honest value. This exists so that DECIDING costs no write:
+ * the mismatch check reads the ledger and can refuse having touched nothing.
+ */
+function readLedger(db: Database): Map<number, RecordedMigration> {
+  const present = ledgerColumns(db)
+  const provenance = PROVENANCE_COLUMNS.map(([column]) =>
+    present.has(column) ? column : `NULL AS ${column}`,
+  ).join(', ')
+  return new Map(
+    db
+      .query<RecordedMigration, []>(
+        `SELECT version, name, applied_at, ${provenance} FROM _migrations`,
+      )
+      .all()
+      .map((r) => [r.version, r] as const),
+  )
+}
+
+/**
+ * Bring `_migrations` up to the current shape. Called ONLY on the path that is
+ * about to write a row — see the call site for why that ordering is load-bearing.
+ *
+ * WHY THIS IS NOT A `NNNN_*.sql` MIGRATION, which is the obvious place for it:
+ * `_migrations` is the ledger, and the runner is its sole owner — it is
+ * created here by `CREATE TABLE IF NOT EXISTS` and no `.sql` file in this tree
+ * has ever touched its DDL. Evolving it from inside the ledger is circular,
+ * and on a fresh install it is also WRONG: the runner writes each row inside
+ * that migration's own transaction, so migrations 0001..NNNN-1 would all be
+ * recorded before the ALTER at ordinal NNNN ever ran. Every fresh install
+ * would come up with a provenance-less history — reintroducing the exact
+ * forensic gap this work exists to close, on the population where the record
+ * is easiest to get right, and on the very ordinal (124) the incident was
+ * about. Bootstrapping here means row one of a brand-new database carries its
+ * provenance; `migration-provenance.test.ts` pins that directly.
+ *
+ * The contract is unchanged in substance: additive, forward-only, idempotent.
+ * Columns are only ever added, never dropped or renamed, and re-running is a
+ * no-op because `pragma_table_info` is consulted first (SQLite has no
+ * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+ */
+function ensureProvenanceColumns(db: Database): void {
+  const present = ledgerColumns(db)
+  for (const [column, type] of PROVENANCE_COLUMNS) {
+    if (present.has(column)) continue
+    try {
+      db.exec(`ALTER TABLE _migrations ADD COLUMN ${column} ${type}`)
+    } catch (err) {
+      // Check-then-ALTER is not atomic. If two processes boot at once on the
+      // first run after an upgrade, both can read the column as absent and the
+      // loser gets "duplicate column name". The post-state is what matters and
+      // it is correct, so re-read rather than take down a boot over a race we
+      // won either way. Anything else still throws — this widens nothing.
+      if (!ledgerColumns(db).has(column)) throw err
+    }
+  }
+}
+
+function assertUniqueMigrationOrdinals(migrations: Migration[]): void {
+  const byVersion = new Map<number, Migration>()
+  for (const migration of migrations) {
+    const previous = byVersion.get(migration.version)
+    if (previous) {
+      throw new Error(
+        `Migration ordinal collision at version ${migration.version}: ${previous.fileName} and ${migration.fileName}`,
+      )
+    }
+    byVersion.set(migration.version, migration)
+  }
 }
 
 /**
@@ -88,15 +332,66 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
        applied_at REAL NOT NULL
      )`,
   )
-  const seen = new Set(
-    db
-      .query<{ version: number }, []>('SELECT version FROM _migrations')
-      .all()
-      .map((r) => r.version),
+  const seen = readLedger(db)
+  const migrations = loadMigrations(dir)
+  assertUniqueMigrationOrdinals(migrations)
+  const repairs = new Map(
+    loadMigrationRepairs(dir).map((repair) => [
+      repairKey(repair.version, repair.recorded_name, repair.file_name),
+      repair,
+    ]),
   )
+  const acknowledged = new Map<number, MigrationRepair>()
+  const today = new Date().toISOString().slice(0, 10)
+  for (const migration of migrations) {
+    const recorded = seen.get(migration.version)
+    if (recorded === undefined || !migrationNameMismatch(recorded.name, migration.name)) continue
+    const repair = repairs.get(repairKey(migration.version, recorded.name, migration.name))
+    if (!repair) {
+      // Fail closed, exactly as before: refuse, apply nothing, rename nothing.
+      // Only the message got better.
+      throw new Error(formatNameMismatch(migration, recorded, today))
+    }
+    acknowledged.set(migration.version, repair)
+  }
+
+  if (acknowledged.size > 0) {
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migration_repairs (
+         version INTEGER NOT NULL,
+         recorded_name TEXT NOT NULL,
+         file_name TEXT NOT NULL,
+         note TEXT NOT NULL,
+         acknowledged_at REAL NOT NULL,
+         PRIMARY KEY (version, recorded_name, file_name)
+       )`,
+    )
+  }
+  for (const repair of acknowledged.values()) {
+    db.run(
+      `INSERT OR IGNORE INTO _migration_repairs
+       (version, recorded_name, file_name, note, acknowledged_at) VALUES (?, ?, ?, ?, ?)`,
+      [repair.version, repair.recorded_name, repair.file_name, repair.note, Date.now() / 1000],
+    )
+  }
   const applied: number[] = []
   const skipped: number[] = []
-  for (const m of loadMigrations(dir)) {
+  // Resolved ONCE per run, and only when there is something to apply, so a
+  // steady-state boot (every migration already recorded) does no filesystem
+  // work at all. `dir` is the search origin: for the instance tree that walks
+  // up to the checkout's `.git`, and for a sidecar tree (`migrations/comments`)
+  // it finds the same one.
+  const pending = migrations.some((m) => !seen.has(m.version))
+  // ORDERING IS LOAD-BEARING, and it is the whole reason the ledger is read
+  // shape-tolerantly above. Reshaping the ledger before deciding would mean a
+  // boot that ends in the refusal had already mutated the schema of the
+  // database it just declared untrustworthy — a guard whose job is to change
+  // nothing, changing something. It would also turn `applyMigrations` from a
+  // read into a write for a fully-migrated database, which breaks opening a
+  // backup read-only to inspect it. Nothing pending, nothing written.
+  if (pending) ensureProvenanceColumns(db)
+  const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
+  for (const m of migrations) {
     if (seen.has(m.version)) {
       skipped.push(m.version)
       continue
@@ -117,11 +412,14 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     db.exec('BEGIN')
     try {
       db.exec(body)
-      db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)', [
-        m.version,
-        m.name,
-        Date.now() / 1000,
-      ])
+      // Provenance is written inside the migration's own transaction, so a row
+      // can never exist without naming the build that wrote it — the gap that
+      // made the original incident unanswerable after the fact.
+      db.run(
+        `INSERT INTO _migrations (version, name, applied_at, content_sha256, applied_by_commit)
+         VALUES (?, ?, ?, ?, ?)`,
+        [m.version, m.name, Date.now() / 1000, migrationContentHash(m.sql), deployedCommit],
+      )
       db.exec('COMMIT')
     } catch (err) {
       db.exec('ROLLBACK')

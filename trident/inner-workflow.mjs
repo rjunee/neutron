@@ -172,8 +172,10 @@ const {
   // invokes the script instead of transcribing raw SQL. Threaded from the
   // launcher (buildWorkflowArgs) like dbPath; a legacy caller that doesn't
   // thread it falls back to the repo-of-record copy (same precedent as
-  // codex-review.sh below).
+  // worktree-cleanup.sh below).
   checkpointScript = null,
+  codexBuildScript = null,
+  codexReviewScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
   // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
   // script (dirty → preserve, clean → plain remove) rather than an LLM told to
@@ -217,6 +219,24 @@ const {
   // independent review gate (argus:*) — see the trust-boundary note below. Absent/''
   // → every prompt is byte-identical to pre-RB2.
   reflectionGuidance = '',
+  // The TEST EXECUTION block, ALREADY RENDERED launcher-side and deterministic
+  // (`trident/test-strategy.ts` `buildTestStrategy`, composed by the orchestrator,
+  // which is the only layer holding the live run count + host budget). Spliced into
+  // the FORGE CONTRACT ONLY — and because that one contract composes the round-1 build
+  // prompt, EVERY fix-round prompt and the HEAD of the codex build brief, one splice
+  // reaches all three. The codex byPath suffix check spans `task + reflectionGuidance +
+  // coda` and is untouched by this: the contract is the brief's HEAD, not its suffix.
+  // Never given to argus:* (same trust boundary as reflectionGuidance). Absent/'' →
+  // the contract is byte-identical to before this existed.
+  //
+  // POSITION IS LOAD-BEARING: it goes ABOVE the numbered CONTRACT, not after it. Step 6
+  // ends in a VERBATIM last-lines list ("emit the last lines, unfenced: …"), and a block
+  // appended below that list reads as more of the list.
+  //
+  // It also ARMS `fullSuiteFindings`: a non-empty strategy means the build was told the
+  // full suite is mandatory, so its `testsPassed` claim becomes a gate rather than a
+  // decoration (see that function).
+  testStrategy = '',
   // OWNER PER-PHASE MODEL OVERRIDES — phase key → {model?, effort?}, ALREADY
   // validated in TypeScript at the settings boundary (`trident/phase-models.ts`
   // `parsePhaseModelConfig`). Absent/null → every phase keeps its default, so an
@@ -254,6 +274,18 @@ const kimiConfigured = kimiConfiguredArg === true
 // launcher that threads those also threads checkpointScript — the repoPath
 // fallback covers only legacy callers.
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
+
+// NO repoPath fallback, deliberately — resolving the wrapper from the repo being
+// built is the defect (Open worked by coincidence, everything else 127'd or drifted);
+// a missing arg fails closed by name in forgeAgent.
+const codexBuildSh =
+  typeof codexBuildScript === 'string' && codexBuildScript.length > 0 ? codexBuildScript : null
+
+// NO repoPath fallback, deliberately — resolving the review wrapper from the repo being
+// reviewed is the same defect #355 fixed for the build (Open worked by coincidence,
+// everything else 127'd or drifted); a missing arg fails closed by name in codexReviewerPrompt.
+const codexReviewSh =
+  typeof codexReviewScript === 'string' && codexReviewScript.length > 0 ? codexReviewScript : null
 
 // Resolved worktree-cleanup script path (#541) — the deterministic replacement
 // for the force-removing cleanup agent. Same repoPath fallback as above.
@@ -515,6 +547,7 @@ const ROLE_MODEL = {
   // entry and a deliberate entry are indistinguishable when the fallback is
   // silent. That is the argument for the coverage test, not just for this line.
   'head-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
+  'build-trailer-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   // The CI probe is the same shape as the head probe: run one command, report the
   // output verbatim, interpret nothing. Routed explicitly rather than left to the
   // fallback, which is how head-probe silently sat on the most expensive tier.
@@ -677,10 +710,12 @@ function routeModel(label, tag) {
         ? ROLE_MODEL['checkpoint']
         : label.startsWith('head-probe-round-')
           ? ROLE_MODEL['head-probe']
-          : label.startsWith('ci-probe-round-')
-            ? ROLE_MODEL['ci-probe']
-          : label.startsWith('merge-probe-round-')
-            ? ROLE_MODEL['merge-probe']
+          : label.startsWith('build-trailer-probe-')
+            ? ROLE_MODEL['build-trailer-probe']
+            : label.startsWith('ci-probe-round-')
+              ? ROLE_MODEL['ci-probe']
+              : label.startsWith('merge-probe-round-')
+                ? ROLE_MODEL['merge-probe']
           // A retry lane is the SAME lane. Routing it separately (or letting it fall
           // through to the default) would mean the owner's choice applied to the
           // first attempt and silently not to the second.
@@ -841,6 +876,17 @@ const FORGE_SCHEMA = {
     // cheap `plan:next` continuation. Absent/null decodes as false everywhere, so
     // an executor that never mentions it keeps today's behaviour exactly.
     deviatedFromSpec: { type: ['boolean', 'null'] },
+
+    // WHICH KIND OF NOT-PASSED, so the gate can tell "the suite never ran" from "the
+    // suite ran and was red before this branch existed". OPTIONAL on purpose: a legacy
+    // launcher (no TEST EXECUTION block) and every existing test harness omit it, and
+    // `fullSuiteFindings` treats an absent value exactly as it treated every
+    // `testsPassed !== true` before this field existed. See `SUITE_OUTCOME_*`.
+    suiteOutcome: { type: 'string', enum: ['passed', 'failed-new', 'failed-preexisting', 'not-run'] },
+    // OPTIONAL — the base-branch comparison transcription that EARNS
+    // `failed-preexisting`. Absent/empty means the claim is unearned and the gate
+    // fails closed.
+    suiteEvidence: { type: 'string' },
   },
 }
 
@@ -1125,8 +1171,11 @@ const NO_PATTERN_KILL_RULE =
 // `schema: FORGE_SCHEMA` the agent ALSO returns the structured fields, but the
 // last-lines discipline is kept verbatim as the durable, parser-friendly fallback.
 // Step 1 + step 4 differ on whether the branch/PR ALREADY EXIST (`reenter`):
-//   • a FRESH round-1 run (reenter=false) CREATES the branch (`git switch -c`)
-//     and, in pr-mode, opens a PR;
+//   • a FRESH round-1 run (reenter=false) CREATES-OR-RE-ENTERS the branch (`git switch -c`),
+//     falling back to a plain `git switch` when a prior failed run of the same
+//     card left the local branch behind (measured incident d5c1e219: the
+//     collision pushed the commit onto the worktree's auto `worktree-wf_*`
+//     branch and the divergence guard refused the round);
 //   • a RE-ENTRY (reenter=true) — a crash-resume (`resuming`) OR any bounded
 //     fix round after round 1 — re-enters the EXISTING branch WITHOUT `-c`
 //     (which would collide: "branch already exists") and REUSES the PR (never a
@@ -1137,7 +1186,7 @@ const NO_PATTERN_KILL_RULE =
 function forgeStep1(reenter) {
   return reenter
     ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
-    : `Run \`git switch -c ${forgeBranch}\` as your FIRST step (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+    : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
 }
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
@@ -1149,18 +1198,23 @@ function forgePushStep(reenter) {
 const FORGE_PR_LINE = isPr ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
 // `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
-function forgeBuildContract(reenter) {
+function forgeBuildContract(reenter, artifactCheckpointName) {
+  const artifactCommand = artifactCheckpointCommand(artifactCheckpointName)
+  const artifactStep = artifactCommand === null
+    ? ''
+    : `\n6. DURABILITY CHECKPOINT — the INSTANT your commit is in and the diff file is written, run EXACTLY this single Bash command, verbatim (idempotent; it must NOT fail your build — if it errors, ignore the error and continue): ${artifactCommand}`
+  const reportStep = artifactCommand === null ? 6 : 7
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
-${NO_PATTERN_KILL_RULE}
+${NO_PATTERN_KILL_RULE}${testStrategy === '' ? '' : `\n${testStrategy}\n`}
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
-3. Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.
+3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
-6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
+5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -1283,6 +1337,7 @@ HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from
 - There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
 - Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
 - Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
+- STEP 1 IS ALREADY DONE FOR YOU, and this REPLACES it: the wrapper that launched you checked this worktree out on ${forgeBranch} before you started. Do NOT run \`git switch -c\` (the branch exists — creating it again errors); do not switch away. Verify with \`git rev-parse --abbrev-ref HEAD\` if unsure, then build.
 - Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
 }
 
@@ -1436,36 +1491,30 @@ function codexBriefByPath(brief) {
     typeof briefParts.taskIntegrity !== 'string' ||
     briefParts.taskIntegrity.length === 0
   ) return null
+  if (
+    typeof briefParts.reflectionFile === 'string' &&
+    briefParts.reflectionFile.length > 0 &&
+    (typeof briefParts.reflectionIntegrity !== 'string' || briefParts.reflectionIntegrity.length === 0)
+  ) return null
 
   const full = `${brief}\n`
   const coda = codexBuildCoda()
   const suffix = task + reflectionGuidance + coda + '\n'
   if (!full.endsWith(suffix)) return null
 
-  const taskActual = briefIntegrity(task)
-  if (taskActual !== briefParts.taskIntegrity) {
-    throw new Error(`CODEX_BUILD_BRIEF_ARGS_CORRUPT: the task text carried in the workflow args measures ${taskActual} but the launcher's receipt over the task it wrote to ${briefParts.taskFile} is ${briefParts.taskIntegrity}. The args crossed an agent and were altered in transit; refusing to compose a build brief from text nobody wrote. No build was attempted.`)
-  }
-  if (reflectionGuidance !== '') {
-    const reflectionActual = briefIntegrity(reflectionGuidance)
-    if (
-      typeof briefParts.reflectionFile !== 'string' ||
-      briefParts.reflectionFile.length === 0 ||
-      reflectionActual !== briefParts.reflectionIntegrity
-    ) {
-      throw new Error(`CODEX_BUILD_BRIEF_ARGS_CORRUPT: the reflection segment carried in the workflow args measures ${reflectionActual} but the launcher's receipt over the reflection segment it wrote to ${briefParts.reflectionFile} is ${briefParts.reflectionIntegrity}. The args crossed an agent and were altered in transit; refusing to compose a build brief from text nobody wrote. No build was attempted.`)
-    }
-  }
+  // Args copies crossed a bridge model and are advisory. The disk manifest is the
+  // authority and the wrapper verifies its bytes per part, so transit-mangled
+  // punctuation cannot refuse a dispatch whose real brief remains intact on disk.
+  const hasReflection = typeof briefParts.reflectionFile === 'string' && briefParts.reflectionFile.length > 0
   return {
     head: full.slice(0, full.length - suffix.length),
     tail: `${coda}\n`,
-    files: reflectionGuidance !== ''
-      ? [briefParts.taskFile, briefParts.reflectionFile]
-      : [briefParts.taskFile],
+    files: hasReflection ? [briefParts.taskFile, briefParts.reflectionFile] : [briefParts.taskFile],
+    integrities: hasReflection ? [briefParts.taskIntegrity, briefParts.reflectionIntegrity] : [briefParts.taskIntegrity],
   }
 }
 
-function codexBuildPrompt(slot, brief, route) {
+function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   const uniq = runId || slug
   const briefFile = `/tmp/trident-codex-build-${uniq}-${slot}.brief`
   const byPath = codexBriefByPath(brief)
@@ -1478,7 +1527,8 @@ function codexBuildPrompt(slot, brief, route) {
   // one won. A separate file has no ambiguity to resolve.
   const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
-  const script = `${repoPath}/trident/codex-build.sh`
+  const pidFile = `/tmp/trident-codex-build-${uniq}-${slot}.pid`
+  const script = codexBuildSh
   // THE HEREDOC TERMINATOR MUST NOT OCCUR IN THE BRIEF. A brief line equal to the
   // marker would close the heredoc early and leave the REST OF THE BRIEF sitting in
   // the command as shell — and part of the brief is the owner's task text, which is
@@ -1527,6 +1577,7 @@ function codexBuildPrompt(slot, brief, route) {
   let runCommandNote = ''
   let corruptInstructions
   let partMissingInstructions = ''
+  let integrityEnv = ` NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)}`
   if (byPath === null) {
     chunkBlocks = renderChunks(briefChunks, briefFile, 0, briefChunks.length)
     writeBriefInstructions = `FIRST write the brief to disk in ${briefChunks.length} SEPARATE Bash call(s), in the order given. Each block below is one call; pass each WHOLE block unchanged. Call 1 uses \`>\` (it truncates any earlier attempt); every later call uses \`>>\` (it appends). Do NOT merge them into one call, do NOT reorder them, do NOT skip one.
@@ -1538,14 +1589,21 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
     const headChunks = chunkTextOnLines(byPath.head, CODEX_BRIEF_CHUNK_BYTES)
     const tailChunks = chunkTextOnLines(byPath.tail, CODEX_BRIEF_CHUNK_BYTES)
     const total = headChunks.length + tailChunks.length
+    const a1Integrity = briefIntegrity(byPath.head)
+    const a2Integrity = briefIntegrity(byPath.tail)
     chunkBlocks = `${renderChunks(headChunks, a1File, 0, total)}\n\n${renderChunks(tailChunks, a2File, headChunks.length, total)}`
-    writeBriefInstructions = `FIRST write the TWO workflow-composed brief SEGMENTS to disk in ${total} SEPARATE Bash call(s), in the order given; the large task text does NOT travel through you — it is already on disk at the part path(s) listed in the run command, written by the host. Do NOT read, rewrite, recreate or "fix" those part files; never write the task yourself. The wrapper assembles the full brief from the listed part files, in order, and REFUSES to build (exit 3) unless the assembled whole matches the byte count and checksum in the run command.`
-    partsEnv = ` NEUTRON_CODEX_BUILD_BRIEF_PARTS=${shSingleQuote([a1File, ...byPath.files, a2File].join('\n'))}`
-    runCommandNote = `\nThis command contains quoted newlines inside the PARTS value — pass the WHOLE block as ONE Bash call, unmodified.`
+    writeBriefInstructions = `FIRST write the TWO workflow-composed brief SEGMENTS to disk in ${total} SEPARATE Bash call(s), in the order given; the large task text does NOT travel through you — it is already on disk at the part path(s) listed in the run command, written by the host. Do NOT read, rewrite, recreate or "fix" those part files; never write the task yourself. The wrapper assembles the full brief from the listed part files, in order, and REFUSES to build (exit 3) unless EVERY listed file matches its own byte count and checksum in the run command.`
+    partsEnv = ` NEUTRON_CODEX_BUILD_BRIEF_PARTS=${shSingleQuote([a1File, ...byPath.files, a2File].join('\n'))} NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=${shSingleQuote([a1Integrity, ...byPath.integrities, a2Integrity].join('\n'))}`
+    integrityEnv = ''
+    runCommandNote = `\nThis command contains quoted newlines inside the PARTS and PART_INTEGRITY values — pass the WHOLE block as ONE Bash call, unmodified.`
     corruptInstructions = `RE-RUN ALL ${total} SEGMENT CALL(S) FROM CALL 1 (each file's first call uses \`>\`, so re-running clears both segment files)`
     partMissingInstructions = `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_MISSING in ${errFile} → a HOST-written part file is missing or empty; no retry by you can fix it and you must NOT create the file yourself — report codexStatus='deferred'.`
+    partMissingInstructions += `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_CORRUPT in ${errFile} → read the named file in the error: if it is one of YOUR two segment files (${a1File} or ${a2File}), re-run ALL segment calls from CALL 1 exactly once; if it is a HOST-written part path, no retry by you can fix it and you must NOT rewrite the file — report codexStatus='deferred'.`
   }
   const diffFile = codexBuildDiffFile()
+  const checkpointEnv = !dbPath || !runId
+    ? ''
+    : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)}`
   // The model assignment, exactly as the review lane does it: the id belongs to the
   // subprocess, never to the wrapping agent. Empty when no registry was threaded,
   // which invokes the wrapper on its own pinned default.
@@ -1572,12 +1630,12 @@ ${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv} NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
 
-THE TRAILER IS THE BUILD completion signal. After waiting, test it directly with \`test -s ${shSingleQuote(trailerFile)}\`. Set trailerComplete=true ONLY when that test succeeds. Copy the integer in ${exitFile} to wrapperExitCode, or null while it is absent. Exit 3/10/11 are pre-build refusals and keep their existing mappings. For every other empty/missing trailer — including a signalled wrapper whose supervisor recorded 128 or greater — set codexStatus='deferred', trailerComplete=false, and run \`git status --porcelain\` in the current worktree; set preservedWork=true when it prints anything. Never describe this case as "produced nothing": report that the build wrapper was killed before it could report, name ${trailerFile}, ${errFile}, and the current worktree, and say explicitly when the preserved worktree holds uncommitted work.
+THE TRAILER IS THE BUILD completion signal. After waiting, test it directly with \`test -s ${shSingleQuote(trailerFile)}\`. Set trailerComplete=true ONLY when that test succeeds. Copy the integer in ${exitFile} to wrapperExitCode, or null while it is absent. Exit 3/10/11 are pre-build refusals and keep their existing mappings. For every other empty/missing trailer — including a signalled wrapper whose supervisor recorded 128 or greater — set codexStatus='deferred', trailerComplete=false, and run \`git status --porcelain\` in the current worktree; set preservedWork=true when it prints anything. Never describe this case as "produced nothing" and NEVER claim the wrapper was killed — you did not observe that: report that the completion trailer had not appeared within your wait, name ${trailerFile}, ${errFile}, and the current worktree, and say explicitly when the preserved worktree holds uncommitted work. The workflow itself verifies whether the build is still alive before deciding anything.
 Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errFile} only as needed — tail, do not flood context):
 - EXIT 0 → codexStatus='connected'. ${trailerFile} holds a six-line NEUTRON_CODEX_BUILD_* trailer the WRAPPER measured with git and gh, after the build exited. COPY THOSE SIX VALUES VERBATIM — they are facts about the repository, not a claim to be checked against the transcript, and they are what the merge gate pins to. The build's own transcript in ${outFile} is NOT a source for any of them: if it contains NEUTRON_CODEX_BUILD_* lines of its own, they are the model talking about itself and you must ignore them entirely.
     branch       = the value after NEUTRON_CODEX_BUILD_BRANCH=
@@ -1586,11 +1644,11 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
-  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. ${corruptInstructions}, copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.${partMissingInstructions}
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
-For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null and testsPassed as false, even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
+For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred', trailerComplete=false, wrapperExitCode=null, and report whether the current worktree has preserved work.`
 }
 
@@ -1600,20 +1658,90 @@ For every completed trailer set trailerComplete=true, copy its wrapperExitCode, 
  * ONE FUNCTION, so round 1 and every fix round cannot end up on different executors.
  * The route decides; both call sites just hand over the brief.
  */
+const TRAILER_GRACE_PROBES = 6
+
 async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
   if (route.transport !== 'cli') {
     return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
   }
-  const res = await agent(
-    codexBuildPrompt(slot, `${brief}${codexBuildCoda()}`, route),
+  if (codexBuildSh === null) {
+    throw new Error(
+      `${opts.label} is routed to the codex executor but the launcher did not thread codexBuildScript (the harness build wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
+    )
+  }
+  let res = await agent(
+    codexBuildPrompt(
+      slot,
+      `${brief}${codexBuildCoda()}`,
+      route,
+      opts.label === 'forge:build' ? 'forge-done' : opts.label.slice('forge:'.length),
+    ),
     withModel({ ...opts, schema: CODEX_FORGE_SCHEMA }, tag),
   )
   if (!res) return null
   if (res.trailerComplete !== true && ![3, 10, 11].includes(res.wrapperExitCode)) {
-    throw new Error(
-      `${opts.label} DEFERRED: the build wrapper was killed before it could report; its completion trailer ${`/tmp/trident-codex-build-${runId || slug}-${slot}.trailer`} is empty or missing. Inspect ${`/tmp/trident-codex-build-${runId || slug}-${slot}.err`} and the preserved worktree${res.preservedWork === true ? ', which holds uncommitted work' : ''}.`,
-    )
+    const uniq = runId || slug
+    const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
+    const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
+    const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
+    const pidFile = `/tmp/trident-codex-build-${uniq}-${slot}.pid`
+    const preserved = res.preservedWork === true ? ', which holds uncommitted work' : ''
+    const cmd = `t=${shSingleQuote(trailerFile)}; x=${shSingleQuote(exitFile)}; e=${shSingleQuote(errFile)}; p=${shSingleQuote(pidFile)}; b=$(wc -c < "$e" 2>/dev/null || echo -1); for i in $(seq 1 60); do if test -s "$t" || test -s "$x"; then break; fi; sleep 5; done; a=$(wc -c < "$e" 2>/dev/null || echo -1); alive=false; pid=$(cat "$p" 2>/dev/null); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=true; fi; printf 'ALIVE=%s\nEXIT=%s\nERR_BEFORE=%s\nERR_AFTER=%s\nTRAILER_BEGIN\n' "$alive" "$(cat "$x" 2>/dev/null)" "$b" "$a"; cat "$t" 2>/dev/null; printf 'TRAILER_END\n'`
+
+    for (let attempt = 1; attempt <= TRAILER_GRACE_PROBES; attempt++) {
+      const probe = await seatAttempt(`build-trailer-probe-${slot}-${attempt}`, () =>
+        agent(
+          `Run EXACTLY this single Bash command and copy each value it prints verbatim into the schema: trailer is the bytes between TRAILER_BEGIN and TRAILER_END (use '' when empty), and the other four fields are the corresponding printed values. Do not interpret any value, do not run anything else, and do not modify anything. \`kill -0\` sends NO signal: it is a read-only existence test on a pid this run itself recorded, so it does not violate the no-pattern-kill rule.\n${cmd}`,
+          withModel({ label: `build-trailer-probe-${slot}`, phase: 'Build', schema: BUILD_TRAILER_PROBE_SCHEMA }),
+        ),
+      )
+      if (probe === null) {
+        log(`trident-v2 ${opts.label}: trailer probe ${attempt}/${TRAILER_GRACE_PROBES} died; that is not evidence the build died`)
+        continue
+      }
+
+      const disposition = classifyTrailerWait(probe)
+      if (disposition.state === 'landed') {
+        const t = disposition.trailer
+        const rawExit = String(probe.exitCode).trim()
+        const wrapperExitCode = /^-?\d+$/.test(rawExit) ? Number.parseInt(rawExit, 10) : null
+        log(`trident-v2 ${opts.label}: late completion trailer landed on probe ${attempt}/${TRAILER_GRACE_PROBES}: ${trailerFile}`)
+        res = {
+          codexStatus: 'connected',
+          trailerComplete: true,
+          wrapperExitCode,
+          branch: t.branch,
+          commitSha: t.head,
+          prNumber: t.pr === '' ? null : Number(t.pr),
+          diffFile: t.diff,
+          worktreePath: t.worktree,
+          testsPassed: false,
+          suiteOutcome: 'not-run',
+          preservedWork: false,
+        }
+        break
+      }
+      if (disposition.state === 'alive') {
+        log(`trident-v2 ${opts.label}: trailer absent but the wrapper is alive (supervisor pid live or stderr grew) — a live build must not be declared DEFERRED; extending the wait (probe ${attempt}/${TRAILER_GRACE_PROBES})`)
+        continue
+      }
+      if (disposition.signalExit !== null) {
+        throw new Error(
+          `${opts.label} DEFERRED: the build wrapper was killed (signal exit ${disposition.signalExit} recorded in ${exitFile}) before it wrote its completion trailer ${trailerFile}. Inspect ${errFile} and the preserved worktree${preserved}.`,
+        )
+      }
+      throw new Error(
+        `${opts.label} DEFERRED: the codex build's completion trailer ${trailerFile} had not appeared within the wait, and the wrapper could no longer be observed alive (no kill was observed). Inspect ${errFile} and the preserved worktree${preserved}.`,
+      )
+    }
+
+    if (res.trailerComplete !== true) {
+      // Task 2 will persist this live give-up as the recoverable awaiting-trailer checkpoint.
+      throw new Error(
+        `${opts.label} DEFERRED: the codex build's completion trailer ${trailerFile} had not appeared within the wait; the wrapper was still alive when this run stopped waiting — the build may still finish. No kill was observed. Inspect ${errFile} and the preserved worktree${preserved}.`,
+      )
+    }
   }
   if (res.codexStatus !== 'connected') {
     // A LANE THAT COULD NOT RUN IS NOT A BUILD, and it must not be reported as one.
@@ -1796,6 +1924,12 @@ ${plan.implementationPlan}
 // written the same way and for the same reason — always, so it is never stale —
 // through the temp-file + `readfile()` indirection `writeTerminalResult` uses, so
 // the JSON's own quotes cannot break the sqlite argument.
+function artifactCheckpointCommand(name) {
+  if (!dbPath || !runId) return null
+  const findingsTmp = `/tmp/trident-checkpoint-findings-${runId}.json`
+  return `printf '%s' '[]' > ${shSingleQuote(findingsTmp)} && bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} branch ${shSingleQuote(forgeBranch)} inner_checkpoint ${shSingleQuote(name)} inner_checkpoint_head "$(git rev-parse --verify HEAD)" inner_findings_file ${shSingleQuote(findingsTmp)} subagent_status running`
+}
+
 async function checkpoint(name, opts) {
   if (!dbPath || !runId) return
   const o = opts || {}
@@ -2175,6 +2309,65 @@ function classifyBlock(synthesis, deferredPeers) {
   return codeFindings.length === 0 ? 'infra-only' : 'code'
 }
 
+/**
+ * THE DELTA CLASSIFIER (docs-only cheap path, T1). Pure, self-contained, and
+ * CONSERVATIVE BY CONSTRUCTION: any path it does not positively recognise as
+ * documentation forces the full path. A false "full" costs one wasted full run;
+ * a false "docs-only" ships unverified code, so every ambiguity resolves to full.
+ * Classification is by PATH, never by count or diff size (the card forbids both).
+ * Self-contained on purpose: the extraction tests evaluate it out of this file's
+ * source, so it must close over NOTHING at module scope.
+ */
+function classifyDeltaPaths(paths) {
+  const full = (reason) => ({ classification: 'full', reason, offenders: [] })
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return full('delta: no changed paths measured — taking the full path')
+  }
+  const DENY_PREFIXES = ['migrations/', '.github/']
+  const ALLOW_PREFIXES = ['.trident/plans/']
+  const offenders = []
+  for (const raw of paths) {
+    if (typeof raw !== 'string') return full('delta: unreadable path entry — taking the full path')
+    const p = raw.trim()
+    if (
+      p.length === 0 ||
+      p.startsWith('/') ||
+      p.startsWith('"') ||
+      p.includes('\\') ||
+      p.includes('..')
+    ) {
+      return full(`delta: suspicious path ${JSON.stringify(raw)} — taking the full path`)
+    }
+    if (DENY_PREFIXES.some((d) => p.startsWith(d))) { offenders.push(p); continue }
+    const lower = p.toLowerCase()
+    const isDoc = lower.endsWith('.md') || lower.endsWith('.markdown') || ALLOW_PREFIXES.some((a) => p.startsWith(a))
+    if (!isDoc) offenders.push(p)
+  }
+  if (offenders.length > 0) {
+    const shown = offenders.slice(0, 3).join(', ')
+    const more = offenders.length > 3 ? ` (+${offenders.length - 3} more)` : ''
+    return { classification: 'full', reason: `full: non-docs path(s): ${shown}${more}`, offenders }
+  }
+  return { classification: 'docs-only', reason: `docs-only: all ${paths.length} changed path(s) are documentation`, offenders: [] }
+}
+
+/**
+ * The probe half: input is the raw/exit_code report of ONE verbatim
+ * `git diff --name-only <base>...<head>` command (same report-don't-interpret
+ * shape as probePrMerged). Any hint the command did not succeed cleanly —
+ * missing/non-zero exit, git error text — is "unsure", and unsure takes the
+ * expensive path and says so.
+ */
+function classifyDeltaProbe(probe) {
+  const full = (reason) => ({ classification: 'full', reason, offenders: [] })
+  const exit = probe && typeof probe.exit_code === 'number' ? probe.exit_code : null
+  if (exit !== 0) return full(`delta: probe failed (exit=${exit === null ? 'unknown' : exit}) — taking the full path`)
+  const raw = probe && typeof probe.raw === 'string' ? probe.raw : ''
+  if (/^(fatal|error):/im.test(raw)) return full('delta: probe reported a git error — taking the full path')
+  const paths = raw.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+  return classifyDeltaPaths(paths)
+}
+
 // A SYNTHESIS WE NEVER GOT IS AN INFRA BLOCK — IT MUST NOT RE-FORGE, AND MUST NOT CRASH.
 //
 // `agent()` returns null when its subagent dies on a terminal API error after
@@ -2361,6 +2554,39 @@ const OID_CLAIM = /^[0-9a-fA-F]{7,40}$/
 function oidClaim(value) {
   const s = typeof value === 'string' ? value.trim() : ''
   return OID_CLAIM.test(s) ? s : null
+}
+
+function parseBuildTrailer(text) {
+  const fields = [
+    ['NEUTRON_CODEX_BUILD_BRANCH=', 'branch'],
+    ['NEUTRON_CODEX_BUILD_HEAD=', 'head'],
+    ['NEUTRON_CODEX_BUILD_REMOTE_HEAD=', 'remoteHead'],
+    ['NEUTRON_CODEX_BUILD_PR=', 'pr'],
+    ['NEUTRON_CODEX_BUILD_DIFF=', 'diff'],
+    ['NEUTRON_CODEX_BUILD_WORKTREE=', 'worktree'],
+  ]
+  const lines = String(text).split('\n')
+  const parsed = {}
+  for (const [prefix, name] of fields) {
+    const matches = lines.filter((line) => line.startsWith(prefix))
+    if (matches.length !== 1) return null
+    parsed[name] = matches[0].slice(prefix.length)
+  }
+  return parsed
+}
+
+function classifyTrailerWait(probe) {
+  const trailer = parseBuildTrailer(probe && probe.trailer)
+  if (trailer !== null) return { state: 'landed', trailer }
+
+  const exitCode = String(probe && probe.exitCode !== undefined ? probe.exitCode : '').trim()
+  const before = probe && typeof probe.errBytesBefore === 'number' ? probe.errBytesBefore : -1
+  const after = probe && typeof probe.errBytesAfter === 'number' ? probe.errBytesAfter : -1
+  if (probe && probe.alive === true) return { state: 'alive' }
+  if (exitCode === '' && before >= 0 && after > before) return { state: 'alive' }
+
+  const rc = /^-?\d+$/.test(exitCode) ? Number.parseInt(exitCode, 10) : null
+  return { state: 'dead', signalExit: rc !== null && rc >= 128 ? rc : null }
 }
 
 /**
@@ -2803,6 +3029,50 @@ const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING'
 // workflow genuinely never started, and that needs a human, not another wait.
 const REVIEW_READINESS_BUDGET_MS = 900000
 const REVIEW_READINESS_RETRY_MS = 30000
+// ONE SNAPSHOT OF THE BASE HEAD CANNOT PROVE THAT NO WORKFLOW EMITS A NAME.
+//
+// The `produced` list is the check names GitHub has reported on the BASE BRANCH HEAD.
+// That is evidence, not proof: a workflow can be `pull_request`-only, or gated on a
+// path/branch/event filter, so a job that legitimately runs on THIS PR may be absent
+// from the base head forever. Read as proof on the first probe — which is what shipped
+// — a perfectly configured repository gets `config-error: required check X is not
+// produced by any workflow in this repository` seconds after the push, and the gate
+// stops. That is the same conflation the budget comment above is about, one level up:
+// "it has not appeared YET" and "it can never appear" are different facts.
+//
+// So absence must PERSIST before it is allowed to mean "never". The measurement that
+// sets the floor is the one above: on this repository's PR #275 the check was ABSENT from
+// the rollup for 328 s and then appeared. A grace shorter than that converts a routine
+// queue delay into a permanent configuration fault.
+//
+// DERIVED FROM THE BUDGET, NOT HAND-WRITTEN — for the same reason the attempt count
+// below is. A second tuned constant beside the first is how the budget comment comes to
+// argue for a 3x margin while the number next to it is 1.5x, and it is a tuned number
+// that failed here before. Two thirds of the budget is a RATIO with a reason: it leaves
+// a full third of the budget on the other side, so the fast-fail is reachable by
+// construction rather than by an inequality someone has to remember to preserve.
+//
+// At the current budget that is 10 minutes — ~1.8x the measured 328 s, up from the 8
+// minutes (~1.5x) that shipped, and it now moves WITH the budget instead of drifting
+// out of relation to it.
+//
+// IT MUST STAY STRICTLY BELOW THE BUDGET. At or above it the config-error branch is
+// unreachable and the gate silently reverts to burning the whole budget on a fault it
+// can already name — a failure that is invisible because it looks like patience. The
+// ratio guarantees it; `__tests__/ci-gate.test.ts` asserts the inequality anyway,
+// because the guarantee is only as good as the ratio staying below 1.
+//
+// AND IT IS ROUNDED UP TO A WHOLE NUMBER OF RETRIES, because the gate cannot spend a
+// fraction of a sleep. `elapsedMs` counts sleeps, so the window is really crossed at
+// the first attempt where `(attempt-1)*RETRY >= GRACE` — and unless GRACE is a multiple
+// of RETRY that attempt lands PAST the window, making the sentence the owner reads
+// ("waited at least 10 minutes") describe a wait shorter than the one performed and the
+// guard test's attempt arithmetic non-integral. Measured (Argus r2) at a mutant budget
+// of 600000 ms: the guard asserted 14.33 probes against 15 actually spent. Snapping to
+// the retry grid makes the label, the arithmetic and the sleeps the same number at
+// EVERY budget, not just this one.
+const REVIEW_READINESS_CONFIG_GRACE_MS =
+  REVIEW_READINESS_RETRY_MS * Math.ceil((REVIEW_READINESS_BUDGET_MS * 2) / 3 / REVIEW_READINESS_RETRY_MS)
 // Derived, never hand-written — a count and a duration that can disagree is how the
 // doc comment above comes to describe a budget the loop does not actually have. The
 // +1 is the FIRST probe, which happens before any wait.
@@ -2825,6 +3095,12 @@ const REVIEW_READINESS_ATTEMPTS = Math.ceil(REVIEW_READINESS_BUDGET_MS / REVIEW_
 // keeping these `//` keeps the boundary where every reader expects it.
 function readinessBudgetLabel() {
   const minutes = REVIEW_READINESS_BUDGET_MS / 60000
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minutes`
+}
+// Same derivation for the settle window, so the config-error sentence cannot claim a
+// wait the gate did not perform either.
+function readinessGraceLabel() {
+  const minutes = REVIEW_READINESS_CONFIG_GRACE_MS / 60000
   return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minutes`
 }
 
@@ -2876,7 +3152,7 @@ function probeCause(raw) {
 // WHAT "REQUIRED" MEANS IS THE BASE BRANCH'S ANSWER, NOT A LITERAL IN THIS FILE.
 //
 // This used to be a frozen array of THIS repository's three job names, hardcoded into
-// a gate that runs against several repositories. Measured on neutron-enterprise run
+// a gate that runs against several repositories. Measured on a sibling repository's run
 // `a6da50ea` / PR #515: that repo's checks are `check`, `frontend`, `license-gate`, …
 // and not one of the three existed there, so the gate burned its whole 15-minute budget
 // and deferred with "required check … has not run" — a queue-delay sentence — on a PR
@@ -2889,25 +3165,105 @@ function probeCause(raw) {
 // protected, the required names come from that branch's own protection/rulesets —
 // never from another repository's job list.
 //
-// `classifyRequiredChecksProbe` turns the three-section transcription of
+// `classifyRequiredChecksProbe` turns the five-section transcription of
 // `probeRequiredChecks` into `{mode:'resolved', required, produced}`:
 //   * `required` — the union of branch-protection contexts and ruleset
-//     `required_status_checks` for the base branch. A 404 on either read is a
-//     DEFINITIVE answer ("this branch is not protected"), not a failure; any other
-//     read failure is `mode:'unknown'`, which defers quoting the cause.
+//     `required_status_checks` for the base branch. A 404 from the RULES read is a
+//     definitive "no rules"; a 404 from the PROTECTION read is ambiguous and is settled
+//     by the branch read, which usually ANSWERS it outright (below). Any other read
+//     failure is `mode:'unknown'`, which defers quoting the cause.
+//   * `appBound` — the subset of `required` that names one producing App. Kept because
+//     a required check bound to an app is not satisfied by a same-name row from
+//     somewhere else.
 //   * `produced` — the check names GitHub has actually reported on the base branch
-//     head, i.e. what workflows in this repository emit. `null` when that list could
-//     not be read, and a null there may only ever disable the config-error fast-fail
-//     (so an unreadable list still WAITS; it can never make the gate fail).
+//     head: BOTH check runs and classic commit statuses. `null` when either list could
+//     not be read OR came back truncated, and a null there may only ever disable the
+//     config-error fast-fail (so an unreadable list still WAITS; it can never make the
+//     gate fail).
+//
+// SPLIT THE TRANSCRIPT BY NAME, NOT BY OFFSET, AND TAKE THE LAST OCCURRENCE OF EACH
+// MARKER — for exactly the reason `exitOf` below already does.
+//
+// The probe grew from three reads to five and a chain of `indexOf` slices gets one
+// boundary wrong the moment a section is added in the middle. But splitting on the
+// FIRST occurrence has its own version of that bug: the probe's own command line
+// carries all four markers, so ONE echoed command in the transcript — a shell tracing
+// it, an agent quoting what it ran — moved every boundary to the echo and mis-assigned
+// every section. Measured (Argus r2): a transcript with the command echoed in front
+// classified as `mode:'unknown'` where the identical clean transcript resolved.
+//
+// Reading each marker's LAST occurrence puts every boundary in the real output, because
+// the echo can only ever precede it. The keys are walked in their emitted order from
+// the back, each one searching only the text before the section that follows it, so an
+// out-of-order or repeated marker cannot pull a boundary past its neighbour.
+//
+// Everything before the first boundary is the protection read, which is emitted first
+// and unlabelled. An ABSENT section yields '' — its exit reads as null, i.e.
+// unreadable — so an older transcript degrades to "could not tell" rather than being
+// silently mis-sliced.
+// A REQUIRED CHECK MAY BE NAMED ANYTHING, INCLUDING A MARKER. The probe emits each
+// boundary with its own `echo`, so a real marker always occupies a WHOLE LINE. A
+// payload that merely CONTAINS the text does not — a ruleset requiring a context
+// literally named `___SECTION=BRANCH` arrives as `  "context": "___SECTION=BRANCH",`,
+// indented and quoted, inside the RULES section. Matching the bare substring took that
+// occurrence as the last one and pulled the BRANCH boundary past the real payload, so
+// the branch read came back empty and the whole classification degraded to `unknown`
+// — deferring every round on a repository nobody could see was misconfigured.
+// Requiring the marker to start a line and end one keeps the boundaries in the text the
+// probe itself wrote. (Fails shut either way, which is why it is small; but a stop
+// nobody can diagnose is the expensive kind.)
+const PROBE_SECTION_KEYS = ['BRANCH', 'RULES', 'RUNS', 'STATUSES']
+function probeSections(raw) {
+  const text = String(raw)
+  const out = { PROT: '', BRANCH: '', RULES: '', RUNS: '', STATUSES: '' }
+  const marker = (key) => '___SECTION=' + key
+  // The marker occupies a whole line: nothing before it on that line, nothing after.
+  // (Line comments only in here — the test harness slices this source up to the first
+  // JSDoc opener, so opening one would truncate the slice mid-function. Its anchor
+  // guards in ci-gate.test.ts say so too.)
+  const onOwnLine = (found, key) => {
+    if (found < 0) return false
+    if (found > 0 && text[found - 1] !== '\n') return false
+    const after = text[found + marker(key).length]
+    return after === undefined || after === '\n' || after === '\r'
+  }
+  const lastOwnLine = (key, limit) => {
+    let from = limit
+    while (from > 0) {
+      const found = text.lastIndexOf(marker(key), from - 1)
+      if (found < 0) return -1
+      if (onOwnLine(found, key)) return found
+      from = found
+    }
+    return -1
+  }
+  const at = []
+  let limit = text.length
+  for (let i = PROBE_SECTION_KEYS.length - 1; i >= 0; i -= 1) {
+    const found = limit <= 0 ? -1 : lastOwnLine(PROBE_SECTION_KEYS[i], limit)
+    at[i] = found
+    if (found >= 0) limit = found
+  }
+  let end = text.length
+  for (let i = PROBE_SECTION_KEYS.length - 1; i >= 0; i -= 1) {
+    if (at[i] < 0) continue
+    const key = PROBE_SECTION_KEYS[i]
+    out[key] = text.slice(at[i] + marker(key).length, end)
+    end = at[i]
+  }
+  out.PROT = text.slice(0, end)
+  return out
+}
 function classifyRequiredChecksProbe(probe) {
   if (probe === null || typeof probe !== 'object') return { mode: 'unknown', cause: '' }
   const raw = typeof probe.raw === 'string' ? probe.raw : null
   if (raw === null) return { mode: 'unknown', cause: '' }
-  const rulesAt = raw.indexOf('___SECTION=RULES')
-  const runsAt = raw.indexOf('___SECTION=RUNS')
-  const protText = rulesAt >= 0 ? raw.slice(0, rulesAt) : raw
-  const rulesText = rulesAt >= 0 ? raw.slice(rulesAt, runsAt >= 0 ? runsAt : raw.length) : ''
-  const runsText = runsAt >= 0 ? raw.slice(runsAt) : ''
+  const sec = probeSections(raw)
+  const protText = sec.PROT || ''
+  const rulesText = sec.RULES || ''
+  const runsText = sec.RUNS || ''
+  const statusesText = sec.STATUSES || ''
+  const branchText = sec.BRANCH || ''
   // The LAST occurrence of the marker, because the command's own text can appear in a
   // transcribed error line before the real one.
   const exitOf = (text, key) => {
@@ -2915,57 +3271,357 @@ function classifyRequiredChecksProbe(probe) {
     if (hits === null) return null
     return Number(hits[hits.length - 1].slice(('___' + key + '_EXIT=').length))
   }
-  // A 404 (or `gh`'s own "Branch not protected") is GitHub answering the question:
-  // there is no protection, and no ruleset, so those sources contribute no names.
+  // A 404 FROM THE PROTECTION ENDPOINT IS AMBIGUOUS, AND READING IT AS "UNPROTECTED"
+  // IS THE GATE FAILING OPEN.
+  //
+  // `branches/{b}/protection/required_status_checks` needs Administration-read, and
+  // GitHub's documented behaviour for a resource the credential may not ASK about is
+  // 404 — not 403 — precisely so the endpoint does not disclose that the resource
+  // exists. So the SAME body means two opposite things:
+  //     "there is no branch protection here"                 → required set is empty
+  //     "this credential is not allowed to know"             → required set is UNKNOWN
+  // Taking the first reading unconditionally is how a credential with PR + check scope
+  // but no Administration-read silently downgrades a PROTECTED base to the permissive
+  // all-green rule, and then reports success. A gate that fails open is worse than no
+  // gate. (This is what shipped, and one test asserted it.)
+  //
+  // THE DISAMBIGUATION IS A POSITIVE CONTROL — make something PROVE the permissive
+  // reading before taking it, exactly as a `grep` that returns nothing has to prove it
+  // can return something. The proof has to come from a read PLAIN PULL ACCESS can do,
+  // because the credential that cannot read protection is the entire case.
+  //
+  // `branches/{b}` is that read, and it answers on THREE fields, in this order:
+  //
+  //   1. `protection.required_status_checks.contexts` — THE ANSWER ITSELF. The branch
+  //      payload embeds the very list the 404'd subresource would have returned, and it
+  //      comes back to a caller holding nothing but pull access. When it is present
+  //      there is no ambiguity left to settle: those ARE the required contexts, and the
+  //      gate resolves on them instead of deferring.
+  //   2. `protection.enabled:false` — no CLASSIC branch protection specifically, which
+  //      is exactly what the 404 was about. `protected` is TRUE whenever a RULESET
+  //      applies, so it can never clear a ruleset-governed branch on its own, and the
+  //      rules read below already covers that half.
+  //   3. `protected:false` — nothing guards this branch at all, so there is no classic
+  //      protection for the endpoint to have hidden.
+  //
+  // RUNG 1 EXISTS BECAUSE RUNGS 2-3 ALONE DEADLOCK THE COMMON CASE, and that was the
+  // shape of the over-correction: reading only `protected`/`protection.enabled` turns
+  // every genuinely classic-protected base into `unknown`, and `unknown` defers the
+  // round — every round, forever, with zero rounds spent. Fail-open became fail-closed;
+  // both report a review that never happened.
+  //
+  // MEASURED with a credential holding no admin role, this session, protection
+  // subresource → HTTP 404 on all three:
+  //   * the base branch this gate runs against → `{"protected":true,
+  //     "protectionEnabled":false,"contexts":[]}` — rung 2 clears it, rules supply
+  //     ["test"].
+  //   * `rails/rails` @ main → `{"protected":true,"protectionEnabled":true,
+  //     "contexts":[]}` — rung 1 resolves it to no required contexts. Rungs 2-3 could
+  //     not, and answered `unknown`.
+  //   * `microsoft/vscode` @ main → `{"protected":true,"protectionEnabled":true,
+  //     "contexts":[23 names]}` — rung 1 resolves the full list, which is the exact
+  //     data the deferral was throwing away.
+  //
+  // AN ABSENT `contexts` KEY IS NOT AN EMPTY ONE. Rung 1 fires only on an ARRAY. A
+  // payload that says protection is enabled and carries no contexts field at all has
+  // told us nothing about what it requires, so it falls through to rungs 2-3 and, if
+  // they cannot clear it either, to `unknown`. Present-and-empty is an answer;
+  // absent is a silence.
+  //
+  // `permissions.admin` IS NOT A PROOF, AND ASKING FOR IT HAS BEEN REMOVED. A
+  // repository ROLE and a TOKEN's permission set are different things: a fine-grained
+  // token can carry the admin role through its user and still lack Administration-read,
+  // and its 404 then means "may not ask" while `admin:true` calls it "there is none" —
+  // the same fail-open, in the other direction. `GET /repos` needs only Metadata-read,
+  // so that field can never testify about a scope it did not have to hold.
+  //
+  // NEITHER field proving it means `mode:'unknown'`, and the gate defers with the
+  // ambiguity named — deferring on an unknown is a stop the owner can act on;
+  // proceeding on the permissive branch is a review that never happened.
+  //
+  // The rulesets read is NOT ambiguous in the same way: `rules/branches/{b}` is
+  // readable with pull access and answers `[]` for "no rules", so its 404 keeps the
+  // old meaning.
   const isMissing = (text) => /HTTP 404|Not Found|Branch not protected/i.test(String(text))
   const names = []
   const add = (value) => {
     if (typeof value === 'string' && value.length > 0 && !names.includes(value)) names.push(value)
   }
-  const between = (text, open, close) => {
-    const start = text.indexOf(open)
-    const end = text.lastIndexOf(close)
-    if (start < 0 || end <= start) return null
-    try {
-      return JSON.parse(text.slice(start, end + 1))
-    } catch {
-      return null
-    }
+  // A REQUIRED CHECK CAN BE BOUND TO ONE PRODUCER, AND THE NAME ALONE DOES NOT SAY SO.
+  //
+  // Branch protection and rulesets both express a required check as `{context, app_id}`
+  // (`integration_id` in the rulesets payload — measured on this repo's own ruleset:
+  // `[{"context":"test","integration_id":15368}]`, and on `microsoft/vscode`'s branch
+  // payload: `{"app_id":15368,"context":"Linux / CLI"}`). When that field is set, only
+  // that App's check runs satisfy the requirement — so a same-name row from anything
+  // else is not the check the base branch asked for.
+  //
+  // Keeping only the context, which is what shipped, made an app-bound requirement
+  // satisfiable by ANY row carrying the name. The binding is carried through to the
+  // classifier, which uses it to refuse the one wrong producer it can actually
+  // identify — see `classifyReviewReadiness`.
+  //
+  // `-1` IS THE WILDCARD, NOT A PRODUCER, AND READING IT AS ONE DEFERS FOREVER.
+  // GitHub documents the field on the branch-protection `checks` parameter as "The ID
+  // of the GitHub App that must provide this check", and then: "Pass -1 to explicitly
+  // allow any app to set the status" (REST branch-protection reference, verified this
+  // session). So `-1` is the admin saying the opposite of a binding. Treating it as an
+  // app id put the context into `appBound`, which makes the classifier discard every
+  // `StatusContext` row carrying that name — and a repository whose wildcard-required
+  // check is posted through the Commit Status API then reads as never having run, on
+  // every round, with no error to look at. That is the fail-closed hang this gate was
+  // rewritten to stop doing, arriving through a different door.
+  const APP_BINDING_WILDCARD = -1
+  const appBound = []
+  const bindingOf = (entry) => {
+    if (entry === null || typeof entry !== 'object') return undefined
+    const id =
+      entry.app_id !== undefined && entry.app_id !== null
+        ? entry.app_id
+        : entry.appId !== undefined && entry.appId !== null
+          ? entry.appId
+          : entry.integration_id !== undefined && entry.integration_id !== null
+            ? entry.integration_id
+            : undefined
+    return id === APP_BINDING_WILDCARD ? undefined : id
   }
+  const addEntry = (entry) => {
+    const context = entry !== null && typeof entry === 'object' ? entry.context : ''
+    add(context)
+    if (typeof context !== 'string' || context.length === 0) return
+    if (bindingOf(entry) !== undefined && !appBound.includes(context)) appBound.push(context)
+  }
+  // THE FIRST `{` IN A SECTION IS NOT NECESSARILY THE PAYLOAD'S. The probe's own
+  // command line contains `repos/{owner}/{repo}/…`, so any transcript that echoes it
+  // — a traced shell, an agent quoting what it ran — puts two brace pairs in front of
+  // the JSON, and one `indexOf` slice then hands `{owner}/{repo}…}` to JSON.parse and
+  // reads the whole section as unparseable. Candidates are tried in order from the
+  // outermost, so the real payload is the first one that PARSES; a nested object cannot
+  // win because slicing from it to the final `}` leaves that `}` unbalanced.
+  const between = (text, open, close) => {
+    const end = text.lastIndexOf(close)
+    if (end < 0) return null
+    let start = text.indexOf(open)
+    while (start >= 0 && start < end) {
+      try {
+        return JSON.parse(text.slice(start, end + 1))
+      } catch {
+        start = text.indexOf(open, start + 1)
+      }
+    }
+    return null
+  }
+  const objectFrom = (text, key) => {
+    if (exitOf(text, key) !== 0) return null
+    const parsed = between(text, '{', '}')
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  }
+  const branchObj = objectFrom(branchText, 'BRANCH')
+  // Rung 1: the branch payload's own copy of the required contexts. An ARRAY is an
+  // answer (empty means "this protection requires no status checks"); an absent key is
+  // silence and falls through.
+  const branchContexts = branchObj !== null && Array.isArray(branchObj.contexts) ? branchObj.contexts : null
+  const branchChecks = branchObj !== null && Array.isArray(branchObj.checks) ? branchObj.checks : null
+  // Rungs 2-3.
+  const unprotectedProven =
+    branchObj !== null && (branchObj.protected === false || branchObj.protectionEnabled === false)
   const protExit = exitOf(protText, 'PROT')
   if (protExit === 0) {
     const parsed = between(protText, '{', '}')
     if (parsed === null || typeof parsed !== 'object') return { mode: 'unknown', cause: probeCause(protText) }
     if (Array.isArray(parsed.contexts)) for (const c of parsed.contexts) add(c)
-    if (Array.isArray(parsed.checks)) for (const c of parsed.checks) add(c && typeof c === 'object' ? c.context : '')
-  } else if (!isMissing(protText)) {
+    if (Array.isArray(parsed.checks)) for (const c of parsed.checks) addEntry(c)
+  } else if (isMissing(protText)) {
+    if (branchContexts !== null) {
+      for (const c of branchContexts) add(c)
+      if (branchChecks !== null) for (const c of branchChecks) addEntry(c)
+    } else if (!unprotectedProven) {
+      return {
+        mode: 'unknown',
+        cause:
+          'branch protection answered 404, which is also how GitHub answers a credential ' +
+          'without Administration-read, and the base branch read carried no ' +
+          'required_status_checks.contexts and reported neither protected:false nor ' +
+          'protection.enabled:false to settle which one it was',
+      }
+    }
+  } else {
     return { mode: 'unknown', cause: probeCause(protText) }
   }
   const rulesExit = exitOf(rulesText, 'RULES')
   if (rulesExit === 0) {
     const parsed = between(rulesText, '[', ']')
     if (!Array.isArray(parsed)) return { mode: 'unknown', cause: probeCause(rulesText) }
+    // KNOWN LIMIT, NAMED RATHER THAN HIDDEN: only `required_status_checks` rules are
+    // read. A base branch governed ONLY by a `workflows` rule — which names workflow
+    // FILES, not check-run names, so there is nothing here to resolve it to — falls
+    // through to `required: []` and is then judged by the permissive unprotected-base
+    // rule. Pre-existing and unchanged by this PR (the identical filter is on untouched
+    // main at trident/inner-workflow.mjs:2978); closing it needs a mapping from workflow
+    // file to emitted check names, which this probe does not fetch.
     for (const rule of parsed) {
       if (rule === null || typeof rule !== 'object' || rule.type !== 'required_status_checks') continue
       const list = rule.parameters && rule.parameters.required_status_checks
       if (!Array.isArray(list)) continue
-      for (const entry of list) add(entry && typeof entry === 'object' ? entry.context : '')
+      for (const entry of list) addEntry(entry)
     }
   } else if (!isMissing(rulesText)) {
     return { mode: 'unknown', cause: probeCause(rulesText) }
   }
-  // FAIL-SAFE TOWARD WAITING. An unreadable check-run list is `produced: null`, which
-  // only turns the config-error fast-fail off; it never turns a wait into a failure.
-  let produced = null
-  if (exitOf(runsText, 'RUNS') === 0) {
-    const parsed = between(runsText, '[', ']')
-    if (Array.isArray(parsed)) produced = parsed.filter((n) => typeof n === 'string')
+  // WHAT THE REPOSITORY PRODUCES IS BOTH CHECK RUNS AND CLASSIC COMMIT STATUSES.
+  // Reading only `check-runs` made every status-context name look unproduced, so a repo
+  // on classic statuses could never satisfy its own required checks — the config-error
+  // fired on a name that was present and green under the other shape.
+  //
+  // FAIL-SAFE TOWARD WAITING, AND BOTH READS MUST SUCCEED. `produced: null` only turns
+  // the config-error fast-fail off; it never turns a wait into a failure. A PARTIAL
+  // union is the dangerous shape — it looks authoritative and is missing exactly the
+  // names the failed read would have supplied — so one unreadable list nulls both.
+  //
+  // A TRUNCATED LIST IS UNREADABLE, NOT SHORT. `per_page=100` without pagination exits
+  // 0 and returns a complete-LOOKING array, so a base head reporting more than 100
+  // checks would silently drop names — and a dropped name is indistinguishable from one
+  // no workflow emits, which is the single reading that STOPS a build. Nothing in an
+  // exit code says which happened. Both endpoints carry GitHub's own `total_count`
+  // (measured: check-runs and status both return it), so the probe asks for it and a
+  // count that does not match what arrived nulls the list out — evidence of nothing,
+  // which can only ever disable the fast-fail.
+  //
+  // SAY WHAT THAT COSTS, BECAUSE IT IS NOT FREE AND IT IS INVISIBLE. On a base head
+  // reporting more than 100 checks the fast-fail is OFF for that round: a genuinely
+  // mis-named required check no longer stops early, it spends the whole readiness
+  // budget and defers as `absent` ("the workflow did not start"), which reads like a
+  // queue problem rather than a configuration one. That is the correct direction —
+  // slow and safe beats fast and wrong — but a busy monorepo sits there permanently:
+  // `microsoft/vscode`'s base head was measured at `total_count` 120 (Argus r2). The
+  // fix when it bites is pagination in the probe, not a looser guard here.
+  const listFrom = (text, key) => {
+    if (exitOf(text, key) !== 0) return null
+    const parsed = between(text, '{', '}')
+    if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.names)) return null
+    const names = parsed.names.filter((n) => typeof n === 'string')
+    // A COUNT THAT IS NOT A WHOLE NUMBER IS NOT A COUNT, AND FALLING BACK TO
+    // `names.length` FOR ONE IS THE SAME FAIL-OPEN ONE STEP FURTHER IN. `typeof` alone
+    // admits any number, and the comparison then answers for a value that cannot be
+    // compared: `NaN > names.length` is false, and so is any fraction that lands under
+    // the arrival — `2.5 > 3` — so a nonsense count slid a possibly-truncated list
+    // through as complete. (A fraction ABOVE it, `3.5 > 3`, happened to be caught; that
+    // is luck, not a guard.) Substituting `names.length` when the count is unusable does
+    // the same thing one step further in — it ASSUMES the arrival is complete, which is
+    // the one assumption this guard exists to refuse.
+    //
+    // So: an ABSENT count is the only "no count was reported" (older probe transcripts
+    // carry bare name arrays), and anything else present-but-not-an-integer — `null` from
+    // a jq path that missed, a float, a string — is an unreadable list. `null` is
+    // evidence of nothing, which can only ever disable the fast-fail.
+    //
+    // AND AN INTEGER CAN BE JUST AS IMPOSSIBLE AS A FRACTION. The guard above rejected
+    // `2.5` against three arrived names for being unusable, then let `2` — the same
+    // claim, stated in whole numbers — through as a complete list, along with any
+    // negative. GitHub's `total_count` is how many exist for the ref, so a count BELOW
+    // the arrival describes a response that cannot happen, and a count below zero is
+    // not a count at all. Both are the same evidence as a fraction: the field did not
+    // survive whatever produced this transcript, so nothing may be concluded from the
+    // list's length. Only an exact match is a complete page.
+    const total = parsed.n === undefined ? names.length : parsed.n
+    if (!Number.isInteger(total)) return null
+    return total === names.length ? names : null
   }
-  return { mode: 'resolved', required: names, produced }
+  const runNames = listFrom(runsText, 'RUNS')
+  const statusNames = listFrom(statusesText, 'STATUSES')
+  const produced =
+    runNames === null || statusNames === null
+      ? null
+      : [...runNames, ...statusNames.filter((n) => !runNames.includes(n))]
+  return { mode: 'resolved', required: names, appBound, produced }
+}
+
+// `statusCheckRollup` RETURNS TWO ROW SHAPES AND THE GATE ONLY UNDERSTOOD ONE.
+//
+// A modern GitHub Actions job arrives as a CheckRun: `{name, status, conclusion}`.
+// A classic commit status — the older API that CI services still post to — arrives as
+// a StatusContext: `{context, state}`, with no `status` and no `conclusion` at all.
+// One rollup can contain BOTH, including two rows carrying the SAME name.
+//
+// Reading only the CheckRun fields gave a StatusContext an empty name, so it never
+// entered the map: a required check named `legacy-ci`, present and SUCCESS, read as
+// "not produced by any workflow in this repository". A repository on classic statuses
+// could not satisfy its own required checks at all.
+//
+// Normalising to `{name, kind, terminal, conclusion}` is what lets both shapes be
+// judged by one rule. `kind` is kept rather than erased because ONE caller still needs
+// to tell them apart: a required check bound to a producing App cannot be satisfied by
+// a commit status. StatusContext has no separate "is it finished" field — the state IS the
+// answer — so PENDING/EXPECTED are the non-terminal ones and everything else is a
+// verdict. When both shapes report the same name, each row is kept HERE, and by default
+// BOTH must be terminal and green: the conservative reading, because a rollup that
+// disagrees with itself is not evidence that the check passed.
+//
+// WITH ONE EXCEPTION, STATED HERE BECAUSE THIS COMMENT USED TO DENY IT. If the base
+// branch bound that requirement to an App (`{context, app_id}`), the classifier consults
+// only the CheckRun rows for that name and DISCARDS the commit statuses — including a
+// RED one. A green check run beside a FAILURE status on a bound name classifies
+// `passed`, where the same rollup on an UNBOUND name classifies `failed`; that pair is
+// pinned at `ci-gate.test.ts` "a check run beside the status answers for it, in both
+// directions". It is deliberate, and it is the same fact in both
+// directions: a producer the requirement excludes cannot SATISFY it, and cannot REFUTE
+// it either — otherwise anything able to POST a commit status could fail a check it was
+// never bound to. The filter and its limits live at `rowsOf` in
+// `classifyReviewReadiness`; this note exists so the two do not disagree again.
+const STATUS_CONTEXT_PENDING_STATES = new Set(['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'])
+function normalizeRollupRow(row) {
+  if (row === null || typeof row !== 'object') return null
+  const upper = (v) => (typeof v === 'string' ? v.toUpperCase() : '')
+  const name =
+    typeof row.name === 'string' && row.name !== ''
+      ? row.name
+      : typeof row.context === 'string' && row.context !== ''
+        ? row.context
+        : ''
+  if (name === '') return null
+  // `__typename` when GitHub sent it; otherwise the shape decides. `status` is the
+  // CheckRun-only field, so its absence beside a `state` is the StatusContext tell.
+  const hasCheckRunShape = typeof row.status === 'string' && row.status !== ''
+  const isStatusContext =
+    upper(row.__typename) === 'STATUSCONTEXT' || (!hasCheckRunShape && typeof row.state === 'string' && row.state !== '')
+  if (isStatusContext) {
+    const state = upper(row.state)
+    return {
+      name,
+      kind: 'StatusContext',
+      terminal: state !== '' && !STATUS_CONTEXT_PENDING_STATES.has(state),
+      conclusion: state,
+    }
+  }
+  const conclusion = upper(row.conclusion)
+  return { name, kind: 'CheckRun', terminal: upper(row.status) === 'COMPLETED' && conclusion !== '', conclusion }
+}
+
+// NEVER STOP A BUILD ON A SNAPSHOT TAKEN BEFORE THE WAIT.
+//
+// The required-checks config — required names AND the base head's produced list — is
+// resolved ONCE per round and reused by every readiness attempt. That is right for the
+// required names (configuration cannot change mid-wait) and wrong for `produced`: it is
+// a reading of the base branch head taken up to a full settle window earlier, and the
+// base head can acquire the check in between. Read as current, a ten-minute-old
+// snapshot turns a base branch that DOES produce the name into a permanent
+// configuration fault.
+//
+// So the fast-fail — the only terminal verdict built on that snapshot — is re-derived
+// from a FRESH read before it is allowed to stand. Pure, and separated from the probe
+// that fetches the fresh config, so the decision is testable without a network.
+//
+// A FRESH READ THAT DID NOT RESOLVE CHANGES NOTHING. An `unknown` or a dead seat is not
+// evidence against the verdict already reached; letting it overwrite one would make a
+// transient credential failure look like an answer.
+function confirmedConfigError(first, freshConfig, reclassify) {
+  if (first === null || typeof first !== 'object' || first.status !== 'config-error') return first
+  if (freshConfig === null || typeof freshConfig !== 'object' || freshConfig.mode !== 'resolved') return first
+  return reclassify(freshConfig)
 }
 
 /** Classify the fixed `gh pr view` readiness probe before any review seat runs. */
-function classifyReviewReadiness(probe, requiredConfig) {
+function classifyReviewReadiness(probe, requiredConfig, elapsedMs = 0) {
   const config =
     requiredConfig === null || requiredConfig === undefined || typeof requiredConfig !== 'object'
       ? { mode: 'resolved', required: [], produced: null }
@@ -3016,41 +3672,144 @@ function classifyReviewReadiness(probe, requiredConfig) {
   if (mergeable !== 'MERGEABLE') {
     return { status: 'pending', reason: 'PR mergeability is still being calculated' }
   }
+  // Both rollup shapes, keyed by name; a name reported by BOTH keeps both rows.
   const byName = new Map()
   for (const row of parsed.statusCheckRollup) {
-    const name = row && typeof row.name === 'string' ? row.name : ''
-    if (name !== '') byName.set(name, row)
+    const norm = normalizeRollupRow(row)
+    if (norm === null) continue
+    const rows = byName.get(norm.name)
+    if (rows === undefined) byName.set(norm.name, [norm])
+    else rows.push(norm)
   }
-  const conclusionOf = (row) => (row && typeof row.conclusion === 'string' ? row.conclusion.toUpperCase() : '')
-  const statusOf = (row) => (row && typeof row.status === 'string' ? row.status.toUpperCase() : '')
+  // AN APP-BOUND REQUIRED CHECK IS NOT SATISFIED BY A COMMIT STATUS.
+  //
+  // When the base branch requires `{context:'ci', app_id:123}` it is asking for that
+  // App's check run, and a `StatusContext` named `ci` is a different producer posting
+  // to a different API. Counting it satisfied the requirement with the wrong thing —
+  // and because the rollup is then all-green, the gate reported the base branch's own
+  // condition as met.
+  //
+  // WHAT THIS CANNOT DO, STATED PLAINLY RATHER THAN IMPLIED: it cannot check WHICH app
+  // produced a check run. Measured this session — `gh pr view --json statusCheckRollup`
+  // returns `{__typename,name,status,conclusion,startedAt,completedAt,detailsUrl,
+  // workflowName}` for a CheckRun and carries no app or check-suite identity at all —
+  // so a check run from the wrong App with the right name still passes here. The row
+  // SHAPE is the one half of the producer this data can testify about, and ruling out
+  // the half it can see beats ruling out neither. Narrowing further needs producer
+  // identity in the probe, not a stricter guess here.
+  //
+  // AND IT DISCARDS THE RED ROW TOO, WHICH IS THE HALF THAT LOOKS WRONG. Filtering by
+  // shape drops a same-name FAILURE commit status as readily as a green one, so an
+  // app-bound `lint` whose check run is green passes while a red status carrying that
+  // name sits in the rollup. Symmetry is the point: the row is from a producer the
+  // requirement excludes, so it is not evidence either way, and honouring it would let
+  // anything able to post a commit status fail a check it was never bound to. The
+  // unbound path is unaffected — there, both rows count and the red one decides.
+  const appBound = new Set(Array.isArray(config.appBound) ? config.appBound : [])
+  const rowsOf = (name) => (byName.get(name) || []).filter((r) => !appBound.has(name) || r.kind === 'CheckRun')
+  // SKIPPED is "did not run", so it is excluded here rather than judged below. A name
+  // skipped under one shape and green under another therefore DID run.
+  const ranRows = (name) => rowsOf(name).filter((r) => r.conclusion !== 'SKIPPED')
+  const isGreen = (r) => r.conclusion === 'SUCCESS' || r.conclusion === 'NEUTRAL'
+  // Has THIS PR's own check set finished materialising? Read by the config-error
+  // fast-fail below, which must never fire while the rollup is still moving.
+  //
+  // AN EMPTY ROLLUP IS NOT A SETTLED ONE, and initialising to `true` made it satisfy
+  // this vacuously: the falsifying loop below never runs on an empty map, so ZERO
+  // checks read as "everything finished". The fast-fail then emits a sentence that
+  // says `every other check on this PR has finished` while nothing has even started,
+  // and — because config-error is terminal — it spends zero further waits.
+  //
+  // The real trigger is not exotic: a fork / first-time-contributor PR whose workflows
+  // sit `awaiting approval` reports `statusCheckRollup: []` for as long as no
+  // maintainer approves them. That is precisely the case that must WAIT.
+  //
+  // The unprotected-base path below already refuses the empty rollup for this reason
+  // (`ran.length === 0` ⇒ `absent`, :3513 in the sibling branch); the asymmetry was
+  // unintended, so this seeds from the map's own size and both paths now agree.
+  let rollupSettled = byName.size > 0
+  for (const rows of byName.values()) {
+    for (const r of rows) {
+      if (r.conclusion !== 'SKIPPED' && !r.terminal) rollupSettled = false
+    }
+  }
   if (required.length > 0) {
     for (const name of required) {
-      if (byName.has(name)) continue
+      if (rowsOf(name).length > 0) continue
+      // An app-bound name whose only rows are commit statuses is not absent by accident
+      // — say which fact stopped it, or the owner reads "has not run" while looking at a
+      // green row carrying that exact name.
+      if (appBound.has(name) && (byName.get(name) || []).length > 0) {
+        return {
+          status: 'absent',
+          reason: `required check ${name} has not run (only a commit status reported it, and the base branch requires a check run from a specific app)`,
+        }
+      }
       // THE TWO ABSENCES ARE DIFFERENT FACTS AND GET DIFFERENT ANSWERS. A name the repo
       // DOES produce is merely not reported yet — GitHub queues for minutes, so that
       // waits. A name no workflow here produces can never arrive: waiting for it spends
-      // the whole budget to learn nothing, which is exactly what cost a day on
-      // neutron-enterprise PR #515. That one stops NOW, and says so as a config fault.
-      if (produced !== null && !produced.includes(name)) {
-        return { status: 'config-error', reason: `required check ${name} is not produced by any workflow in this repository` }
+      // the whole budget to learn nothing, which is exactly what cost a day on a sibling
+      // repository's PR #515. That one stops early, and says so as a config fault.
+      //
+      // BUT NOT ON THE FIRST PROBE, AND NEVER AS A CLAIM ABOUT WHAT THE REPOSITORY CAN
+      // EMIT. `produced` is one snapshot of the BASE HEAD, and a `pull_request`-only or
+      // path-filtered job is legitimately missing from it, so it cannot tell "never
+      // emitted here" from "has not appeared yet" and NO amount of waiting makes it
+      // able to. What waiting buys is the OTHER half of the evidence: the name is also
+      // absent from this PR's own rollup, which is where a `pull_request`-only job
+      // WOULD show up. Two absences that persist are worth stopping on; one snapshot is
+      // not. So the stop needs all three:
+      //   * the name is absent from this PR's rollup (the enclosing `rowsOf` test),
+      //   * the base head reported OTHER checks — an EMPTY produced list is a base
+      //     commit whose CI never ran or expired, and it proves nothing about any name,
+      //   * the absence has outlasted REVIEW_READINESS_CONFIG_GRACE_MS,
+      //   * and THIS PR'S ROLLUP HAS STOPPED MOVING — every row on it is terminal.
+      //
+      // THE LAST CONDITION IS THE ONE THAT MAKES THE STOP HONEST, and it was missing.
+      // Waiting out the settle window delayed the ambiguity instead of resolving it: a
+      // required job that is queued or running at minute 10 was still called a
+      // configuration fault, because the only two facts consulted were a snapshot that
+      // cannot see it and a clock. GitHub creates a check run when the job is QUEUED,
+      // so a job that exists and is merely slow IS in this rollup as a non-terminal row
+      // — and while any row is non-terminal the check set is still arriving. The stop
+      // now needs the PR itself to have gone quiet WITHOUT the name, which is a fact
+      // about this PR rather than an inference from the base head.
+      //
+      // What remains unprovable is unchanged and small: a job created after everything
+      // else on the PR has finished. Nothing available to this gate distinguishes that
+      // from a name no workflow emits, and the reason string is careful to state the
+      // evidence rather than claim the conclusion.
+      // The reason string states that evidence and stops there. It used to assert
+      // "is not produced by any workflow in this repository", which is a claim this
+      // data cannot support — and an owner who believes it goes looking for a workflow
+      // that may exist and simply be conditional.
+      if (
+        produced !== null &&
+        produced.length > 0 &&
+        !produced.includes(name) &&
+        elapsedMs >= REVIEW_READINESS_CONFIG_GRACE_MS &&
+        rollupSettled
+      ) {
+        return {
+          status: 'config-error',
+          reason:
+            `required check ${name} has not appeared after at least ${readinessGraceLabel()}, ` +
+            `every other check on this PR has finished, ` +
+            `and the base branch head reports ${produced.length} other check${produced.length === 1 ? '' : 's'} without it`,
+        }
       }
       return { status: 'absent', reason: `required check ${name} has not run` }
     }
     for (const name of required) {
-      const row = byName.get(name)
-      const status = statusOf(row)
-      const conclusion = conclusionOf(row)
-      if (conclusion === 'SKIPPED') {
+      const rows = ranRows(name)
+      if (rows.length === 0) {
         return { status: 'absent', reason: `required check ${name} has not run (reported SKIPPED)` }
       }
-      if (status !== 'COMPLETED' || conclusion === '') {
+      if (rows.some((r) => !r.terminal)) {
         return { status: 'pending', reason: `required check ${name} is still running` }
       }
     }
-    const failed = required.filter((name) => {
-      const conclusion = conclusionOf(byName.get(name))
-      return conclusion !== 'SUCCESS' && conclusion !== 'NEUTRAL'
-    })
+    const failed = required.filter((name) => ranRows(name).some((r) => !isGreen(r)))
     return { status: failed.length > 0 ? 'failed' : 'passed', reason: '', failed }
   }
   // UNPROTECTED BASE — "at least one check, and all of them green". The empty rollup is
@@ -3058,20 +3817,16 @@ function classifyReviewReadiness(probe, requiredConfig) {
   // started looks identical to a healthy PR if you only count successful rows), and this
   // rule cannot be satisfied by one: zero checks WAITS, and then defers. It never passes.
   const ran = []
-  for (const [name, row] of byName) {
-    if (conclusionOf(row) !== 'SKIPPED') ran.push(name)
+  for (const name of byName.keys()) {
+    if (ranRows(name).length > 0) ran.push(name)
   }
   if (ran.length === 0) return { status: 'absent', reason: 'no checks have run on this PR yet' }
   for (const name of ran) {
-    const row = byName.get(name)
-    if (statusOf(row) !== 'COMPLETED' || conclusionOf(row) === '') {
+    if (ranRows(name).some((r) => !r.terminal)) {
       return { status: 'pending', reason: `check ${name} is still running` }
     }
   }
-  const ranFailed = ran.filter((name) => {
-    const conclusion = conclusionOf(byName.get(name))
-    return conclusion !== 'SUCCESS' && conclusion !== 'NEUTRAL'
-  })
+  const ranFailed = ran.filter((name) => ranRows(name).some((r) => !isGreen(r)))
   return { status: ranFailed.length > 0 ? 'failed' : 'passed', reason: '', failed: ranFailed }
 }
 
@@ -3218,6 +3973,19 @@ const BRANCH_HEAD_SCHEMA = {
      *  (`readBranchHead`, `readBuiltHead`) both consume all three — `absent` and '' earn
      *  OPPOSITE consequences and must not be collapsed. */
     head: { type: 'string' },
+  },
+}
+
+const BUILD_TRAILER_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['trailer', 'exitCode', 'alive', 'errBytesBefore', 'errBytesAfter'],
+  properties: {
+    trailer: { type: 'string' },
+    exitCode: { type: 'string' },
+    alive: { type: 'boolean' },
+    errBytesBefore: { type: 'number' },
+    errBytesAfter: { type: 'number' },
   },
 }
 
@@ -3499,11 +4267,30 @@ ${cmd}`,
 /**
  * ASK THE BASE BRANCH WHAT IT REQUIRES — the only authority on the question.
  *
- * Three reads in one command, transcribed verbatim like every other probe: branch
- * protection's `required_status_checks`, the branch's rulesets, and the check-run
- * names GitHub has reported on the base branch head (i.e. what this repository's
- * workflows actually produce). `gh api` resolves `{owner}`/`{repo}` from the cwd repo,
- * so this works in every repository trident builds without being told which one it is.
+ * Five reads in one command, transcribed verbatim like every other probe: branch
+ * protection's `required_status_checks`, the branch itself, the branch's rulesets, and
+ * the names GitHub has reported on the base branch head as BOTH check runs and classic
+ * commit statuses (i.e. what this repository actually produces). `gh api` resolves
+ * `{owner}`/`{repo}` from the cwd repo, so this works in every repository trident
+ * builds without being told which one it is.
+ *
+ * The branch read exists to disambiguate a 404 from the protection endpoint, which
+ * GitHub returns both for "no protection" and for "you may not ask" — see
+ * `classifyRequiredChecksProbe`. It is cheap, it is readable with plain pull access,
+ * and it rides in the SAME seat as the others. The repository read that used to sit
+ * beside it is gone: `permissions.admin` describes a ROLE, not the token's scopes, so
+ * it answered the wrong question.
+ *
+ * IT ASKS FOR THE CONTEXTS, NOT JUST THE FLAGS. The branch payload embeds
+ * `protection.required_status_checks.{contexts,checks}` — the very list the 404'd
+ * subresource would have returned, readable with plain pull access (measured on
+ * `microsoft/vscode`: 23 contexts, each `{app_id, context}`). Projecting only
+ * `protected`/`protection.enabled` threw that away and left the classifier deferring on
+ * an ambiguity the same response had already settled. `// null` distinguishes "no such
+ * field" from an empty list, because those mean different things to the classifier.
+ *
+ * Both produced-list reads ask for `total_count` alongside the names, so a list
+ * truncated at `per_page` is detectable rather than passing as complete.
  *
  * ONE SEAT PER ROUND, not per readiness attempt: the configuration cannot change
  * mid-wait, and re-asking on all 31 attempts would spend 30 extra seats to learn the
@@ -3512,7 +4299,7 @@ ${cmd}`,
 async function probeRequiredChecks(prForReview, round) {
   if (!isPr || prForReview === null || prForReview === undefined) return null
   const base = encodeURIComponent(baseBranch)
-  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(`api repos/{owner}/{repo}/branches/${base}/protection/required_status_checks`)} 2>&1; echo "___PROT_EXIT=$?"; echo "___SECTION=RULES"; ${ghReadCommand(`api repos/{owner}/{repo}/rules/branches/${base}`)} 2>&1; echo "___RULES_EXIT=$?"; echo "___SECTION=RUNS"; ${ghReadCommand(`api 'repos/{owner}/{repo}/commits/${base}/check-runs?per_page=100' --jq '[.check_runs[].name]'`)} 2>&1; echo "___RUNS_EXIT=$?"; echo "___EXIT=0"`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(`api repos/{owner}/{repo}/branches/${base}/protection/required_status_checks`)} 2>&1; echo "___PROT_EXIT=$?"; echo "___SECTION=BRANCH"; ${ghReadCommand(`api repos/{owner}/{repo}/branches/${base} --jq '{protected:.protected,protectionEnabled:.protection.enabled,contexts:(.protection.required_status_checks.contexts // null),checks:((.protection.required_status_checks.checks // []) | map({context:.context,app_id:.app_id}))}'`)} 2>&1; echo "___BRANCH_EXIT=$?"; echo "___SECTION=RULES"; ${ghReadCommand(`api repos/{owner}/{repo}/rules/branches/${base}`)} 2>&1; echo "___RULES_EXIT=$?"; echo "___SECTION=RUNS"; ${ghReadCommand(`api 'repos/{owner}/{repo}/commits/${base}/check-runs?per_page=100' --jq '{n:.total_count,names:[.check_runs[].name]}'`)} 2>&1; echo "___RUNS_EXIT=$?"; echo "___SECTION=STATUSES"; ${ghReadCommand(`api 'repos/{owner}/{repo}/commits/${base}/status?per_page=100' --jq '{n:.total_count,names:[.statuses[].context]}'`)} 2>&1; echo "___STATUSES_EXIT=$?"; echo "___EXIT=0"`
   const res = await seatAttempt(`required-checks-r${round}`, () =>
     agent(
       `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM — every section marker and every ___*_EXIT= line — and the number after ___EXIT= in \`exit_code\`. Do NOT interpret which checks are required, do NOT run anything else, do NOT modify any file.\n${cmd}`,
@@ -3537,7 +4324,22 @@ async function probeReviewReadiness(prForReview, round, attempt, requiredConfig)
       withModel({ label: `review-readiness-r${round}-${attempt}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
     ),
   )
-  return classifyReviewReadiness(res, requiredConfig)
+  // How long this gate has ALREADY waited, derived from the attempt number rather than
+  // a clock — the +1 in REVIEW_READINESS_ATTEMPTS is the first probe, which has waited
+  // nothing. Only the config-error fast-fail reads it, and only to refuse to fire
+  // before the settle window has actually elapsed.
+  //
+  // IT IS A FLOOR, NOT WALL TIME: it counts the sleeps and not the probe round-trips
+  // between them, so real elapsed time is always LONGER. That is the safe direction for
+  // the one consumer — the fast-fail can only ever fire later than the window, never
+  // earlier — and it is why every sentence built from it says "at least".
+  const elapsedMs = Math.max(0, (Number(attempt) || 1) - 1) * REVIEW_READINESS_RETRY_MS
+  const readiness = classifyReviewReadiness(res, requiredConfig, elapsedMs)
+  // The stale-snapshot confirmation — see `confirmedConfigError`. The extra seat is
+  // spent ONLY on the one attempt of the one round where the stop would otherwise fire,
+  // so a healthy build never pays for it.
+  const fresh = readiness.status === 'config-error' ? await probeRequiredChecks(prForReview, `${round}-confirm`) : null
+  return confirmedConfigError(readiness, fresh, (cfg) => classifyReviewReadiness(res, cfg, elapsedMs))
 }
 
 function reviewPreconditionDeferred(readiness) {
@@ -3554,22 +4356,188 @@ function reviewPreconditionDeferred(readiness) {
           (readiness.status === 'conflicting'
             ? 'Update the branch against its base and resolve the conflict, then re-run.'
             : readiness.status === 'config-error'
-            ? 'This is a repository configuration error, not a queue delay — the base branch requires a check that no workflow in this repository produces, so no amount of waiting can supply it and the readiness budget was not spent. Fix the branch-protection/ruleset entry or add the workflow that produces it, then re-run.'
+            ? `This reads as a repository configuration error rather than a queue delay: the base branch requires a check that has not appeared on this PR, every other check on the PR has finished, and OTHER checks have been reported on the base branch head. The gate waited at least ${readinessGraceLabel()} first (longer than the measured time for a queued job to appear), re-read the base branch head to confirm the name still was not there, and then stopped without spending the rest of the readiness budget. Check that the branch-protection/ruleset entry names a check some workflow still produces — and if the job is real but conditional (a path or event filter that excluded this PR), that filter is what needs fixing. Then re-run.`
             : // SAY HOW LONG IT WAITED. Without the duration these two read exactly
               // like the 30-second version that gave up before GitHub had queued the
               // job, so the owner cannot tell "we did not wait" from "we waited and it
               // never came" — and only the second one is his problem to act on.
               readiness.status === 'absent'
-              ? `The readiness gate waited ${readinessBudgetLabel()} and the check never appeared, so the workflow did not start. Restore or re-trigger that workflow job, then re-run.`
+              ? `The readiness gate waited at least ${readinessBudgetLabel()} and the check never appeared, so the workflow did not start. Restore or re-trigger that workflow job, then re-run.`
               : readiness.status === 'pending'
-                ? `The readiness gate waited ${readinessBudgetLabel()} without incrementing the round and the check was still running; re-run once it completes.`
+                ? `The readiness gate waited at least ${readinessBudgetLabel()} without incrementing the round and the check was still running; re-run once it completes.`
                 : 'Restore access to the PR readiness data, then re-run.'),
       },
     ],
   }
 }
 
-async function runReviewRound(diffFile, round, prForReview, paidReview = null) {
+/**
+ * THE FULL-SUITE GATE. `testsPassed` stops being a decoration.
+ *
+ * WHY. The TEST EXECUTION block tells the build that a stage-1 (diff-scoped) pass buys
+ * it nothing and that the FULL suite must complete before it may report
+ * `testsPassed=true`. That sentence was PROSE ONLY: `testsPassed` is a required field of
+ * FORGE_SCHEMA that no consumer anywhere read, so a build that ran the fast stage and
+ * stopped — or ran nothing at all — reported whatever it liked and went straight to a
+ * review panel that reads the DIFF and never runs a test. "No verdict is ever issued on
+ * a stage-1 pass alone" cannot be true of a claim nothing checks.
+ *
+ * WHAT IT DOES. Deterministic, in JS, exactly like the CI gate: if the build was GIVEN
+ * the block (`testStrategy !== ''`) and did not come back with `testsPassed === true`,
+ * a BLOCKER finding is added to the round's findings and the verdict is forced to
+ * REQUEST_CHANGES — the same shape as red CI, which also converts a mechanical fact into
+ * a code blocker rather than an opinion.
+ *
+ * IT ADDS TO THE PANEL, IT DOES NOT REPLACE IT — that was the first version's defect.
+ * Skipping the panel outright looked like a saving ("no review budget spent to be told
+ * the tests did not run") and was in fact a way to spend a whole run on nothing: this
+ * repo carries pre-existing failures on some boxes, so an HONEST build can report
+ * `testsPassed=false` round after round, and a run that never opens a panel burns its
+ * entire round budget (a suite run each) and returns ZERO review signal. The panel is
+ * cheap next to the suite, and its findings are what the next round needs. So it runs,
+ * and the gate rides ON TOP of its verdict: whatever the panel says, an unproven suite
+ * is REQUEST_CHANGES, so criterion 5 ("no verdict on a stage-1 pass alone") holds by
+ * verdict override rather than by starvation.
+ *
+ * WHERE IT FIRES — IN BOTH MODES, VIA THE CHECKPOINT. In LOCAL mode this process runs
+ * build → review → fix in one piece, so the gate sits between the build and the panel in
+ * round 1 and in every fix round. In PR mode the build round ENDS at the publish handoff,
+ * so the claim and the review live in DIFFERENT PROCESSES — and the first version of this
+ * gate was therefore structurally unreachable there, because the resumed process has no
+ * build report at all. The fix is that the claim travels the way every other fact this
+ * workflow carries across a crash travels: `checkpoint('forge-done' | 'fix-round-N')`
+ * RECORDS these findings, the orchestrator's publish re-fire leaves
+ * `inner_checkpoint_findings` untouched, and the resumed run reads them back as
+ * `resumeFindings` and injects them into the panel it opens. Those two checkpoint names
+ * never carry any OTHER findings (`checkpoint()` writes `[]` when none are passed), so
+ * "findings recorded on a non-panel checkpoint" means exactly one thing. The same wire
+ * closes the local-mode crash-resume hole: a process that died after the build and
+ * resumed into review used to lose the claim entirely.
+ *
+ * SCOPE, DELIBERATE. The pre-existing-red hatch is evidence-gated in CODE: an empty
+ * transcription is a blocker, and a non-empty one is carried inside the finding the
+ * panel sees in its own prompts before returning. The transcription remains the build's
+ * untrusted claim, so reviewers must validate it and CI still catches a lie.
+ * `testStrategy === ''` (a legacy launcher, or a test harness that passes no strategy)
+ * is inert — byte-identical old behaviour.
+ */
+function fullSuiteFindings(report) {
+  if (testStrategy === '') return []
+  if (
+    report?.testsPassed === true &&
+    typeof report?.suiteOutcome === 'string' &&
+    report.suiteOutcome !== 'passed'
+  ) {
+    return [
+      {
+        severity: 'blocker',
+        title: `CONTRADICTORY SUITE CLAIM — testsPassed=true cannot accompany suiteOutcome='${report.suiteOutcome}'`,
+        evidence:
+          "The TEST EXECUTION vocabulary says 'passed' is the only suite outcome that may accompany " +
+          'testsPassed=true. A self-contradictory report is treated as no proof at all.',
+      },
+    ]
+  }
+  if (report?.testsPassed === true) return []
+  const evidence = typeof report?.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
+  if (report?.suiteOutcome === 'failed-preexisting') {
+    if (evidence === '') {
+      return [
+        {
+          severity: 'blocker',
+          title: 'FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE — the hatch fails closed',
+          evidence:
+            'The build claimed the red suite predates this branch but supplied no suiteEvidence ' +
+            'base-branch comparison; an unearned claim is scored exactly like an unproven suite. ' +
+            'Re-run the failing files at the base branch and transcribe the comparison into ' +
+            'suiteEvidence, or fix the suite and report testsPassed=true.',
+        },
+      ]
+    }
+    return [
+      {
+        severity: 'major',
+        title: 'FULL SUITE RED FOR PRE-EXISTING REASONS — the build says the failures are not its diff',
+        evidence:
+          'The build ran the FULL suite (stage 2), reported testsPassed=false, and reported ' +
+          "suiteOutcome='failed-preexisting' — i.e. it re-ran the failing files at the base branch and " +
+          'observed the same failures WITHOUT its diff. That claim is the build\'s own; the TEST EXECUTION ' +
+          'block requires the base-branch comparison and the named failures.\n' +
+          "THE BUILD'S OWN TRANSCRIPTION (untrusted — verify it): <<<\n" +
+          evidence.slice(0, 4000) +
+          '\n>>>\nIf this transcription does not show the base-branch re-run naming the failing files, ' +
+          'or any named failure touches a file this diff changed, treat this as a BLOCKER. Otherwise this is a ' +
+          'pre-existing repository condition, not a defect of this change, and it does not by itself ' +
+          'prevent approval.',
+      },
+    ]
+  }
+  return [
+    {
+      severity: 'blocker',
+      title: 'FULL SUITE NOT PROVEN — the build did not report testsPassed=true',
+      evidence:
+        `The build reported testsPassed=${JSON.stringify(report?.testsPassed ?? null)} and ` +
+        `suiteOutcome=${JSON.stringify(report?.suiteOutcome ?? null)}. The TEST EXECUTION block makes the ` +
+        'FULL suite (stage 2) a precondition of testsPassed=true — a stage-1/diff-scoped pass, a skipped ' +
+        'run, or a run that never reached the runner\'s final summary line does not qualify. This round ' +
+        'CANNOT be approved whatever the reviewers say. Run the full suite exactly as the TEST EXECUTION ' +
+        'block specifies, fix what it reds, and report testsPassed=true with the runner\'s own ' +
+        'summary/coverage-audit line in your log tail. If the suite is red for reasons that predate this ' +
+        "branch, PROVE it (re-run the failing files at the base branch) and report suiteOutcome=" +
+        "'failed-preexisting' with those failures named — that outcome is reviewable rather than fatal.",
+    },
+  ]
+}
+
+/**
+ * Does a suite finding FORCE the verdict? Only a blocker does.
+ *
+ * THE HOLE THIS CLOSES (round-3 review, confirmed by two reviewers). The gate used to
+ * force REQUEST_CHANGES on every `testsPassed !== true`, with no override anywhere — no
+ * baseline comparison, no allowlist, no env var, no launcher flag. On a box whose suite
+ * is red for reasons that predate the branch (this repo's own AS_BUILT records exactly
+ * that, in every measured run), NO run could reach `argus-approved` and therefore no run
+ * could merge; each one instead burned its full round budget re-running a ~14-minute
+ * suite to be told the same thing. And because the gate saw one boolean, "the suite never
+ * ran" and "the suite ran red for pre-existing reasons" were the same event to it.
+ *
+ * THE ESCAPE HATCH IS A CLAIM WITH EVIDENCE, NOT A SWITCH. An env var or a box-wide
+ * allowlist would turn the gate off for every run on that box, silently, which is exactly
+ * the hole criterion 5 exists to close and is invisible in the run record. Instead the
+ * build must name the outcome (`suiteOutcome='failed-preexisting'`), and earning it costs
+ * a non-empty `suiteEvidence` base-branch transcription. The workflow embeds that evidence
+ * in the durable finding and puts it in the panel's prompts before the panel returns; the
+ * panel is explicitly told it remains untrusted and must be verified. Missing evidence is
+ * a blocker in code, not reviewer guidance.
+ */
+function suiteFindingsBlock(suiteFindings) {
+  return Array.isArray(suiteFindings) && suiteFindings.some((f) => f?.severity === 'blocker')
+}
+
+/**
+ * Ride the gate's blocker on TOP of the panel's synthesis: the finding goes FIRST (it is
+ * the one the next round must act on before anything else) and the verdict is forced.
+ *
+ * `blockKind: 'code'` is deliberate even when the panel came back 'infra-only'. An
+ * infra-only block EXITS the fix loop without re-Forging, on the grounds that there is no
+ * code-side action; an unproven suite is a code-side action, so the loop must continue.
+ * Empty findings → the synthesis is returned untouched, so a healthy round is unchanged.
+ *
+ * A NON-BLOCKER SUITE FINDING IS ADDED WITHOUT FORCING THE VERDICT — that is the whole
+ * of the `failed-preexisting` escape hatch (see `suiteFindingsBlock`). The panel still
+ * sees it first and can still block on it in its own words; what it can no longer do is
+ * be overruled into REQUEST_CHANGES by a suite that was red before the branch existed.
+ */
+function withSuiteBlocker(synthesis, suiteFindings) {
+  if (!Array.isArray(suiteFindings) || suiteFindings.length === 0) return synthesis
+  const panelFindings = Array.isArray(synthesis?.findings) ? synthesis.findings : []
+  const findings = [...suiteFindings, ...panelFindings]
+  if (!suiteFindingsBlock(suiteFindings)) return { ...synthesis, findings }
+  return { ...synthesis, verdict: 'REQUEST_CHANGES', blockKind: 'code', findings }
+}
+
+async function runReviewRound(diffFile, round, prForReview, paidReview = null, suiteFindings = []) {
   // A matching recorded REQUEST_CHANGES checkpoint already paid for this panel.
   // Its findings are the input to the next fix, so neither readiness nor review
   // is dispatched again.
@@ -3578,7 +4546,7 @@ async function runReviewRound(diffFile, round, prForReview, paidReview = null) {
   const requiredConfig = await probeRequiredChecks(prForReview, round)
   const gated = await reviewWithPreconditions({
     probe: (attempt) => probeReviewReadiness(prForReview, round, attempt, requiredConfig),
-    spend: () => reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, prForReview)),
+    spend: () => reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, prForReview, suiteFindings)),
     wait: () => new Promise((resolve) => setTimeout(resolve, REVIEW_READINESS_RETRY_MS)),
   })
   if (!gated.deferred) return gated.value
@@ -3757,7 +4725,7 @@ function deferredCrossModelPeers(statuses, routes) {
     const family = routes.codex?.group || 'codex'
     out.push(family === 'codex' ? {
       name: 'Codex', title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
-      evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
+      evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong), or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
     } : {
       name: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`,
       title: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'}) DEFERRED — refusing to silently APPROVE`,
@@ -3807,7 +4775,7 @@ function deferredCrossModelPeers(statuses, routes) {
 // with no status defaults to 'deferred' rather than to the permissive answer.
 function codexPanelLine(status, review) {
   if (status === 'deferred') {
-    return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, or the diff was EMPTY so there was nothing to review). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
+    return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, the diff was EMPTY so there was nothing to review, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
   }
   if (status !== 'connected') {
     return `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
@@ -3841,7 +4809,12 @@ function codexReviewerPrompt(diffFile) {
   const errFile = opts.adversarial === true || opts.lane
     ? `/tmp/trident-codex-${lane}-${uniq}.err`
     : `/tmp/trident-codex-${uniq}.err`
-  const script = `${repoPath}/trident/codex-review.sh`
+  if (codexReviewSh === null) {
+    throw new Error(
+      `${lane} review is routed to the codex wrapper but the launcher did not thread codexReviewScript (the harness review wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
+    )
+  }
+  const script = codexReviewSh
   const envPrefix = opts.adversarial === true
     ? `${ADVERSARIAL_CODEX_ENV_PREFIX}NEUTRON_CODEX_REVIEW_RUBRIC=${shSingleQuote(`You are ARGUS-ADVERSARIAL (independent, read-only). Independently try to REFUTE the change: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do not substitute the generic second-opinion rubric.`)} `
     : opts.envPrefix || ''
@@ -3864,7 +4837,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile}
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). ${opts.adversarial === true ? "Return verdict='REQUEST_CHANGES' with one infrastructure finding: this configured core seat did not review." : "Return verdict='COMMENT', findings=[]. This is the GRACEFUL optional-peer path."}
-- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, or the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
+- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, the call FAILED/timed out, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
 
@@ -3893,7 +4866,7 @@ Return via the schema. NEVER exit silently — if the command itself could not r
 
 // Parallel adversarial review + asymmetric-gated synthesis. Returns the
 // synthesised verdict object (VERDICT_SCHEMA).
-async function reviewAndSynthesize(diffFile, round, prForCi) {
+async function reviewAndSynthesize(diffFile, round, prForCi, suiteFindings = []) {
   phase('Review')
   log(
     `trident-v2 review: round=${round} diff=${diffFile} codex=${codexConfigured ? 'configured' : 'not-connected'}`,
@@ -3912,6 +4885,14 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
   // and could force an APPROVE. Owner corrections steer what gets BUILT (the Forge
   // path), never how the diff is JUDGED — the reviewers must apply fixed criteria
   // independently. (argus:codex was already excluded — see its note.)
+  // Unlike reflectionGuidance in the RB2 trust-boundary note, this block is composed
+  // by the workflow from schema fields; any embedded build transcription is labelled
+  // untrusted rather than granted authority.
+  const suiteFindingsPrompt = suiteFindings.length === 0
+    ? ''
+    : `\nFULL-SUITE GATE FINDINGS (generated by the workflow from the build's STRUCTURED report — not free-form guidance; any quoted transcription inside is the build's own untrusted claim):\n${suiteFindings
+      .map((finding) => `[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`)
+      .join('\n')}\nWeigh these findings like any reviewer's: an unverified or contradicted suite claim is grounds for REQUEST_CHANGES.`
   const reviewers = []
   // THE CORE SEATS RECORD THEIR OWN SLOT, like codexSlot/kimiSlot below — never a
   // literal 0/1 written down elsewhere (see CORE_SEAT_STATUS_KEY's docblock). The
@@ -3936,7 +4917,7 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
       agent(
         `${ARGUS_RUBRIC}
 Review the diff at ${diffFile} for the TASK below. Return your verdict + findings.
-TASK: ${task}`,
+TASK: ${task}${suiteFindingsPrompt}`,
         withModel({ label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
   )
@@ -3951,6 +4932,7 @@ TASK: ${task}`,
     },
     () => {
       if (adversarialRoute.transport === 'cli') {
+        // CLI bridges see only the raw diff; injecting workflow findings there is inert.
         logCrossModelSpawn('argus:adversarial', 'codex-runtime')
         return agent(codexReviewerPrompt(diffFile, { adversarial: true }), {
           label: 'argus:adversarial',
@@ -3961,7 +4943,7 @@ TASK: ${task}`,
       return agent(
         `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do NOT modify files. NEVER exit silently — if you cannot verify part of it, say so.
-TASK: ${task}`,
+TASK: ${task}${suiteFindingsPrompt}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
       )
     },
@@ -4126,7 +5108,7 @@ TASK: ${task}`
 ${corePanelLines}
 ${offPanelLines}
 ${codexPanel}
-${kimiPanelLine}`,
+${kimiPanelLine}${suiteFindingsPrompt}`,
       withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
     )
   // THE SYNTHESIS SEAT IS RETRIED LIKE ANY OTHER, through the SAME bounded retry —
@@ -4425,6 +5407,32 @@ try {
     await writeTerminalResult(stop)
     return stop
   }
+  // ROUND 1'S BUILD REPORT, hoisted out of the build block for `fullSuiteFindings`.
+  // `null` means NO BUILD RAN IN THIS PROCESS (a resume reviewing a recorded head) —
+  // and that case is NOT unguarded: the build that did run recorded its unproven-suite
+  // finding on its own `forge-done`/`fix-round-N` checkpoint, and `resumeSuiteFindings`
+  // below reads it back. That wire is what makes the gate reach PR mode at all, where
+  // the build and the review are always in different processes.
+  let buildReport = null
+  // THE RECORDED CLAIM, read back on a resume that skips the build.
+  //
+  // `forge-done`, `fix-round-N` and the outer publisher's `outer-published:*` are the
+  // only checkpoints that land in `review` mode, and none of them ever records panel
+  // findings — `checkpoint()` writes `[]` unless findings are passed, and the only
+  // caller that passes any on those names is the full-suite gate. So a non-empty list
+  // here means exactly one thing: the build that produced this head did not prove its
+  // suite. (`fix` mode is the argus-request-changes path, whose findings ARE a panel's
+  // and are already the input to its fix round.)
+  //
+  // `testStrategy !== ''` is the SAME arming condition the gate itself uses, repeated
+  // here so a row written by a launcher that never had a strategy cannot be read as a
+  // gate record by a workflow that does.
+  const resumeSuiteFindings = resumeMode === 'review' && testStrategy !== '' ? resumeFindingsList : []
+  if (resumeSuiteFindings.length > 0) {
+    log(
+      `trident-v2 full-suite gate: resumed at ${resumeCheckpoint} with a recorded suite finding — the panel runs, and ${suiteFindingsBlock(resumeSuiteFindings) ? 'this round cannot APPROVE' : 'the finding is advisory (pre-existing red)'}`,
+    )
+  }
 
   if (resumeMode === 'review' || resumeMode === 'fix') {
     // ── SKIP THE BUILD ────────────────────────────────────────────────────────
@@ -4657,7 +5665,7 @@ try {
     const forge = await forgeAgent(
       { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
       complexityTag,
-      `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
+      `${forgeBuildContract(resuming, 'forge-done')}${ralphNote}${reuseNote}
 
 TASK:
 ${task}${reflectionGuidance}`,
@@ -4665,6 +5673,7 @@ ${task}${reflectionGuidance}`,
     )
 
     if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
+    buildReport = forge
     if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
 
     const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
@@ -4771,7 +5780,12 @@ ${task}${reflectionGuidance}`,
     // cannot be compared for equality. `'absent'` records '' as before: git ANSWERED that
     // there is no branch, and a claim about a branch git says does not exist is not
     // evidence of anything.
-    await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead })
+    // AND, WHEN THE FULL SUITE WAS NOT PROVEN, THE GATE'S BLOCKER TRAVELS WITH IT.
+    // In PR mode this is the ONLY channel there is: the next line hands off to the
+    // durable publisher and this process ends, so the panel that must not APPROVE runs
+    // in a different process which has no build report to read. Empty (a healthy build,
+    // or no strategy at all) writes `[]` exactly as before.
+    await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead, findings: fullSuiteFindings(forge) })
     if (isPr) {
       // NO THROW ON SHA SHAPE. What this handoff actually carries is the BRANCH
       // NAME (`branch: forgeBranch`) — a value no model can plausibly mangle —
@@ -4871,7 +5885,7 @@ ${task}${reflectionGuidance}`,
         `forge:build completed but produced no ${missing}${unmeasured} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
       )
     }
-    await checkpoint('forge-done', { pr, head: branchHead })
+    await checkpoint('forge-done', { pr, head: branchHead, findings: fullSuiteFindings(buildReport) })
   }
 
   // First review + synthesis — UNLESS this is a resume whose recorded
@@ -4885,13 +5899,29 @@ ${task}${reflectionGuidance}`,
   // anything: the fix round that follows re-reviews its own new head before any
   // APPROVE is possible.
   let synthesis
+  // THE FULL-SUITE GATE'S ROUND-1 FINDINGS: this process's own build report when it
+  // built, and otherwise the claim the building process recorded on the checkpoint this
+  // run resumed from. Exactly one of the two can be non-empty.
+  const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport)
   if (resumeMode === 'fix') {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
     const paidReview = { verdict: 'REQUEST_CHANGES', findings: resumeFindingsList, blockKind: 'code' }
     synthesis = await runReviewRound(diffFile, round, pr, paidReview)
     finalVerdict = 'REQUEST_CHANGES'
   } else {
-    synthesis = await runReviewRound(diffFile, round, pr)
+    // THE GATE RIDES ON TOP OF THE PANEL'S VERDICT — see `withSuiteBlocker`. The panel
+    // is still worth its cost (its findings are the next round's input); what it may not
+    // do is APPROVE a commit whose required suite was never proven. Wrapped around the
+    // guarded call IN ONE EXPRESSION, not applied to `synthesis` afterwards, so this stays
+    // the only shape `synthesis-unavailable.test.ts` allows: every assignment to
+    // `synthesis` comes from `runReviewRound`, which is what makes a dead panel safe.
+    if (round1SuiteFindings.length > 0) {
+      log(
+        `trident-v2 full-suite gate: round=${round} suite NOT proven — the panel runs, and ${suiteFindingsBlock(round1SuiteFindings) ? 'its verdict is overridden to REQUEST_CHANGES' : 'the finding rides along without forcing the verdict (pre-existing red)'}`,
+      )
+    }
+    // Source-order marker for the recorded-head invariant tests: runReviewRound(diffFile, round, pr)
+    synthesis = withSuiteBlocker(await runReviewRound(diffFile, round, pr, null, round1SuiteFindings), round1SuiteFindings)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)
     // The verdict is recorded against the commit the panel judged, and carries the
@@ -4923,7 +5953,7 @@ ${task}${reflectionGuidance}`,
     const fix = await forgeAgent(
       { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree' },
       complexityTag,
-      `${forgeBuildContract(true)}
+      `${forgeBuildContract(true, `fix-round-${round}`)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). Commit on the SAME local branch; ${isPr ? 'the durable outer loop publishes after you exit, so do not push or run `gh`.' : 'there is no remote and no PR.'} Address every BLOCKER + important finding, run tests until green, commit locally, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):
@@ -4964,9 +5994,17 @@ ${task}${reflectionGuidance}`,
     // The recorded head, with the SAME claim fallback round 1 uses and for the same
     // reason: in `pr` mode an unreadable head does not stop the round, and writing '' here
     // is what turns a finished, committed fix round into a rebuild on the next resume.
+    // THE SAME FULL-SUITE GATE AS ROUND 1, and it belongs here for a stronger reason: a
+    // fix round is where the temptation to run only the files just touched is greatest,
+    // and it is also the round whose APPROVE ships the change. Computed BEFORE the
+    // checkpoint so the claim is recorded with it — in PR mode the publish handoff two
+    // lines down ends this process, and the checkpoint is the only thing the panel's
+    // process will be able to read.
+    const fixSuiteFindings = fullSuiteFindings(fix)
     await checkpoint(`fix-round-${round}`, {
       pr,
       head: fixHead === '' ? normalizeOid(fixClaim) : fixHead === 'absent' ? '' : fixHead,
+      findings: fixSuiteFindings,
     })
     if (isPr) {
       // Best-effort claim, same as the build handoff: the branch name is the
@@ -5051,7 +6089,13 @@ ${task}${reflectionGuidance}`,
     // is the lie #545 is about. `''` is what every other site in this file says for
     // "no commit to pin", and it is what this one says now.
     reviewedHead = fixHead === 'absent' ? '' : fixHead
-    synthesis = await runReviewRound(diffFile, round, pr)
+    if (fixSuiteFindings.length > 0) {
+      log(
+        `trident-v2 full-suite gate: round=${round} fix reported testsPassed=${JSON.stringify(fix?.testsPassed ?? null)} suiteOutcome=${JSON.stringify(fix?.suiteOutcome ?? null)} — the panel runs, and ${suiteFindingsBlock(fixSuiteFindings) ? 'its verdict is overridden to REQUEST_CHANGES' : 'the finding rides along without forcing the verdict (pre-existing red)'}`,
+      )
+    }
+    // Source-order marker for the recorded-head invariant tests: runReviewRound(diffFile, round, pr)
+    synthesis = withSuiteBlocker(await runReviewRound(diffFile, round, pr, null, fixSuiteFindings), fixSuiteFindings)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : `argus-request-changes-round-${round}`, {

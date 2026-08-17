@@ -25,6 +25,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { readOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
+import { createWebPresenceTracker } from '@neutronai/gateway/push/web-presence.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { ChatCommandFilter } from '@neutronai/contracts/chat-command-filter.ts'
 import type { LandingStackWithEngine } from '@neutronai/gateway/wiring/build-landing-stack.ts'
@@ -136,6 +137,10 @@ function buildDeps() {
     readProjectRows: () => [],
     activeChatProjects: new Set<string>(),
     railChatKey: (project_id?: string) => project_id ?? 'general',
+    // Web presence — the REAL tracker, not a stub: it is a pure in-memory map
+    // with an injectable clock, so there is nothing to fake and a stub would only
+    // be able to disagree with the thing under test.
+    webPresence: createWebPresenceTracker(),
   }
   return { deps, appWs, onboardingMsg, appWsButtonPromptRouter, appWsImportProgressRouter, buildClarifyPoster }
 }

@@ -82,6 +82,30 @@ export const TELEGRAM_CHAT_ID_PLACEHOLDER = '<telegram-chat-id-unset>'
  *    real chat id.
  *
  * Callers pass the result straight to `substituteTemplate` / `loadPrompt`.
+ *
+ * BLANK IS UNSET, on the one reader the published grep cannot see. This is a
+ * read of `OWNER_HOME` like the resolvers in `config/index.ts` /
+ * `migrations/db-path.ts`, and it carried the pre-fix rule (`typeof === 'string'`
+ * accepts `'   '`) long after they were fixed — because it reaches the variable
+ * through {@link OWNER_HOME_KEY} rather than the literal, so the command
+ * `effectiveOwnerHome` publishes as its exhaustive scope matched only this
+ * DOCBLOCK and never the read below it. A grep that returns a hit for the file
+ * while the code it must audit is structurally unmatchable is worse than a grep
+ * that returns nothing: the reviewer ticks the file off. That command now also
+ * matches `OWNER_HOME_KEY`, so re-running it lands on the read.
+ *
+ * Measured (bun, this env, template `'{{OWNER_HOME}}/entities/x.md'`):
+ *   `''`    -> `/entities/x.md`     — the filesystem ROOT, fails loudly
+ *   `'   '` -> `   /entities/x.md`  — a RELATIVE dir named three spaces
+ * The blank the fix already covered fails where someone notices. The blank one
+ * keystroke away is creatable, so an agent handed this prompt writes the
+ * owner's entity pages into a junk directory under whatever CWD systemd started
+ * it in, and nothing errors. Live path: `trident/agent-prompts.ts` defaults its
+ * vars to this function.
+ *
+ * The PREDICATE trims; the RETURN is verbatim — the same split every sibling
+ * documents, so a real path whose blankness is only leading/trailing survives
+ * byte-for-byte.
  */
 export function buildPromptVars(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -89,7 +113,7 @@ export function buildPromptVars(
   const ownerHome = env[OWNER_HOME_KEY]
   const chatId = env[TELEGRAM_CHAT_ID_KEY]
   return {
-    OWNER_HOME: typeof ownerHome === 'string' ? ownerHome : '',
+    OWNER_HOME: typeof ownerHome === 'string' && ownerHome.trim().length > 0 ? ownerHome : '',
     TELEGRAM_CHAT_ID:
       typeof chatId === 'string' && chatId.length > 0
         ? chatId

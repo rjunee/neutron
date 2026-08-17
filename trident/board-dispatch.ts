@@ -45,7 +45,7 @@ import {
   assessDispatchReadiness,
   type DispatchReadinessTarget,
 } from '@neutronai/work-board/dispatch-readiness.ts'
-import { detectMergeMode, defaultGitModeProbe, detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
+import { detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
@@ -96,8 +96,24 @@ export interface BoardBoundBuildDeps {
    * `ensureProjectBuildWorkspace` over the production fs/git probe. Test seam.
    */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-  /** Defaults to `detectMergeMode` over the production probe. Test seam. */
-  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
+  /**
+   * Resolve the repo's merge mode. REQUIRED — there is deliberately no default.
+   *
+   * It used to fall back to `detectMergeMode(path, defaultGitModeProbe())`, an
+   * UNCREDENTIALED probe that shelled a bare `gh auth status` in the gateway's
+   * own environment. The gateway carries no `GH_TOKEN` by design (the credential
+   * is injected per spawn — `open/composer.ts` `setGithubSpawnEnvResolver`), so
+   * that probe would truthfully answer "not authenticated" about a process that
+   * structurally cannot be. Requiring the resolver means the composition root —
+   * the only place that holds the credential — has to supply it.
+   *
+   * MEASURED, so this does not repeat round 2's overclaim: production never took
+   * this fallback, because `open/composer.ts` already passed a credentialed
+   * resolver. Removing it closes the hole for any FUTURE caller; it is not what
+   * refused the owner's builds. That was the unscoped `gh auth status` the probe
+   * ran — see `git-mode.ts` `PUBLISHER_AUTH_COMMAND`.
+   */
+  resolveMergeMode: (repo_path: string) => Promise<MergeMode>
   /**
    * Resolve whether this build is governed (Ralph mode). Defaults to
    * `detectRalphMode` over the production probe — a `SPEC.md` at the git
@@ -173,7 +189,7 @@ export async function dispatchBoardBoundBuild(
       deps.repo_path,
       deps.project_slug,
     )
-    merge_mode = await (deps.resolveMergeMode ?? ((path) => detectMergeMode(path, defaultGitModeProbe())))(repo_path)
+    merge_mode = await deps.resolveMergeMode(repo_path)
     // K10 restored the governed default (the refactor-window `resolveRalph =
     // false` override is gone): a root `SPEC.md` on the resolved workspace's
     // git root flips the build into Ralph mode via `detectRalphMode`. Neither

@@ -171,6 +171,12 @@ export interface TridentRun {
    * agent's failure and must not consume its fix rounds.
    */
   crash_recoveries: number
+  /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
+  reviewed_head: string | null
+  /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
+  bound_pr: number | null
+  /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
+  fenced_paths: string | null
 }
 
 export interface CreateTridentRunInput {
@@ -196,6 +202,9 @@ export interface CreateTridentRunInput {
   thread_id?: string | null
   /** Originating channel of `chat_id`/`thread_id` (#317). Defaults 'telegram'. */
   channel_kind?: Topic['channel_kind']
+  reviewed_head?: string | null
+  bound_pr?: number | null
+  fenced_paths?: string | null
 }
 
 /**
@@ -260,6 +269,9 @@ interface TridentRunDbRow {
   last_advanced_at: string
   harvested_at: number | null
   crash_recoveries: number | null
+  reviewed_head: string | null
+  bound_pr: number | null
+  fenced_paths: string | null
 }
 
 /** Exported solely so tests can pin the column-count invariant. */
@@ -269,7 +281,8 @@ export const COLS =
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
-  'started_at, last_advanced_at, harvested_at, crash_recoveries'
+  'started_at, last_advanced_at, harvested_at, crash_recoveries, ' +
+  'reviewed_head, bound_pr, fenced_paths'
 
 // Derived from COLS so placeholder-count = column-count BY CONSTRUCTION. A
 // hand-miscounted `?` list silently corrupts every insert and no type error
@@ -351,6 +364,9 @@ export class TridentRunStore {
       last_advanced_at: ts,
       harvested_at: null,
       crash_recoveries: 0,
+      reviewed_head: input.reviewed_head ?? null,
+      bound_pr: input.bound_pr ?? null,
+      fenced_paths: input.fenced_paths ?? null,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
@@ -387,6 +403,9 @@ export class TridentRunStore {
         run.last_advanced_at,
         run.harvested_at,
         run.crash_recoveries,
+        run.reviewed_head,
+        run.bound_pr,
+        run.fenced_paths,
       ],
     )
     return run
@@ -472,6 +491,24 @@ export class TridentRunStore {
           LIMIT ?`,
       )
       .all(limit)
+      .map(rowToRun)
+  }
+
+  /** Every actively running row with an external launcher generation.
+   * Unbounded deliberately: liveness must not inherit the expensive sweep's
+   * per-tick cap or leave newer lanes invisible behind older rows. */
+  listRunningLaunchers(): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, []>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND subagent_status = 'running'
+            AND workflow_run_id IS NOT NULL
+            AND workflow_run_id <> ''
+          ORDER BY last_advanced_at ASC`,
+      )
+      .all()
       .map(rowToRun)
   }
 
@@ -890,5 +927,8 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     harvested_at: row.harvested_at,
     // Legacy rows predate migration 0123 and read NULL — no budget spent yet.
     crash_recoveries: row.crash_recoveries ?? 0,
+    reviewed_head: row.reviewed_head,
+    bound_pr: row.bound_pr,
+    fenced_paths: row.fenced_paths,
   }
 }

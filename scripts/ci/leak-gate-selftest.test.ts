@@ -656,6 +656,108 @@ describe('--messages-only (the pre-push mode)', () => {
     }
   }, 60_000)
 
+  /**
+   * LEAK_GATE_EXCLUDE_REF — already-published history is not this push's to answer for.
+   *
+   * `base..head` has ONE floor, so a branch that MERGES the mainline pulls the mainline's
+   * commits into its own range. Those commits are already on GitHub and already mirrored,
+   * and they carry the `Co-authored-by: <owner>` trailer GitHub stamps on a squash merge —
+   * so the gate failed the push over messages the person pushing cannot rewrite. The hook
+   * already excluded them on the REBASE path; a merge needs an exclusion a floor cannot
+   * express. Observed 2026-08-16: merging main to clear a conflict blocked the push, with
+   * only `--no-verify` or a force-push rebase available as "fixes" — which is precisely the
+   * unsatisfiable-gate failure this hook's own header warns about.
+   */
+  test('a MERGED-IN published commit is excluded, and a NEW one is still caught', () => {
+    const { dir, base } = gitFixture()
+    const file = localDenylistFile([LOCAL_TERM])
+    const g = (...a: string[]): string =>
+      execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    try {
+      // The mainline gains a commit whose MESSAGE carries the term — the already-public
+      // history the author cannot rewrite. `origin/main` is a real ref here, as it is in a
+      // clone, so the gate resolves the exclusion the same way it does on a developer's box.
+      g('checkout', '-q', '-b', 'mainline')
+      writeFileSync(join(dir, 'src', 'main1.ts'), 'export const m = 1\n')
+      g('add', 'src/main1.ts')
+      g('commit', '-q', '-m', `fix: something on main (#330)\n\nCo-authored-by: ${LOCAL_TERM}`)
+      g('update-ref', 'refs/remotes/origin/main', 'HEAD')
+      const mainTip = g('rev-parse', 'HEAD')
+
+      // A feature branch forked BEFORE that, which then merges the mainline in.
+      g('checkout', '-q', '-b', 'feature', base)
+      writeFileSync(join(dir, 'src', 'f1.ts'), 'export const f = 1\n')
+      g('add', 'src/f1.ts')
+      g('commit', '-q', '-m', 'feat: a clean subject of my own')
+      const branchTipBeforeMerge = g('rev-parse', 'HEAD')
+      g('merge', '-q', '--no-edit', mainTip)
+      const head = g('rev-parse', 'HEAD')
+
+      // CONTROL — WITHOUT the exclusion the merged-in public commit is in window and the
+      // push is blocked. This is the bug, reproduced, and it is what makes the pass below
+      // mean something rather than being a scenario that was never failing.
+      const without = runGate(dir, {
+        LEAK_GATE_BASE_SHA: branchTipBeforeMerge,
+        LEAK_GATE_HEAD_SHA: head,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(without.out).toContain('[pii-denylist-msg]')
+      expect(without.code).toBe(1)
+
+      // WITH it, the window is exactly what this push publishes: clean.
+      const withExcl = runGate(dir, {
+        LEAK_GATE_BASE_SHA: branchTipBeforeMerge,
+        LEAK_GATE_HEAD_SHA: head,
+        LEAK_GATE_EXCLUDE_REF: 'origin/main',
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(withExcl.out).not.toContain('[pii-denylist-msg]')
+      expect(withExcl.code).toBe(0)
+
+      // AND IT IS NOT A BLANKET MUTE — the exclusion drops PUBLISHED commits, not the rule.
+      // A new commit of this branch's own carrying the same term is still caught with the
+      // exclusion set, which is the property that keeps this from being a hole.
+      writeFileSync(join(dir, 'src', 'f2.ts'), 'export const f2 = 2\n')
+      g('add', 'src/f2.ts')
+      g('commit', '-q', '-m', `feat: my own commit naming ${LOCAL_TERM}`)
+      const stillCaught = runGate(dir, {
+        LEAK_GATE_BASE_SHA: branchTipBeforeMerge,
+        LEAK_GATE_HEAD_SHA: g('rev-parse', 'HEAD'),
+        LEAK_GATE_EXCLUDE_REF: 'origin/main',
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(stillCaught.out).toContain('[pii-denylist-msg]')
+      expect(stillCaught.code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  }, 60_000)
+
+  test('an unresolvable LEAK_GATE_EXCLUDE_REF is ignored, not obeyed silently', () => {
+    // Fail-closed: a typo'd or missing ref must leave the window as it was rather than
+    // dropping commits, because "exclude something that does not exist" and "exclude
+    // nothing" must not be able to become "exclude everything".
+    const { dir, base } = gitFixture([`feat: the ${LOCAL_TERM} archive`])
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_EXCLUDE_REF: 'origin/no-such-ref',
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(out).toContain('[pii-denylist-msg]')
+      expect(code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  }, 60_000)
+
   test('no resolvable commit range ⇒ exit 2 — it scanned NOTHING', () => {
     const dir = freshTree() // deliberately not a git repo
     const file = localDenylistFile([LOCAL_TERM])
@@ -686,9 +788,15 @@ function pushFixture(denylistEntries: string[] | null): {
   install: () => { code: number; out: string }
   push: () => { code: number; out: string }
   pushWithoutDenylist: () => { code: number; out: string }
+  branch: (name: string) => void
+  checkout: (name: string) => void
+  mergeMain: () => void
+  pushRef: (ref: string) => { code: number; out: string }
+  publishBypassingHook: (ref: string) => { code: number; out: string }
   cleanup: () => void
 } {
   const sandbox = mkdtempSync(join(tmpdir(), 'leak-gate-prepush-'))
+  let seq = 0
   const root = join(sandbox, 'repo')
   const remote = join(sandbox, 'remote.git')
   mkdirSync(join(root, 'scripts', 'ci'), { recursive: true })
@@ -738,7 +846,10 @@ function pushFixture(denylistEntries: string[] | null): {
   return {
     root,
     commit: (subject: string) => {
-      writeFileSync(join(root, `f${Date.now()}.ts`), 'export const x = 1\n')
+      // A counter, not a clock: two commits in the same millisecond would write the same filename
+      // with the same contents, stage nothing, and fail the commit.
+      seq += 1
+      writeFileSync(join(root, `f${seq}.ts`), `export const x = ${seq}\n`)
       git('add', '-A')
       git('commit', '-q', '-m', subject)
     },
@@ -760,6 +871,16 @@ function pushFixture(denylistEntries: string[] | null): {
     /** Push with the denylist pointed somewhere else — "the list went missing". */
     pushWithoutDenylist: () =>
       run(['push', 'origin', 'main'], gateEnv({ LEAK_GATE_PII_DENYLIST_FILE: join(sandbox, 'gone') })),
+    branch: (name: string) => git('checkout', '-q', '-b', name),
+    checkout: (name: string) => git('checkout', '-q', name),
+    mergeMain: () => git('merge', '-q', '--no-edit', '-m', 'chore: merge main', 'main'),
+    pushRef: (ref: string) => run(['push', 'origin', ref]),
+    /**
+     * A push that skips the hook, used ONLY to stage history as "already on the remote".
+     * It stands in for the route such commits really arrive by — a GitHub squash-merge, which
+     * stamps its own trailer on a message nobody pushing can rewrite afterwards.
+     */
+    publishBypassingHook: (ref: string) => run(['push', '--no-verify', 'origin', ref]),
     cleanup: () => rmSync(sandbox, { recursive: true, force: true }),
   }
 }
@@ -852,6 +973,113 @@ describe('pre-push hook — the control fires before anything is published', () 
       fx.cleanup()
     }
   }, 60_000)
+
+  /**
+   * THE EXCLUSION, THROUGH THE HOOK THAT COMPUTES IT — not through the variable it sets.
+   *
+   * The tests above at `--messages-only` set `LEAK_GATE_EXCLUDE_REF` by hand and prove the GATE
+   * honours it. That is half the wiring. The other half is `.githooks/pre-push`, which has to
+   * decide whether to set the variable at all, from the ref being pushed — and a variable that is
+   * always injected by the test can never catch a hook that never sets it, or sets it for the
+   * wrong ref. Both halves of that decision are load-bearing in opposite directions:
+   *
+   *   - NOT set when the target is main → main's own new commits are the ones landing, and
+   *     excluding origin/main would empty the window and check nothing.
+   *   - set for every other target → a branch that merged main in carries main's already-published
+   *     commits, which the pusher cannot rewrite. Observed 2026-08-16: merging main to clear a
+   *     conflict blocked the push with only `--no-verify` or a force-push rebase available.
+   *
+   * So the pair below pushes the SAME denylisted commit twice through a REAL `git push`, varying
+   * nothing but the ref it is going to.
+   *
+   * THE BRANCH MUST ALREADY EXIST ON THE REMOTE, and getting this wrong makes the whole pair
+   * vacuous. For a branch the remote has never seen, `remote_sha` is all-zero and the gate already
+   * falls back to origin/main as the base (`.githooks/pre-push:54-56`) — main's commits are
+   * outside the window for free and the exclusion changes nothing. Verified by mutation: with the
+   * first-push spelling, DELETING the hook's `exclude_ref` assignment entirely left both tests
+   * green. The exclusion only bites on the case that was actually observed — a branch with an open
+   * PR that merges main in to clear a conflict and pushes again, where the base is the branch's
+   * own previous tip and main's commits are squarely inside the range.
+   *
+   * WHAT THESE DO NOT PROVE, STATED PLAINLY. The `refs/heads/main|main) ;;` arm of the hook's
+   * `case` is DEFENSIVE, and no real push demonstrates it. Mutating the hook to exclude
+   * origin/main on a main push too leaves both tests green, and that is not a gap in the tests:
+   * for `--not origin/main` to change a main push's window, the commits being pushed would have to
+   * be reachable from origin/main already — and then there is nothing to push and git never runs
+   * the hook. The arm is worth keeping as a statement of intent about a ref that is special here,
+   * but it is not load-bearing today and no assertion below pretends otherwise. What IS proven by
+   * mutation: deleting the exclusion breaks the branch case (test one goes red), and widening it
+   * to swallow the branch's own commits breaks the other (test two).
+   */
+  describe('the pre-push exclusion is decided by the hook, from the ref being pushed', () => {
+    const BRANCH = 'feature/some-work'
+
+    test('BLOCKED onto main, and the SAME commit is excluded on a branch that merged it in', () => {
+      const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+      try {
+        expect(fx.install().code).toBe(0)
+
+        // The branch exists on the remote FIRST, with nothing interesting on it. This is what
+        // makes the later push's base the branch's own tip rather than origin/main.
+        fx.branch(BRANCH)
+        fx.commit('chore: the work so far')
+        expect(fx.pushRef(BRANCH).code).toBe(0)
+
+        // Meanwhile main gains a commit whose message trips the denylist. Not a plant: this is
+        // the shape of the `Co-authored-by:` trailer GitHub stamps on a squash merge.
+        fx.checkout('main')
+        fx.commit(`feat: migrate the ${LOCAL_TERM} archive`)
+
+        // CONTROL — pushing that commit AT MAIN is refused. The hook must not exclude origin/main
+        // here, or the window would be empty and the commit would sail through unchecked.
+        const ontoMain = fx.pushRef('main')
+        expect(ontoMain.out).toContain('[pii-denylist-msg]')
+        expect(ontoMain.out).toContain('PUSH BLOCKED')
+        expect(ontoMain.code).not.toBe(0)
+
+        // Stage it as already-published history, by the route such commits really arrive.
+        expect(fx.publishBypassingHook('main').code).toBe(0)
+
+        // TREATMENT — the branch merges main in to clear a conflict and pushes again. The same
+        // commit is now inside the range, and the pusher cannot rewrite it. Only the ref differs.
+        fx.checkout(BRANCH)
+        fx.mergeMain()
+        fx.commit('chore: a perfectly clean subject of my own')
+        const ontoBranch = fx.pushRef(BRANCH)
+        expect(ontoBranch.out).not.toContain('PUSH BLOCKED')
+        expect(ontoBranch.code).toBe(0)
+      } finally {
+        fx.cleanup()
+      }
+    }, 60_000)
+
+    test('the exclusion does NOT blind the branch push to a NEW bad commit', () => {
+      // The cheapest way to make the test above pass is to exclude too much. A commit the branch
+      // itself introduces is not on origin/main and must still be caught — same hook, same real
+      // push, same already-published main commit sitting in the range beside it.
+      const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+      try {
+        expect(fx.install().code).toBe(0)
+        fx.branch(BRANCH)
+        fx.commit('chore: the work so far')
+        expect(fx.pushRef(BRANCH).code).toBe(0)
+
+        fx.checkout('main')
+        fx.commit(`feat: migrate the ${LOCAL_TERM} archive`)
+        expect(fx.publishBypassingHook('main').code).toBe(0)
+
+        fx.checkout(BRANCH)
+        fx.mergeMain()
+        fx.commit(`feat: reference the ${LOCAL_TERM} archive from the branch`)
+        const pushed = fx.pushRef(BRANCH)
+        expect(pushed.out).toContain('[pii-denylist-msg]')
+        expect(pushed.out).toContain('PUSH BLOCKED')
+        expect(pushed.code).not.toBe(0)
+      } finally {
+        fx.cleanup()
+      }
+    }, 60_000)
+  })
 })
 
 describe('denylist MATCHING — case-insensitive, separator-flexible substring', () => {

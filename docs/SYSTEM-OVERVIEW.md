@@ -637,10 +637,20 @@ a slash-command.
   calls `setReplToolBridge(graph.get('mcp'))` once the registry is populated;
   shutdown clears it. LLM-less boxes (no graph) leave it unset → no second
   server.
-- **Security (opt-in per substrate).** Only the owner's WARM conversational
-  substrate (`cc-agent-*`) sets `enableToolBridge: true`. The untrusted
-  history-import REPL (`cc-import-*`), the per-project onboarding-compose REPL
-  (`cc-compose-*` — see "Per-project isolated onboarding compose" below), and the
+- **Security (opt-in per substrate).** The owner's two WARM conversational
+  substrates set `enableToolBridge: true`: the live chat (`cc-agent-*`) and the
+  background proactive-compose REPL (`cc-nudge-*` — fired reminders/rituals and the
+  work-board wakeup). The second is an equal-grant, separate-session twin of the
+  first: it runs `PROFILE_WARM_CHAT` with the same bridge, GitHub credential and
+  frontier-model floor, because a RITUAL composes there and ISSUES #504 settled that
+  a fired ritual must have "access to everything general has access to" — the
+  previous locked-down `cc-ritual-*` lane could not read the owner's calendar and was
+  rejected. What is separate is the SESSION, so a background compose that aborts
+  cannot evict the child the owner is chatting on; the security boundary for that
+  lane remains the ritual APPROVAL GATE (`reminders/ritual-fire.ts`), not the
+  substrate. The untrusted history-import REPL (`cc-import-*`), the per-project
+  onboarding-compose REPL (`cc-compose-*` — see "Per-project isolated onboarding
+  compose" below), and the
   Trident build / fire REPLs (`cc-trident-*` / `cc-trident-fire-*`) leave it off,
   so a prompt-injection in untrusted content can never reach a Core tool. The bridge's MCP namespace is
   permitted via `--allowedTools mcp__neutron`. The built-in `--tools` surface is
@@ -2925,19 +2935,48 @@ actionable `dispatchConstraint` describing the wrapper or executor required to w
     naming the conflicting paths), never a `REQUEST_CHANGES`. A resolved conflict
     shortcuts nothing: resolution is a mergeability operation, not a verdict, and
     the branch goes through the full review gate exactly as a clean replay does.
-    The credential
+    The outer loop's own credential
     is injected at the host-command boundary in `open/composer.ts`; it never enters the
-    wrapper command, the Forge transcript, or any process below the inner workflow.
+    wrapper command or the Forge transcript.
+  - **THE BUILD SUBSTRATE NOW CARRIES A GITHUB CREDENTIAL OF ITS OWN, and the older
+    "nothing below the inner workflow has one" invariant is RETIRED.** This paragraph
+    used to end "…or any process below the inner workflow", and `SPEC.md` cited
+    `/proc/<pid>/environ` as verified free of `GH_TOKEN`. That was true when the outer
+    loop's `run_host` was the only credentialed path, and it stopped being true with
+    `github_credential` (`gateway/wiring/substrate-profiles.ts`): `PROFILE_EPHEMERAL`
+    (disposable trident / agent-dispatch builds) and `PROFILE_WARM_FIRE` (the trident
+    fire seam) both set it, and `gateway/wiring/build-llm-call-substrate.ts` resolves
+    `githubSpawnEnvRef` and merges `GH_TOKEN` plus the credential helper into the spawn
+    env. Stating the retired invariant beside the shipped grant is worse than stating
+    neither, so: the grant is REAL, it is deliberate, and here is what bounds it.
+    - **Why it exists.** Measured on the owner's instance 2026-08-15: without it every
+      enterprise dispatch against a PRIVATE repo built, committed, and then died at
+      `fatal: could not read Username for 'https://github.com'`, burning a full Forge
+      round each time. A build that cannot reach its own remote is not a build.
+    - **What bounds it.** It is a PER-PROFILE decision, not a per-call one, and the
+      profile list is the audit surface: every attacker-influenced trust class
+      (`PROFILE_UNTRUSTED_IMPORT`, `PROFILE_PHASE_SPEC`, `PROFILE_ISOLATED_COMPOSE`,
+      `PROFILE_TOOLLESS_UTILITY`) is explicitly `github_credential: false`, and
+      `__tests__/substrate-profiles.test.ts` freezes that split. Resolution is per
+      spawn, so a rotated credential is never stale and a revoked one is simply gone.
+    - **What is honestly NOT bounded.** The build agent reads the repository it is
+      building, so repo-authored content (a README, a test fixture, a task card) is in
+      the context of a process that holds the owner's token — the same exposure the
+      owner's own `PROFILE_WARM_CHAT` has always had. The scope of the token is the
+      real limit here, not the process boundary. The one boundary that DOES still hold
+      below this is the codex sandbox's, described next: the wrapper's environment may
+      now hold a credential, and the `codex` child is `env -u`'d free of it.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
     MAY reach the network; it says nothing about what environment it is handed.
     `codex exec` filters that (`shell_environment_policy`), defaulting to
     `inherit = "core"` plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*`.
     An earlier version of the wrapper turned both off (`inherit=all` +
     `ignore_default_excludes=true`) to deliver `GH_TOKEN` and `GIT_CONFIG_KEY_0` to the
-    build's push, and that was wrong twice: the credential is wired to trident's OUTER
-    loop only (`open/composer.ts` `run_host`), so the inner workflow that launches the
-    wrapper never had it to inherit — `SPEC.md` records `/proc/<pid>/environ` as
-    verified free of `GH_TOKEN` and `GIT_CONFIG_*` — while clearing the excludes DID
+    build's push, and that was wrong twice: at the time the credential was wired to
+    trident's OUTER loop only (`open/composer.ts` `run_host`), so the inner workflow that
+    launches the wrapper had nothing to inherit — `SPEC.md` records `/proc/<pid>/environ`
+    as verified free of `GH_TOKEN` and `GIT_CONFIG_*` for that build — while clearing the
+    excludes DID
     expose the owner's Anthropic credential, which
     `gateway/wiring/build-import-substrate.ts` puts in that same REPL environment as
     `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It handed the quota this route
@@ -4262,6 +4301,36 @@ not a read receipt; gating on it would silence exactly the case a notification e
 for.
 `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are merely rate-limited.
 
+**But it IS gated on WEB PRESENCE** (2026-08-15), which is the same question asked with a
+real answer instead of an inference. The owner: *"can you also check if I'm actively using
+the web app, and if so dont send push notifications to my phone."* A socket cannot answer
+that — a browser tab holds one open while minimised exactly as Android does — so the web
+client now SAYS so: `chat-core/web-session.ts` sends `{ v:1, type:'presence', state }` on
+every socket open, on every `visibilitychange` (wired at
+`landing/chat-react/useNeutronChat.ts`, which also states the level once on mount because
+`visibilitychange` is an edge), and then repeats `foreground` every
+`WEB_PRESENCE_REFRESH_MS`. The app-ws surface records it per CONNECTION — not per device,
+so two tabs are two screens and closing one does not mark the owner absent — and ONLY for
+`platform=web` sockets, because a native client's foreground is the device's own question
+(`app/lib/push-foreground-policy.ts`, which is untouched and still suppresses the banner
+for the conversation on screen; a push never sent and a push sent-but-not-shown are
+different things).
+
+The decision itself is one wrapper, `suppressPushWhileWebForeground`
+(`gateway/push/web-presence.ts`), applied at the SINGLE `buildChatMessagePushSink`
+construction in `open/composer.ts`, so both pushing paths — `createDeliver`'s `notify` and
+the `ownsNotify` branch of the app-ws send — inherit it and cannot disagree. A suppressed
+push answers `false`, so the row is NOT stamped `delivered_at` and a later re-emit is still
+free to buzz him.
+
+Every uncertain case biases toward NOTIFYING, because the failure this feature can cause is
+SILENCE and nobody notices silence: a `foreground` claim is believed for
+`WEB_PRESENCE_TTL_MS` and no longer (derived as 3× the refresh in
+`wire-types/web-presence.ts`, so the two numbers cannot drift apart), so a browser killed
+without a close frame is forgotten within a minute; an absent tracker, an unknown owner and
+a THROWING presence check all read as not-present; and the decoder refuses any `state` it
+does not recognise rather than treating "not background" as present.
+
 **The tap** (`app/lib/push-deep-link-dispatch.ts`). `agent_message` resolves to
 `/projects/<id>/chat?message_id=<id>`, and the chat route CONSUMES that param:
 `app/app/projects/[id]/chat.tsx` threads it as `targetMessageId`, and
@@ -4324,9 +4393,13 @@ ritual content in chat.
   what must be recorded about it? A `nudge` answer composes the row's stored
   message; a `skipped` answer (the fail-closed verdict) writes a durable
   `code_ritual_runs` 'skipped' row and posts NOTHING; a `fire` answer writes a
-  durable `'running'` row and composes the APPROVED PROMPT — on the owner's own
-  warm `cc-agent-*` session, through the same `llm.compose` call and the same
+  durable `'running'` row and composes the APPROVED PROMPT — on the warm BACKGROUND
+  compose session (`cc-nudge-*`), through the same `llm.compose` call and the same
   `deliver()` outbound a nudge uses — then settles the ledger `finished`/`failed`.
+  That session was `cc-agent-*`, the owner's chat REPL, until 2026-08-16: one
+  aborted compose poisoned it and he could not chat until the service restarted
+  (see the AS_BUILT entry). The lane is still ONE fire path with the live-chat
+  `--tools` surface — it simply no longer runs inside the session he is talking to.
   A `silent` ritual skips the success post; a failure posts one one-line notice and
   escalates once per 3-consecutive-failure streak. `reapOrphanRitualRuns` still
   reaps prior-boot orphaned `'running'` rows to `'crashed'` at boot and prunes runs
@@ -6389,6 +6462,291 @@ Threading the production gateway credential closure into a live
 `TridentDispatch` so boot drives the loop (and the run-creation call site that
 calls `detectRalphMode`) is PR-5.
 
+## Concurrent publishes and the AS_BUILT log — the entry-aware merge driver (`scripts/git/`)
+
+Concurrent builds used to conflict on two shared documents. One is closed: each
+build writes its plan to `.trident/plans/<branch>.md` (#302), so there is no
+shared plan file left to fight over. The other is `docs/AS_BUILT.md`, which is
+**canonical and single by owner lock** (#304) — the split into one file per
+entry was tried and reversed.
+
+That file is newest-first, so every build prepends its entry at the SAME OFFSET
+under the SAME header lines. Two builds therefore write different bytes against
+identical context, which conflicts by construction, not by bad luck: three
+concurrent publishes died on that file and nothing else on 2026-08-15T23:20Z.
+
+The fix is a git merge driver that works on **whole entries**:
+
+- `scripts/git/as-built-log-merge.ts` — the pure three-way merge. It splits each
+  side into a preamble plus `## ` entries, treats an entry present on one side
+  and absent from the base as an ADDITION, and UNIONS the additions. Retained
+  entries keep their existing order (the log is only loosely ordered
+  historically, and re-sorting 300 entries would bury a one-entry change);
+  additions are placed newest-first among them. It is entry-aware and never
+  line-aware on purpose — a `union` driver would interleave two entries, and
+  **every ambiguous case is biased toward refusing.** Concretely, **a removal is
+  honoured only when BOTH sides made it**: a base entry present on one side and
+  absent from the other is a conflict, whatever the surviving side did to it. An
+  earlier rule refused only when a side kept NONE of the base's entries, which
+  let the ordinary failure through — a side truncated to its newest two entries
+  clears a zero-survivor guard with one entry to spare, and every older entry
+  then reads as "deleted by us, untouched by them" and is dropped under a
+  success nobody diffs. Against the real 308-entry log that is 307 entries gone.
+  The zero-survivor guard is still there, ahead of the general rule, only because
+  it names the wholesale-truncation case in a sentence an operator can act on.
+  Entry boundaries ignore `## ` inside a fenced block, and a fence is closed only
+  by its OWN delimiter, at least as long as the one that opened it, with nothing
+  after it: a `~~~` quoted inside a backtick fence used to end the block early,
+  which made the sample heading below it parse as a real entry and let concurrent
+  additions land INSIDE somebody's code block. Fence indentation is bounded at
+  CommonMark's three spaces — `^\s*` accepted any, so a four-space-indented
+  ` ``` ` (which CommonMark reads as ordinary indented-code text) opened a block
+  that swallowed every heading after it. The delimiter's trailing group is
+  `[^\n]*` and **not** `.`, because JavaScript's `.` excludes a carriage return:
+  with `(.*)` the pattern matched **nothing at all** on a CRLF file, so no fence
+  ever opened there and the tracker silently did not run on the one input class
+  where its absence corrupts the file. (Interleaving inside one entry is what
+  produced broken TypeScript in an earlier incident — hence entry-aware.)
+- A refusal also records **whether git may be asked to finish it**
+  (`wouldLoseEntries`). This is the difference between refusing and refusing
+  *effectively*: to a line-based merge a one-sided deletion is a clean hunk, so
+  `git merge-file` resolves it, exits 0 and writes no markers — measured, 3 of 21
+  headings surviving. So a refusal about a MISSING ENTRY is terminated by the
+  driver itself (both sides written whole between conflict markers, non-zero
+  exit, the reason on the marker label), while a textual disagreement — two
+  rewrites of one entry, a diverged header, a file that is not this log — is
+  still delegated, because there git's own three-way is a real answer and is
+  exactly the pre-driver behaviour. **Which kind a refusal is depends on the
+  BASE, not only on the sides.** "Neither side parses as an entry log" was
+  reported as delegable unconditionally — but against an entryful base that is
+  the largest history-loss case in the file, neither side keeping anything, sat
+  one guard above the rule that refuses the strictly smaller case of ONE side
+  keeping nothing. Measured, `git merge-file` conflicts when the two truncations
+  differ and resolves to a file with no entries when they match, so the loud
+  outcome was git's accident rather than the driver's decision.
+- **And the ORDER the refusals are found in is part of that guarantee.** Each one
+  was individually right about its own flag while the function returned whichever
+  the base reached first — so a header disagreement (checked before the base is
+  scanned at all) or a both-sides-rewrote-this-entry refusal from the middle of
+  the scan was returned while a one-sided deletion further down went unexamined,
+  and the driver delegated a file that git then resolved the deletion out of.
+  Measured end to end on a 10-entry base with entry 1 rewritten on both sides and
+  entry 7 dropped from `ours`: markers around entry 1 only, `entry 7` gone, 11
+  headings in and 10 out. A refusal that fires about the wrong thing and loses
+  the entry anyway is indistinguishable from no refusal. A textual refusal is now
+  HELD until both scans complete; a losing one returns immediately, because
+  nothing outranks it.
+- **An undated FIRST entry is "no date", not "the oldest date".** Effective dates
+  carry forward, so the `''` sentinel survives only where nothing before an entry
+  was ever dated — an undated section at the very top of the log. Every addition
+  compares `sortDate >= ''`, so that one entry admitted all of them above it and
+  a dated addition landed OVER an undated preface. An entry with no effective
+  date now orders nothing. Unreachable against the real log, which holds 314
+  entries and ZERO undated ones — the docblocks that said "ten sections carry no
+  date" were last true around `d5ba62b7`, and the correction matters beyond the
+  number: this subsystem has no coverage from the real file and is exercised only
+  by fixtures.
+- An **added undated section** sorts at the date of the entry it continues, not
+  at `''`. Sorting at `''` put it below every real date, i.e. at the very tail of
+  the file, hundreds of entries away from the entry whose text it continues; one
+  added under an entry the base already had is emitted directly after that entry,
+  and one added under an entry **the other side added in the same merge** is
+  folded into that entry's run. The last case is the one an anchor resolved only
+  against base entries could not see: both sides write the same heading, only one
+  writes the follow-up under it, and the section then date-sorted on its own —
+  measured landing ABOVE its own head, because the tie broke on heading bytes.
+- `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls. A
+  TEXTUAL disagreement it will not merge (both sides editing one entry, a
+  diverged header, a file that does not parse as a log) is handed to
+  `git merge-file`, so that floor is exactly today's behaviour: conflict markers
+  a human reads. A refusal about a MISSING ENTRY, and an unexpected throw, are
+  conflicted here instead — see `wouldLoseEntries` above. It also checks `%P`, so
+  a checkout that points `merge=as-built-log` at other paths through its own
+  `.gitattributes` gets git's merge for them rather than this log's semantics.
+  **`%L` is the one input the checkout supplies, and it is clamped.** git derives
+  it from the path's `conflict-marker-size` attribute, which a TRACKED
+  `.gitattributes` in the merged repo sets — verified by handing git a driver
+  that prints `%L` and reading back a committed `2000000`. The conflict this
+  driver constructs writes that many characters three times, so one refusal grew
+  from 302 bytes to 6,000,281, linearly. Capped at 200 (git's default is 7),
+  **on both conflict paths**. The first cut of the cap covered only the
+  constructed conflict and left `git merge-file` handed `%L` unclamped, on the
+  reasoning that the delegated path must stay byte-for-byte what an unconfigured
+  repo does. That reasoning is false here and the next bullet is why: without the
+  driver this path is `merge=union`, which never conflicts at all, so an
+  unconfigured repo writes **zero** markers rather than six megabytes of them.
+  There was no floor property to protect. (git does not bound `%L` either —
+  measured at the same 6 MB from `git merge-file` alone.)
+- `scripts/install-merge-drivers.sh` — installs the driver config AND the
+  binding. **The binding lives in `.git/info/attributes`, not in a tracked
+  `.gitattributes`** — and the reason is the measured one rather than the
+  dramatic one this used to give. There are TWO ways to have the attribute
+  without a working driver and they do not behave alike (git 2.50.1):
+  `merge.<name>.name` set with no `.driver` is `fatal: … lacks command line`,
+  exit 128; **no `merge.<name>.*` config at all is not fatal** — git falls back
+  to its built-in text merge, exit 1 with ordinary markers. A fresh clone is the
+  second state, so a committed attribute would not brick it; it would silently
+  swap the `merge=union` this path gets today for a conflict on every concurrent
+  append, for every outside contributor and for CI, and leave each of them one
+  stray `merge.<name>.name` away from the 128. Untracked, the attribute is never
+  present without the driver it names — the same rule `install-git-hooks.sh`
+  applies to the leak gate and its denylist. The two half-states are also not
+  symmetric: **attribute without driver is the bad half and is impossible**
+  (written last, and removed again if the driver cannot be read back), while
+  **driver without attribute is inert and IS reachable** (a failed `mkdir`/append
+  exits 3 loudly and leaves the config). The guarantee is "never the bad half,
+  always loudly" — not "never a half".
+- **`--check` verifies WHAT is installed, not merely THAT something is.** It used
+  to ask whether `merge.<name>.driver` was non-empty and whether the attribute
+  line was present, and answered "installed" to any command — so a clone that ran
+  an EARLIER version of the installer reported success while still holding that
+  version's command, and the credential scrub and interpreter-isolation flags
+  never reached it. Measured on git 2.50.1 before the fix: install, replace the
+  config value with the predecessor's `bun <driver> %O %A %B %L %P`, leave the
+  attribute alone, and `--check` printed `merge drivers: installed`, exit 0. It
+  now reports `STALE` (exit 1) with both strings and the remedy, and `NOT
+  installed` stays distinct from `STALE`.
+- **…but WHERE the check runs is not part of WHAT is installed.** The first cut
+  of the above compared the whole command byte-for-byte, and two of its words are
+  absolute paths belonging to the shell asking rather than to the hardening: the
+  driver path came from `${BASH_SOURCE[0]}`, and the config it is compared
+  against lives in the COMMON git dir and is shared by every worktree; the bun
+  path came from `command -v` at check time. So a linked worktree reported a
+  correctly-installed clone STALE (measured on git 2.50.1), contradicting the
+  script's own promise that installing once serves every worktree — and following
+  the remedy it printed from a throwaway worktree wrote that worktree's path into
+  the shared config, where it dangled once the worktree was removed. `--check`
+  now reads both paths back OUT of the installed command, feeds them to the same
+  `driver_command` the install uses, and requires the rebuild to reproduce the
+  configured string byte for byte. Every hardening token is still exact; the two
+  free words are validated for what they must BE — the driver is an
+  `as-built-merge-driver.ts` that exists, the bun is a regular executable file
+  whose final component is `bun` — which also catches a dangling command that
+  parses perfectly and cannot run, and means the check no longer needs a bun on
+  `PATH` at all. Install resolves the driver from
+  the MAIN worktree, so a throwaway checkout cannot write a path that dies with
+  it.
+- **…and three things that PARSE correctly still are not an install.** Each of
+  these rebuilt byte-for-byte and reported `installed`. (1) The interpreter was
+  gated on `[ -x ]`, which is true of nearly every file on a unix box:
+  `/usr/bin/true`, the DIRECTORY `/usr/bin`, and `/bin/sh` all passed. That is
+  not cosmetic — git ran `true`, which exits 0 having written nothing to `%A`, so
+  git took the merge as SUCCESSFUL and one side's entries left the log with no
+  conflict and no message (measured on git 2.50.1: the mainline heading present,
+  zero of the side's). The word must now be a regular executable file named
+  `bun`, judged by NAME rather than by running it — executing a binary named in
+  repo config to decide whether it is safe to let git execute it answers the
+  question by doing the thing. The same three conditions apply at install time,
+  so the check can never reject a command the installer wrote. (2) The attribute
+  line's PRESENCE was being read as the path's BINDING; attributes are
+  last-match-wins, so a later `docs/AS_BUILT.md merge=union` overrides the driver
+  while a `grep -x -F` for the installed line still matches. The verdict now
+  comes from `git check-attr`, the resolver git itself uses. (3) The command
+  names the MAIN worktree's copy on purpose, so the path can be current while the
+  CODE behind it is an older revision; the contents are compared against the
+  invoking checkout's copy. That last one reports STALE for a linked worktree on
+  a differing revision, which is true rather than a false alarm, and its message
+  says re-running will NOT change it — the installer would rewrite the same path.
+  `--check` has no programmatic caller (`CONTRIBUTING.md:118-120` and this
+  document describe it as a human command), so no build gates on that verdict.
+
+**What "the repo merges exactly as it does today" means here, precisely.** It is
+**not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,
+which never conflicts and interleaves the two sides line by line. The driver's
+attribute lives in `$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE
+the tracked `.gitattributes` (measured with `git check-attr merge -- <path>` with
+both present), so a successful install genuinely displaces `union`; an
+unsuccessful one leaves `union` in charge, which is worse than a conflict and is
+the honest floor. The tracked line stays, because removing it would hand every
+fresh clone, outside contributor and CI job the conflict storm it was added to
+stop.
+
+`rebaseOntoObservedBase` (`trident/orchestrator.ts`) binds the driver before it
+replays a branch, so build lanes get this without anyone remembering.
+`ensureAsBuiltMergeDriver` writes the same halves the script does — the driver
+config, then the (cosmetic) `merge.<name>.name`, then the attribute, and the
+attribute only if the driver config landed — **directly, and it executes nothing
+out of the checkout**. The command it configures is *this installation's*
+`scripts/git/as-built-merge-driver.ts` under the interpreter already running
+trident, invoked as `bun --config=/dev/null …`.
+
+**That flag is load-bearing, not tidiness.** git runs a merge driver with its cwd
+at the top of the working tree being merged, and bun reads `bunfig.toml` from its
+cwd — so naming a trusted script is not sufficient while the checkout still
+supplies the configuration that script starts under. A repository committing
+`preload = ["./anything.ts"]` had that file executed inside the driver process,
+before any of our code, on every merge of this path. Measured on bun 1.3.9: with
+the preload present the child printed the `GH_TOKEN` it found in its environment;
+with `--config=/dev/null` it printed nothing and the driver still ran. What was
+measured is the **cwd** `bunfig.toml`, which is the one an untrusted checkout
+controls; nothing here depends on the flag's effect on `$HOME`. The
+property to hold is that **nothing the target checkout contains — not a script,
+not a config, not an environment file, not a `PATH` — decides what runs on the
+publisher host.** Both halves of that are pinned with a control that produces the
+credential before the treatment suppresses it
+(`scripts/git/as-built-merge-realgit.test.ts`,
+`trident/as-built-publish-wiring-realgit.test.ts`).
+
+**`--config` does not cover `.env`, and the credential does not belong there at
+all.** bun auto-loads a `.env` from that same cwd — the merged repository —
+independently of `bunfig.toml`; measured on bun 1.3.9, with `--config=/dev/null`
+alone a checkout's `.env` still reached `process.env` inside the driver, and with
+`--env-file=/dev/null` it did not. Separately, the command is prefixed with
+`env -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u
+GIT_CONFIG_VALUE_0`, so the owner's credential and the helper that reads it back
+are simply not in the environment of a process that reads three files and writes
+one. Two independent controls — one over what can get **in**, one over what is
+there to **take** — because "nothing can get in" has already been stated
+confidently and been incomplete twice on this code path. The wiring test proves
+each fails on its own: with the interpreter unconfigured but the credential
+scrubbed, the injected payload still runs and finds nothing.
+
+That matters because the publisher's `run_host` carries the owner's `GH_TOKEN`
+(`open/composer.ts` composes it via `makeLazyCredentialedHostRunner` over
+`github/credential.ts` `githubProcessEnv`). The first cut took the *presence* of
+`scripts/install-merge-drivers.sh` in the checkout as its condition and then ran
+it, so any repository containing a file at that path got it executed on the
+publisher host with the credential that publishes every PR readable from its
+environment. Nothing under the checkout is executed now, at install time or at
+merge time.
+
+Applicability is still decided by what the checkout contains — it needs
+`docs/AS_BUILT.md` **and** `scripts/git/as-built-log-merge.ts` — but both are
+read as data, and what that presence now authorises is only "merge this one path
+with our own reviewed code, or conflict". Repositories failing either are left
+completely untouched.
+
+The standalone `scripts/install-merge-drivers.sh` remains the path for humans
+(`CONTRIBUTING.md`), and enforces the same ordering by hand: it has no `errexit`
+(a `--unset` of an absent key exits 5, a `grep -v` with no output exits 1 — both
+normal there), so each write is checked and both halves are verified before it
+reports success. **The order is what makes the fatal half unreachable rather than
+merely repaired:** `merge.<name>.driver` is written FIRST and nothing else
+happens if it fails, and `merge.<name>.name` — which is only the description
+`git config --get-regexp merge.` prints — is written after and is not fatal.
+Measured on git 2.50.1, a lone `.driver` with no `.name` merges perfectly while a
+lone `.name` with no `.driver` is `lacks command line`, exit 128. The earlier
+version wrote `.name` first and unset it by hand on failure, i.e. it repaired the
+fatal state with a THIRD write that the held `config.lock` causing the failure
+would also have blocked.
+
+Both installers locate `$GIT_COMMON_DIR` with `rev-parse --path-format=absolute`
+and **both fall back to the plain spelling**, resolving a relative answer against
+the repo. That flag arrived in git 2.31 and an older git exits non-zero on it
+rather than ignoring it. The shell installer always had the retry; the
+orchestrator's in-process copy did not, and returned false there — *after*
+`merge.<name>.driver` had been written — so the attribute was never bound, the
+replay went ahead under the tracked `merge=union`, and trident reported the
+driver as unavailable. A downgrade that reports itself as an absence is the shape
+this subsystem keeps producing, so it is now a fallback rather than a return.
+
+Proven against real git, not stubs: `scripts/git/as-built-merge-realgit.test.ts`
+replays two branches onto a moved base and asserts the conflict WITHOUT the
+driver before asserting the clean merge with it, then uninstalls to bring the
+conflict back. `trident/as-built-publish-wiring-realgit.test.ts` drives the real
+publish step and installs nothing itself, so deleting the production call turns
+it red.
+
 ## Agent-dispatch reliability — double-spawn guard + agent-aware watchdog (`runtime/subagent/`)
 
 The substrate-agnostic dispatch layer (`runtime/subagent/`) owns the
@@ -6974,6 +7332,24 @@ chased a non-bug. The string detector + its test were **removed**.
   `reportFailure`, and re-emits it unchanged — so a slow turn is a recoverable
   single-turn retry (the substrate poisons + respawns the warm session) instead
   of parking the credential and cascading into "all credentials in cooldown".
+- **A BACKGROUND lane cannot park the owner's credential (2026-08-16).** The three
+  fast-paths above are per-SYMPTOM: each names one substrate failure that must not
+  be mistaken for a quota condition. A dead REPL child was not on that list, so it
+  fell through to `mapStatusForPoolCooldown(null, retryable)` → 429; five reminder
+  composes reached `MAX_CONSECUTIVE_FAILURES` and parked the box's single
+  credential for an hour, after which every owner chat turn failed instantly with
+  "all Anthropic credentials are in cooldown". The structural guard is a LANE, not
+  another symptom: `BuildLlmCallSubstrateInput.credential_failure_lane`
+  (`'interactive'` by default, `'background'` on `cc-nudge-*`) makes a background
+  failure leave the pool-wide strike ledger entirely alone (`reportFailure`'s
+  `origin`, `runtime/credential-pool.ts`: neither incremented nor re-read, so it can
+  neither trip the hour-long park nor EXTEND one an interactive turn tripped) and
+  decline to report an INFERRED cooldown at all. "Inferred" is drawn strictly: the
+  retryable→429 default, a parsed status the mapper REWRITES (a retryable `HTTP 503`
+  also maps to 429), and `detectCliAuthFailure`, whose weakest rule is the substring
+  `401` anywhere in the prose. A REAL provider status (a 429/402/401 the provider
+  itself returned, or an adapter-stamped `rate_limited`) still cools on either lane —
+  the owner's next turn would meet that wall a second later regardless.
 - **Regression guard.** `dev-channel-pty-bind.e2e.test.ts` spawns claude under a
   real `Bun.spawn({terminal})` PTY and asserts `/channel-bound` fires + a turn
   round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in

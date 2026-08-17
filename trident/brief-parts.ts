@@ -59,9 +59,10 @@ export interface BriefParts {
 }
 
 /**
- * Write launcher-held brief segments by path so they never transit a model.
- * This manifest is consumed by T3 and `NEUTRON_CODEX_BUILD_BRIEF_PARTS` in
- * `codex-build.sh`; it addresses defect 2026-08-13 run `000cedc8`, where a
+ * Write the authoritative launcher-held brief segments by path so they never
+ * transit a model. The workflow args carry their receipts; `codex-build.sh`
+ * consumes the manifest and verifies every part against its receipt before
+ * assembly. This addresses defect 2026-08-13 run `000cedc8`, where a
  * bridge model deterministically dropped about 1,660 bytes while retyping a
  * 26 KB brief. Node's `utf8` encoder also replaces lone surrogates with U+FFFD,
  * so the bytes on disk match the integrity byte count even for malformed input;

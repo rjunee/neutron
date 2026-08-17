@@ -22,6 +22,7 @@ import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { boot } from '../index.ts'
+import type { GraphComposer } from '../boot-composition-types.ts'
 
 const BOOT_SLUG = 'juno'
 const STALE_SLUG = 'dev'
@@ -244,8 +245,204 @@ test('(a3) AMBIGUOUS: a real boot changes nothing, the FRESH value survives, and
   const payloads = systemEventPayloads('credential_scope_orphaned')
   expect(payloads).toHaveLength(1)
   assertNoSecretMaterial(payloads[0]!, ['stale-token', 'fresh-token'])
+  // `reason` distinguishes the two ways this event happens, which needed
+  // opposite operator responses and rendered identically before: AMBIGUOUS data
+  // says "look at your credential rows"; a refused direction says "this process
+  // has no configured handle". Asserted by exact equality, like the rest of this
+  // payload — an audit row that grows a field silently is how one starts
+  // carrying something it should not.
   expect(JSON.parse(payloads[0]!)).toEqual({
     from: [STALE_SLUG],
     orphan_counts: [{ table: 'secrets', handle: STALE_SLUG, rows: 1 }],
+    reason: 'ambiguous_census',
   })
+})
+
+// ── THE FALLBACK BOOT, AT THE AUDIT BOUNDARY ──────────────────────────────
+/**
+ * A review round pointed out the reason field had no boundary coverage: only
+ * `ambiguous_census` was ever asserted, so an inverted branch or a typo in
+ * `fallback_boot_handle_refused_direction` stayed green while the operator got
+ * the wrong instruction — and the wrong instruction here points at the one
+ * action that must not be taken.
+ *
+ * So this boots for real with NO `.url_slug` and no instance slug set, which is
+ * what an anonymous process actually is: `resolveOwnerSlugSourceFromConfig`
+ * returns the documented fallback, and the rows below belong to somebody else.
+ */
+test('a real FALLBACK boot refuses, says why in the audit row, and leaves the rows alone', async () => {
+  const LIVE = 'live-owner'
+  // The log line and the journal payload compute `reason` INDEPENDENTLY, and
+  // the as-built promises both. Asserting only the journal leaves the log free
+  // to be deleted or mistyped with every test still green — and the log is what
+  // an operator actually reads at 3am.
+  const warned: string[] = []
+  const realWarn = console.warn
+  // The distinguishing act: no `.url_slug`, so nothing has told this process
+  // who it is. (`beforeEach` wrote one; an anonymous boot is its absence.)
+  rmSync(join(home, '.url_slug'), { force: true })
+  delete process.env['NEUTRON_INSTANCE_SLUG']
+
+  const seedDb = ProjectDb.open(dbPath)
+  try {
+    const store = new SecretsStore({ data_dir: home, db: seedDb })
+    await store.put({
+      owner_handle: asOwnerHandle(LIVE),
+      kind: 'byo_api_key',
+      label: 'anthropic:prod',
+      plaintext: 'live-token',
+    })
+  } finally {
+    seedDb.close()
+  }
+
+  // The mock goes on INSIDE the try that restores it. Installed before an
+  // `await boot()` that sits outside one, a boot rejection leaks the global into
+  // every later test in the file — which happened during review when listener
+  // creation failed.
+  try {
+    console.warn = (...args: unknown[]): void => {
+      warned.push(args.map(String).join(' '))
+    }
+    const handle = await boot({ port: 0 })
+    try {
+      // The rows are exactly where they were. Asserted on the VALUE, because a
+      // migration that moved and re-encrypted would also leave one row here.
+      const store = new SecretsStore({ data_dir: home, db: handle.db })
+      expect(
+        await store.get({
+          owner_handle: asOwnerHandle(LIVE),
+          kind: 'byo_api_key',
+          label: 'anthropic:prod',
+        }),
+      ).toBe('live-token')
+    } finally {
+      // THE JOURNAL IS READ AFTER THIS, NOT BEFORE. The write is
+      // fire-and-forget and microtask-scheduled (`persistence/system-events.ts`),
+      // so only shutdown's drain makes it durable — reading earlier is a race
+      // that passes on a fast machine and fails on a loaded one, which is the
+      // worst kind of test.
+      await handle.shutdown({ force: true })
+    }
+
+    const names = systemEventNames()
+    expect(names).toContain('credential_scope_orphaned')
+    expect(names).not.toContain('credential_scope_migrated')
+
+    // THE POINT: the reason, by exact equality on the whole payload. A generic
+    // orphan row would send the reader to the migration that just refused.
+    //
+    // THE SHAPE CHANGED WITH INVARIANTS #116(b), AND THE CHANGE IS THE FEATURE.
+    // This used to assert `{from: [LIVE], orphan_counts: [...], reason}` — i.e.
+    // the FROZEN credential handle's NAME and its row count, written under the
+    // booting process's own handle. Both halves were the defect:
+    //   - the SCOPE. `listRecentForScope` is strictly `WHERE project_slug = ?`,
+    //     so a row under the anonymous fallback is one no owner ever reads.
+    //     The row now goes to the handles this database records as its own and,
+    //     only when it records none (this fixture seeds a secret and nothing
+    //     else — no ledger, no onboarding row), falls back to the attempting
+    //     handle, which is the documented floor and exactly what shipped before.
+    //   - the CONTENT. `LIVE` is a foreign handle relative to whatever scope the
+    //     row lands in, and a foreign handle's NAME in an instance-scoped feed
+    //     is the cross-scope disclosure the strict predicate exists to prevent.
+    //     It is reduced to counts, and `attempted_by_slug` carries the one name
+    //     the reader needs to act (`gateway/scope-refusal-journal.ts`).
+    // `refused_direction: true` is what now says WHY in the journal — the thing
+    // this test was added to pin — and the operator-facing log line below still
+    // carries the reason string verbatim.
+    const payloads = systemEventPayloads('credential_scope_orphaned')
+    expect(payloads).toHaveLength(1)
+    assertNoSecretMaterial(payloads[0]!, ['live-token'])
+    expect(JSON.parse(payloads[0]!)).toEqual({
+      refused_direction: true,
+      orphaned_handles: 1,
+      orphaned_rows: 1,
+      orphaned_tables: ['secrets'],
+      attempted_by_slug: 'dev',
+    })
+    // The narrowing, asserted as an ABSENCE and not merely implied by the
+    // equality above: a later field addition that reintroduced the frozen
+    // handle's name would have to delete this line to go green.
+    expect(payloads[0]!).not.toContain(LIVE)
+
+    // AND the operator-facing line carries it too.
+    const orphanLines = warned.filter((l) => l.includes('credential_scope_orphaned'))
+    expect(orphanLines.length).toBeGreaterThan(0)
+    expect(orphanLines.join('\n')).toContain('fallback_boot_handle_refused_direction')
+  } finally {
+    console.warn = realWarn
+  }
+})
+
+// ── THE BOOT → COMPOSER HANDOFF ───────────────────────────────────────────
+/**
+ * A review round found the last hole in this chain: `GraphComposer`'s
+ * `slug_is_fallback` is OPTIONAL, so deleting the property at the boot handoff
+ * still typechecks — and every configured production boot then reaches the
+ * composer with `undefined`, which normalises to fallback and silently refuses
+ * to migrate. The provenance test one layer down cannot see it, because it calls
+ * the composer with literal booleans rather than being handed them by boot.
+ *
+ * The failure is invisible by construction: the wrong answer and the safe
+ * default are the same value. So the only thing that can catch it is a REAL boot
+ * with a composer that records what it was actually given.
+ */
+async function bootCapturingProvenance(): Promise<boolean | undefined> {
+  let seen: boolean | undefined
+  const handle = await boot({
+    port: 0,
+    composer: (({ db, slug_is_fallback }: { db: ProjectDb; slug_is_fallback?: boolean }) => {
+      seen = slug_is_fallback
+      // Deliberately the narrowest object boot will accept, and cast rather
+      // than filled out: this test is about WHAT BOOT HANDS THE COMPOSER, and
+      // fabricating a whole composition to satisfy the type would add a large
+      // fixture whose every field is irrelevant to the one assertion.
+      //
+      // Hand BACK the db boot gave us rather than opening another: `shutdown`
+      // closes only boot's own connection, so a second one leaks per test.
+      return { db, project_slug: BOOT_SLUG }
+    }) as unknown as GraphComposer,
+  })
+  await handle.shutdown({ force: true })
+  return seen
+}
+
+test('a CONFIGURED boot hands the composer a configured provenance', async () => {
+  // `beforeEach` wrote `.url_slug`, so this boot knows who it is.
+  expect(await bootCapturingProvenance()).toBe(false)
+})
+
+test('a FALLBACK boot hands the composer a fallback provenance', async () => {
+  rmSync(join(home, '.url_slug'), { force: true })
+  delete process.env['NEUTRON_INSTANCE_SLUG']
+  expect(await bootCapturingProvenance()).toBe(true)
+})
+
+test('an EMPTY instance slug is anonymous, not configured', async () => {
+  // Review repro: `NEUTRON_INSTANCE_SLUG=''` classified as `source:'env'`, so the
+  // guard read `false` and the explicit migration moved rows onto the empty
+  // handle. An empty variable is not an identity.
+  rmSync(join(home, '.url_slug'), { force: true })
+  process.env['NEUTRON_INSTANCE_SLUG'] = '   '
+  try {
+    expect(await bootCapturingProvenance()).toBe(true)
+  } finally {
+    delete process.env['NEUTRON_INSTANCE_SLUG']
+  }
+})
+
+test('an EXPLICIT dev is configured, not a fallback — the two look identical and are opposite', async () => {
+  // The contract's whole point: `'dev'` is both the fallback string AND a slug
+  // someone may deliberately configure. Boot coverage tested configured `juno`,
+  // absent input and whitespace — never the one case where the safe answer and
+  // the wrong answer are the SAME STRING, so misclassifying a deliberately
+  // configured `dev` as anonymous would have stayed green while quietly
+  // refusing every migration on a machine that is configured exactly that way.
+  rmSync(join(home, '.url_slug'), { force: true })
+  process.env['NEUTRON_INSTANCE_SLUG'] = 'dev'
+  try {
+    expect(await bootCapturingProvenance()).toBe(false)
+  } finally {
+    delete process.env['NEUTRON_INSTANCE_SLUG']
+  }
 })

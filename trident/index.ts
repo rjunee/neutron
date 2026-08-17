@@ -60,9 +60,16 @@ export {
   isGithubRemoteUrl,
   cleanupAfterMerge,
   spawnCapture,
+  unwiredPublisherCredential,
+  describePublisherAuthFailure,
 } from './git-mode.ts'
 export type {
   GitModeProbe,
+  PublisherIdentity,
+  PublisherCredentialSource,
+  PublisherAuthResult,
+  PublisherAuthFailureCause,
+  EnvCapableHostRunner,
   RalphModeProbe,
   HostCommandResult,
   MergeCleanupDeps,
@@ -99,6 +106,22 @@ export {
   TridentMergeConflictEscalation,
 } from './merge.ts'
 export type { RunHostCommand, MergeConflictResolver } from './merge.ts'
+
+export {
+  buildFableArbiter,
+  assertArbitrableOptions,
+  isOwnerOnlyQuestion,
+  ARBITER_TOOL_NAMES,
+  FORBIDDEN_OPTION_IDS,
+  DEFAULT_ARBITER_CAP,
+} from './arbiter.ts'
+export type {
+  TridentArbiter,
+  ArbitrationInput,
+  ArbitrationOption,
+  ArbitrationOutcome,
+  ArbitrationRecord,
+} from './arbiter.ts'
 
 export {
   buildTridentOrchestrator,

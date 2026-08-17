@@ -135,7 +135,8 @@ export interface ReminderTopicResolver {
 }
 
 /**
- * The fire-time composition seam. Production wraps the warm CC substrate via
+ * The fire-time composition seam. Production wraps the warm BACKGROUND CC
+ * substrate (`cc-nudge-*`, never the owner's chat REPL) via
  * `buildSubstrateReminderLlm`; tests inject a deterministic fake. `null`/absent
  * → the dispatcher composes nothing and posts the literal degrade body.
  *
@@ -151,20 +152,24 @@ export interface ReminderLlm {
 /**
  * Tool surface for a fire-time composition turn.
  *
- * ⚠️ THIS MUST MATCH THE OWNER'S LIVE-CHAT SURFACE, and matching it is not a
- * style choice — it is what makes a fired reminder land ON the owner's warm
- * session instead of destroying it. The persistent-REPL reuse guard compares the
- * requested `--tools` surface against the one the warm child was spawned with and,
- * on a mismatch, EVICTS the child and respawns it
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). This dispatcher
- * composes on `liveAgentSubstrate` — the SAME substrate the live chat uses, and
- * the only one carrying the native-MCP tool bridge — so a narrower surface here
- * would tear down the owner's chat REPL on every fire, and his next chat turn
- * would tear it down again.
+ * ⚠️ A FIRED REMINDER NO LONGER COMPOSES ON THE OWNER'S CHAT REPL. It composes on
+ * the dedicated background substrate (`cc-nudge-*`, `open/wiring/substrates.ts`),
+ * because an aborted or crashed compose on a SHARED session poisons that session —
+ * measured 2026-08-17, when one aborted compose evicted the owner's warm child and
+ * he could not chat until the service was restarted. Matching the chat surface can
+ * prevent an eviction from a `--tools` MISMATCH; it cannot prevent an eviction from
+ * a FAILURE, which is why the substrate is separate now.
  *
- * So the production composition passes the live-agent surface explicitly (the
- * composer threads `tool_names`), and this default exists only for callers with
- * no live-chat substrate at all, where there is no warm child to thrash.
+ * The surface still has to be CONSTANT — the persistent-REPL reuse guard evicts a
+ * child whose requested `--tools` differs from the one it was spawned with
+ * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`) — and every caller of
+ * `cc-nudge-*` must therefore agree on it. Production passes
+ * `LIVE_AGENT_TOOL_NAMES` explicitly, now for CAPABILITY rather than session
+ * matching: a ritual composes through this seam and cannot apply its own surface, so
+ * the web egress its approval prompt names exists only if this list carries it.
+ *
+ * This default exists for callers that wire no surface at all (tests, an instance
+ * with no model credential).
  */
 const DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep'] as const
 
@@ -218,9 +223,10 @@ export interface BuildReminderDispatcherInput {
   /** Topic id used when no resolver is wired and a reminder has no destination. */
   general_topic_id?: string
   /**
-   * The composition tool allow-list. Production MUST pass the owner's live-chat
-   * surface — see {@link DEFAULT_TOOL_NAMES} for why a mismatch evicts the warm
-   * session rather than restricting the turn.
+   * The composition tool allow-list for the background `cc-nudge-*` REPL. Must be
+   * CONSTANT across every caller of that substrate — see {@link DEFAULT_TOOL_NAMES}
+   * for why a varying surface thrashes the warm child rather than restricting the
+   * turn, and for why production passes the live-chat list.
    */
   tool_names?: ReadonlyArray<string>
   /**
@@ -361,12 +367,41 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
     return result.body
   }
 
+  /**
+   * Say WHICH degrade route fired, on the sink that demonstrably reaches
+   * production logs. The three routes below all collapse into the same
+   * degraded post, and until this line existed the only visible trace of a
+   * failed composition was the downstream `nudge_refused` guard — which fires
+   * only when the degrade body is ALSO over the intent bound, and names the
+   * guard rather than the cause. The per-route `log(...)` lines already
+   * existed but default onto `dispatcherLog.debug` (see the `log` default
+   * above), and the production log level is `info` (`logger/index.ts`
+   * `DEFAULT_LEVEL`), so on a live box they are dropped and three routes are
+   * indistinguishable — a real fired-and-degraded night was undiagnosable from
+   * the journal. One structured `warn` per degrade, `route` discriminating,
+   * carrying NO bytes of the owner's stored intent (the `reason` is the
+   * substrate's error, bounded; the intent never enters it).
+   */
+  function warnDegraded(
+    reminder: Reminder,
+    route: 'no_llm' | 'compose_failed' | 'over_max_body_chars',
+    fields: { reason?: string; composed_chars?: number } = {},
+  ): void {
+    dispatcherLog.warn('nudge_degraded', {
+      reminder: reminder.id,
+      route,
+      ...(fields.reason !== undefined ? { reason: fields.reason.slice(0, 400) } : {}),
+      ...(fields.composed_chars !== undefined ? { composed_chars: fields.composed_chars } : {}),
+    })
+  }
+
   async function compose(
     reminder: Reminder,
     shape: ReminderShape,
     project_id: string,
   ): Promise<string> {
     if (llm === null) {
+      warnDegraded(reminder, 'no_llm')
       return fallbackBody(reminder, shape)
     }
     {
@@ -391,6 +426,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
         max_tokens,
       })
       if (!outcome.ok) {
+        warnDegraded(reminder, 'compose_failed', { reason: outcome.reason })
         log(`reminder ${reminder.id} composed nothing (${outcome.reason}) — using literal fallback`)
         return fallbackBody(reminder, shape)
       }
@@ -399,6 +435,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       // thrown compose: fall through to the bounded degrade. Never post it, and
       // never truncate-and-post (a truncated intent is still the intent).
       if (outcome.text.length > MAX_NUDGE_BODY_CHARS) {
+        warnDegraded(reminder, 'over_max_body_chars', { composed_chars: outcome.text.length })
         log(
           `reminder ${reminder.id} composed ${outcome.text.length} chars, over MAX_NUDGE_BODY_CHARS (${MAX_NUDGE_BODY_CHARS}) — refusing the composed body, using literal fallback`,
         )
