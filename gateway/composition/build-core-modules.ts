@@ -528,7 +528,8 @@ export function buildCoreModules(
       // skip delivery nor un-terminate the run (the loop already transitioned
       // it). Composed with any skill-forge observer into one observer fn.
       const boardReconcile = buildBoardReconcileObserver(input.work_board?.store) ?? undefined
-      const observers = [boardReconcile, runTerminalObserver].filter(
+      // #335 — register the same terminal-build wake observer in the tick-loop chain.
+      const observers = [boardReconcile, runTerminalObserver, tridentWiring?.on_terminal_wake].filter(
         (o): o is (run: TridentRun) => Promise<void> => o !== undefined,
       )
       // §F6a — the SAME assembly the out-of-band `terminate()` chokepoint uses,

@@ -281,6 +281,7 @@ import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-swee
 import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
+import { buildTerminalBuildWakeObserver } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
 import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
@@ -4144,6 +4145,39 @@ export function buildOpenGraphComposer(
       projectId !== null && projectId.length > 0
         ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
         : appWsTopicId(OWNER_USER_ID)
+    // #335 WIRING — the terminal-build wake observer, constructed ONCE and
+    // registered at ALL THREE composeTerminalHook sites (both terminator binds
+    // below + the tick loop via `trident.on_terminal_wake`), so a cancelled build
+    // wakes the agent exactly like a loop-reaped one (§F6a). Claim-first:
+    // `claimAgentWake` is the single writer of `agent_waked_at`, so redelivery /
+    // boot-replay / a second site observing the same row compose ZERO duplicate
+    // turns. Registered LAST in each chain so the multi-minute wake compose never
+    // delays board reconcile or skill-forge; by then the reconcile has usually
+    // detached `linked_run_id`, so the prompt's "Board item id" is commonly
+    // "none" (a module-supported shape) — the wake turn still carries run id /
+    // branch / task and has board tools to locate the item. Accepted tradeoff.
+    const terminalBuildWake = buildTerminalBuildWakeObserver({
+      claimWake: (id) => boardRunStore.claimAgentWake(id),
+      boardItemIdForRun: async (run) => workBoardStore.getByRunId(run.project_slug, run.id)?.id ?? null,
+      // The SAME background `cc-nudge-*` seam the fired-reminder + work-wakeup
+      // paths compose through — never the owner's chat REPL. Null when LLM-less
+      // → the observer returns before claiming (module-tested).
+      llm:
+        reminderComposeSubstrate === null
+          ? null
+          : { compose: (spec, opts) => buildSubstrateReminderLlm(reminderComposeSubstrate).compose(spec, opts) },
+      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? 'general',
+      // Durable inert row + live push to the run's own chat; buzz only when loud.
+      post: async (run, reply, opts) => {
+        const result = await deliver(run.chat_id ?? tridentDeliveryChatId(null), {
+          body: reply,
+          durability: 'inert',
+          ...(opts.loud ? {} : { notify: 'suppress' as const }),
+        })
+        return result.persisted
+      },
+      logger: log,
+    })
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT
@@ -5724,7 +5758,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5745,7 +5779,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -6478,6 +6512,7 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: tridentOnRunTerminal,
+              on_terminal_wake: terminalBuildWake,
               // PULL launcher-death detection covers missed push events instead
               // of leaving the lane occupied until the 90-minute reaper.
               probe_launcher_alive: buildTridentLauncherLivenessProbe(),
