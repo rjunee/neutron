@@ -994,10 +994,9 @@ count, and floors a negative at zero.
 **The fourth park was the one nothing tested.** #375's own log claimed the fix was
 "applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
 strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
-pair left every existing test green (the review counted 124 across four suites; that
-is its measurement, and what is re-measured here is that the revert is now red),
-because reaching that branch needs a
-standing park LONGER than the hour — which only a `retry-after` produces — while the
+pair left every existing test green (the review counted 124 across four suites; that is
+its measurement, and what is re-measured here is that the revert is now red), because
+reaching that branch needs a standing park LONGER than the hour — which only a `retry-after` produces — while the
 owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
 says wait two hours, in-flight turns fail their way to the threshold, and the strike
 park would then release the credential 60 minutes into a 120-minute window the
