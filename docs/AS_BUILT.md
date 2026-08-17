@@ -77,6 +77,17 @@ third silent), and the sweep's counters are logged every tick — they were bein
 returned and dropped by their only production caller, which made the claim that
 the rate limit "never costs the fact" true of a number nothing printed.
 
+One last thing came out rather than in. The selection input carried a
+`no_advance_hang_ms` override documented as a test seam, and NO CALLER EVER SET IT
+— not production, not a test. Its docstring said production used the reaper's bare
+`NO_ADVANCE_HANG_MS`, which by then was the one number a review had already refused
+as this threshold: production actually defaults to `WAKEUP_STAND_DOWN_MS`, the
+reaper's value PLUS the margin that is the whole safety argument above. So the
+parameter was unexercised and its comment pointed at the rejected reading — a
+reader following it would conclude the fix had not landed. Both are gone; the
+ordering that matters is asserted on the constants themselves in
+`run-driving.test.ts`, which is a claim that cannot rot the way a sentence can.
+
 ## 2026-08-16 — the identity-trim claim was true and unexecuted, so CI now runs it
 
 Landed via PR #349.

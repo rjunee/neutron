@@ -52,8 +52,6 @@ export interface WakeupSelectionInput {
   /** The instance owner's slug — General's board key (`workBoardProjectIdForKey`). */
   owner_slug: string
   now_ms: number
-  /** Test seam; production uses `NO_ADVANCE_HANG_MS` (see `run-driving.ts`). */
-  no_advance_hang_ms?: number
 }
 
 /**
@@ -93,7 +91,17 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
     // wakeable.
     const run = linked !== null && linked.project_slug === item.project_slug ? linked : null
     if (run !== null) {
-      const verdict = runDrivingVerdict(run, input.now_ms, input.no_advance_hang_ms)
+      // No threshold override: the stand-down number is a SAFETY ORDERING, not a
+      // tuning knob. `runDrivingVerdict` defaults to `WAKEUP_STAND_DOWN_MS`, which
+      // is the reaper's `NO_ADVANCE_HANG_MS` plus a deliberate margin so the reaper
+      // answers first for every run it can reach (`run-driving.ts` header). An
+      // earlier cut exposed a `no_advance_hang_ms` seam here that no caller — test
+      // or production — ever set, and whose docstring named the bare reaper
+      // constant: the exact number a review had already refused as the threshold.
+      // A parameter nothing exercises cannot be right; the ordering is pinned by a
+      // test instead (`run-driving.test.ts`, "the stand-down threshold is STRICTLY
+      // above the reaper, by more than a sweep").
+      const verdict = runDrivingVerdict(run, input.now_ms)
       if (verdict.driving) {
         ensure(item.project_slug).deferred.push({
           title: item.title,
