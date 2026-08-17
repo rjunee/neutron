@@ -125,14 +125,27 @@ const NO_BUILD_IDENTITY = '(not discoverable — the build carried no git metada
  */
 const PREDATES_TREE_VERIFICATION = '(not recorded — row predates deployed-tree verification)'
 
-/** `tree_provenance` for a file the deployed tree demonstrably tracks. */
-const TRACKED_IN_DEPLOYED_TREE = 'tracked'
+/**
+ * `tree_provenance` for a file the deployed checkout demonstrably tracks.
+ *
+ * THE VALUE NAMES ITS OWN EVIDENCE, and that is deliberate. What was checked is
+ * git's INDEX — the staged tree — so the honest claim is "this checkout tracks
+ * the file", not "the deployed commit contained it". The two differ for a file
+ * that was `git add`ed and never committed, which this value therefore covers;
+ * `git-index.ts`'s header argues why closing that last gap would mean a packfile
+ * reader on the boot path, and why the guard is worth having without it. A row
+ * that overclaimed (`tracked`, reading as "in the commit") would be the worse
+ * outcome: these columns exist so a later investigation can trust them, and a
+ * forensic value that has to be discounted is no better than a NULL.
+ */
+const TRACKED_IN_DEPLOYED_TREE = 'tracked-in-index'
 
 /**
  * `tree_provenance` for a file whose membership of the deployed tree could not
  * be established, and the reason it could not. The prefix is the contract:
- * anything that does not equal `tracked` is unverified, and a reader can test
- * for it without enumerating every reason this or a future version can produce.
+ * anything that does not equal `tracked-in-index` is unverified, and a reader can
+ * test for it without enumerating every reason this or a future version can
+ * produce.
  */
 function unverifiedTreeProvenance(reason: string): string {
   return `unverifiable:${reason}`
@@ -219,25 +232,43 @@ function formatNameMismatch(
 }
 
 /**
- * The thrown message for a migration file the deployed tree does not track.
+ * The thrown message for a migration file the deployed checkout does not track.
  *
  * Same self-diagnosing shape as the mismatch above, and for the same reason: the
  * operator reading this has a boot that will not come up, and everything needed
- * to decide should be in front of them. Two things this message must get right.
+ * to decide should be in front of them. Three things this message must get right.
  *
- * It states that NOTHING WAS APPLIED. This refusal happens before any write, so
- * deleting a stray file is a complete fix — and an operator who fears the
- * database is half-migrated will reach for something more destructive.
+ * It states that NOTHING WAS WRITTEN, and that claim is load-bearing: an operator
+ * who fears the database is half-migrated will reach for something more
+ * destructive than deleting a file. It is also a claim the code has to EARN — the
+ * call site resolves the tree before the acknowledged-repair writes and before
+ * the ledger is created or reshaped, precisely so this sentence is true. An
+ * earlier revision of this message asserted it while `_migration_repairs` DDL ran
+ * first; on an instance carrying acknowledged repairs (this repository has two)
+ * that made the message wrong in exactly the incident-recovery state where it is
+ * read.
  *
  * It names the tracked SIBLINGS. A refusal that only says "not tracked" is
  * indistinguishable from a check that has broken and is refusing everything —
  * the exact failure a fail-closed boot gate must let the operator rule out in
  * one read. The count is the check's own positive control.
+ *
+ * It is HONEST ABOUT ITS EVIDENCE. The check reads git's index, so `git add`
+ * alone satisfies it while only a commit makes the file survive the next
+ * checkout — which is the failure being prevented. The remedy says both, because
+ * "COMMIT it" alone describes a stricter check than the one that just fired.
+ *
+ * `recorded` is the row already at this ordinal, when there is one. Then the file
+ * ALSO reads as a name mismatch, and that is the presentation the last outage
+ * arrived in — with a remedy (a `repairs.json` entry) that would acknowledge a
+ * row against a file the repository does not track. This refusal takes
+ * precedence, and says why.
  */
 function formatUntrackedMigration(
   migration: Migration,
   tree: { readonly dirPrefix: string; readonly tracked: ReadonlySet<string> },
   deployedCommit: string | null,
+  recorded: RecordedMigration | null,
 ): string {
   return [
     `Migration file ${migration.fileName} is present in the migrations directory but is NOT part of ` +
@@ -249,28 +280,48 @@ function formatUntrackedMigration(
     '  deployed tree',
     `    build   ${deployedCommit ?? NO_BUILD_IDENTITY}`,
     `    tracked ${tree.tracked.size} file(s) in this directory, and this is not one of them`,
+    ...(recorded === null
+      ? []
+      : [
+          '  recorded',
+          `    name    ${recorded.name}`,
+          `    applied ${formatAppliedAt(recorded.applied_at)}`,
+        ]),
     '',
-    'NOTHING HAS BEEN APPLIED and nothing has been written — this refusal happens before the first',
-    'write, so the database is exactly as it was.',
+    'NOTHING HAS BEEN APPLIED and nothing has been written — no migration ran, no _migrations row',
+    'was written, the ledger was not reshaped, and no repair was acknowledged. This refusal is',
+    'resolved before the first write, so the database is exactly as it was.',
     '',
     'An untracked file here is not a harmless extra. It would be applied at boot and recorded in',
     '_migrations PERMANENTLY, and then disappear with the next checkout, leaving a ledger row that',
     'names a migration this repository never contained. Every later boot then refuses on a mismatch',
     'that cannot be explained from anything on disk. That is how the last outage started.',
+    ...(recorded === null
+      ? []
+      : [
+          '',
+          `Ordinal ${migration.version} is ALREADY recorded, under the name "${recorded.name}", so this file also`,
+          'reads as a name mismatch — which is the shape the last outage was reported in. Do not resolve',
+          'it that way: a migrations/repairs.json entry here would acknowledge a row against a file this',
+          'repository does not track, which is the disease rather than the cure. Deleting the stray',
+          'clears the mismatch outright.',
+        ]),
     '',
     'Resolve by ONE of:',
     '  - DELETE the file, if it is a stray — a scratch copy, an editor artifact, a leftover from',
     '    another branch, something written into this directory by another process.',
-    '  - COMMIT it to the deployed tree, if it is a real migration, then boot again.',
+    '  - ADD AND COMMIT it, if it is a real migration, then boot again. Both halves matter: this',
+    "    check reads git's index, so `git add` is what satisfies it, and only the commit makes the",
+    '    file outlive the next checkout — which is the failure the refusal exists to prevent.',
     '',
     'Do NOT reach for migrations/repairs.json. Those entries acknowledge a name mismatch on a row',
-    'that is already recorded; nothing is recorded here, and there is nothing to repair.',
+    'whose file this tree DOES contain; that is not the situation here.',
   ].join('\n')
 }
 
 /**
  * Provenance columns on `_migrations`, added additively and forward-only.
- * Both are nullable: rows written before this shipped are pre-existing and
+ * All three are nullable: rows written before each shipped are pre-existing and
  * stay NULL, which is the honest record — nobody knows what build applied
  * them, and that is exactly the problem this closes going forward.
  */
@@ -290,15 +341,31 @@ function ledgerColumns(db: Database): Set<string> {
   )
 }
 
+/** Whether `_migrations` exists yet. A fresh database has no ledger at all. */
+function ledgerExists(db: Database): boolean {
+  return (
+    db
+      .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_migrations'")
+      .get() !== null
+  )
+}
+
 /**
- * Read the ledger without requiring it to have been reshaped first.
+ * Read the ledger without requiring it to exist or to have been reshaped first.
  *
  * A ledger written before provenance shipped has neither column, so the select
  * list is built from what is actually there and the rest is selected as NULL —
- * which is also the honest value. This exists so that DECIDING costs no write:
- * the mismatch check reads the ledger and can refuse having touched nothing.
+ * which is also the honest value. A database that has never been migrated has no
+ * table, which reads as an empty ledger.
+ *
+ * This exists so that DECIDING costs no write. Both refusals — a name mismatch
+ * and an untracked file — read the ledger and can then refuse having touched
+ * nothing whatsoever, including on a fresh database where `CREATE TABLE` would
+ * otherwise have been the one write standing between the message's claim and the
+ * truth.
  */
 function readLedger(db: Database): Map<number, RecordedMigration> {
+  if (!ledgerExists(db)) return new Map()
   const present = ledgerColumns(db)
   const provenance = PROVENANCE_COLUMNS.map(([column]) =>
     present.has(column) ? column : `NULL AS ${column}`,
@@ -314,8 +381,9 @@ function readLedger(db: Database): Map<number, RecordedMigration> {
 }
 
 /**
- * Bring `_migrations` up to the current shape. Called ONLY on the path that is
- * about to write a row — see the call site for why that ordering is load-bearing.
+ * Create `_migrations` and bring it up to the current shape. Called ONLY on the
+ * path that is about to write a row — see the call site for why that ordering is
+ * load-bearing.
  *
  * WHY THIS IS NOT A `NNNN_*.sql` MIGRATION, which is the obvious place for it:
  * `_migrations` is the ledger, and the runner is its sole owner — it is
@@ -335,7 +403,14 @@ function readLedger(db: Database): Map<number, RecordedMigration> {
  * no-op because `pragma_table_info` is consulted first (SQLite has no
  * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
  */
-function ensureProvenanceColumns(db: Database): void {
+function ensureLedgerShape(db: Database): void {
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS _migrations (
+       version INTEGER PRIMARY KEY,
+       name TEXT NOT NULL,
+       applied_at REAL NOT NULL
+     )`,
+  )
   const present = ledgerColumns(db)
   for (const [column, type] of PROVENANCE_COLUMNS) {
     if (present.has(column)) continue
@@ -360,8 +435,10 @@ function ensureProvenanceColumns(db: Database): void {
  * proven tracked (the alternative threw), and on the `unverifiable` path nothing
  * about any of them could be established.
  *
- * NULL only when nothing is pending, which is also the only case where no row is
- * written. It is not "unknown" — it is "no run happened".
+ * The caller passes NULL when nothing is pending, which is also the only case
+ * where no row is written. That is not "unknown" — it is "no run happened". Note
+ * the tree can be resolved for a name mismatch with nothing pending at all; the
+ * verdict then describes no row and the call site drops it.
  */
 function treeProvenanceOf(tree: DeployedTree | null): string | null {
   if (tree === null) return null
@@ -428,13 +505,6 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // gets it asserted here before any work. The bootstrap SQL also sets it for direct sqlite CLI
   // runs; both paths are required.
   db.exec('PRAGMA foreign_keys = ON')
-  db.exec(
-    `CREATE TABLE IF NOT EXISTS _migrations (
-       version INTEGER PRIMARY KEY,
-       name TEXT NOT NULL,
-       applied_at REAL NOT NULL
-     )`,
-  )
   const seen = readLedger(db)
   const migrations = loadMigrations(dir)
   assertUniqueMigrationOrdinals(migrations)
@@ -444,19 +514,89 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
       repair,
     ]),
   )
+
+  // EVERY REFUSAL IS DECIDED BEFORE THE FIRST WRITE, and the whole block below is
+  // ordered around that. Nothing here mutates the database: the ledger has not
+  // been created or reshaped (`readLedger` tolerates its absence), no repair has
+  // been acknowledged, no migration has run. That is what lets both refusal
+  // messages state that the database is untouched — a guard whose job is to
+  // change nothing must actually change nothing, and the untracked message says
+  // so in as many words. It also keeps `applyMigrations` a pure READ for a
+  // fully-migrated database, which is what makes opening a backup read-only to
+  // inspect it work.
+  const pendingMigrations = migrations.filter((m) => !seen.has(m.version))
+  const pending = pendingMigrations.length > 0
+  // A MISMATCH NEEDS THE TREE VERDICT TOO. Until this was true, an untracked
+  // stray landing on an ordinal that is ALREADY recorded surfaced as a name
+  // mismatch — whose remedy is a `repairs.json` entry naming a file the tree does
+  // not track, which the sibling message correctly calls the disease. That was
+  // not hypothetical: it is how ordinals 122 and 124 presented on the live
+  // instance, and it is why the remedy applied there was the harder one.
+  const mismatched = migrations.some((m) => {
+    const recorded = seen.get(m.version)
+    return recorded !== undefined && migrationNameMismatch(recorded.name, m.name)
+  })
+  // Both provenance reads happen ONCE per run, and only when there is something
+  // to decide, so a steady-state boot (every migration recorded, no mismatch) does
+  // no filesystem work at all. `dir` is the search origin: for the instance tree
+  // that walks up to the checkout's `.git`, and for a sidecar tree
+  // (`migrations/comments`) it finds the same one.
+  const decidable = pending || mismatched
+  const deployedCommit = decidable ? resolveDeployedCommit(process.env, dir) : null
+  const tree = decidable ? resolveDeployedTree(dir) : null
+  // The tracked-file list, or null when there is none to compare against. A
+  // `null` here is "cannot verify" and refuses nothing — see `resolveDeployedTree`.
+  const verified = tree !== null && tree.kind === 'verified' ? tree : null
+  /**
+   * The tree verdict WHEN IT REFUSES this file, else null.
+   *
+   * Returning the verdict rather than a boolean is what lets the caller pass it
+   * straight to the message: a bare `untracked` flag would leave the tree's type
+   * unnarrowed at exactly the point the message needs `dirPrefix` and the tracked
+   * count off it.
+   */
+  const refusesFile = (m: Migration): typeof verified =>
+    verified !== null && !verified.tracked.has(m.fileName) ? verified : null
+
   const acknowledged = new Map<number, MigrationRepair>()
   const today = new Date().toISOString().slice(0, 10)
   for (const migration of migrations) {
+    // A file that is present but untracked is not a migration this build
+    // contains, and applying it writes a permanent ledger row for something that
+    // will not exist after the next checkout. Fail closed, name the file.
+    const untracked = refusesFile(migration)
     const recorded = seen.get(migration.version)
-    if (recorded === undefined || !migrationNameMismatch(recorded.name, migration.name)) continue
-    const repair = repairs.get(repairKey(migration.version, recorded.name, migration.name))
-    if (!repair) {
-      // Fail closed, exactly as before: refuse, apply nothing, rename nothing.
-      // Only the message got better.
-      throw new Error(formatNameMismatch(migration, recorded, today))
+    if (recorded === undefined) {
+      // PENDING. Only pending files can be refused for being untracked: a row
+      // already recorded is already permanent, and refusing forever over a stray
+      // applied long ago would be a boot outage with no remedy. This guard's job
+      // is to stop the silent APPLY, which is the only moment damage is done.
+      if (untracked !== null) {
+        throw new Error(formatUntrackedMigration(migration, untracked, deployedCommit, null))
+      }
+      continue
     }
-    acknowledged.set(migration.version, repair)
+    if (!migrationNameMismatch(recorded.name, migration.name)) continue
+    const repair = repairs.get(repairKey(migration.version, recorded.name, migration.name))
+    if (repair) {
+      // An acknowledged repair wins even over the untracked verdict. The entry is
+      // an explicit, hand-verified operator decision about this exact ordinal, and
+      // overriding it would turn a documented recovery into an outage with no
+      // remedy — which is the failure mode every rule here is written against.
+      acknowledged.set(migration.version, repair)
+      continue
+    }
+    // Fail closed either way; what improved is WHICH diagnosis is given. An
+    // untracked file at a recorded ordinal is the stray, not a rename, and its
+    // remedy is deletion rather than a repairs entry.
+    throw new Error(
+      untracked !== null
+        ? formatUntrackedMigration(migration, untracked, deployedCommit, recorded)
+        : formatNameMismatch(migration, recorded, today),
+    )
   }
+
+  // ---- Past this line, and not before it, the database is written to. ----
 
   if (acknowledged.size > 0) {
     db.exec(
@@ -479,41 +619,19 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   }
   const applied: number[] = []
   const skipped: number[] = []
-  // Both provenance reads happen ONCE per run, and only when there is something
-  // to apply, so a steady-state boot (every migration already recorded) does no
-  // filesystem work at all. `dir` is the search origin: for the instance tree
-  // that walks up to the checkout's `.git`, and for a sidecar tree
-  // (`migrations/comments`) it finds the same one.
-  const pendingMigrations = migrations.filter((m) => !seen.has(m.version))
-  const pending = pendingMigrations.length > 0
-  const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
-  // Whether the files about to be applied are part of the deployed tree, or why
-  // that could not be established. Read BEFORE the ledger is reshaped, so the
-  // refusal below costs no write either — see the ordering note that follows.
-  const tree = pending ? resolveDeployedTree(dir) : null
-  if (tree !== null && tree.kind === 'verified') {
-    for (const m of pendingMigrations) {
-      // A file that is present but untracked is not a migration this build
-      // contains, and applying it writes a permanent ledger row for something
-      // that will not exist after the next checkout. Fail closed, name the file.
-      // Only PENDING files are checked, deliberately: a row already recorded is
-      // already permanent, and refusing forever over a stray that was applied
-      // long ago would be a boot outage with no remedy. This guard's job is to
-      // stop the silent APPLY, which is the only moment the damage is done.
-      if (!tree.tracked.has(m.fileName)) {
-        throw new Error(formatUntrackedMigration(m, tree, deployedCommit))
-      }
-    }
-  }
-  const treeProvenance = treeProvenanceOf(tree)
-  // ORDERING IS LOAD-BEARING, and it is the whole reason the ledger is read
-  // shape-tolerantly above. Reshaping the ledger before deciding would mean a
-  // boot that ends in the refusal had already mutated the schema of the
-  // database it just declared untrustworthy — a guard whose job is to change
-  // nothing, changing something. It would also turn `applyMigrations` from a
-  // read into a write for a fully-migrated database, which breaks opening a
-  // backup read-only to inspect it. Nothing pending, nothing written.
-  if (pending) ensureProvenanceColumns(db)
+  // NULL when nothing is pending, which is also the only case where no row is
+  // written — see `treeProvenanceOf`. The tree may have been resolved for a
+  // mismatch alone, and that verdict describes no row.
+  const treeProvenance = pending ? treeProvenanceOf(tree) : null
+  // The ledger is created and reshaped HERE, on the path that is about to write a
+  // row, and nowhere earlier — which is the whole reason it is read
+  // shape-tolerantly (and existence-tolerantly) above. Doing it first would mean a
+  // boot that ends in a refusal had already mutated the schema of the database it
+  // just declared untrustworthy: a guard whose job is to change nothing, changing
+  // something. It would also turn `applyMigrations` from a read into a write for a
+  // fully-migrated database, which breaks opening a backup read-only to inspect
+  // it. Nothing pending, nothing written.
+  if (pending) ensureLedgerShape(db)
   for (const m of migrations) {
     if (seen.has(m.version)) {
       skipped.push(m.version)

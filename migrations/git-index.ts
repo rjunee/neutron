@@ -1,5 +1,5 @@
 /**
- * @neutronai/migrations — the deployed tree's file list, read out of git's index.
+ * @neutronai/migrations — the checkout's tracked-file list, read out of git's index.
  *
  * WHY THIS EXISTS. `loadMigrations` applies every `NNNN_*.sql` file that is
  * PRESENT IN THE DIRECTORY, tracked or not. So a stray `.sql` that appears in
@@ -10,9 +10,38 @@
  * contained, which is precisely the state that crash-looped a live instance
  * twice (see `docs/AS_BUILT.md`, and `migrations/repairs.json`).
  *
- * Answering "is this file part of the deployed tree?" needs the tree's own file
- * list, and git already keeps one: `.git/index` lists every tracked path. This
- * module reads it.
+ * Answering "does this checkout know about this file at all?" needs the
+ * checkout's own file list, and git already keeps one: `.git/index` lists every
+ * tracked path. This module reads it.
+ *
+ * WHAT THE INDEX IS, EXACTLY — and the limit that follows, stated here rather
+ * than left for a reader to discover. The index is the STAGED tree, which is a
+ * SUPERSET of the committed tree: a file that has been `git add`ed but never
+ * committed is listed, and this module reports it as tracked. So the guard built
+ * on top of this catches the stray that nothing ever told git about — which is
+ * every occurrence of the incident above, none of which involved a `git add` —
+ * and does NOT catch a stray somebody staged. That residual is a deliberate
+ * scope decision, not an oversight:
+ *
+ *   Verifying against HEAD's tree instead would mean reading commit and tree
+ *   OBJECTS, and in any clone those live in a packfile — so it would mean an
+ *   `.idx` search plus delta reconstruction (`OFS_DELTA`/`REF_DELTA`), hundreds
+ *   of lines of binary decoding, on the boot path, to close a hole narrower than
+ *   the one being closed. The NO SUBPROCESS constraint below is what rules out
+ *   the cheap version of that (`git ls-tree`), and the reason it exists applies
+ *   with more force to a hand-rolled packfile reader: this check exists to stop a
+ *   boot outage and must not become a new cause of one.
+ *
+ *   The narrowing that IS cheap is applied: an intent-to-add entry (`git add -N`)
+ *   is EXCLUDED, because such an entry is git recording a path with no staged
+ *   content — definitionally not in any tree, present in the index only as a
+ *   note-to-self.
+ *
+ * The honest name for what a caller learns is therefore "tracked in the index",
+ * and that is the phrase the ledger records (`runner.ts`,
+ * `TRACKED_IN_DEPLOYED_TREE`). Naming it "in the deployed commit" would be an
+ * overclaim, and an overclaimed provenance value is worse than a modest one —
+ * the whole point of these columns is that a later investigation can trust them.
  *
  * TWO CONSTRAINTS SHAPE EVERY LINE HERE, and both come from the failure being
  * fixed rather than from taste:
@@ -30,13 +59,25 @@
  *   legitimate install. Git can write index shapes this parser deliberately does
  *   not decode (version 4's prefix compression, a split index, a sparse index of
  *   directory entries), and it can be handed a truncated or corrupt file. All of
- *   them are `cannot verify`. Parsing is also STRICT about landing exactly on
- *   the trailing checksum, because a half-parsed index yields a PARTIAL file
- *   list — the one wrong answer that produces a false refusal.
+ *   them are `cannot verify`. Two mechanisms enforce that, and they catch
+ *   different things:
+ *
+ *     THE FILE'S OWN CHECKSUM IS VERIFIED. Git closes every index with the SHA-1
+ *     of everything before it. Without checking it, a flipped byte INSIDE a
+ *     pathname is invisible — entry lengths are unchanged, so the walk lands
+ *     exactly where it should and returns an authoritative-looking list holding
+ *     a corrupted name. The real file then reads as untracked and a legitimate
+ *     deploy refuses to boot: a false refusal produced by trusting bytes that
+ *     carried their own proof of corruption.
+ *
+ *     PARSING IS STRICT ABOUT LANDING exactly on that checksum, because a
+ *     half-parsed index yields a PARTIAL file list — the other way to arrive at
+ *     a false refusal, and the one a valid checksum cannot rule out.
  *
  * Format reference: git's `Documentation/gitformat-index.txt`.
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -47,6 +88,8 @@ export type GitIndexUnreadable =
   | 'unsupported-index-version'
   | 'split-index'
   | 'sparse-index'
+  | 'index-checksum-mismatch'
+  | 'index-hash-skipped'
 
 export type GitIndexRead =
   | { readonly ok: true; readonly paths: ReadonlySet<string> }
@@ -66,6 +109,14 @@ const ENTRY_FLAGS_OFFSET = 60
 const EXTENDED_FLAG = 0x4000
 /** Flags bits 0-11 — the path length, or `0x0fff` meaning "longer than this". */
 const NAME_LENGTH_MASK = 0x0fff
+/**
+ * Extended-flags bit 13 — `git add -N`. Git has been told the path exists but
+ * nothing has been staged for it, so it is in no tree and cannot be "part of the
+ * deployed tree" under any reading. Listing it would let `git add -N` alone
+ * satisfy the guard, which is the one staging operation that provably stages
+ * nothing.
+ */
+const EXTENDED_INTENT_TO_ADD = 0x2000
 /** The trailing SHA-1 of everything before it. */
 const CHECKSUM_BYTES = 20
 /** An extension's signature (4) + payload length (4). */
@@ -121,6 +172,11 @@ function parse(bytes: Uint8Array): GitIndexRead {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   if (signatureAt(bytes, 0) !== SIGNATURE) return unreadable('unreadable-index')
 
+  // BEFORE ANY PATH IS DECODED, because a corrupt path that decodes cleanly is
+  // the failure this catches and nothing downstream can catch it. See the header.
+  const integrity = checkTrailingChecksum(bytes)
+  if (integrity !== null) return unreadable(integrity)
+
   // Version 4 prefix-compresses every path against the previous one and drops
   // the padding, so it needs a different decoder. `feature.manyFiles` turns it
   // on, so this is a real shape on real machines — and the honest answer for it
@@ -142,14 +198,20 @@ function parse(bytes: Uint8Array): GitIndexRead {
     if ((mode & MODE_TYPE_MASK) === MODE_DIRECTORY) return unreadable('sparse-index')
 
     const flags = view.getUint16(offset + ENTRY_FLAGS_OFFSET)
-    const nameStart = offset + ENTRY_FIXED_BYTES + ((flags & EXTENDED_FLAG) === 0 ? 0 : 2)
+    const extended = (flags & EXTENDED_FLAG) !== 0
+    const extendedFlags = extended ? view.getUint16(offset + ENTRY_FIXED_BYTES) : 0
+    const nameStart = offset + ENTRY_FIXED_BYTES + (extended ? 2 : 0)
     const declared = flags & NAME_LENGTH_MASK
     // The length field saturates, so a longer path is delimited by its NUL
     // instead. Every entry has at least one NUL of padding, so a missing
     // terminator is a truncated file.
     const nameEnd = declared === NAME_LENGTH_MASK ? bytes.indexOf(0, nameStart) : nameStart + declared
     if (nameEnd < nameStart || nameEnd >= bytes.length) return unreadable('unreadable-index')
-    paths.add(pathBetween(bytes, nameStart, nameEnd))
+    // The entry is still WALKED — it occupies bytes and the offset must advance
+    // past it — it is simply not reported as tracked.
+    if ((extendedFlags & EXTENDED_INTENT_TO_ADD) === 0) {
+      paths.add(pathBetween(bytes, nameStart, nameEnd))
+    }
 
     // Entries are padded with 1-8 NULs to a multiple of 8 bytes, measured from
     // the start of the entry (git: `(offsetof(name) + len + 8) & ~7`).
@@ -176,6 +238,36 @@ function parse(bytes: Uint8Array): GitIndexRead {
   // verify against half a list.
   if (offset !== bytes.length - CHECKSUM_BYTES) return unreadable('unreadable-index')
   return { ok: true, paths }
+}
+
+/**
+ * Whether the index's trailing hash matches its contents — `null` when it does,
+ * otherwise the reason it cannot be trusted.
+ *
+ * TWO DISTINCT ANSWERS, because they mean different things to whoever reads the
+ * ledger row that results. A MISMATCH is corruption, or a file this reader has
+ * misunderstood (a SHA-256 repository closes its index with 32 bytes, not 20).
+ * An ALL-ZERO trailer is git working as configured: `index.skipHash` (which
+ * `feature.manyFiles` turns on) deliberately writes no hash, trading integrity
+ * checking for speed.
+ *
+ * Both are `cannot verify`, and skipHash is the more interesting of the two: the
+ * index's paths are almost certainly fine, but nothing on disk PROVES it, and a
+ * fail-closed boot gate does not get to assume. Recording
+ * `unverifiable:index-hash-skipped` says exactly that, and it is the honest
+ * answer — an operator who wants the guard active on such a machine can turn
+ * `index.skipHash` off, and the row tells them that is the lever.
+ */
+function checkTrailingChecksum(bytes: Uint8Array): GitIndexUnreadable | null {
+  const split = bytes.length - CHECKSUM_BYTES
+  const trailer = bytes.subarray(split)
+  if (trailer.every((b) => b === 0)) return 'index-hash-skipped'
+  const actual = createHash('sha1').update(bytes.subarray(0, split)).digest()
+  if (actual.length !== trailer.length) return 'index-checksum-mismatch'
+  for (let i = 0; i < trailer.length; i++) {
+    if (actual[i] !== trailer[i]) return 'index-checksum-mismatch'
+  }
+  return null
 }
 
 /** A 4-byte signature, which is ASCII by the format's definition. */

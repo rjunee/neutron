@@ -30,6 +30,7 @@
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
+import { createHash } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
@@ -140,6 +141,30 @@ function messageOf(fn: () => unknown): string {
   throw new Error('expected a throw, got none')
 }
 
+/** Where `needle`'s utf8 bytes start in `haystack`, or -1. */
+function indexOfBytes(haystack: Uint8Array, needle: string): number {
+  const bytes = new TextEncoder().encode(needle)
+  outer: for (let i = 0; i + bytes.length <= haystack.length; i++) {
+    for (let j = 0; j < bytes.length; j++) {
+      if (haystack[i + j] !== bytes[j]) continue outer
+    }
+    return i
+  }
+  return -1
+}
+
+/**
+ * The same bytes with a trailing checksum that MATCHES them — i.e. corruption made
+ * undetectable. Used to show what the boot would have done with the corrupt path
+ * list had the checksum not been verified.
+ */
+function resealChecksum(bytes: Uint8Array): Uint8Array {
+  const split = bytes.length - 20
+  const out = Uint8Array.from(bytes)
+  out.set(createHash('sha1').update(bytes.subarray(0, split)).digest(), split)
+  return out
+}
+
 /** The message's labelled blocks, as `{ section: { field: value } }`. */
 function sections(message: string): Record<string, Record<string, string>> {
   const parsed: Record<string, Record<string, string>> = {}
@@ -181,11 +206,19 @@ test('an untracked migration file is REFUSED, and the message names it', () => {
   // The remedy is deleting or committing the file. `repairs.json` would record a
   // row for a migration that does not exist, which is the disease.
   expect(message).toContain('DELETE the file')
-  expect(message).toContain('COMMIT it to the deployed tree')
+  // ADD *and* COMMIT, and the message says why both halves matter. "COMMIT it"
+  // alone described a stricter check than the one that fired: what is read is
+  // git's index, so `git add` is what satisfies it.
+  expect(message).toContain('ADD AND COMMIT it')
+  expect(message).toContain("check reads git's index")
   expect(message).toContain('Do NOT reach for migrations/repairs.json')
+  // No row is recorded at this ordinal, so the message carries no `recorded` block
+  // and none of the already-recorded prose.
+  expect(parsed['recorded']).toBeUndefined()
+  expect(message).not.toContain('is ALREADY recorded')
 })
 
-test('the refusal applies NOTHING — not the stray, and not the tracked file beside it', () => {
+test('the refusal writes NOTHING — the message says so, and the database agrees', () => {
   // The check runs before the apply loop for exactly this reason. Refusing
   // part-way would leave `0001` applied and recorded while the boot still fails,
   // so a retry would face a half-migrated database.
@@ -198,12 +231,49 @@ test('the refusal applies NOTHING — not the stray, and not the tracked file be
   expect(() => applyMigrations(db, dir)).toThrow(/0002_stray\.sql/)
   expect(tableExists(db, 'alpha')).toBe(false)
   expect(tableExists(db, 'stray')).toBe(false)
-  expect(db.query('SELECT version FROM _migrations').all()).toEqual([])
-  // And the ledger's SHAPE is untouched: a guard whose job is to change nothing
-  // must not have reshaped the database it just declared untrustworthy. (Which
-  // is also why the row helper cannot be used above — its select list names
-  // columns that, correctly, do not exist yet.)
-  expect(ledgerColumns(db)).toEqual(['version', 'name', 'applied_at'])
+  // NOTHING, as the message claims — not even the ledger. `_migrations` is created
+  // on the path that writes a row and on no other, so a refused boot leaves a
+  // database that is byte-for-byte what it was. Asserting the whole `sqlite_master`
+  // is deliberate: it is the only form of this assertion that cannot be satisfied
+  // by a table nobody thought to name.
+  expect(db.query('SELECT name FROM sqlite_master').all()).toEqual([])
+  expect(messageOf(() => applyMigrations(db, dir))).toContain('nothing has been written')
+})
+
+test('a refusal writes nothing EVEN WHEN a repair would be acknowledged first', () => {
+  // The ordering bug this pins. `_migration_repairs` DDL and its INSERT used to run
+  // BEFORE the tree was resolved, so on any instance carrying acknowledged repairs
+  // — this repository ships two — the refusal's "nothing has been written" was
+  // false, in exactly the incident-recovery state where an operator reads it.
+  const db = new Database(':memory:')
+  const applied = checkout('ack-was', {
+    files: { '0001_alpha.sql': ALPHA },
+    tracked: ['0001_alpha.sql'],
+  })
+  expect(applyMigrations(db, applied)).toEqual({ applied: [1], skipped: [] })
+
+  // Ordinal 1 now reads as a mismatch (recorded `alpha`, on disk `beta`) with a
+  // repairs entry that acknowledges it, AND ordinal 2 is an untracked stray.
+  const dir = checkout('ack-now', {
+    files: { '0001_beta.sql': BETA, '0002_stray.sql': STRAY },
+    tracked: ['0001_beta.sql'],
+  })
+  writeFileSync(
+    join(dir, 'repairs.json'),
+    JSON.stringify([
+      { version: 1, recorded_name: 'alpha', file_name: 'beta', note: 'test', date: '2026-08-17' },
+    ]),
+  )
+
+  expect(() => applyMigrations(db, dir)).toThrow(/0002_stray\.sql/)
+  // The acknowledgement is the write that used to land first. It has not.
+  expect(tableExists(db, '_migration_repairs')).toBe(false)
+  expect(tableExists(db, 'beta')).toBe(false)
+  // CONTROL: with the stray deleted the acknowledgement DOES land, so the
+  // assertion above is the ordering and not a repair that never matched.
+  rmSync(join(dir, '0002_stray.sql'))
+  expect(applyMigrations(db, dir)).toEqual({ applied: [], skipped: [1] })
+  expect(tableExists(db, '_migration_repairs')).toBe(true)
 })
 
 test('the untracked check is per-file, so a stray beside many tracked migrations is still caught', () => {
@@ -235,9 +305,50 @@ test('THE CONTROL — the same tree with the file TRACKED applies normally', () 
   expect(tableExists(db, 'alpha')).toBe(true)
   expect(tableExists(db, 'stray')).toBe(true)
   for (const row of rows(db)) {
-    expect(row['tree_provenance']).toBe('tracked')
+    // The value names its own evidence. What was read is git's INDEX, so the row
+    // claims the checkout tracks the file — not that a commit contained it.
+    expect(row['tree_provenance']).toBe('tracked-in-index')
     expect(row['applied_by_commit']).toBe(HEAD_SHA)
   }
+})
+
+test('an intent-to-add entry does NOT count as tracked — `git add -N` stages no content', () => {
+  // The one staging operation that provably stages nothing: git records the path
+  // with no blob, so the file is in no tree under any reading. Listing it would let
+  // `git add -N` alone satisfy the guard.
+  const db = new Database(':memory:')
+  const root = join(tmp, 'intent')
+  const dir = join(root, 'migrations')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'neutron' }))
+  mkdirSync(join(root, '.git'), { recursive: true })
+  writeFileSync(join(root, '.git', 'HEAD'), `${HEAD_SHA}\n`)
+  writeFileSync(join(dir, '0001_alpha.sql'), ALPHA)
+  const entries = [
+    { path: 'package.json' },
+    // A tracked sibling, so the DIRECTORY is verifiable and the emptiness rule
+    // does not swallow the case.
+    { path: 'migrations/README.md' },
+    { path: 'migrations/0001_alpha.sql', intentToAdd: true },
+  ]
+  writeFileSync(join(root, '.git', 'index'), encodeIndex(entries))
+
+  const tree = resolveDeployedTree(dir)
+  expect(tree.kind).toBe('verified')
+  if (tree.kind === 'verified') expect(tree.tracked.has('0001_alpha.sql')).toBe(false)
+  expect(() => applyMigrations(db, dir)).toThrow(/0001_alpha\.sql/)
+
+  // CONTROL: the identical index with the intent-to-add flag cleared applies. So
+  // the refusal is the flag, not the extended-entry layout being misparsed — an
+  // extended entry carries two extra bytes before its pathname, and a reader that
+  // mishandled them would fail this too.
+  const control = new Database(':memory:')
+  writeFileSync(
+    join(root, '.git', 'index'),
+    encodeIndex(entries.map((e) => ({ path: e.path })), { version: 3 }),
+  )
+  expect(applyMigrations(control, dir)).toEqual({ applied: [1], skipped: [] })
+  expect(rows(control)[0]?.['tree_provenance']).toBe('tracked-in-index')
 })
 
 test('a migration already recorded is not re-refused when a stray copy of it lingers', () => {
@@ -295,8 +406,21 @@ test('every index shape this parser cannot read is recorded as unverifiable, and
       encodeIndex([{ path: 'migrations/', mode: 0o040000 }]),
       'sparse-index',
     ],
-    ['truncated', encodeIndex([{ path: 'migrations/0001_alpha.sql' }]).slice(0, 40), 'unreadable-index'],
+    // A truncated file fails its own checksum before the walk ever starts, which is
+    // a better diagnosis than the strict-landing failure it used to produce.
+    [
+      'truncated',
+      encodeIndex([{ path: 'migrations/0001_alpha.sql' }]).slice(0, 40),
+      'index-checksum-mismatch',
+    ],
     ['garbage', Uint8Array.from(new Array<number>(64).fill(7)), 'unreadable-index'],
+    // `index.skipHash` (which `feature.manyFiles` turns on) makes git write no
+    // trailing hash at all, so nothing on disk proves the paths are intact.
+    [
+      'skip-hash',
+      encodeIndex([{ path: 'migrations/0001_alpha.sql' }], { checksum: 'zero' }),
+      'index-hash-skipped',
+    ],
   ]
 
   for (const [name, index, reason] of cases) {
@@ -306,6 +430,53 @@ test('every index shape this parser cannot read is recorded as unverifiable, and
     expect(applyMigrations(db, dir), name).toEqual({ applied: [1], skipped: [] })
     expect(rows(db)[0]?.['tree_provenance'], name).toBe(`unverifiable:${reason}`)
   }
+})
+
+test('a same-length byte flip inside a pathname is unverifiable, NOT a false refusal', () => {
+  // The failure that hides behind a valid-looking parse. Flipping one byte in a
+  // pathname leaves every entry length untouched, so the walk lands exactly on the
+  // trailing checksum and returns an authoritative-looking list holding a
+  // corrupted name — after which the real file reads as untracked and a legitimate
+  // deploy refuses to boot. Only the file's own checksum can tell.
+  const good = encodeIndex([
+    { path: 'package.json' },
+    { path: 'migrations/0001_alpha.sql' },
+  ])
+  const flipped = Uint8Array.from(good)
+  const target = indexOfBytes(flipped, 'migrations/0001_alpha.sql')
+  expect(target).toBeGreaterThan(0)
+  // Same length, so the layout is byte-identical: `0001_alpha` becomes `0001_Alpha`.
+  flipped[target + 'migrations/0001_'.length] = 'A'.charCodeAt(0)
+  expect(flipped.length).toBe(good.length)
+
+  const db = new Database(':memory:')
+  const dir = checkout('corrupt', { files: { '0001_alpha.sql': ALPHA }, index: flipped })
+  expect(resolveDeployedTree(dir)).toEqual({
+    kind: 'unverifiable',
+    reason: 'index-checksum-mismatch',
+  })
+  expect(applyMigrations(db, dir)).toEqual({ applied: [1], skipped: [] })
+  expect(rows(db)[0]?.['tree_provenance']).toBe('unverifiable:index-checksum-mismatch')
+
+  // CONTROL — and it is the whole test. The unflipped fixture verifies and applies,
+  // which proves the checksum check is not simply rejecting everything; and the
+  // flipped one WOULD have refused this exact boot, which is what makes the
+  // degrade-to-unverifiable above the fix rather than a shrug. The second half is
+  // shown by parsing the flipped bytes with the trailer repaired to match them.
+  const control = new Database(':memory:')
+  const controlDir = checkout('corrupt-control', {
+    files: { '0001_alpha.sql': ALPHA },
+    index: good,
+  })
+  expect(applyMigrations(control, controlDir)).toEqual({ applied: [1], skipped: [] })
+  expect(rows(control)[0]?.['tree_provenance']).toBe('tracked-in-index')
+
+  const resealed = resealChecksum(flipped)
+  const wouldRefuse = checkout('corrupt-unsealed', {
+    files: { '0001_alpha.sql': ALPHA },
+    index: resealed,
+  })
+  expect(() => applyMigrations(new Database(':memory:'), wouldRefuse)).toThrow(/0001_alpha\.sql/)
 })
 
 test('a migration tree the checkout does not track AT ALL is unverifiable, not refused', () => {
@@ -359,7 +530,7 @@ test('a sidecar migration tree is resolved against its own directory, not the ro
   expect(() => applyMigrations(db, dir)).toThrow(/0002_stray\.sql/)
   rmSync(join(dir, '0002_stray.sql'))
   expect(applyMigrations(db, dir)).toEqual({ applied: [1], skipped: [] })
-  expect(rows(db)[0]?.['tree_provenance']).toBe('tracked')
+  expect(rows(db)[0]?.['tree_provenance']).toBe('tracked-in-index')
 })
 
 // -------------------------------------- 4. the existing refusal still refuses
@@ -392,7 +563,9 @@ test('the mismatch message reports what the recorded row established about the t
   const db = new Database(':memory:')
   applyMigrations(db, checkout('m-was', { files: { '0001_alpha.sql': ALPHA }, tracked: ['0001_alpha.sql'] }))
   const now = checkout('m-now', { files: { '0001_beta.sql': BETA }, tracked: ['0001_beta.sql'] })
-  expect(sections(messageOf(() => applyMigrations(db, now)))['recorded']?.['tree']).toBe('tracked')
+  expect(sections(messageOf(() => applyMigrations(db, now)))['recorded']?.['tree']).toBe(
+    'tracked-in-index',
+  )
 
   const unverified = new Database(':memory:')
   applyMigrations(unverified, bareTree('u-was', { '0001_alpha.sql': ALPHA }))
@@ -423,6 +596,67 @@ test('the mismatch message reports what the recorded row established about the t
   )
 })
 
+test('an untracked stray at an ALREADY-RECORDED ordinal is diagnosed as the stray, not a rename', () => {
+  // The presentation the last outage actually arrived in. Both refusals fire on the
+  // same file, and the mismatch used to win — sending the operator to a
+  // repairs.json entry naming a file this tree does not track, which the sibling
+  // message correctly calls the disease. It is also the harder remedy: deleting the
+  // stray clears the mismatch outright.
+  const db = new Database(':memory:')
+  const applied = checkout('recorded-was', {
+    files: { '0001_alpha.sql': ALPHA },
+    tracked: ['0001_alpha.sql'],
+  })
+  expect(applyMigrations(db, applied)).toEqual({ applied: [1], skipped: [] })
+
+  // Ordinal 1 is recorded as `alpha`; the file on disk is `beta` AND untracked.
+  const dir = checkout('recorded-now', {
+    files: { '0001_beta.sql': BETA },
+    tracked: ['README.md'],
+  })
+  const message = messageOf(() => applyMigrations(db, dir))
+  expect(message).toContain('NOT part of the deployed tree')
+  expect(message).toContain('0001_beta.sql')
+  expect(message).not.toContain('"recorded_name"') // no repairs.json entry to paste
+  // It still tells the operator what the mismatch they would otherwise have seen is.
+  expect(message).toContain('Ordinal 1 is ALREADY recorded, under the name "alpha"')
+  expect(sections(message)['recorded']).toEqual({ name: 'alpha', applied: expect.any(String) })
+  expect(tableExists(db, 'beta')).toBe(false)
+
+  // CONTROL: the same recorded mismatch with the file TRACKED is still a name
+  // mismatch, with the repairs entry to paste. So the reclassification is the
+  // tree verdict, not the untracked message swallowing every mismatch.
+  const tracked = checkout('recorded-now-tracked', {
+    files: { '0001_beta.sql': BETA },
+    tracked: ['0001_beta.sql'],
+  })
+  const mismatch = messageOf(() => applyMigrations(db, tracked))
+  expect(mismatch).toContain('Migration version 1 was recorded as "alpha"')
+  expect(mismatch).toContain('"recorded_name": "alpha"')
+})
+
+test('an acknowledged repair still wins over the untracked verdict', () => {
+  // The deliberate precedence. A repairs entry is an explicit, hand-verified
+  // operator decision about one ordinal; overriding it would convert a documented
+  // recovery into a boot outage with no remedy — including on this repository's own
+  // two entries.
+  const db = new Database(':memory:')
+  const applied = checkout('ack-win-was', {
+    files: { '0001_alpha.sql': ALPHA },
+    tracked: ['0001_alpha.sql'],
+  })
+  applyMigrations(db, applied)
+
+  const dir = checkout('ack-win-now', { files: { '0001_beta.sql': BETA }, tracked: ['README.md'] })
+  writeFileSync(
+    join(dir, 'repairs.json'),
+    JSON.stringify([
+      { version: 1, recorded_name: 'alpha', file_name: 'beta', note: 'test', date: '2026-08-17' },
+    ]),
+  )
+  expect(applyMigrations(db, dir)).toEqual({ applied: [], skipped: [1] })
+})
+
 test('the column is added additively; a pre-existing row stays NULL and still boots', () => {
   const db = new Database(':memory:')
   db.exec(`CREATE TABLE _migrations (
@@ -445,22 +679,46 @@ test('the column is added additively; a pre-existing row stays NULL and still bo
 
 // ------------------------------------------------ the parser's own ground truth
 
+/**
+ * Say out loud that a control did not run.
+ *
+ * A control that returns early reads as a pass, which is this repository's own
+ * rule-7 trap: the tool could not answer and the silence looked like an answer.
+ * These two controls legitimately cannot run everywhere (a source export has no
+ * `.git`; a machine may have no `git` on PATH), so they may not be hard failures —
+ * but a skipped control must be VISIBLE in the output rather than indistinguishable
+ * from a verified one.
+ */
+function controlDidNotRun(name: string, why: string): void {
+  console.warn(`CONTROL DID NOT EXECUTE — ${name}: ${why}. Fixtures still cover the logic.`)
+}
+
 test('THE CONTROL — the parser agrees with git ls-files on this repository', () => {
   // A hand-built fixture cannot prove that REAL git output is read correctly,
   // and a parser that misread it would report tracked files as absent — turning
   // this guard into a boot refusal on every correct install. So compare against
-  // git's own answer, on a real index, for the whole tree.
+  // git's own answer, on a real index, for the whole tree. This is also the only
+  // check that the verified trailing checksum is computed the way GIT computes it:
+  // an encoder and a parser agreeing on a wrong hash would pass every fixture and
+  // reject every real index.
   const gitPath = join(REPO_ROOT, '.git')
-  if (!existsSync(gitPath)) return // a source export legitimately has none
+  if (!existsSync(gitPath)) {
+    controlDidNotRun('parser vs git ls-files', 'this tree has no .git (a source export)')
+    return
+  }
 
   // A machine with no `git` on PATH is a supported machine — the fixtures above
   // still cover the logic, this control just cannot run.
   let expected: Set<string>
   try {
     const lsFiles = Bun.spawnSync(['git', 'ls-files', '-z'], { cwd: REPO_ROOT })
-    if (lsFiles.exitCode !== 0) return
+    if (lsFiles.exitCode !== 0) {
+      controlDidNotRun('parser vs git ls-files', `git ls-files exited ${lsFiles.exitCode}`)
+      return
+    }
     expected = new Set(lsFiles.stdout.toString().split('\0').filter((p) => p.length > 0))
-  } catch {
+  } catch (err) {
+    controlDidNotRun('parser vs git ls-files', `git could not be spawned (${String(err)})`)
     return
   }
 
@@ -479,7 +737,10 @@ test('THE CONTROL — the parser agrees with git ls-files on this repository', (
 test("this repository's own migration files are all tracked", () => {
   // The invariant the guard enforces, asserted against the real tree — and the
   // end-to-end proof that the check is ACTIVE here rather than silently inert.
-  if (!existsSync(join(REPO_ROOT, '.git'))) return
+  if (!existsSync(join(REPO_ROOT, '.git'))) {
+    controlDidNotRun("this repository's own migrations", 'this tree has no .git (a source export)')
+    return
+  }
 
   const tree = resolveDeployedTree(join(REPO_ROOT, 'migrations'))
   expect(tree.kind).toBe('verified')

@@ -104,17 +104,26 @@ with cross-references noted inline.
     Protects: **P1** (ProjectDb API widening).
 17. Migration runner: PRAGMA preamble hoisted out of the per-migration transaction;
     `PRAGMA foreign_keys=ON` re-asserted in a `finally`; per-migration BEGIN/COMMIT atomicity;
-    migration version numbers are never renumbered or backfilled. `migrations/runner.ts:89-126`.
+    migration version numbers are never renumbered or backfilled. `migrations/runner.ts`
+    (`applyMigrations`' apply loop, `splitPragmaPreamble`) — cited by function rather than by line,
+    because the previous line anchor had drifted off the code it named.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
-    Two refusals in that runner are fail-closed and must stay so: a recorded name that differs from
-    the file on disk (`migrationNameMismatch`, resolvable only via a hand-verified
-    `migrations/repairs.json` entry), and a pending migration file the deployed tree does not track
-    (`formatUntrackedMigration` + `resolveDeployedTree` in `migrations/provenance.ts`). Both decide
-    BEFORE any write. Where tree membership cannot be established (no git metadata, an index shape
-    the reader does not decode, a migration directory git does not track at all) the runner applies
-    and records `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from
-    "not tracked" and collapsing them either breaks tarball installs or re-opens the class.
+    Three refusals in that runner are fail-closed and must stay so: a duplicate ordinal
+    (`assertUniqueMigrationOrdinals`), a recorded name that differs from the file on disk
+    (`migrationNameMismatch`, resolvable only via a hand-verified `migrations/repairs.json` entry),
+    and a pending migration file the deployed checkout does not track (`formatUntrackedMigration` in
+    `migrations/runner.ts`, on the verdict from `resolveDeployedTree` in `migrations/provenance.ts`).
+    **All three decide before ANY write** — `_migrations` is created, and repairs are acknowledged,
+    only after the last refusal has been passed, which is what makes the untracked message's claim
+    that nothing was written true. Where tracking cannot be established (no git metadata, an index
+    shape the reader does not decode, an index that fails its own checksum or carries none, a
+    migration directory git does not track at all) the runner applies and records
+    `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from "not
+    tracked" and collapsing them either breaks tarball installs or re-opens the class. The verified
+    value is `tracked-in-index` and names its evidence: the index is the STAGED tree, so a
+    staged-but-uncommitted file passes; HEAD-tree verification is deliberately out of scope (it would
+    need a packfile reader on the boot path) and the value must not be renamed to imply otherwise.
 18. Schema snapshot test is the refactor's data-layer safety net; regenerate only via
     `regen-snapshot.ts`, never hand-edit. `migrations/snapshot.test.ts:1` (the test),
     `migrations/regen-snapshot.ts:9-15` (writes `expected-schema.txt`).

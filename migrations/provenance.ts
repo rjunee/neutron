@@ -34,10 +34,13 @@
  * bounded in how far it will walk.
  *
  * `resolveDeployedTree` answers the other half of the same question — not "which
- * build wrote this row" but "was this file part of that build at all" — from the
- * tracked-file list in `git-index.ts`. It degrades the same way and returns a
+ * build wrote this row" but "did that build know about this file at all" — from
+ * the tracked-file list in `git-index.ts`. It degrades the same way and returns a
  * REASON rather than an empty answer, because "we cannot check" and "nothing is
- * tracked" have opposite consequences at the call site.
+ * tracked" have opposite consequences at the call site. What it can and cannot
+ * prove is stated at the function, and argued in `git-index.ts`'s header: the
+ * evidence is git's INDEX, so it is the staged tree rather than the committed
+ * one.
  */
 
 import { createHash } from 'node:crypto'
@@ -270,10 +273,10 @@ export function resolveDeployedCommit(
 }
 
 /**
- * Whether a migration directory's files are part of the deployed tree.
+ * Whether a migration directory's files are tracked by the deployed checkout.
  *
- * `verified` carries the names of the files in that directory the deployed tree
- * actually tracks, so the caller can refuse one that is not among them.
+ * `verified` carries the names of the files in that directory the checkout's
+ * index tracks, so the caller can refuse one that is not among them.
  * `unverifiable` carries WHY, so the caller can record that provenance was not
  * established instead of pretending it was.
  *
@@ -283,6 +286,15 @@ export function resolveDeployedCommit(
  * and treating a stray file as fine because SOME installs cannot check is how a
  * ledger ends up naming migrations that never existed. Each state gets its own
  * behaviour, and the one that cannot decide says so in the row it writes.
+ *
+ * WHAT `verified` PROVES, precisely: the path is in git's INDEX — the staged
+ * tree. That is a superset of the committed tree, so a file `git add`ed and never
+ * committed passes, and one `git add -N`'d does not (`git-index.ts` excludes
+ * intent-to-add entries, which stage no content). The residual and the reason
+ * HEAD-tree verification is out of scope are argued in that module's header; the
+ * short version is that it would require a packfile reader on the boot path. The
+ * naming here follows from it: the caller records `tracked-in-index`, which is
+ * what was actually established, rather than a claim about a commit.
  */
 export type DeployedTree =
   | { readonly kind: 'verified'; readonly dirPrefix: string; readonly tracked: ReadonlySet<string> }
