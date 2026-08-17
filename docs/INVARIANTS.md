@@ -52,8 +52,12 @@ with cross-references noted inline.
    Protects: **D1**/**D2** (PoolRuntime reification / Substrate banner split) — flag/promise pair
    must move together.
 7. Substrate instance-id prefixes are pool keys; the trident fire substrate must stay warm
-   per-repo-cwd; only `cc-agent-`-prefixed instances get `enableToolBridge`.
-   `open/composer.ts:590-633,535-541`.
+   per-repo-cwd; the OWNER-FACING CONVERSATIONAL PAIR — `cc-agent-` (live chat) and `cc-nudge-`
+   (background proactive compose: fired reminders/rituals + the work-board wakeup) — and ONLY that
+   pair get `enableToolBridge` and `PROFILE_WARM_CHAT`. `cc-nudge-` is a deliberate equal-grant,
+   separate-session twin of `cc-agent-`: equal grants because a ritual composes there and ISSUES
+   #504 settled that it must reach Core tools; separate session because a background compose that
+   aborts must not poison the child the owner is talking to. `open/wiring/substrates.ts`.
    Protects: **D1**/**D2**.
 8. `Bun.serve` selects the chained fetch handler per-request inside the serve arrow so the live
    server ref reaches WS upgrades; `maxRequestBodySize` = import cap + 64MB.
@@ -340,6 +344,18 @@ with cross-references noted inline.
     Protects: **O3** (Error taxonomy + typed substrate error codes).
 39. Binary-ENOENT must stay non-retryable so it can't launder into a 429 cooldown; `all_cooldown`
     must stay `retryable:true`. `build-llm-call-substrate.ts:437-442,515-523`.
+    A SUBSTRATE-LOCAL failure must never be reported as a credential fault, on EITHER
+    credential-failure lane. `detectBinaryNotFound`, `detectChannelWedged`,
+    `detectTurnTimeout` and `detectReplProcessExited` are classified AHEAD of the cooldown
+    map in `build-llm-call-substrate.ts` and MUST skip `reportFailure`: none carries an HTTP
+    status, so the map can only guess 429, and on a single-credential box (every Open
+    install) five guesses park the pool for an hour behind "all Anthropic credentials are in
+    cooldown" — a cause that is not true. The dead-REPL member is the one a lane rule cannot
+    cover: the strikes that caused the 2026-08-17 chat lockout were the owner's own
+    INTERACTIVE retries against a respawning child.
+    Because each detector matches PROSE emitted by another module, invariant 38 applies to
+    their producer literals: a reword is a behavior change, and
+    `__tests__/g6-error-string-conformance.test.ts` pins each one to its producer source.
     Protects: **O3**.
 40. Email triage LLM stub THROWS by design so triage renders its deterministic fallback;
     agent-settings fallbacks must report `available:false`, never fake success.
@@ -471,9 +487,9 @@ with cross-references noted inline.
 67. `open/server.ts:58-73` env mutation happens BEFORE `boot()` — untouched by the composer split
     but adjacent; config reads must not move out of the entrypoint. (Cross-ref #1.)
     Protects: **C1**.
-68. Trident fire substrate must be WARM per-repo-cwd and only `cc-agent-` gets
+68. Trident fire substrate must be WARM per-repo-cwd and only the `cc-agent-`/`cc-nudge-` pair gets
     `enableToolBridge` — pool-key/instance-id prefixes are semantic.
-    `open/composer.ts:590-633,535-541`. (Cross-ref #7.)
+    `open/wiring/substrates.ts`. (Cross-ref #7, which carries the reasoning for the pair.)
     Protects: **D1**, **D2**.
 69. 30 `open/__tests__` wiring tests + gateway `*-production-composer` tests are the composer-split
     lock; a characterization test snapshotting which `CompositionInput` fields Open sets must be

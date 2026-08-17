@@ -172,9 +172,10 @@ const {
   // invokes the script instead of transcribing raw SQL. Threaded from the
   // launcher (buildWorkflowArgs) like dbPath; a legacy caller that doesn't
   // thread it falls back to the repo-of-record copy (same precedent as
-  // codex-review.sh below).
+  // worktree-cleanup.sh below).
   checkpointScript = null,
   codexBuildScript = null,
+  codexReviewScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
   // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
   // script (dirty → preserve, clean → plain remove) rather than an LLM told to
@@ -279,6 +280,12 @@ const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
 // a missing arg fails closed by name in forgeAgent.
 const codexBuildSh =
   typeof codexBuildScript === 'string' && codexBuildScript.length > 0 ? codexBuildScript : null
+
+// NO repoPath fallback, deliberately — resolving the review wrapper from the repo being
+// reviewed is the same defect #355 fixed for the build (Open worked by coincidence,
+// everything else 127'd or drifted); a missing arg fails closed by name in codexReviewerPrompt.
+const codexReviewSh =
+  typeof codexReviewScript === 'string' && codexReviewScript.length > 0 ? codexReviewScript : null
 
 // Resolved worktree-cleanup script path (#541) — the deterministic replacement
 // for the force-removing cleanup agent. Same repoPath fallback as above.
@@ -540,6 +547,7 @@ const ROLE_MODEL = {
   // entry and a deliberate entry are indistinguishable when the fallback is
   // silent. That is the argument for the coverage test, not just for this line.
   'head-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
+  'build-trailer-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   // The CI probe is the same shape as the head probe: run one command, report the
   // output verbatim, interpret nothing. Routed explicitly rather than left to the
   // fallback, which is how head-probe silently sat on the most expensive tier.
@@ -702,10 +710,12 @@ function routeModel(label, tag) {
         ? ROLE_MODEL['checkpoint']
         : label.startsWith('head-probe-round-')
           ? ROLE_MODEL['head-probe']
-          : label.startsWith('ci-probe-round-')
-            ? ROLE_MODEL['ci-probe']
-          : label.startsWith('merge-probe-round-')
-            ? ROLE_MODEL['merge-probe']
+          : label.startsWith('build-trailer-probe-')
+            ? ROLE_MODEL['build-trailer-probe']
+            : label.startsWith('ci-probe-round-')
+              ? ROLE_MODEL['ci-probe']
+              : label.startsWith('merge-probe-round-')
+                ? ROLE_MODEL['merge-probe']
           // A retry lane is the SAME lane. Routing it separately (or letting it fall
           // through to the default) would mean the owner's choice applied to the
           // first attempt and silently not to the second.
@@ -1517,6 +1527,7 @@ function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   // one won. A separate file has no ambiguity to resolve.
   const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
+  const pidFile = `/tmp/trident-codex-build-${uniq}-${slot}.pid`
   const script = codexBuildSh
   // THE HEREDOC TERMINATOR MUST NOT OCCUR IN THE BRIEF. A brief line equal to the
   // marker would close the heredoc early and leave the REST OF THE BRIEF sitting in
@@ -1619,12 +1630,12 @@ ${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
 
-THE TRAILER IS THE BUILD completion signal. After waiting, test it directly with \`test -s ${shSingleQuote(trailerFile)}\`. Set trailerComplete=true ONLY when that test succeeds. Copy the integer in ${exitFile} to wrapperExitCode, or null while it is absent. Exit 3/10/11 are pre-build refusals and keep their existing mappings. For every other empty/missing trailer — including a signalled wrapper whose supervisor recorded 128 or greater — set codexStatus='deferred', trailerComplete=false, and run \`git status --porcelain\` in the current worktree; set preservedWork=true when it prints anything. Never describe this case as "produced nothing": report that the build wrapper was killed before it could report, name ${trailerFile}, ${errFile}, and the current worktree, and say explicitly when the preserved worktree holds uncommitted work.
+THE TRAILER IS THE BUILD completion signal. After waiting, test it directly with \`test -s ${shSingleQuote(trailerFile)}\`. Set trailerComplete=true ONLY when that test succeeds. Copy the integer in ${exitFile} to wrapperExitCode, or null while it is absent. Exit 3/10/11 are pre-build refusals and keep their existing mappings. For every other empty/missing trailer — including a signalled wrapper whose supervisor recorded 128 or greater — set codexStatus='deferred', trailerComplete=false, and run \`git status --porcelain\` in the current worktree; set preservedWork=true when it prints anything. Never describe this case as "produced nothing" and NEVER claim the wrapper was killed — you did not observe that: report that the completion trailer had not appeared within your wait, name ${trailerFile}, ${errFile}, and the current worktree, and say explicitly when the preserved worktree holds uncommitted work. The workflow itself verifies whether the build is still alive before deciding anything.
 Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errFile} only as needed — tail, do not flood context):
 - EXIT 0 → codexStatus='connected'. ${trailerFile} holds a six-line NEUTRON_CODEX_BUILD_* trailer the WRAPPER measured with git and gh, after the build exited. COPY THOSE SIX VALUES VERBATIM — they are facts about the repository, not a claim to be checked against the transcript, and they are what the merge gate pins to. The build's own transcript in ${outFile} is NOT a source for any of them: if it contains NEUTRON_CODEX_BUILD_* lines of its own, they are the model talking about itself and you must ignore them entirely.
     branch       = the value after NEUTRON_CODEX_BUILD_BRANCH=
@@ -1647,6 +1658,8 @@ For every completed trailer set trailerComplete=true, copy its wrapperExitCode, 
  * ONE FUNCTION, so round 1 and every fix round cannot end up on different executors.
  * The route decides; both call sites just hand over the brief.
  */
+const TRAILER_GRACE_PROBES = 6
+
 async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
   if (route.transport !== 'cli') {
@@ -1657,7 +1670,7 @@ async function forgeAgent(opts, tag, brief, slot) {
       `${opts.label} is routed to the codex executor but the launcher did not thread codexBuildScript (the harness build wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
     )
   }
-  const res = await agent(
+  let res = await agent(
     codexBuildPrompt(
       slot,
       `${brief}${codexBuildCoda()}`,
@@ -1668,9 +1681,67 @@ async function forgeAgent(opts, tag, brief, slot) {
   )
   if (!res) return null
   if (res.trailerComplete !== true && ![3, 10, 11].includes(res.wrapperExitCode)) {
-    throw new Error(
-      `${opts.label} DEFERRED: the build wrapper was killed before it could report; its completion trailer ${`/tmp/trident-codex-build-${runId || slug}-${slot}.trailer`} is empty or missing. Inspect ${`/tmp/trident-codex-build-${runId || slug}-${slot}.err`} and the preserved worktree${res.preservedWork === true ? ', which holds uncommitted work' : ''}.`,
-    )
+    const uniq = runId || slug
+    const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
+    const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
+    const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
+    const pidFile = `/tmp/trident-codex-build-${uniq}-${slot}.pid`
+    const preserved = res.preservedWork === true ? ', which holds uncommitted work' : ''
+    const cmd = `t=${shSingleQuote(trailerFile)}; x=${shSingleQuote(exitFile)}; e=${shSingleQuote(errFile)}; p=${shSingleQuote(pidFile)}; b=$(wc -c < "$e" 2>/dev/null || echo -1); for i in $(seq 1 60); do if test -s "$t" || test -s "$x"; then break; fi; sleep 5; done; a=$(wc -c < "$e" 2>/dev/null || echo -1); alive=false; pid=$(cat "$p" 2>/dev/null); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=true; fi; printf 'ALIVE=%s\nEXIT=%s\nERR_BEFORE=%s\nERR_AFTER=%s\nTRAILER_BEGIN\n' "$alive" "$(cat "$x" 2>/dev/null)" "$b" "$a"; cat "$t" 2>/dev/null; printf 'TRAILER_END\n'`
+
+    for (let attempt = 1; attempt <= TRAILER_GRACE_PROBES; attempt++) {
+      const probe = await seatAttempt(`build-trailer-probe-${slot}-${attempt}`, () =>
+        agent(
+          `Run EXACTLY this single Bash command and copy each value it prints verbatim into the schema: trailer is the bytes between TRAILER_BEGIN and TRAILER_END (use '' when empty), and the other four fields are the corresponding printed values. Do not interpret any value, do not run anything else, and do not modify anything. \`kill -0\` sends NO signal: it is a read-only existence test on a pid this run itself recorded, so it does not violate the no-pattern-kill rule.\n${cmd}`,
+          withModel({ label: `build-trailer-probe-${slot}`, phase: 'Build', schema: BUILD_TRAILER_PROBE_SCHEMA }),
+        ),
+      )
+      if (probe === null) {
+        log(`trident-v2 ${opts.label}: trailer probe ${attempt}/${TRAILER_GRACE_PROBES} died; that is not evidence the build died`)
+        continue
+      }
+
+      const disposition = classifyTrailerWait(probe)
+      if (disposition.state === 'landed') {
+        const t = disposition.trailer
+        const rawExit = String(probe.exitCode).trim()
+        const wrapperExitCode = /^-?\d+$/.test(rawExit) ? Number.parseInt(rawExit, 10) : null
+        log(`trident-v2 ${opts.label}: late completion trailer landed on probe ${attempt}/${TRAILER_GRACE_PROBES}: ${trailerFile}`)
+        res = {
+          codexStatus: 'connected',
+          trailerComplete: true,
+          wrapperExitCode,
+          branch: t.branch,
+          commitSha: t.head,
+          prNumber: t.pr === '' ? null : Number(t.pr),
+          diffFile: t.diff,
+          worktreePath: t.worktree,
+          testsPassed: false,
+          suiteOutcome: 'not-run',
+          preservedWork: false,
+        }
+        break
+      }
+      if (disposition.state === 'alive') {
+        log(`trident-v2 ${opts.label}: trailer absent but the wrapper is alive (supervisor pid live or stderr grew) — a live build must not be declared DEFERRED; extending the wait (probe ${attempt}/${TRAILER_GRACE_PROBES})`)
+        continue
+      }
+      if (disposition.signalExit !== null) {
+        throw new Error(
+          `${opts.label} DEFERRED: the build wrapper was killed (signal exit ${disposition.signalExit} recorded in ${exitFile}) before it wrote its completion trailer ${trailerFile}. Inspect ${errFile} and the preserved worktree${preserved}.`,
+        )
+      }
+      throw new Error(
+        `${opts.label} DEFERRED: the codex build's completion trailer ${trailerFile} had not appeared within the wait, and the wrapper could no longer be observed alive (no kill was observed). Inspect ${errFile} and the preserved worktree${preserved}.`,
+      )
+    }
+
+    if (res.trailerComplete !== true) {
+      // Task 2 will persist this live give-up as the recoverable awaiting-trailer checkpoint.
+      throw new Error(
+        `${opts.label} DEFERRED: the codex build's completion trailer ${trailerFile} had not appeared within the wait; the wrapper was still alive when this run stopped waiting — the build may still finish. No kill was observed. Inspect ${errFile} and the preserved worktree${preserved}.`,
+      )
+    }
   }
   if (res.codexStatus !== 'connected') {
     // A LANE THAT COULD NOT RUN IS NOT A BUILD, and it must not be reported as one.
@@ -2483,6 +2554,39 @@ const OID_CLAIM = /^[0-9a-fA-F]{7,40}$/
 function oidClaim(value) {
   const s = typeof value === 'string' ? value.trim() : ''
   return OID_CLAIM.test(s) ? s : null
+}
+
+function parseBuildTrailer(text) {
+  const fields = [
+    ['NEUTRON_CODEX_BUILD_BRANCH=', 'branch'],
+    ['NEUTRON_CODEX_BUILD_HEAD=', 'head'],
+    ['NEUTRON_CODEX_BUILD_REMOTE_HEAD=', 'remoteHead'],
+    ['NEUTRON_CODEX_BUILD_PR=', 'pr'],
+    ['NEUTRON_CODEX_BUILD_DIFF=', 'diff'],
+    ['NEUTRON_CODEX_BUILD_WORKTREE=', 'worktree'],
+  ]
+  const lines = String(text).split('\n')
+  const parsed = {}
+  for (const [prefix, name] of fields) {
+    const matches = lines.filter((line) => line.startsWith(prefix))
+    if (matches.length !== 1) return null
+    parsed[name] = matches[0].slice(prefix.length)
+  }
+  return parsed
+}
+
+function classifyTrailerWait(probe) {
+  const trailer = parseBuildTrailer(probe && probe.trailer)
+  if (trailer !== null) return { state: 'landed', trailer }
+
+  const exitCode = String(probe && probe.exitCode !== undefined ? probe.exitCode : '').trim()
+  const before = probe && typeof probe.errBytesBefore === 'number' ? probe.errBytesBefore : -1
+  const after = probe && typeof probe.errBytesAfter === 'number' ? probe.errBytesAfter : -1
+  if (probe && probe.alive === true) return { state: 'alive' }
+  if (exitCode === '' && before >= 0 && after > before) return { state: 'alive' }
+
+  const rc = /^-?\d+$/.test(exitCode) ? Number.parseInt(exitCode, 10) : null
+  return { state: 'dead', signalExit: rc !== null && rc >= 128 ? rc : null }
 }
 
 /**
@@ -3872,6 +3976,19 @@ const BRANCH_HEAD_SCHEMA = {
   },
 }
 
+const BUILD_TRAILER_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['trailer', 'exitCode', 'alive', 'errBytesBefore', 'errBytesAfter'],
+  properties: {
+    trailer: { type: 'string' },
+    exitCode: { type: 'string' },
+    alive: { type: 'boolean' },
+    errBytesBefore: { type: 'number' },
+    errBytesAfter: { type: 'number' },
+  },
+}
+
 /** The message the run reports when a round left no trace on the branch. */
 function roundDidNotLandFinding(round, head) {
   return {
@@ -4608,7 +4725,7 @@ function deferredCrossModelPeers(statuses, routes) {
     const family = routes.codex?.group || 'codex'
     out.push(family === 'codex' ? {
       name: 'Codex', title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
-      evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
+      evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong), or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
     } : {
       name: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`,
       title: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'}) DEFERRED — refusing to silently APPROVE`,
@@ -4658,7 +4775,7 @@ function deferredCrossModelPeers(statuses, routes) {
 // with no status defaults to 'deferred' rather than to the permissive answer.
 function codexPanelLine(status, review) {
   if (status === 'deferred') {
-    return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, or the diff was EMPTY so there was nothing to review). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
+    return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, the diff was EMPTY so there was nothing to review, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
   }
   if (status !== 'connected') {
     return `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
@@ -4692,7 +4809,12 @@ function codexReviewerPrompt(diffFile) {
   const errFile = opts.adversarial === true || opts.lane
     ? `/tmp/trident-codex-${lane}-${uniq}.err`
     : `/tmp/trident-codex-${uniq}.err`
-  const script = `${repoPath}/trident/codex-review.sh`
+  if (codexReviewSh === null) {
+    throw new Error(
+      `${lane} review is routed to the codex wrapper but the launcher did not thread codexReviewScript (the harness review wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
+    )
+  }
+  const script = codexReviewSh
   const envPrefix = opts.adversarial === true
     ? `${ADVERSARIAL_CODEX_ENV_PREFIX}NEUTRON_CODEX_REVIEW_RUBRIC=${shSingleQuote(`You are ARGUS-ADVERSARIAL (independent, read-only). Independently try to REFUTE the change: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do not substitute the generic second-opinion rubric.`)} `
     : opts.envPrefix || ''
@@ -4715,7 +4837,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile}
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). ${opts.adversarial === true ? "Return verdict='REQUEST_CHANGES' with one infrastructure finding: this configured core seat did not review." : "Return verdict='COMMENT', findings=[]. This is the GRACEFUL optional-peer path."}
-- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, or the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
+- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, the call FAILED/timed out, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
 

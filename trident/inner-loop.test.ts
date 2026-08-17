@@ -24,6 +24,7 @@ import {
   buildWorkflowArgs,
   buildSubstrateWorkflowFire,
   CODEX_BUILD_SCRIPT_PATH,
+  CODEX_REVIEW_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
@@ -497,6 +498,18 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(threaded.startsWith('/')).toBe(true)
     expect(existsSync(threaded)).toBe(true)
     expect(threaded).toBe(CODEX_BUILD_SCRIPT_PATH)
+  })
+
+  test('args thread the harness codexReviewScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexReviewScript":"([^"]*\/trident\/codex-review\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_REVIEW_SCRIPT_PATH)
   })
 
   test('args thread the checked-in worktreeCleanupScript abs path (#541 — no LLM in the destructive path)', async () => {

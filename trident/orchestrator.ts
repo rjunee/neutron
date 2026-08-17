@@ -1686,6 +1686,10 @@ export function buildTridentOrchestrator(
   // Run ids redispatched in THIS process — the per-process bound on orphan
   // recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
+  // Deliberately in-memory: a restart replaces the failing pool/generation, while
+  // each individual process still bounds launch faults and cannot retry forever.
+  const launchFaults = new Map<string, { count: number; last: string }>()
+  const MAX_LAUNCH_FAULTS = 3
   // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
   // seconds; the build itself runs detached and is NOT tracked here.
   const inflight = new Set<Promise<void>>()
@@ -1719,6 +1723,31 @@ export function buildTridentOrchestrator(
       // probe failure → treat as no existing PR (the workflow opens one).
     }
     return null
+  }
+
+  /** Best-effort, read-only probe for a PR that already reached MERGED while its
+   *  launcher was unavailable. No evidence is never treated as a merge. */
+  async function detectMergedPr(run: TridentRun): Promise<number | null> {
+    if (run.merge_mode !== 'pr') return null
+    try {
+      if (run.pr !== null) {
+        const res = await opts.run_host(
+          ['gh', 'pr', 'view', String(run.pr), '--json', 'state,number', '--jq', '.state'],
+          run.repo_path,
+        )
+        return res.ok && res.stdout.trim() === 'MERGED' ? run.pr : null
+      }
+      const branch = run.branch ?? `trident/${run.slug}`
+      const res = await opts.run_host(
+        ['gh', 'pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number', '--jq', '.[0].number // empty'],
+        run.repo_path,
+      )
+      if (!res.ok) return null
+      const n = parseInt(res.stdout.trim(), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -2563,6 +2592,7 @@ export function buildTridentOrchestrator(
       fired.delete(run.id)
       redispatched.delete(run.id)
       infraRetryNotBefore.delete(run.id)
+      launchFaults.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
@@ -2616,6 +2646,39 @@ export function buildTridentOrchestrator(
       //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
       //     unchanged reap below, byte-stable for legacy callers.
       if (run.subagent_status === 'crashed' && beginCrashRecovery !== undefined) {
+        // MEASURED 2026-08-16 23:21 gateway restart: recovery blindly relaunched
+        // finished PRs #336/#337 and the owner hand-cancelled both. A merged PR is
+        // terminal and outranks the recovery budget, but the claim MUST precede the
+        // return: it clears the crash latch whose save veto would otherwise silently
+        // discard done/completed. The claim spending one recovery unit is harmless
+        // because the run ends terminal. Nothing was harvested, so do NOT stamp
+        // `harvested_at` (applyResult remains its sole writer).
+        const mergedPr = await detectMergedPr(run)
+        if (mergedPr !== null) {
+          const claimed = await beginCrashRecovery(run.id)
+          if (claimed === null) {
+            return { run, changed: false, waiting: true, note: 'crash-recovery claim lost — re-read next tick' }
+          }
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const adopted: TridentRun = {
+            ...claimed,
+            phase: 'done',
+            pr: mergedPr,
+            branch: claimed.branch ?? run.branch,
+            inner_checkpoint: 'pr-merged',
+            inner_verdict: 'APPROVE',
+            subagent_status: 'completed',
+            failure_reason: null,
+            last_advanced_at: now(),
+          }
+          return {
+            run: adopted,
+            changed: true,
+            waiting: false,
+            note: `PR #${mergedPr} already merged — adopted after launcher crash → done (no relaunch)`,
+          }
+        }
         if (run.crash_recoveries >= maxCrashRecoveries) {
           fired.delete(run.id)
           redispatched.delete(run.id)
@@ -2650,7 +2713,33 @@ export function buildTridentOrchestrator(
         redispatched.delete(run.id)
         // CONTINUATION, not a restart: `launch()` folds `inner_checkpoint`/`pr`/`branch`
         // so the workflow resumes on the pushed branch and reuses the PR.
-        return launch(claimed)
+        try {
+          const out = await launch(claimed)
+          launchFaults.delete(run.id)
+          return out
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+          launchFaults.set(run.id, { count, last: msg })
+          if (count < MAX_LAUNCH_FAULTS) {
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+            }
+          }
+          launchFaults.delete(run.id)
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+          return {
+            run: failedRun(run, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (launch kept throwing)`,
+          }
+        }
       }
       // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
       //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes
@@ -2735,6 +2824,9 @@ export function buildTridentOrchestrator(
 
     // (3) Launch-if-needed — the single fire site (null-guarded).
     if (run.subagent_run_id === null) {
+      // The infra-retry backoff is checked BEFORE the launch-fault budget: a run
+      // that is deliberately waiting out a backoff has not attempted a launch, so
+      // it must not consume a fault from the budget that reaps a THROWING launch.
       const notBefore = infraRetryNotBefore.get(run.id)
       if (notBefore !== undefined) {
         const remainingMs = notBefore - Date.parse(now())
@@ -2748,7 +2840,33 @@ export function buildTridentOrchestrator(
         }
         infraRetryNotBefore.delete(run.id)
       }
-      return launch(run)
+      try {
+        const out = await launch(run)
+        launchFaults.delete(run.id)
+        return out
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+        launchFaults.set(run.id, { count, last: msg })
+        if (count < MAX_LAUNCH_FAULTS) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+          }
+        }
+        launchFaults.delete(run.id)
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+        return {
+          run: failedRun(run, reason, false),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (launch kept throwing)`,
+        }
+      }
     }
 
     // (4) In flight (fired by THIS process, no result yet). Reap a stalled

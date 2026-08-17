@@ -2,6 +2,245 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the normalizer was pinned, the line that uses it was not
+
+Landed via PR #364.
+
+Round-two corrections landed via PR #365.
+
+A retroactive panel on #333 returned five findings, and #349 answered them by
+re-measuring rather than inheriting. **Every one of the five settles the same way
+here, independently re-measured — closed.** What is left is one level down
+again, and it is the only live defect in this entry. Measured first at
+3fb3e0e2, then RE-MEASURED after rebasing onto c3654db6, because #344 and #354
+moved lines inside the two files this touches: every citation below was
+re-derived by CONTENT rather than carried, and the seam finding was re-run on
+plain `origin/main` at c3654db6 rather than assumed to survive the rebase.
+
+Every measurement below was re-run after rebasing onto c3654db6, so the numbers
+and the line citations describe the same tree. **Line citations resolve against
+the tree this entry MERGES INTO, not against the commit the experiment first ran
+on** — `runtime/adapters/claude-code/index.ts` moved twice underneath this work
+(#344, then the docblock in this change), and a citation that resolves only at
+the commit it was typed at is the rot #339 is about.
+
+**THE HEADLINE FINDING DOES NOT REPRODUCE, AND THE SENTENCE IT ATTACKED STAYS.**
+The panel's blocker was that `docs/AS_BUILT.md` claims "each trim was
+mutation-proved" while four of eleven changed behaviour sites were pinned by
+nothing. Re-run here on `main`, one predicate at a time, against a green control
+(162 pass / 0 fail across the twelve suites that name any of these resolvers,
+before any mutation): **fourteen predicates, fourteen REDs.** Both arms of
+`resolveNeutronHome` and `resolveOpenDbPath` (`migrations/db-path.ts:46,48,81`);
+all three tiers of `resolveRegistryDbPath` and both arms of `resolveOwnerHome`
+(`gateway/boot-listener-registry.ts:69,71,73,336,338`); `applyEnvShim`
+(`open/server.ts:76`); both predicates in `resolveSkillsDir`
+(`gateway/wiring/build-phase-spec-resolver.ts:515,520`); `resolveM2FeedbackPath`
+(`onboarding/feedback/m2-week-4-collector.ts:48`); the `--home` guard
+(`scripts/email-accounts.ts:73`); `buildPromptVars` (`prompts/template.ts:116`);
+the normalizer's own predicate (`runtime/adapters/claude-code/index.ts:331`); and
+the return-verbatim half of `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts:216`). Each mutation was proved to have LANDED
+(`git diff` printed per mutation) and each was restored and re-verified clean.
+The claim is true as written.
+
+**WHAT IS NOT TRUE IS THE SCOPE IT READS AS.** `resolveReplCwdAndHome` appears in
+that mutation-proved list, and the FUNCTION is pinned. The LINE THAT USES IT was
+not. Measured: replacing `runtime/adapters/claude-code/index.ts:367`
+
+    if (resolved.cwd !== undefined) p.cwd = resolved.cwd
+
+with the pre-#333 code verbatim — `if (options.cwd !== undefined) p.cwd =
+options.cwd` — left **162 of 162 green**. That is finding (2) of the same panel,
+the one-variable-two-answers split at the one site nobody tested, and it was
+restorable in one line without a single test noticing. `persistent/pool.ts:118`
+records `cwd: options.cwd ?? process.cwd()`, so a blank survives the `??` into
+the session record; `persistent/supervision.ts` then refuses every respawn for
+that session because `existsSync('   ')` is false. The failure is silent and
+permanent for the life of the process, which is why a green suite over it is
+worse than no suite.
+
+The irony is on the record and worth keeping: the test file that covers this
+opens with "an earlier round of this change trimmed the supervision home and left
+`options.cwd` forwarded raw, and NOTHING went red", and then pinned only the pure
+function. Its sibling
+`persistent/__tests__/append-system-prompt-wiring.test.ts` exists because
+`appendSystemPromptFile` was proven onto an intermediate option bag while the real
+factory dropped it at THIS EXACT MAPPING. The same seam, the same file, the same
+year — and the second time it was the fix for the first that went unpinned.
+
+Three tests now sit at that seam, each mutation-proved with the failing test named:
+`p.cwd = options.cwd` reddens two by name; making the supervision home fall back
+(`resolved.home ?? process.cwd()`) reddens the third. They read the mapped bag back
+out of `supervisedBySessionKey` — the map `registerSupervisedSubstrate` populates,
+which is how the watchdog reaches a session's owning options — so the assertion is
+on the POST-MAPPING value and nothing is spawned. Finding (3), a blank home with no
+cwd turning supervision OFF entirely rather than misplacing it, is pinned there too:
+it was previously asserted as a returned `undefined`, which is not the same claim as
+"the registry, the respawns, the watchdog and the heartbeat are all skipped".
+
+**AND IT WAS RUN AGAIN ON THE FIXES, WHICH IS THE PART WORTH COPYING.** The
+second pass confirmed the premise and the two seam tests, and refused three
+things the first round had introduced or left:
+
+- **The leg count was STILL wrong.** The first correction said three; the
+  reviewer found more — `open/wiring/substrates.ts:189`, `:244`, `:329` and
+  `open/wiring/memory.ts` all reach the same factory, and `open/composer.ts:1296`
+  is the history-import/synthesis REPL, not the conversational one it had been
+  labelled. **Enumerating the callers had now been wrong twice, in the same
+  direction both times**, so the docblock stopped enumerating: every route goes
+  through `buildLlmCallSubstrate`, which copies `cwd` unexamined (`:778`) and
+  calls this factory (`:868`), and the callers divide into a HOME that cannot be
+  blank and a CALLER-SUPPLIED PER-RUN PATH that can. That is a structure, and it
+  does not depend on getting a count right.
+- **The scoped `afterEach` still reached globally.** Scoping it to the seam
+  `describe` narrowed WHEN it fired without changing WHAT it touched:
+  `shutdownAllPersistentRepls()` SIGTERMs every warm REPL in the pool and clears
+  every supervision entry, and with files running concurrently in one process it
+  can kill a child a sibling suite is awaiting — `append-system-prompt-wiring.
+  test.ts:210` is exactly such an await, on the same pool. These tests never call
+  `.start()`, so they own nothing in the pool; the only durable things they
+  create are two timers and one registry entry per instance, all keyed by paths
+  derived from a temp dir this file owns. Teardown now removes exactly those, by
+  name, synchronously.
+- **This entry contained the reviewer's own findings TWICE**, and dated itself
+  2026-08-16 above three 2026-08-17 entries in a log whose first line says
+  "newest first". Both fixed. A log that documents unproved claims while itself
+  carrying a duplicated section and a misordered heading is the same defect one
+  level up, and the reviewer was right to say so.
+
+**A METHOD NOTE THAT IS PART OF THE RESULT.** The first pass of this audit
+produced **eighteen consecutive REDs and every one was false.** The harness took
+its suite list as `"$@"` from a `zsh` caller, where an unquoted `$VAR` is not
+word-split, so twelve paths arrived as ONE filter, matched no test file, and
+`bun test` exited 1. Eighteen exit-1s that meant "your filter is malformed" read
+exactly like eighteen proofs. It was caught only because the nineteenth mutation
+was expected to be green and also came back red. The harness now requires a
+POSITIVE CONTROL — the run must report at least 150 tests executed or the result
+is discarded rather than reported. **A mutation proof asserts a negative, and a
+negative from a tool that could not run is indistinguishable from one it earned;
+this is the failure the original claim was accused of, reproduced inside the audit
+of that accusation.**
+
+**THE TWO REACHABILITY ITEMS THE PANEL LEFT UNVERIFIED ARE SETTLED, AND BOTH WERE
+RIGHT.** `resolveRegistryDbPath` has NO invocation: `git grep` over tracked files
+returns the definition (`gateway/boot-listener-registry.ts:67`), two re-export
+statements (`gateway/index.ts:61`, `gateway/composer-contract.ts:41`), its tests
+and docs — no call site. Checked one hop further than before, in the private
+hosting overlay that consumes this repo as a submodule: zero hits outside
+`vendor/`, with a positive control on the same query shape (a known symbol
+returns 2 there) so the zero is an answer rather than a broken grep. Its trim is
+hardening on a published surface, not a bug fix, and `config/index.ts` already
+says exactly that. The REPL blank-`cwd` arm is likewise unreached — but for a
+weaker reason than the docblock claimed, and the docblock is corrected in this
+change. It said every production caller resolves `cwd` through
+`resolveNeutronHome`. **There are three INDEPENDENT legs into that factory and
+only the first does** — and the first correction of this docblock, written in
+this change, still got it wrong by treating the second and third as one leg. A
+cross-model reviewer caught that, and both errors pointed the same way: toward
+believing the blank arms could not be reached and so need not be pinned.
+Leg 1 is the owner's conversational substrate (`open/composer.ts:1296`, resolved
+at `:856`). Leg 2 is the ephemeral per-dispatch factory
+(`open/wiring/substrates.ts:364`), whose value reaches here unexamined
+(`gateway/wiring/build-llm-call-substrate.ts:778`) from
+`agent-dispatch/service.ts:487` — `req.repo_path ?? this.deps.repo_path`, where
+`??` keeps a blank. Leg 3 is the warm fire substrate
+(`open/wiring/substrates.ts:413`, wired at `open/composer.ts:1045`), which is NOT
+fed by leg 2 at all: its cwd is `run.worktree ?? run.repo_path`
+(`trident/inner-loop.ts:702`), and it is memoized per cwd, so a blank would be
+cached under the blank key and reused. What actually keeps the arms unreached is
+narrower than "every producer avoids a blank": leg 2's real callers —
+`agent-dispatch/tool.ts`, `command.ts` and `board-research-start.ts` — never
+mention `repo_path` at all (verified: zero occurrences in each), so the `??`
+falls through to `this.deps.repo_path`, bound to `owner_home` at
+`open/composer.ts:1122`. The code-gen core's blank rejection
+(`cores/free/code-gen/src/backend.ts:278`) guards ITS input, not this leg, and
+citing it as protection here was part of the same conflation. So the arms are
+unreached BY CONSTRUCTION AT THE CALLERS, not by any check on the path — one
+caller electing to pass a computed `repo_path` reopens them.
+
+Findings (4) and (5) were confirmed closed and needed nothing: the shim test
+covers `NEUTRON_DB_PATH` as well as `OWNER_HOME`, with an operator-pin control
+(`open/__tests__/owner-slug-agreement.test.ts:447-500`), and
+`skill-forge/registrar.ts:32` no longer calls itself a mirror — it states, and
+this audit confirms by search, that it has no in-tree caller at all.
+
+**"PREVIOUSLY UNPINNED" IS SETTLED STATICALLY AS WELL AS EMPIRICALLY**, because
+a mutation over twelve suites proves those twelve did not catch it and nothing
+more. Eight test files on `main` name `createClaudeCodeSubstrateAuto`, and every
+one that passes a `cwd` passes a REAL path — temp dirs in
+`gateway/wiring/__tests__/build-live-agent-turn-session-isolation.test.ts:128`
+and `build-llm-call-substrate.test.ts:132`, a literal in
+`persistent/__tests__/append-system-prompt-wiring.test.ts:122`, a temp dir in
+`persistent/__tests__/model-floor.test.ts:597`. None passes a blank, so none can
+distinguish `resolved.cwd` from `options.cwd`. Positive control on the same
+query: it does find `.cwd` assertions where they exist
+(`open/__tests__/open-wiring-substrates.test.ts:330`), so the absence is an
+answer rather than a broken grep.
+
+**THE CROSS-MODEL REVIEWER RAN — it was DEFERRED on #333, which is the reason
+those findings sat unactioned — and it could not refute the fix or the
+unpinned claim. It returned four corrections and every one was to what this
+change SAYS about itself**, which is the defect class the entry is about, so
+they are recorded rather than quietly folded in:
+
+- **"Nothing is started here" was FALSE.** Constructing the factory arms
+  `startReplWatchdog` and `startModelUpdateWatchdogForInstance` — real timers.
+  Only the REPL CHILD is absent, because nothing calls `.start()`. The
+  `afterEach` exists to stop those timers, and now says so.
+- **The supervision test's prose claimed more than it asserts.** It observes
+  REGISTRATION; registry path, respawns, watchdog and heartbeat merely share the
+  same `if (home !== undefined)` block. Registration is a PROXY for that block
+  being entered — sound today, and it stops being sound the moment the block is
+  split, which is now written down instead of assumed.
+- **"Nothing downstream of it re-checks" was self-contradictory** — this
+  function IS the re-check. It is now "no stage BETWEEN that producer and this
+  function", with the unexamined intermediate copy cited
+  (`gateway/wiring/build-llm-call-substrate.ts:778`).
+- **The three legs were conflated.** `agent-dispatch/service.ts:487` feeds the
+  EPHEMERAL leg; WARM FIRE is wired separately at `open/composer.ts:1045` and
+  takes its cwd from `trident/inner-loop.ts:702`
+  (`run.worktree ?? run.repo_path`), MEMOIZED per cwd rather than fresh per run.
+  And the blank arms are unreached not because a core rejects a blank
+  (`cores/free/code-gen/src/backend.ts:278` guards ITS OWN input, a different
+  leg) but because the dispatch tool and its slash command OMIT `repo_path`
+  entirely, so the `??` falls through to `deps.repo_path`, bound to `owner_home`
+  at `open/composer.ts:1122`. Unreached BY CONSTRUCTION AT THE CALLERS — one
+  caller electing to pass a computed path reopens it.
+
+It also found the one thing with teeth beyond wording. **The runner executes
+many files concurrently INSIDE ONE PROCESS, so `process.env` is shared**, and a
+file-level `afterEach` restoring a module-load `NEUTRON_HOME` snapshot could
+overwrite another suite's home while that suite sat suspended at an `await` —
+several suites set that same variable. Env mutation is now confined to
+`withEnvHome`, which sets, calls and restores with NO intervening `await`, so
+single-threaded execution makes the interleaving IMPOSSIBLE rather than
+unlikely; and the hook is scoped to the seam block so it no longer fires after
+the four pure-function tests or clears every persistent REPL more often than
+needed. A test that fixes a race by narrowing the odds is the same kind of claim
+this entry exists to refuse.
+
+## 2026-08-17 — a live instance crash-looped on a migration ordinal, and the repair is now in `repairs.json`
+
+An instance refused to boot for ~3 hours (1248 uncaught exceptions) because `_migrations` recorded version 124 under one name while the deployed tree carried another at that ordinal. `migrations/runner.ts` threw rather than guess, which is the designed behaviour — the cost is a hard crash loop, so the instance served nothing and clients connected to an empty server.
+
+Resolved by a hand-verified entry in `migrations/repairs.json` (#350). The merged 0124 had in fact already run, recorded at ordinal 125, and its three ALTERs on `code_trident_runs` (`reviewed_head`, `bound_pr`, `fenced_paths`) were confirmed present via `pragma_table_info` with a positive control before the entry was written. No SQL was applied by hand and no `_migrations` row was rewritten; the rows stay as the incident record.
+
+Second occurrence of the class already documented in that file. The provenance gap it exposes — nothing records WHICH build applied a given migration, so the vector is unrecoverable after the fact — is being closed separately in #352.
+
+## 2026-08-17 — the review wrapper resolves from the harness install
+
+`trident/inner-loop.ts` now resolves the sibling `codex-review.sh` as
+`CODEX_REVIEW_SCRIPT_PATH` and threads it into the module-less workflow as
+`codexReviewScript`. That harness path is authoritative for every target,
+including Open: there is deliberately no `repoPath` fallback, and a configured
+Codex review seat without the threaded value fails closed with an error naming
+`codexReviewScript`.
+
+This completes the review half of #355. Builds and reviews now both resolve their
+Codex wrappers from the harness install, so a target repo does not need a
+`trident/` directory and Open can no longer work merely by coincidence while
+other projects exit 127 or drift onto deployed copies.
+
 ## 2026-08-17 — the build wrapper resolves from the harness install
 
 `trident/inner-loop.ts` now resolves the sibling `codex-build.sh` as
@@ -24,6 +263,604 @@ needed. Until this change deploys, the currently deployed harness still resolves
 from `repoPath`, so Enterprise builds can fail with the named 127/deferred outcome
 during the accepted window between workaround removal and deployment. Nothing
 under `/opt/neutron-managed` was changed or copied.
+
+## 2026-08-16 — a fired reminder gets its own REPL, and a background failure stops silencing chat
+
+Two defects, one outage. Three consecutive journal lines from a live instance at
+2026-08-17T01:56:11Z: a reminder's compose aborted
+(`route=compose_failed reason="SubstrateCallError: cc-llm-call: aborted"`), the
+warm chat session was evicted as abandon-poisoned, and the owner's next chat turn
+died with `persistent-repl: REPL process exited`. He could not send a message
+until the service was restarted.
+
+**Defect 1 — composition ran on the owner's chat REPL.** `open/composer.ts` wired
+the reminder dispatcher's `llm` onto `liveAgentSubstrate`, and the work-board
+wakeup onto the same substrate through the same wrapper. The persistent pool keys
+on `substrate_instance_id` first (`persistent/pool.ts` `poolKeyFor`), so composing
+on `cc-agent-*` meant composing on his session. The abort path cancels the handle
+(`runtime/collect-tokens.ts`, `keepAliveExempt: true`), cancelling an unsettled
+turn poisons the session (`persistent/pool.ts:678`), and the next dispatch evicts
+and respawns it (`persistent/spawn.ts:862-866`).
+
+The two prior patches at that call site — passing the live-chat `--tools` surface,
+then the live-chat model — were both attempts to make SHARING the session safe.
+They stop an eviction caused by a mismatch; nothing stops an eviction caused by a
+failure. The #340 entry directly below closed with the actual answer ("it needs its
+own substrate") and this is it: `cc-nudge-*` (`open/wiring/substrates.ts`), a warm
+background REPL. Both timer-driven callers move onto it.
+
+**The new lane is an EQUAL-GRANT, SEPARATE-SESSION twin of the chat lane, not a
+sandbox.** It runs `PROFILE_WARM_CHAT` with `enableToolBridge: true`, the GitHub
+credential and the frontier-model floor — deliberately identical to `cc-agent-*`.
+Tightening it would rebuild the `cc-ritual-*` sandbox that ISSUES #504 deleted: a
+ritual composes on this seam, that sandbox meant the morning brief could not read
+the owner's calendar, and he rejected it outright ("access to everything general has
+access to"). The security boundary for the lane is the ritual APPROVAL GATE
+(`reminders/ritual-fire.ts`), which is unchanged. What is deliberately different is
+the instance id (the whole fix), the credential-failure lane, and the owner-facing
+notice/delivery sinks, which are omitted so a failed background compose cannot push
+a banner into his chat. `docs/INVARIANTS.md` #7/#68 and the tool-bridge section of
+`docs/SYSTEM-OVERVIEW.md` are updated in this change to state the pair rather than
+`cc-agent-*` alone. The `--tools` surface stays `LIVE_AGENT_TOOL_NAMES`, now for
+capability rather than session-matching: a ritual composes on this seam and cannot
+apply its own surface, so its approval prompt's promise of web egress is only true
+if the surface carries it.
+
+**Cost, stated plainly.** The pool key folds `project_id`
+(`runtime/adapters/claude-code/persistent/pool.ts` `poolKeyFor`) and both callers
+pass a `metering_context.project_id`, so this adds ONE resident `claude` child per
+project that actually receives background composition — the same per-project shape
+`cc-agent-*` already has, and the persistent pool has no count cap or idle TTL
+today. Also NOT fixed by this change: the spawn-side respawn failure in the incident
+journal (`persistent/spawn.ts:862-866` emits "REPL process exited" AFTER an
+evict-and-respawn, i.e. the respawn itself failed). This change removes the reason
+the owner's child was being evicted at all; if that respawn failure has a resource
+component, a second warm child per project moves against it and it will resurface
+on its own terms.
+
+**Defect 2 — a background failure locked out interactive traffic.** The substrate
+maps "retryable, no HTTP status" to 429 (`mapStatusForPoolCooldown`), so a crashed
+REPL child read as a quota condition. Five of those reached
+`MAX_CONSECUTIVE_FAILURES` and parked the box's ONE credential for
+`CONSECUTIVE_COOLDOWN_MS`; every subsequent owner turn then failed instantly with
+"all Anthropic credentials are in cooldown (429/402/401)" — naming a cause that was
+not true. The decision taken: a background lane may not contribute to a pool-wide
+counter that gates the owner's chat at all. `reportFailure` gains an `origin`
+(`runtime/credential-pool.ts`); on `'background'` the strike ledger is left entirely
+alone — neither incremented NOR re-read, so such a report can neither trip the park
+nor extend one an interactive turn already tripped. Gating only the increment would
+have left a background failure re-stamping `cooldown_until` an hour out on every
+fire: the same outage with a slower fuse.
+
+The substrate additionally declines to report an INFERRED cooldown on that lane
+(`credential_failure_lane` in `gateway/wiring/build-llm-call-substrate.ts`, threaded
+through the OpenAI path too). "Inferred" is drawn strictly, because the first cut of
+this guard drew it too loosely and left the hole open: it covers the retryable→429
+default, a parsed status the mapper REWRITES (a retryable `HTTP 503` also maps to
+429), and `detectCliAuthFailure` — whose weakest rule is the substring `401`
+appearing ANYWHERE in the message, so a background REPL crash mentioning it would
+otherwise have cooled the owner's only credential straight through the new guard.
+A REAL provider status still cools on either lane: a 429/402/401 the provider itself
+returned, or an adapter-stamped `rate_limited`. Rationale: nobody is blocked on a
+background turn, it retries on its own schedule, and any condition it could discover
+is rediscovered immediately and authoritatively by the next interactive turn — while
+the cost of the old behaviour was total product silence. On the CC path that real-429
+cooldown is `COOLDOWN_429_MS` = 60s flat: `retry_after_ms` is never populated by the
+claude-code adapters (`grep -rn retry_after_ms runtime/adapters/claude-code/` returns
+nothing), so the `retry-after` branch is reachable only from the OpenAI path.
+
+Regression tests. `open/__tests__/background-compose-never-disturbs-chat.test.ts`
+models the warm pool with the real `poolKeyFor` and the real poison rule (an aborted
+compose must leave the chat child at generation 1), with `metering_context` on every
+spec so the `project_id` pool-key dimension is actually exercised; its wiring guard
+now drives the REAL `buildOpenGraphComposer` and asserts which
+`substrate_instance_id` the production `reminder_dispatcher.dispatch()` turn lands
+on, instead of grepping composer source.
+`gateway/wiring/__tests__/background-lane-never-locks-out-owner.test.ts` drives
+inferred-cooldown failures through both lanes with an interactive CONTROL on every
+assertion, and — because the first round's tests never reached `reportFailure` on
+the background path at all, which made the `origin` argument itself untested — adds
+REAL-provider-status cases on both the Claude and the OpenAI dispatch paths. Its
+lane tests deliberately do NOT use the dead-REPL message as their vehicle any more
+(see Defect 3): a message the substrate now classifies for itself proves nothing
+about the lane, so they run on a generic unstamped retryable failure instead.
+`open/__tests__/open-wiring-substrates.test.ts` now enumerates every wired substrate
+for the tool-bridge and frontier-floor claims rather than asserting only the positive
+case, so those exclusivity titles are measured.
+
+Mutation results, MEASURED (each mutation applied alone, then the three files above
+run together: baseline 52 pass / 0 fail):
+- collapse `cc-nudge-${owner_handle}` → `cc-agent-${owner_handle}`: 7 failures.
+- point the composer's dispatcher back at `buildSubstrateReminderLlm(liveAgentSubstrate)`:
+  2 failures.
+- drop the `failureLane` argument from all four `reportFailure` call sites: 2 failures.
+- delete `credential_failure_lane: 'background'` from the nudge substrate: 1 failure.
+- revert `reportFailure`'s strike-park check to unconditional: 1 failure.
+- treat `detectCliAuthFailure` as a provider status again: 1 failure.
+
+The last three were each survived by the first round's tests and are the reason this
+round's were written: a guard whose wiring, whose park re-check and whose definition
+of "provider-reported" are all untested is a guard that reads correct and is not.
+
+**Defect 3 — the owner's own retries parked his own credential, and no lane rule
+could have stopped it.** Review found the lane split and the strike gating still
+left the incident partly live, and the PR's own passing CONTROL test was asserting
+the defect: five `persistent-repl: REPL process exited` failures on the INTERACTIVE
+lane still parked the pool for an hour. Re-reading the journal shows why that
+matters rather than being a hypothetical — the third line of the incident is exactly
+that error on the owner's chat turn. The sequence is: a background compose kills the
+shared child; the pool evicts and respawns it; the owner, seeing a failure, retries;
+each retry lands mid-respawn and fails the same way; five of them reach
+`MAX_CONSECUTIVE_FAILURES`. Every one of those turns has a person waiting on it, so
+`origin: 'background'` never applies to any of them.
+
+The fix is a classification, not a lane rule. `detectReplProcessExited`
+(`gateway/wiring/build-llm-call-substrate.ts`) joins the existing substrate
+fast-paths — `detectBinaryNotFound`, `detectChannelWedged`, `detectTurnTimeout` —
+which all sit AHEAD of the cooldown map and suppress it on BOTH lanes. A dead child
+is a local substrate fact that says nothing about the credential: no status comes
+back, so `mapStatusForPoolCooldown(null, retryable=true)` can only guess 429, and
+rotating credentials cannot revive a process. The error is re-emitted UNCHANGED and
+retryable, so the caller retries onto the respawned child on the same healthy
+credential — the pool's existing self-heal, which only ever worked if the credential
+was not parked underneath it. Precedence note: this now also outranks
+`detectCliAuthFailure` for a dead-REPL message whose stderr tail happens to contain
+`401`, which is correct — a tool call inside the turn returning 401 says nothing
+about the credential the turn was dispatched on, and the process death is the
+authoritative fact.
+
+Mutation, MEASURED: forcing `detectReplProcessExited` to return `false` fails 2 of
+the new tests (the owner-retry case and the 401-in-the-tail precedence case). The
+background-lane assertion survives that mutation by design — the lane exemption
+already covers it, and the two mechanisms are deliberately independent.
+
+**Three costs this change accepts, stated rather than implied.**
+1. *Turn serialization is per-session, so the two lanes can now run concurrently in
+   the same cwd.* `acquireTurn` (`runtime/adapters/claude-code/persistent/repl-session.ts`)
+   serializes turns within ONE session; splitting the lanes necessarily removes the
+   accidental mutual exclusion the shared session gave. Both children spawn at
+   `owner_home` and both carry `Bash`/`Write`/`Edit`, so a ritual writing files can
+   now race an owner chat turn doing the same (git `index.lock` contention, lost
+   edits). This is the direct price of isolation and is accepted: the alternative is
+   the shared session whose failures caused the outage. It is bounded by rituals
+   being rare and short. If it is ever observed, the answer is a work-scoped lock,
+   not re-merging the lanes.
+2. *The new lane is not pre-warmed.* `prewarmSubstrate` runs only for
+   `llmCallSubstrate` (`open/wiring/substrates.ts`), so the first fired reminder
+   after each restart pays the ~10-30s cold spawn inside the dispatcher's 90s compose
+   budget (`DEFAULT_TIMEOUT_MS`, `reminders/dispatcher.ts`). It fits, it is
+   self-healing, and it is once per restart — not worth holding a second resident
+   child at every boot on installs that may never fire a reminder.
+3. *The lane is outside `/reset` and the periodic context-reset sweep.* Both
+   actuators address `cc-agent-*` only; the reasoning is recorded inline at the sweep
+   in `open/composer.ts`. If that transcript is ever observed growing, it needs its
+   own policy instance with its own cooldown map, not an extra id on the existing
+   one. The per-session idle auto-compact remains the backstop.
+
+Also corrected in this round: the comments claiming the owner-facing sinks are
+omitted from the new lane were incomplete. `enableToolBridge` is ONE gate that
+installs three things, so the TodoWrite→Work Board sync and the Activity Inspector
+tap ride onto `cc-nudge-*` too. The todo sync is unreachable there (`TodoWrite` is
+not in `LIVE_AGENT_TOOL_NAMES`, the surface both callers pass); the activity tap is
+reachable and kept deliberately, because a read-only record of work done for the
+owner is reporting, not interrupting. `open/wiring/substrates.ts` and
+`runtime/adapters/claude-code/persistent/spawn.ts` now say so.
+
+Local verification of the final state: `scripts/ci/typecheck-all.sh` — 51 tsconfigs,
+all pass; `bun test reminders/ gateway/wiring/ gateway/proactive/ runtime/__tests__`
+plus the three files above — 1968 pass, 0 fail; `scripts/ci/leak-gate.sh` on the
+pushed diff — silent.
+
+## 2026-08-16 — a stalled driver is not a driver, and a silent skip is going quiet
+
+Landed via PR #341.
+
+The overnight autonomy loop shipped hours earlier and then stopped. Measured on
+the owner's instance: `work-wakeup` was registered and alive, fired exactly ONCE
+in three hours, and had three `in_progress` board items it never touched. His
+words: "I can't tell if it's actually autonomously progressing work."
+
+It was deferring to a driver that was not driving. The selector skipped any item
+whose `linked_run_id` pointed at a run that was not in a terminal phase, on the
+correct-sounding reasoning that the trident tick already drives such an item.
+But `phase` is not progress: in the EXEC model the outer phase stays `forge-init`
+for the whole inner Forge-Argus-fix workflow, so "non-terminal" is equally true of
+a build working hard and of one parked since 22:31Z. All three items were bound to
+runs in the second state. The wakeup stood down for peers that had stopped, and
+because the skip wrote no line anywhere, the loop looked idle rather than blocked.
+
+`trident/run-driving.ts` now answers "is this run still driving?" from
+`last_advanced_at` — the field the hang watchdog and the board's stall display
+already key on — and every consumer asks the same function.
+
+TWO THINGS A REVIEW CHANGED, both of which had been reasoned into the first cut
+and both of which failed toward double-driving rather than toward silence:
+
+A null `subagent_run_id` plus a null `subagent_status` past the 3-minute settle
+budget was read as proof that no workflow was ever fired, so the item could be
+released in minutes instead of hours. IT RACED THE LAUNCH IT WAS MEANT TO OUTLIVE.
+Those columns are written only after the fire settles, and the settle timer
+triggers a cancellation that is itself unbounded — the fire keeps draining events
+after `cancel()`. A launch genuinely in flight presents exactly that row shape. No
+finite bound on the window can be read off the row, so the rule is gone rather
+than retuned.
+
+The no-advance timer used the reaper's own threshold, on the argument that sharing
+one number meant the two mechanisms could never disagree. At that number a healthy
+long build — whose `last_advanced_at` is stale by construction mid-phase — was
+declared not-driving while it worked. The threshold now sits a deliberate margin
+ABOVE the reaper's, which is stronger than agreement: for any run the reaper can
+reach it has already flipped the row terminal before this timer is consulted, so
+the answer comes from a FACT and the timer is left deciding only the runs no
+reaper can reach. Those are exactly the incident's runs, which carry no dispatch
+id and are therefore reachable by neither reap path.
+
+`isRunLive` — the guard on marking an item done — was moved onto that same verdict
+and then MOVED BACK, which is the most useful thing in this entry. The argument for
+unifying was real: every item the wakeup newly takes is bound to a non-terminal run,
+so the phase-based guard refuses precisely the work just made reachable. A
+cross-model review refused the unification anyway, and was right. The two questions
+fail in opposite directions. A stale `last_advanced_at` is weak evidence that nobody
+is driving — good enough to risk a duplicate turn — and no evidence at all that the
+build finished; `complete()` writes the board row without stopping the build, so
+completing on that signal asserts something false, which is the 2026-08-11 incident
+the guard exists to prevent. Consistency between two predicates is not a reason to
+weaken the stricter one. The dead window is real and stays: an item the wakeup takes
+cannot be closed by that path until its run goes terminal. It refuses LOUDLY, and the
+fix is to reap the stalled run rather than to loosen the claim that work shipped.
+
+The threshold argument was also overstated in the first draft of the comment, and is
+now written as what it is. The margin buys the reaper the FIRST word, not the only
+one: 90 s is the sweep's cadence, not a bound on reap latency, and because the sweep
+is single-flight and steps runs sequentially, one wedged launch stalls it entirely
+and a second run's reap check is never reached. What actually bounds that residue is
+that a live inner workflow re-stamps `last_advanced_at` itself, out of process
+(`checkpoint.sh:196`) — so what remains is a build that checkpoints less often than
+the threshold, which is the known heartbeat gap in #534 and the same false positive
+the reaper already carries.
+
+The silence is fixed as its own defect: a deferral now writes a line naming the
+item, the run and how long since it moved, rate-limited per ITEM rather than per
+run (one run can drive several items, and keying on the run made the second and
+third silent), and the sweep's counters are logged every tick — they were being
+returned and dropped by their only production caller, which made the claim that
+the rate limit "never costs the fact" true of a number nothing printed.
+
+One last thing came out rather than in. The selection input carried a
+`no_advance_hang_ms` override documented as a test seam, and NO CALLER EVER SET IT
+— not production, not a test. Its docstring said production used the reaper's bare
+`NO_ADVANCE_HANG_MS`, which by then was the one number a review had already refused
+as this threshold: production actually defaults to `WAKEUP_STAND_DOWN_MS`, the
+reaper's value PLUS the margin that is the whole safety argument above. So the
+parameter was unexercised and its comment pointed at the rejected reading — a
+reader following it would conclude the fix had not landed. Both are gone; the
+ordering that matters is asserted on the constants themselves in
+`run-driving.test.ts`, which is a claim that cannot rot the way a sentence can.
+
+And the deferral key's separator turned the file it lives in into a BINARY BLOB.
+NUL is the correct delimiter — the one byte that cannot occur in a project slug, a
+board item id or a run id, so the composite key is injective — but it had been
+typed LITERALLY, putting two real NUL bytes into a tracked `.ts` file. A tracked
+file containing a NUL is binary to grep, so `scripts/ci/leak-gate.sh` reported
+`binary-hidden` and failed `purity`: every PII and vocabulary rule the gate runs
+matches NOTHING inside such a file, which is why the gate treats it as a finding in
+its own right rather than as a curiosity. The delimiter is unchanged and is now
+written as a `\u0000` escape — measured, not assumed: the escape parses to
+charCode 0, compares equal to `String.fromCharCode(0)`, and the key stays injective
+across component boundaries, so runtime behaviour is identical and only the source
+encoding moved.
+
+Worth recording HOW it hid, because the same blindness is one keystroke from any
+reviewer: the file reads perfectly in an editor and in a file-reading tool, both of
+which render NUL as whitespace, so the line looks like it uses spaces. The tell was
+a grep that returned nothing on a pattern that was certainly present — the
+"a tool that cannot read the format returns a negative that looks like an answer"
+shape. The gate caught it; the humans and the editors did not.
+
+Fixing it surfaced that NOTHING PINNED THE SEPARATOR. Removing it outright —
+`${project}${item}${run}` — left all 25 tests in the file GREEN, which means a
+later tidy-up to a space, or to nothing, would land silently. It is not a
+hypothetical: the components are concatenated, so `item 'ab' + run 'c'` and
+`item 'a' + run 'bc'` flatten to the same key in one project, and the second
+item's deferral is then suppressed as a standing repeat of the first — one item
+going permanently unlogged, which is the precise defect this logging exists to
+cure. A test now meets that collision head-on, and it is a real discriminator
+rather than a restatement: under the separator-removal mutation it is the ONLY
+test that fails, 25 others still passing, and it passes again on restore.
+
+## 2026-08-16 — the model floor was a list of four ids, not a floor
+
+Landed via PR #344.
+
+A cross-model review of #342 came back `BLOCKERS — 1, 2`, and both were right.
+The floor shipped there matched the requested model against
+`getKnownFallbackModels()` — four literal ids — plus a trailing `-YYYYMMDD`
+strip. That is not the property the file's name claims. The `claude` CLI accepts
+the BARE ALIASES `haiku` and `sonnet`; an older generation and a future
+generation with a new base are not in the set and never will be; case and
+whitespace variants miss. And the row is not schema-validated —
+`repl-registry.ts` declares `model?: string` and never checks it — so a record
+written by another build genuinely can carry any of those. "Whatever the
+persisted record says" has to mean whatever it says.
+
+The second blocker was a guard added by the same hand a day earlier, which is
+the more useful half of the story. `BEST_MODEL` is overridable via
+`NEUTRON_BEST_MODEL`, so an operator can run an instance deliberately on a
+cheaper tier, and that guard DISABLED the floor entirely in that case to avoid
+emitting a "floor applied" event for a degradation that had not happened. The
+reviewer's objection: that honours "run cheaper" and abandons the floor — with
+the best model pinned to the middle tier, a poisoned fast-tier row sits below the
+operator's OWN configured best and stays there. The original defect wearing a
+different hat.
+
+Both collapse into one change, and it removes code rather than adding it.
+Comparison is now by TIER RANK derived from the FAMILY token of an id
+(`claude-haiku-4-5-20251001` → `haiku`, bare `haiku` → `haiku`, trimmed and
+lowercased). Clamp when the request ranks BELOW the floor, leave it alone at or
+above.
+`isBelowFrontierTier`, the snapshot regex and the `getKnownFallbackModels()`
+dependency are all gone. The alias, generation, snapshot and casing gaps close in
+one predicate with nothing left to maintain, and the same-tier case still does
+not fire the event — which was the legitimate half of the guard that was wrong.
+
+An UNRECOGNISED id still ranks at the top, deliberately: clamping it would fight
+the model-update path, which legitimately writes ids this process has never heard
+of into a record before a `--resume` respawn.
+
+Three non-blocking findings from the same review are fixed alongside, all of the
+same shape — a value that would fail the spawn rather than degrade it. A blank
+requested id (only `undefined` was rejected, so `''` reached `--model`) now
+resolves TO the floor. A non-string model in an unvalidated row would have thrown
+inside `.trim()` — inside a spawn, turning a wrong-model bug into a dead session
+— and is now coerced. And an empty `NEUTRON_BEST_MODEL` arrives as `''` because
+`BEST_MODEL` resolves with `??`, so the floor never clamps TO a blank value.
+
+Round 3 replaced the rank ORDER, and the reason is the sharpest finding of the
+whole sequence — two reviewers raised it independently. The order used to be read
+off the `runtime/models.ts` aliases rather than a hardcoded table, on the
+reasoning that a hardcoded table could be inverted by a generation bump. It could.
+What that reasoning missed is that it also left the floor able to rank exactly TWO
+families, and WHICH two was operator configuration: rank 0 was
+`familyOf(FAST_MODEL)`, rank 1 was `familyOf(SONNET_MODEL)`, everything else
+frontier. Point `NEUTRON_FAST_MODEL` at anything that is not the cheapest tier and
+a whole tier stops being ranked. With `NEUTRON_FAST_MODEL=claude-sonnet-5` both
+aliases resolve to `sonnet`, so a persisted `claude-haiku-4-5-20251001` matched
+neither rank and came back FRONTIER: no clamp, so the child spawned on the fast
+tier, `spawn.ts` rewrote the row with it, and not one of the three visibility
+surfaces fired. `NEUTRON_FAST_MODEL=claude-opus-4-5` was worse — `opus` took rank
+0, so the FLOOR itself ranked bottom and nothing could ever clamp. Reproduced
+against the branch head before fixing: 17 failures under that env, 35/35 green on
+the default one.
+
+That is the failure mode this file exists to end, rebuilt one level up. A floor
+that goes INERT under a configuration is worse than one that is absent, because
+everything downstream — the warn, the `system_events` row, the chat bubble — is
+gated on the clamp that never happens. So the order now comes from `TIER_WORDS`,
+which held the true order all along and was consulted only for membership; it is
+an ordered array and the index IS the rank. The aliases still contribute for the
+case the canonical list genuinely cannot cover — a tier name this build predates
+is seeded at the tier its alias names — and a known tier word is never
+overwritten, which is what stops a mis-pointed alias dragging `sonnet` to rank 0.
+The aliases became parameters at the same time, because `runtime/models.ts` binds
+them at import and no in-process test could otherwise reach the environment that
+produced the bug.
+
+Three smaller findings from the same round land with it. The clamp bubble now
+NAMES THE SESSION, because it does not arrive on the degraded chat: the sink
+delivers to one pinned owner topic while a project chat binds its own, so copy
+reading "this chat" was pointing at a different one. Routing the pill to the
+degraded topic is the right fix and is deliberately NOT done here — it needs a
+session-key → topic mapping the sink does not have — but copy that misidentifies
+its own subject is not an acceptable place to wait. The bubble's interpolated
+values are also sanitised through an allow-list (`[A-Za-z0-9._:/@-]`) and capped
+at 64 characters with a marked ellipsis, since the value rendered there is the
+never-schema-checked `record.model` and a backtick in it would close the code span
+early. And `getRecord` now drops an UNUSABLE `model` — a number, an object, a
+blank string — at the one reader, so that the eight spawn profiles that all spend
+it as `record?.model ?? getBestModel()` fall back to the best model as each of
+them already intends; `??` catches only null and undefined, and seven of those
+profiles have no floor in front of them.
+
+The review also CONFIRMED the load-bearing claims of #342 against the code, which
+is worth recording because they were the reason to clamp where it clamps: every
+session spawn path reaches it (cold spawn, watchdog respawn, admin force-resume,
+pending-inbound replay), the only interactive PTY launch is downstream of it,
+neither the pool key nor the reuse guard keys on the model so a resume is
+unaffected, and the single synchronous decision feeding both argv and the record
+introduces no new concurrency hazard.
+
+Mutation-proved, each with a control: reverting `familyOf` to identity (the
+pre-review exact-id matching) reddens 6 of 23; restoring the disable-when-cheap
+guard reddens 1.
+
+A second review round found four more, and the two that matter most are about
+the SAME failure mode in different clothing: a check that cannot fail for the
+reason it claims.
+
+THE FAMILY TOKEN WAS THE FIRST TOKEN, which is only correct for one of the two
+naming orders Anthropic has shipped. `claude-3-5-haiku-20241022` — real,
+published, generation first — yielded family `3`, was therefore unrecognised,
+was therefore ranked at the frontier, and sailed past the floor. Gateway and
+proxy id forms failed identically: `us.anthropic.claude-haiku-4-5-v1:0` and
+`anthropic/claude-haiku-4-5` both anchored on a vendor word. The regression test
+hid all of it by asserting on `claude-haiku-3-5-20241022`, the CURRENT order
+applied to an old generation, which nobody has ever published. A fabricated
+input made a live gap look closed. The id is now split on every non-alphanumeric
+boundary and scanned for the first token that is neither a vendor word nor a
+bare number, which lands on the tier in both orders and behind every prefix
+form. Note which way the residual error leans: a scan that lands on a lower-tier
+word by accident spends more money on a better model, while the failure this
+file exists to stop is the reverse.
+
+THE LOUDNESS HAD NO TEST AND WAS NOT LOUD. Deleting the `log.warn` left every
+test in the suite green — the assertions all ran on the return value — and even
+when it fired it was a stderr line on a server, which is not a signal to the
+person whose chat got worse. That is the identical invisibility that let the
+original defect run for a working day, twice. A clamp now takes the same
+two-surface route as the dead-turn and rate-limit notices: the structured
+operator line, AND a `ModelFloorNotice` through an injected sink wired only on
+the owner's chat substrate, which the gateway fans to a `system_events` row plus
+a chat bubble naming both the requested model and the floor. It is deliberately
+UNLATCHED, unlike its three siblings: their upstream condition persists and
+would re-fire on every scan, whereas a clamp rewrites the offending row in the
+same breath — so a second clamp means something is actively re-poisoning it,
+which is the one thing that must not be suppressed.
+
+The other two were coverage holes with the same shape. The pre-poisoned-row test
+seeded `record.model` and then passed the same id in through `spec(...)`, so the
+production readers were never exercised and deleting the seed left it green;
+there are now two tests driving the REAL readers — `pool.ts`'s replay path and
+`supervision.ts`'s resume path — with the clamp notice asserting on the seeded
+value, so the seed is load-bearing twice over. And the "only the owner's chat
+carries the floor" test built `wireSubstrates` alone, while the deliberate
+fast-tier callers it was protecting are built by `wireMemory`: flipping the
+correction judge onto the chat profile was measured to leave that test fully
+green, and now reddens two in `open-wiring-memory.test.ts`.
+
+Two nits closed alongside. The non-string coercion ran BEFORE the enabled check,
+so an unfloored substrate did not get its own value back verbatim as the
+docstring promised; the early return moved above it. And the floor normalised
+for the comparison but not for the output, so a padded id from an unvalidated
+row reached `--model` padded; the returned value is trimmed now (case is left
+alone — it is meaningful to the API).
+
+The vendor-word list the family scan skips is an ENUMERATION, and an enumeration
+is a list of the prefixes someone remembered — so the RANK deliberately does not
+depend on it. `tierRankOf` scans every token of the id and a lower-tier family
+found anywhere wins, which means one unlisted routing segment
+(`bedrock/us-east-1/claude-3-5-haiku-20241022`) cannot reproduce this same
+blocker one level up. `familyOf` keeps its positional answer, which is what the
+alias constants and a human reader want; the divergence is documented at both.
+
+A cross-model reviewer then ran against the finished branch and found a hole in
+the very mechanism that had just closed the last one, which is the most useful
+kind of finding. Databricks publishes `databricks-claude-haiku-4-5` and
+`databricks-claude-opus-4-5`; the positional scan returned `databricks` for both,
+so an instance with BOTH aliases pointed at that form derived the same family for
+the fast tier and the best tier, every rank came out equal, and the floor went
+INERT. Reproduced before fixing and re-run after (FLOOR INERT → FLOOR HELD). Note
+which half broke, because it is the half the token scan cannot protect: the
+REQUEST was still ranked correctly (its tokens contain `haiku`); it was deriving
+the ALIAS's family that collapsed. So a known tier word anywhere in an id now
+wins over position. That IS an enumeration, sitting under a comment about the
+danger of enumerations, and the trade is stated where it lives: cloud vendors
+mint routing prefixes continuously — this one was missed — while Anthropic has
+shipped three tier names in five years. The ORDER still comes off the aliases, so
+a generation bump cannot invert it.
+
+The first version of THAT test did not isolate its own fix either. The vendor
+list had also gained `databricks`, so two mechanisms closed the same instance and
+deleting the tier-word pass left the test green — a class fix mistaken for done.
+The load-bearing assertion is now a vendor prefix that is not on the list and
+never will be.
+
+The same review disproved a claim in this file's own prose, and the correction is
+kept rather than quietly dropped: the unlatched-notice rationale asserted that a
+clamp cannot repeat for the same cause because it rewrites the row in the same
+breath. That holds only on the SUCCEEDING path. The registry write happens after
+the post-spawn readiness assertion (`spawn.ts:631`) while a channel-wedged
+attempt throws before it (`spawn.ts:573`), so the bounded respawn loop re-enters
+with the row still poisoned and one bad row emits three identical notices. It
+stays unlatched on volume rather than on the false claim — both loops are
+hard-capped — but the docblock now says which.
+
+One finding is recorded and NOT fixed here, deliberately. The owner-facing bubble
+is delivered to the bare `app:<owner>` topic (`open/composer.ts:984`) while a
+project chat's socket binds `app:<owner>:<project>`
+(`gateway/http/app-ws-surface.ts:201`) and delivery is an exact-key lookup, so an
+owner sitting only in a project chat sees the bubble in General rather than where
+the degradation happened — which is precisely where it happened last time. This
+is PRE-EXISTING and shared by all four notices in the family, not introduced
+here, and the durable `system_events` row plus the operator log land either way.
+Re-routing the whole notice family is a separate change with a design question
+attached (the composer's comment claims the bare topic is the only one the live
+client binds, which the surface code appears to contradict — the aspirational-
+docblock shape), so it is written down here instead of being quietly widened.
+
+One guard in that scan is DEFENSIVE AND LABELLED AS SUCH, because the honest
+thing was measured rather than assumed. `tierRankOf` refuses the empty string on
+both sides — an empty token (a padded id) and an empty family (an alias an
+operator pinned to a tier-less id like `claude-2`) — since matching either would
+rank EVERY id as the fast tier and produce a floor that clamps its own frontier
+requests. Only the token half is reachable from a test: the aliases are
+module-level consts bound at import, so no suite can pin a tier-less one.
+Removing the token filter leaves the file green on the default aliases; an
+out-of-suite probe under `NEUTRON_FAST_MODEL=claude-2` shows `'  claude-opus-5  '`
+ranking as the fast tier without the refusals and at the frontier with them. The
+first draft of that test claimed coverage it did not have, which the mutation run
+caught — the same defect class this whole round is about.
+
+Eight mutations reddened tests, each with a control proving it landed: reverting
+the family extraction reddens 3; reverting the rank to the positional lookup
+reddens 1; removing the tier-word pass reddens 1; deleting the owner notice
+reddens 3; deleting the operator log line reddens 1; bypassing the floor at the
+spawn chokepoint reddens 4; removing the poisoned seed reddens the replay test;
+flipping a memory call site onto the chat profile reddens 2. A ninth — removing
+the empty-string refusals — is the one described above as unreachable from a
+suite, and was verified by probe instead of being counted as test coverage.
+
+## 2026-08-16 — a migration row names the build that applied it
+
+Landed via PR #352.
+
+`_migrations` gained two nullable columns, `content_sha256` and `applied_by_commit`, written
+inside each migration's own transaction so a row can never exist without naming what wrote it.
+The commit resolves from `NEUTRON_COMMIT_SHA` first, then from git metadata read as plain files
+(no subprocess — `git` may be absent and a subprocess on the boot path can hang), then NULL. A
+tarball or container install with no `.git` still boots and still records the content hash. The
+git search only accepts a checkout this tree owns — one whose root `package.json` names this
+package — so an install unpacked inside an unrelated repository records NULL instead of that
+repository's HEAD, which would be well-formed, plausible and wrong.
+
+Nothing is written while deciding. The ledger is read shape-tolerantly and the columns are added
+only on the path that is about to write a row, so a boot that ends in the refusal has not touched
+the schema of the database it just declared untrustworthy, and a fully-migrated database can still
+be opened read-only for inspection.
+
+The columns are bootstrapped by the runner rather than by a `NNNN_*.sql` file. The runner is the
+ledger's sole owner, and an ALTER at some ordinal would land after the rows 0001..NNNN-1 it needs
+to change, so every fresh install would come up provenance-less — reintroducing the gap this
+closes.
+
+The name-mismatch refusal is unchanged and still fail-closed; only its message changed. It now
+prints what is on disk (file + hash) against what was recorded (name, timestamp, hash, build) and
+emits the exact `repairs.json` entry that resolves it, so recovery no longer means
+reverse-engineering `repairKey()` from source. A test parses that entry back out of the thrown
+message and proves it resolves the mismatch; others pin that the guard still refuses a genuine
+mismatch, that an entry for a different version or a different name cannot launder one, and that
+pre-existing rows stay NULL.
+
+Declined: refusing a `.sql` file that is not part of the deployed tree. Such a guard *would* have
+flagged the motivating incident — an untracked file at that ordinal is exactly the condition it
+tests — but only in an install with trusted repo metadata, and it can detect nothing in the
+tarball, zip and container installs a self-hostable engine has to support. A refusal that is
+silently inert on much of the fleet trains operators to trust a check that is not running, so
+the answer here is the recorded hash, which every install carries.
+
+The ownership test is anchored, not just applied. Checking ownership wherever a `.git` happens to
+sit still lets the walk climb past this tree's own root, so a copy of it unpacked inside ANOTHER
+Neutron checkout passes ownership against the HOST's `package.json` — both are named `neutron`,
+which is precisely what a name cannot decide — and records the host's HEAD. The walk therefore
+ends at the nearest root: a `.git` that is not ours is NULL, and our root carrying no `.git` is
+also NULL rather than a reason to look one directory higher.
+
+Both guards carry kill evidence rather than a passing assertion. `toBeNull()` is a weak witness,
+since null is equally what a broken resolver, an unreadable fixture, or a walk that never arrived
+returns. Every null assertion is paired with a positive control that starts from the same nested
+directory and differs only in the root package name, and each guard is then deleted from a scratch
+copy and proved to turn its scenario red — ownership kills the stranger's-repository case,
+anchoring kills the vendored-copy case, and neither mutant kills the other's.
+
+Two behaviours are documented rather than changed, because both are deliberate. A steady-state
+boot does not reshape the ledger, so an instance that upgraded onto this build keeps the old
+column set until its next pending migration; reads are shape-tolerant and absent columns select
+as NULL, which is the honest value anyway. And an acknowledged `repairs.json` entry does write —
+it records the acknowledgement in `_migration_repairs` — so a database with acknowledged repairs
+is not one that opens read-only, which the README now says instead of promising otherwise. The
+recorded hash is likewise reported, not enforced: applied migration files get edited in place for
+benign reasons (a comment, a reflow), and gating boot on the hash would turn each into a crash
+loop, while the failure it would catch already produces a name mismatch.
+
 
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 
