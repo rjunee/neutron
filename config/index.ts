@@ -119,16 +119,45 @@ function intKnob(name: string, fallback: number, min: number, max: number) {
 }
 
 /**
- * An OPTIONAL integer knob: unset/empty => `undefined` (the downstream resolver
+ * An OPTIONAL integer knob: unset/blank => `undefined` (the downstream resolver
  * keeps its own default — e.g. `resolveListenPort`'s 7800), bad => LOUD throw.
  * Used for `NEUTRON_PORT`, whose seam default lives in `resolveListenPort`.
+ *
+ * BLANK IS UNSET, AND WHITESPACE IS BLANK — the same rule every identity read in
+ * this repo already follows (`effectiveOwnerHome` below documents it for the home
+ * family). This predicate was `raw === ''`, so ONE variable had TWO answers:
+ * `NEUTRON_PORT=` resolved to `undefined` and the seam's 7800 default applied,
+ * while `NEUTRON_PORT=' '` was a hard boot refusal. Nothing chose that split; it
+ * is what `=== ''` does to a value one space away from empty, and it is the same
+ * shape as the empty-vs-whitespace defect that was fixed across eleven home
+ * readers and never reached this knob because this knob is on a different
+ * variable.
+ *
+ * AND THE CANONICAL-DECIMAL GUARD BELOW IS LOAD-BEARING FOR A REASON IT DOES NOT
+ * STATE, which is why the fix belongs HERE rather than there. `Number('   ')` is
+ * **0**, not `NaN` — whitespace coerces through numeric conversion silently — so
+ * `Number.isInteger` accepts a blank, the range check accepts it (this knob's
+ * floor is 0), and the ONLY thing that turned a blank into a throw was the
+ * string comparison `String(n) !== raw.trim()`, whose own comment justifies it
+ * purely in terms of hex / scientific / signed / leading-zero lexicals. Port 0
+ * is not a rejected value in this tree — it MEANS "bind a random port"
+ * (`resolveListenPort`'s `assertPort` admits 0; `gateway/boot-listener-registry.ts`
+ * treats `port !== 0` as "explicitly resolved"). So a future reader who narrows
+ * that comparison to skip blanks — the most natural way to bring this knob onto
+ * the blank-is-unset rule, and measured: `raw.trim().length > 0 && String(n) !==
+ * raw.trim()` — turns `NEUTRON_PORT=' '` into **port 0**, and the gateway comes
+ * up on an ephemeral port nothing routes to, with the in-use guard disabled and
+ * no error anywhere. Handling the blank at the TOP makes the coercion
+ * unreachable instead of guarded-by-accident, and the boundary is pinned in
+ * `config/__tests__/bootconfig-numeric.test.ts` with an assertion that names 0
+ * specifically, so the narrowing edit reddens.
  */
 function optionalIntKnob(name: string, min: number, max: number) {
   return z
     .string()
     .optional()
     .transform((raw, ctx): number | undefined => {
-      if (raw === undefined || raw === '') return undefined
+      if (raw === undefined || raw.trim() === '') return undefined
       const n = Number(raw)
       if (!Number.isInteger(n)) {
         ctx.addIssue({

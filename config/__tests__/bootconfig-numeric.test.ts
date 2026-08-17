@@ -94,4 +94,41 @@ describe('C1 BootConfig — numeric knobs fail loud (never NaN)', () => {
   test('surrounding whitespace on NEUTRON_PORT is tolerated (canonical after trim)', () => {
     expect(resolveBootConfig({ NEUTRON_PORT: '  9001  ' }).port).toBe(9001)
   })
+
+  // THE BLANK CLASS, WHICH IS WHERE ONE VARIABLE HAD TWO ANSWERS. The test above
+  // covers whitespace AROUND a number; nothing covered whitespace INSTEAD of one.
+  // Measured before the fix: `NEUTRON_PORT=''` → `undefined` (seam default 7800),
+  // `NEUTRON_PORT=' '` → a hard boot refusal. Same variable, same "the operator
+  // set nothing" intent, opposite outcomes, and every identity read in this repo
+  // already answers UNSET for both.
+  test('a WHITESPACE-ONLY NEUTRON_PORT is unset, exactly as an empty one is', () => {
+    for (const blank of [' ', '   ', '\t', '\n', '\t\n ']) {
+      const c = resolveBootConfig({ NEUTRON_PORT: blank })
+      expect(c.port).toBeUndefined()
+    }
+    // CONTROL — "blank is unset" did not become "everything is unset". A real
+    // value still parses, and the empty case still behaves as it always did.
+    expect(resolveBootConfig({ NEUTRON_PORT: '9001' }).port).toBe(9001)
+    expect(resolveBootConfig({ NEUTRON_PORT: '' }).port).toBeUndefined()
+  })
+
+  test('a blank NEUTRON_PORT never resolves to 0 — whitespace coerces to zero, and 0 means "bind random"', () => {
+    // THE ASSERTION THAT NAMES THE NUMBER, because `undefined` and `0` are both
+    // "falsy port" and only one of them is safe. `Number('   ')` is 0, NOT NaN,
+    // so `Number.isInteger` accepts a blank and this knob's floor is 0 — the only
+    // thing that ever rejected a blank was the canonical-decimal STRING compare,
+    // whose comment justifies it purely in terms of hex/scientific/signed
+    // lexicals. Narrowing that compare to skip blanks (`raw.trim().length > 0 &&
+    // …`) is the natural way to bring this knob onto the blank-is-unset rule and
+    // it yields port 0 — an ephemeral port nothing routes to, with
+    // `boot-listener-registry`'s in-use guard (`port !== 0`) disabled, silently.
+    // A `toBeUndefined()` alone passes under that edit only because 0 !==
+    // undefined; this states the failure mode so the next reader cannot miss it.
+    for (const blank of [' ', '   ', '\t\n ']) {
+      expect(resolveBootConfig({ NEUTRON_PORT: blank }).port).not.toBe(0)
+    }
+    // CONTROL — an EXPLICIT '0' is still honoured, so the guard above rejects the
+    // coercion and not the value. Without this, refusing 0 outright would pass.
+    expect(resolveBootConfig({ NEUTRON_PORT: '0' }).port).toBe(0)
+  })
 })
