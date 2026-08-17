@@ -2,6 +2,61 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
+
+`.github/workflows/ci.yml` runs the suite on **eight** shard legs, up from four, and
+`scripts/run-tests.sh` §2c splits the general lane by **estimated cost** instead of
+round-robin by file index.
+
+Both halves exist because CI wall-clock is the SLOWEST shard, not the average.
+Round-robin balances FILE COUNT, which is the right thing to balance only if files cost
+about the same. They do not: a fully-migrated project database is built by replaying the
+whole migration tree, measured at ~137 ms of CPU, and 334 test call sites do exactly that
+(`applyMigrations(db.raw())` — counted with `git grep` against `origin/main`). So one
+runner can draw a disproportionate share of the expensive files and set the wait for
+everyone.
+
+The general lane is now bin-packed longest-processing-time-first: each file gets
+`150 + 137 x (migration replays in it)` ms from its own CONTENT, heaviest goes to the
+lightest shard, and every runner computes the identical assignment independently — so the
+partition property is untouched. Weights are content-derived on purpose rather than a
+checked-in timing manifest: a manifest is a second source of truth that rots every time a
+test is added, and a stale weight looks exactly like a fresh one. The PGLite and device
+lanes stay on round-robin, deliberately — both are dominated by a fixed per-file cost (a
+WASM compile; a DOM + module-registry install) rather than by migration work, so counting
+IS their cost model.
+
+Measured over the 1296 general-lane files on this tree, slowest shard's estimated cost:
+
+| legs | round-robin | cost-packed |
+| --- | --- | --- |
+| 4 | 72.7s | 70.4s |
+| 8 | 39.8s | 35.2s |
+
+**Correcting a figure carried into this work: the rebalance is worth ~3% at four legs, not
+the ~14% previously claimed.** At 1296 files round-robin is already near-balanced by the
+law of large numbers, and the weighting only starts paying as the bins get smaller — 11.4%
+at eight legs. Which is the real relationship between the two halves: more legs is the
+lever (70.4s to 35.2s), and cost-packing is what stops the extra legs being wasted on an
+unlucky draw. The partition is exact at both sizes, verified by union: four shards emit
+336 + 338 + 339 + 338 = 1351 distinct files, identical to the unsharded plan's 1351.
+
+The balance assertion in `scripts/__tests__/run-tests-shard.test.ts` changed shape with
+it. It used to require file counts within one of each other, which now FORBIDS the fix —
+an uneven count is the expected shape of a cost-balanced split. It asserts on the runner's
+own reported per-shard cost instead (parsed from the log, never recomputed in the test: a
+reimplementation of the model would agree with itself while the script's model was broken).
+Mutation-proved — reverting the packer to round-robin fails it on both 2 and 4 legs
+(3836 > 1454 tolerance) while the gaps/overlap assertions stay green, so it fails for
+imbalance and nothing else. `run-tests-shard` 13 pass, `ci-workflow` + `run-tests-selftest`
+49 pass.
+
+The eight-leg matrix and the `/8` denominator have to move together or shards 5-8 run
+NOTHING while reporting green; that pairing is already guarded by
+`scripts/ci/ci-workflow.test.ts` ('the shard matrix size MATCHES the /N').
+
+Landed by PR #399.
+
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
 The outer publisher refused to publish when origin's branch ref already equalled the

@@ -56,6 +56,34 @@ function filesOf(out: string): string[] {
   return lines.slice(start + 1, end).filter((l) => l.length > 0)
 }
 
+/**
+ * The per-shard estimated general-lane cost, as the runner reports it.
+ *
+ * Every shard prints the WHOLE table (its own line marked), because the packing is
+ * computed identically and independently on each runner — so any one shard's
+ * output is enough, and seeing the same table from all of them is itself evidence
+ * that they agree. Parsed out of the log rather than recomputed here on purpose: a
+ * reimplementation of the cost model in the test would pass while the script's own
+ * model was broken, which is the one failure this is supposed to catch.
+ */
+function weightsOf(out: string, n: number): number[] {
+  const byShard = new Map<number, number>()
+  for (const l of out.split('\n')) {
+    const m = l.match(/run-tests: shard (\d+) general est (\d+)ms over (\d+) files/)
+    if (m) byShard.set(Number(m[1]), Number(m[2]))
+  }
+  const weights: number[] = []
+  for (let i = 1; i <= n; i++) {
+    const w = byShard.get(i)
+    // A missing line means the runner stopped printing the table — the balance
+    // would then be unverifiable, and silently passing on an empty array is how a
+    // regression to round-robin would sail through.
+    expect(w).toBeDefined()
+    weights.push(w as number)
+  }
+  return weights
+}
+
 describe('run-tests.sh shard partition', () => {
   const full = shardPlan(null)
   const all = filesOf(full.out)
@@ -76,9 +104,11 @@ describe('run-tests.sh shard partition', () => {
   for (const n of [2, 4]) {
     test(`${n} shards partition the set exactly — no gaps, no overlap`, () => {
       const slices: string[][] = []
+      const plans: { code: number; out: string }[] = []
       for (let i = 1; i <= n; i++) {
         const r = shardPlan(`${i}/${n}`)
         expect(r.code).toBe(0)
+        plans.push(r)
         slices.push(filesOf(r.out))
         if (n === 4) {
           const m = r.out.match(/executing \d+ general \+ (\d+) PGLite/)
@@ -95,9 +125,29 @@ describe('run-tests.sh shard partition', () => {
       // the sharded coverage guarantee depends on.
       expect(union.slice().sort()).toEqual(all.slice().sort())
 
-      // Balanced within one file, so no runner becomes the long pole.
-      const sizes = slices.map((s) => s.length)
-      expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1)
+      // BALANCED BY COST, NOT BY COUNT. This assertion used to require the file
+      // counts to be within one of each other, which is the right check only if
+      // every file costs the same — and they do not: 334 test call sites replay
+      // the whole migration tree at ~137ms each, so a file can cost multiple
+      // seconds or almost nothing. Balancing the count while ignoring the cost is
+      // how one runner ends up the long pole, and a PR waits on the long pole.
+      //
+      // So the runner now bin-packs the general lane by estimated cost and prints
+      // what each shard drew; this asserts on THAT. Counts are deliberately NOT
+      // asserted — an uneven count is the expected shape of a cost-balanced split
+      // and pinning it would forbid the fix.
+      const weights = weightsOf(
+        slices.map((_, i) => plans[i]!.out).join('\n'),
+        n,
+      )
+      expect(weights).toHaveLength(n)
+      const spread = Math.max(...weights) - Math.min(...weights)
+      // 2% of the heaviest shard. Generous on purpose: the exact figure depends on
+      // the tree's file mix, and the property worth pinning is "no shard is the
+      // long pole", not a specific packing. On this tree the real spread is ~0.3%,
+      // so a regression to round-robin (measured 12.9% at eight legs) fails loudly
+      // while an ordinary change in the file mix does not.
+      expect(spread).toBeLessThanOrEqual(Math.max(...weights) * 0.02)
     }, PLAN_BUDGET_MS)
   }
 
