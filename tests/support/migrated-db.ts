@@ -110,7 +110,8 @@ process.on('exit', () => {
  *
  * Throws if `path` already exists and is non-empty. That is the guard that
  * keeps this helper honest: seeding is only equivalent to a replay on a FRESH
- * database, so the one case where it would not be, it refuses.
+ * database, so the one case where it would not be, it refuses. It also throws on
+ * an in-memory database, which has no file to copy onto at all.
  */
 export function seedMigratedDb(path: string): void {
   // An in-memory database has no file to copy onto, and `copyFileSync` would
