@@ -26,6 +26,37 @@ SQLite schema migrations for Neutron's per-instance SQLite database. Forward-onl
 
 The runner enforces the regex `^\d{4}_.+\.sql$`. Files that don't match are silently ignored — keep stray notes / `.bak` files out of the directory.
 
+## The `_migrations` ledger
+
+The ledger is owned by the runner, not by any `.sql` file — `runner.ts` creates it and evolves it on every boot (`ensureProvenanceColumns`). Nothing in this directory should `ALTER` it: evolving the ledger from inside the ledger is circular, and on a fresh install the ALTER would land *after* the rows it needs to change.
+
+| column | meaning |
+| --- | --- |
+| `version` | the 4-digit ordinal |
+| `name` | the `<slug>` half of the filename. **This is the identity the runner compares.** |
+| `applied_at` | unix seconds, as a REAL |
+| `content_sha256` | SHA-256 of the migration file's bytes, as applied |
+| `applied_by_commit` | the deployed commit SHA, or NULL |
+
+The last two answer *which build wrote this row*. A live instance once crash-looped on boot because an ordinal was recorded under one name while the deployed code carried another — and the investigation stalled, because at the moment the row was written the running commit contained no migration at that ordinal at all, and nothing on disk recorded what had applied it.
+
+Both are nullable, and NULL is a real answer, not a defect:
+
+- **`content_sha256` is NULL** on rows written before provenance shipped. Nothing more can be learned about them.
+- **`applied_by_commit` is NULL** when the build had no discoverable identity. Neutron Open is self-hostable, so an install may be an unpacked tarball, a zip, or a `COPY` into a container image with no `.git` and no `git` on PATH. The runner reads git metadata as plain files and never spawns a subprocess (a subprocess on the boot path can hang); when there is nothing to read it records NULL rather than a fabricated value. **Set `NEUTRON_COMMIT_SHA` when packaging a build without git metadata** and provenance stays answerable for exactly the install shape that would otherwise have none.
+
+## When the runner refuses: `repairs.json`
+
+If a version is recorded under one name and this code contains another, `applyMigrations` **throws and applies nothing**. That is deliberate and fail-closed: the schema may not match the code, and the runner will not guess, auto-apply, or rename the recorded row.
+
+The thrown message is self-diagnosing. It prints what is on disk (file + hash) against what was recorded (name, timestamp, hash, build), and then the exact `repairs.json` entry that resolves it. Copy that entry, **replace the `note` with what you actually verified**, and append it to `migrations/repairs.json`.
+
+Verify by hand *before* writing the entry — an entry is an assertion that the live schema already matches this code. Check that the migration's objects are really present (`PRAGMA table_info(<table>)`, and include a column you know exists as a positive control, so an empty result proves absence rather than a mistyped query).
+
+One trap worth naming: the entry's **`file_name` field holds the migration's slug, not the filename on disk** — `trident_checkpoint_head`, not `0122_trident_checkpoint_head.sql`. That is what the runner keys on. "Correcting" it to the real filename stops the entry matching, and the failure is invisible: the ledger looks repaired while the runner keeps refusing to boot.
+
+Entries are permanent incident records. They are never rewritten or removed.
+
 ## PRAGMAs and transactions
 
 The runner wraps each migration's body in `BEGIN ... COMMIT` automatically (and `ROLLBACK` on throw, so a mid-file failure leaves the DB exactly as it was — see `runner.ts`, `splitPragmaPreamble`). Two consequences:

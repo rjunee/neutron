@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveOpenDbPath } from './db-path.ts'
+import { migrationContentHash, resolveDeployedCommit } from './provenance.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -26,6 +27,15 @@ interface MigrationRepair {
 export interface ApplyResult {
   applied: number[]
   skipped: number[]
+}
+
+/** One `_migrations` row, as the runner reads it back on the next boot. */
+interface RecordedMigration {
+  version: number
+  name: string
+  applied_at: number
+  content_sha256: string | null
+  applied_by_commit: string | null
 }
 
 export function loadMigrations(dir: string = HERE): Migration[] {
@@ -60,6 +70,137 @@ function loadMigrationRepairs(dir: string): MigrationRepair[] {
 
 function repairKey(version: number, recordedName: string, fileName: string): string {
   return `${version}\0${recordedName}\0${fileName}`
+}
+
+/**
+ * The `repairs.json` entry that would acknowledge this exact mismatch.
+ *
+ * READ THE FIELD NAME CAREFULLY: `file_name` holds the migration's NAME (the
+ * `<slug>` half of `NNNN_<slug>.sql`), NOT the file's name on disk. That is
+ * what `repairKey` compares — it is called with `migration.name`, and the
+ * shipped entries in `repairs.json` carry slugs (`trident_checkpoint_head`,
+ * for the file `0122_trident_checkpoint_head.sql`). "Correcting" this to the
+ * real filename would silently stop every entry from ever matching, and the
+ * failure would be invisible: the ledger would look repaired while the runner
+ * kept refusing to boot. This builder exists so the operator never has to
+ * infer the convention from the key function — and so the two cannot drift.
+ */
+function repairsEntryFor(
+  version: number,
+  recordedName: string,
+  migrationName: string,
+  today: string,
+): Record<string, unknown> {
+  return {
+    version,
+    recorded_name: recordedName,
+    file_name: migrationName,
+    note: 'REPLACE THIS — what you verified by hand, and why the live schema already matches this code.',
+    date: today,
+  }
+}
+
+/**
+ * A blank reads as a value, so absence is spelled out — and the two REASONS a
+ * field can be absent are spelled out separately, because they send the reader
+ * to different places. A row with no hash at all was written before provenance
+ * existed and nothing more can be learned from it. A row that has a hash but no
+ * commit was written by a build that carried no git metadata (a tarball or
+ * container install), and the hash still identifies the file exactly.
+ */
+const PREDATES_PROVENANCE = '(not recorded — row predates migration provenance)'
+const NO_BUILD_IDENTITY = '(not discoverable — the build carried no git metadata)'
+
+/**
+ * The thrown message for a name mismatch.
+ *
+ * The refusal itself is unchanged and deliberately fail-closed (see the call
+ * site). What changed is that recovery no longer requires reverse-engineering
+ * `repairKey` from source: the message prints what is on disk against what was
+ * recorded — including the provenance of the build that wrote the row, which
+ * is the question the original incident could not answer — and then the exact
+ * JSON to paste into `migrations/repairs.json`.
+ */
+function formatNameMismatch(
+  migration: Migration,
+  recorded: RecordedMigration,
+  today: string,
+): string {
+  const entry = repairsEntryFor(migration.version, recorded.name, migration.name, today)
+  const indented = JSON.stringify(entry, null, 2)
+    .split('\n')
+    .map((line) => `    ${line}`)
+    .join('\n')
+  const appliedAt = Number.isFinite(recorded.applied_at)
+    ? new Date(recorded.applied_at * 1000).toISOString()
+    : '(unknown)'
+  return [
+    `Migration version ${migration.version} was recorded as "${recorded.name}" but this code contains "${migration.name}". ` +
+      'The schema may not match this code.',
+    '',
+    '  on disk',
+    `    file    ${migration.fileName}`,
+    `    sha256  ${migrationContentHash(migration.sql)}`,
+    '  recorded',
+    `    name    ${recorded.name}`,
+    `    applied ${appliedAt}`,
+    `    sha256  ${recorded.content_sha256 ?? PREDATES_PROVENANCE}`,
+    `    build   ${
+      recorded.applied_by_commit ??
+      (recorded.content_sha256 === null ? PREDATES_PROVENANCE : NO_BUILD_IDENTITY)
+    }`,
+    '',
+    'Resolve ONLY with a hand-verified entry in migrations/repairs.json. Confirm by hand that the',
+    'live schema already matches this code, then append this entry (replacing the note):',
+    '',
+    indented,
+    '',
+    'Never rename the recorded row and never auto-apply the migration.',
+  ].join('\n')
+}
+
+/**
+ * Provenance columns on `_migrations`, added additively and forward-only.
+ * Both are nullable: rows written before this shipped are pre-existing and
+ * stay NULL, which is the honest record — nobody knows what build applied
+ * them, and that is exactly the problem this closes going forward.
+ */
+const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ['content_sha256', 'TEXT'],
+  ['applied_by_commit', 'TEXT'],
+]
+
+/**
+ * Bring `_migrations` up to the current shape.
+ *
+ * WHY THIS IS NOT A `NNNN_*.sql` MIGRATION, which is the obvious place for it:
+ * `_migrations` is the ledger, and the runner is its sole owner — it is
+ * created here by `CREATE TABLE IF NOT EXISTS` and no `.sql` file in this tree
+ * has ever touched its DDL. Evolving it from inside the ledger is circular,
+ * and on a fresh install it is also WRONG: the runner writes each row inside
+ * that migration's own transaction, so migrations 0001..NNNN-1 would all be
+ * recorded before the ALTER at ordinal NNNN ever ran. Every fresh install
+ * would come up with a provenance-less history — reintroducing the exact
+ * forensic gap this work exists to close, on the population where the record
+ * is easiest to get right. Bootstrapping here means row one of a brand-new
+ * database carries its provenance.
+ *
+ * The contract is unchanged in substance: additive, forward-only, idempotent.
+ * Columns are only ever added, never dropped or renamed, and re-running is a
+ * no-op because `pragma_table_info` is consulted first (SQLite has no
+ * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+ */
+function ensureProvenanceColumns(db: Database): void {
+  const present = new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('_migrations')")
+      .all()
+      .map((r) => r.name),
+  )
+  for (const [column, type] of PROVENANCE_COLUMNS) {
+    if (present.has(column)) continue
+    db.exec(`ALTER TABLE _migrations ADD COLUMN ${column} ${type}`)
+  }
 }
 
 function assertUniqueMigrationOrdinals(migrations: Migration[]): void {
@@ -127,11 +268,14 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
        applied_at REAL NOT NULL
      )`,
   )
+  ensureProvenanceColumns(db)
   const seen = new Map(
     db
-      .query<{ version: number; name: string }, []>('SELECT version, name FROM _migrations')
+      .query<RecordedMigration, []>(
+        'SELECT version, name, applied_at, content_sha256, applied_by_commit FROM _migrations',
+      )
       .all()
-      .map((r) => [r.version, r.name] as const),
+      .map((r) => [r.version, r] as const),
   )
   const migrations = loadMigrations(dir)
   assertUniqueMigrationOrdinals(migrations)
@@ -142,15 +286,15 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     ]),
   )
   const acknowledged = new Map<number, MigrationRepair>()
+  const today = new Date().toISOString().slice(0, 10)
   for (const migration of migrations) {
-    const recordedName = seen.get(migration.version)
-    if (recordedName === undefined || !migrationNameMismatch(recordedName, migration.name)) continue
-    const repair = repairs.get(repairKey(migration.version, recordedName, migration.name))
+    const recorded = seen.get(migration.version)
+    if (recorded === undefined || !migrationNameMismatch(recorded.name, migration.name)) continue
+    const repair = repairs.get(repairKey(migration.version, recorded.name, migration.name))
     if (!repair) {
-      throw new Error(
-        `Migration version ${migration.version} was recorded as "${recordedName}" but this code contains "${migration.name}". ` +
-          'The schema may not match this code. Resolve only with a hand-verified entry in migrations/repairs.json; never rename or auto-apply the migration.',
-      )
+      // Fail closed, exactly as before: refuse, apply nothing, rename nothing.
+      // Only the message got better.
+      throw new Error(formatNameMismatch(migration, recorded, today))
     }
     acknowledged.set(migration.version, repair)
   }
@@ -176,6 +320,13 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   }
   const applied: number[] = []
   const skipped: number[] = []
+  // Resolved ONCE per run, and only when there is something to apply, so a
+  // steady-state boot (every migration already recorded) does no filesystem
+  // work at all. `dir` is the search origin: for the instance tree that walks
+  // up to the checkout's `.git`, and for a sidecar tree (`migrations/comments`)
+  // it finds the same one.
+  const pending = migrations.some((m) => !seen.has(m.version))
+  const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
   for (const m of migrations) {
     if (seen.has(m.version)) {
       skipped.push(m.version)
@@ -197,11 +348,14 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     db.exec('BEGIN')
     try {
       db.exec(body)
-      db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)', [
-        m.version,
-        m.name,
-        Date.now() / 1000,
-      ])
+      // Provenance is written inside the migration's own transaction, so a row
+      // can never exist without naming the build that wrote it — the gap that
+      // made the original incident unanswerable after the fact.
+      db.run(
+        `INSERT INTO _migrations (version, name, applied_at, content_sha256, applied_by_commit)
+         VALUES (?, ?, ?, ?, ?)`,
+        [m.version, m.name, Date.now() / 1000, migrationContentHash(m.sql), deployedCommit],
+      )
       db.exec('COMMIT')
     } catch (err) {
       db.exec('ROLLBACK')
