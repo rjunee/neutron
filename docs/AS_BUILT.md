@@ -264,27 +264,6 @@ Codex wrappers from the harness install, so a target repo does not need a
 `trident/` directory and Open can no longer work merely by coincidence while
 other projects exit 127 or drift onto deployed copies.
 
-## 2026-08-17 — a live instance crash-looped on a migration ordinal, and the repair is now in `repairs.json`
-
-An instance refused to boot for ~3 hours (1248 uncaught exceptions) because `_migrations` recorded version 124 under one name while the deployed tree carried another at that ordinal. `migrations/runner.ts` threw rather than guess, which is the designed behaviour — the cost is a hard crash loop, so the instance served nothing and clients connected to an empty server.
-
-Resolved by a hand-verified entry in `migrations/repairs.json` (#350). The merged 0124 had in fact already run, recorded at ordinal 125, and its three ALTERs on `code_trident_runs` (`reviewed_head`, `bound_pr`, `fenced_paths`) were confirmed present via `pragma_table_info` with a positive control before the entry was written. No SQL was applied by hand and no `_migrations` row was rewritten; the rows stay as the incident record.
-
-Second occurrence of the class already documented in that file. The provenance gap it exposes — nothing records WHICH build applied a given migration, so the vector is unrecoverable after the fact — is being closed separately in #352.
-
-## 2026-08-17 — the build wrapper resolves from the harness install
-
-`trident/inner-loop.ts` now resolves the sibling `codex-build.sh` as
-`CODEX_BUILD_SCRIPT_PATH` and threads it into the module-less workflow as
-`codexBuildScript`. That harness path is authoritative for every target, including
-Open: there is deliberately no `repoPath` fallback, and a CLI-routed build without
-the threaded value fails closed with an error naming `codexBuildScript`.
-
-Previously, Open worked only because it is also the harness repo. Every other
-project exited 127 unless patched by hand. Enterprise had such a patch: an
-untracked symlink to the DEPLOYED harness plus a local `.git/info/exclude` entry.
-That also hid drift: #345's `model_reasoning_effort=xhigh` pin reached Open's
-checkout while Enterprise continued through a deployed copy with reasoning off.
 ## 2026-08-16 — Forge checkpoints at artifact time
 
 Forge and fix-round contracts now write their existing semantic checkpoint through
@@ -1386,7 +1365,7 @@ failed with `repository lacks the necessary blob to perform 3-way merge`, follow
 `lib.txt: patch does not apply`; restoring the guard makes the same server-side fork-point patch
 replay cleanly.
 
-## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly (2)
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
 heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
