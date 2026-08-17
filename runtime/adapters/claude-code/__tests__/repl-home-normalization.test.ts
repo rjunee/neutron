@@ -28,10 +28,17 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createClaudeCodeSubstrateAuto, resolveReplCwdAndHome } from '../index.ts'
-import { shutdownAllPersistentRepls } from '../persistent/persistent-repl-substrate.ts'
+import {
+  createClaudeCodeSubstrateAuto,
+  deriveReplSupervisionPaths,
+  resolveReplCwdAndHome,
+} from '../index.ts'
 import type { PersistentReplSubstrateOptions } from '../persistent/persistent-repl-substrate.ts'
-import { supervisedBySessionKey } from '../persistent/pool-state.ts'
+import {
+  activeModelWatchdogs,
+  activeWatchdogs,
+  supervisedBySessionKey,
+} from '../persistent/pool-state.ts'
 
 const BLANKS = ['', '   ', '\t\n'] as const
 
@@ -175,18 +182,58 @@ function withEnvHome<T>(home: string | undefined, fn: () => T): T {
   }
 }
 
+/**
+ * Stop ONLY what these tests armed, and do it SYNCHRONOUSLY.
+ *
+ * The obvious teardown is `shutdownAllPersistentRepls()`, and an earlier
+ * revision used it. A cross-model review refused it and was right: it is a
+ * GLOBAL teardown — it SIGTERMs every warm REPL in the pool and clears every
+ * supervision entry (`../persistent/pool.ts:858-870`) — and because the runner
+ * executes files concurrently inside ONE process (`scripts/run-tests.sh:8`), it
+ * can fire while a sibling suite sits suspended awaiting a live drain, killing
+ * the child that suite is waiting on. `append-system-prompt-wiring.test.ts:210`
+ * is exactly such an await, in the same directory, on the same pool. That is the
+ * env-clobber hazard again one layer over, and "scoped to this describe" narrows
+ * WHEN it fires without changing WHAT it reaches.
+ *
+ * Nothing here needs it. These tests never call `.start()`, so they put no
+ * session in the pool and no child anywhere; the only durable things they create
+ * are two timers per home and one registry entry per instance id, and BOTH are
+ * keyed by paths derived from a temp dir this file owns
+ * (`activeWatchdogs` by `replRegistryPath`, `activeModelWatchdogs` by
+ * `modelUpdateStatePath` — `../persistent/supervision.ts:714,875`). So they can
+ * be removed by name, touching nothing another suite can observe.
+ */
+function stopOnlyOurs(homes: readonly string[], instanceIds: readonly string[]): void {
+  for (const home of homes) {
+    const paths = deriveReplSupervisionPaths(home)
+    activeWatchdogs.get(paths.replRegistryPath)?.stop()
+    activeWatchdogs.delete(paths.replRegistryPath)
+    activeModelWatchdogs.get(paths.modelUpdateStatePath)?.stop()
+    activeModelWatchdogs.delete(paths.modelUpdateStatePath)
+  }
+  const ours = new Set(instanceIds)
+  for (const [key, o] of supervisedBySessionKey.entries()) {
+    if (ours.has(o.substrate_instance_id)) supervisedBySessionKey.delete(key)
+  }
+}
+
 describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw one', () => {
-  // SCOPED TO THIS BLOCK on purpose. Registered at file level it would also fire
-  // after the four pure-function tests above, which start nothing and touch no
-  // env — and `shutdownAllPersistentRepls` is a GLOBAL clear of every persistent
-  // REPL, so firing it more often than necessary is reach into other suites for
-  // no benefit.
-  afterEach(async () => {
-    await shutdownAllPersistentRepls()
+  // Every instance id this block registers, so teardown can name them.
+  const ourIds: string[] = []
+  const track = (id: string): string => {
+    ourIds.push(id)
+    return id
+  }
+
+  // SYNCHRONOUS and SCOPED — see {@link stopOnlyOurs}. No `await`, so no other
+  // suite can be scheduled inside it, and nothing global is cleared.
+  afterEach(() => {
+    stopOnlyOurs(tempDirs, ourIds.splice(0))
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   })
 
-  test('a blank cwd never reaches the child, so crash recovery cannot fail closed', () => {
+  test('a blank cwd is not forwarded as the child cwd, so crash recovery cannot fail closed', () => {
     // THE CHAIN, restated where it is now actually asserted. `persistent/pool.ts:118`
     // records the session as `cwd: options.cwd ?? process.cwd()`; `??` falls through
     // on `undefined` but NOT on `'   '`. `persistent/supervision.ts` then refuses the
@@ -200,7 +247,7 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     BLANKS.forEach((blank, i) => {
       const id = `cc-blank-cwd-${i}-${Date.now()}`
       withEnvHome(home, () =>
-        createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: blank }),
+        createClaudeCodeSubstrateAuto({ substrate_instance_id: track(id), cwd: blank }),
       )
       const reg = registeredFor(id)
       expect(reg).toBeDefined()
@@ -213,7 +260,7 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     const realId = `cc-real-cwd-${Date.now()}`
     const realCwd = tempHome('neutron-cwd-seam-real-')
     withEnvHome(home, () =>
-      createClaudeCodeSubstrateAuto({ substrate_instance_id: realId, cwd: realCwd }),
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: track(realId), cwd: realCwd }),
     )
     expect(registeredFor(realId)?.cwd).toBe(realCwd)
   })
@@ -226,7 +273,7 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     const home = tempHome('neutron-cwd-seam-both-')
     const id = `cc-blank-cwd-home-${Date.now()}`
     withEnvHome(home, () =>
-      createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: '   ' }),
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: track(id), cwd: '   ' }),
     )
     const reg = registeredFor(id)
     expect(reg).toBeDefined()
@@ -252,7 +299,7 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     for (const blank of BLANKS) {
       const id = `cc-both-blank-${blank.length}-${Date.now()}`
       withEnvHome(blank, () =>
-        createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: blank }),
+        createClaudeCodeSubstrateAuto({ substrate_instance_id: track(id), cwd: blank }),
       )
       expect(registeredFor(id)).toBeUndefined()
     }
@@ -264,14 +311,14 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     const armedHome = tempHome('neutron-cwd-seam-arm-')
     const armedByEnv = `cc-armed-env-${Date.now()}`
     withEnvHome(armedHome, () =>
-      createClaudeCodeSubstrateAuto({ substrate_instance_id: armedByEnv, cwd: '   ' }),
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: track(armedByEnv), cwd: '   ' }),
     )
     expect(registeredFor(armedByEnv)).toBeDefined()
 
     const armedByCwd = `cc-armed-cwd-${Date.now()}`
     const armedCwd = tempHome('neutron-cwd-seam-armcwd-')
     withEnvHome(undefined, () =>
-      createClaudeCodeSubstrateAuto({ substrate_instance_id: armedByCwd, cwd: armedCwd }),
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: track(armedByCwd), cwd: armedCwd }),
     )
     expect(registeredFor(armedByCwd)).toBeDefined()
   })
