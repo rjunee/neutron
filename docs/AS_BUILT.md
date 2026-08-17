@@ -649,6 +649,227 @@ complete. Closing it needs a backfill primitive the wire has no shape for yet
 (`{type:'history', before_seq}` + a client affordance), which stays the next thing to
 build and is explicitly not faked with a bigger constant.
 
+## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
+
+Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
+those had already merged when this round's review landed, so the remediation could
+not go back into either; every finding below was re-verified against `main` before
+anything changed.
+
+**The seam the composer alone reaches, now driven end to end.** #375 gave the
+timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
+being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
+which proves `wireSubstrates` routes what it is handed and says nothing about whether
+anything hands it that. One line in `open/composer.ts` does. Deleting it left 862
+tests passing across 105 files while returning the lane to a stderr-only clamp — the
+exact class of gap this repo keeps shipping, one level up from "built but never
+wired": WIRED, and the wire pinned by nothing.
+
+`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
+`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
+the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
+reminder (nothing shorter reaches that lane — its options exist only once something
+composes on it), then reads what the production composition actually handed each one.
+The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
+connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
+without it, "the nudge lane produced no bubble" could equally mean the harness cannot
+see bubbles at all. Then the same notice on the nudge lane produces no frame from the
+same socket in the same test, and both reach the `system_events` journal. Three
+mutations, each red on a different assertion: deleting the composer's
+`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
+sinks (the two sinks are identical), and giving the background sink the chat
+`deliver` (ten bubbles where zero were asserted).
+
+**An unbounded park could not be shortened, and the release was unreachable.**
+Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
+had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
+every finite replacement, and `reportSuccess` is the only release but cannot run while
+the credential is parked, because `selectCredential` filters a cooled credential out
+and no dispatch means no success to report. On a single-credential box, which every
+Open install is, that is the product silent until the process restarts.
+
+The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
+legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
+`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
+then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
+pool clamps every park at the new `MAX_PARK_MS` (six hours: past every reset window we
+honour — a Claude subscription window is five — and short of every window
+indistinguishable from a brick), and `reportFailure` discards a non-finite or negative
+`retry_after_ms` in favour of the status default rather than believing it. The `NaN`
+direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
+instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
+`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
+The parser now yields `undefined` for a value that cannot become a real millisecond
+count, and floors a negative at zero.
+
+**The fourth park was the one nothing tested.** #375's own log claimed the fix was
+"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
+strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
+pair left 124 tests green across four suites, because reaching that branch needs a
+standing park LONGER than the hour — which only a `retry-after` produces — while the
+owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
+says wait two hours, in-flight turns fail their way to the threshold, and the strike
+park would then release the credential 60 minutes into a 120-minute window the
+provider asked for, relabelled. Now covered with its control (with nothing standing,
+the fifth strike still parks for the hour), and mutation-proved: that one test goes
+red, the control stays green.
+
+**Two record corrections, appended rather than rewritten**, since this log is
+append-only and a correction that edits history is how a sibling's entry gets lost:
+- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
+  had benched" says "Seven new tests cover it" and "three of them red … four
+  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
+  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
+  reports never walk the park outward`, which is a real assertion and not a control.
+  A mutation proof asserts a negative, so a miscount in it is the one number that must
+  be right.
+- That same entry says the clamp "is now durably recorded". It is not, and its own
+  closing paragraph says so three paragraphs later: the journal is best-effort at
+  every call site. The wording is corrected where it can be — the two test comments
+  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
+  dropped.
+
+No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
+— a bounded park, a discarded bogus header value, and coverage for two branches that
+had none.
+## 2026-08-17 — an untracked .sql in the migrations directory was applied silently
+
+Landed via PR #374.
+
+`loadMigrations` applied every file matching `NNNN_*.sql` that was PRESENT IN THE
+DIRECTORY, tracked or not (`migrations/runner.ts`, the `readdirSync` filter). So a
+stray file that appeared there for a moment was applied at boot, recorded in
+`_migrations` permanently, and then vanished with the next checkout — leaving a
+ledger row naming a migration the repository never contained, after which every
+boot refused on a mismatch nothing on disk could explain. Fourth occurrence of the
+class; it took a live instance down twice, the last time for three hours (row 124,
+resolved only by a hand-verified `repairs.json` entry; row 122 is the same shape
+two days earlier). Rows 125 and 126 on that instance were measured the same way and
+have no source in any checkout, any vendor commit, or any reachable commit.
+
+PR #352 considered this exact check and DECLINED it, on two sound objections: it
+needs ground truth about "the deployed tree" that a tarball install does not have,
+and `git status` on the boot path can hang. Both are answered rather than waved
+past. `migrations/git-index.ts` reads `.git/index` as a plain FILE and decodes it —
+no subprocess, the same constraint `provenance.ts` already obeys for `HEAD`. And
+the reach objection frames the choice as "refuse everything or silently pass",
+missing the option the ledger exists to express: **absence of git metadata means
+CANNOT VERIFY, not NOTHING TO VERIFY.** Verifiable-and-untracked refuses before
+any write; unverifiable applies and records `tree_provenance =
+unverifiable:<reason>` on the row, so the ledger says which it was instead of
+implying a clean apply. Third nullable column, added through the same additive
+`PROVENANCE_COLUMNS` path — not a parallel mechanism, and not an overload of
+`applied_by_commit`, whose name would then no longer describe its content.
+
+The guard deliberately does not fire where it cannot decide, and each of those is a
+false-refusal that would have been worse than the bug: a migration directory the
+tree does not track AT ALL (`node_modules`, a build directory) reads as
+`directory-not-tracked`; index shapes the parser does not decode (version 4, split,
+sparse) and any corrupt file read as unverifiable; parsing is strict about landing
+exactly on the trailing checksum, because a PARTIAL path list is the one wrong
+answer that produces a false refusal. Only pending migrations are checked — a
+recorded row is already permanent, and refusing forever over a stray applied long
+ago would be an outage with no remedy.
+
+Measured, not assumed: the parser's output equals `git ls-files` on this repository
+exactly (3083 = 3083), and two other real indexes parse to 3019 and 15494 paths,
+one from a linked worktree and one from an ordinary clone. Both new guards were
+mutation-tested against the REAL files, not only scratch copies — dropping the
+refusal reddens 6 tests, dropping the reach guard reddens 3 (including the
+PRE-EXISTING `ordinal-collision-mutation` test, whose fixtures live in an untracked
+scratch directory, which is live proof the reach guard is load-bearing). Neither
+mutant kills the other's scenario. `bun test migrations/` 115 pass / 0 fail; runner
+consumers 471 pass; the sidecar-migration packages 2299 pass. Typecheck 50/51, the
+one failure (`app/tsconfig.json`, missing `node` types) reproducing identically on
+the untouched tree in this checkout. Leak gate 168 findings, the same count `main`
+produces, none in a file this change touches.
+
+### Review round 2 — four defects in the above, three of which made it wrong
+
+All still PR #374. Every item below was a real defect in the first cut, and each is
+recorded with what it would have cost, because three of them turned a guard into a
+new way to fail.
+
+**The ledger value overclaimed, and staging alone satisfied it.** `.git/index` is
+the STAGED tree, not the committed one, so `git add` (or `git add -N`) of a stray
+flipped the refusal to an apply and recorded it as `tracked` — a row asserting the
+deployed tree contained a file no commit ever did, which is the orphan row this work
+exists to prevent, now wearing a clean label. Two changes: intent-to-add entries
+(`git add -N`, which stages no content and so is in no tree at all) are excluded
+from the tracked set, and the recorded value is now `tracked-in-index`, naming its
+own evidence. HEAD-tree verification stays OUT of scope, and this is the argument
+rather than a shrug: commit and tree objects live in a packfile in any clone, so it
+would mean an `.idx` search plus `OFS_DELTA`/`REF_DELTA` reconstruction — hundreds
+of lines of binary decoding, on the boot path, to close a hole narrower than the one
+being closed, in a module whose entire premise is that it must not become a new
+cause of a boot outage. The residual (a staged-but-uncommitted migration still
+applies) is documented at `migrations/git-index.ts`'s header, in `migrations/README.md`,
+and in the value itself. A forensic column that has to be discounted is worth less
+than one that is modest and exact.
+
+**The refusal claimed "nothing has been written" while the repairs write ran
+first.** `_migration_repairs` DDL and its `INSERT OR IGNORE` executed before the
+tree was resolved, so on any instance carrying acknowledged repairs — this
+repository ships two, and a live instance took both — the sentence an operator reads
+during incident recovery was false. Every refusal is now decided before the first
+write, and the claim is stronger than it was: `_migrations` itself is created only on
+the path that inserts a row (`ensureLedgerShape`, with `readLedger` tolerant of the
+table's absence), so a refused boot leaves `sqlite_master` empty on a fresh database.
+Pinned by asserting the whole of `sqlite_master`, which is the only form of that
+assertion a table nobody thought to name cannot satisfy — and by a test that stages
+an acknowledgeable repair *and* a stray together, with the stray's deletion as the
+control that proves the repair does land.
+
+**The index's own checksum was never verified.** It was used only as a
+strict-landing offset. A flipped byte INSIDE a pathname leaves every entry length
+untouched, so the walk landed exactly where it should and returned an
+authoritative-looking list holding a corrupted name — after which the real file read
+as untracked and a legitimate deploy refused to boot. That is the precise false
+refusal the strict-landing comment claimed to guard against, produced by trusting
+bytes that carried their own proof of corruption. The trailing SHA-1 is now
+recomputed before any path is decoded, with two distinct verdicts:
+`index-checksum-mismatch` (corruption, or a shape this reader misunderstands — a
+SHA-256 repository closes its index with 32 bytes) and `index-hash-skipped`
+(`index.skipHash`, which `feature.manyFiles` enables, where git deliberately writes
+no hash). Both degrade to unverifiable, which applies and records rather than
+refusing. The test flips one byte in a pathname and asserts the boot survives; its
+control re-seals the trailer over the corrupted bytes and shows that same boot
+refusing, which is what makes the degradation the fix rather than a shrug.
+
+**A stray at an already-recorded ordinal was diagnosed as a rename.** The mismatch
+loop threw before any tree verdict existed, so the operator was sent to a
+`repairs.json` entry naming a file the tree does not track — which the sibling
+message correctly calls the disease, and which is exactly how ordinals 122 and 124
+presented on the live instance, and why the remedy applied there was the harder one.
+The tree is now resolved for a mismatch as well as for a pending file, and an
+untracked file at a recorded ordinal gets the untracked diagnosis, states what the
+mismatch would have been, and points at deletion — which clears both at once. An
+*acknowledged* repair still wins over the untracked verdict, deliberately: that entry
+is an explicit hand-verified decision about one ordinal, and overriding it would
+convert a documented recovery into an outage with no remedy.
+
+Also: the mutation suite covered two mutants and now covers FOUR, rewritten as a
+table so each property carries its own kill — refusal, reach, the
+unverifiable-RECORDING path (a mutant that records `tracked-in-index` for a tree it
+could not check), and the recorded-ordinal DIAGNOSIS. Each kills exactly one of four
+scenarios, asserted on the pass/fail counts because a passing test's name is never
+printed, with the unmutated control green on all four. The two ground-truth controls
+that legitimately cannot run everywhere (no `.git`, no `git` on PATH) now print
+`CONTROL DID NOT EXECUTE` instead of returning early into a silent pass — this
+repository's own rule-7 shape. Stale prose corrected: "Both are nullable" over three
+columns, and INVARIANTS #17, which attributed `formatUntrackedMigration` to
+`migrations/provenance.ts` (it is in `migrations/runner.ts`) and carried a line
+anchor that had drifted off the code it cited; it now cites by function name, names
+all three refusals, and records the `tracked-in-index` scope decision so a later
+reader cannot "tidy" the value into an overclaim.
+
+Re-measured this round on this checkout: the parser equals `git ls-files` exactly
+again, now WITH checksum verification active (3093 = 3093, zero missing, zero extra)
+— which is the positive control that matters most here, since an encoder and a
+parser agreeing on a wrong hash would pass every hand-built fixture and reject every
+real index on earth. `bun test migrations/` 120 pass / 0 fail. The four mutants kill
+four scenarios, one each.
+
 ## 2026-08-17 — the blank-is-unset sweep never reached the port knob, where a blank coerces to zero and the invite advertises it
 
 Landed via PR #373.
@@ -23402,3 +23623,4 @@ four scenarios, one each.
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+a note pointing at the file where the lane IS observable.

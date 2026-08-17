@@ -381,6 +381,49 @@ describe('a background report cannot TRUNCATE a park that is still standing', ()
     expect(cred.cooldown_reason).toBe('billing_402')
   })
 
+  test('THE STRIKE PARK CANNOT TRUNCATE EITHER — the fifth strike is a floor, not a rewrite', () => {
+    // THE ONE BRANCH THE BLOCK ABOVE CANNOT REACH. Every test up to here exercises
+    // the three per-status parks; the FOURTH park in `reportFailure` is the strike
+    // branch, and nothing pinned it. Reverting just that line to the unconditional
+    // `cooldown_until = now + CONSECUTIVE_COOLDOWN_MS; cooldown_reason =
+    // 'consecutive_failures'` pair left 124 tests green across four suites, so the
+    // claim that the fix was "applied on BOTH lanes" was true of the code and
+    // pinned by nothing.
+    //
+    // Reaching it needs a standing park LONGER than the hour — which only a
+    // `retry-after` produces — while the owner's own strikes accumulate underneath
+    // it. That sequence is ordinary: the provider tells us to wait two hours, the
+    // in-flight turns fail their way to the threshold, and the strike park would
+    // then RELEASE the credential 60 minutes into a 120-minute window the provider
+    // asked for, relabelling the reason on the way out. Truncation by the interactive
+    // lane's own escalation, which is the same defect the block is named for.
+    const pool = onePool()
+    const twoHours = 2 * 60 * 60_000
+    reportFailure(pool, 'anthropic:only', 429, twoHours)
+    const cred = pool.credentials[0]!
+    const until = cred.cooldown_until!
+    expect(until - Date.now()).toBeGreaterThan(CONSECUTIVE_COOLDOWN_MS)
+
+    // Strikes 2..MAX on the INTERACTIVE lane — the fifth crosses the threshold and
+    // fires the strike park with the two hours still standing.
+    for (let i = 1; i < MAX_CONSECUTIVE_FAILURES; i++) reportFailure(pool, 'anthropic:only', 429)
+    expect(cred.consecutive_failures).toBe(MAX_CONSECUTIVE_FAILURES)
+
+    expect(cred.cooldown_until).toBe(until)
+    expect(cred.cooldown_reason).toBe('rate_limit_429')
+  })
+
+  test('CONTROL — with nothing standing, the fifth strike still parks for the hour', () => {
+    // The counter-assertion for the test above: if the strike park had been
+    // neutered rather than made monotonic, the hour-long park that protects a
+    // silently broken credential would be gone and that test would not notice.
+    const pool = onePool()
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) reportFailure(pool, 'anthropic:only', 429)
+    const cred = pool.credentials[0]!
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(CONSECUTIVE_COOLDOWN_MS - 5_000)
+  })
+
   test('CONTROL — reportSuccess is still the ONE thing that releases a park', () => {
     // Monotonic under FAILURE only. If a confirmed working dispatch stopped
     // clearing the park, the fix would have turned every cooldown into a

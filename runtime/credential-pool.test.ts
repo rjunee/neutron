@@ -3,7 +3,9 @@ import {
   COOLDOWN_401_MS,
   COOLDOWN_402_MS,
   COOLDOWN_429_MS,
+  hasUsableCredential,
   MAX_CONSECUTIVE_FAILURES,
+  MAX_PARK_MS,
   newCredentialPool,
   reportFailure,
   reportSuccess,
@@ -158,5 +160,107 @@ describe('credential-pool', () => {
   test('soonestCooldownUntil on an empty pool is null', () => {
     const pool = newCredentialPool({ strategy: 'fill_first', credentials: [] })
     expect(soonestCooldownUntil(pool)).toBeNull()
+  })
+})
+
+/**
+ * THE COST OF MONOTONICITY, priced. Making a park unshortenable (so a background
+ * 429 could not release the hour the owner's own strike counter set) also made an
+ * ABSURD park permanent: `>=` rejects every finite replacement, and `reportSuccess`
+ * — the one release — is unreachable while the credential is parked, because
+ * `selectCredential` filters it out and no dispatch means no success to report. On
+ * a single-credential box, which every Open install is, that is the whole product
+ * silent until the process restarts.
+ *
+ * The value that gets there arrives from upstream: `retry-after: 31536000` is one
+ * legal year, and the OpenAI header parser shipped `Infinity` outright (finiteness
+ * checked on the seconds, then multiplied by 1000). So the pool clamps every park
+ * at `MAX_PARK_MS` and refuses to believe a non-finite or negative `retry_after_ms`
+ * at all.
+ */
+describe('no report can park a credential past the ceiling', () => {
+  const one = (): ReturnType<typeof newCredentialPool> =>
+    newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'only', kind: 'api_key', secret: 's' }],
+    })
+
+  test('a one-YEAR retry-after is clamped to the ceiling, not honoured', () => {
+    const pool = one()
+    reportFailure(pool, 'only', 429, 365 * 24 * 60 * 60_000)
+    const c = pool.credentials[0]!
+    expect(c.cooldown_reason).toBe('rate_limit_429')
+    expect(c.cooldown_until! - Date.now()).toBeLessThanOrEqual(MAX_PARK_MS)
+    // Still a real park — clamped, not discarded. Handing back a credential the
+    // provider just told us to stop using would be the opposite failure.
+    expect(hasUsableCredential(pool)).toBe(false)
+    expect(c.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS)
+  })
+
+  test('an INFINITE retry-after leaves a park that still ends', () => {
+    // The exact shipped value: `Number.isFinite('1e308')` is true and
+    // `1e308 * 1000` is `Infinity`. Stored raw, `cooldown_until` was a timestamp
+    // no clock ever reaches.
+    const pool = one()
+    reportFailure(pool, 'only', 429, Number.POSITIVE_INFINITY)
+    const c = pool.credentials[0]!
+    expect(Number.isFinite(c.cooldown_until)).toBe(true)
+    expect(c.cooldown_until! - Date.now()).toBeLessThanOrEqual(MAX_PARK_MS)
+  })
+
+  test('a NaN retry-after falls back to the status window instead of being written through', () => {
+    // `NaN` is the dangerous direction the other way: it is FALSY and `NaN > now`
+    // is false, so `!c.cooldown_until` and `cooldown_until <= now` would BOTH read
+    // a parked credential as available. A garbage header must not be able to
+    // cancel a cooldown either.
+    const pool = one()
+    reportFailure(pool, 'only', 429, Number.NaN)
+    const c = pool.credentials[0]!
+    expect(Number.isFinite(c.cooldown_until)).toBe(true)
+    expect(c.cooldown_reason).toBe('rate_limit_429')
+    expect(hasUsableCredential(pool)).toBe(false)
+    expect(c.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS - 1_000)
+    expect(c.cooldown_until! - Date.now()).toBeLessThanOrEqual(COOLDOWN_429_MS)
+  })
+
+  test('a NEGATIVE retry-after cannot be used to skip the cooldown entirely', () => {
+    const pool = one()
+    reportFailure(pool, 'only', 429, -60_000)
+    const c = pool.credentials[0]!
+    expect(hasUsableCredential(pool)).toBe(false)
+    expect(c.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS - 1_000)
+  })
+
+  test('the ceiling is a floor for recovery: the clamped park is still MONOTONIC under later reports', () => {
+    // The clamp must not have reopened truncation. A one-year park clamped to six
+    // hours is still longer than every status window, so a later 429/401 leaves it
+    // exactly where it was.
+    const pool = one()
+    reportFailure(pool, 'only', 429, 365 * 24 * 60 * 60_000)
+    const c = pool.credentials[0]!
+    const until = c.cooldown_until!
+
+    reportFailure(pool, 'only', 401)
+    reportFailure(pool, 'only', 429)
+
+    expect(c.cooldown_until).toBe(until)
+    expect(c.cooldown_reason).toBe('rate_limit_429')
+  })
+
+  test('CONTROL — an ordinary retry-after under the ceiling is honoured exactly', () => {
+    // Without this, a clamp written as a flat "always MAX_PARK_MS" would pass
+    // every assertion above while ignoring provider back-pressure entirely.
+    const pool = one()
+    reportFailure(pool, 'only', 429, 90_000)
+    const c = pool.credentials[0]!
+    expect(c.cooldown_until! - Date.now()).toBeGreaterThan(89_000)
+    expect(c.cooldown_until! - Date.now()).toBeLessThanOrEqual(90_000)
+  })
+
+  test('CONTROL — reportSuccess still releases a clamped park', () => {
+    const pool = one()
+    reportFailure(pool, 'only', 429, Number.POSITIVE_INFINITY)
+    reportSuccess(pool, 'only')
+    expect(hasUsableCredential(pool)).toBe(true)
   })
 })

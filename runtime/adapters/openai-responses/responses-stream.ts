@@ -383,10 +383,25 @@ export function parseRetryAfterFromMessage(message: string): number | undefined 
   return undefined
 }
 
+/**
+ * FINITENESS IS CHECKED ON THE RESULT, not on the input. `Number.isFinite` on the
+ * seconds passed `1e308`, and `1e308 * 1000` is `Infinity` — which the credential
+ * pool then stored as a cooldown no finite report could shorten and no success
+ * could clear, because a parked credential is never selected. The pool now clamps
+ * (`MAX_PARK_MS`), and this stops the bogus value at its source as well: a header
+ * that cannot be turned into a real millisecond count yields `undefined`, so the
+ * caller falls back to the status default. Negative seconds are floored at 0 for
+ * the same reason the date branch below already was — a park in the past is not a
+ * park.
+ */
 function parseRetryAfterMs(value: string | null): number | undefined {
   if (!value) return undefined
   const seconds = Number(value)
-  if (Number.isFinite(seconds)) return seconds * 1000
+  if (Number.isFinite(seconds)) {
+    const ms = seconds * 1000
+    if (Number.isFinite(ms)) return Math.max(0, ms)
+    return undefined
+  }
   const dt = Date.parse(value)
   if (Number.isFinite(dt)) return Math.max(0, dt - Date.now())
   return undefined

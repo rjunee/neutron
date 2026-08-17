@@ -45,6 +45,36 @@ export const MAX_CONSECUTIVE_FAILURES = 5
 export const CONSECUTIVE_COOLDOWN_MS = 60 * 60_000
 
 /**
+ * CEILING on any single park, and the only bound this pool has.
+ *
+ * Cooldowns became MONOTONIC under failure (see {@link park}) so a short park
+ * could not release a long one. That fix has a cost nobody had priced: with no
+ * ceiling, one absurd park is UNSHORTENABLE. `>=` rejects every finite
+ * replacement, {@link reportSuccess} is the one release and it is unreachable —
+ * {@link selectCredential} and {@link hasUsableCredential} both filter a cooled
+ * credential out, so no dispatch happens, so no success can ever be reported.
+ * On a single-credential box, which every Open install is, that is the product
+ * silent until the process restarts.
+ *
+ * The value that gets there is not exotic. `retry-after: 31536000` is one year
+ * and a legal HTTP header. `retry-after: 1e308` is worse: the OpenAI adapter's
+ * `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and then
+ * multiplied by 1000, so the pool received `Infinity`. Either way an upstream
+ * value we do not control decides how long the owner's box stays dark.
+ *
+ * SIX HOURS because that is past every reset window we actually honour and short
+ * of every window that is indistinguishable from a brick. A Claude subscription
+ * quota window is five hours, so the longest park with a real cause fits under
+ * the ceiling untouched; beyond it, one more dispatch attempt costs a single
+ * failed request and buys back a box that recovers on its own.
+ *
+ * This is a CLAMP, not a rejection: a park longer than the ceiling still parks
+ * for the ceiling. Refusing it outright would hand back a credential the
+ * provider just told us to stop using.
+ */
+export const MAX_PARK_MS = 6 * 60 * 60_000
+
+/**
  * WHOSE turn produced a failure report. `'background'` marks a timer-driven lane
  * with nobody waiting on it (proactive nudge composition); everything else is
  * `'interactive'`. See {@link reportFailure} for what it changes and why.
@@ -240,10 +270,29 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
  *
  * `>=` rather than `>` so an equal-length park does not RELABEL a standing one:
  * the first reason to explain a given expiry is the one that keeps it.
+ *
+ * THE CEILING IS APPLIED HERE, not at the call sites, because monotonicity is
+ * what makes an unbounded park permanent and this is the one line monotonicity
+ * lives on — see {@link MAX_PARK_MS}. A non-finite proposal (`Infinity` from an
+ * adapter's own overflowed arithmetic, `NaN` from a header that parsed to
+ * garbage) collapses to the ceiling rather than being written through: `NaN` is
+ * falsy and `NaN > now` is false, so writing it would make a PARKED credential
+ * read as available at every reader in this file, which is the failure direction
+ * that hammers a provider asking us to stop. Failing toward a bounded park keeps
+ * both readers honest and still recovers without a restart.
+ *
+ * The ceiling is re-derived from the current clock on every call, so a park
+ * cannot exceed six hours from the most recent report rather than from some
+ * first one. It does not become a treadmill: reports arrive only for a
+ * credential a dispatch selected, and a parked credential is never selected, so
+ * the only reports that can land during a park are the in-flight turns that were
+ * already dispatched before it started.
  */
 function park(c: PooledCredential, until: number, reason: CooldownReason): void {
-  if (c.cooldown_until !== undefined && c.cooldown_until >= until) return
-  c.cooldown_until = until
+  const ceiling = Date.now() + MAX_PARK_MS
+  const capped = Number.isFinite(until) ? Math.min(until, ceiling) : ceiling
+  if (c.cooldown_until !== undefined && c.cooldown_until >= capped) return
+  c.cooldown_until = capped
   c.cooldown_reason = reason
 }
 
@@ -258,7 +307,10 @@ function park(c: PooledCredential, until: number, reason: CooldownReason): void 
  *
  * `retry_after_ms` (parsed from upstream `retry-after` header) overrides the
  * default 429 cooldown — adapters MUST honor it so we play nice with provider
- * back-pressure signals.
+ * back-pressure signals. It is honoured up to {@link MAX_PARK_MS} and no further,
+ * and a non-finite or negative value is discarded in favour of the status default
+ * rather than believed: the number is an upstream one, and the cost of believing a
+ * bad one is a credential nothing can release.
  *
  * `origin` says WHOSE turn failed, and it changes only the STRIKE COUNTER:
  *
@@ -317,8 +369,26 @@ export function reportFailure(
   const c = pool.credentials.find((x) => x.id === id)
   if (!c) return
   const now = Date.now()
+  // `retry_after_ms` IS UNTRUSTED ARITHMETIC, not a number we computed. It comes
+  // from an upstream header an adapter parsed, and the parsers have already shipped
+  // `Infinity` (finiteness checked on the seconds, then multiplied by 1000) — a
+  // value that used to park the credential until the process restarted. A negative
+  // delta is the mirror image: it proposes a park in the PAST, which is not a park
+  // at all. Neither is a window this pool should honour, so both fall back to the
+  // status default and the provider still gets its minute.
+  //
+  // THE TWO GUARDS ARE NOT REDUNDANT. `park`'s clamp bounds an `Infinity` at the
+  // six-hour ceiling, which stops the brick; this boundary decides that a value
+  // that is not a number of milliseconds buys no extra time AT ALL, so a garbage
+  // header gets the 60-second default instead of the maximum park the pool allows.
+  // And it is the only one of the two that can see a `NaN` for what it is: by the
+  // time `now + NaN` reaches `park` the origin is gone.
+  const retry_after =
+    retry_after_ms !== undefined && Number.isFinite(retry_after_ms) && retry_after_ms >= 0
+      ? retry_after_ms
+      : undefined
   if (status === 429) {
-    park(c, now + (retry_after_ms ?? COOLDOWN_429_MS), 'rate_limit_429')
+    park(c, now + (retry_after ?? COOLDOWN_429_MS), 'rate_limit_429')
   } else if (status === 402) {
     park(c, now + COOLDOWN_402_MS, 'billing_402')
   } else if (status === 401) {

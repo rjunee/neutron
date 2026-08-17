@@ -7,7 +7,7 @@ function ssePayload(frames: ReadonlyArray<{ event: string; data: unknown }>): st
   return frames.map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`).join('\n') + '\n'
 }
 
-function mockFetch(body: string, opts?: { status?: number }): typeof fetch {
+function mockFetch(body: string, opts?: { status?: number; headers?: Record<string, string> }): typeof fetch {
   return (async () => {
     const stream = new ReadableStream({
       start(controller) {
@@ -15,7 +15,10 @@ function mockFetch(body: string, opts?: { status?: number }): typeof fetch {
         controller.close()
       },
     })
-    return new Response(stream, { status: opts?.status ?? 200 })
+    return new Response(stream, {
+      status: opts?.status ?? 200,
+      ...(opts?.headers !== undefined ? { headers: opts.headers } : {}),
+    })
   }) as unknown as typeof fetch
 }
 
@@ -173,6 +176,64 @@ describe('openai-responses responses-stream', () => {
     const err = events.find((e) => e.kind === 'error')
     expect(err!.kind === 'error' && err!.code).toBe('rate_limited')
     expect(err!.kind === 'error' && err!.retry_after_ms).toBe(2000)
+  })
+
+  // WHERE `Infinity` USED TO COME FROM. The header parser checked
+  // `Number.isFinite` on the SECONDS and then multiplied by 1000, so
+  // `retry-after: 1e308` produced `Infinity` — and the credential pool stored
+  // that as a cooldown nothing could shorten (`>=` rejects every finite
+  // replacement) and nothing could clear (a parked credential is never selected,
+  // so no success is ever reported). One upstream header, one box dark until
+  // restart. The pool now clamps too (`MAX_PARK_MS`); this pins the source.
+  test('an OVERFLOWING retry-after header yields NO retry hint rather than Infinity', async () => {
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': '1e308' } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.code).toBe('rate_limited')
+    // Absent, so the pool falls back to its own 429 window. Before the fix this
+    // read `Infinity` and every reader of `cooldown_until` believed it.
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBeUndefined()
+  })
+
+  test('CONTROL — an ordinary retry-after header is still honoured to the millisecond', async () => {
+    // The mutation-control for the test above: if the finiteness check had been
+    // written to reject the whole numeric branch, this is what would have gone
+    // red, and provider back-pressure would be silently ignored.
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': '90' } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBe(90_000)
+  })
+
+  test('a NEGATIVE retry-after header floors at zero rather than proposing a park in the past', async () => {
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': '-30' } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBe(0)
   })
 
   test('reasoning deltas → thinking', async () => {
