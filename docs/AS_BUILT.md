@@ -649,89 +649,6 @@ complete. Closing it needs a backfill primitive the wire has no shape for yet
 (`{type:'history', before_seq}` + a client affordance), which stays the next thing to
 build and is explicitly not faked with a bigger constant.
 
-## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
-
-Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
-those had already merged when this round's review landed, so the remediation could
-not go back into either; every finding below was re-verified against `main` before
-anything changed.
-
-**The seam the composer alone reaches, now driven end to end.** #375 gave the
-timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
-being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
-which proves `wireSubstrates` routes what it is handed and says nothing about whether
-anything hands it that. One line in `open/composer.ts` does. Deleting it left 862
-tests passing across 105 files while returning the lane to a stderr-only clamp — the
-exact class of gap this repo keeps shipping, one level up from "built but never
-wired": WIRED, and the wire pinned by nothing.
-
-`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
-`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
-the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
-reminder (nothing shorter reaches that lane — its options exist only once something
-composes on it), then reads what the production composition actually handed each one.
-The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
-connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
-without it, "the nudge lane produced no bubble" could equally mean the harness cannot
-see bubbles at all. Then the same notice on the nudge lane produces no frame from the
-same socket in the same test, and both reach the `system_events` journal. Three
-mutations, each red on a different assertion: deleting the composer's
-`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
-sinks (the two sinks are identical), and giving the background sink the chat
-`deliver` (ten bubbles where zero were asserted).
-
-**An unbounded park could not be shortened, and the release was unreachable.**
-Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
-had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
-every finite replacement, and `reportSuccess` is the only release but cannot run while
-the credential is parked, because `selectCredential` filters a cooled credential out
-and no dispatch means no success to report. On a single-credential box, which every
-Open install is, that is the product silent until the process restarts.
-
-The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
-legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
-`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
-then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
-pool clamps every park at the new `MAX_PARK_MS` (six hours: past every reset window we
-honour — a Claude subscription window is five — and short of every window
-indistinguishable from a brick), and `reportFailure` discards a non-finite or negative
-`retry_after_ms` in favour of the status default rather than believing it. The `NaN`
-direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
-instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
-`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
-The parser now yields `undefined` for a value that cannot become a real millisecond
-count, and floors a negative at zero.
-
-**The fourth park was the one nothing tested.** #375's own log claimed the fix was
-"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
-strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
-pair left 124 tests green across four suites, because reaching that branch needs a
-standing park LONGER than the hour — which only a `retry-after` produces — while the
-owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
-says wait two hours, in-flight turns fail their way to the threshold, and the strike
-park would then release the credential 60 minutes into a 120-minute window the
-provider asked for, relabelled. Now covered with its control (with nothing standing,
-the fifth strike still parks for the hour), and mutation-proved: that one test goes
-red, the control stays green.
-
-**Two record corrections, appended rather than rewritten**, since this log is
-append-only and a correction that edits history is how a sibling's entry gets lost:
-- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
-  had benched" says "Seven new tests cover it" and "three of them red … four
-  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
-  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
-  reports never walk the park outward`, which is a real assertion and not a control.
-  A mutation proof asserts a negative, so a miscount in it is the one number that must
-  be right.
-- That same entry says the clamp "is now durably recorded". It is not, and its own
-  closing paragraph says so three paragraphs later: the journal is best-effort at
-  every call site. The wording is corrected where it can be — the two test comments
-  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
-  dropped.
-
-No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
-— a bounded park, a discarded bogus header value, and coverage for two branches that
-had none.
 ## 2026-08-17 — an untracked .sql in the migrations directory was applied silently
 
 Landed via PR #374.
@@ -1017,6 +934,91 @@ files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
 
+## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
+
+Landed via PR #378.
+
+Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
+those had already merged when this round's review landed, so the remediation could
+not go back into either; every finding below was re-verified against `main` before
+anything changed.
+
+**The seam the composer alone reaches, now driven end to end.** #375 gave the
+timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
+being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
+which proves `wireSubstrates` routes what it is handed and says nothing about whether
+anything hands it that. One line in `open/composer.ts` does. Deleting it left 862
+tests passing across 105 files while returning the lane to a stderr-only clamp — the
+exact class of gap this repo keeps shipping, one level up from "built but never
+wired": WIRED, and the wire pinned by nothing.
+
+`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
+`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
+the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
+reminder (nothing shorter reaches that lane — its options exist only once something
+composes on it), then reads what the production composition actually handed each one.
+The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
+connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
+without it, "the nudge lane produced no bubble" could equally mean the harness cannot
+see bubbles at all. Then the same notice on the nudge lane produces no frame from the
+same socket in the same test, and both reach the `system_events` journal. Three
+mutations, each red on a different assertion: deleting the composer's
+`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
+sinks (the two sinks are identical), and giving the background sink the chat
+`deliver` (ten bubbles where zero were asserted).
+
+**An unbounded park could not be shortened, and the release was unreachable.**
+Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
+had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
+every finite replacement, and `reportSuccess` is the only release but cannot run while
+the credential is parked, because `selectCredential` filters a cooled credential out
+and no dispatch means no success to report. On a single-credential box, which every
+Open install is, that is the product silent until the process restarts.
+
+The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
+legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
+`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
+then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
+pool clamps every park at the new `MAX_PARK_MS` (six hours: past every reset window we
+honour — a Claude subscription window is five — and short of every window
+indistinguishable from a brick), and `reportFailure` discards a non-finite or negative
+`retry_after_ms` in favour of the status default rather than believing it. The `NaN`
+direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
+instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
+`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
+The parser now yields `undefined` for a value that cannot become a real millisecond
+count, and floors a negative at zero.
+
+**The fourth park was the one nothing tested.** #375's own log claimed the fix was
+"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
+strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
+pair left 124 tests green across four suites, because reaching that branch needs a
+standing park LONGER than the hour — which only a `retry-after` produces — while the
+owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
+says wait two hours, in-flight turns fail their way to the threshold, and the strike
+park would then release the credential 60 minutes into a 120-minute window the
+provider asked for, relabelled. Now covered with its control (with nothing standing,
+the fifth strike still parks for the hour), and mutation-proved: that one test goes
+red, the control stays green.
+
+**Two record corrections, appended rather than rewritten**, since this log is
+append-only and a correction that edits history is how a sibling's entry gets lost:
+- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
+  had benched" says "Seven new tests cover it" and "three of them red … four
+  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
+  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
+  reports never walk the park outward`, which is a real assertion and not a control.
+  A mutation proof asserts a negative, so a miscount in it is the one number that must
+  be right.
+- That same entry says the clamp "is now durably recorded". It is not, and its own
+  closing paragraph says so three paragraphs later: the journal is best-effort at
+  every call site. The wording is corrected where it can be — the two test comments
+  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
+  dropped.
+
+No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
+— a bounded park, a discarded bogus header value, and coverage for two branches that
+had none.
 ## 2026-08-16 — "done" is refused on the write path, not on one of its doors
 
 A review of the stalled-driver wakeup change (#341) reproduced the 2026-08-11 incident on a store that already carried the guard. `WorkBoardStore.complete()` refused to mark an item done while its bound run was live, but `complete()` was never the only door: `update()` accepts the full status enum, and the `work_board_update` agent tool hands a model's `status` straight to it. Patching `{status:'done'}` walked past the check and stamped `completed_at` mid-build — the same false claim, through the other door.
