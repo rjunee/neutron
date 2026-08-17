@@ -488,9 +488,24 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     // The re-enter step switches WITHOUT -c; the create step uses -c.
     expect(SRC).toContain('Re-enter it WITHOUT')
   })
+
+  test('the FRESH forge step tolerates a leftover local branch: create-or-re-enter, -c first', () => {
+    // Measured incident d5c1e219: a relaunched card whose earlier run left
+    // refs/heads/trident/<slug> behind died on `git switch -c` ("branch already
+    // exists") and committed on the worktree-wf_ auto branch instead. The fresh
+    // step must fall back to plain `git switch`; order (-c first) distinguishes
+    // it from the reenter step, which tries the plain switch first.
+    expect(SRC).toContain('git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}')
+    expect(SRC).toContain('git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}')
+  })
 })
 
 describe('inner-workflow.mjs — codex cross-model review panelist', () => {
+  test('the codex build coda pins both halves of the host-side branch binding', () => {
+    expect(SRC).toContain('STEP 1 IS ALREADY DONE FOR YOU')
+    expect(SRC).toContain('Stay on branch ${forgeBranch}')
+  })
+
   test('destructures codexHome from args (per-project CODEX_HOME) + gates on codexConfigured', () => {
     expect(SRC).toContain('codexHome = null')
     expect(SRC).toContain('const codexConfigured =')

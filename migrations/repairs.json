@@ -5,5 +5,12 @@
     "file_name": "trident_checkpoint_head",
     "note": "An unmerged branch migration ran against the live database at 18:55:09Z. The merged 0122 migration's inner_checkpoint_head and inner_checkpoint_findings ALTERs were applied by hand at 22:04Z. The _migrations row is deliberately retained as the incident record and must never be rewritten (tracker #575).",
     "date": "2026-08-14"
+  },
+  {
+    "version": 124,
+    "recorded_name": "dispatch_dependencies_and_claims",
+    "file_name": "code_trident_runs_fix_round_contract",
+    "note": "Same class as the 0122 incident (#575): an unmerged branch migration consumed ordinal 124 against a live database, so the merged 0124 reads as a name mismatch and boot refuses. The merged 0124 itself DID run, recorded at ordinal 125, and its three ALTERs (reviewed_head, bound_pr, fenced_paths on code_trident_runs) were hand-verified present via pragma_table_info before this entry was written. Nothing was applied by hand and no _migrations row was rewritten.",
+    "date": "2026-08-16"
   }
 ]
