@@ -243,6 +243,9 @@ export function buildCoreModules(
           ...(input.work_board.derive_inline_active !== undefined
             ? { deriveInlineActive: input.work_board.derive_inline_active }
             : {}),
+          // The composer-built removal chokepoint — the SAME one the UI's X
+          // runs. Present → `work_board_remove` registers; absent → it does not.
+          ...(input.work_board.removal !== undefined ? { removal: input.work_board.removal } : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build

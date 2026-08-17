@@ -32,7 +32,9 @@ import {
   httpProjectSegmentEncoded,
 } from './general-scope';
 
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed';
+/** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
+ *  and NEVER counted as completed — it is not a quieter `done`. */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived';
 
 export interface WorkBoardItem {
   id: string;

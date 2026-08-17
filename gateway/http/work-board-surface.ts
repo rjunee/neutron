@@ -11,6 +11,10 @@
  *   - `POST   /api/app/projects/<project_id>/work-board/<item_id>/complete`
  *   - `POST   /api/app/projects/<project_id>/work-board/<item_id>/reorder`
  *   - `DELETE /api/app/projects/<project_id>/work-board/<item_id>`
+ *     (`?reason=shipped|cancelled|moved`, default `cancelled` — the X's existing
+ *      semantics; `?plan_doc=delete` to deliberately destroy the card's spec doc,
+ *      which no other path ever does. Routed through the shared
+ *      `WorkBoardRemovalService` chokepoint the agent removal tool also rides.)
  *
  * All routes are bearer-authed via the shared `AppWsAuthResolver` (same
  * dev-bypass + HS256 paths as the tabs/tasks/chat surfaces). It dispatches the
@@ -39,6 +43,11 @@ import {
   type WorkBoardStatus,
   type WorkBoardStore,
   type WorkBoardTaskType, WorkBoardRunStillLiveError } from '@neutronai/work-board/store.ts'
+import {
+  WorkBoardRemovalService,
+  WORK_BOARD_REMOVAL_REASONS,
+  type WorkBoardRemovalReason,
+} from '@neutronai/work-board/removal.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
@@ -158,6 +167,15 @@ export interface WorkBoardSurfaceOptions {
    * and it never writes to the store.
    */
   derive_inline_active?: (items: WorkBoardItem[], project_id: string) => WorkBoardItem[]
+  /**
+   * The shared card-removal CHOKEPOINT (cancel a live bound run → dispose the
+   * plan doc by reason → hard-delete the row). The composer builds ONE and hands
+   * it to both this surface and the agent tool, so the UI's X and an agent
+   * removal run the SAME path. Absent → the surface builds its own from the deps
+   * it already has (board-less boots + unit tests); either way there is exactly
+   * ONE implementation of the logic — the class.
+   */
+  removal?: WorkBoardRemovalService
 }
 
 export interface WorkBoardSurface {
@@ -173,7 +191,11 @@ const WORK_BOARD_PATH_RE =
   /^\/api\/app\/projects\/([^/]+)\/work-board(?:\/([^/]+))?(?:\/([a-z]+))?$/
 
 const MAX_ITEM_ID_LEN = 128
-const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+// 'archived' (SHELVED) is client-writable — it is the deprioritise lane, and the
+// whole point is that taking a card off the board no longer requires claiming it
+// shipped. 'failed' stays OUT: it is run-driven, written only by the terminal
+// reconcile, so a client PATCH of it is still a 400.
+const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done', 'archived']
 const VALID_TASK_TYPES: WorkBoardTaskType[] = ['build', 'research']
 
 export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
@@ -185,6 +207,18 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
   const cancelDispatch = opts.cancel_dispatch
   const classifyTaskType = opts.classify_task_type
   const deriveInline = opts.derive_inline_active
+  // The removal chokepoint. An internal default keeps board-less boots and the
+  // surface's own unit tests working WITHOUT a second copy of the logic — it is
+  // the same class the composer builds, minus the docs store (so a doc is only
+  // ever left in place here).
+  const removal =
+    opts.removal ??
+    new WorkBoardRemovalService({
+      store,
+      ...(trident_runs !== undefined ? { trident_runs } : {}),
+      is_terminal_phase: (phase: string) => isTerminalPhase(phase as TridentPhase),
+      ...(cancelDispatch !== undefined ? { cancel_dispatch: cancelDispatch } : {}),
+    })
 
   /**
    * Attach each bound item's live run progress (item 1) so the HTTP GET carries
@@ -266,7 +300,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
           return handleUpdate(req, store, scope, project_id, item_id, deriveOne)
         }
         if (method === 'DELETE') {
-          return handleDelete(store, scope, project_id, item_id, trident_runs, cancelDispatch)
+          return handleDelete(store, removal, scope, project_id, item_id, url.searchParams)
         }
         return jsonError(
           405,
@@ -472,6 +506,13 @@ async function handleUpdate(
     const item = await store.update(project_slug, item_id, patch)
     return jsonOk({ item: deriveOne(item), project_id })
   } catch (err) {
+    // 409, not 500: the store REFUSES to SHELVE (status:'archived') an item whose
+    // build is still live, and that is a legitimate answer about state rather
+    // than a fault — the same rule handleComplete applies to 'done'. The client
+    // shows the message.
+    if (err instanceof WorkBoardRunStillLiveError) {
+      return jsonError(409, 'run_still_live', err.message)
+    }
     return mapWriteError(err)
   }
 }
@@ -529,72 +570,45 @@ async function handleReorder(
 
 async function handleDelete(
   store: WorkBoardStore,
-  project_slug: string,
+  removal: WorkBoardRemovalService,
+  // The BOARD SCOPE KEY, not a slug: `workBoardScopeKey(owner, project_id)`.
+  scope: string,
+  // The DOCS project id (the validated URL segment) — a SEPARATE argument from
+  // the scope on purpose, exactly as the create path hands it to `createCard`.
+  // Collapsing the two is the phantom-directory conflation documented in
+  // `work-board/spec-doc-service.ts`.
   project_id: string,
   item_id: string,
-  trident_runs: TridentRunAccess | undefined,
-  cancelDispatch: ((run_id: string) => Promise<void>) | undefined,
+  query: URLSearchParams,
 ): Promise<Response> {
-  const owned = store.get(project_slug, item_id)
+  const owned = store.get(scope, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
-  // Item 3 — deleting a card bound to a RUNNING build must not orphan the trident
-  // run (it would keep building headless). Cancel it FIRST: if the item names a
-  // non-terminal `linked_run_id`, set the run's phase to `stopped` (the existing
-  // trident stop path — `code-command.ts` executeStop) so the outer loop stops
-  // harvesting/advancing/merging it. Best-effort: a cancel failure never blocks
-  // the delete (the row is disposable; the run reap backstops liveness). Only
-  // THEN remove the board item.
-  let cancelled_run: string | undefined
-  const runId = owned.linked_run_id
-  // #379 — a RESEARCH card's linked run is an agent-dispatch run (not a trident
-  // row), so the trident cancel below no-ops for it. Cancel it via the dispatch
-  // stop hook so the Atlas subprocess isn't orphaned. Best-effort + a no-op for
-  // an unknown/terminal run id (DispatchService.stop returns false). Fire this
-  // for every bound run — a build run id is unknown to the dispatcher and vice
-  // versa, so exactly one hook actually cancels.
-  if (owned.task_type === 'research' && cancelDispatch !== undefined && runId !== null && runId.length > 0) {
-    try {
-      await cancelDispatch(runId)
-      cancelled_run = runId
-    } catch {
-      // dispatch cancel is best-effort — proceed with the delete
-    }
+  // The removal REASON drives the plan doc's disposition (shipped / cancelled /
+  // moved are three different fates). The X in the UI sends none, and its
+  // semantics have always been "I'm dropping this" → default `cancelled`.
+  const rawReason = query.get('reason')
+  if (rawReason !== null && !WORK_BOARD_REMOVAL_REASONS.includes(rawReason as WorkBoardRemovalReason)) {
+    return jsonError(400, 'invalid_reason', `reason must be one of ${WORK_BOARD_REMOVAL_REASONS.join('/')}`)
   }
-  if (owned.task_type !== 'research' && trident_runs !== undefined && runId !== null && runId.length > 0) {
-    try {
-      const run = trident_runs.get(runId)
-      if (run !== null && !isTerminalPhase(run.phase)) {
-        // §F6a — route the cancel through the ONE `terminate()` chokepoint when
-        // wired, so the terminal-observer chain (delivery + board reconcile) fires
-        // for an X-cancel exactly as it does for a loop-reaped run (the fix — this
-        // path used to bypass the observers). Fall back to a bare `update` for
-        // board-less / observer-less boots (behaviour-identical to pre-F6a there).
-        if (trident_runs.terminate !== undefined) {
-          // Only claim a cancellation the ATOMIC transition actually won — the
-          // pre-check above can go stale in the await gap (the tick loop finishes
-          // the run first), and a lost race cancelled nothing (Codex r3).
-          const { won } = await trident_runs.terminate(runId, 'stopped')
-          if (won) cancelled_run = runId
-        } else {
-          // Bare `update` does NOT retract a stale `subagent_status='running'` the
-          // way `terminalTransition` does, so a run cancelled on a board-less boot
-          // can still read as in-flight. Accepted: unreachable in a normal boot
-          // (`open/composer.ts` binds the terminator unconditionally), and passing
-          // `subagent_status: null` here would trip `update()`'s crash veto and
-          // refuse the phase write outright on an already-crashed row.
-          await trident_runs.update(runId, { phase: 'stopped' })
-          cancelled_run = runId
-        }
-      }
-    } catch {
-      // Cancel is best-effort — proceed with the delete regardless.
-    }
+  const reason = (rawReason ?? 'cancelled') as WorkBoardRemovalReason
+  // The ONLY way to destroy a plan doc, and it must be spelled out exactly.
+  const rawPlanDoc = query.get('plan_doc')
+  if (rawPlanDoc !== null && rawPlanDoc !== 'delete') {
+    return jsonError(400, 'invalid_plan_doc', "plan_doc must be 'delete' when present")
   }
-  await store.delete(project_slug, item_id)
+  // Cancel a live bound run FIRST, dispose the doc, THEN drop the row — the
+  // shared chokepoint owns that order (and the agent tool rides the same one).
+  const result = await removal.remove(scope, project_id, item_id, {
+    reason,
+    ...(rawPlanDoc === 'delete' ? { plan_doc: 'delete' as const } : {}),
+  })
+  if (!result.removed) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  // Wire-compatible: existing clients read `deleted` / `cancelled_run` unchanged.
   return jsonOk({
     deleted: item_id,
     project_id,
-    ...(cancelled_run !== undefined ? { cancelled_run } : {}),
+    ...(result.cancelled_run !== undefined ? { cancelled_run: result.cancelled_run } : {}),
+    ...(result.plan_doc !== undefined ? { plan_doc: result.plan_doc } : {}),
   })
 }
 
