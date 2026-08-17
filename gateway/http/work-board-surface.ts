@@ -139,6 +139,10 @@ export interface WorkBoardSurfaceOptions {
   trident_runs?: TridentRunAccess
   /** Injectable clock (ms) for the run-progress derivation; defaults to wall-clock. */
   now?: () => number
+  /** Sync peek into the composer's shared repo-web-url cache, so a bound item's
+   *  `run_progress.pr_url` can be composed without awaiting a `git remote` shell
+   *  (structural on purpose — the surface stays decoupled from trident). */
+  repo_web_urls?: { peek(repo_path: string): string | null }
   /** M1 on-disk spec — persist a non-trivial create `spec` to a plans/ doc. */
   create_card?: WorkBoardCreateCardFn
   /** M1 ▶ play button — start/retry a BUILD ('build' task_type) from the card's saved spec. */
@@ -200,6 +204,7 @@ const VALID_TASK_TYPES: WorkBoardTaskType[] = ['build', 'research']
 
 export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
   const { store, auth, trident_runs } = opts
+  const repoWebUrls = opts.repo_web_urls
   const nowMs = opts.now ?? (() => Date.now())
   const createCard = opts.create_card
   const startBuild = opts.start_build
@@ -230,7 +235,12 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
     const when = nowMs()
     const lookup = (id: string): TridentRun | null => trident_runs.get(id)
     return items.map((it) => {
-      const progress = runProgressForItem(it, lookup, when)
+      const progress = runProgressForItem(
+        it,
+        lookup,
+        when,
+        repoWebUrls !== undefined ? (p: string) => repoWebUrls.peek(p) : undefined,
+      )
       return progress === null ? it : { ...it, run_progress: progress }
     })
   }

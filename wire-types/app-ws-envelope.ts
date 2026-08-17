@@ -486,6 +486,15 @@ export interface AppWsWorkBoardItem {
   updated_at: string
   completed_at: string | null
   /**
+   * DURABLE PR provenance (migration 0122) — the PR number the item's terminal
+   * run opened, plus its composed GitHub url. Written at DETACH, so it outlives
+   * the run binding and is what a COMPLETED card renders ("Merged #265").
+   * Optional: an older gateway's frame omits both. A `pr` with a null `pr_url`
+   * means the repo could not be resolved — render the number as plain text.
+   */
+  pr?: number | null
+  pr_url?: string | null
+  /**
    * Item 1 (M1 trident-UX hardening) — the bound trident run's LIVE progress,
    * present ONLY on an item whose `linked_run_id` names a live run.
    */
@@ -503,6 +512,12 @@ export interface AppWsRunProgress {
   stalled: boolean
   stalled_ms: number | null
   pr: number | null
+  /**
+   * `<repo web url>/pull/<pr>` for a LIVE card's clickable `#NNN`. The server
+   * always emits the field; null = no PR yet, or the run's repo is not a
+   * resolvable GitHub remote → the client renders the tag as plain text.
+   */
+  pr_url: string | null
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   failure_reason: string | null
 }

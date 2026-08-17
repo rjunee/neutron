@@ -1,0 +1,32 @@
+-- 0133_work_board_items_pr.sql
+--
+-- DURABLE PR PROVENANCE ON A BOARD CARD.
+--
+-- The board already knows a bound run's PR number, but only for as long as the
+-- BINDING lasts: `run_progress` is DERIVED from `linked_run_id`, and the terminal
+-- reconcile (`work-board/store.ts` `detachRun`) NULLs that link the moment a run
+-- reaches 'done'. So the one card that most wants to say "Merged #265" — the
+-- completed one — is precisely the card that has no path back to `run.pr`. Reading
+-- the number off `run_progress` looks right in a live test and renders nothing on a
+-- real completed card.
+--
+-- These two columns are that number, written at the SAME moment `status` and
+-- `completed_at` are written (one UPDATE inside `detachRun`'s transaction), so it
+-- survives detach, a gateway restart, and the run row's own retention.
+--
+--   pr      — the PR number as an integer (`code_trident_runs.pr`), NULL when the
+--             run had none (inline work, a hand-completed card, a local-merge run).
+--   pr_url  — the fully-composed https://github.com/<owner>/<repo>/pull/<n> link,
+--             resolved from the RUN'S OWN `repo_path` remote at reconcile time (see
+--             `trident/repo-web-url.ts`) — never a hardcoded repo. NULL when the
+--             repo could not be resolved or is not GitHub; the client then renders
+--             the number as plain text rather than a dead or wrong link.
+--
+-- Both are NULLable and written only by the terminal reconcile. `attachRun` clears
+-- them, so a re-dispatched card never wears the previous run's number.
+--
+-- `work_board_items` is a STRICT table; ADD COLUMN with no default is legal on
+-- STRICT and rewrites nothing (existing rows read NULL).
+
+ALTER TABLE work_board_items ADD COLUMN pr INTEGER;
+ALTER TABLE work_board_items ADD COLUMN pr_url TEXT;
