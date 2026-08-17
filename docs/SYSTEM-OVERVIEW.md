@@ -2792,6 +2792,73 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
 
+### More than one Codex seat — rotation at the CODEX_HOME resolver
+
+One ChatGPT subscription can run out before its window resets. The owner may
+therefore connect several seats, and trident picks one per run.
+
+- **A seat is a SLOT with its own directory, for its whole life.** The first seat
+  keeps the bare service name `codex` and the bare `<owner_home>/.codex` — so a
+  one-seat install is unchanged and nothing migrates, which is also why there is no
+  feature flag: rotation always runs and with a single slot it trivially selects the
+  credential that was always there. Additional seats are service
+  `codex-acct-<slot>` (the store's service grammar admits dashes,
+  `project-credentials/store.ts:164`) materialized to
+  `<owner_home>/.codex/accounts/<slot>/`, which cannot collide with the override
+  tree at `.codex/projects/<id>/`.
+- **Selection is a POINTER, never a copy.** The codex CLI rewrites `auth.json` when
+  it refreshes and that refresh ROTATES the refresh token, so two live directories
+  holding one account revoke each other — whichever refreshed later wins. Rotation
+  therefore changes only WHICH directory is handed to a run, and the
+  re-materialize guard stays only-if-missing. Copying a stored bundle over a
+  CLI-refreshed file would install a token the server already invalidated.
+- **Harvest-back keeps the stored copy honest.** When a seat's on-disk
+  `last_refresh` is newer than the stored row's, the disk bundle is re-encrypted
+  back into the store. Without it the store drifts staler with every refresh and the
+  self-heal path eventually restores a dead token over a live login — a hazard that
+  predates rotation.
+- **The exhaustion signal is harvested, not probed.** There is no free usage-gauge
+  endpoint. Every `codex` session appends a rollout JSONL under
+  `<CODEX_HOME>/sessions/YYYY/MM/DD/` whose `token_count` events carry
+  `rate_limits` — `used_percent`, `window_minutes`, `resets_at` (epoch SECONDS,
+  converted once at the parse boundary), `plan_type`. That the rollout follows
+  `CODEX_HOME` was verified live: pointing `CODEX_HOME` at an empty directory and
+  running `codex exec` produced the whole state root, `sessions/` included, even
+  though the run never authenticated.
+- **The threshold is keyed on `window_minutes`, not on `primary`/`secondary`.**
+  Measured across 12,582 real `token_count` samples from 600 rollout files
+  (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a WEEK — in every
+  sample and `secondary` was null in every sample. A policy that read `primary` as
+  "the 5-hour window" would apply the session threshold and a session-length
+  cooldown to a weekly cap and rotate a still-capped seat back into service. A
+  window at or under 1440 minutes cools at 98%, longer windows at 99%, and the
+  fallback cooldown is the window's own declared length.
+- **Two rules are load-bearing and inherited from the Anthropic rotator.** A
+  harvest that ERRORS or finds nothing cools nothing — a transient read failure must
+  never retire a seat the owner is paying for. And when EVERY seat is cooling the
+  current one is KEPT, never dropped: a capped seat returns a legible retryable
+  error, whereas no seat silently removes codex from the review. That case logs
+  `codex_rotation_exhausted`.
+- **A revoked refresh token is not a quota problem.** `refresh token was revoked`
+  (and `invalid_grant`) cools a seat with reason `unauthorized`, which ignores the
+  clock and stays ineligible until the owner reconnects that seat — waiting does not
+  fix it. Every unrecognised failure (timeout, 5xx, refusal) retires nothing.
+- **Per-project overrides are OUTSIDE rotation** and resolve first, verbatim: an
+  override exists to pin one project to one subscription.
+- **Adding a seat.** Chat: `codex_connect` with `account: "work"` plus the pasted
+  `auth.json`. HTTP: `POST /api/app/codex-auth` with `{ auth, account: "work" }`.
+  `GET /api/app/codex-auth` lists every seat with its cooldown and last usage while
+  keeping all of its original top-level fields, and
+  `DELETE /api/app/codex-auth?account=work` removes one. Omitting `account`
+  everywhere means the first seat, so pre-rotation clients are unaffected.
+- **Operator rule.** Once a seat is connected to Neutron, stop using that same
+  ChatGPT login for codex anywhere else. One seat, one live store — otherwise the
+  CLI's refresh rotation revokes whichever copy refreshed earlier.
+
+Code: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts`
+(rollout harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0133_codex_rotation.sql`.
+
 ### Connect GitHub — the device flow, and the control that finally starts it (#551)
 
 A build pushes a branch and opens a pull request with the OWNER's GitHub token.

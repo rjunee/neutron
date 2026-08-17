@@ -210,6 +210,7 @@ describe('codex-auth HTTP surface — MULTIPLE SEATS', () => {
       scope: string
       detail: string
       accounts: { slot: string; active: boolean; cooling: boolean }[]
+      active: string
       next: string
       exhausted: boolean
     }
@@ -221,6 +222,7 @@ describe('codex-auth HTTP surface — MULTIPLE SEATS', () => {
     expect(typeof body.detail).toBe('string')
     // …and the additive fields.
     expect(body.accounts.map((a) => a.slot).sort()).toEqual(['default', 'work'])
+    expect(body.active).toBe('default')
     expect(body.next).toBe('default')
     expect(body.exhausted).toBe(false)
     expect(body.accounts.find((a) => a.slot === 'default')?.active).toBe(true)
