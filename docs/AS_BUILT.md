@@ -495,13 +495,34 @@ assumed. And topic-keying was credited with preventing cross-project serving on 
 `topicForProject` is a pure function of (userId, projectId), so it prevents nothing of the
 sort — deletion invalidation, driven off the `projects_changed` frame, is what does.
 
-`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (18 tests) pins all of it,
-and every guard was mutation-tested. The one that mattered most had to be rebuilt: the
-original `frame_rendered` test asserted only that the mark was PRESENT, and a review
-mutation that stamped it synchronously — the exact defect the mark exists to detect — kept
-25 of 25 tests green. Presence is what a broken implementation also has. The replacement
-asserts WHEN the mark lands, and kills both the synchronous stamp and a bare `raf(fn)`
-that would time the render instead of the picture.
+**The misattribution is now a test, not a comment.** `switchTimingNow` injects the
+stopwatch's clock (the same seam `switchConnectingGraceMs` and `switchTimingEmit` already
+are), so the decomposition can be asserted exactly instead of against real elapsed time,
+which measures the runner (ISSUES #438). The test reproduces the report's *shape*:
+`publish()` only SCHEDULES React's render, React flushes it synchronously at the end of the
+discrete event — after `setProject` returns, and therefore before any microtask — and the
+awaited read resumes in a microtask behind it. With a 250 ms render, `vm_published` reads
+**0** and `transcript_read` reads **250**. That is the owner's "3 ms vs 3283 ms" in
+miniature, and it means the two halves of the false conclusion now both fail if the
+mechanism is disturbed. Getting this right took one wrong attempt: modelling the render
+inside the subscriber put it inside `vm_published`, and the entire reason the bug was
+invisible is that it is *not* there.
+
+`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (19 tests) pins all of it,
+and every guard was mutation-tested: **15 mutations, 15 killed, 0 survived.** The one that
+mattered most had to be rebuilt: the original `frame_rendered` test asserted only that the
+mark was PRESENT, and a review mutation that stamped it synchronously — the exact defect
+the mark exists to detect — kept 25 of 25 tests green. Presence is what a broken
+implementation also has. The replacement asserts WHEN the mark lands, deterministically
+(rAF under test control; a second `setProject` supersedes the timer, which flushes on
+demand), and kills both the synchronous stamp and a bare `raf(fn)` that would time the
+render instead of the picture.
+
+One mutation was tried and **discarded rather than counted**: `DEFAULT_DEADLINE_MS` back to
+8 s survives, because no test waits 8 s and any assertion for it would be a constant
+restating a constant. It is a tuning number justified by a measurement in its docblock,
+with no behavioural guard — recording that beats adding a tautological test to make the
+table look complete.
 
 📌 Two lessons, and the second is the one that nearly shipped. **An instrument stamped
 after an `await` measures the queue, not the work** — the number was current, real, and

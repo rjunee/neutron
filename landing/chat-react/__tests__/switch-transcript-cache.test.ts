@@ -529,6 +529,18 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
       frameCb = cb
       return 1
     }
+    /**
+     * Take the frame the switch just scheduled, asserting one exists. Reading
+     * `frameCb` through a function is also what keeps it typed: at the call site
+     * TypeScript narrows the outer `let` to `null`, because it cannot see that
+     * `setProject` reaches the closure that assigns it.
+     */
+    const takeScheduledFrame = (): (() => void) => {
+      if (frameCb === null) throw new Error('the switch scheduled no frame')
+      const cb = frameCb
+      frameCb = null
+      return cb
+    }
     try {
       const { controller, sessions, records } = setup()
       await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
@@ -539,7 +551,7 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
       records.length = 0
       frameCb = null
       controller.setProject('alpha')
-      expect(frameCb).not.toBeNull()
+      takeScheduledFrame() // scheduled, deliberately never run
       controller.setProject('beta')
       const beforeFrame = records.find((r) => r.to === 'alpha')
       expect(beforeFrame).toBeDefined()
@@ -550,9 +562,7 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
       records.length = 0
       frameCb = null
       controller.setProject('alpha')
-      const insideFrame = frameCb
-      expect(insideFrame).not.toBeNull()
-      insideFrame!()
+      takeScheduledFrame()()
       controller.setProject('beta')
       const duringFrame = records.find((r) => r.to === 'alpha')
       expect(duringFrame).toBeDefined()
@@ -564,9 +574,7 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
       records.length = 0
       frameCb = null
       controller.setProject('alpha')
-      const painted = frameCb
-      expect(painted).not.toBeNull()
-      painted!()
+      takeScheduledFrame()()
       await tick()
       await tick()
       const afterFrame = records.find((r) => r.to === 'alpha')
@@ -576,6 +584,85 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
       if (original === undefined) delete g.requestAnimationFrame
       else g.requestAnimationFrame = original
     }
+  })
+
+  it('CHARGES A SLOW RENDER TO THE RENDER, WHICH IS WHAT THE REPORT GOT WRONG', async () => {
+    // ── THE DECOMPOSITION, ASSERTED ──────────────────────────────────────────
+    // 47 real samples read `transcript_read` median 3283 ms against
+    // `vm_published` median 3 ms, and the conclusion everyone drew from that —
+    // "rendering is instant, the store read is the whole cost" — is wrong in both
+    // halves. The reason lived only in a comment until this test: `vm_published`
+    // is stamped INSIDE `publish()`, so it measures notifying subscribers and not
+    // the render they perform, and `transcript_read` is stamped after an `await`
+    // whose continuation cannot run until that render finishes.
+    //
+    // A fake clock makes it exact rather than approximate, and keeps the assertion
+    // off real elapsed time (ISSUES #438). The ORDERING is what has to be faithful:
+    // `publish()` only SCHEDULES React's render, and React flushes it synchronously
+    // at the end of the discrete event — after `setProject` has returned, and
+    // therefore before any microtask, which is where the awaited read resumes. So
+    // the render is modelled as a scheduled cost the test flushes at exactly that
+    // point. Advancing the clock inside the subscriber instead would put the render
+    // inside `vm_published`, and the whole reason this bug was invisible is that it
+    // is NOT there.
+    let t = 0
+    const sessions = new Map<string, StallableSession>()
+    const records: SwitchRecord[] = []
+    const controller = new NeutronChatController({
+      projectId: null,
+      projects: [{ id: 'alpha', label: 'Alpha' }, { id: 'beta', label: 'Beta' }],
+      topicForProject: (p) => (p === null ? 'app:owner' : `app:owner:${p}`),
+      switchTimingEmit: (r) => records.push(r),
+      switchTimingNow: () => t,
+      createSession: (_sinks, scope) => {
+        const existing = sessions.get(scope.topicId)
+        if (existing !== undefined) return existing
+        const s = new StallableSession(scope.topicId)
+        sessions.set(scope.topicId, s)
+        return s
+      },
+    })
+    let renderScheduled = false
+    controller.subscribe(() => {
+      renderScheduled = true
+    })
+    /** React's discrete-event flush: synchronous, once, after the handler returns. */
+    const flushRender = (): void => {
+      if (!renderScheduled) return
+      renderScheduled = false
+      t += 250
+    }
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    records.length = 0
+    renderScheduled = false
+    controller.setProject('alpha')
+    flushRender()
+    await tick()
+    await tick()
+
+    const r = records.find((rec) => rec.to === 'alpha')
+    expect(r).toBeDefined()
+    const vm = r!.marks.vm_published
+    const read = r!.marks.transcript_read
+    expect(vm).toBeDefined()
+    expect(read).toBeDefined()
+    // `vm_published` sees NONE of the render — it is stamped while the render is
+    // merely scheduled. This is the "3 ms" half of the owner's report, and it is
+    // why the instrument read as though painting were free.
+    expect(vm!).toBe(0)
+    // THE MISATTRIBUTION: the store read is instant here (the clock only advances
+    // for renders), yet `transcript_read` carries a whole 250 ms render, because
+    // the awaited continuation could not resume until the render finished. This is
+    // the "3283 ms" half, and the two together are the false conclusion.
+    expect(read!).toBeGreaterThanOrEqual(250)
+    expect(read! - vm!).toBeGreaterThanOrEqual(250)
+    // And the paint mark is what separates the two: it lands with the render, not
+    // with the data, so `frame_rendered ≈ transcript_read` reads "the render is
+    // the cost" instead of blaming the store.
+    expect(r!.marks.frame_rendered).toBeDefined()
+    expect(r!.marks.frame_rendered!).toBeGreaterThanOrEqual(read!)
   })
 
   it('does not hold the record open for a paint that a hidden tab never makes', async () => {
