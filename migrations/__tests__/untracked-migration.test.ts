@@ -734,6 +734,73 @@ test('THE CONTROL — the parser agrees with git ls-files on this repository', (
   for (const path of expected) expect(parsed.paths.has(path)).toBe(true)
 })
 
+test('THE CONTROL — REAL git agrees about all four states, on an index git wrote itself', () => {
+  // The hand-built fixture cannot prove the intent-to-add decoding is right: an
+  // encoder and a parser agreeing on a WRONG extended-entry layout would pass every
+  // fixture in this file. So let git build the index — `git add -N` also forces
+  // index version 3, so this is the only place a real extended entry is read — and
+  // assert all four states at once, since the value of the guard is exactly that it
+  // separates them.
+  const repo = join(tmp, 'realgit')
+  mkdirSync(join(repo, 'migrations'), { recursive: true })
+  const git = (...args: string[]): boolean => {
+    const r = Bun.spawnSync(['git', ...args], { cwd: repo })
+    return r.exitCode === 0
+  }
+  try {
+    if (!git('init', '-q', '.')) {
+      controlDidNotRun('real git four states', 'git init failed (no usable git)')
+      return
+    }
+  } catch (err) {
+    controlDidNotRun('real git four states', `git could not be spawned (${String(err)})`)
+    return
+  }
+  git('config', 'user.email', 'test@example.com')
+  git('config', 'user.name', 'test')
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'neutron' }))
+  const dir = join(repo, 'migrations')
+  writeFileSync(join(dir, 'README.md'), 'x\n')
+  writeFileSync(join(dir, '0001_committed.sql'), ALPHA)
+  writeFileSync(join(dir, '0002_intent.sql'), BETA)
+  writeFileSync(join(dir, '0003_never_added.sql'), STRAY)
+  writeFileSync(join(dir, '0004_staged.sql'), BETA)
+  git('add', 'package.json', 'migrations/README.md', 'migrations/0001_committed.sql')
+  if (!git('commit', '-qm', 'init')) {
+    controlDidNotRun('real git four states', 'git commit failed')
+    return
+  }
+  git('add', '-N', 'migrations/0002_intent.sql')
+  git('add', 'migrations/0004_staged.sql')
+
+  const tree = resolveDeployedTree(dir)
+  // The index git wrote parses, checksum and all — the negative controls in this
+  // file only mean something if a REAL index still reads clean.
+  expect(tree.kind).toBe('verified')
+  if (tree.kind !== 'verified') return
+  expect(tree.tracked.has('0001_committed.sql')).toBe(true)
+  // `git add -N` records a path with NO staged content, so it is in no tree.
+  expect(tree.tracked.has('0002_intent.sql')).toBe(false)
+  // Never told git about — every occurrence of the incident class.
+  expect(tree.tracked.has('0003_never_added.sql')).toBe(false)
+  // THE DOCUMENTED RESIDUAL, asserted rather than left implicit: the index is the
+  // STAGED tree, so a file `git add`ed and never committed reads as tracked. That is
+  // why the recorded value is `tracked-in-index` and not a claim about a commit.
+  expect(tree.tracked.has('0004_staged.sql')).toBe(true)
+
+  // And end to end. BOTH untracked files refuse, reported in ordinal order, which is
+  // what makes the refusal deterministic rather than dependent on directory order.
+  expect(() => applyMigrations(new Database(':memory:'), dir)).toThrow(/0002_intent\.sql/)
+  rmSync(join(dir, '0002_intent.sql'))
+  expect(() => applyMigrations(new Database(':memory:'), dir)).toThrow(/0003_never_added\.sql/)
+  rmSync(join(dir, '0003_never_added.sql'))
+  // With both gone, the committed file AND the staged-uncommitted one apply — the
+  // control that this whole fixture is not simply refusing everything.
+  const db = new Database(':memory:')
+  expect(applyMigrations(db, dir)).toEqual({ applied: [1, 4], skipped: [] })
+  for (const row of rows(db)) expect(row['tree_provenance']).toBe('tracked-in-index')
+})
+
 test("this repository's own migration files are all tracked", () => {
   // The invariant the guard enforces, asserted against the real tree — and the
   // end-to-end proof that the check is ACTIVE here rather than silently inert.
