@@ -166,7 +166,24 @@ cut allowed one and resolved the pin through git, and CI showed the shards check
 out shallow so the object is absent and a correct citation was reported as a bad
 pin. An exemption nothing can verify is worth less than none, so the historical
 citation gives up its line number and names its commit and the config write
-instead. Mutation-tested with a control proving each mutation landed.
+instead.
+
+The guard needed two rounds of its own medicine. The first version was green on
+things it was not checking: it resolved a cited symbol against the whole target
+file, so the word `bun` sitting beside a misspelled symbol carried it (`bun`
+occurs seven times in the target); it matched a definition as a prefix, so any
+rename that appended — V2, Impl — passed; it keyed sites on an exact path, so
+misspelling the path skipped every check; and it asserted nothing about its own
+coverage, which matters because every check in it is a loop over sites and a loop
+over zero sites passes. A cross-model reviewer then defeated the repairs four more
+ways: an extension cap that missed `.markdown` and `.7z`, a path check that only
+saw a backtick span holding nothing else, a definition check a commented-out
+corpse of the old declaration satisfied, and an anchor that is an expression
+rather than an identifier and so was never really checked at its site. Nine
+mutations in total, each measured green before and red after, each with a control
+proving the mutation landed and a clean baseline proving it is not a false
+positive. The coverage assertion earned its place during the work: rewording a
+docblock dropped a citation site and the assertion is what said so.
 
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 

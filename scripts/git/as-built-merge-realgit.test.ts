@@ -1280,10 +1280,15 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // `scripts/install-merge-drivers.sh` argues against one file over — it has to be edited every
       // time a file type appears, and until someone remembers, the gap is a silent pass rather than
       // a visible hole. The first cut listed ts|tsx|js|mjs|sh|md|json and was measured blind to
-      // `.yml`, `.mts` and `.toml` locators appended to this cluster. Any short alphanumeric
-      // extension counts now. Widening it costs nothing here: run against the cluster at this
-      // commit it matches zero lines, so the only thing it can newly catch is a new offender.
-      const LOCATOR = /([\w./-]+\.[A-Za-z][A-Za-z0-9]{0,4})(?::|#L)(\d+)/
+      // `.yml`, `.mts` and `.toml` locators appended to this cluster. Any alphanumeric extension
+      // counts now. Widening it costs nothing here: run against the cluster at this commit it
+      // matches zero lines, so the only thing it can newly catch is a new offender.
+      //
+      // The first attempt at "any extension" still capped it at five characters and required a
+      // letter first, which the cross-model reviewer defeated with `.markdown` (eight) and `.7z`
+      // (leading digit). A cap is an enumeration wearing a different hat — it fails the same way,
+      // just less obviously — so there is no cap and no leading-character rule.
+      const LOCATOR = /([\w./-]+\.[A-Za-z0-9]+)(?::|#L)(\d+)/
       const offenders: string[] = []
       for (const rel of cluster) {
         read(rel).split('\n').forEach((line, i) => {
@@ -1303,36 +1308,67 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // asBuiltDriverCommand` left the name in a call and a comment, and a bare-symbol check passed
       // a function that no longer exists under that name.
       //
-      // The definition string CARRIES ITS OPEN PAREN, and that is load-bearing rather than tidy: it
-      // is matched as a substring, so `function asBuiltDriverCommand` is satisfied by `function
-      // asBuiltDriverCommandV2`. Measured — renaming both anchored functions to a `V2` suffix left
-      // this check green, while a non-suffix rename correctly reddened it, so every rename that ADDS
-      // to the end of a name (V2, Impl, 2 — the shape a rename actually takes) walked straight
-      // through. The paren makes the match end where the name does.
-      const anchors: Array<{ symbol: string; definition: string; definedIn: string; citedBy: string[] }> = [
+      // The definition is a REGEX ANCHORED TO THE START OF A LINE, and both halves of that are
+      // load-bearing.
+      //
+      // The paren, because a substring match on `function asBuiltDriverCommand` is satisfied by
+      // `function asBuiltDriverCommandV2`. Measured — renaming both anchored functions with a `V2`
+      // suffix left the first version of this check green, while a non-suffix rename reddened it, so
+      // every rename that APPENDS (V2, Impl, 2 — the shape a rename actually takes) walked through.
+      //
+      // The line anchor, because presence is not definition: `/* function asBuiltDriverCommand( */`
+      // left in a comment satisfies a bare substring just as well as the real declaration, so the
+      // check could be defeated by renaming the function and leaving a corpse behind. That was the
+      // cross-model reviewer's find, and it is the same "exists ≠ is what you think" shape the check
+      // was written to catch one level down. These two are top-level declarations at column zero;
+      // the expression anchor is indented inside one, so it carries its own leading whitespace.
+      // `citedBy` COUNTS, it does not merely ask "is it present". Presence is satisfied by any one
+      // surviving mention, so misspelling ONE of several citations of the same symbol leaves the
+      // others to hold the check up — which is how the expression anchor stayed effectively
+      // unguarded: it is cited twice in the installer, and the reviewer's mutation typos one and
+      // lets the other carry it, with an adjacent correct anchor satisfying the site window too. A
+      // floor makes losing a citation visible while adding one stays free.
+      const anchors: Array<{
+        symbol: string
+        definition: RegExp
+        definedIn: string
+        citedBy: Array<{ file: string; atLeast: number }>
+      }> = [
         {
           symbol: 'asBuiltDriverCommand',
-          definition: 'function asBuiltDriverCommand(',
+          definition: /^function asBuiltDriverCommand\(/m,
           definedIn: 'trident/orchestrator.ts',
-          citedBy: ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts'],
+          citedBy: [
+            { file: 'scripts/install-merge-drivers.sh', atLeast: 3 },
+            { file: 'scripts/git/as-built-merge-realgit.test.ts', atLeast: 6 },
+          ],
         },
         {
           symbol: 'rebaseOntoObservedBase',
-          definition: 'export async function rebaseOntoObservedBase(',
+          definition: /^export async function rebaseOntoObservedBase\(/m,
           definedIn: 'trident/orchestrator.ts',
-          citedBy: ['scripts/git/as-built-merge-realgit.test.ts'],
+          citedBy: [{ file: 'scripts/git/as-built-merge-realgit.test.ts', atLeast: 2 }],
         },
         {
           symbol: 'basename(process.execPath)',
-          definition: "basename(process.execPath).replace(/\\.exe$/i, '')",
+          definition: /^ +if \(basename\(process\.execPath\)\.replace\(\/\\\.exe\$\/i, ''\) !== 'bun'\)/m,
           definedIn: 'trident/orchestrator.ts',
-          citedBy: ['scripts/install-merge-drivers.sh'],
+          citedBy: [{ file: 'scripts/install-merge-drivers.sh', atLeast: 2 }],
         },
       ]
+      const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      /** A BACKTICKED mention of exactly this symbol — the trailing rule is what stops a typo that
+       *  merely CONTAINS the symbol (`…Commandd`) from counting as a citation of it. */
+      const mentions = (text: string, symbol: string) =>
+        [...text.matchAll(new RegExp('`' + escapeRe(symbol) + '(?![A-Za-z0-9_])', 'g'))].length
+
       for (const { symbol, definition, definedIn, citedBy } of anchors) {
-        expect(read(definedIn).includes(definition), `${definedIn} no longer defines the cited \`${symbol}\``).toBe(true)
-        for (const citer of citedBy) {
-          expect(read(citer).includes(symbol), `${citer} no longer cites \`${symbol}\` — renamed at one end only`).toBe(true)
+        expect(definition.test(read(definedIn)), `${definedIn} no longer defines the cited \`${symbol}\``).toBe(true)
+        for (const { file, atLeast } of citedBy) {
+          expect(
+            mentions(read(file), symbol),
+            `${file} cites \`${symbol}\` fewer times than it did — one end of a citation was renamed or misspelled`,
+          ).toBeGreaterThanOrEqual(atLeast)
         }
       }
 
@@ -1355,17 +1391,30 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // cluster is entitled to cite, so a site has to name something ON it. A new legitimate
       // citation therefore costs one row in that table — which is the point, since the row is what
       // resolves the symbol against the target at all.
-      const allowedFor = new Map<string, Set<string>>()
+      //
+      // AN ANCHOR IS MATCHED AS BACKTICKED TEXT, not as a bare identifier. The first version pulled
+      // identifiers out of the window with /`(\w+)`/ and compared them, which silently excluded the
+      // one anchor that is an EXPRESSION — `basename(process.execPath)` can never be a bare
+      // identifier, so its site was never really checked and only the file-wide substring stood
+      // behind it. The cross-model reviewer defeated exactly that: misspell the expression at its
+      // site, and the other citation of it further down the same file satisfies the file-wide check
+      // while the adjacent `asBuiltDriverCommand` satisfies the window.
+      //
+      // So the match is: an opening backtick, the anchor text verbatim, and then a character that
+      // cannot continue an identifier. The trailing rule is what keeps this from being the substring
+      // bug over again — without it `` `asBuiltDriverCommandd` `` contains `asBuiltDriverCommand`
+      // and the typo passes. Expressions terminate on their own punctuation and need no special case.
+      const anchorPatterns = new Map<string, Array<{ symbol: string; re: RegExp }>>()
       for (const a of anchors) {
-        if (!allowedFor.has(a.definedIn)) allowedFor.set(a.definedIn, new Set())
-        allowedFor.get(a.definedIn)!.add(a.symbol)
+        if (!anchorPatterns.has(a.definedIn)) anchorPatterns.set(a.definedIn, [])
+        anchorPatterns.get(a.definedIn)!.push({ symbol: a.symbol, re: new RegExp('`' + escapeRe(a.symbol) + '(?![A-Za-z0-9_])') })
       }
 
       const unresolved: string[] = []
       let sitesChecked = 0
       for (const rel of cluster) {
         const lines = read(rel).split('\n')
-        for (const [target, allowed] of allowedFor) {
+        for (const [target, allowed] of anchorPatterns) {
           lines.forEach((line, i) => {
             if (!line.includes(`\`${target}\``)) return
             sitesChecked++
@@ -1375,10 +1424,9 @@ describe('the installer under a locked config — the FATAL half-state must be i
             // nothing wrong with the citations at all. A one-sided window turns a reflow into a
             // verdict.
             const near = `${lines[i - 1] ?? ''}\n${line}\n${lines[i + 1] ?? ''}`
-            const named = [...near.matchAll(/`([A-Za-z_][A-Za-z0-9_]*)`/g)].map((m) => m[1]!)
-            if (named.some((id) => allowed.has(id))) return
+            if (allowed.some((a) => a.re.test(near))) return
             unresolved.push(
-              `${rel} line ${i + 1} cites ${target} naming ${named.join(', ') || '<nothing>'} — no anchored symbol among them`,
+              `${rel} line ${i + 1} cites ${target} but names none of its anchored symbols (${allowed.map((a) => a.symbol).join(', ')})`,
             )
           })
         }
@@ -1407,16 +1455,26 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // and renames during a config write — which are BY DEFINITION never tracked paths, so
       // "does this file exist in the repository" is not a question about them. `.github/` is a
       // tracked directory and deliberately still checked; the skip is the `.git/` prefix exactly.
+      // The path is looked for INSIDE a backtick span rather than being required to fill one. The
+      // first version demanded the whole span be the path, which quietly skipped every citation that
+      // says anything else in the same span — the reviewer's example is the installer's
+      // `docs/AS_BUILT.md merge=union`, where misspelling the path matched no pattern at all and
+      // stayed green. Spans are split on whitespace and each word judged on its own.
       const deadPaths: string[] = []
-      const PATHISH = /`([\w./-]+\/[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,4})`/g
+      const SPAN = /`([^`\n]+)`/g
+      const PATHISH = /^[\w.-]*[\w-]\/[\w./-]+\.[A-Za-z0-9]+$/
       for (const rel of cluster) {
         read(rel)
           .split('\n')
           .forEach((line, i) => {
-            for (const m of line.matchAll(PATHISH)) {
-              if (m[1]!.startsWith('.git/')) continue // git's runtime dir, never a tracked path
-              if (existsSync(join(REPO_ROOT, m[1]!))) continue
-              deadPaths.push(`${rel} line ${i + 1} cites \`${m[1]}\`, which is not in the repository`)
+            for (const span of line.matchAll(SPAN)) {
+              for (const word of span[1]!.split(/\s+/)) {
+                const p = word.replace(/[),.;:]+$/, '')
+                if (!PATHISH.test(p)) continue
+                if (p.startsWith('.git/')) continue // git's runtime dir, never a tracked path
+                if (existsSync(join(REPO_ROOT, p))) continue
+                deadPaths.push(`${rel} line ${i + 1} cites \`${p}\`, which is not in the repository`)
+              }
             }
           })
       }
