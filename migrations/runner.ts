@@ -1403,17 +1403,24 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // see `classifyMigration` and `formatDuplicateContentMigrations`. A hand-verified
   // repair naming the file still speaks for it, so an acknowledged duplicate stays
   // acknowledged.
-  const duplicates = migrations
-    .filter(
-      (m) => !repairedNames.has(m.name) && verdicts.get(m.name) === 'duplicates-an-applied-file',
-    )
-    .map((migration) => ({
-      migration,
-      recordedName:
-        [...(ledger.hashOwners.get(migrationContentHash(migration.sql)) ?? [])].find((owner) =>
-          treeNames.has(owner),
-        ) ?? '',
-    }))
+  //
+  // BUILT BY WALKING THE OWNERS, so a reported duplicate always carries a name that
+  // really is in the ledger. Composing this as a `.map` needed a `?? ''` for the
+  // owner-not-found case, and that case cannot happen — the verdict is only
+  // `duplicates-an-applied-file` when EVERY owner of those bytes is a file in this tree,
+  // so the search below always finds one. An empty string standing in for it would be a
+  // second unreachable branch reading as a real mode, which is what the narrowed row
+  // type further down exists to avoid.
+  const duplicates: Array<{ migration: Migration; recordedName: string }> = []
+  for (const migration of migrations) {
+    if (repairedNames.has(migration.name)) continue
+    if (verdicts.get(migration.name) !== 'duplicates-an-applied-file') continue
+    for (const owner of ledger.hashOwners.get(migrationContentHash(migration.sql)) ?? []) {
+      if (!treeNames.has(owner)) continue
+      duplicates.push({ migration, recordedName: owner })
+      break
+    }
+  }
   if (duplicates.length > 0) throw new Error(formatDuplicateContentMigrations(duplicates))
   // THE REMAINING FAIL-CLOSED GUARD, restated against identity: a recorded
   // migration that NO file in this build corresponds to. The whole-tree hash below is
