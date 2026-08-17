@@ -344,6 +344,18 @@ with cross-references noted inline.
     Protects: **O3** (Error taxonomy + typed substrate error codes).
 39. Binary-ENOENT must stay non-retryable so it can't launder into a 429 cooldown; `all_cooldown`
     must stay `retryable:true`. `build-llm-call-substrate.ts:437-442,515-523`.
+    A SUBSTRATE-LOCAL failure must never be reported as a credential fault, on EITHER
+    credential-failure lane. `detectBinaryNotFound`, `detectChannelWedged`,
+    `detectTurnTimeout` and `detectReplProcessExited` are classified AHEAD of the cooldown
+    map in `build-llm-call-substrate.ts` and MUST skip `reportFailure`: none carries an HTTP
+    status, so the map can only guess 429, and on a single-credential box (every Open
+    install) five guesses park the pool for an hour behind "all Anthropic credentials are in
+    cooldown" — a cause that is not true. The dead-REPL member is the one a lane rule cannot
+    cover: the strikes that caused the 2026-08-17 chat lockout were the owner's own
+    INTERACTIVE retries against a respawning child.
+    Because each detector matches PROSE emitted by another module, invariant 38 applies to
+    their producer literals: a reword is a behavior change, and
+    `__tests__/g6-error-string-conformance.test.ts` pins each one to its producer source.
     Protects: **O3**.
 40. Email triage LLM stub THROWS by design so triage renders its deterministic fallback;
     agent-settings fallbacks must report `available:false`, never fake success.
