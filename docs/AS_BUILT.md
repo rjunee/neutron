@@ -2,6 +2,65 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the wakeup asks the ROW first, and only then the timer
+
+Landed via PR #341.
+
+A cross-model review of the change above (recorded on that PR) found the first
+cut still failing INVISIBLE in three places — the exact direction it exists to
+remove — and the fixes are worth recording separately because two of them were
+positions this repo had already reasoned itself into once.
+
+A `linked_run_id` naming ANOTHER project's run was read as this item's driver.
+`TridentRunStore.get` is keyed on the id alone, so a stale cross-project link to a
+healthy run suppressed the item for as long as that run lived. `runProgressForItem`
+already carries exactly this defensive check (`trident/run-progress.ts:217-219`)
+and the new selector had simply not copied it.
+
+An unparseable — or future — `last_advanced_at` was read as "just advanced", and
+the reason given was symmetry with the reaper (`orchestrator.ts:2380-2388`). THE
+SYMMETRY WAS THE ERROR, and it is the more interesting of the two: the same
+conservatism means opposite things to the two consumers. The reaper's caution
+protects work from being killed; here it hid a work item from the only autonomy
+mechanism forever, and the reaper — reading the same 0 — never recovered it
+either. Consistency with a neighbour is not a virtue when the neighbour fails in
+the other direction. No reading now stands the run down.
+
+The 90-minute timer was also being asked FIRST, where the row often answers with
+certainty. A clean fire writes `subagent_run_id` and `subagent_status='running'`
+together (`orchestrator.ts:2064-2073`) and a fire that does not settle fails the
+run outright (`:2053-2062`), so a non-terminal run carrying NEITHER has no
+recorded workflow to collide with — decidable in minutes against
+`DEFAULT_SETTLE_TIMEOUT_MS` rather than in hours against a threshold. That is the
+reported shape exactly: a run parked at `forge-init` that never launched. A
+crashed launcher is deliberately excluded from this, because a dead launcher is
+not a dead build (`orchestrator.ts:2419-2426`); those keep the conservative timer.
+The verdict now reads terminal → no-usable-reading → never-launched → timer, most
+certain to least.
+
+The deferral log was rate-limited per (project, run) at 30 minutes: at the
+five-minute cadence it was 288 lines a day per item, which is a volume that stops
+being a signal. A new run still logs on the first sweep that defers to it, and the
+COUNT in `WakeupSweepResult` is never suppressed, so the rate limit costs volume
+and never costs the fact.
+
+One docblock claim was withdrawn rather than defended. Matching the reaper's
+threshold buys AGREEMENT about when a run stops looking alive; it does not buy
+mutual exclusion, because the reaper only applies to a run with a dispatch id
+(`orchestrator.ts:2529`) and reaping writes a `failed` row rather than terminating
+the detached workflow (`:1817`). The residual — a healthy build genuinely running
+past the threshold with no checkpoint — is now stated in the module instead of
+implied away, and it needs the mid-phase heartbeat tracked in ISSUES #534, not a
+different constant.
+
+Five mutation tests, each with a control proving the mutation landed and the
+remaining tests still passing: restoring the unconditional skip (5 red), removing
+the never-launched rule (2 red), restoring the corrupt-stamp reading (3 red),
+dropping the cross-project scope check (1 red), and collapsing the log rate-limit
+key (2 red). The 14 failures in a whole-`trident/` local run are byte-identical on
+an untouched `origin/main` checkout (`worktree-cleanup-sh` and `merge-realgit`,
+both real-`git` suites this diff does not touch).
+
 ## 2026-08-16 — a stalled driver is not a driver, and a silent skip is going quiet
 
 Landed via PR #341.
