@@ -1494,7 +1494,7 @@ CREATE TABLE "work_board_items" (
     completed_at    TEXT,                           -- ISO-8601 UTC; NULL until status='done' (NEVER stamped for 'archived')
     task_type       TEXT NOT NULL DEFAULT 'build'   -- 0105 — the ▶ routing discriminator
                         CHECK (task_type IN ('build', 'research'))
-) STRICT
+, blocked_by TEXT, declared_surfaces TEXT) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (
