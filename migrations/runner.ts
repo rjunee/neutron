@@ -505,20 +505,81 @@ function addProvenanceColumns(db: Database, table: string): void {
 /** Where the old rows live for the duration of a rekey. */
 const LEDGER_LEGACY_TABLE = '_migrations_version_keyed'
 
+/** Whether a provenance column actually recorded something. `''` is not a record. */
+function hasProvenance(value: string | null): boolean {
+  return value !== null && value.length > 0
+}
+
 /**
- * Move the ledger's primary key from `version` to `name`, preserving every row.
+ * One row per migration NAME, from a legacy ledger that may hold the same name at
+ * two different ordinals.
+ *
+ * THAT SHAPE IS LEGITIMATE, NOT CORRUPT, WHICH IS WHY IT IS COLLAPSED RATHER THAN
+ * REFUSED. Migrations in this tree are idempotent by contract (`AGENTS.md`), and the
+ * old runner deduplicated on the ORDINAL — so when a merge renumbered an
+ * already-applied file to an ordinal the instance had not spent, that runner
+ * re-applied it (harmlessly) and recorded a SECOND row under the new number. One
+ * name, two ordinals, both rows true, nothing missing from the schema. Refusing that
+ * would brick the boot of instances that were healthy, which is this file's own
+ * defect class — an ordinal treated as an identity — reintroduced by its fix.
+ *
+ * The distinction being preserved is between a ledger this build can EXPLAIN and one
+ * it cannot. Two ordinals for one name is fully explained by the paragraph above, so
+ * it collapses here. A recorded migration that corresponds to NO file in this build
+ * is explained by nothing, and it still fails closed — that guard lives in
+ * `applyMigrations` and this function does not touch it.
+ *
+ * DETERMINISTIC, AND IT LOSES NOTHING RECORDED. The surviving row is the one applied
+ * EARLIEST (ties broken by ordinal, then name) because that is when the schema
+ * change actually landed on this database, and `applied_at` is the field that claims
+ * to say so. Provenance is then filled from any row in the group that carries it:
+ * the earliest row is typically the oldest release's, written before provenance
+ * shipped and therefore NULL, while the re-record carries a real hash and commit.
+ * Keeping the early row's identity and the late row's provenance is strictly more
+ * truth than either row alone, and discarding a recorded hash for a NULL would throw
+ * away the only forensic evidence the instance has.
+ */
+function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[] {
+  const ordered = [...rows].sort(
+    (a, b) => a.applied_at - b.applied_at || a.version - b.version || a.name.localeCompare(b.name),
+  )
+  const kept = new Map<string, RecordedMigration>()
+  for (const row of ordered) {
+    const winner = kept.get(row.name)
+    if (winner === undefined) {
+      kept.set(row.name, { ...row })
+      continue
+    }
+    if (!hasProvenance(winner.content_sha256)) winner.content_sha256 = row.content_sha256
+    if (!hasProvenance(winner.applied_by_commit)) winner.applied_by_commit = row.applied_by_commit
+    if (!hasProvenance(winner.tree_provenance)) winner.tree_provenance = row.tree_provenance
+  }
+  return [...kept.values()]
+}
+
+/**
+ * Move the ledger's primary key from `version` to `name`, preserving every migration.
  *
  * ONE TRANSACTION, and the rename happens FIRST so the surviving `_migrations` is
  * created by `ledgerDdl` directly rather than by `ALTER TABLE ... RENAME TO` —
  * which rewrites `sqlite_master` with the table name quoted and would leave a
  * rekeyed instance's schema text subtly different from a fresh install's for no
- * reason. Either the whole swap lands or the database is untouched.
+ * reason. Either the whole swap lands or the ledger is untouched.
  *
- * A DUPLICATE NAME IN THE OLD LEDGER FAILS THE COPY, AND THAT IS CORRECT. Two rows
- * recording the same migration name means the ledger cannot say what has run —
- * genuine corruption, not a shape to migrate — so the transaction rolls back and
- * boot refuses with the constraint SQLite raised. Silently collapsing the pair
- * would discard the evidence and leave a database nobody can reason about.
+ * THE PROVENANCE COLUMNS ARE ADDED IN HERE, INSIDE THE TRANSACTION, AND THAT
+ * PLACEMENT IS THE POINT. `ALTER TABLE ... ADD COLUMN` is a statement like any other:
+ * run outside an explicit transaction it is its own implicit one and COMMITS. The
+ * caller used to add them before calling this, so a failed rekey rolled back the swap
+ * while the columns stayed — and the error below told the operator the ledger was
+ * unchanged, which was false. SQLite rolls DDL back with everything else, so moving
+ * the ALTERs inside the `BEGIN IMMEDIATE` makes the sentence true instead of
+ * softening it.
+ *
+ * A DUPLICATE NAME DOES NOT FAIL THE COPY — `collapseLedgerRowsByName` resolves it,
+ * for the reasons documented there. The copy is row-by-row rather than one
+ * `INSERT ... SELECT` because the collapse is a decision about a GROUP of rows, and
+ * it needs the legacy ledger read shape-tolerantly anyway (a pre-provenance ledger
+ * has none of the three columns to select).
  *
  * CONCURRENT REKEY IS SAFE. `BEGIN IMMEDIATE` takes the write lock up front, so a
  * second process racing the same upgrade gets SQLITE_BUSY rather than a half-built
@@ -532,18 +593,39 @@ function rekeyLedgerOnName(db: Database): void {
     db.exec(`ALTER TABLE _migrations RENAME TO ${LEDGER_LEGACY_TABLE}`)
     db.exec(ledgerDdl('_migrations'))
     addProvenanceColumns(db, '_migrations')
-    const columns = 'version, name, applied_at, content_sha256, applied_by_commit, tree_provenance'
-    db.exec(
-      `INSERT INTO _migrations (${columns}) SELECT ${columns} FROM ${LEDGER_LEGACY_TABLE}`,
-    )
+    for (const row of collapseLedgerRowsByName(selectLedgerRows(db, LEDGER_LEGACY_TABLE))) {
+      db.run(
+        `INSERT INTO _migrations
+           (version, name, applied_at, content_sha256, applied_by_commit, tree_provenance)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          row.version,
+          row.name,
+          row.applied_at,
+          row.content_sha256,
+          row.applied_by_commit,
+          row.tree_provenance,
+        ],
+      )
+    }
     db.exec(`DROP TABLE ${LEDGER_LEGACY_TABLE}`)
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
+    // WHAT THIS SENTENCE MAY AND MAY NOT CLAIM. "The ledger is unchanged" is now
+    // literally true — the swap, the provenance ALTERs and the copy are all inside
+    // the transaction that just rolled back. It deliberately does NOT say "the
+    // database is unchanged": on this same path `applyMigrations` may already have
+    // written acknowledgement rows to `_migration_repairs` before calling us, and an
+    // operator sent looking for a pristine database would be sent wrong. State the
+    // narrow claim that holds, and name the one thing that may not.
     throw new Error(
-      'The _migrations ledger could not be rekeyed from its ordinal onto the migration name, and ' +
-        'the database is unchanged. The most likely cause is two rows recording the same migration ' +
-        'name, which means the ledger cannot say what has run. SQLite reported: ' +
+      'The _migrations ledger could not be rekeyed from its ordinal onto the migration name. The ' +
+        'ledger is unchanged — its shape, its columns and its rows are exactly what they were ' +
+        'before this boot, because the whole rekey runs in one transaction that has rolled back. ' +
+        '(A `_migration_repairs` acknowledgement row, if this boot had one to write, was written ' +
+        'before the rekey and is still there.) Two rows recording one migration name is NOT the ' +
+        'cause: that is a legitimate history and it is collapsed, not refused. SQLite reported: ' +
         (err instanceof Error ? err.message : String(err)),
       { cause: err },
     )
@@ -575,17 +657,24 @@ function ledgerExists(db: Database): boolean {
  */
 function readLedger(db: Database): Ledger {
   if (!ledgerExists(db)) return buildLedger([])
-  const present = tableColumns(db, '_migrations')
+  return buildLedger(selectLedgerRows(db, '_migrations'))
+}
+
+/**
+ * Every row of a ledger table, whatever provenance columns it does or does not
+ * carry. The table is named because the rekey reads the legacy copy with exactly
+ * these semantics — a ledger written before provenance shipped has none of the
+ * three columns, and selecting them as NULL is both what SQLite needs and what is
+ * true of those rows.
+ */
+function selectLedgerRows(db: Database, table: string): RecordedMigration[] {
+  const present = tableColumns(db, table)
   const provenance = PROVENANCE_COLUMNS.map(([column]) =>
     present.has(column) ? column : `NULL AS ${column}`,
   ).join(', ')
-  return buildLedger(
-    db
-      .query<RecordedMigration, []>(
-        `SELECT version, name, applied_at, ${provenance} FROM _migrations`,
-      )
-      .all(),
-  )
+  return db
+    .query<RecordedMigration, []>(`SELECT version, name, applied_at, ${provenance} FROM ${table}`)
+    .all()
 }
 
 /**
@@ -642,15 +731,24 @@ function buildLedger(rows: RecordedMigration[]): Ledger {
  * the state that took the live instance down.
  */
 function ensureLedgerShape(db: Database): void {
-  const existed = ledgerExists(db)
-  db.exec(ledgerDdl('_migrations'))
-  addProvenanceColumns(db, '_migrations')
   // The rekey runs only for a ledger that predates name-keying, and only on this
   // path — the one that is about to write a row. A steady-state boot never reshapes
   // the ledger, so an instance stays version-keyed until its next pending migration
   // and reads work either way (identity comes from `name` and `content_sha256`,
   // neither of which the key affects).
-  if (existed && ledgerIsVersionKeyed(db)) rekeyLedgerOnName(db)
+  //
+  // IT RETURNS RATHER THAN FALLING THROUGH, and the ALTERs below are not run first.
+  // `rekeyLedgerOnName` builds the new ledger from `ledgerDdl` and adds the
+  // provenance columns to it INSIDE its own transaction, so a failed rekey leaves
+  // nothing behind. Adding them here would put a committing `ALTER TABLE` in front
+  // of that transaction and make its "the ledger is unchanged" false — see the
+  // function.
+  if (ledgerExists(db) && ledgerIsVersionKeyed(db)) {
+    rekeyLedgerOnName(db)
+    return
+  }
+  db.exec(ledgerDdl('_migrations'))
+  addProvenanceColumns(db, '_migrations')
 }
 
 /**

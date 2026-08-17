@@ -138,6 +138,80 @@ already converted. `migrations/expected-schema.txt` regenerated (a two-line diff
 `migrations/README.md` gains a "The ordinal is not an identity" section;
 `docs/INVARIANTS.md` #17 now names four fail-closed refusals instead of three.
 
+**A cross-model review of this PR found two defects in its own fix, and both are fixed
+here.** The first is the fix reintroducing its own defect class, which is the reason the
+review was worth running at all.
+
+**The rekey refused a ledger that was legitimate, which would have bricked instances that
+were healthy.** `rekeyLedgerOnName` copied the old rows into a name-keyed table with a
+single `INSERT ... SELECT`, and a database written by the ORDINAL-keyed runner can
+legitimately hold one migration NAME at TWO ordinals: migrations here are idempotent by
+contract (`migrations/AGENTS.md`), so when a merge renumbered an already-applied file to
+an ordinal that instance had not spent, the old runner's version-only dedup re-applied it
+harmlessly and recorded a SECOND row under the new number. Two rows, one name, nothing
+corrupt and nothing missing from the schema. The copy then violated the new name key, the
+rekey threw, and EVERY boot with a pending migration failed — an ordinal treated as an
+identity, one level up, and strictly worse than the bug being fixed because it breaks
+instances that worked. Reproduced first and measured, not reasoned about: two sequential
+runs of the pre-change algorithm over the real tree (the second having renumbered
+`0131_work_board_items_archived_status` back to its merged `0130`) produce the duplicate,
+and the current runner died on it with `UNIQUE constraint failed: _migrations.name`.
+
+`collapseLedgerRowsByName` now resolves the group instead: the surviving row is the one
+applied EARLIEST — ties broken by ordinal then name, so it is deterministic — because that
+is when the schema change actually landed on this database, and provenance
+(`content_sha256` / `applied_by_commit` / `tree_provenance`) is filled from any row in the
+group that carries it. That second half matters more than it looks: the earliest row is
+typically the oldest release's, written before provenance shipped and therefore NULL, so a
+plain "first row wins, drop the rest" collapse would have thrown away the only forensic
+record the instance has of that migration. The copy is row-by-row rather than one
+`INSERT ... SELECT` because the collapse is a decision about a group, and because the
+legacy ledger has to be read shape-tolerantly anyway.
+
+**The distinction being preserved is EXPLAINABLE versus not, and the fail-closed guard is
+untouched.** One name at two ordinals is fully explained by the paragraph above, so it
+collapses. A recorded migration that corresponds to no file in this build, by name or by
+hash, is explained by nothing and still refuses the boot.
+
+**The rekey's failure message told the operator something false.** It said "the database
+is unchanged", but the provenance `ALTER TABLE`s ran in `ensureLedgerShape` BEFORE
+`rekeyLedgerOnName` opened its transaction — and a statement run outside an explicit
+transaction is its own implicit one, so they COMMITTED. A failed rekey therefore left a
+ledger carrying three new columns while the error said nothing had happened, and an
+operator who believed that sentence would not go looking for a half-modified ledger. Fixed
+by making the claim true rather than by softening it: the ALTERs moved inside the
+`BEGIN IMMEDIATE`, verified against the driver first (`ALTER TABLE ... ADD COLUMN` inside
+a transaction is rolled back by `ROLLBACK` — SQLite rolls DDL back with everything else).
+The message also stops naming duplicate names as the likely cause, since that cause is now
+handled, and it says "the LEDGER is unchanged" rather than "the database": on this same
+path `applyMigrations` may already have written a `_migration_repairs` acknowledgement row
+before the rekey, so the narrow claim is the one that holds, and the message names the one
+thing that may not.
+
+`ordinal-identity.test.ts` gains the two cases that did not exist — which is why the
+review found these and the suite did not. **CASE 5 — one migration name at TWO ordinals is
+collapsed, and the instance BOOTS** asserts the pending migration applies, the post-rekey
+ledger holds exactly one row for that name at the earliest-applied ordinal, its provenance
+columns survived from the row that had them, and no other row was collapsed or duplicated.
+**CASE 6 — when the rekey fails, the ledger really is unchanged as the message says** fails
+a rekey deterministically (a leftover VIEW on the scratch-table name; `DROP TABLE IF
+EXISTS` refuses a view) and then verifies the claim: same DDL, same rows, and the
+provenance columns still ABSENT.
+
+Both cases are driven by `versionKeyedRunner`, the shipped runner's own pre-change
+algorithm, added to the test file because it is the only thing that can produce these
+ledgers and the current runner cannot. Its rows are still not hand-written — every value
+comes from a real migration file and it really executes each file's SQL — and its
+`applied_at` is passed in rather than read from the clock, so the collapse's tie-break is
+not what the assertions rest on.
+
+Three mutation proofs, each red in exactly the expected place and nowhere else: deleting
+the unexplained-row throw turns CASE 4 and CASE 4b red and leaves the new cases green
+(the fail-closed guard was not weakened to make the collapse work); making the collapse a
+pass-through turns CASE 5 red with the original `UNIQUE constraint failed` error; and
+restoring the pre-fix ALTER ordering turns CASE 6 red on the still-absent-columns
+assertion alone.
+
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
 Landed via PR #384.

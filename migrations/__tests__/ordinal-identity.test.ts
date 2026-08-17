@@ -15,9 +15,13 @@
  *
  * NO LEDGER ROW IS HAND-WRITTEN. The prior state is produced by running the real
  * runner over a copy of this tree renumbered the way the branch had it — the same
- * mechanism that produced it in the first place. The one thing written by hand is
- * the ledger's SHAPE (`asPreviousReleaseWroteIt`), because the point of that state
- * is that a PREVIOUS RELEASE wrote it, and the current runner cannot produce it.
+ * mechanism that produced it in the first place. Two things are not the current
+ * runner, because the current runner cannot produce them and the point of both
+ * states is that a PREVIOUS RELEASE did: the ledger's SHAPE
+ * (`asPreviousReleaseWroteIt`), and `versionKeyedRunner`, which is the shipped
+ * runner's own algorithm from before this change — dedup on the ORDINAL. Its rows
+ * are still not hand-written: every value comes from a real migration file, and it
+ * really executes each file's SQL, so the schema it leaves behind is genuine.
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -33,7 +37,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '../runner.ts'
+import { applyMigrations, loadMigrations, splitPragmaPreamble } from '../runner.ts'
+import { migrationContentHash } from '../provenance.ts'
 
 const REAL_TREE = join(import.meta.dir, '..')
 
@@ -124,6 +129,120 @@ function asPreviousReleaseWroteIt(db: Database, options: { provenance: boolean }
    )`)
   db.exec(`INSERT INTO _migrations (${columns}) SELECT ${columns} FROM _migrations_old`)
   db.exec('DROP TABLE _migrations_old')
+}
+
+/**
+ * A copy of the real tree with `0127` removed (so it is left PENDING for the runner
+ * under test) and the given files renumbered.
+ */
+function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
+  const dir = mkdtempSync(join(tmp, 'release-'))
+  for (const file of readdirSync(REAL_TREE)) {
+    if (!/^\d{4}_.+\.sql$/.test(file)) continue
+    cpSync(join(REAL_TREE, file), join(dir, file))
+  }
+  rmSync(join(dir, PENDING_FILE))
+  for (const [from, to] of renames) renameSync(join(dir, from), join(dir, to))
+  return dir
+}
+
+/** The migration held back so the boot under test always has something to apply. */
+const PENDING_FILE = '0127_code_trident_runs_agent_waked_at.sql'
+const PENDING_NAME = 'code_trident_runs_agent_waked_at'
+
+/** The name whose duplicate the collapse has to resolve, and its two ordinals. */
+const RENUMBERED_NAME = 'work_board_items_archived_status'
+const RENUMBERED_FILE = '0130_work_board_items_archived_status.sql'
+const BRANCH_ORDINAL = 131
+const MERGED_ORDINAL = 130
+
+/**
+ * THE SHIPPED RUNNER, AS IT BEHAVED BEFORE THIS CHANGE: dedup on the ORDINAL.
+ *
+ * This is what wrote every ledger in the field, and it is the only thing that can
+ * produce the state CASE 5 is about. Feed it two trees in sequence, the second having
+ * renumbered an already-applied file to an unspent ordinal, and it re-applies that
+ * file (legal — migrations are idempotent, see AGENTS.md) and records a SECOND row for
+ * it. One name, two ordinals, nothing corrupt and nothing missing.
+ *
+ * `appliedAt` is passed rather than read from the clock so the two releases are
+ * ordered by more than a millisecond of luck — a real fleet's releases are days
+ * apart, and the collapse's tie-break must not be what the assertions rest on.
+ */
+function versionKeyedRunner(
+  db: Database,
+  dir: string,
+  options: { provenance: boolean; appliedAt: number },
+): void {
+  db.exec('PRAGMA foreign_keys = ON')
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (
+     version INTEGER PRIMARY KEY,
+     name TEXT NOT NULL,
+     applied_at REAL NOT NULL
+   )`)
+  if (options.provenance) {
+    const present = new Set(columnsOf(db, '_migrations'))
+    for (const column of ['content_sha256', 'applied_by_commit', 'tree_provenance']) {
+      if (!present.has(column)) db.exec(`ALTER TABLE _migrations ADD COLUMN ${column} TEXT`)
+    }
+  }
+  const recorded = new Set(
+    db.query<{ version: number }, []>('SELECT version FROM _migrations').all().map((r) => r.version),
+  )
+  for (const migration of loadMigrations(dir)) {
+    if (recorded.has(migration.version)) continue
+    const { preamble, body } = splitPragmaPreamble(migration.sql)
+    if (preamble.trim().length > 0) db.exec(preamble)
+    db.exec('BEGIN')
+    db.exec(body)
+    if (options.provenance) {
+      db.run(
+        `INSERT INTO _migrations
+           (version, name, applied_at, content_sha256, applied_by_commit, tree_provenance)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          migration.version,
+          migration.name,
+          options.appliedAt,
+          migrationContentHash(migration.sql),
+          'c'.repeat(40),
+          'tracked-in-deployed-tree',
+        ],
+      )
+    } else {
+      db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)', [
+        migration.version,
+        migration.name,
+        options.appliedAt,
+      ])
+    }
+    db.exec('COMMIT')
+    db.exec('PRAGMA foreign_keys = ON')
+  }
+}
+
+/**
+ * An instance carrying ONE migration name at TWO ordinals, written entirely by the
+ * old version-keyed runner across two releases, with `0127` still pending.
+ *
+ * Release 1 predates provenance and numbered the file 0131. Release 2 ships
+ * provenance and carries the file at its merged number, 0130 — an ordinal release 1
+ * never spent, so the ordinal-keyed dedup re-applies and re-records it. The EARLIEST
+ * row is therefore the one with NO provenance, which is exactly the case where a
+ * "first row wins, drop the rest" collapse would discard the only hash the instance
+ * has.
+ */
+function instanceWithOneNameAtTwoOrdinals(): Database {
+  const db = new Database(join(tmp, 'renumbered.db'), { create: true })
+  versionKeyedRunner(db, treeWithoutPendingFile([[RENUMBERED_FILE, `0131_${RENUMBERED_NAME}.sql`]]), {
+    provenance: false,
+    appliedAt: 1_700_000_000,
+  })
+  versionKeyedRunner(db, treeWithoutPendingFile(), {
+    provenance: true,
+    appliedAt: 1_760_000_000,
+  })
+  return db
 }
 
 /** The live instance's prior state: the branch's ledger, in the old release's shape. */
@@ -385,5 +504,143 @@ test('CASE 4b — the refusal is resolvable, and only by a hand-written acknowle
   )
   expect(applyMigrations(db, acknowledged).applied).toContain(125)
   expect(ledger(db).find((r) => r.name === 'ghost_two')?.version).toBe(501)
+  db.close()
+})
+
+// ------------------------- 5. a legitimate ledger the rekey must not choke on
+
+test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instance BOOTS', () => {
+  // THE DEFECT CLASS THIS FILE EXISTS TO FIX, ONE LEVEL OVER. Keying the ledger on
+  // the name is right, but the rekey that gets it there has to accept every ledger
+  // the ORDINAL-keyed runner could legally write — and that runner could write one
+  // name twice, because migrations are idempotent and it deduplicated on the number.
+  // A rekey that refuses this bricks the boot of an instance that was healthy, which
+  // is strictly worse than the bug being fixed.
+  const db = instanceWithOneNameAtTwoOrdinals()
+
+  // THE PRECONDITION, MEASURED. Two rows, one name, two ordinals — and the earlier
+  // of the two is the one with no provenance.
+  const before = db
+    .query<{ version: number; content_sha256: string | null; applied_at: number }, [string]>(
+      'SELECT version, content_sha256, applied_at FROM _migrations WHERE name = ? ORDER BY applied_at',
+    )
+    .all(RENUMBERED_NAME)
+  expect(before.map((r) => r.version)).toEqual([BRANCH_ORDINAL, MERGED_ORDINAL])
+  expect(before[0]?.content_sha256).toBeNull()
+  expect(before[1]?.content_sha256).toMatch(/^[0-9a-f]{64}$/)
+  const recordedHash = before[1]?.content_sha256
+  // Nothing corrupt about it: every name in the ledger is a migration this tree has.
+  const namesBefore = new Set(ledger(db).map((r) => r.name))
+  expect(namesBefore.has(PENDING_NAME)).toBe(false) // the one pending migration
+  expect(columnsOf(db, 'code_trident_runs')).not.toContain('agent_waked_at')
+
+  const result = applyMigrations(db)
+
+  // IT BOOTED, and the pending migration actually ran.
+  expect(result.applied).toEqual([127])
+  expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
+  expect(
+    db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()
+      ?.sql,
+  ).toContain('name TEXT NOT NULL PRIMARY KEY')
+
+  // EXACTLY ONE ROW for the duplicated name, and it is the EARLIEST application —
+  // when the schema change actually landed here — not the later re-record.
+  const after = db
+    .query<
+      {
+        version: number
+        applied_at: number
+        content_sha256: string | null
+        applied_by_commit: string | null
+        tree_provenance: string | null
+      },
+      [string]
+    >(
+      `SELECT version, applied_at, content_sha256, applied_by_commit, tree_provenance
+       FROM _migrations WHERE name = ?`,
+    )
+    .all(RENUMBERED_NAME)
+  expect(after).toHaveLength(1)
+  expect(after[0]?.version).toBe(BRANCH_ORDINAL)
+  expect(after[0]?.applied_at).toBe(before[0]?.applied_at)
+  // AND ITS PROVENANCE SURVIVED. The row that won identity had none; the row that
+  // lost had a real hash and commit. Collapsing to a NULL would have destroyed the
+  // only forensic record this instance has of that migration.
+  expect(after[0]?.content_sha256).toBe(recordedHash as string)
+  expect(after[0]?.applied_by_commit).toBe('c'.repeat(40))
+  expect(after[0]?.tree_provenance).toBe('tracked-in-deployed-tree')
+
+  // No other row was collapsed, dropped or duplicated by the pass.
+  const namesAfter = ledger(db).map((r) => r.name)
+  expect(new Set(namesAfter)).toEqual(new Set([...namesBefore, PENDING_NAME]))
+  expect(namesAfter).toHaveLength(new Set(namesAfter).size)
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name LIKE '_migrations_%'").get()).toBeNull()
+
+  // Idempotent: the collapsed ledger is a fixed point.
+  expect(applyMigrations(db).applied).toEqual([])
+  db.close()
+})
+
+// ------------------- 6. what the rekey's own failure message may claim
+
+test('CASE 6 — when the rekey fails, the ledger really is unchanged as the message says', () => {
+  // The message is an instruction to an operator at 3am, so it has to be true. It
+  // used to be false: the provenance `ALTER TABLE`s ran BEFORE the rekey's
+  // transaction, so they auto-committed, and a failed rekey left a ledger carrying
+  // three new columns while telling the operator the database was untouched.
+  //
+  // THIS TEST CAN FAIL FOR THE REASON UNDER TEST, which is the only kind worth
+  // having: the discriminating assertion is that the provenance columns are still
+  // ABSENT afterwards. With the ALTERs back outside the transaction it goes red,
+  // whatever else stays green.
+  const db = new Database(join(tmp, 'rekey-fails.db'), { create: true })
+  versionKeyedRunner(db, treeWithoutPendingFile(), {
+    provenance: false,
+    appliedAt: 1_700_000_000,
+  })
+  // The failure, and a realistic one: an operator inspected the ledger and left a
+  // view behind on the name the rekey needs for its scratch table. `DROP TABLE IF
+  // EXISTS` refuses a view, so the rekey dies on its first statement.
+  db.exec('CREATE VIEW _migrations_version_keyed AS SELECT version, name FROM _migrations')
+
+  const ddlBefore = db
+    .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = '_migrations'")
+    .get()?.sql
+  const rowsBefore = ledger(db)
+  expect(ddlBefore).toContain('version INTEGER PRIMARY KEY')
+  expect(columnsOf(db, '_migrations')).not.toContain('content_sha256')
+
+  let message = ''
+  try {
+    applyMigrations(db)
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+
+  // What the message claims.
+  expect(message).toContain('could not be rekeyed')
+  expect(message).toContain('ledger is unchanged')
+  // Positive control on the diagnosis: it quotes what SQLite actually said, so the
+  // operator learns it was the view and not a mystery.
+  expect(message).toContain('DROP VIEW')
+
+  // ...and the claim, verified. Same shape, same columns, same rows.
+  expect(
+    db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()
+      ?.sql,
+  ).toBe(ddlBefore as string)
+  // THE DISCRIMINATING ONE — the provenance ALTERs rolled back with everything else.
+  expect(columnsOf(db, '_migrations')).not.toContain('content_sha256')
+  expect(columnsOf(db, '_migrations')).not.toContain('applied_by_commit')
+  expect(columnsOf(db, '_migrations')).not.toContain('tree_provenance')
+  expect(ledger(db)).toEqual(rowsBefore)
+  // Nothing was applied either, so the pending migration's column is still absent.
+  expect(columnsOf(db, 'code_trident_runs')).not.toContain('agent_waked_at')
+
+  // And the remedy the message points at actually works: drop the view, boot.
+  db.exec('DROP VIEW _migrations_version_keyed')
+  expect(applyMigrations(db).applied).toEqual([127])
+  expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   db.close()
 })
