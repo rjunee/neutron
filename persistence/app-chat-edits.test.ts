@@ -161,7 +161,7 @@ describe('AppChatEditStore — aggregatesAfter (resume replay)', () => {
     expect(await edits.aggregatesAfter(TOPIC, 0)).toEqual([])
   })
 
-  it('the limit caps replayed messages', async () => {
+  it('the limit caps replayed messages to the NEWEST page', async () => {
     await appendMessage('m1') // seq 1
     await appendMessage('m2') // seq 2
     await appendMessage('m3') // seq 3
@@ -169,8 +169,11 @@ describe('AppChatEditStore — aggregatesAfter (resume replay)', () => {
     await edits.record({ topic_id: TOPIC, message_id: 'm2', editor_device_id: 'devA', action: 'edit', body: 'e2', at: 2 })
     await edits.record({ topic_id: TOPIC, message_id: 'm3', editor_device_id: 'devA', action: 'edit', body: 'e3', at: 3 })
 
+    // The edit window has to match the MESSAGE window (newest page), or a
+    // device that received the newest messages would be handed edit state for
+    // messages it does not have.
     const capped = await edits.aggregatesAfter(TOPIC, 0, 2)
-    expect(capped.map((a) => a.message_id)).toEqual(['m1', 'm2'])
+    expect(capped.map((a) => a.message_id)).toEqual(['m2', 'm3'])
   })
 
   it('aggregate() returns rev 0 / empty for an unedited message', async () => {

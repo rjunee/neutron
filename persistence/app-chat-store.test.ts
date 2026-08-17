@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { AppChatStore } from './app-chat-store.ts'
+import { AppChatStore, DEFAULT_REPLAY_LIMIT } from './app-chat-store.ts'
 import { ProjectDb } from './db.ts'
 
 const TOPIC = 'app:sam'
@@ -84,7 +84,8 @@ describe('AppChatStore — resume replay (WHERE seq > N ORDER BY seq)', () => {
     }
     expect((await store.replayAfter(TOPIC, -10)).map((r) => r.seq)).toEqual([1, 2, 3, 4])
     expect((await store.replayAfter(TOPIC, 2.9)).map((r) => r.seq)).toEqual([3, 4]) // trunc, not round
-    expect((await store.replayAfter(TOPIC, 0, 2)).map((r) => r.seq)).toEqual([1, 2])
+    // A capped page is the NEWEST `limit`, ascending — not the oldest.
+    expect((await store.replayAfter(TOPIC, 0, 2)).map((r) => r.seq)).toEqual([3, 4])
     expect((await store.replayAfter(TOPIC, 0, Number.NaN)).map((r) => r.seq)).toEqual([1, 2, 3, 4]) // falls back to default
   })
 
@@ -322,5 +323,88 @@ describe('AppChatStore — the voice-note transcript is DURABLE', () => {
     expect(second.was_new).toBe(false)
     expect(second.row.seq).toBe(first.row.seq)
     expect(second.row.transcript).toBe('the words')
+  })
+})
+
+/**
+ * A long chat used to open on its OLDEST messages and stop short of the present:
+ * the client's only history request is `resume {after_seq: lastSeenSeq}` (0 on a
+ * cold store), it fires exactly once per socket open, and the replay took the
+ * FIRST `DEFAULT_REPLAY_LIMIT` rows after the cursor. Every message past 500 was
+ * dropped with no truncation signal, so the transcript never caught up. Reported
+ * live on a 1130-message topic — it showed old messages and ended ~630 short.
+ *
+ * The window is now the NEWEST `limit`. Still lossy when capped (the gap moves to
+ * the middle), but the recent end of the conversation is the end that has to be
+ * there.
+ */
+describe('AppChatStore — a capped replay keeps the NEWEST page (regression)', () => {
+  const seed = async (count: number): Promise<void> => {
+    for (let i = 1; i <= count; i++) {
+      await store.append({
+        topic_id: TOPIC, message_id: `m${i}`, role: i % 2 === 0 ? 'agent' : 'user',
+        body: `msg-${i}`, created_at: i,
+      })
+    }
+  }
+
+  it('replays the newest DEFAULT_REPLAY_LIMIT of an over-long topic, ascending', async () => {
+    await seed(DEFAULT_REPLAY_LIMIT + 130) // 630, the shape of the live report
+    const replay = await store.replayAfter(TOPIC, 0)
+
+    expect(replay).toHaveLength(DEFAULT_REPLAY_LIMIT)
+    // The last message in the topic MUST be the last message replayed. This is
+    // the assertion the old `ORDER BY seq ASC` fails: it returned seq 1..500 and
+    // ended 130 short of the present.
+    expect(replay[replay.length - 1]!.seq).toBe(DEFAULT_REPLAY_LIMIT + 130)
+    expect(replay[replay.length - 1]!.body).toBe(`msg-${DEFAULT_REPLAY_LIMIT + 130}`)
+    expect(replay[0]!.seq).toBe(131)
+    // Contiguous and ASCENDING — the reverse walk is undone before it ships.
+    expect(replay.map((r) => r.seq)).toEqual(
+      Array.from({ length: DEFAULT_REPLAY_LIMIT }, (_, i) => 131 + i),
+    )
+  })
+
+  it('is a byte-identical no-op for a topic that fits inside the limit', async () => {
+    // The control for the test above: below the threshold both orderings return
+    // the same rows, which is what keeps the ordinary gap-fill contract intact.
+    await seed(DEFAULT_REPLAY_LIMIT)
+    const replay = await store.replayAfter(TOPIC, 0)
+
+    expect(replay).toHaveLength(DEFAULT_REPLAY_LIMIT)
+    expect(replay.map((r) => r.seq)).toEqual(
+      Array.from({ length: DEFAULT_REPLAY_LIMIT }, (_, i) => i + 1),
+    )
+    expect(replay[0]).toEqual({
+      topic_id: TOPIC, seq: 1, message_id: 'm1', role: 'user', body: 'msg-1',
+      client_msg_id: null, project_id: null, attachments: null, meta: null,
+      transcript: null, created_at: 1,
+    })
+  })
+
+  // CONTROL — the uncapped gap-fill contract this change must NOT touch. Green
+  // under both orderings by construction (every remainder here fits the limit),
+  // so if it ever fails, the change broke ordinary resume rather than the cap.
+  it('still gap-fills forward from a non-zero cursor', async () => {
+    await seed(12)
+    expect((await store.replayAfter(TOPIC, 9)).map((r) => r.seq)).toEqual([10, 11, 12])
+    expect((await store.replayAfter(TOPIC, 0)).map((r) => r.seq)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ])
+    // Cursor at the head: nothing to replay.
+    expect(await store.replayAfter(TOPIC, 12)).toEqual([])
+    // Cursor past the head: still nothing, no wrap-around from the reverse walk.
+    expect(await store.replayAfter(TOPIC, 99)).toEqual([])
+  })
+
+  it('caps from a non-zero cursor to the newest page, not the oldest', async () => {
+    await seed(12)
+    expect((await store.replayAfter(TOPIC, 4, 3)).map((r) => r.seq)).toEqual([10, 11, 12])
+  })
+
+  it('leaves other topics untouched', async () => {
+    await seed(DEFAULT_REPLAY_LIMIT + 3)
+    await store.append({ topic_id: 'app:kim', message_id: 'k1', role: 'user', body: 'k', created_at: 1 })
+    expect((await store.replayAfter('app:kim', 0)).map((r) => r.seq)).toEqual([1])
   })
 })

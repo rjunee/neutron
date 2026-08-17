@@ -105,9 +105,10 @@ export interface AppChatMessageLog {
    */
   append(input: AppChatAppendInput): Promise<AppChatAppendResult>
   /**
-   * Replay every message after `after_seq` for a topic, ascending by seq.
-   * `after_seq <= 0` (or a cold client) returns the whole transcript up to
-   * `limit`.
+   * Replay messages after `after_seq` for a topic, ascending by seq, bounded by
+   * `limit` (default {@link DEFAULT_REPLAY_LIMIT}). `after_seq <= 0` (or a cold
+   * client) returns the whole transcript when it fits within `limit`, and its
+   * NEWEST `limit` messages when it does not.
    */
   replayAfter(topic_id: string, after_seq: number, limit?: number): Promise<AppChatRow[]>
   /** Highest seq persisted for a topic, or 0 when the topic has no messages. */
@@ -141,9 +142,21 @@ export interface AppChatMessageLog {
   }): Promise<AppChatPromptChoiceResult | null>
 }
 
-/** Default replay page size — bounds a single resume so a long-offline
- *  client can't pull an unbounded transcript in one frame burst. The
- *  client re-issues resume from the new high-water mark to page the rest. */
+/**
+ * Default replay page size — bounds a single resume so a long-offline client
+ * can't pull an unbounded transcript in one frame burst.
+ *
+ * A topic with more than this many messages after the cursor replays the
+ * NEWEST 500 (`AppChatEventLogCore.rowsAfterNewest`), and the rest is SKIPPED,
+ * not paged: `resume` fires once per socket open, and there is no wire signal
+ * for "older messages exist above this". Raising this number is not the fix for
+ * a truncated transcript — it only moves the threshold.
+ *
+ * (An earlier version of this comment claimed "the client re-issues resume from
+ * the new high-water mark to page the rest." No client ever did. It described an
+ * intended design, not the code, and it is what made the ordering bug read as
+ * harmless for as long as it did.)
+ */
 export const DEFAULT_REPLAY_LIMIT = 500
 
 interface MessageRow {

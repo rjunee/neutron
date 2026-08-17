@@ -100,10 +100,12 @@ export interface AppChatEditLog {
   /** Current edit state for one message (rev 0 / original empty when none). */
   aggregate(topic_id: string, message_id: string): Promise<AppChatEditAggregate>
   /**
-   * Edit aggregates for every edited/deleted message whose seq is greater than
+   * Edit aggregates for edited/deleted messages whose seq is greater than
    * `after_seq`, ascending by seq. Used to replay edit state to a reconnecting
    * device after the message replay. Bounded by `limit` messages (default
-   * {@link DEFAULT_EDIT_REPLAY_LIMIT}).
+   * {@link DEFAULT_EDIT_REPLAY_LIMIT}); past that bound it returns the NEWEST
+   * `limit`, matching the message replay's window so the edits a device receives
+   * cover the messages it received.
    */
   aggregatesAfter(
     topic_id: string,

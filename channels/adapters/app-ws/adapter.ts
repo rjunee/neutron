@@ -876,8 +876,9 @@ export class AppWsAdapter implements ChannelAdapter {
   /**
    * Track B Phase 4 (message edit/delete) — replay edit state to a reconnecting
    * device after the message replay. Returns one `edit_update` per edited/deleted
-   * message (with seq > after_seq), ascending by seq. `[]` when the edit log
-   * isn't wired.
+   * message (with seq > after_seq), ascending by seq, bounded to the newest
+   * `DEFAULT_EDIT_REPLAY_LIMIT` the same way the message replay is. `[]` when the
+   * edit log isn't wired.
    */
   async replayEditsAfter(
     channel_topic_id: string,
@@ -903,11 +904,17 @@ export class AppWsAdapter implements ChannelAdapter {
   }
 
   /**
-   * Chat-sync foundation — replay every persisted message after `after_seq`
-   * for a topic as wire envelopes, ascending by seq. The surface sends these
-   * to the single requesting socket (NOT a fan-out) so a reconnecting device
-   * fills its gap without re-broadcasting to other devices. Returns `[]` when
-   * no durable log is wired.
+   * Chat-sync foundation — replay persisted messages after `after_seq` for a
+   * topic as wire envelopes, ascending by seq. The surface sends these to the
+   * single requesting socket (NOT a fan-out) so a reconnecting device fills its
+   * gap without re-broadcasting to other devices. Returns `[]` when no durable
+   * log is wired.
+   *
+   * NOT necessarily every message: the store bounds one replay to
+   * `DEFAULT_REPLAY_LIMIT` and, past that, returns the NEWEST page — so a topic
+   * with a longer backlog than the limit lands on the requesting device missing
+   * a MIDDLE span, with the newest messages present. `resume` is sent once per
+   * socket open and nothing pages the remainder.
    */
   async replayAfter(channel_topic_id: string, after_seq: number): Promise<AppWsOutbound[]> {
     if (this.chat_log === undefined) return []
