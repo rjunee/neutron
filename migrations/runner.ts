@@ -877,7 +877,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // THE REMAINING FAIL-CLOSED GUARD, restated against identity: a recorded
   // migration that NO file in this build corresponds to. Hashes are computed lazily
   // and only for the rows that survive the name check, so a healthy boot hashes
-  // nothing. See `formatUnexplainedLedgerRow` for why only rows carrying a
+  // nothing. See `formatUnexplainedLedgerRows` for why only rows carrying a
   // `content_sha256` are adjudicated, and why that is narrower rather than weaker.
   const fileNames = new Set(migrations.map((m) => m.name))
   const candidateRows = ledger.rows.filter(
