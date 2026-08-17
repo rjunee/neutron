@@ -64,10 +64,13 @@ async function spawnSession(
     enabled: options.frontierModelFloor === true,
     sessionKey,
     source: resume !== undefined ? 'resume' : 'spawn',
-    // The OWNER-FACING half of "make it loud". Without this the clamp is a
-    // stderr line on a box nobody reads — the same invisibility that let the
-    // degradation run for a day. Wired only on the owner's chat substrate
-    // (`open/wiring/substrates.ts`), which is also the only substrate floored.
+    // The half of "make it loud" that leaves the box. Without this the clamp is
+    // a stderr line on a box nobody reads — the same invisibility that let the
+    // degradation run for a day. Both FLOORED substrates supply it
+    // (`open/wiring/substrates.ts`), and they supply DIFFERENT sinks: the owner's
+    // chat lane bubbles + journals, the timer-driven nudge lane journals only, so
+    // a background clamp is recorded without interrupting him. A substrate that
+    // omits it keeps the stderr fallback.
     ...(options.onModelFloorApplied !== undefined
       ? { notify: options.onModelFloorApplied }
       : {}),

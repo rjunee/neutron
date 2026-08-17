@@ -288,10 +288,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
                 onDeadTurnNotice: ctx.liveAgentNoticeSinks.onDeadTurnNotice,
                 onSizeAlert: ctx.liveAgentNoticeSinks.onSizeAlert,
                 onRateLimitBanner: ctx.liveAgentNoticeSinks.onRateLimitBanner,
-                // …and the model-floor clamp, wired HERE and only here: this is
-                // the one substrate carrying `frontier_model_floor`, so it is the
-                // only one that can ever emit the notice, and it is the one with
-                // an owner chat surface to deliver it to.
+                // …and the model-floor clamp. This is the one substrate that gets
+                // the BUBBLING sink, because it is the one with an owner chat
+                // surface a clamp belongs on: he is sitting in this conversation
+                // when it degrades. It is NOT the only floored substrate — the
+                // nudge lane below shares `PROFILE_WARM_CHAT` and so carries
+                // `frontier_model_floor` too (pinned by the two-id assertion in
+                // `open/__tests__/open-wiring-substrates.test.ts`). That lane gets
+                // the journal-only sink instead; see its block.
                 onModelFloorApplied: ctx.liveAgentNoticeSinks.onModelFloorApplied,
               }
             : {}),
@@ -418,6 +422,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   //     owner's Activity Inspector. That is a READ-ONLY record of work done on his
   //     behalf, not an interruption of a chat turn, and seeing why a nudge said what
   //     it said is worth more than the silence. Not a leak: same owner, same project.
+  //   - model-floor clamp: RECORDED, not bubbled. `PROFILE_WARM_CHAT` carries
+  //     `frontier_model_floor`, so this lane CAN be clamped, and with no sink at all
+  //     that clamp was a stderr line on a box nobody reads — the same invisibility
+  //     that let a lower tier serve the owner for a working day. So it takes
+  //     `ctx.backgroundNoticeSinks`: the same `system_events` journal, built with no
+  //     chat-delivery seam, so a clamp here leaves a durable row and no bubble. The
+  //     other three notice seams stay omitted — they describe a chat turn's health
+  //     and there is no chat turn here.
   // The line this lane draws is between REPORTING to the owner and INTERRUPTING him.
   const reminderComposeSubstrate =
     conversationalAvailable
@@ -434,6 +446,10 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // pool against the owner's INTERACTIVE turns. See
           // `gateway/wiring/build-llm-call-substrate.ts` `credential_failure_lane`.
           credential_failure_lane: 'background',
+          // The journal-only floor notice — see the `model-floor clamp` bullet above.
+          ...(ctx.backgroundNoticeSinks !== undefined
+            ? { onModelFloorApplied: ctx.backgroundNoticeSinks.onModelFloorApplied }
+            : {}),
           // Same provider config as the live chat, tool manifest included — the
           // OpenAI-path equivalent of `enableToolBridge` (capability parity).
           ...liveAgentProvider,

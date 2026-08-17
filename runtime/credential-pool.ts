@@ -213,9 +213,47 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
 }
 
 /**
+ * A cooldown is a FLOOR on when this credential may be dispatched again, so
+ * {@link reportFailure} may only ever push it LATER. `park` is what makes that
+ * true: it takes the max of the standing park and the proposed one, and leaves
+ * `cooldown_reason` describing whichever park actually governs. The plain
+ * assignment it replaces had a THIRD failure direction nobody had named — a
+ * SHORT park silently TRUNCATING a long one — and the release it handed out was
+ * of a credential something had already judged unfit.
+ *
+ * The concrete case (Codex review, PR #356). A background report cannot trip the
+ * hour-long strike park and cannot extend one, both of which were handled. But
+ * `reportFailure(pool, id, 401, undefined, 'background')` arriving while an
+ * hour-long `consecutive_failures` park stands used to overwrite `cooldown_until`
+ * with `now + COOLDOWN_401_MS` — five minutes — and relabel the reason. A
+ * timer-driven lane with nobody waiting on it thereby RELEASED the credential
+ * the owner's own strike counter had benched, 55 minutes early, and left a label
+ * naming the wrong cause. Reachable whenever a background turn is in flight while
+ * the interactive lane parks the credential underneath it.
+ *
+ * Monotonic-under-failure applies on BOTH lanes rather than only the background
+ * one, because it is the same defect wherever it appears and it is a smaller rule
+ * than a lane-conditional: a 429's one-minute window must not release a standing
+ * 30-minute `billing_402` park either, and a `retry-after` of two hours must not
+ * be undercut by a later short status. {@link reportSuccess} stays the ONE
+ * release — a confirmed working dispatch is the only evidence that ends a park.
+ *
+ * `>=` rather than `>` so an equal-length park does not RELABEL a standing one:
+ * the first reason to explain a given expiry is the one that keeps it.
+ */
+function park(c: PooledCredential, until: number, reason: CooldownReason): void {
+  if (c.cooldown_until !== undefined && c.cooldown_until >= until) return
+  c.cooldown_until = until
+  c.cooldown_reason = reason
+}
+
+/**
  * Report a non-2xx / connection failure. Sets the cooldown clock per the
  * status code and increments `consecutive_failures`. After
  * `MAX_CONSECUTIVE_FAILURES` strikes the credential is parked for an hour.
+ *
+ * Every cooldown write here goes through {@link park}, so a failure can only
+ * EXTEND a standing park, never shorten or relabel it. See that docblock.
  *
  * `retry_after_ms` (parsed from upstream `retry-after` header) overrides the
  * default 429 cooldown — adapters MUST honor it so we play nice with provider
@@ -231,11 +269,13 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
  *     per-status cooldown still applies, because a real 429/402/401 is the
  *     provider's own back-pressure and ignoring it would be rude and useless.
  *     But the strike counter is untouched — NOT incremented, and NOT re-read —
- *     so a background report can neither trip the hour-long park nor EXTEND one
+ *     so a background report can neither TRIP the hour-long park nor EXTEND one
  *     an interactive turn already tripped. Both halves matter: gating only the
  *     increment still lets a background failure re-stamp `cooldown_until` an
  *     hour into the future every time it fires, which is the same outage with a
- *     slower fuse.
+ *     slower fuse. The THIRD direction — TRUNCATING a standing park — is closed
+ *     by {@link park} for every caller, not just this lane, and that is the one
+ *     that handed the owner's lane a credential it had already benched.
  *
  * WHY THE ASYMMETRY (incident, live instance 2026-08-17). This counter is
  * PER-CREDENTIAL but the consequence is POOL-WIDE on a single-credential box —
@@ -263,14 +303,11 @@ export function reportFailure(
   if (!c) return
   const now = Date.now()
   if (status === 429) {
-    c.cooldown_until = now + (retry_after_ms ?? COOLDOWN_429_MS)
-    c.cooldown_reason = 'rate_limit_429'
+    park(c, now + (retry_after_ms ?? COOLDOWN_429_MS), 'rate_limit_429')
   } else if (status === 402) {
-    c.cooldown_until = now + COOLDOWN_402_MS
-    c.cooldown_reason = 'billing_402'
+    park(c, now + COOLDOWN_402_MS, 'billing_402')
   } else if (status === 401) {
-    c.cooldown_until = now + COOLDOWN_401_MS
-    c.cooldown_reason = 'auth_401'
+    park(c, now + COOLDOWN_401_MS, 'auth_401')
   }
   // THE STRIKE LEDGER IS INTERACTIVE-ONLY, both the write and the read. A
   // background report must not be able to reach `CONSECUTIVE_COOLDOWN_MS` — not
@@ -279,8 +316,7 @@ export function reportFailure(
   if (origin === 'interactive') {
     c.consecutive_failures++
     if (c.consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
-      c.cooldown_until = now + CONSECUTIVE_COOLDOWN_MS
-      c.cooldown_reason = 'consecutive_failures'
+      park(c, now + CONSECUTIVE_COOLDOWN_MS, 'consecutive_failures')
     }
   }
 }

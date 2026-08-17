@@ -21337,3 +21337,95 @@ injected-resolver precedence, and store-failure behavior. The secrets seam is
 typed as `Pick<SecretsStore, 'get'>`, and the probe is composed through
 `defaultGitModeProbe`. The loadEnv catch deliberately degrades to `{}` because
 a throwing origin probe becomes silent `local`, removing the PR gate.
+
+## 2026-08-17 — a short cooldown was releasing a credential the owner's lane had benched
+
+Landed via PR #356.
+
+Follow-up hardening from that PR's cross-model review, carried by PR #375 — #356 had
+already merged when the review's two findings were acted on, so the work could not go
+back into it, and both defects were re-verified live in `main` before anything changed.
+
+PR #356 gave a fired reminder its own REPL and stopped a background compose failure
+from reaching the strike counter. Its docblock promised a background report could
+"neither trip the hour-long park nor EXTEND one". Trip and extend were handled. A
+third direction was not, and it was the one that mattered.
+
+`reportFailure` wrote `cooldown_until` and `cooldown_reason` UNCONDITIONALLY for
+429/402/401, BEFORE the `origin === 'interactive'` gate. So a background 401 arriving
+while an hour-long `consecutive_failures` park was standing rewrote the park down to
+five minutes — one minute for a 429 — and relabelled the reason. A timer-driven lane
+with nobody waiting on it thereby RELEASED the credential the owner's own strike
+counter had just judged unfit, 55 minutes early, and left a label naming a cause that
+was not the one governing. Reachable whenever a background turn is in flight while the
+interactive lane parks the credential underneath it. TRUNCATION, not escalation: the
+failure direction nobody had named, and the inverse of the outage #356 was fixing.
+
+The fix is a `park` helper that takes the max of the standing park and the proposed
+one and leaves `cooldown_reason` describing whichever park actually governs. Applied
+on BOTH lanes rather than only the background one: it is the same defect wherever it
+appears and a smaller rule than a lane-conditional — a 429's one-minute window must
+not release a standing 30-minute `billing_402` park either, and a two-hour
+`retry-after` must not be undercut by a later short status. `reportSuccess` stays the
+ONE release, because a confirmed working dispatch is the only evidence that ends a
+park. `>=` rather than `>` so an equal-length park is not relabelled.
+
+Why the existing tests could not see it: the paired test RETIRED the park
+(`cooldown_until = Date.now() - 1`) before reporting, so every assertion was about a
+credential that was already selectable again. The standing-park case had no coverage.
+Seven new tests cover it, and the fix was mutation-proven — restoring the
+unconditional write turns three of them red (background 401, background 429, and the
+interactive 402-then-429 case) while the four controls stay green, which is what
+distinguishes controls from duplicates of one assertion.
+
+SECOND FINDING, same review. `open/wiring/substrates.ts` claimed the owner's chat
+lane was "the one substrate carrying `frontier_model_floor`, so it is the only one
+that can ever emit the notice" — and this repo's own test asserts TWO floored ids,
+because #356's new nudge lane shares `PROFILE_WARM_CHAT`. `spawn.ts` carried the same
+stale claim. The nudge lane was built with no notice sink at all, so `applyModelFloor`
+clamped it with `notify` absent and the clamp was a stderr line on a box nobody reads
+— the exact silent degradation the floor notice exists to end, reintroduced on a new
+lane.
+
+Neither offered remedy was taken whole. Correcting the comment alone leaves the
+silence; handing the lane the live sinks would end the silence by letting a background
+timer push a bubble into the owner's chat, which is the one thing that lane is built
+not to do. The two surfaces are separable, so they were separated: the lane takes a
+JOURNAL-ONLY sink built over the same `system_events` journal with no chat-delivery
+seam, which is the sink's own documented no-bubble path. The clamp is now durably
+recorded and the owner is not interrupted. The other three notice seams stay omitted
+— they describe a chat turn's health and there is no chat turn on a timer. Both stale
+comments were corrected to match. Also mutation-proven.
+
+THREE COMMENTS TIGHTENED AFTER REVIEW, all the same defect class as the two above —
+a docblock asserting a property the code does not have. (1) `reportFailure` said a
+background report "can neither trip the hour-long park nor EXTEND one", and this
+PR's own test disproves the second half: a background `retry-after` of two hours
+DOES outlast the hour-long strike park, and should. The bound that is actually true
+is that a background lane has no route to the strike ledger, so nothing it does is
+SELF-COMPOUNDING; a longer provider status is a fact about the credential, not an
+escalation the lane invented. (2) The nudge lane said a failure there "must not park
+the shared credential pool against the owner's INTERACTIVE turns" — but a real
+401/402/429 from that lane does set a shared per-status cooldown, and has to. What
+it cannot do is invent one or compound several into the hour. (3) "durable row"
+overstated a journal that is best-effort at every call site — an unregistered
+ambient sink is a no-op and a write failure is swallowed. Each now says what the
+code does.
+
+The review also asked whether the nudge lane meets a "no other owner-visible seam"
+invariant, since `enableToolBridge` installs the Activity Inspector tap and that tap
+fans to the owner's app socket. It does not, and that was never the invariant: the
+tap is pre-existing, deliberate, and argued in that lane's own block comment as a
+read-only record of work done on his behalf. Making it independently suppressible
+would mean splitting a gate that currently installs three things at once — a real
+change to a decided trade-off, not a defect in this PR. Left alone; the test comment
+that had loosely claimed "nothing else from a timer can reach his chat" was corrected
+to name the tap and scope its assertion to the notice family, because that sentence
+was the actual overclaim.
+
+One assertion was written and then removed rather than shipped: `credential_failure_lane`
+is a `buildLlmCallSubstrate` input consumed by the pool reporter, not an adapter
+option, so it never appears on the captured opts the wiring test inspects. It read as
+a passing check on the right field and would have asserted `undefined` against a name
+that does not live on that object. Printed the field, deleted the assertion, and left
+a note pointing at the file where the lane IS observable.

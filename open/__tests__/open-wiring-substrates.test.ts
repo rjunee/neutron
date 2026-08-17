@@ -463,6 +463,67 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     }
   })
 
+  test('BOTH floored substrates get a floor-clamp sink, and they get DIFFERENT ones', async () => {
+    // THE GAP THIS CLOSES. The test directly above proves the nudge lane is floored,
+    // so `applyModelFloor` CAN clamp it — and that lane was built with no notice sink
+    // at all, which made its clamp a stderr line on a box nobody reads. That is the
+    // exact silent degradation the floor notice exists to end, reintroduced on a new
+    // lane. A comment in `substrates.ts` had also claimed the chat lane was "the only
+    // one that can ever emit the notice", which this file's own assertion disproved.
+    //
+    // Why two sinks and not one: the chat lane's sink BUBBLES into the owner's chat,
+    // which is right when he is sitting in the conversation that degraded and wrong
+    // when a timer fired it. The nudge lane takes the journal-only sink, so the clamp
+    // is durably recorded without a background lane pushing anything into his chat.
+    // If a future edit hands the nudge lane `liveAgentNoticeSinks` instead, the
+    // identity assertions below fail rather than shipping a timer-driven bubble.
+    const liveFloor = (): void => {}
+    const journalFloor = (): void => {}
+    const { ctx, captured } = makeCtx({
+      liveAgentNoticeSinks: {
+        onDeadTurnNotice: () => {},
+        onSizeAlert: () => {},
+        onRateLimitBanner: () => {},
+        onModelFloorApplied: liveFloor,
+      },
+      backgroundNoticeSinks: {
+        onDeadTurnNotice: () => {},
+        onSizeAlert: () => {},
+        onRateLimitBanner: () => {},
+        onModelFloorApplied: journalFloor,
+      },
+    })
+    const w = wireSubstrates(ctx)
+    await drainEveryWiredSubstrate(w)
+
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')!
+    const nudge = captured.find((o) => o.substrate_instance_id === 'cc-nudge-owner')!
+
+    // No floored substrate is left on the stderr fallback.
+    expect(agent.onModelFloorApplied).toBe(liveFloor)
+    expect(nudge.onModelFloorApplied).toBe(journalFloor)
+    expect(nudge.onModelFloorApplied).not.toBe(agent.onModelFloorApplied)
+
+    // The lane's other promise is unchanged: the three CHAT-TURN notice seams and
+    // the recovered-reply/delivery seams stay omitted, so nothing else from a timer
+    // can reach his chat. Only the floor clamp crossed, and only to the journal.
+    expect(nudge.onDeadTurnNotice).toBeUndefined()
+    expect(nudge.onSizeAlert).toBeUndefined()
+    expect(nudge.onRateLimitBanner).toBeUndefined()
+    expect(nudge.onRecoveredReply).toBeUndefined()
+    expect(nudge.delivery_topic_id).toBeUndefined()
+    // (`credential_failure_lane` is deliberately NOT asserted here: it is a
+    // `buildLlmCallSubstrate` input consumed by the pool reporter, not an adapter
+    // option, so it never appears on `captured`. It is pinned where it is actually
+    // observable — `background-lane-never-locks-out-owner.test.ts`.)
+
+    // COUNTER-ASSERTION — the journal-only sink did not leak onto anything else.
+    for (const o of captured) {
+      if (o.substrate_instance_id === 'cc-nudge-owner') continue
+      expect(o.onModelFloorApplied, o.substrate_instance_id).not.toBe(journalFloor)
+    }
+  })
+
   test('production watchdog wiring reaps a capped pid-dead run, then one tick aligns count and board (#514)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'neutron-open-crash-reap-'))
     const db = ProjectDb.open(join(dir, 'project.db'))
