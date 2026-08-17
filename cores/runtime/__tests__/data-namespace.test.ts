@@ -2,10 +2,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 import {
   CoreInstallError,
@@ -28,8 +27,7 @@ beforeEach(() => {
   const dbPath = join(dataDir, 'project.db')
   // mkdir parent before opening
   require('node:fs').mkdirSync(dataDir, { recursive: true })
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   projectDb = ProjectDb.open(dbPath)
 })

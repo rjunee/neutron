@@ -12,7 +12,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Database } from 'bun:sqlite'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   SubagentRegistry,
@@ -24,14 +23,14 @@ import {
 import { SubagentRegistryStore } from './store.ts'
 import { sweepOrphanedDispatchesOnBoot } from './boot-sweep.ts'
 import { cancelRun, failRun, newControlState, registerCanceller } from './control.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-subagent-persist-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

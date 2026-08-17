@@ -19,7 +19,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   ExpoPushError,
@@ -31,6 +30,7 @@ import {
 import { DevicePushTokenStore } from './store.ts'
 import { createPushDispatcher, type PushDispatcherLogger } from './dispatcher.ts'
 import { buildChatMessagePushSink } from './chat-message-push.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -38,8 +38,7 @@ let store: DevicePushTokenStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-push-disp-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   store = new DevicePushTokenStore(db)
 })
 

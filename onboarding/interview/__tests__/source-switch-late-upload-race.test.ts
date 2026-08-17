@@ -47,7 +47,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -60,6 +59,7 @@ import type { ImportJob } from '../../history-import/types.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
 import type { OnboardingPhase } from '../phase.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 const OWNER = 't1'
 const TOPIC = 'topic-1'
@@ -151,8 +151,7 @@ async function seedState(
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-source-switch-race-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   buttonStore = new ButtonStore({ db })
   stateStore = new InMemoryOnboardingStateStore()
   transcript = new TranscriptWriter({

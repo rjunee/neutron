@@ -20,7 +20,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { readOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
@@ -40,6 +39,7 @@ import {
   type OnboardingMsgEmit,
 } from '../wiring/app-ws.ts'
 import type { OpenComposition } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // ── C3d compile-level assertion: `OpenComposition`'s required-pick makes every
 // UNCONDITIONALLY-set surface non-optional, so a return literal that DROPS one is
@@ -64,8 +64,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-wire-appws-'))
-  db = ProjectDb.open(join(tmpDir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmpDir, 'project.db'))
 })
 
 afterEach(() => {

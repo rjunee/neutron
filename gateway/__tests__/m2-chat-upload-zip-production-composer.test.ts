@@ -32,12 +32,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { buildImportUploadHandler } from '../upload/import-upload-handler.ts'
 import type { AdvanceResult } from '@neutronai/onboarding/interview/engine.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // First 4 bytes are the local-file-header magic; trailing bytes keep
 // the fixture > 4 bytes so the magic check + the full-file write both
@@ -82,8 +82,7 @@ function makeMultipart(bytes: Uint8Array, name: string): FormData {
 
 async function startHarness(): Promise<Harness> {
   const owner_home = mkdtempSync(join(tmpdir(), 'neutron-m2-zip-prod-'))
-  const db = ProjectDb.open(join(owner_home, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(owner_home, 'owner.db'))
   const engineCalls: EngineCall[] = []
   let topicMissingCount = 0
 

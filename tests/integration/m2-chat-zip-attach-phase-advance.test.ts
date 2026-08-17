@@ -44,8 +44,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import {
   InterviewEngine,
@@ -55,6 +53,7 @@ import {
 import type { ImportJob } from '@neutronai/onboarding/history-import/types.ts'
 import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const OWNER = 'm2-chat-zip-attach'
 const TOPIC = 'web:user-1'
@@ -72,8 +71,7 @@ function buildEnv(opts: {
   resolverReturnsNull?: boolean
 }): TestEnv {
   const tmp = mkdtempSync(join(tmpdir(), 'm2-chat-zip-attach-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const buttonStore = new ButtonStore({ db })
   const stateStore = new InMemoryOnboardingStateStore()
   const transcript = new TranscriptWriter({

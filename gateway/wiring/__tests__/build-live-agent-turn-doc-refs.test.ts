@@ -12,13 +12,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -26,8 +26,7 @@ let store: ButtonStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-lat-docref-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   store = new ButtonStore({ db })
 })
 afterEach(() => {

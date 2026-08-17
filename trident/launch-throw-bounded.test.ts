@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -14,8 +14,7 @@ let store: TridentRunStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'trident-launch-throw-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
 })
 

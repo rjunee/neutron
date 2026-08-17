@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { dispatchBoardBoundBuild } from './board-dispatch.ts'
@@ -25,6 +24,7 @@ import {
 } from './build-workspace.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import { TridentRunStore } from './store.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let home: string
 beforeEach(() => {
@@ -159,8 +159,7 @@ describe('dispatchBoardBoundBuild resolves a per-project git workspace', () => {
   let store: TridentRunStore
   let board: WorkBoardStore
   beforeEach(() => {
-    db = ProjectDb.open(join(home, 'project.db'))
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(join(home, 'project.db'))
     store = new TridentRunStore(db)
     board = new WorkBoardStore(db)
   })

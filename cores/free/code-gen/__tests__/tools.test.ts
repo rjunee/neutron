@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
 import {
   CapabilityDeniedError,
@@ -11,7 +10,6 @@ import {
 } from '@neutronai/cores-runtime'
 import type { NeutronManifest } from '@neutronai/cores-sdk'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import {
@@ -32,6 +30,7 @@ import {
 // buildInMemoryCodegenRunner is a deterministic test fake — imported from
 // the package internals, not the public barrel (R1, audit P2-17).
 import { buildInMemoryCodegenRunner } from '../src/backend.ts'
+import { openMigratedDatabaseAt } from '../../../../tests/support/migrated-db.ts'
 
 const OWNER = 't1'
 
@@ -42,8 +41,7 @@ let audit: SecretAuditLog
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'codegen-tools-'))
   const dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   projectDb = ProjectDb.open(dbPath)
   audit = new SecretAuditLog({ db: projectDb })

@@ -25,13 +25,13 @@ import { join } from 'node:path'
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { MemoryStore } from '@neutronai/gbrain-memory/memory-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   createAppAdminSurface,
   type DeploymentTier,
 } from '../http/app-admin-surface.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
@@ -73,8 +73,7 @@ interface StartOptions {
 async function startGateway(opts: StartOptions = {}): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-admin-'))
   const owner_home = join(tmp, 'owner_home')
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const coresStore = new CoreInstallationsStore({ db })
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
   const restartSpy = { calls: 0 }
@@ -166,8 +165,7 @@ describe('app-admin — auth + project isolation', () => {
     await h.close()
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-admin-mis-'))
     const owner_home = join(tmp, 'owner_home')
-    const db = ProjectDb.open(join(tmp, 'owner.db'))
-    applyMigrations(db.raw())
+    const db = openMigratedDbAt(join(tmp, 'owner.db'))
     const otherAuth = createAppWsAuthResolver({ project_slug: OTHER_OWNER, bypass: true })
     const surface = createAppAdminSurface({
       auth: otherAuth,

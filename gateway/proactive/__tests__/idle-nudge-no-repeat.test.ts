@@ -38,7 +38,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
@@ -52,6 +51,7 @@ import {
 import { buildOwnerIdleTopicEnumerator } from '../idle-topic-enumeration.ts'
 import type { OutgoingMessage } from '../sink.ts'
 import { ProactiveStateStore } from '../state-store.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 /** Placeholder owner id — never a real one (this repo is public). */
 const OWNER = 'owner-under-test'
@@ -88,8 +88,7 @@ interface Harness {
 
 function open(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-nudge-no-repeat-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   let clock = DAY_START
   const buttons = new ButtonStore({ db, now: () => clock })
   const tasks = new TaskStore(db)

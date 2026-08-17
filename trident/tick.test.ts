@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
@@ -16,14 +15,14 @@ import { TridentTickLoop } from './tick.ts'
 import { buildTridentTerminator } from './terminate.ts'
 import { buildTridentDelivery, type OutboundSink } from './delivery.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-tick-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

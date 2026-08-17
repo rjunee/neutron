@@ -18,12 +18,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { UsageSamplesStore } from '@neutronai/persistence/usage-samples-store.ts'
 import type { KimiUsageProbeOutcome } from '@neutronai/trident/kimi-usage-probe.ts'
 
 import { KimiUsageMonitor } from '../kimi-usage-monitor.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -35,8 +35,7 @@ let store: UsageSamplesStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'kimi-usage-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   store = new UsageSamplesStore({ db, now: () => NOW })
 })
 afterEach(() => {

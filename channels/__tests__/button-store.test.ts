@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildButtonPrompt,
@@ -10,6 +9,7 @@ import {
   type ButtonPrompt,
 } from '../button-primitive.ts'
 import { ButtonStore, ButtonStoreError } from '../button-store.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -18,8 +18,7 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-bs-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })
@@ -525,8 +524,7 @@ describe('ButtonStore.latestTurnByTopic — insertion-order recency (same-ms tie
       rmSync(tmp, { recursive: true, force: true })
       tmp = mkdtempSync(join(tmpdir(), 'neutron-bs-recency-'))
       db.close()
-      db = ProjectDb.open(join(tmp, 'project.db'))
-      applyMigrations(db.raw())
+      db = openMigratedDbAt(join(tmp, 'project.db'))
       now = 1_000_000
       store = new ButtonStore({ db, now: () => now })
 

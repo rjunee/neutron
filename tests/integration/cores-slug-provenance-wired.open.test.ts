@@ -62,7 +62,6 @@ import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
@@ -72,6 +71,7 @@ import type { ToolCallContext } from '@neutronai/tools/registry.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -154,8 +154,7 @@ async function boot(slug_is_fallback: boolean | 'absent'): Promise<Harness> {
     },
   })
 
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
 
   const composer = buildOpenGraphComposer({
     env: process.env,

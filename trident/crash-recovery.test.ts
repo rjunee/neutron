@@ -21,7 +21,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
 import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
@@ -29,6 +28,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { TridentRunStore } from './store.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
 import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -36,8 +36,7 @@ let store: TridentRunStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'trident-crash-recovery-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
 })
 

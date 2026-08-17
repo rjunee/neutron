@@ -21,12 +21,10 @@
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -44,6 +42,7 @@ import {
 } from '../oauth-token-manager.ts'
 import { CoreCredentialResolver } from '../core-credential-resolver.ts'
 import { mountOpenCores, GOOGLE_CLIENT_ID_ENV } from '../mount-open-cores.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 const OWNER = asOwnerHandle('multi-account-test')
 
@@ -67,8 +66,7 @@ function makeBench(): Bench {
   const owner_home = mkdtempSync(join(tmpdir(), 'neutron-multi-account-'))
   cleanups.push(() => rmSync(owner_home, { recursive: true, force: true }))
   const dbPath = join(owner_home, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

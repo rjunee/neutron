@@ -34,6 +34,7 @@ import {
 } from '@neutronai/runtime/platform-adapter.ts'
 import { buildLocalPlatformAdapter } from '@neutronai/runtime/platform-adapter-local.ts'
 import type { Topic, IncomingEvent } from '@neutronai/channels/types.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 function buildBaseCompositionInput(db: ProjectDb): Omit<CompositionInput, 'platform'> {
   return {
@@ -64,11 +65,10 @@ describe('LocalPlatformAdapter — boot integration (Sprint B)', () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'neutron-sprint-b-'))
     dbPath = join(tmpDir, 'owner.db')
-    db = ProjectDb.open(dbPath)
+    db = openMigratedDbAt(dbPath)
     // `applyMigrations` defaults to the `migrations/` dir co-located with
     // `migrations/runner.ts` — this is the canonical per-instance DB
     // schema, same as every other integration test.
-    applyMigrations(db.raw())
   })
 
   afterEach(() => {
@@ -236,8 +236,7 @@ describe('Sprint B engine-seam contract — InterviewEngine consumes SlugAvailab
 
     const tmpDir = mkdtempSync(join(tmpdir(), 'neutron-engine-seam-'))
     const dbPath = join(tmpDir, 'owner.db')
-    const instanceDb = ProjectDb.open(dbPath)
-    applyMigrations(instanceDb.raw())
+    const instanceDb = openMigratedDbAt(dbPath)
 
     try {
       const platform = buildLocalPlatformAdapter({ selfOwner: SELF_OWNER })
@@ -319,8 +318,7 @@ describe('Sprint B production-composer reachability — composeProductionGraph b
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'neutron-sprint-b-reachability-'))
     dbPath = join(tmpDir, 'owner.db')
-    db = ProjectDb.open(dbPath)
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(dbPath)
   })
 
   afterEach(() => {

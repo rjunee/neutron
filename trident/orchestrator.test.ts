@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
@@ -21,6 +20,7 @@ import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 /**
  * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
@@ -38,8 +38,7 @@ let store: TridentRunStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-orch-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
 })
 

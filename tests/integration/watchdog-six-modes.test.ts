@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
@@ -30,6 +29,7 @@ import {
 } from '@neutronai/watchdog/detectors.ts'
 import { WatchdogSupervisor } from '@neutronai/watchdog/supervisor.ts'
 import type { WatchdogAlert, WatchdogKind } from '@neutronai/watchdog/types.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -37,8 +37,7 @@ let alertStore: AlertStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-watchdog-six-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   alertStore = new AlertStore(db)
 })
 

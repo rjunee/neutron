@@ -14,7 +14,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   GeminiImagenClient,
@@ -25,14 +24,14 @@ import {
 } from '../gemini-imagegen.ts'
 import { FallbackGallery } from '../fallback-gallery.ts'
 import { ProfilePicPipeline, ProfilePicError, archetypeHintToFallbackSlug } from '../pipeline.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'pp-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

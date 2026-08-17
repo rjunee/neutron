@@ -38,7 +38,6 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
   CLIENT_POLL_BUDGET_MS,
@@ -53,6 +52,7 @@ import { KIMI_CREDENTIAL_SERVICE } from '@neutronai/trident/kimi-key.ts'
 import { CODEX_CREDENTIAL_SERVICE } from '@neutronai/trident/codex-credential.ts'
 import { USAGE_POLL_INTERVAL_MS } from '../credential-usage-monitor.ts'
 import { KIMI_USAGE_POLL_INTERVAL_MS } from '../kimi-usage-monitor.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 import {
   USAGE_POLL_MS,
@@ -136,8 +136,7 @@ beforeAll(async () => {
   // holds regardless of module import order.
   process.env['KIMI_BASE_URL'] = 'http://127.0.0.1:9/coding'
 
-  db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(process.env['NEUTRON_DB_PATH'])
   // A stored Kimi key — the same credential the Settings pane writes and the
   // review panel reads. This is what makes the Kimi card `connected`.
   const secrets = new SecretsStore({ data_dir: tmpDir, db })

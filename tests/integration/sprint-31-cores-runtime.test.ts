@@ -23,11 +23,10 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { openMigratedDatabaseAt } from '../support/migrated-db.ts'
 
 import {
   CapabilityDeniedError,
@@ -54,8 +53,7 @@ beforeEach(() => {
   dataDir = join(tmp, 'owner')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(dataDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   projectDb = ProjectDb.open(dbPath)
   secretsStore = new SecretsStore({ data_dir: dataDir, db: projectDb })

@@ -11,13 +11,13 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from './store.ts'
 import { WorkBoardSpecDocService, type SpecDocStore,
   stripFrontmatter,
 } from './spec-doc-service.ts'
 import { docPathFromDesignRef } from './spec-doc.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 const PROJECT = 'proj-1'
 
@@ -47,8 +47,7 @@ let svc: WorkBoardSpecDocService
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-spec-doc-svc-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new WorkBoardStore(db)
   docs = new FakeDocs()
   svc = new WorkBoardSpecDocService({ docs, board: store, log: { warn: () => {} } })

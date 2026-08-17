@@ -13,7 +13,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import {
@@ -26,6 +25,7 @@ import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approva
 import { ReminderStore } from './store.ts'
 import { registerBundledRituals, seedBundledRituals } from './bundled-rituals.ts'
 import { createRitualRegistry, validateRitualFire, RITUAL_MODEL_TIER, RITUAL_TIMEOUT_MS } from './rituals.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 import {
   computeRitualContentHash,
   createRitualApprovalCheck,
@@ -54,8 +54,7 @@ let rituals_dir: string
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-ritual-reg-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   rituals_dir = join(tmp, 'rituals')
 })
 

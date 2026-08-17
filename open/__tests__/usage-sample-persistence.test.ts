@@ -17,11 +17,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { UsageSamplesStore } from '@neutronai/persistence/usage-samples-store.ts'
 
 import { CredentialUsageMonitor } from '../credential-usage-monitor.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HOUR = 60 * 60 * 1000
 const NOW = 1_800_000_000_000
@@ -32,8 +32,7 @@ let store: UsageSamplesStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'usage-wiring-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   store = new UsageSamplesStore({ db, now: () => NOW })
 })
 afterEach(() => {

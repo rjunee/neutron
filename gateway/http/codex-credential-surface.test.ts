@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -20,6 +19,7 @@ import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/aut
 import { codexAuthPath, codexProjectHome } from '@neutronai/trident/codex-auth.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
 import { createCodexCredentialSurface, type CodexCredentialSurface } from './codex-credential-surface.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const SLUG = 'owner'
 const GLOBAL = '/api/app/codex-auth'
@@ -48,8 +48,7 @@ function req(method: string, path: string, body?: unknown, withAuth = true): Req
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'codex-surface-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')

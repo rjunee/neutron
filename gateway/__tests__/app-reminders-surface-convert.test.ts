@@ -27,7 +27,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import {
@@ -38,6 +37,7 @@ import {
   type ConvertReminderToTaskResult,
 } from '../http/app-reminders-surface.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
@@ -75,8 +75,7 @@ async function startGateway(opts: {
   adapter?: ConvertReminderToTaskAdapter | null
 }): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-reminders-convert-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const store = new ReminderStore(db)
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
   const adapterCalls: ConvertReminderToTaskInput[] = []

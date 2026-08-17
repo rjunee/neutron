@@ -27,7 +27,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '../composition.ts'
@@ -35,6 +34,7 @@ import { createProjectCredentialsSurface } from '../http/project-credentials-sur
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'creds-composer-owner'
 
@@ -58,8 +58,7 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-creds-composer-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   const auth = createAppWsAuthResolver({ project_slug: OWNER, bypass: true })
   const crypto = new SecretsStore({ data_dir: tmp, db })

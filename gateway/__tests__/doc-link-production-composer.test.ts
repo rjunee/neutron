@@ -56,10 +56,10 @@ import {
   VAULT_REDIRECTOR_BASE,
   webAppBase,
 } from '@neutronai/runtime/doc-links.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'doc-link-composer-project'
 
@@ -101,8 +101,7 @@ function makeFakeTelegramClient(sent: CapturedTelegramCall[]): TelegramClient {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-doc-link-composer-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   // Production wires the channel router OUTSIDE composeProductionGraph
   // (so the Telegram webhook can hold the same router reference) and

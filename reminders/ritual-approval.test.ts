@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   ApprovalManager,
@@ -10,6 +9,7 @@ import {
   type ApprovalRow,
 } from '@neutronai/tools/approval.ts'
 import { createRitualRegistry, validateRitualFire, type RitualDef } from './rituals.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 import {
   computeRitualContentHash,
   createRitualApprovalCheck,
@@ -26,8 +26,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-ritual-approval-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

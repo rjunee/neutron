@@ -35,10 +35,10 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from './store.ts'
 import { buildWorkflowArgs } from './inner-loop.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -50,8 +50,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-cap-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

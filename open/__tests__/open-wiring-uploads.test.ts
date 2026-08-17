@@ -23,13 +23,13 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { LandingStackWithEngine } from '@neutronai/gateway/wiring/build-landing-stack.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { LoopRegistry } from '@neutronai/loop'
 import { wireUploads } from '../wiring/uploads.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // First two bytes are the ZIP local-file-header magic (`PK`); the single-shot
 // handler checks the magic + reads the assembled bytes, so the fixture is > 4B.
@@ -40,8 +40,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-wiring-uploads-'))
-  db = ProjectDb.open(join(tmpDir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmpDir, 'project.db'))
 })
 
 afterEach(() => {

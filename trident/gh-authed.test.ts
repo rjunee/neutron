@@ -18,12 +18,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { storeGitHubToken } from '@neutronai/github/credential.ts'
 import { runGhAuthed } from './gh-authed.ts'
+import { openMigratedDatabaseAt } from '../tests/support/migrated-db.ts'
 
 const SCRIPT = new URL('./gh-authed.ts', import.meta.url).pathname
 const SENTINEL = 'ghp_TEST_SENTINEL_12345'
@@ -45,8 +44,7 @@ beforeEach(() => {
   mkdirSync(stubBin, { recursive: true })
   mkdirSync(fakeHome, { recursive: true })
   dbPath = join(workdir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
 
   // The capture file lives OUTSIDE the temp tree the "never written to disk"

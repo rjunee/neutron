@@ -40,7 +40,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
@@ -54,6 +53,7 @@ import {
   type FocusResponse,
 } from '../http/app-focus-surface.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'focus-composer-project'
 const PROJECT = 'demo-project'
@@ -79,8 +79,7 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-focus-composer-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   // Build the surface pieces FIRST so we can hand them to
   // `composeProductionGraph` via `app_focus_surface`. Mirrors the

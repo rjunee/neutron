@@ -19,9 +19,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import type {
   IncomingEvent,
@@ -29,6 +27,7 @@ import type {
 } from '@neutronai/channels/types.ts'
 import { ChannelRouter } from '@neutronai/channels/router.ts'
 import { buildTelegramWebhookSurface } from '../build-telegram-webhook.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 let workdir: string
 let dataDir: string
@@ -42,8 +41,7 @@ beforeEach(() => {
   dataDir = join(workdir, 'project')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(workdir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
   secrets = new SecretsStore({ data_dir: dataDir, db })

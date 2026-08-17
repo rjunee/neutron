@@ -12,7 +12,6 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
@@ -24,14 +23,14 @@ import {
 import { OVERNIGHT_HANDLER_NAME } from '@neutronai/onboarding/overnight/register.ts'
 import { composeProductionGraph } from './composition.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'composition-onboarding-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 
 afterEach(async () => {

@@ -31,12 +31,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   createAppFocusSurface,
   type FocusItem,
@@ -80,8 +80,7 @@ const FROZEN_NOW = Date.parse('2026-05-18T12:00:00.000Z')
 
 async function startGateway(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-focus-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const tasks = new TaskStore(db)
   const reminders = new ReminderStore(db)
   let now = FROZEN_NOW

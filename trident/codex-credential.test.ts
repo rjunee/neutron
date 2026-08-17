@@ -20,11 +20,11 @@ import {
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { codexAuthPath, readMaterializedAuth } from './codex-auth.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 import {
   buildRunCodexHomeResolver,
   CODEX_CREDENTIAL_SERVICE,
@@ -56,8 +56,7 @@ function newService(): CodexCredentialService {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'codex-cred-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   const crypto = new SecretsStore({ data_dir: tmp, db })
   store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')

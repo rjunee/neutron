@@ -36,11 +36,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { writeOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
 
 import { buildOwnerOnboardingPreamble } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER_SLUG = 'owner'
 
@@ -49,8 +49,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-onboarding-tz-'))
-  db = ProjectDb.open(join(tmpDir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmpDir, 'project.db'))
 })
 
 afterEach(() => {

@@ -18,12 +18,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
@@ -32,6 +30,7 @@ import type { ToolCallContext as SdkToolCallContext } from '@neutronai/cores-sdk
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { SecretsPrompter } from '@neutronai/cores-runtime/lifecycle.ts'
 import { installBundledCores, reinstallFailedCore } from '../cores/install-bundled.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 const NOOP_PROMPTER: SecretsPrompter = {
   async promptApiKey() {
@@ -81,8 +80,7 @@ function makeBench(): Bench {
   const dbDir = join(ownerHome, 'db')
   mkdirSync(dbDir, { recursive: true })
   const dbPath = join(dbDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

@@ -15,11 +15,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import type { OutgoingMessage } from '../sink.ts'
 import { ProactiveStateStore } from '../state-store.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 import {
   buildLlmNudgeRater,
   composeNudge,
@@ -52,8 +52,7 @@ interface Harness {
 
 function open(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-proactive-nudge-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const sent: OutgoingMessage[] = []
   return {
     db,

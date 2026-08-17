@@ -19,13 +19,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 
 import { createProjectCredentialsSurface } from '../project-credentials-surface.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 const OWNER = asOwnerHandle('acme')
 const PROJECT_URL = 'http://x/api/app/projects/proj-a/credentials'
@@ -46,8 +46,7 @@ let handler: (req: Request) => Promise<Response | null>
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-cred-surface-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new ProjectCredentialStore(db, { crypto: new SecretsStore({ data_dir: tmp, db }) })
   handler = createProjectCredentialsSurface({
     store,

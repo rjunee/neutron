@@ -28,7 +28,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import {
   ProjectDb,
   registerSystemEventSink,
@@ -48,6 +47,7 @@ import {
 import type { ImportJob, ImportResult } from '../../history-import/types.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 const MIN = 60_000
 const OWNER = 't1'
@@ -237,8 +237,7 @@ const SAMPLE_RESULT: ImportResult = {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-import-timeout-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   buttonStore = new ButtonStore({ db })
   stateStore = new InMemoryOnboardingStateStore()
   transcript = new TranscriptWriter({

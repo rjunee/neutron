@@ -26,11 +26,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { storeGitHubToken } from '@neutronai/github/credential.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const SLUG = 'owner'
 const TOKEN = 'gho_synthetic_wiring_probe_token'
@@ -64,8 +64,7 @@ async function composeOpen(): Promise<{
   run_host: (cmd: string[], cwd?: string) => Promise<{ ok: boolean; stdout: string }>
   db: ProjectDb
 }> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   const composition = await buildOpenGraphComposer({ env: process.env })({
     db,
     project_slug: SLUG,

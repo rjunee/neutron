@@ -43,7 +43,6 @@ import { dirname, join } from 'node:path'
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
@@ -52,6 +51,7 @@ import type { OnboardingPhase } from '@neutronai/onboarding/interview/phase.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -134,8 +134,7 @@ const COMPLETE_PHASE_STATE: Record<string, unknown> = {
 }
 
 async function startHarness(seedPhase: OnboardingPhase, extraPhaseState: Record<string, unknown> = {}): Promise<Harness> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
 
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({

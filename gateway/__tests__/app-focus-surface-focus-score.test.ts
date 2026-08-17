@@ -13,12 +13,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 import { createAppFocusSurface } from '../http/app-focus-surface.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
@@ -49,8 +48,7 @@ interface Harness {
 
 async function startGateway(now: () => number = () => Date.now()): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-focus-score-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const tasks = new TaskStore(db)
   const reminders = new ReminderStore(db)
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })

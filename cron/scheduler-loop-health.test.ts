@@ -11,19 +11,18 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CronJobRegistry } from './jobs.ts'
 import { CronHandlerRegistry } from './handlers.ts'
 import { CronScheduler } from './scheduler.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-cron-health-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 afterEach(() => {
   try {
@@ -152,8 +151,7 @@ describe('CronScheduler — loop-inventory health (defect #4)', () => {
     // fire tail. The handler still runs healthy; the tail failure must set
     // `lastError` (the pre-fix bug stamped healthy BEFORE awaiting record()).
     const localTmp = mkdtempSync(join(tmpdir(), 'neutron-cron-tail-'))
-    const localDb = ProjectDb.open(join(localTmp, 'project.db'))
-    applyMigrations(localDb.raw())
+    const localDb = openMigratedDbAt(join(localTmp, 'project.db'))
     const jobs = new CronJobRegistry()
     jobs.register({
       name: 'job',

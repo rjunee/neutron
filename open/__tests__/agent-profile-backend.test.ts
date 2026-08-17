@@ -23,7 +23,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -41,16 +40,12 @@ import {
   type AgentSettingsTelegram,
 } from '@neutronai/agent-settings'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 /** Open a migrated per-instance ProjectDb on disk (the agent-settings test pattern). */
-function openMigratedDb(dir: string): ProjectDb {
-  const dbPath = join(dir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
-  return ProjectDb.open(dbPath)
+function openInstanceDb(dir: string): ProjectDb {
+  return openMigratedDbAt(join(dir, 'project.db'))
 }
 
 let ownerHome: string
@@ -207,7 +202,7 @@ describe('buildOpenAgentProfileBackend — persistence', () => {
 
 describe('Open profile backend ⇄ agent-settings Core (the real broken-promise repro)', () => {
   test('CONTROL: the available:false no-op still returns the unavailable error', async () => {
-    const db = openMigratedDb(ownerHome)
+    const db = openInstanceDb(ownerHome)
     const settings = buildAgentSettingsBackend({
       projectDb: db,
       telegram: noopTelegram,
@@ -227,7 +222,7 @@ describe('Open profile backend ⇄ agent-settings Core (the real broken-promise 
   })
 
   test('FIX: Open profile makes update_agent_name + update_personality succeed and persist', async () => {
-    const db = openMigratedDb(ownerHome)
+    const db = openInstanceDb(ownerHome)
 
     const loader = new PersonaPromptLoader({ owner_home: ownerHome })
     const profile = buildOpenAgentProfileBackend({
@@ -262,7 +257,7 @@ describe('Open profile backend ⇄ agent-settings Core (the real broken-promise 
   })
 
   test('FIX: a SUBSEQUENT turn reflects a renamed agent (loader re-reads the rewrite)', async () => {
-    const db = openMigratedDb(ownerHome)
+    const db = openInstanceDb(ownerHome)
 
     const loader = new PersonaPromptLoader({ owner_home: ownerHome })
     const profile = buildOpenAgentProfileBackend({

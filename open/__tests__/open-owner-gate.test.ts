@@ -26,7 +26,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
@@ -34,6 +33,7 @@ import type { LandingStackWithEngine } from '@neutronai/gateway/wiring/build-lan
 import { buildLocalStartTokenAuth } from '../local-start-token.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   buildOpenOwnerGate,
   type ProjectRailRow,
@@ -51,8 +51,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-owner-gate-'))
-  db = ProjectDb.open(join(tmpDir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmpDir, 'project.db'))
 })
 
 afterEach(() => {

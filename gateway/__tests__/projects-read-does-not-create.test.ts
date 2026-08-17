@@ -21,7 +21,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SqliteProjectSettingsStore } from '../projects/sqlite-store.ts'
 import {
@@ -29,6 +28,7 @@ import {
   createAppProjectsSurface,
 } from '../http/app-projects-surface.ts'
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'issues-412'
 
@@ -38,8 +38,7 @@ let store: SqliteProjectSettingsStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-412-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   store = new SqliteProjectSettingsStore(db)
 })
 

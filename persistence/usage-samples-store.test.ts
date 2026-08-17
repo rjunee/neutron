@@ -25,9 +25,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 import { ProjectDb } from './db.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 import {
   CLIENT_POLL_BUDGET_MS,
   POOL_CADENCE_MS,
@@ -73,8 +73,7 @@ let clock = NOW
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'usage-samples-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   clock = NOW
   store = new UsageSamplesStore({ db, now: () => clock })
 })

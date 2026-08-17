@@ -44,7 +44,6 @@ import {
   InMemoryAppWsSessionRegistry,
   createAppWsAuthResolver,
 } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppLauncherSurface } from '../http/app-launcher-surface.ts'
@@ -55,6 +54,7 @@ import {
   type LauncherEntry,
 } from '../http/project-launcher-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'launcher-composer-project'
 const PROJECT = 'demo-project'
@@ -79,8 +79,7 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-launcher-composer-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   // Build the surface pieces FIRST so we can hand them to
   // `composeProductionGraph` via `app_launcher_surface` +

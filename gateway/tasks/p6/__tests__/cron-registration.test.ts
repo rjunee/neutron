@@ -11,8 +11,8 @@ import { join } from 'node:path'
 
 import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDbAt } from '../../../../tests/support/migrated-db.ts'
 import {
   buildNudgeEngineHandler,
   buildNudgeEngineJob,
@@ -26,8 +26,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-nudge-cron-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 
 afterEach(() => {

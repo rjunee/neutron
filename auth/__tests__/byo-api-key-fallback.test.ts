@@ -3,13 +3,12 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore } from '../secrets-store.ts'
 import { ApiKeyStore } from '../api-key-store.ts'
 import { buildBYOApiKeyPool } from '../byo-api-key-fallback.ts'
 import { selectCredential } from '@neutronai/runtime/credential-pool.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 let workdir: string
 let db: ProjectDb
@@ -20,8 +19,7 @@ beforeEach(() => {
   dataDir = join(workdir, 'project')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(workdir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
 })

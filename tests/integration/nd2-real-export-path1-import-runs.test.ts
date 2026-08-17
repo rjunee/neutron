@@ -24,7 +24,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -38,6 +37,7 @@ import type { ImportJob } from '@neutronai/onboarding/history-import/types.ts'
 import { parseClaudeExport } from '@neutronai/onboarding/history-import/claude-export.ts'
 import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const REAL_EXPORT = join(homedir(), 'Downloads', 'Claude Data Batch (1).zip')
 const HAVE_EXPORT = existsSync(REAL_EXPORT)
@@ -55,8 +55,7 @@ let sentPrompts: Array<{ prompt: ButtonPrompt }>
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-nd2-real-export-'))
   owner_home = join(tmp, 'owner_home')
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   buttonStore = new ButtonStore({ db })
   stateStore = new InMemoryOnboardingStateStore()
   transcript = new TranscriptWriter({

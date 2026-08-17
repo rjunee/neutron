@@ -2,14 +2,13 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { SkillForge, type ProposalNotifier } from '../forge.ts'
 import { SkillForgeProposalsStore } from '../proposals-store.ts'
 import type { CompletedWorkflow, ProposalRecord } from '../types.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 class CapturingNotifier implements ProposalNotifier {
   calls: Array<{ proposal: ProposalRecord; message: string }> = []
@@ -51,8 +50,7 @@ function listPacks(): string[] {
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'skill-forge-'))
   dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
   skillsDir = join(tmp, 'owner-data', 'skills')

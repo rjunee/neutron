@@ -44,7 +44,6 @@ import type { IncomingEvent, Topic } from '@neutronai/channels/types.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import {
   InMemoryStore,
   SyncEngine,
@@ -57,6 +56,7 @@ import type { ChatMessage } from '@neutronai/chat-core/index.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
 import { buildButtonPromptClaim } from '../wiring/build-button-prompt-claim.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const TOPIC = 'app:sam'
 /** The production Retry affordance, verbatim (`build-live-agent-turn.ts`). */
@@ -69,8 +69,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'spent-419-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 afterEach(() => {
   db.close()

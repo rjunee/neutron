@@ -28,10 +28,10 @@ import {
   type AppWsOutbound,
 } from '@neutronai/channels/index.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
 import { createWebPresenceTracker, type WebPresenceTracker } from '../push/web-presence.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'sam'
 
@@ -125,8 +125,7 @@ async function openClient(
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'ne-web-presence-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 
 afterEach(() => {

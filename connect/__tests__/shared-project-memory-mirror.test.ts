@@ -24,12 +24,10 @@
  */
 
 import { afterEach, beforeAll, afterAll, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { GBrainUnavailableError } from '@neutronai/gbrain-memory/memory-store.ts'
 import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'
@@ -54,6 +52,7 @@ import {
   type SharedProjectGraphSource,
 } from '../shared-project-memory-mirror.ts'
 import { bootPgliteBrain } from '@neutronai/gbrain-memory/__tests__/boot-pglite-brain.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 const RECEIVING = 'owner-host' // the host / owner instance slug
 
@@ -96,8 +95,7 @@ function makeDb(projectId: string): ProjectDb {
   const dir = mkdtempSync(join(tmpdir(), 'neutron-mirror-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

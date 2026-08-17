@@ -16,7 +16,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,10 +25,10 @@ import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts
 import { createAppTabsSurface } from '../http/app-tabs-surface.ts'
 import type { TabDescriptor } from '@neutronai/tabs/registry.ts'
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import type { BundledCore } from '@neutronai/cores-runtime/bundled-registry.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 const __composedHandlers = new Map<string, ComposedHttpHandler>()
@@ -96,8 +95,7 @@ interface TabsPayload {
 function openStore(): { store: CoreInstallationsStore; db: ProjectDb } {
   const tmp = mkdtempSync(join(tmpdir(), 'app-tabs-surface-'))
   const dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   return { store: new CoreInstallationsStore({ db, now: () => 1_000_000 }), db }

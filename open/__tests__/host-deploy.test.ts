@@ -24,7 +24,6 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { uuidToToken } from '@neutronai/reminders/index.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApprovalManager, type ApprovalRow } from '@neutronai/tools/approval.ts'
@@ -51,6 +50,7 @@ import {
   isDispatchTimeout,
 } from '../host-deploy.ts'
 import { createHostDeployRemoteGit } from '../host-deploy-runtime.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'owner'
 const AGENT = 'agent-7'
@@ -76,8 +76,7 @@ let nowMs: number
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-host-deploy-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   nowMs = Date.now()
   approvals = new ApprovalManager(db, { notify: async () => undefined }, { now: () => nowMs })
 })

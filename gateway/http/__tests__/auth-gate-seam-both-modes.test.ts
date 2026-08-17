@@ -44,7 +44,6 @@ import { join } from 'node:path'
 import type { Server, WebSocketHandler } from 'bun'
 import { exportJWK, generateKeyPair, importJWK, type KeyLike } from 'jose'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
@@ -56,6 +55,7 @@ import {
 import { buildLocalStartTokenAuth } from '@neutronai/open/local-start-token.ts'
 import { OWNER_USER_ID } from '@neutronai/open/owner-identity.ts'
 import type { OpenWiringContext } from '@neutronai/open/wiring/context.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 import {
   buildOpenOwnerGate,
   type ProjectRailRow,
@@ -393,8 +393,7 @@ let openDb: ProjectDb
 
 beforeEach(() => {
   openTmpDir = mkdtempSync(join(tmpdir(), 'neutron-c5b-seam-'))
-  openDb = ProjectDb.open(join(openTmpDir, 'project.db'))
-  applyMigrations(openDb.raw())
+  openDb = openMigratedDbAt(join(openTmpDir, 'project.db'))
 })
 
 afterEach(() => {

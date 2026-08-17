@@ -14,9 +14,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { collectCliDiagnostics, formatDiagnosticsText, fmtPayload } from '../diagnostics-cli-impl.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 let tmp: string
 
@@ -38,8 +38,7 @@ afterEach(() => {
 describe('collectCliDiagnostics', () => {
   it('reads a real migrated project.db read-only and composes DB-backed sections', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.close()
 
     const result = collectCliDiagnostics(envFor(dbPath))
@@ -65,8 +64,7 @@ describe('collectCliDiagnostics', () => {
 
   it('surfaces a gbrain latch + import job written to the DB', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.runSync(
       `INSERT INTO gbrain_sync_state (scope, status, latch_reason, latched_at, last_success_at, deferred_count, updated_at)
        VALUES (?, 'unavailable', 'GBrainUnavailableError', '2026-07-01T00:00:00Z', NULL, 3, '2026-07-01T00:00:01Z')`,
@@ -89,8 +87,7 @@ describe('collectCliDiagnostics', () => {
 
   it('surfaces a system_events degrade row (O4 journal) off-process', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     // A `core_install_failed` degrade — the exact "why is a Core broken?" signal
     // the journal makes visible without journalctl.
     db.runSync(
@@ -182,8 +179,7 @@ describe('collectCliDiagnostics', () => {
 
   it('scopes cron jobs to THIS instance slug (no cross-project leak)', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.runSync(
       `INSERT INTO cron_state (job_name, project_slug, last_run_at, last_run_status, last_run_error, last_run_duration_ms)
        VALUES ('nudge', 'demo', 1710000000, 'ok', NULL, 5)`,
@@ -212,8 +208,7 @@ describe('collectCliDiagnostics', () => {
   it('repl registry: absent file → available with zero sessions', () => {
     const dbPath = join(tmp, 'project.db')
     ProjectDb.open(dbPath).close()
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.close()
     const result = collectCliDiagnostics(envFor(dbPath))
     expect(result.ok).toBe(true)
@@ -224,8 +219,7 @@ describe('collectCliDiagnostics', () => {
 
   it('repl registry: corrupt file → available:false with a note (NOT falsely healthy)', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.close()
     // owner_home is `tmp` (see envFor) → registry at tmp/.neutron/repl-registry.json
     mkdirSync(join(tmp, '.neutron'), { recursive: true })
@@ -263,8 +257,7 @@ describe('collectCliDiagnostics', () => {
    */
   it('does NOT throw when an UNRELATED setting is malformed', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.close()
 
     // CONTROL — the same env without the bad knob works, so a pass below cannot
@@ -312,8 +305,7 @@ describe('collectCliDiagnostics', () => {
    */
   it('returns {ok:false} — not a throw — when `.url_slug` cannot be read (EACCES)', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.close()
 
     const slugFile = join(tmp, '.url_slug')
@@ -358,8 +350,7 @@ describe('collectCliDiagnostics', () => {
 
   it('returns {ok:false} — not a throw — when `.url_slug` is a directory (EISDIR)', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.close()
 
     // CONTROL — the same env with no `.url_slug` at all already returns ok.
@@ -384,8 +375,7 @@ describe('collectCliDiagnostics', () => {
    */
   it('reads `.url_slug` under NEUTRON_HOME when OWNER_HOME is the empty string', () => {
     const dbPath = join(tmp, 'project.db')
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.close()
     writeFileSync(join(tmp, '.url_slug'), 'renamed\n', 'utf8')
 
@@ -406,8 +396,7 @@ describe('collectCliDiagnostics', () => {
  */
 describe('collectCliDiagnostics — the CLI scope agrees with the boot scope', () => {
   function seedRefusalUnder(dbPath: string, scope: string): void {
-    const db = ProjectDb.open(dbPath)
-    applyMigrationsToProjectDb(db)
+    const db = openMigratedDbAt(dbPath)
     db.runSync(
       `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
        VALUES ('r1', 700, 'warn', 'gateway', 'instance_scope_rekey_refused', ?, ?, NULL)`,

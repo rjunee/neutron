@@ -38,12 +38,12 @@ import {
   createAppWsAuthResolver,
 } from '@neutronai/channels/index.ts'
 import type { IncomingEvent } from '@neutronai/channels/types.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppUploadSurface } from '../http/app-upload-surface.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const TINY_PNG_HEX =
   '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489' +
@@ -89,8 +89,7 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const owner_home = mkdtempSync(join(tmpdir(), 'neutron-m2-chat-upload-prod-'))
-  const db = ProjectDb.open(join(owner_home, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(owner_home, 'owner.db'))
   const receivedEvents: IncomingEvent[] = []
   const registry = new InMemoryAppWsSessionRegistry()
   const adapter = new AppWsAdapter({

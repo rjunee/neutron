@@ -23,12 +23,10 @@
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
@@ -49,6 +47,7 @@ import {
   type CoresOAuthSurface,
 } from '../http/cores-oauth-surface.ts'
 import { signInternalRequest } from '@neutronai/runtime/internal-signature.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const OWNER = asOwnerHandle('oauth-identity-test')
@@ -205,8 +204,7 @@ async function makeBench(): Promise<Bench> {
   const dbDir = join(ownerHome, 'db')
   mkdirSync(dbDir, { recursive: true })
   const dbPath = join(dbDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

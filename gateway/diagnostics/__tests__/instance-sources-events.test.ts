@@ -16,7 +16,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import {
   ProjectDb,
   SystemEventsStore,
@@ -25,6 +24,7 @@ import {
 } from '@neutronai/persistence/index.ts'
 import { composeDiagnostics } from '../diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '../instance-sources.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 const SLUG = 'demo'
 let tmp: string
@@ -32,8 +32,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'diag-events-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 
 afterEach(() => {

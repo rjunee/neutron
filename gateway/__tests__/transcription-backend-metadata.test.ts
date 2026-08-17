@@ -19,8 +19,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 import {
   readOwnerTimezone,
@@ -36,8 +36,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'neutron-asr-meta-'))
-  db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(dir, 'project.db'))
 })
 
 afterEach(() => {

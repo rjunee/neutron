@@ -13,13 +13,13 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -75,8 +75,7 @@ interface Built {
 
 async function buildGraph(host: string): Promise<Built> {
   process.env['NEUTRON_HOST'] = host
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   const composer = buildOpenGraphComposer({
     env: process.env,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

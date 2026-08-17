@@ -21,11 +21,11 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { DocSearchIndex } from '@neutronai/doc-search/store.ts'
 import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from '../doc-search-live-enumerator.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 let ownerHome: string
 let dbPath: string
@@ -55,8 +55,7 @@ function insertProject(id: string, deleted: boolean): void {
 beforeEach(async () => {
   ownerHome = mkdtempSync(join(tmpdir(), 'neutron-docsearch-deleted-'))
   dbPath = join(ownerHome, 'project.db')
-  db = ProjectDb.open(dbPath)
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(dbPath)
   await seedTree(ownerHome)
   index = DocSearchIndex.open(':memory:')
 })

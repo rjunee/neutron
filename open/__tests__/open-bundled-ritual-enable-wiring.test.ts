@@ -32,7 +32,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { writeOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
@@ -40,6 +39,7 @@ import { BUNDLED_RITUAL_DEFAULT_CRONS } from '@neutronai/reminders/index.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -197,8 +197,7 @@ beforeEach(async () => {
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
-  db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(process.env['NEUTRON_DB_PATH'])
   // A stored zone, so the cron resolution exercises the real
   // `instance_metadata.timezone` read rather than only its fallback.
   await writeOwnerTimezone(db, 'owner', 'America/Los_Angeles')

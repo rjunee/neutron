@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildButtonPrompt,
@@ -12,6 +11,7 @@ import {
 } from '../button-primitive.ts'
 import { DefaultButtonRouter, parseTelegramCallbackData } from '../button-routing.ts'
 import { ButtonStore } from '../button-store.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const SAMPLE_UUID = '0123abcd-4567-89ef-0123-456789abcdef'
 
@@ -67,8 +67,7 @@ describe('DefaultButtonRouter.routeChoice', () => {
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-br-'))
-    db = ProjectDb.open(join(tmp, 'project.db'))
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(join(tmp, 'project.db'))
     store = new ButtonStore({ db })
     router = new DefaultButtonRouter({ store })
   })

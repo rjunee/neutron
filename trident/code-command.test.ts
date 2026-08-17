@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   parseAndExecuteCodeCommand,
@@ -28,6 +27,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -36,8 +36,7 @@ let attached: Array<{ id: string; run_id: string }>
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-code-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
   attached = []
 })

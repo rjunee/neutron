@@ -13,12 +13,10 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ConnectedMembersStore } from '../connected-members-store.ts'
 import {
@@ -29,6 +27,7 @@ import {
   type AcceptTrustedMemberResult,
 } from '../member-join.ts'
 import { SLUG_RE } from '../slug-format.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -42,8 +41,7 @@ function makeDb(): ProjectDb {
   const dir = mkdtempSync(join(tmpdir(), 'neutron-connect-member-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

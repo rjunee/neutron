@@ -22,11 +22,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAdminPersonalitySurface } from '../http/admin-personality-surface.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'admin-persona-composer-project'
 
@@ -53,8 +53,7 @@ async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-admin-persona-composer-'))
   const owner_home = join(tmp, 'owner_home')
   mkdirSync(join(owner_home, 'persona'), { recursive: true })
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   const auth = createAppWsAuthResolver({ project_slug: OWNER, bypass: true })
   const reloadCalls: string[] = []

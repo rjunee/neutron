@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { TaskStore } from '../store.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   attachReminderLinkSubscriber,
   createLinkedReminder,
@@ -21,8 +21,7 @@ let remindersStore: ReminderStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-task-reminder-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   taskStore = new TaskStore(db)
   remindersStore = new ReminderStore(db)
   attachReminderLinkSubscriber({

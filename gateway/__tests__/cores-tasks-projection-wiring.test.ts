@@ -45,7 +45,6 @@ import {
   loadManifest as loadTasksManifest,
 } from '@neutronai/tasks-core'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
@@ -53,6 +52,7 @@ import {
   type CompositionInput,
 } from '../composition.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'cores-wiring-project'
 const PROJECT = 'proj-A'
@@ -70,8 +70,7 @@ async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-cores-tasks-wiring-'))
   const owner_home = tmp
   const dbPath = join(tmp, 'owner.db')
-  const db = ProjectDb.open(dbPath)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(dbPath)
 
   // Mirrors `gateway/index.ts`: ONE canonical store, supplied to BOTH
   // the composition (so subscribers attach) AND the Tasks-Core adapter

@@ -12,7 +12,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import { PersonaPromptLoader } from '../../../wiring/persona-loader.ts'
@@ -27,6 +26,7 @@ import {
   runNudgePass,
 } from '../nudge-engine.ts'
 import { NUDGE_RATIONALE_MAX_CHARS } from '../nudge-engine-prompt.ts'
+import { openMigratedDbAt } from '../../../../tests/support/migrated-db.ts'
 
 const OWNER = 'demo'
 
@@ -39,8 +39,7 @@ interface Harness {
 
 function openHarness(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-nudge-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const tasks = new TaskStore(db)
   return {
     db,

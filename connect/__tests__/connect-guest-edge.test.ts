@@ -17,13 +17,11 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exportJWK, generateKeyPair, type KeyLike, SignJWT } from 'jose'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   createConnectApiHandler,
@@ -34,6 +32,7 @@ import { stampOriginInstance } from '../api/origin-tag.ts'
 import { JwksCache, type FetchLike } from '@neutronai/jwt-validator/index.ts'
 import { ConnectedMembersStore } from '../connected-members-store.ts'
 import { ConnectGuestInviteStore } from '../guest-invite-store.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 import {
   acceptGuestMember,
   buildResolveMember,
@@ -85,8 +84,7 @@ function makeDb(): ProjectDb {
   const dir = mkdtempSync(join(tmpdir(), 'neutron-guest-edge-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

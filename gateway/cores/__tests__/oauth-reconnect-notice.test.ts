@@ -14,13 +14,12 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 
 import type { DeliveryEnvelope, DeliveryResult } from '../../http/deliver.ts'
 import { OAuthTokenManager, serviceAccountLabel } from '../oauth-token-manager.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 import {
   buildReconnectNoticeBody,
   createOAuthReconnectNotifier,
@@ -242,8 +241,7 @@ beforeEach(() => {
   const dataDir = join(workdir, 'project')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(workdir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
   secretsStore = new SecretsStore({ data_dir: dataDir, db, now: () => Date.now() })

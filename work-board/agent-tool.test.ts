@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
 import { GENERAL_WORK_BOARD_PROJECT_ID, WorkBoardStore, type WorkBoardItem } from './store.ts'
 import { INLINE_EVIDENCE_WINDOW_MS, withDerivedInlineActive } from './inline-activity.ts'
 import { WorkBoardRemovalService } from './removal.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 import {
   registerWorkBoardToolSurface,
   WORK_BOARD_ADD_TOOL,
@@ -29,8 +29,7 @@ function ctx(project_slug: string, project_id: string | null = null): ToolCallCo
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-work-board-tool-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   registry = new ToolRegistry()
   store = new WorkBoardStore(db)
   registerWorkBoardToolSurface(registry, store)

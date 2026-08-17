@@ -26,7 +26,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import {
@@ -36,6 +35,7 @@ import {
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { writeOwnerTimezone } from '../storage/owner-metadata.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'reminders-owner-tz-project'
 
@@ -52,8 +52,7 @@ interface Harness {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-reminders-owner-tz-wiring-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   const graph = await composeProductionGraph({
     db,

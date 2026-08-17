@@ -12,18 +12,17 @@
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOnboardingEnginePieces } from '../build-landing-stack.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { ConversationRecord } from '@neutronai/onboarding/history-import/types.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 
 let workdir: string
@@ -35,8 +34,7 @@ beforeEach(() => {
   ownerHome = join(workdir, 'project-home')
   mkdirSync(ownerHome, { recursive: true })
   const dbPath = join(workdir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
 })

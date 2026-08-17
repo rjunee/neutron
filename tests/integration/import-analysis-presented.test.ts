@@ -55,7 +55,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -67,6 +66,7 @@ import {
 import type { ImportJob, ImportResult } from '@neutronai/onboarding/history-import/types.ts'
 import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const OWNER = 'alex-test'
 const TOPIC = 'chat'
@@ -229,8 +229,7 @@ async function pollToAnalysisPresented(engine: InterviewEngine): Promise<void> {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'import-analysis-presented-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   buttonStore = new ButtonStore({ db })
   stateStore = new InMemoryOnboardingStateStore()
   transcript = new TranscriptWriter({

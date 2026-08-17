@@ -91,7 +91,7 @@ export default [
       import: importPlugin,
     },
     rules: {
-      // `ignore` holds the two L5 sweep exceptions that must stay relative
+      // `ignore` holds the L5 sweep exceptions that must stay relative
       // (see PR #280 body for the full writeup):
       //  - `tests/support/test-isolation.ts` is shared test-support code that
       //    lives at the repo root but is NOT a workspace package (it isn't in
@@ -99,6 +99,10 @@ export default [
       //    to rewrite to — `findNamedPackage` would otherwise misattribute it
       //    to the root "neutron" meta-package and mint a bogus
       //    `neutron/tests/support/...` specifier that resolves nowhere.
+      //  - `tests/support/migrated-db.ts` is the same case, one file over: the
+      //    migrate-once-then-clone test DB template. It lives beside
+      //    test-isolation.ts in the same non-package directory for the same
+      //    reason, and ~400 test files import it relatively.
       //  - `connect/__tests__/trusted-accept-handler.test.ts`'s import of
       //    `onboarding/api/invite-link-generate.ts`: `onboarding` already
       //    depends on `@neutronai/connect`, so declaring the reverse
@@ -107,7 +111,11 @@ export default [
       'import/no-relative-packages': [
         'error',
         {
-          ignore: ['tests/support/test-isolation\\.ts$', '^\\.\\./\\.\\./onboarding/api/invite-link-generate\\.ts$'],
+          ignore: [
+            'tests/support/test-isolation\\.ts$',
+            'tests/support/migrated-db\\.ts$',
+            '^\\.\\./\\.\\./onboarding/api/invite-link-generate\\.ts$',
+          ],
         },
       ],
     },

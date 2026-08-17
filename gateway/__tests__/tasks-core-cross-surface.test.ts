@@ -21,7 +21,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,11 +33,11 @@ import {
 } from '@neutronai/tasks-core'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore as CanonicalTaskStore } from '@neutronai/tasks/store.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppTasksSurface } from '../http/app-tasks-surface.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'cross-surface-project'
 const PROJECT = 'p-demo'
@@ -55,8 +54,7 @@ interface Harness {
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-tasks-cross-surface-'))
   const dbPath = join(tmp, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
 

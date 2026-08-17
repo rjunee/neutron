@@ -69,7 +69,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
@@ -80,6 +79,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
 import { readDeclaredCompositionFields } from './declared-composition-fields.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   MIN_EXPECTED_WIRED_FIELDS,
   UNWIRED_FIELDS,
@@ -169,8 +169,7 @@ let wired = new Map<string, boolean>()
  * — which is why the read happens here and not on the composer's return value.
  */
 async function probeComposedFields(): Promise<void> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH'] as string)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH'] as string)
   await seedTelegramSecrets(db)
   const composer = buildOpenGraphComposer({
     env: process.env,

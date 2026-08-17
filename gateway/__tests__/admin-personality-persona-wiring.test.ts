@@ -30,7 +30,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createAdminPersonalitySurface } from '../http/admin-personality-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts'
@@ -39,6 +38,7 @@ import { PersonaPromptLoader } from '../wiring/persona-loader.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // Sprint cc-substrate-migration-3-sites (2026-05-31) — production code
 // now consumes a `Substrate` rather than resolving credentials internally.
@@ -94,8 +94,7 @@ async function startHarness(): Promise<Harness> {
     'utf8',
   )
 
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   // The SHARED loader — every consumer reads/invalidates this instance.
   const personaLoader = new PersonaPromptLoader({ owner_home, log: () => {} })

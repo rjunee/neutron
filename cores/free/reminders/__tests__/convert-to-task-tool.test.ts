@@ -7,7 +7,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,8 +16,8 @@ import { ReminderStore } from '@neutronai/reminders'
 import { TaskStore } from '@neutronai/tasks'
 import { attachReminderLinkSubscriber } from '@neutronai/tasks'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDatabaseAt } from '../../../../tests/support/migrated-db.ts'
 
 import {
   buildReminderStoreBackend,
@@ -37,8 +36,7 @@ let taskStore: TaskStore
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'reminders-convert-'))
   const dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   projectDb = ProjectDb.open(dbPath)
   audit = new SecretAuditLog({ db: projectDb })

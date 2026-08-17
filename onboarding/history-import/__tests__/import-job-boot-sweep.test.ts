@@ -16,8 +16,8 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 import {
   NON_TERMINAL_IMPORT_JOB_STATUSES,
   sweepOrphanedImportJobsOnBoot,
@@ -28,8 +28,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-import-boot-sweep-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

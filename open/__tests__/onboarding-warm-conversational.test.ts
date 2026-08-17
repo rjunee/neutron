@@ -34,8 +34,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
@@ -44,6 +42,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { buildOpenGraphComposer, awaitPrewarmReady, prewarmSubstrate } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -121,8 +120,7 @@ async function bootAndCapture(
     captured.push(opts)
     return { start: () => cannedHandle(opts.substrate_instance_id) }
   }
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)

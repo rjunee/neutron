@@ -3,7 +3,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildProjectionWriter,
@@ -16,6 +15,7 @@ import {
   replaceMarkedBlock,
 } from '../projection/index.ts'
 import { TaskStore, type Task } from '../store.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const NOW = Date.parse('2026-05-20T12:00:00.000Z')
 
@@ -168,8 +168,7 @@ describe('projection — writer (debounced atomic write)', () => {
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-projection-'))
-    db = ProjectDb.open(join(tmp, 'project.db'))
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(join(tmp, 'project.db'))
   })
 
   afterEach(() => {

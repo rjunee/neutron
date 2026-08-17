@@ -20,7 +20,6 @@ import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { createLogger } from '@neutronai/logger'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { DevicePushTokenStore } from '../push/store.ts'
 import {
@@ -29,6 +28,7 @@ import {
   type AppDevicesLogger,
 } from '../http/app-devices-surface.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
@@ -65,8 +65,7 @@ interface StartOpts {
 
 async function startGateway(opts: StartOpts = {}): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-devices-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const store = opts.store ?? new DevicePushTokenStore(db)
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
   // The REAL logger with a capturing sink, not a mock: these tests assert on

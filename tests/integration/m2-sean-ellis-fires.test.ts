@@ -23,7 +23,6 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
@@ -38,6 +37,7 @@ import {
   type SeanEllisChannel,
 } from '@neutronai/onboarding/telemetry/sean-ellis-trigger.ts'
 import { M2FeedbackCollector } from '@neutronai/onboarding/feedback/m2-week-4-collector.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const OWNER = 'mira'
 const USER = 'u-mira'
@@ -48,8 +48,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'm2-sean-ellis-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 
 afterEach(() => {

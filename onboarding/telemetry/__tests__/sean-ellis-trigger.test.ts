@@ -18,7 +18,6 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import { OnboardingTelemetry } from '../event-emitter.ts'
@@ -32,6 +31,7 @@ import {
   type SeanEllisChannel,
 } from '../sean-ellis-trigger.ts'
 import { M2FeedbackCollector } from '../../feedback/m2-week-4-collector.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -42,8 +42,7 @@ const TOPIC = 'topic-onboarding'
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'sean-ellis-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

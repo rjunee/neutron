@@ -25,11 +25,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const COOKIE_SECRET = 'open-test-secret-0123456789'
 
@@ -87,8 +87,7 @@ afterEach(async () => {
 })
 
 async function startHarness(): Promise<Harness> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   // Seed one resolved General turn directly into button_prompts so the
   // mounted surface returns real history (not just an empty array).
   const nowMs = Date.now()

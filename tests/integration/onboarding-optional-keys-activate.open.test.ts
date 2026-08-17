@@ -21,14 +21,13 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
 import { resolveLlmCredentials } from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
 import { selectCredential } from '@neutronai/runtime/credential-pool.ts'
 import { storeOptionalKey } from '@neutronai/onboarding/optional-keys.ts'
+import { openMigratedDatabaseAt } from '../support/migrated-db.ts'
 
 const NOW_FIXED = 1_700_000_000_000
 const OWNER = asOwnerHandle('alice')
@@ -43,8 +42,7 @@ beforeEach(() => {
   dataDir = join(root, 'owner')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(root, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
 })

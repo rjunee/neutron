@@ -9,12 +9,10 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -22,6 +20,7 @@ import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/acc
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { installBundledCores } from '../install-bundled.ts'
 import { mountOpenCores, GOOGLE_CLIENT_ID_ENV } from '../mount-open-cores.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 const OWNER = asOwnerHandle('mount-open-cores-test')
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
@@ -42,8 +41,7 @@ function makeBench(env: NodeJS.ProcessEnv = {}): {
   const owner_home = mkdtempSync(join(tmpdir(), 'mount-open-cores-'))
   cleanups.push(() => rmSync(owner_home, { recursive: true, force: true }))
   const dbPath = join(owner_home, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

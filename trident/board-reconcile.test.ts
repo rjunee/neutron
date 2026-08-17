@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { buildBoardReconcileObserver } from './board-reconcile.ts'
@@ -17,6 +16,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -25,8 +25,7 @@ let board: WorkBoardStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-board-reconcile-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
   board = new WorkBoardStore(db)
 })

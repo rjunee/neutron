@@ -15,12 +15,10 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -28,6 +26,7 @@ import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/acc
 import type { OAuthTokenManager } from '../oauth-token-manager.ts'
 import { CoreCredentialResolver, scopeForService } from '../core-credential-resolver.ts'
 import { runWithActiveProject } from '../active-project-context.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 const OWNER = asOwnerHandle('cred-resolver-test')
 const PROJECT = 'proj-alpha'
@@ -47,8 +46,7 @@ function makeStores(): { store: ProjectCredentialStore; selection: ProjectAccoun
   const owner_home = mkdtempSync(join(tmpdir(), 'cred-resolver-'))
   cleanups.push(() => rmSync(owner_home, { recursive: true, force: true }))
   const dbPath = join(owner_home, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

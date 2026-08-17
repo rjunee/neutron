@@ -28,7 +28,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approval.ts'
@@ -44,6 +43,7 @@ import {
 } from './dispatcher.ts'
 import { MAX_NUDGE_BODY_CHARS } from './message-shape.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 /**
  * The owner's live-chat `--tools` surface, as a LOCAL literal.
@@ -84,8 +84,7 @@ const resolveTopic = (): string => 'app:owner-topic'
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-bundled-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new ReminderStore(db)
   runs = createRitualRunStore(db)
   subagents = new SubagentRegistry()

@@ -18,7 +18,6 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { OnboardingTelemetry } from '../../telemetry/event-emitter.ts'
 import { SeanEllisStore } from '../../telemetry/sean-ellis-trigger.ts'
@@ -29,6 +28,7 @@ import {
   routeSeanEllisChoice,
 } from '../m2-week-4-collector.ts'
 import type { ButtonChoice } from '@neutronai/channels/button-primitive.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 // readFileSync is already imported by the file's existing tests
 
 
@@ -37,8 +37,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'm2-collector-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

@@ -58,7 +58,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
@@ -68,6 +67,7 @@ import { InMemoryWebChatSessionProjectRegistry } from '../http/chat-bridge.ts'
 import { DocStore } from '../http/doc-store.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { buildPhaseSpecResolver } from '../wiring/build-phase-spec-resolver.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const PROJECT_SLUG = 'demo'
 const USER_ID = 'sam'
@@ -98,8 +98,7 @@ async function startHarness(): Promise<Harness> {
     writeFileSync(join(docsDir, 'doc.md'), `# ${project_id} doc\n`, 'utf8')
   }
 
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const secrets = new SecretsStore({ data_dir: tmp, db })
   const apiKeys = new ApiKeyStore({ db, secrets })
 

@@ -15,9 +15,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { createProjectRow, type ProjectScaffoldDeps } from '../project-create.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 import {
   CREATE_PROJECT_TOOL,
   registerCreateProjectToolSurface,
@@ -28,8 +28,7 @@ const PROJECT_SLUG = 'acme'
 
 function makeDb(): ProjectDb {
   const dir = mkdtempSync(join(tmpdir(), 'project-create-'))
-  const db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(dir, 'project.db'))
   return db
 }
 

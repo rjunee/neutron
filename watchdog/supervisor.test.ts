@@ -12,12 +12,12 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { AlertStore } from './alert-store.ts'
 import { HeartbeatDetector, type HeartbeatTracker } from './detectors.ts'
 import { WatchdogSupervisor } from './supervisor.ts'
 import type { WatchdogAlert, WatchdogDetector } from './types.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 let db: ProjectDb | undefined
 let tmp: string | undefined
@@ -68,8 +68,7 @@ describe('WatchdogSupervisor — COMMIT-ON-SUCCESS (round-3)', () => {
 
   test('a throwing notifier on the first tick → retried and delivered next, persisted exactly once', async () => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-wd-supervisor-'))
-    db = ProjectDb.open(join(tmp, 'project.db'))
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(join(tmp, 'project.db'))
     const store = new AlertStore(db) // REAL store — proves INSERT OR IGNORE idempotency
 
     let notifyCalls = 0

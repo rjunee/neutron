@@ -5,7 +5,6 @@ import { join } from 'node:path'
 
 import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { computeFocusScore } from '../focus-score.ts'
 import {
@@ -16,14 +15,14 @@ import {
   registerFocusScoreRecomputeCron,
 } from '../focus-score-cron.ts'
 import { TaskStore } from '../store.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-focus-cron-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

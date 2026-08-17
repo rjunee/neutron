@@ -24,7 +24,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
@@ -43,6 +42,7 @@ import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { buildCoreModules } from '../composition/build-core-modules.ts'
 import type { CompositionInput } from '../composition.ts'
 import type { ModuleContext } from '../module-graph.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 interface Harness {
   db: ProjectDb
@@ -52,8 +52,7 @@ interface Harness {
 
 async function openHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-nudge-tz-wiring-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const tasks = new TaskStore(db)
   return {
     db,

@@ -22,10 +22,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { openMigratedDatabaseAt } from '../tests/support/migrated-db.ts'
 import {
   githubProcessEnv,
   readGitHubToken,
@@ -51,8 +50,7 @@ beforeEach(() => {
   dataDir = join(workdir, 'project')
   mkdirSync(dataDir, { recursive: true })
   dbPath = join(workdir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
 })
 

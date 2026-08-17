@@ -95,6 +95,33 @@ export class ProjectDb {
   }
 
   /**
+   * Wrap an ALREADY-OPEN `bun:sqlite` Database as a ProjectDb, applying the
+   * same `STARTUP_PRAGMAS` preamble `open` applies. `path` is recorded as the
+   * instance's `path` for diagnostics; for a handle with no file behind it,
+   * pass `':memory:'`.
+   *
+   * WHY THIS EXISTS: `Database.deserialize(buf)` is a STATIC on the driver —
+   * it hands back a Database that no path can reopen — so a caller restoring a
+   * serialized page image cannot route it through `open`. Its consumer today
+   * is the test DB template (`tests/support/migrated-db.ts`), which migrates
+   * once per process and then clones the migrated image per test; the clone is
+   * a Database, and every store under test wants a ProjectDb.
+   *
+   * The pragma preamble is deliberately SHARED with `open` rather than
+   * re-listed here: an adopted connection that skipped `foreign_keys = ON`
+   * would silently not enforce the constraints the schema declares, so a test
+   * would pass against a DB the server would have rejected. `journal_mode =
+   * WAL` is a no-op on an in-memory database (SQLite answers `memory` and does
+   * not error), which is why one list serves both.
+   */
+  static adopt(path: string, db: Database): ProjectDb {
+    for (const stmt of STARTUP_PRAGMAS) {
+      db.exec(stmt)
+    }
+    return new ProjectDb(path, db)
+  }
+
+  /**
    * Escape hatch for callers that need the raw `bun:sqlite` Database — primarily
    * the migration runner (which expects a `Database` argument). Avoid in normal
    * code paths; prefer the `prepare` / `exec` / `run` / `transaction` wrappers so

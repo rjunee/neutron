@@ -33,12 +33,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -76,8 +76,7 @@ beforeEach(() => {
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1' // force handoff default: ignore any host `claude` login (#101 Keychain probe)
   delete process.env['NOTIFY_SOCKET']
-  db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(process.env['NEUTRON_DB_PATH'])
 })
 
 afterEach(() => {

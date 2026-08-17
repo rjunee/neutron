@@ -7,7 +7,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
 import {
@@ -18,6 +17,7 @@ import {
 } from './orchestrator.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 const INCIDENT_CAUSE =
   'forge:build was routed to the codex executor and NO BUILD HAPPENED ' +
@@ -39,8 +39,7 @@ let clockMs: number
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'trident-infra-retry-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   clockMs = 0
   store = new TridentRunStore(db, () => new Date(clockMs).toISOString())
 })

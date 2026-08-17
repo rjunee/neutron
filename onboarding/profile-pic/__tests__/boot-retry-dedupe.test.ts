@@ -32,7 +32,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   GeminiImagenClient,
@@ -43,14 +42,14 @@ import { ProfilePicPipeline } from '../pipeline.ts'
 import { ProfilePicPendingStore } from '../pending-call-store.ts'
 import { DEFAULT_PENDING_FRESH_WINDOW_MS } from '../restart-resume.ts'
 import { buildProfilePicEngineHook } from '../storage.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'pp-boot-retry-dedupe-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

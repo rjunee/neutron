@@ -9,7 +9,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,9 +22,9 @@ import {
   type ProjectSettingsStore,
 } from '../http/app-projects-surface.ts'
 import { canInviteRole } from '../http/app-project-invite.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ConnectGuestInviteStore, hashInviteToken } from '@neutronai/connect/guest-invite-store.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
@@ -63,8 +62,7 @@ async function start(): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'neutron-ph5-issue-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
 

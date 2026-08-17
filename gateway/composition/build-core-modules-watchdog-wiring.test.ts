@@ -17,7 +17,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
@@ -28,14 +27,14 @@ import type { PidLivenessProbe } from '@neutronai/watchdog/detectors.ts'
 import { buildCoreModules } from './build-core-modules.ts'
 import type { CompositionInput } from '../composition.ts'
 import type { ModuleContext } from '../module-graph.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 let tmp: string | undefined
 let db: ProjectDb | undefined
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-watchdog-wiring-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

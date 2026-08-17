@@ -20,12 +20,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { runDrivingVerdict, WAKEUP_STAND_DOWN_MS } from '@neutronai/trident/run-driving.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { WorkBoardStore, WorkBoardRunStillLiveError } from './store.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 const SCOPE = 'proj'
 let dir: string
@@ -33,8 +33,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'neutron-wb-live-run-'))
-  db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(dir, 'project.db'))
 })
 afterEach(() => {
   db.close()

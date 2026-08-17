@@ -17,11 +17,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { buildTridentTerminalObserver } from '../wiring/trident-nexus-observer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const VALID_RESULT = JSON.stringify({
   ok: true,
@@ -40,8 +40,7 @@ let nexus: NexusStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-nexus-obs-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
   nexusHome = mkdtempSync(join(tmpdir(), 'neutron-trident-nexus-obs-home-'))
   nexus = new NexusStore({ owner_home: nexusHome })

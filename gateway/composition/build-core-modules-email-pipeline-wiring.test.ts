@@ -13,12 +13,12 @@ import { join } from 'node:path'
 
 import { buildSeededInMemoryGmailClient } from '@neutronai/email-managed-core'
 import type { GmailClient } from '@neutronai/email-managed-core/backend'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { buildCoreModules } from './build-core-modules.ts'
 import type { CompositionInput } from './input/composition-input.ts'
 import type { ModuleContext } from '../module-graph.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   EMAIL_PIPELINE_POLL_HANDLER_NAME,
   EMAIL_PIPELINE_POLL_JOB_NAME,
@@ -30,8 +30,7 @@ describe('buildCoreModules email pipeline invocation', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'email-pipeline-composition-'))
-    db = ProjectDb.open(join(home, 'project.db'))
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(join(home, 'project.db'))
   })
 
   afterEach(() => {

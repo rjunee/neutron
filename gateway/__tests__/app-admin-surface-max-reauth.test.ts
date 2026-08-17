@@ -39,10 +39,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createAppAdminSurface } from '../http/app-admin-surface.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
@@ -105,8 +104,7 @@ interface StartOptions {
 async function startGateway(opts: StartOptions = {}): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-admin-reauth-'))
   const owner_home = join(tmp, 'owner_home')
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
   const mintCalls: Array<{ user_id: string }> = []
   const surfaceOpts: Parameters<typeof createAppAdminSurface>[0] = {
@@ -188,8 +186,7 @@ describe('app-admin — mint-reauth-token: auth + wiring guards', () => {
     await h.close()
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-admin-reauth-mis-'))
     const owner_home = join(tmp, 'owner_home')
-    const db = ProjectDb.open(join(tmp, 'owner.db'))
-    applyMigrations(db.raw())
+    const db = openMigratedDbAt(join(tmp, 'owner.db'))
     const otherAuth = createAppWsAuthResolver({ project_slug: 'someone-else', bypass: true })
     const surface = createAppAdminSurface({
       auth: otherAuth,

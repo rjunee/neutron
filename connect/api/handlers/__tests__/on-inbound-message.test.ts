@@ -2,9 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ChannelRouter } from '@neutronai/channels/router.ts'
 import type {
   ChannelAdapter,
@@ -15,6 +13,7 @@ import type {
 import type { ConnectAuthContext } from '../../jwt-bearer-middleware.ts'
 import type { TaggedContent } from '../../origin-tag.ts'
 import type { IncomingMessage } from '../../server.ts'
+import { openMigratedDatabaseAt } from '../../../../tests/support/migrated-db.ts'
 import {
   buildOnInboundMessageHandler,
   onInboundMessage,
@@ -26,8 +25,7 @@ let db: ProjectDb
 beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'neutron-on-inbound-'))
   const dbPath = join(workdir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
 })

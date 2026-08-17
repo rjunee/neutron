@@ -22,7 +22,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   readTridentPhaseModels,
@@ -31,6 +30,7 @@ import {
 } from '@neutronai/gateway/storage/owner-metadata.ts'
 import type { CodexAvailability } from '@neutronai/trident/codex-credential.ts'
 import { TRIDENT_PHASES } from '@neutronai/trident/phase-models.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const SCOPE = 'owner'
 let tmp: string
@@ -38,8 +38,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'phase-models-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 afterEach(() => {
   db.close()

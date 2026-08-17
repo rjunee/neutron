@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore, type Reminder } from './store.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 import {
   ReminderTickLoop,
   type ReminderDispatcher,
@@ -15,8 +15,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-reminders-tick-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

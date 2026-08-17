@@ -11,7 +11,6 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -24,6 +23,7 @@ import { LIVE_AGENT_TOOL_NAMES } from '../build-live-agent-turn.ts'
 import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
 import { MISSING_CREDENTIAL_DOCTRINE } from '../operating-doctrine.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -32,8 +32,7 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-lat-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })

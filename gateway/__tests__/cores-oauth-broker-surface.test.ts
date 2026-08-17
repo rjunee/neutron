@@ -55,9 +55,9 @@ import { join } from 'node:path'
 
 import type { SQLQueryBindings } from 'bun:sqlite'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { resolveTabs } from '@neutronai/tabs/registry.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   signInternalRequest,
   verifyInternalRequest,
@@ -84,8 +84,7 @@ let clock: number
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-oauth-broker-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   relays = []
   relayStatus = 200
   relayThrows = false

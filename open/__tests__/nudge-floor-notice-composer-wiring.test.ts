@@ -41,7 +41,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, SystemEventsStore, pushSystemEventSink } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
@@ -51,6 +50,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -158,8 +158,7 @@ async function waitFor(pred: () => boolean, timeoutMs = 40_000): Promise<void> {
 }
 
 async function startHarness(): Promise<Harness> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   // The ambient journal sink the real boot pushes (`gateway/index.ts`). Without it
   // every `emitSystemEventSafe` is a documented no-op, so this is what the harness
   // has to supply for the journal half to be observable at all.

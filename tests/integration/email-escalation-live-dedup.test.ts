@@ -26,7 +26,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
@@ -41,6 +40,7 @@ import {
 import { escalateEmail } from '@neutronai/email-managed-core/pipeline/escalate'
 
 import { createDeliver } from '@neutronai/gateway/http/deliver.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const TOPIC = 'app:owner-1'
 const EMAIL_ID = 'msg-important-1'
@@ -54,8 +54,7 @@ let now = 1_700_000_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-esc-dedup-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   buttonStore = new ButtonStore({ db, now: () => now })
   pipeline = openEmailPipelineStore({ owner_home: tmp, now: () => now })
   live = []

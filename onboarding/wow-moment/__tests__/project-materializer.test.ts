@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildProjectMaterializer,
@@ -22,14 +21,14 @@ import {
   type ProjectMaterializerDeps,
 } from '../project-materializer.ts'
 import type { ImportResult } from '../../history-import/types.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let dir: string
 let db: ProjectDb
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'materializer-'))
-  db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(dir, 'project.db'))
 })
 
 afterEach(() => {

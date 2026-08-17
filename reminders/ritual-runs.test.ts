@@ -16,13 +16,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { createRitualRunStore, type RitualRunStore } from './ritual-runs.ts'
 import { reapOrphanRitualRuns } from './ritual-delivery.ts'
 import type { ReminderOutbound, ReminderOutboundInput } from './dispatcher.ts'
 import type { RitualFireSkipReason } from './rituals.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 // DDL↔TS lockstep freeze: EVERY member of the RitualFireSkipReason union must be
 // admissible by the real 0106 skip_reason CHECK. If a new member is added to the
@@ -43,8 +43,7 @@ let runs: RitualRunStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-ritual-runs-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   runs = createRitualRunStore(db)
 })
 

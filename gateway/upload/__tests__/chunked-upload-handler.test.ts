@@ -20,6 +20,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { Database } from 'bun:sqlite'
 import type { AdvanceResult } from '@neutronai/onboarding/interview/engine.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 import {
   buildChunkedUploadHandler,
@@ -68,8 +69,7 @@ function openTestDb(): ProjectDb {
   // but doesn't expose it. Open a sibling bare Database against the
   // same file for migrations (the bare connection inherits the WAL
   // journal mode the ProjectDb constructor already set).
-  const bare = new Database(path)
-  applyMigrations(bare)
+  const bare = openMigratedDatabaseAt(path)
   bare.close()
   dbs.push(db)
   return db

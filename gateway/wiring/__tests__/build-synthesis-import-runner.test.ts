@@ -17,11 +17,9 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -38,6 +36,7 @@ import {
   type WriteProjectSeedOutcome,
 } from '@neutronai/onboarding/synthesis/index.ts'
 import { buildSynthesisSession, type SynthesisRunner } from '../build-synthesis-session.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 import {
   buildSynthesisImportJobRunner,
   synthesisResultToImportResult,
@@ -52,8 +51,7 @@ function freshTmp(): string {
 }
 function freshDb(): ProjectDb {
   const dbPath = join(freshTmp(), 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   openDbs.push(db)

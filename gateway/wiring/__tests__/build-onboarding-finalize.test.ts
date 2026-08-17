@@ -17,12 +17,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
 import type { OnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import { MAX_ANALYSIS_PROJECTS } from '@neutronai/onboarding/interview/phase-prompts.ts'
 import { buildScaffoldMaterializer, ensureProjectRow } from '../project-create.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 import {
   buildOnboardingFinalize,
   type OnboardingFinalizeDeps,
@@ -35,8 +35,7 @@ const TOPIC_ID = 'topic-general'
 
 function makeDb(): ProjectDb {
   const dir = mkdtempSync(join(tmpdir(), 'finalize-'))
-  const db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(dir, 'project.db'))
   return db
 }
 

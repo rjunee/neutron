@@ -43,7 +43,6 @@ import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import { ChannelRouter } from '@neutronai/channels/router.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { SecretAuditLog } from '@neutronai/cores-runtime'
@@ -55,6 +54,7 @@ import {
 } from '../http/app-ws-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 import {
   CORE_SOURCE_TAG,
@@ -107,8 +107,7 @@ function fakeLoadPattern(name: string): string {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-reminders-chat-composer-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   // Production-shape adapter + registry + receiver.
   const auth = createAppWsAuthResolver({ project_slug: OWNER, bypass: true })

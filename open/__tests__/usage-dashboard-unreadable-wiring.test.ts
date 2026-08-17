@@ -24,12 +24,12 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import type { PoolSummary } from '@neutronai/persistence/usage-samples-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { KIMI_CREDENTIAL_SERVICE } from '@neutronai/trident/kimi-key.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 import {
   connectionNote,
@@ -91,8 +91,7 @@ beforeAll(async () => {
   })
   process.env['KIMI_BASE_URL'] = `http://127.0.0.1:${upstream.port}/coding`
 
-  db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(process.env['NEUTRON_DB_PATH'])
   const secrets = new SecretsStore({ data_dir: tmpDir, db })
   const credentials = new ProjectCredentialStore(db, { crypto: secrets })
   await credentials.set(asOwnerHandle('owner'), {

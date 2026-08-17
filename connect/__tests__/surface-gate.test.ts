@@ -12,10 +12,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { buildConnectSurfaceGate, connectSurfaceIsOpen } from '../surface-gate.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const NOW = 1_800_000_000_000
 
@@ -24,8 +24,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'connect-surface-gate-'))
-  db = ProjectDb.open(join(dir, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(dir, 'owner.db'))
 })
 
 afterEach(() => {

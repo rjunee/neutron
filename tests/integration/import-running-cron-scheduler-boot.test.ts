@@ -49,7 +49,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -62,6 +61,7 @@ import type { ImportJobRunnerHook } from '@neutronai/onboarding/interview/engine
 import type { ImportJob, ImportResult } from '@neutronai/onboarding/history-import/types.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const OWNER = 'owner-s15'
 const TOPIC = 'chat-s15'
@@ -117,8 +117,7 @@ function completedResult(): ImportResult {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-s15-cron-boot-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   buttonStore = new ButtonStore({ db })
   stateStore = new SqliteOnboardingStateStore({ db })
   transcript = new TranscriptWriter({

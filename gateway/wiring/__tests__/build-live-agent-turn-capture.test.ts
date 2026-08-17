@@ -21,7 +21,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -32,6 +31,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn, type LiveAgentOnboardingSeam } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -40,8 +40,7 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-lat-cap-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })

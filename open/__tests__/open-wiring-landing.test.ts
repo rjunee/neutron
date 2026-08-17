@@ -20,7 +20,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { newCredentialPool, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 
@@ -33,6 +32,7 @@ function newPool(provider: string): CredentialPool {
 import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireLandingStack, type WireLandingStackDeps } from '../wiring/landing.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -42,8 +42,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-wiring-landing-'))
-  db = ProjectDb.open(join(tmpDir, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmpDir, 'project.db'))
 })
 
 afterEach(() => {

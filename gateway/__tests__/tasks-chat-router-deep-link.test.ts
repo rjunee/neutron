@@ -38,7 +38,6 @@ import {
   loadManifest as loadTasksManifest,
 } from '@neutronai/tasks-core'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore as CanonicalTaskStore } from '@neutronai/tasks/store.ts'
 import { composeProductionGraph } from '../composition.ts'
@@ -52,6 +51,7 @@ import {
 } from '../cores/tasks-chat-router.ts'
 import type { IncomingEvent } from '@neutronai/channels/types.ts'
 import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'tasks-deep-link-project'
 const PROJECT = 'demo-project'
@@ -83,8 +83,7 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-tasks-deep-link-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   const canonical = new CanonicalTaskStore(db)
   const auth = createAppWsAuthResolver({ project_slug: OWNER, bypass: true })

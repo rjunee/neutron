@@ -41,7 +41,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { AnchorWalker } from '../comments/anchor-walker.ts'
@@ -49,6 +48,7 @@ import { CommentStore } from '../comments/comment-store.ts'
 import { createAppDocsSurface } from '../http/app-docs-surface.ts'
 import { DocStore } from '../http/doc-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'comments-composer-project'
 const PROJECT = 'demo-project'
@@ -78,8 +78,7 @@ async function startHarness(): Promise<Harness> {
   const owner_home = join(tmp, 'home')
   mkdirSync(owner_home, { recursive: true })
   mkdirSync(join(owner_home, 'Projects', PROJECT, 'docs'), { recursive: true })
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   // Build the docs surface in the same SHAPE the live composer uses
   // (`open/composer.ts:1417` CommentStore, `:2684` AnchorWalker +

@@ -93,6 +93,38 @@ bun test $(grep -LE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__
 bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
 ```
 
+## The migrated-DB template — migrate once per process, clone per test
+
+`tests/support/migrated-db.ts`. Do **not** write `ProjectDb.open(...)` +
+`applyMigrations(db.raw())` in a `beforeEach` — `applyMigrations` executes the
+whole migration tree (~350 KB of SQL) and measured ~137 ms of CPU per call.
+
+```ts
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
+
+beforeEach(() => {
+  tmp = mkdtempSync(join(tmpdir(), 'neutron-<suite>-'))
+  db = openMigratedDbAt(join(tmp, 'project.db'))   // ~7 ms, real file, real path
+})
+```
+
+| Helper | Shape | Cost | Use when |
+|---|---|---|---|
+| `openMigratedDb()` | in-memory `ProjectDb` | ~1.4 ms | the test only needs a handle |
+| `openMigratedDatabase()` | in-memory `bun:sqlite` `Database` | ~1.4 ms | the fixture holds a raw handle |
+| `openMigratedDbAt(path)` | file-backed `ProjectDb` | ~7 ms | the code under test reads `db.path`, or the test asserts about the file |
+| `openMigratedDatabaseAt(path)` | file-backed `Database` | ~7 ms | same, raw handle |
+
+The template is built lazily on first use by the **real** `applyMigrations`, so
+the schema is identical by construction — `tests/support/migrated-db.test.ts`
+pins that against a freshly-migrated database, ledger included. Scope is the
+**process**, so with this runner it is built once per chunk, not once per run.
+
+**Tests that are ABOUT migration behaviour must keep calling `applyMigrations`
+directly** — the ledger, provenance, the scope rekey, ordinal identity, repairs,
+untracked-file refusals. Exercising the real path is their coverage; template-ise
+them and you delete it.
+
 ## Knobs
 
 | Env | Default | What it does |

@@ -39,7 +39,6 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import {
@@ -59,6 +58,7 @@ import { githubSpawnEnvRef } from '@neutronai/gateway/wiring/substrate-profiles.
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireSubstrates } from '../wiring/substrates.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 /** One warm child per pool key, exactly as the persistent pool holds it. */
 interface WarmChild {
@@ -382,8 +382,7 @@ describe('the PRODUCTION dispatcher composes on the background REPL', () => {
     delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
     process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
     delete process.env['NOTIFY_SOCKET']
-    db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(process.env['NEUTRON_DB_PATH'])
   })
 
   afterEach(() => {

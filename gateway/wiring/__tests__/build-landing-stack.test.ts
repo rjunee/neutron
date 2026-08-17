@@ -13,14 +13,13 @@
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 import {
   buildLandingStack,
   resolveLandingStaticDir,
@@ -38,8 +37,7 @@ let db: ProjectDb
 beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'neutron-landing-stack-'))
   const dbPath = join(workdir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   db = ProjectDb.open(dbPath)
 })

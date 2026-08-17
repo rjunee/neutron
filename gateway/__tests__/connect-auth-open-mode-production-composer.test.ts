@@ -34,13 +34,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppConnectAuthSurface } from '../http/app-connect-auth.ts'
 import { FederatedTokenStore } from '../connect/federated-token-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   formatSetCookie,
   readSessionCookie,
@@ -82,8 +82,7 @@ interface Harness {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-ct-open-composer-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
 
   const secrets = new SecretsStore({ data_dir: tmp, db })
   // Construct the FederatedTokenStore exactly as the open-mode boot block

@@ -40,8 +40,8 @@ import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import { buildButtonPromptClaim } from '../wiring/build-button-prompt-claim.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { InMemoryStore, SendQueue, SyncEngine, normalizeInbound } from '@neutronai/chat-core/index.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const TOPIC = 'app:sam'
 
@@ -50,8 +50,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'no-dd-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 afterEach(() => {
   db.close()

@@ -41,11 +41,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { resolveBootConfig } from '@neutronai/config/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -114,8 +114,7 @@ afterEach(async () => {
  * composer THROUGH that config and nowhere else.
  */
 async function startHarness(opts: { withConfig?: boolean } = {}): Promise<Harness> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   const nowIso = new Date().toISOString()
   await db.run(
     `INSERT INTO projects (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)

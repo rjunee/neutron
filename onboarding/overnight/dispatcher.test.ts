@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { OvernightQueueStore } from './queue-store.ts'
@@ -16,6 +15,7 @@ import {
   type OvernightTridentSnapshot,
 } from './dispatcher.ts'
 import { runMorningBrief, type MorningBriefDeliverInput } from './morning-brief.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 import {
   buildOvernightTridentSeam,
   defaultResultDocWriter,
@@ -34,8 +34,7 @@ let queue: OvernightQueueStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-overnight-disp-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   queue = new OvernightQueueStore(db)
 })
 

@@ -2,13 +2,12 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { PlatformSecretsStore } from '@neutronai/cores-sdk'
 
 import { SecretAuditLog, buildAuditedSecretsStore } from '../secret-audit.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let dbPath: string
@@ -19,8 +18,7 @@ let now = 2_000_000
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'cores-runtime-audit-'))
   dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   projectDb = ProjectDb.open(dbPath)
   now = 2_000_000

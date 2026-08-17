@@ -34,13 +34,11 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -48,6 +46,7 @@ import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/acc
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import { mountOpenCores } from '@neutronai/gateway/cores/mount-open-cores.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = asOwnerHandle('codegen-cancel-composition')
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -62,8 +61,7 @@ function bench(): { db: ProjectDb; owner_home: string; trident: TridentRunStore;
   const owner_home = mkdtempSync(join(tmpdir(), 'codegen-cancel-comp-'))
   cleanups.push(() => rmSync(owner_home, { recursive: true, force: true }))
   const dbPath = join(owner_home, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

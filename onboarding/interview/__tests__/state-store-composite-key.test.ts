@@ -20,13 +20,13 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   InMemoryOnboardingStateStore,
   type OnboardingStateStore,
 } from '../state-store.ts'
 import { SqliteOnboardingStateStore } from '../sqlite-state-store.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 const OWNER = 't1'
 const USER_A = 'user-A'
@@ -37,8 +37,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-composite-key-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
 })
 
 afterEach(() => {

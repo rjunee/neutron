@@ -16,7 +16,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generateKeyPair, type KeyLike } from 'jose'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   canInviteRole,
@@ -29,6 +28,7 @@ import {
 import { createAppProjectsSurface } from '../app-projects-surface.ts'
 import { InMemoryProjectSettingsStore } from '../app-projects-surface.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 let tmp: string
 let inviterDb: ProjectDb
@@ -38,8 +38,7 @@ const FIXED_NOW = 1_900_000_000_000
 
 beforeEach(async () => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-app-invite-'))
-  inviterDb = ProjectDb.open(join(tmp, 'inviter.db'))
-  applyMigrations(inviterDb.raw())
+  inviterDb = openMigratedDbAt(join(tmp, 'inviter.db'))
   const { privateKey, publicKey } = await generateKeyPair('EdDSA')
   signing_key = { kid: 'invite-key-1', privateKey, publicKey }
 })

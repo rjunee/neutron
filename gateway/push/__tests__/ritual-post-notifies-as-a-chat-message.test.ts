@@ -40,7 +40,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { ButtonStore } from '@neutronai/channels/button-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approval.ts'
 import {
@@ -58,6 +57,7 @@ import {
 import { createDeliver } from '../../http/deliver.ts'
 import { buildButtonStoreReminderOutbound } from '../../proactive/reminder-outbound.ts'
 import { buildChatMessagePushSink } from '../chat-message-push.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 /** The composed report a fired `kaizen` posts — deliberately NOT the row's message. */
 const COMPOSED =
@@ -79,8 +79,7 @@ const noopNotifier: ApprovalNotifier = { notify: async () => {} }
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-ritual-push-'))
   ritualsDir = mkdtempSync(join(tmpdir(), 'neutron-ritual-push-defs-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new ReminderStore(db)
 })
 

@@ -51,13 +51,13 @@ import { join } from 'node:path'
 
 import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CommentStore, type AppendEventInput } from '../comment-store.ts'
 import { AgentWatcher } from '../agent-watcher.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '../../http/chat-bridge.ts'
 import { buildPhaseSpecResolver } from '../../wiring/build-phase-spec-resolver.ts'
 import type { AgentWatcherLlmCall } from '../../wiring/build-agent-watcher-llm-call.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 const PROJECT_SLUG = 'demo'
 const USER_ID = 'user_uA'
@@ -97,8 +97,7 @@ function start(): Harness {
     )
   }
 
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const secrets = new SecretsStore({ data_dir: tmp, db })
   const apiKeys = new ApiKeyStore({ db, secrets })
 

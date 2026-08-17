@@ -13,7 +13,6 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -26,6 +25,7 @@ import {
 import type { ImportJob } from '@neutronai/onboarding/history-import/types.ts'
 import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
+import { openMigratedDbAt } from '../support/migrated-db.ts'
 
 const ZIP_MAGIC = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x01])
 
@@ -42,8 +42,7 @@ let sentPrompts: Array<{ prompt: ButtonPrompt }>
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-upload-roundtrip-'))
   owner_home = join(tmp, 'owner_home')
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   buttonStore = new ButtonStore({ db })
   stateStore = new InMemoryOnboardingStateStore()
   transcript = new TranscriptWriter({

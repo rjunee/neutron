@@ -18,9 +18,9 @@ import {
   type AppWsOutbound,
 } from '@neutronai/channels/index.ts'
 import { AppChatReceiptStore, AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 interface Harness {
   base: string
@@ -96,9 +96,8 @@ function receiptFor(events: AppWsOutbound[], messageId: string) {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'gw-receipts-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   // Apply the full migration tree so app_chat_messages + app_chat_receipts exist.
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

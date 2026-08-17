@@ -78,6 +78,55 @@ for a different problem:
   that matters.
 
 Landed by PR #402.
+## 2026-08-17 — the suite migrated once per test; now it migrates once per process and clones
+
+`applyMigrations` executes the whole migration tree — ~350 KB of SQL across ~120
+migrations — and the dominant test fixture in this repo ran it in `beforeEach`. A
+1,349-file sweep measured it at ~137 ms of CPU per call and ~485 s across ~3,730 tests,
+about a quarter of the suite's ~1,918 s. It is not fsync (`persistence/db.ts`
+STARTUP_PRAGMAS already sets `journal_mode = WAL` + `synchronous = NORMAL`); it is DDL
+parse and exec spread thin with no single villain, so there is nothing to tune inside the
+runner. The only real win is to stop doing it per test.
+
+`tests/support/migrated-db.ts` builds the migrated page image ONCE per process, lazily on
+first use, with the REAL `applyMigrations` against an in-memory database, then hands each
+test a clone: `openMigratedDb()` / `openMigratedDatabase()` restore it in memory via
+`Database.deserialize` (~1.4 ms), and `openMigratedDbAt(path)` /
+`openMigratedDatabaseAt(path)` write it to a real file and open that (~7 ms). 386 test
+files and 412 call sites moved over. `ProjectDb.adopt(path, db)` is the new factory the
+in-memory shape needs — `Database.deserialize` is a static that returns a handle no path
+can reopen — and it shares `STARTUP_PRAGMAS` with `open` so an adopted connection cannot
+silently skip foreign-key enforcement.
+
+THE FILE-BACKED SHAPE IS THE MECHANICAL DEFAULT, deliberately. The one production reader
+of `ProjectDb.path` (`gateway/composition/build-core-modules.ts:589`, `db_path` for the
+trident orchestrator) hands the path to a process that reopens that database, so a
+blanket in-memory conversion would have been equivalent-only-if-nothing-reads-the-path.
+Keeping the path every fixture already had makes it equivalent by construction.
+
+THE MIGRATION-BEHAVIOUR TESTS WERE LEFT ON THE REAL RUNNER, which is the point of the
+cut rather than an exception to it: `migrations/__tests__/`, `migrations/runner.test.ts`,
+`migrations/snapshot.test.ts`, `tests/integration/migration-*-roundtrip`,
+`tests/integration/orphan-survival.test.ts` and `open/__tests__/open-scope-rekey-*` assert
+on the ledger, provenance, the rekey, ordinal identity and repairs — exercising the real
+path IS their coverage. Nine further files were left alone because a statement sits
+between the open and the migrate; that is noted rather than forced.
+
+`tests/support/migrated-db.test.ts` is the safety argument, and its control is a real
+`applyMigrations` against a real file taken in the same process — not a checked-in
+snapshot, which could agree with a template that had drifted along with it. It pins that
+both clone shapes carry an identical `sqlite_master` and an identical ledger (columns read
+from `pragma_table_info` so a future provenance column is covered automatically), that a
+re-run of the real runner against a clone finds NOTHING pending, that clones are
+independent of each other and of the template, and that the template is built once per
+process.
+
+MEASURED, same box, back-to-back, nothing else running, `bun test work-board
+project-credentials skill-forge persistence tasks reminders channels` (146 files):
+before 2,073 tests in 608.1 s wall / 220.9 s CPU (167.6 user + 53.3 sys); after the
+same 2,073 tests in 73.3 s wall / 19.7 s CPU (11.8 user + 7.9 sys) — 91% of the CPU
+gone, and the count is identical either side. The one baseline failure was a 10.8 s
+same-millisecond ordering test starved by the slow path; it passes on the fast one.
 
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 

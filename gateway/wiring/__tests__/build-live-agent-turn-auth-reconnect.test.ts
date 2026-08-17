@@ -15,7 +15,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ChatOutbound } from '@neutronai/landing/server.ts'
@@ -32,6 +31,7 @@ import {
   TIMEOUT_BODY,
 } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 
 /** The message the substrate's `failAuthInvalid` (pool.ts) surfaces, as the caller
  *  sees it after `collectTokensToString` prefixes `cc-llm-call: `. */
@@ -45,8 +45,7 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-auth-reconnect-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })

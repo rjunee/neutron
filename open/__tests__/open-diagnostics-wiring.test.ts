@@ -20,10 +20,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const COOKIE_SECRET = 'open-test-secret-0123456789'
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -80,8 +80,7 @@ afterEach(async () => {
 })
 
 async function startHarness(): Promise<Harness> {
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   // Seed a LIVE source: a failed import job the diagnostics endpoint must surface.
   await db.run(
     `INSERT INTO import_jobs (job_id, project_slug, source, status, started_at, error_code, error_message)

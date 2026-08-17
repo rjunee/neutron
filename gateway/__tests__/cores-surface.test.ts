@@ -13,12 +13,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
@@ -26,6 +24,7 @@ import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import { createCoresSurface } from '../http/cores-surface.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
+import { openMigratedDatabaseAt } from '../../tests/support/migrated-db.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const OWNER = 'surface-test'
@@ -78,8 +77,7 @@ async function makeBench(): Promise<Bench> {
   const dbDir = join(ownerHome, 'db')
   mkdirSync(dbDir, { recursive: true })
   const dbPath = join(dbDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

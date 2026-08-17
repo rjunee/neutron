@@ -16,13 +16,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import type { OutgoingMessage } from '../sink.ts'
 import { ProactiveStateStore } from '../state-store.ts'
 import { DEFAULT_SWEEP_INTERVAL_MS } from '../idle-nudge-sweep.ts'
+import { openMigratedDbAt } from '../../../tests/support/migrated-db.ts'
 import {
   IDLE_NUDGE_SWEEP_HANDLER_NAME,
   buildIdleNudgeSweepHandler,
@@ -42,8 +42,7 @@ interface Harness {
 
 function open(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-proactive-cron-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   const sent: OutgoingMessage[] = []
   return {
     db,

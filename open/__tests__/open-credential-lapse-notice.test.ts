@@ -46,13 +46,13 @@ import {
   AUTH_RECONNECT_BODY,
   RECONNECT_AUTH_VALUE,
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
 import { createCredentialLapseNotifier } from '../credential-lapse-notice.ts'
 import { CredentialUsageMonitor } from '../credential-usage-monitor.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -174,8 +174,7 @@ beforeEach(() => {
   delete process.env['ANTHROPIC_API_KEY']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
-  db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(process.env['NEUTRON_DB_PATH'])
   anthropicResponse = null
   installFetchStub()
 })

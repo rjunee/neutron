@@ -30,7 +30,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import type { AppChatMessageLog } from '@neutronai/persistence/index.ts'
 import {
   AppChatEditStore,
@@ -42,6 +41,7 @@ import {
 import { AppWsAdapter } from '../adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../session-registry.ts'
 import type { AppWsOutbound } from '../envelope.ts'
+import { openMigratedDbAt } from '../../../../tests/support/migrated-db.ts'
 
 const CHANNEL_TOPIC = 'app:sam'
 /** The live report's exact shape: 1130 messages, ~630 of them missing. */
@@ -54,8 +54,7 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-ws-replay-'))
-  db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'owner.db'))
 })
 
 afterEach(() => {

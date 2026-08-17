@@ -25,14 +25,13 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { composeProductionGraph, DORMANT_LOOPS } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -135,8 +134,7 @@ async function bootRealOpen(): Promise<Harness> {
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
     start: () => cannedHandle(opts.substrate_instance_id),
   })
-  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(process.env['NEUTRON_DB_PATH']!)
   // 1) REAL Open composer — starts the sweeper + (credentialed) lifecycle watchdog
   //    and registers them into `composition.loop_registry`.
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })

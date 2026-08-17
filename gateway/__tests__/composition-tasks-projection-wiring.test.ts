@@ -38,7 +38,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
@@ -48,6 +47,7 @@ import {
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppTasksSurface } from '../http/app-tasks-surface.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 const OWNER = 'wiring-project'
 const PROJECT = 'proj-A'
@@ -66,8 +66,7 @@ async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-tasks-wiring-'))
   const owner_home = tmp
   const dbPath = join(tmp, 'owner.db')
-  const db = ProjectDb.open(dbPath)
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(dbPath)
 
   // Mirrors the production composer in `gateway/index.ts`: ONE canonical
   // store, passed to BOTH the HTTP surface AND the composition's
@@ -274,8 +273,7 @@ describe('composition wiring — guardrail for subscriber-feature + missing cano
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-tasks-warn-'))
-    db = ProjectDb.open(join(tmp, 'owner.db'))
-    applyMigrations(db.raw())
+    db = openMigratedDbAt(join(tmp, 'owner.db'))
     originalWarn = console.warn
   })
 

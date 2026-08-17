@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { TridentRunStore } from './store.ts'
@@ -22,6 +21,7 @@ import {
   WORK_BOARD_START_TOOL,
 } from './work-board-build-tool.ts'
 import type { GitModeProbe } from './git-mode.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 
 /**
  * A merge-mode probe that never shells out. `hasGithubOrigin: false` short-
@@ -54,8 +54,7 @@ let runningRunId: string | null
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-wb-build-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
   attached = []
   runningRunId = null

@@ -34,7 +34,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
@@ -44,6 +43,7 @@ import type { ModuleContext } from '../module-graph.ts'
 import { IDLE_NUDGE_SWEEP_HANDLER_NAME } from '../proactive/cron.ts'
 import type { OutgoingMessage } from '../proactive/sink.ts'
 import { writeOwnerTimezone } from '../storage/owner-metadata.ts'
+import { openMigratedDbAt } from '../../tests/support/migrated-db.ts'
 
 /** The owner's real zone, stored in `instance_metadata`. */
 const OWNER_TZ = 'America/Los_Angeles'
@@ -95,8 +95,7 @@ interface Harness {
 
 function openHarness(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-proactive-tz-'))
-  const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
+  const db = openMigratedDbAt(join(tmp, 'owner.db'))
   return {
     db,
     tasks: new TaskStore(db),

@@ -25,12 +25,10 @@
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle, type OwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
@@ -38,6 +36,7 @@ import type { ToolCallContext, ToolRegistration } from '@neutronai/tools/registr
 import { installBundledCores } from '../install-bundled.ts'
 import { OAuthTokenManager, GOOGLE_REVOKE_URL, metaLabel } from '../oauth-token-manager.ts'
 import { buildIntegrationsTools } from '../integrations-tools.ts'
+import { openMigratedDatabaseAt } from '../../../tests/support/migrated-db.ts'
 import {
   buildIntegrationsStatus,
   type ApiKeyIntegration,
@@ -76,8 +75,7 @@ async function makeBench() {
   const dbDir = join(home, 'db')
   mkdirSync(dbDir, { recursive: true })
   const dbPath = join(dbDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
+  const raw = openMigratedDatabaseAt(dbPath)
   raw.close()
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())

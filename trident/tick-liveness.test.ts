@@ -24,10 +24,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { AdvanceOutcome } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
+import { openMigratedDbAt } from '../tests/support/migrated-db.ts'
 import {
   TridentTickLoop,
   type LauncherLiveness,
@@ -41,8 +41,7 @@ let store: TridentRunStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'trident-tick-liveness-'))
-  db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
+  db = openMigratedDbAt(join(tmp, 'project.db'))
   store = new TridentRunStore(db)
 })
 
