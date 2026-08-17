@@ -3,7 +3,7 @@
 Spec: the Plan card "the pending deploy will not boot: ordinal 125 mismatches with no repairs entry, and base_sha/base_behind/agent_waked_at are missing from the live DB". Base branch: `main` (verified at `de09d6a6`).
 
 Planner verification record (2026-08-17, all read-only):
-- Live DB `/var/lib/neutron/tenants/n7eb7cca79ce58139/project.db` `_migrations`: 122=`work_board_items_pr`, 123=`code_trident_runs_crash_recoveries`, 124=`dispatch_dependencies_and_claims`, 125=`code_trident_runs_fix_round_contract`, 126=`code_trident_runs_infra_retries`; no rows 127+.
+- Live DB (`<NEUTRON_HOME>/project.db`) `_migrations`: 122=`work_board_items_pr`, 123=`code_trident_runs_crash_recoveries`, 124=`dispatch_dependencies_and_claims`, 125=`code_trident_runs_fix_round_contract`, 126=`code_trident_runs_infra_retries`; no rows 127+.
 - Live `code_trident_runs` LACKS `base_sha`, `base_behind`, `agent_waked_at`; HAS `infra_retries` plus stray branch column `claimed_paths` (referenced nowhere on main — safe to shed).
 - Live `work_board_items` has all 12 canonical columns plus strays `pr`, `pr_url`, `blockers`; statuses are within 0130's widened CHECK — 0127 and 0130 apply cleanly once boot passes 125.
 - Deployed `e474cf1f` migrations stop at 0124; `0125_code_trident_runs_base_sha.sql` arrives in `a8f98914` — the deploy is what arms the refusal. `repairs.json` on main covers only 122 and 124.
