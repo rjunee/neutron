@@ -509,7 +509,16 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * the claim is already wrong. So the command is now executed as a registry:
  * `tests/integration/identity-env-readers-registry.test.ts` walks the tree with
  * these patterns and asserts the set of reader files EXACTLY equals its known
- * list. A new untrimmed reader fails on the PR that adds it, and a registry row
+ * list. It scans the BARE NAME rather than the access forms above, so it is
+ * deliberately BROADER than the command it executes: `env["NEUTRON_HOME"]`,
+ * `` env[`OWNER_HOME`] `` and `const { OWNER_HOME } = env` match none of the
+ * forms in that grep and would otherwise land silently — mirroring the command
+ * exactly would have rebuilt round 3's blind spot inside the guard against
+ * round 3's blind spot. The cost is that a file merely NAMING a variable (an
+ * error string, a schema key, a template placeholder) also registers, which is
+ * one annotated line instead of a hole. A fully computed key (`env[someVar]`)
+ * remains invisible to any textual scan; that is stated there rather than
+ * papered over. A new untrimmed reader fails on the PR that adds it, and a registry row
  * whose file stopped reading the variable fails too, so the list cannot rot
  * into a description of a tree that no longer exists — the way rounds 1 and 2
  * went wrong. That test covers COMPLETENESS (which files are in scope); each

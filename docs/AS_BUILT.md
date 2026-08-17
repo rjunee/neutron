@@ -136,6 +136,23 @@ direction; and neutering the walker → RED on the anti-vacuity control, which i
 the failure a set-equality guard silently hides when it compares two empty
 lists.
 
+**The guard scans the BARE NAME, which makes it strictly broader than the
+command it executes — on purpose.** Mirroring the published grep's access forms
+would have inherited its blind spots and rebuilt round 3's bug inside the guard
+against round 3's bug: `env["NEUTRON_HOME"]`, a template-literal key, and
+`const { OWNER_HOME } = env` match none of those forms. Measured — the published
+pattern set returns **0** on a file containing both shapes while returning 1 on
+a form it does match (positive control, so the 0 is an answer rather than a
+broken grep); the widened guard flags both. The cost is that three files which
+NAME a variable without reading it now carry a registry line saying so
+(`gateway/boot-bind-policy.ts`'s wide-bind refusal message, `open/server.ts`'s
+boot banner, and `runtime/system-prompt.ts`'s `{{OWNER_HOME}}` placeholder
+rewrite). One annotated line beats a hole, and the asymmetry is the reason: a
+false positive costs a line, a false negative costs another silent
+identity-resolution bug found months later. A fully computed key
+(`env[someVar]`) stays invisible to any textual scan; that limit is written down
+in the test rather than papered over.
+
 **A pin that lives only in a distant file is indistinguishable from no pin.**
 `gateway/__tests__/resolve-registry-db-path.test.ts` advertises itself as
 pinning "all four resolution tiers" and covered `''` but never whitespace; the

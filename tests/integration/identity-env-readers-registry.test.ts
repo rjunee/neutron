@@ -51,18 +51,36 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
 /**
- * The published scope command, as patterns. Mirrors the grep in
- * `config/index.ts` verbatim, including the constant-key form that round 3's
- * version could not match.
+ * DELIBERATELY BROADER THAN THE COMMAND IT EXECUTES: the BARE NAME, anywhere in
+ * non-comment code.
+ *
+ * The published grep matches access FORMS — `.NEUTRON_HOME`, `NEUTRON_HOME']`,
+ * `OWNER_HOME_KEY`. Mirroring it here would inherit its blind spots and rebuild
+ * round 3's bug in the guard against round 3's bug: a future reader written
+ * `env["NEUTRON_HOME"]` (double quotes), `` env[`OWNER_HOME`] `` (template
+ * literal), or `const { NEUTRON_HOME } = env` (destructured) matches NONE of
+ * those forms and would land silently. I checked all three shapes against the
+ * current tree and none exist today — which is exactly why this is the moment
+ * to make them impossible rather than to note them as absent.
+ *
+ * The trade is deliberately asymmetric, because the two errors do not cost the
+ * same. Matching the bare name also catches lines that merely NAME the variable
+ * without reading it — a schema key, an error string, a template placeholder.
+ * That false positive costs one registry line with a note saying what the file
+ * actually does. A false negative costs a silent identity-resolution bug found
+ * months later, which is the entire history of this claim. So the scan is
+ * over-inclusive on purpose and the registry absorbs the difference.
+ *
+ * WHAT NO TEXTUAL SCAN CAN CATCH, stated rather than implied: a fully computed
+ * key (`env[someVariable]`) names nothing and is invisible here. That is a real
+ * hole, it is not closeable without a type-aware pass, and pretending otherwise
+ * would be the same over-claim this file exists to end.
  */
 const READ_PATTERNS: ReadonlyArray<RegExp> = [
-  /NEUTRON_HOME'\]/,
-  /\.NEUTRON_HOME\b/,
-  /OWNER_HOME'\]/,
-  /\.OWNER_HOME\b/,
-  /NEUTRON_DB_PATH'\]/,
-  /\.NEUTRON_DB_PATH\b/,
-  /OWNER_HOME_KEY/,
+  /\bNEUTRON_HOME\b/,
+  /\bOWNER_HOME\b/,
+  /\bNEUTRON_DB_PATH\b/,
+  /\bOWNER_HOME_KEY\b/,
 ]
 
 /**
@@ -102,6 +120,16 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
 
   // --- Re-export only, no predicate of its own ---
   'prompts/index.ts': 're-exports OWNER_HOME_KEY from prompts/template.ts; no read of its own.',
+
+  // --- NAMES the variable but does not READ it. These are the cost of scanning
+  // --- the bare name (see READ_PATTERNS): each is one line here instead of a
+  // --- blind spot a future reader could hide in.
+  'gateway/boot-bind-policy.ts':
+    'NOT a reader — names NEUTRON_HOME inside the wide-bind refusal message telling the operator which variable to fix. No env access.',
+  'open/server.ts':
+    'NOT a reader of its own — the boot banner interpolates the ALREADY-resolved home. The blank-is-unset predicate here is applyEnvShim, which takes the value from the frozen BootConfig rather than re-reading the env.',
+  'runtime/system-prompt.ts':
+    'NOT a reader — compactHomePath rewrites the literal {{OWNER_HOME}} TEMPLATE PLACEHOLDER to ~ for display. It never touches process.env.',
 }
 
 /** Roots that are excluded wholesale. */
