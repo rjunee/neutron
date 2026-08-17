@@ -450,8 +450,9 @@ export class WebChatSession {
     // reading the store here — `chat-core/ws-client.ts` dispatches frames without
     // awaiting the previous one, so a read sees an arbitrary prefix of the page this
     // frame is about, and it fails in the direction that DECLINES a walk the device
-    // needs. Both operands are captured in `resumeAndFlush`, before any response can
-    // arrive.
+    // needs. Both operands are therefore captured in `resumeAndFlush` BEFORE it sends
+    // the resume — ordering, not timing, is what makes them describe the store as it
+    // was when the request went out.
     //
     // AND THE CURSOR TERM IS NOT DECORATION: a device that was whole can acquire a
     // hole from the very page it is reacting to. Holding 1..100 of a topic grown to
@@ -662,7 +663,26 @@ export class WebChatSession {
     // fallback) doesn't resume/resend a second time on the same connection.
     this.resumedThisOpen = true
     const resume = await this.engine.resumeRequest(this.topic_id)
+    // EVERY OPERAND OF THE GAP GUARD IS CAPTURED BEFORE THE RESUME IS SENT.
+    // `ws.send(resume)` is the instant the server may start answering, and
+    // `chat-core/ws-client.ts` dispatches each inbound frame WITHOUT awaiting the
+    // previous one — so the `history_gap` handler can run inside any `await` that
+    // follows the send. Reading the store after the send therefore reads a store the
+    // page is already landing in, and the guard decides on a mixture of before and
+    // after. That failed in both directions: a stale `false` re-bought a page the
+    // device already held (the waste this guard exists to remove), and after a
+    // `clear()` a stale high cursor with a stale `true` SUPPRESSED a real gap, leaving
+    // the fresh transcript's prefix missing until the next open. The window is small
+    // and the loss it can cause is permanent, so the capture is ordered, not timed.
+    //
+    // `backfillFrom` is null both for an EMPTY store and for a transcript that is
+    // already whole, and only the second is a reason to refuse a backwards page.
+    this.backfillRounds = 0
+    this.backfillFloor = null
     this.resumeCursor = resume.after_seq
+    const backfillFrom = await this.engine.backfillFrom(this.topic_id)
+    this.historyWholeAtResume =
+      backfillFrom === null && (await this.store.lastSeenSeq(this.topic_id)) > 0
     this.ws.send(resume)
     const flushed = await this.queue.flushUnacked((envelope) => {
       const ok = this.ws.send(envelope)
@@ -670,11 +690,10 @@ export class WebChatSession {
     }, this.topic_id)
     this.armAckTimersFor(flushed)
     if (flushed.length > 0) this.emitChange()
-    // LAST, behind the queue drain: history is never more urgent than the owner's
-    // undelivered sends. A fresh budget per forward resume, then one backwards
-    // request if this device's transcript is NOT CONTIGUOUS down to seq 1 — the
-    // server can only report a gap for a page it just sent, so without this local
-    // test a walk that ran out of budget on one open could never be picked up on
+    // The backwards REQUEST stays last, behind the queue drain: history is never more
+    // urgent than the owner's undelivered sends. Only the request is ordered here —
+    // the decision to make it was taken above, before the send. A fresh budget per
+    // forward resume, so a walk that ran out of budget on one open is picked up on
     // the next.
     //
     // Contiguity, not "my oldest applied seq" — which is what this said, and it
@@ -682,16 +701,6 @@ export class WebChatSession {
     // `earliestSeenSeq`. A device holding seq 1 with a hole ABOVE it has an oldest
     // seq of 1, so an oldest-row test reports "nothing missing" and the hole is never
     // asked for again (`chat-core/sync-engine.ts` `backfillFrom`).
-    this.backfillRounds = 0
-    this.backfillFloor = null
-    const backfillFrom = await this.engine.backfillFrom(this.topic_id)
-    // Cached for the open, because the `history_gap` handler cannot safely re-derive
-    // either operand (`chat-core/ws-client.ts` dispatches frames without awaiting the
-    // previous one, so a store read there sees an arbitrary prefix of the page it is
-    // reacting to). `backfillFrom` is null both for an EMPTY store and for a
-    // transcript that is already whole, and only the second is a reason to refuse.
-    this.historyWholeAtResume =
-      backfillFrom === null && (await this.store.lastSeenSeq(this.topic_id)) > 0
     if (backfillFrom !== null) this.requestHistoryBackfill(backfillFrom)
   }
 
