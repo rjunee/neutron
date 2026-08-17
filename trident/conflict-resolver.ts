@@ -97,10 +97,10 @@ const RESOLVER_TOOLS: AgentSpec['tools'] = RESOLVER_TOOL_NAMES.map((name) => ({
   capability_required: 'fs:project_data',
 }))
 
-const NO_INTERACTIVE_RULE =
+export const NO_INTERACTIVE_RULE =
   'You run UNATTENDED. NEVER call AskUserQuestion or any interactive prompt — if you would need to ask, ESCALATE (below) instead of hanging.'
 
-const REDIRECT_RULE =
+export const REDIRECT_RULE =
   'For ANY long or verbose command (a full test run), redirect stdout+stderr to a log file and read ONLY the summary tail — never let raw output flood your context.'
 
 // Same rule, same wording, as `NO_PATTERN_KILL_RULE` in trident/inner-workflow.mjs
@@ -108,7 +108,7 @@ const REDIRECT_RULE =
 // script — the two other rules above are duplicated from it for the same reason).
 // This resolver is a FORGE with Bash running mid-rebase on the SHARED box, which is
 // exactly when an agent reaches for `pkill` to clear something it thinks is stuck.
-const NO_PATTERN_KILL_RULE =
+export const NO_PATTERN_KILL_RULE =
   'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match the whole machine, not your worktree, and one such command has already SIGTERMed every concurrent lane on this box including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
 
 /**
