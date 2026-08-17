@@ -2,6 +2,69 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the migration tree is replayed once per PROCESS and copied per test, and the runner keeps a zero-line diff (#406)
+
+`tests/support/migrated-db.ts` seeds a test database by COPYING a template that the
+**unmodified `applyMigrations`** builds once per process, replacing the per-test replay at
+the call sites that only ever wanted a migrated database. The seed moves ABOVE the open —
+`seedMigratedDb(path)` then `ProjectDb.open(path)` — which is what lets a file copy do the
+work, since it never has to reach a handle somebody already holds.
+
+Why a copy and not something cleverer: phase decomposition of `applyMigrations` on this
+tree puts **86% of it in SQL execution** and another 16% in the per-migration ledger
+inserts, against ~2.1% for `loadMigrations` and ~2.0% for the git index read. So memoising
+the loaded/hashed tree is a dead end — it can recover 4-5% at best, and a steady-state
+re-apply on an already-migrated database still costs ~48 ms because it re-reads the tree
+and re-hashes every recorded file for the content-drift notice. An SQL-dump-hydration
+variant was prototyped and rejected: conformant, but ~122 ms/op and ~170 CREATE statements
+re-executed per test. `Database.deserialize` cannot help — static-only, returns a NEW
+handle, and no backup API exists. A byte copy is ~4.6 ms.
+
+`migrations/runner.ts` is NOT MODIFIED — a zero-line diff on the file that had three real
+defects fixed in it the day before. There is no second migration engine here and no fast
+path that could drift, because the template IS a real replay: the real runner, over the
+real tree, in the same checkout. Every seeded database is byte-for-byte that replay — same
+schema, same rows, same `_migrations` ledger including `content_sha256`,
+`applied_by_commit` and `tree_provenance`, same persisted `journal_mode`. Production is
+untouched STRUCTURALLY rather than by a flag: the gateway boot and the install CLI keep
+calling the real runner, and `tests/support/` is not a workspace package, so nothing on the
+production package graph can import the helper. The eslint `import/no-relative-packages`
+entry records that as deliberate rather than incidental.
+
+The equivalence is DIFFED, not asserted.
+`tests/support/migrated-db-conformance.test.ts` builds one database each way over the full
+tree and compares five things: schema byte-identically through the same serializer
+`migrations/snapshot.test.ts` pins; `PRAGMA journal_mode`; every user table's full contents
+ordered, minus an exhaustive one-entry allowlist of wall-clock columns
+(`_migrations.applied_at`) — the arm that covers the ledger, since `version`, `name`,
+`content_sha256`, `applied_by_commit` and `tree_provenance` are all inside it; the REAL
+runner certifying the seed, which must report `applied = []` with the whole tree `skipped`;
+and `PRAGMA integrity_check` = ok with an empty `foreign_key_check`. Two real replays
+already differ on `applied_at`, so arm 3 is the strongest equality that exists between two
+independently built databases — a future migration seeding time-dependent data breaks it
+loudly, and the resolution is a deliberate allowlist entry, never a loosened comparison.
+
+Mutation-tested BOTH ways in the same file, because a control that cannot fail is
+decoration:
+
+| Mutant | Result |
+| --- | --- |
+| inject one extra `_migrations` row into the seeded database | RED — arm 3, the full-data diff |
+| inject one extra table into the seeded database | RED — arm 1, the schema |
+
+Each is asserted identical BEFORE its mutation, so the failure is caused by the mutation
+and not by a pre-existing difference.
+
+`seedMigratedDb` REFUSES a non-empty target and deliberately has no fallback to a slow
+path: seeding is only equivalent to a replay on a fresh database, so the one case where it
+would not be, it throws. That is what makes a wrongly-converted call site fail loudly
+instead of quietly masking a refusal, a repair entry or a legacy-ledger rekey that only the
+real runner performs. Every suite under `migrations/` stays on the real runner untouched —
+the ledger, provenance, ordinal identity, the rekey, the refusal paths — because those
+replays ARE the coverage that caught four boot-breaking defects. Sites inside otherwise
+converted files that pass a custom migrations directory or assert on the result object stay
+too; those files import both.
+
 ## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
 
 `.github/workflows/ci.yml` runs the suite on **eight** shard legs, up from four, and
