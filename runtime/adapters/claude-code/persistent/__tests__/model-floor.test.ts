@@ -32,19 +32,27 @@ import { join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
-import { FAST_MODEL, SONNET_MODEL, getBestModel, getKnownFallbackModels } from '../../../../models.ts'
+import { FAST_MODEL, SONNET_MODEL, getBestModel } from '../../../../models.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
 import { createClaudeCodeSubstrateAuto } from '../../index.ts'
-import { isBelowFrontierTier, resolveModelFloor } from '../model-floor.ts'
+import {
+  applyModelFloor,
+  familyOf,
+  resolveModelFloor,
+  tierRankOf,
+  FRONTIER_RANK,
+  type ModelFloorNotice,
+} from '../model-floor.ts'
 import {
   createPersistentReplSubstrate,
   getReplSinkInfo,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
-import { poolKeyFor } from '../pool.ts'
+import { poolKeyFor, replayPendingInbound } from '../pool.ts'
 import { supervisedBySessionKey } from '../pool-state.ts'
-import { getRecord, upsertRecord } from '../repl-registry.ts'
+import { registerSupervisedSubstrate, respawnReplSession } from '../supervision.ts'
+import { getRecord, patchRecord, upsertRecord } from '../repl-registry.ts'
 
 /** The EXACT id measured in the owner's live REPL registry on the degraded row. */
 const LIVE_HAIKU_ID = 'claude-haiku-4-5-20251001'
@@ -78,19 +86,244 @@ describe('resolveModelFloor — the decision', () => {
     expect(d.requested).toBe(LIVE_HAIKU_ID)
   })
 
-  it('clamps every known lower tier, dated or base form', () => {
+  it('clamps every named lower tier, dated or base form', () => {
     for (const id of [FAST_MODEL, SONNET_MODEL, 'claude-haiku-4-5', 'claude-sonnet-4-6']) {
       expect(resolveModelFloor({ requested: id, enabled: true }).clamped, id).toBe(true)
     }
   })
 
-  it('clamps a FUTURE dated snapshot of a lower tier the alias set has not learned yet', () => {
-    // The set carries dated + base forms BY HAND today. Normalising the snapshot
-    // means the next Haiku release is caught without anyone remembering to add it
-    // — otherwise the floor would look correct and quietly stop holding.
+  it('clamps the BARE CLI ALIASES — `--model haiku` is a real thing the CLI accepts', () => {
+    // Cross-model review blocker #1. The first revision matched a set of four
+    // literal ids, so `haiku` / `sonnet` walked straight past a floor whose whole
+    // claim is "whatever the persisted record says". The record is not
+    // schema-checked (`repl-registry.ts` leaves `model` optional and unvalidated),
+    // so it really can hold one of these.
+    for (const id of ['haiku', 'sonnet']) {
+      const d = resolveModelFloor({ requested: id, enabled: true })
+      expect(d.clamped, id).toBe(true)
+      expect(d.model, id).toBe(getBestModel())
+    }
+  })
+
+  it('clamps an OLDER generation and a FUTURE generation of a lower tier', () => {
+    // Neither is in the alias set, and neither ever will be — a set of literals
+    // needs a human to remember. The family token does not.
+    //
+    // ⚠️ THE FIRST TWO ARE REAL PUBLISHED IDS, AND THAT IS THE WHOLE POINT. The
+    // previous revision of this test asserted on `claude-haiku-3-5-20241022` — the
+    // CURRENT naming order applied to an OLD generation, which Anthropic never
+    // shipped. A fabricated id let the older-generation claim pass while the
+    // genuinely published `claude-3-5-haiku-20241022` (generation FIRST) walked
+    // straight through the floor: it yielded family `3`, unrecognised, ranked at
+    // the frontier. A regression test whose input cannot occur proves nothing.
+    for (const id of [
+      'claude-3-5-haiku-20241022',
+      'claude-3-5-sonnet-20241022',
+      'claude-haiku-9',
+      'claude-sonnet-7',
+    ]) {
+      expect(resolveModelFloor({ requested: id, enabled: true }).clamped, id).toBe(true)
+    }
+  })
+
+  it('clamps a lower tier behind a GATEWAY / PROXY prefix', () => {
+    // `repl-registry.ts` never schema-checks `model`, and these are the real id
+    // shapes a Bedrock / Vertex / proxy-routed deployment writes. Anchoring the
+    // family on the first token read every one of them as a vendor word, ranked
+    // them at the frontier, and let them through.
+    for (const id of [
+      'us.anthropic.claude-haiku-4-5-v1:0',
+      'eu.anthropic.claude-3-5-haiku-20241022-v1:0',
+      'anthropic/claude-haiku-4-5',
+      'publishers/anthropic/models/claude-3-5-haiku@20241022',
+    ]) {
+      const d = resolveModelFloor({ requested: id, enabled: true })
+      expect(d.clamped, id).toBe(true)
+      expect(d.model, id).toBe(getBestModel())
+    }
+  })
+
+  it('clamps a lower tier behind a prefix NOBODY ENUMERATED', () => {
+    // The vendor-word list is an enumeration, and an enumeration is a list of the
+    // prefixes someone remembered. So the RANK does not depend on it: it scans
+    // every token, and a lower-tier family found anywhere wins. Without that,
+    // one unlisted routing segment reproduces this round's blocker one level up.
+    for (const id of [
+      'bedrock/us-east-1/claude-3-5-haiku-20241022',
+      'my-proxy.internal/v3/claude-haiku-4-5',
+      'gateway:prod:claude-sonnet-4-6',
+    ]) {
+      expect(resolveModelFloor({ requested: id, enabled: true }).clamped, id).toBe(true)
+    }
+    // …and an unrecognised id with an unlisted prefix still ranks at the frontier,
+    // so the scan did not become "clamp anything with a slash in it".
+    expect(resolveModelFloor({ requested: 'my-proxy.internal/v3/claude-opus-6', enabled: true }).clamped).toBe(false)
+  })
+
+  it('a TIER WORD beats a vendor prefix, so two aliases cannot collapse onto one family', () => {
+    // CROSS-MODEL REVIEW, and the sharpest finding of the round. Databricks
+    // publishes `databricks-claude-haiku-4-5` / `databricks-claude-opus-4-5`. The
+    // positional scan returned `databricks` for BOTH, so an instance with both
+    // aliases pointed at that form derived the same family for the fast tier and
+    // the best tier — every rank came out equal and the floor went INERT.
+    //
+    // Note WHICH half broke, because it is the half a token scan cannot save: the
+    // requested id was still ranked correctly (the tokens contain `haiku`); it was
+    // deriving the ALIAS's family that collapsed. That is why the fix is in
+    // `familyOf` — a known tier word anywhere wins over position — rather than
+    // another entry on the vendor list, which is the enumeration that missed it.
+    expect(familyOf('databricks-claude-haiku-4-5')).toBe('haiku')
+    expect(familyOf('databricks-claude-opus-4-5')).toBe('opus')
+    // The two families are DISTINCT, which is the property that was actually lost.
+    expect(familyOf('databricks-claude-haiku-4-5')).not.toBe(
+      familyOf('databricks-claude-opus-4-5'),
+    )
+
+    // ⚠️ THE ASSERTIONS ABOVE DO NOT ISOLATE THE FIX, and a mutation run proved
+    // it: the vendor list also gained `databricks`, so deleting the tier-word
+    // pass left them all green. Two mechanisms closing the same instance is
+    // exactly how a class fix gets mistaken for done. So the load-bearing case is
+    // a vendor prefix that is NOT on the list and never will be — which is the
+    // whole reason the tier-word pass exists.
+    expect(familyOf('acme-gateway-claude-haiku-4-5')).toBe('haiku')
+    expect(familyOf('acme-gateway-claude-opus-5')).toBe('opus')
+    expect(familyOf('acme-gateway-claude-haiku-4-5')).not.toBe(
+      familyOf('acme-gateway-claude-opus-5'),
+    )
+
+    // …and an unheard-of tier still falls back to position rather than matching
+    // nothing, so the second pass stays live for a name this build predates.
+    expect(familyOf('databricks-claude-quasar-9')).toBe('quasar')
+  })
+
+  it('an id naming no tier at all yields an empty family, and still ranks frontier', () => {
+    // The precondition behind the two empty-string refusals: a tier-less id
+    // yields `''`, and a padded id splits to an empty token. Match either and
+    // EVERY id would rank as the fast tier — a floor that clamps its own frontier
+    // requests.
+    //
+    // ⚠️ THE EXAMPLE ID CHANGED WITH THE CANONICAL RANK TABLE, and the reason is
+    // worth stating rather than editing away. `claude-opus-5` used to rank
+    // FRONTIER, because rank came only off the two aliases and `opus` was neither
+    // of them. It now ranks 2 — a real tier with a real rank — so it can no longer
+    // stand in for "an id naming no tier". `claude-2` genuinely names none.
+    expect(familyOf('claude-2')).toBe('')
+    expect(tierRankOf('  claude-2  ')).toBe(FRONTIER_RANK)
+    expect(tierRankOf('claude-2')).toBe(FRONTIER_RANK)
+    // The padded form of a RANKED id must also survive the empty token, which is
+    // the half this assertion actually exercises.
+    expect(tierRankOf('  claude-opus-5  ')).toBe(tierRankOf('claude-opus-5'))
+  })
+
+  it('ranks the three tiers in the canonical order, whatever the aliases say', () => {
+    // THE FIX FOR THE REPRODUCED INERTNESS BUG (Argus round 2, CONFIRMED by two
+    // reviewers). The previous `tierRankOf` derived BOTH sub-frontier ranks from
+    // the aliases — rank 0 = `familyOf(FAST_MODEL)`, rank 1 =
+    // `familyOf(SONNET_MODEL)` — so the floor recognised exactly two families and
+    // WHICH two was operator configuration.
+    expect(tierRankOf('claude-haiku-4-5-20251001')).toBe(0)
+    expect(tierRankOf('claude-sonnet-5')).toBe(1)
+    expect(tierRankOf('claude-opus-5')).toBe(2)
+    // …and the order holds under an operator env that used to erase a whole tier.
+    const asIfFastWereSonnet = { fast: 'claude-sonnet-5', sonnet: 'claude-sonnet-5' }
+    expect(tierRankOf('claude-haiku-4-5-20251001', asIfFastWereSonnet)).toBe(0)
+    expect(tierRankOf('claude-opus-5', asIfFastWereSonnet)).toBe(2)
+  })
+
+  it('still clamps the fast tier when NEUTRON_FAST_MODEL names a HIGHER tier', () => {
+    // THE LIVE REPRO, as a test. `NEUTRON_FAST_MODEL=claude-sonnet-5` made
+    // `familyOf(FAST_MODEL) === familyOf(SONNET_MODEL) === 'sonnet'`, so `haiku`
+    // matched NEITHER rank and a persisted `claude-haiku-4-5-20251001` came back
+    // FRONTIER: `clamped: false`, the child spawned on the fast tier, `spawn.ts`
+    // rewrote the row with it, and not one of the three visibility surfaces fired.
+    // The floor did not fail loudly — it went silently inert, which is the exact
+    // failure this file exists to end.
+    //
+    // The env cannot be set in-process (`runtime/models.ts` binds the aliases at
+    // import), so the aliases are injected, which is why they are parameters.
+    for (const aliases of [
+      { fast: 'claude-sonnet-5', sonnet: 'claude-sonnet-5' },
+      // Strictly worse in the old scheme: `opus` took rank 0, so the FLOOR itself
+      // ranked bottom and nothing could ever clamp.
+      { fast: 'claude-opus-4-5', sonnet: 'claude-sonnet-5' },
+    ]) {
+      const d = resolveModelFloor({
+        requested: LIVE_HAIKU_ID,
+        enabled: true,
+        best: 'claude-opus-5',
+        aliases,
+      })
+      expect(d.clamped, JSON.stringify(aliases)).toBe(true)
+      expect(d.model, JSON.stringify(aliases)).toBe('claude-opus-5')
+    }
+  })
+
+  it('an operator running deliberately on the mid tier gets a mid-tier floor, not none', () => {
+    // `BEST_MODEL` is overridable, so the floor is the CONFIGURED best rather than
+    // "the top tier". Below it clamps, at it and above it does not — an `opus` row
+    // under a `sonnet` floor is left alone rather than DOWNgraded, which is the
+    // direction that would turn a floor into a ceiling.
+    const best = 'claude-sonnet-5'
+    expect(resolveModelFloor({ requested: LIVE_HAIKU_ID, enabled: true, best }).clamped).toBe(true)
+    expect(resolveModelFloor({ requested: 'claude-sonnet-5', enabled: true, best }).clamped).toBe(
+      false,
+    )
+    expect(resolveModelFloor({ requested: 'claude-opus-5', enabled: true, best }).clamped).toBe(
+      false,
+    )
+  })
+
+  it('seeds a tier name this build predates from the alias that names it', () => {
+    // The canonical list cannot cover a tier Anthropic has not shipped yet, so the
+    // aliases still contribute: an alias family that is NOT a known tier word is
+    // seeded at that alias's tier. A KNOWN word is never overwritten, which is what
+    // stops `NEUTRON_FAST_MODEL=claude-sonnet-5` dragging `sonnet` down to rank 0.
+    const aliases = { fast: 'claude-quasar-1', sonnet: 'claude-sonnet-5' }
+    expect(tierRankOf('claude-quasar-1', aliases)).toBe(0)
+    expect(tierRankOf('claude-sonnet-5', aliases)).toBe(1)
+    expect(
+      resolveModelFloor({
+        requested: 'claude-quasar-1',
+        enabled: true,
+        best: 'claude-opus-5',
+        aliases,
+      }).clamped,
+    ).toBe(true)
+    // …and an unknown family still ranks FRONTIER when no alias names it, so this
+    // did not become "clamp anything unfamiliar" and start fighting the upgrade path.
+    expect(tierRankOf('claude-quasar-1')).toBe(FRONTIER_RANK)
+  })
+
+  it('reads the tier out of BOTH naming orders and every prefix shape', () => {
+    // The predicate under the clamps above, asserted directly so a failure says
+    // WHICH id shape broke rather than only that a clamp stopped happening.
+    for (const id of [
+      'claude-haiku-4-5-20251001',
+      'claude-3-5-haiku-20241022',
+      'us.anthropic.claude-haiku-4-5-v1:0',
+      'anthropic/claude-haiku-4-5',
+      'publishers/anthropic/models/claude-3-5-haiku@20241022',
+      'HAIKU',
+    ]) {
+      expect(familyOf(id), id).toBe('haiku')
+    }
+    // …and the frontier tiers still read as themselves in both orders, so the
+    // scan did not simply start matching everything.
+    expect(familyOf('claude-opus-5')).toBe('opus')
+    expect(familyOf('claude-3-opus-20240229')).toBe('opus')
+    expect(familyOf('us.anthropic.claude-opus-5-v1:0')).toBe('opus')
+  })
+
+  it('clamps a FUTURE dated snapshot of a lower tier', () => {
     const d = resolveModelFloor({ requested: 'claude-haiku-4-5-20260901', enabled: true })
     expect(d.clamped).toBe(true)
     expect(d.model).toBe(getBestModel())
+  })
+
+  it('clamps despite stray whitespace or mixed case in an unvalidated row', () => {
+    for (const id of ['  claude-haiku-4-5  ', 'CLAUDE-HAIKU-4-5', 'Haiku']) {
+      expect(resolveModelFloor({ requested: id, enabled: true }).clamped, id).toBe(true)
+    }
   })
 
   it('leaves the frontier model itself alone', () => {
@@ -100,10 +333,10 @@ describe('resolveModelFloor — the decision', () => {
   })
 
   it('does NOT clamp an unrecognised or newer top-tier id', () => {
-    // Clamping "anything ≠ best" would fight the model-update watchdog: a newer
-    // id adopted elsewhere, or the generation a warm session legitimately spawned
-    // with, is not a degradation. Only a KNOWN lower tier is unambiguous.
-    for (const id of ['claude-opus-6', 'claude-fable-5', 'claude-opus-5-20260401']) {
+    // Clamping "anything ≠ best" would fight the model-update watchdog, which
+    // legitimately writes ids THIS process has never heard of into a record before
+    // a `--resume` respawn. A NAMED lower tier is unambiguous; an unknown id is not.
+    for (const id of ['claude-opus-6', 'claude-fable-5', 'claude-opus-5-20260401', 'some-new-model']) {
       expect(resolveModelFloor({ requested: id, enabled: true }).clamped, id).toBe(false)
     }
   })
@@ -114,13 +347,175 @@ describe('resolveModelFloor — the decision', () => {
     expect(d.model).toBe(FAST_MODEL)
   })
 
-  it('reuses the SAME lower-tier set the watchdog refuses to adopt', () => {
-    // The guard already existed one layer up (`getKnownFallbackModels`, the
-    // `--fallback-model` trap); the gap was that nothing mirrored it on the
-    // record-READ path. Pin the reuse so the two ends cannot drift apart.
-    for (const id of getKnownFallbackModels()) {
-      expect(isBelowFrontierTier(id, getKnownFallbackModels()), id).toBe(true)
+  it('returns an UNFLOORED substrate’s value byte-for-byte, whatever it is', () => {
+    // The unfloored path is a passthrough BY CONTRACT — `spawn.ts` relies on it to
+    // claim the deliberate FAST_MODEL callers are untouched. A previous revision
+    // coerced a non-string BEFORE the enabled check, so an unfloored substrate
+    // that passed a junk value got `''` back instead of its own input. Padding is
+    // the observable case; the non-string is the one that changed the outcome.
+    const padded = '  claude-haiku-4-5  '
+    expect(resolveModelFloor({ requested: padded, enabled: false }).model).toBe(padded)
+    const junk = 42 as unknown as string
+    expect(resolveModelFloor({ requested: junk, enabled: false }).model).toBe(junk)
+  })
+
+  it('TRIMS the id it hands to --model, not just the one it compares', () => {
+    // The comparison has always been whitespace-insensitive; the RETURN was not,
+    // so a padded frontier id in an unvalidated row reached the CLI padded. Case
+    // is left alone deliberately — a model id's case is meaningful to the API.
+    const d = resolveModelFloor({ requested: `  ${getBestModel()}  `, enabled: true })
+    expect(d.clamped).toBe(false)
+    expect(d.model).toBe(getBestModel())
+  })
+
+  it('holds at the CONFIGURED best when an operator pinned a cheaper tier', () => {
+    // Cross-model review blocker #2, against an earlier revision of this file that
+    // DISABLED the floor whenever the configured best was itself a lower tier.
+    // That is not a floor: a poisoned fast-tier row would then sit below the
+    // operator's OWN configured best and stay there. Rank comparison holds the
+    // line at whatever the operator configured.
+    const d = resolveModelFloor({ requested: FAST_MODEL, enabled: true, best: SONNET_MODEL })
+    expect(d.clamped).toBe(true)
+    expect(d.model).toBe(SONNET_MODEL)
+  })
+
+  it('does NOT clamp a request at the SAME tier as a cheaper configured best', () => {
+    // The other half of the same decision, and the reason it is rank-based rather
+    // than "is a lower tier": a same-tier request must not produce a no-op clamp
+    // with a `model_floor_applied` event naming a degradation that did not happen.
+    // An event that fires on correct behaviour trains the reader to ignore it —
+    // the exact failure the loudness exists to prevent.
+    const d = resolveModelFloor({ requested: SONNET_MODEL, enabled: true, best: SONNET_MODEL })
+    expect(d.clamped).toBe(false)
+    expect(d.model).toBe(SONNET_MODEL)
+  })
+
+  it('never clamps TO a blank floor — that would fail the launch outright', () => {
+    // `BEST_MODEL` resolves with `??`, so an empty `NEUTRON_BEST_MODEL` arrives as
+    // `''`. Handing the CLI an empty `--model` is strictly worse than the
+    // degradation being corrected.
+    const d = resolveModelFloor({ requested: FAST_MODEL, enabled: true, best: '' })
+    expect(d.clamped).toBe(false)
+    expect(d.model).toBe(FAST_MODEL)
+  })
+
+  it('resolves a BLANK request to the floor rather than spawning an empty --model', () => {
+    const d = resolveModelFloor({ requested: '   ', enabled: true })
+    expect(d.clamped).toBe(true)
+    expect(d.model).toBe(getBestModel())
+  })
+
+  it('survives a non-string model in an unvalidated registry row', () => {
+    // `repl-registry.ts` never schema-checks `model`, so a row from another build
+    // can carry anything. A throw HERE would be inside a spawn — a wrong-model
+    // bug turned into a dead session.
+    const d = resolveModelFloor({ requested: 42 as unknown as string, enabled: true })
+    expect(d.model).toBe(getBestModel())
+  })
+
+  it('orders the tiers FROM the aliases, so a generation bump cannot invert it', () => {
+    expect(tierRankOf(FAST_MODEL)).toBeLessThan(tierRankOf(SONNET_MODEL))
+    expect(tierRankOf(SONNET_MODEL)).toBeLessThan(tierRankOf(getBestModel()))
+  })
+
+  it('extracts the tier family from every id shape the CLI accepts', () => {
+    expect(familyOf('claude-haiku-4-5-20251001')).toBe('haiku')
+    expect(familyOf('claude-sonnet-5')).toBe('sonnet')
+    expect(familyOf('claude-opus-5')).toBe('opus')
+    expect(familyOf('haiku')).toBe('haiku')
+    expect(familyOf('  Sonnet ')).toBe('sonnet')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 1b. The clamp is LOUD — on BOTH surfaces.
+// ---------------------------------------------------------------------------
+
+describe('applyModelFloor — a clamp is never silent', () => {
+  /** Capture the process log lines `createLogger`'s default sink writes. */
+  function captureWarnings<T>(body: () => T): { result: T; lines: string[] } {
+    const lines: string[] = []
+    const original = console.warn
+    console.warn = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(' '))
     }
+    try {
+      return { result: body(), lines }
+    } finally {
+      console.warn = original
+    }
+  }
+
+  it('writes a structured operator line naming the session, the request and the floor', () => {
+    // The OPERATOR half. Asserted on the emitted LINE rather than on a spy for the
+    // helper, because the previous revision's only loudness was this call and
+    // NOTHING failed when it was deleted — every test passed on the return value.
+    const { result, lines } = captureWarnings(() =>
+      applyModelFloor({
+        requested: LIVE_HAIKU_ID,
+        enabled: true,
+        sessionKey: 'key-loud',
+        source: 'resume',
+      }),
+    )
+    expect(result).toBe(getBestModel())
+    const line = lines.find((l) => l.includes('event=model_floor_applied'))
+    expect(line, `no model_floor_applied line in ${JSON.stringify(lines)}`).toBeDefined()
+    expect(line!).toContain('session_key=key-loud')
+    expect(line!).toContain('source=resume')
+    expect(line!).toContain(`requested_model=${LIVE_HAIKU_ID}`)
+    expect(line!).toContain(`floor_model=${getBestModel()}`)
+  })
+
+  it('fires the OWNER-facing notice with the record’s model and the floor', () => {
+    // The half a journald line cannot do. `log.warn` reaches the server's stderr;
+    // the owner reads a chat. This seam is what `open/wiring/substrates.ts` hands
+    // to the gateway's `substrate-notice-sink`, which turns it into a
+    // `system_events` row plus a bubble on the owner's chat topic.
+    const notices: ModelFloorNotice[] = []
+    const model = applyModelFloor({
+      requested: LIVE_HAIKU_ID,
+      enabled: true,
+      sessionKey: 'key-notice',
+      source: 'spawn',
+      notify: (n) => notices.push(n),
+    })
+    expect(model).toBe(getBestModel())
+    expect(notices.length).toBe(1)
+    expect(notices[0]).toEqual({
+      sessionKey: 'key-notice',
+      source: 'spawn',
+      requested: LIVE_HAIKU_ID,
+      floor: getBestModel(),
+    })
+  })
+
+  it('stays quiet when nothing was clamped — an event on correct behaviour is noise', () => {
+    const notices: ModelFloorNotice[] = []
+    const { lines } = captureWarnings(() =>
+      applyModelFloor({
+        requested: getBestModel(),
+        enabled: true,
+        sessionKey: 'key-quiet',
+        source: 'spawn',
+        notify: (n) => notices.push(n),
+      }),
+    )
+    expect(notices.length).toBe(0)
+    expect(lines.filter((l) => l.includes('model_floor_applied')).length).toBe(0)
+  })
+
+  it('a throwing notice sink never fails the spawn it is describing', () => {
+    const model = applyModelFloor({
+      requested: LIVE_HAIKU_ID,
+      enabled: true,
+      sessionKey: 'key-throw',
+      source: 'spawn',
+      notify: () => {
+        throw new Error('sink is down')
+      },
+    })
+    expect(model).toBe(getBestModel())
   })
 })
 
@@ -276,41 +671,98 @@ describe('the frontier-model floor holds at the spawn chokepoint', () => {
     expect(record!.model).toBe(getBestModel())
   }, SPAWN_TEST_TIMEOUT_MS)
 
-  it('a pre-poisoned row is corrected rather than obeyed on the next spawn', async () => {
-    // Seed the registry the way the live box was found — under the REAL pool key,
-    // so this is the row `record.model` would actually be resolved from — then
-    // spawn and assert both halves: the child comes up on the frontier model, and
-    // nothing is left holding the poisoned value.
+  it('the pool’s REPLAY reader resolves the poisoned row — and the floor still holds', async () => {
+    // THE PRODUCTION READER, not a hand-built spec. `pool.ts` resolves a replay
+    // spawn as `record?.model ?? getBestModel()` — the exact `??` that is the
+    // whole defect — so this drives `replayPendingInbound` against a seeded row
+    // instead of passing the model in itself. A previous revision of this test
+    // seeded the row AND passed the same id through `spec(...)`, which meant
+    // deleting the seed left it green: it never proved the reader was covered.
+    // Here the seed is load-bearing twice over — it is the only source of the
+    // spawn's model, and the clamp notice must name it.
     const { host, argvs } = makeCapturingHost()
     const registryPath = join(tempDir('neutron-model-floor-reg-'), 'repl-registry.json')
+    const notices: ModelFloorNotice[] = []
     const options = opts(host, {
-      user_id: 'u-seed',
+      user_id: 'u-replay',
       project_id: 'default',
       credential_identity: 'cred-1',
       replRegistryPath: registryPath,
       frontierModelFloor: true,
+      onModelFloorApplied: (n) => notices.push(n),
     })
     const sessionKey = poolKeyFor(options)
+    const sessionId = '00000000-0000-4000-8000-000000000000'
     upsertRecord(registryPath, {
       sessionKey,
-      sessionId: '00000000-0000-4000-8000-000000000000',
+      sessionId,
       cwd: options.cwd!,
       channelName: 'seeded',
-      has_session: false,
+      has_session: true,
       model: LIVE_HAIKU_ID,
     })
     expect(getRecord(registryPath, sessionKey)!.model).toBe(LIVE_HAIKU_ID)
 
-    await drain(createPersistentReplSubstrate(options).start(spec(LIVE_HAIKU_ID)))
+    const replayed = await replayPendingInbound(options, {
+      sessionKey,
+      sessionId,
+      cwd: options.cwd!,
+      droppedInbound: 'the turn that was dropped when the REPL died',
+    })
+    expect(replayed).toBe(true)
+    expect(argvs.length).toBeGreaterThan(0)
     expect(modelArg(argvs[0]!)).toBe(getBestModel())
+    // The clamp NAMED the seeded value — so this assertion cannot pass without
+    // the reader having actually read the row.
+    expect(notices.map((n) => n.requested)).toEqual([LIVE_HAIKU_ID])
+    // …and nothing is left holding the poisoned value.
     const rows = JSON.parse(readFileSync(registryPath, 'utf8')) as Record<
       string,
       { model?: string }
     >
-    expect(Object.keys(rows)).toContain(sessionKey)
     for (const [key, row] of Object.entries(rows)) {
       expect(row.model, key).not.toBe(LIVE_HAIKU_ID)
     }
+  }, SPAWN_TEST_TIMEOUT_MS)
+
+  it('the supervision RESUME reader resolves the poisoned row — the respawn comes up floored', async () => {
+    // THE SECOND PRODUCTION READER (`supervision.ts` `resumeSpecFor`), and the one
+    // that made the live bug self-perpetuating: every watchdog respawn re-read the
+    // row, re-spawned on it, and wrote it back. Spawn clean, poison the row the
+    // way the live box was found, then respawn through the REAL actuation.
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-model-floor-reg-'), 'repl-registry.json')
+    const notices: ModelFloorNotice[] = []
+    const options = opts(host, {
+      user_id: 'u-resume',
+      project_id: 'default',
+      credential_identity: 'cred-1',
+      replRegistryPath: registryPath,
+      frontierModelFloor: true,
+      jsonlExistsProbe: () => true, // pretend the transcript landed → has_session flips
+      onModelFloorApplied: (n) => notices.push(n),
+    })
+    registerSupervisedSubstrate(options)
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    const sessionKey = poolKeyFor(options)
+    for (let i = 0; i < 200; i++) {
+      if (getRecord(registryPath, sessionKey)?.has_session === true) break
+      await Bun.sleep(15)
+    }
+    expect(getRecord(registryPath, sessionKey)?.has_session).toBe(true)
+    expect(notices.length).toBe(0) // the clean spawn clamped nothing
+
+    patchRecord(registryPath, sessionKey, { model: LIVE_HAIKU_ID })
+    const outcome = respawnReplSession(options, sessionKey, 'wedge-watchdog', 'model-floor-test')
+    expect(outcome.ok).toBe(true)
+    for (let i = 0; i < 200; i++) {
+      if (argvs.length >= 2) break
+      await Bun.sleep(15)
+    }
+    expect(argvs.length).toBeGreaterThanOrEqual(2)
+    expect(modelArg(argvs[1]!)).toBe(getBestModel())
+    expect(notices.map((n) => n.requested)).toEqual([LIVE_HAIKU_ID])
+    expect(notices[0]!.source).toBe('resume')
   }, SPAWN_TEST_TIMEOUT_MS)
 
   it('a substrate WITHOUT the floor keeps its deliberate fast-tier choice', async () => {

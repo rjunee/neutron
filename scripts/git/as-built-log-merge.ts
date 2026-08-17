@@ -23,6 +23,9 @@
  * on every merge would bury a one-entry change in a whole-file diff. New entries are placed
  * newest-first among the retained ones, which for the ordinary case (a build writing today's
  * date) means exactly where a build would have prepended it by hand.
+ * When both sides add different entries under the same heading, ours keeps that heading and theirs
+ * is retitled with the first free numeric suffix (`… (n)`), preserving both entries and the
+ * heading-uniqueness contract.
  *
  * WHAT IT REFUSES. If both sides modify the SAME existing entry differently, or the preamble
  * diverges, or A BASE ENTRY IS ABSENT FROM ONE SIDE WHILE THE OTHER STILL HAS IT, that is a
@@ -498,18 +501,24 @@ export function mergeAsBuiltLog(base: string, ours: string, theirs: string): Mer
 
   // (2) Additions — an entry present on a side and absent from the base. THIS is the union that
   //     makes two concurrent builds land together.
+  const usedHeadings = new Set(
+    [...O.entries, ...A.entries, ...B.entries].map((entry) => entry.lines[0]!.trimEnd()),
+  )
   for (const entry of B.entries) {
     if (inO.has(entry.key)) continue
     const alsoOurs = inA.get(entry.key)
     // Both sides added an entry with the same heading. Identical bytes → one copy (taken from ours
-    // below). Different bytes → two different entries that collide on identity; refuse rather than
-    // pick. Nothing is deleted either way, so git's own three-way is a fair fallback.
+    // below). Different bytes → keep both whole entries, retitling the incoming copy so this merge
+    // cannot introduce a duplicate heading. Rewrite before `additionsFrom`: continuation chains use
+    // keys, and every reference to this entry on the incoming side must see the same identity.
     if (alsoOurs !== undefined && body(alsoOurs) !== body(entry)) {
-      return {
-        ok: false,
-        reason: `both sides added a different entry under the same heading: ${entry.key}`,
-        wouldLoseEntries: false,
-      }
+      const base = entry.lines[0]!.trimEnd()
+      let n = 2
+      while (usedHeadings.has(`${base} (${n})`)) n += 1
+      const heading = `${base} (${n})`
+      entry.lines[0] = heading
+      entry.key = `${heading} 1`
+      usedHeadings.add(heading)
     }
   }
   const sides = [

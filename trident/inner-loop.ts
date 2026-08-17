@@ -329,6 +329,16 @@ export const WORKTREE_CLEANUP_SCRIPT_PATH = fileURLToPath(
   new URL('./worktree-cleanup.sh', import.meta.url),
 )
 
+/** The abs path of the sibling Codex BUILD wrapper, which ships with the
+ *  HARNESS, never with the repo being built. `${repoPath}/trident/codex-build.sh`
+ *  only ever existed in neutron-open because Open IS the harness repo; every
+ *  other project exited 127, while Enterprise's hand-made symlink to the
+ *  deployed copy let #345's `model_reasoning_effort=xhigh` pin reach Open but
+ *  left Enterprise building with reasoning off. Threaded via args (the workflow
+ *  script has no module resolution; the TARGET repo need not contain trident/),
+ *  and authoritative for ALL projects including Open. */
+export const CODEX_BUILD_SCRIPT_PATH = fileURLToPath(new URL('./codex-build.sh', import.meta.url))
+
 /**
  * The `--tools` surface the WARM fire substrate needs. Includes `Workflow` (the
  * launcher fires it) PLUS the build/review tools — because the inner-workflow's
@@ -398,6 +408,8 @@ export function buildWorkflowArgs(
     // runs on every path — dirty worktrees are preserved, never force-removed
     // (#541).
     worktreeCleanupScript: WORKTREE_CLEANUP_SCRIPT_PATH,
+    // The harness-authoritative Codex build wrapper; never resolve it from the target repo.
+    codexBuildScript: CODEX_BUILD_SCRIPT_PATH,
     // The checked-in credentialed-`gh` runner the three GitHub READ probes shell
     // into, plus the STORE COORDINATES it resolves the token from. Paths and a
     // handle — never the token, which these args (a launcher prompt) could not

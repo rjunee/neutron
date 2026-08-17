@@ -7,8 +7,8 @@
  * lines, and git's three-way merge sees two different insertions against identical context. A
  * stubbed merge would prove nothing about that — the whole question is what REAL git does. So this
  * file uses a real repository, real commits, a real moved base, and the publisher's own replay
- * mechanism (`git apply --3way`, `trident/orchestrator.ts:715`), the way
- * `trident/publish-rebase-realgit.test.ts` does.
+ * mechanism (the `git apply --3way` in `rebaseOntoObservedBase`, `trident/orchestrator.ts`), the
+ * way `trident/publish-rebase-realgit.test.ts` does.
  *
  * THE FAILURE IS PROVEN BEFORE THE FIX IS. `replay()` is run twice over the identical scenario:
  * once with the merge driver NOT installed, which MUST conflict, and once with it installed, which
@@ -122,6 +122,45 @@ function scenario(): { repo: string; forkPoint: string } {
 
   return { repo, forkPoint }
 }
+
+function sameHeadingScenario(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'as-built-same-heading-realgit-'))
+  created.push(repo)
+  git(repo, 'init', '-q', '-b', 'main')
+  git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+  git(repo, 'config', 'user.name', 'Trident Test')
+  git(repo, 'config', 'commit.gpgsign', 'false')
+  mkdirSync(join(repo, 'docs'), { recursive: true })
+  mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+  cpSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), join(repo, 'scripts', 'install-merge-drivers.sh'))
+  cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-merge-driver.ts'), join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
+  cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-log-merge.ts'), join(repo, 'scripts', 'git', 'as-built-log-merge.ts'))
+  writeLog(repo, HISTORY)
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'base')
+  git(repo, 'checkout', '-q', '-b', 'ours')
+  writeLog(repo, [...entry('2026-08-16', 'same concurrent title', 'Body from ours.'), ...HISTORY])
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'ours')
+  git(repo, 'checkout', '-q', '-b', 'theirs', 'main')
+  writeLog(repo, [...entry('2026-08-16', 'same concurrent title', 'Body from theirs.'), ...HISTORY])
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'theirs')
+  git(repo, 'checkout', '-q', 'ours')
+  return repo
+}
+
+test('real git unions different additions under one heading without conflict markers', () => {
+  const repo = sameHeadingScenario()
+  expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+  const merged = run(repo, ['git', 'merge', '--no-edit', 'theirs'])
+  expect(merged.ok).toBe(true)
+  const text = readFileSync(join(repo, 'docs', 'AS_BUILT.md'), 'utf8')
+  expect(text).not.toContain('<<<<<<<')
+  expect(text).toContain('## 2026-08-16 — same concurrent title\n\nBody from ours.')
+  expect(text).toContain('## 2026-08-16 — same concurrent title (2)\n\nBody from theirs.')
+  for (const body of ['History that must survive.', 'More history that must survive.']) expect(text).toContain(body)
+}, 30_000)
 
 /**
  * Replay build two onto the moved `main` exactly as the publisher does: take the branch's own diff
@@ -653,9 +692,16 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // left exactly as the installer left it, so the command is the ONLY thing under test.
       //
       // Spelled with the RESOLVED bun and driver paths, because that is what the predecessor
-      // actually wrote (`origin/main` scripts/install-merge-drivers.sh:145 — `"$BUN $DRIVER_SCRIPT
-      // %O %A %B %L %P"`, both already absolute). A literal `bun` here would be a command no
-      // release of this script has ever installed.
+      // actually wrote — the `merge.$DRIVER_NAME.driver` write in `scripts/install-merge-drivers.sh`
+      // at commit 63a342b2 passed `"$BUN $DRIVER_SCRIPT %O %A %B %L %P"`, both already absolute. A
+      // literal `bun` here would be a command no release of this script has ever installed.
+      //
+      // NAMED BY COMMIT AND BY THE WRITE ITSELF, not by a line number, and not by `origin/main` —
+      // which is what this said first. A branch name plus a line number is a citation whose target
+      // moves on its own: those words became false the moment the fix merged. The line number is
+      // gone too, and deliberately: see the citation test at the foot of this file, which had to
+      // reach into git history to check a pinned line and could not on the shallow checkout CI
+      // gives the test shards. A citation nothing can verify is the thing this file is against.
       const { bun, driver } = words(hardened)
       const predecessor = `${bun} ${driver} %O %A %B %L %P`
       expect(predecessor).not.toBe(hardened)
@@ -1200,6 +1246,371 @@ describe('the installer under a locked config — the FATAL half-state must be i
       expect(credentialEnv, 'CREDENTIAL_ENV is no longer a literal array').not.toBeNull()
       const names = [...credentialEnv![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
       expect(scrubbed).toEqual(names)
+    }, 30_000)
+
+    /**
+     * THE CITATIONS IN THIS CLUSTER POINT AT SYMBOLS, NOT AT LINE NUMBERS THAT MOVE.
+     *
+     * A LINE NUMBER IS NOT A PROPERTY OF A FILE. It is a property of a file AT A COMMIT, and every
+     * reader is at a different one — which is why this is not fixable by being more careful.
+     *
+     * Re-measured at caf6928e, the merge of #323, because the first version of this paragraph got
+     * it wrong in the direction that flatters the change and the correction is the actual argument:
+     *
+     *   - `install-merge-drivers.sh` cited line 633 of `trident/orchestrator.ts` twice for the
+     *     `.exe`-stripping guard that opens `asBuiltDriverCommand`. At caf6928e line 633 IS that
+     *     guard — the citations were CORRECT. Read the same two lines in a tree that has merged
+     *     current main and they are 45 lines short, because main grew above them. Neither file was
+     *     touched. Nobody was careless. The citation rotted because the READER moved, which no
+     *     amount of diligence at typing time can prevent.
+     *   - This file's own header cited line 715 of `trident/orchestrator.ts` for the publisher's
+     *     `git apply --3way`, which is in `rebaseOntoObservedBase`. That one was genuinely wrong at
+     *     caf6928e: 715 is prose about `.gitattributes` and `merge=union`, and the call sits some
+     *     360 lines further down. A citation that lands on unrelated prose is worse than no
+     *     citation, because it reads as though it were checked.
+     *
+     * So one of the three had rotted against its own commit and the other two were waiting to. The
+     * earlier claim here — that three of four had rotted, `asBuiltDriverCommand` "at 677" — took its
+     * numbers from the post-merge branch tree while attributing them to caf6928e, which is the same
+     * mistake one level up: a measurement is only meaningful with the commit it was taken at.
+     *
+     * RENUMBERING THEM WOULD BUY ONE COMMIT. This file already applies the durable form of the rule
+     * one level up — "the two are pinned in agreement by a test rather than by this comment, because
+     * a comment asserting they match is the thing that goes stale first" — and a line number into a
+     * living file is exactly that comment in its most fragile spelling. So the citations name a
+     * symbol, and this test resolves each one: a rename or a deletion fails here, and reflowing the
+     * file above them cannot.
+     *
+     * NO LINE LOCATOR SURVIVES ANYWHERE IN THE CLUSTER, INCLUDING AGAINST AN IMMUTABLE COMMIT. That
+     * exemption existed for one citation and was withdrawn when CI showed it could not be verified
+     * where it runs — the shards check out shallow, the pinned object is not fetched, and the check
+     * called a correct citation a bad pin. The full argument is at the rule below; the short form is
+     * that an exemption nothing can check is worth less than no exemption. The one historical
+     * citation now names its commit and the config write, and gives up its line number.
+     *
+     * WHO THIS IS DEFENDING AGAINST, because that decides when it is finished. The adversary is an
+     * ORDINARY EDIT — a rename, a reflow, a typo, a merge that grows a file above a citation. It is
+     * not a hostile author, and it cannot be: every check here is a regex over prose, and three
+     * rounds of an adversarial cross-model reviewer produced a fresh encoding every time — a path
+     * spelled `trident/./orchestrator.ts`, a zero-width joiner inside an identifier, a decoy
+     * declaration inside a template literal, a non-ASCII filename. Each is real and none is reachable
+     * by the failure this exists to catch. Chasing them buys encodings and costs the thing that makes
+     * a guard useful, which is that a red means something. Thirteen mutations drawn from the ordinary
+     * class are pinned by this test, each measured red with a control and a clean baseline.
+     *
+     * The known false REDS are left in on the same reasoning, since they cost one edit and announce
+     * themselves: prose naming a host with a port after it parses as a line locator, and a citation
+     * whose symbol sits more than one line from its path is reported unresolved. The first of those
+     * was demonstrated by writing this paragraph — spelling the example out literally reddened the
+     * suite, which is the check working and the reason it is described in words. False red costs an
+     * edit; false green costs the property.
+     *
+     * WHAT THIS DELIBERATELY DOES NOT MATCH: the prose form, "line 715 of `orchestrator.ts`". Narrative
+     * that DESCRIBES a citation is not a citation, and the paragraphs above are made of exactly that
+     * — a check that flagged them would flag the explanation of its own rule. The machine-readable
+     * forms are the ones a reader clicks, and those are the ones covered.
+     */
+    test('cross-file citations name a symbol that resolves, and no line locator survives', () => {
+      const cluster = ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts', 'scripts/git/as-built-merge-driver.ts']
+      const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
+
+      // NO LINE LOCATOR AT ALL, WITH NO EXEMPTION — and the exemption is gone for a measured reason
+      // rather than a tidiness one. The first cut allowed a locator when the same line pinned a
+      // commit, and resolved that pin through git so an arbitrary hex word could not buy the pass.
+      // CI proved the resolution unrunnable: `actions/checkout@v4` gives the test shards a SHALLOW
+      // clone (only two jobs in `.github/workflows/ci.yml` set `fetch-depth: 0`), the pinned object
+      // is simply not fetched there, and the check reported a correct citation as `[pin ... is not a
+      // commit]` — a false verdict manufactured by an incomplete clone, which is the exact failure
+      // shape this repository keeps writing rules about.
+      //
+      // Keying the skip on `--is-shallow-repository` would not have saved it either: this clone is
+      // shallow too and still holds the object, so the skip would fire locally and take the
+      // mutation proof with it. An unverifiable exemption is worth less than no exemption, so the
+      // rule is now absolute and needs no git at all. The historical citation above gives up its
+      // line number and names the config write instead, which greps.
+      //
+      // (Spelling an offending form out literally here would trip this very check — which is the
+      // check working — so the description stays in words.)
+      //
+      // THE EXTENSION IS NOT ENUMERATED, because an enumerated one is the hand-extended hunt that
+      // `scripts/install-merge-drivers.sh` argues against one file over — it has to be edited every
+      // time a file type appears, and until someone remembers, the gap is a silent pass rather than
+      // a visible hole. The first cut listed ts|tsx|js|mjs|sh|md|json and was measured blind to
+      // `.yml`, `.mts` and `.toml` locators appended to this cluster. Any alphanumeric extension
+      // counts now. Widening it costs nothing here: run against the cluster at this commit it
+      // matches zero lines, so the only thing it can newly catch is a new offender.
+      //
+      // The first attempt at "any extension" still capped it at five characters and required a
+      // letter first, which the cross-model reviewer defeated with `.markdown` (eight) and `.7z`
+      // (leading digit). A cap is an enumeration wearing a different hat — it fails the same way,
+      // just less obviously — so there is no cap and no leading-character rule.
+      // The hash-L form is ALSO matched on its own, with nothing required before it. Requiring it to
+      // sit directly against a file extension meant a permalink carrying a query string in between —
+      // the shape the hosting provider's own "copy permalink to line" button produces — slipped past
+      // the ban entirely. That form is a line locator wherever it appears and whatever precedes it,
+      // so it is judged alone. (Written in words, not spelled out, for the reason given above.)
+      const LOCATOR = /([\w./-]+\.[A-Za-z0-9]+)(?::)(\d+)/
+      const FRAGMENT = /#L\d+/
+      const offenders: string[] = []
+      for (const rel of cluster) {
+        read(rel).split('\n').forEach((line, i) => {
+          if (!LOCATOR.test(line) && !FRAGMENT.test(line)) return
+          offenders.push(`${rel} line ${i + 1} — ${line.trim()}`)
+        })
+      }
+      expect(offenders, `citations into a living file must name a symbol, not a line:\n${offenders.join('\n')}`).toEqual([])
+
+      // …and every symbol these docblocks cite has to exist at BOTH ends: in the file it is
+      // attributed to, and in the file doing the citing. Checking only the target is the weaker
+      // half and it passes the failure that matters most — misspell the symbol in the CITATION and
+      // the correct spelling is still sitting in the target, so a target-only check sees nothing.
+      //
+      // `definition` is checked rather than the bare `symbol`, because a symbol still appears at its
+      // own call sites after the DEFINITION is renamed — measured: renaming `function
+      // asBuiltDriverCommand` left the name in a call and a comment, and a bare-symbol check passed
+      // a function that no longer exists under that name.
+      //
+      // The definition is a REGEX ANCHORED TO THE START OF A LINE, and both halves of that are
+      // load-bearing.
+      //
+      // The paren, because a substring match on `function asBuiltDriverCommand` is satisfied by
+      // `function asBuiltDriverCommandV2`. Measured — renaming both anchored functions with a `V2`
+      // suffix left the first version of this check green, while a non-suffix rename reddened it, so
+      // every rename that APPENDS (V2, Impl, 2 — the shape a rename actually takes) walked through.
+      //
+      // The line anchor, because presence is not definition: `/* function asBuiltDriverCommand( */`
+      // left in a comment satisfies a bare substring just as well as the real declaration, so the
+      // check could be defeated by renaming the function and leaving a corpse behind. That was the
+      // cross-model reviewer's find, and it is the same "exists ≠ is what you think" shape the check
+      // was written to catch one level down. These two are top-level declarations at column zero;
+      // the expression anchor is indented inside one, so it carries its own leading whitespace.
+      // `citedBy` COUNTS, it does not merely ask "is it present". Presence is satisfied by any one
+      // surviving mention, so misspelling ONE of several citations of the same symbol leaves the
+      // others to hold the check up — which is how the expression anchor stayed effectively
+      // unguarded: it is cited twice in the installer, and the reviewer's mutation typos one and
+      // lets the other carry it, with an adjacent correct anchor satisfying the site window too. A
+      // floor makes losing a citation visible while adding one stays free.
+      const anchors: Array<{
+        symbol: string
+        definition: RegExp
+        definedIn: string
+        citedBy: Array<{ file: string; atLeast: number }>
+      }> = [
+        {
+          symbol: 'asBuiltDriverCommand',
+          definition: /^function asBuiltDriverCommand\s*\(/m,
+          definedIn: 'trident/orchestrator.ts',
+          citedBy: [
+            { file: 'scripts/install-merge-drivers.sh', atLeast: 3 },
+            { file: 'scripts/git/as-built-merge-realgit.test.ts', atLeast: 6 },
+          ],
+        },
+        {
+          symbol: 'rebaseOntoObservedBase',
+          definition: /^export async function rebaseOntoObservedBase\s*\(/m,
+          definedIn: 'trident/orchestrator.ts',
+          citedBy: [{ file: 'scripts/git/as-built-merge-realgit.test.ts', atLeast: 2 }],
+        },
+        {
+          symbol: 'basename(process.execPath)',
+          definition: /^ +if \(basename\(process\.execPath\)\.replace\(\/\\\.exe\$\/i, ''\) !== 'bun'\)/m,
+          definedIn: 'trident/orchestrator.ts',
+          citedBy: [{ file: 'scripts/install-merge-drivers.sh', atLeast: 2 }],
+        },
+      ]
+      const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      /** A BACKTICKED mention of exactly this symbol — the trailing rule is what stops a typo that
+       *  merely CONTAINS the symbol from counting as a citation of it. The class it must not admit
+       *  is "the symbol plus one more identifier character", so the lookahead covers `$` and any
+       *  Unicode letter or digit as well as ASCII: the reviewer got through an ASCII-only version
+       *  with a `$` in the middle of a name, which is legal in an identifier here. */
+      const mentions = (text: string, symbol: string) =>
+        [...text.matchAll(new RegExp('`' + escapeRe(symbol) + '(?![\\p{L}\\p{N}_$])', 'gu'))].length
+
+      // A DEFINITION IS CHECKED AGAINST CODE WITH THE COMMENTS TAKEN OUT. Anchoring the pattern to
+      // the start of a line was not enough: the reviewer left the old declaration inside a block
+      // comment, on its own line at column zero, and the anchor matched the corpse. Presence is not
+      // definition, and a comment is the cheapest way to be present. Stripping block and line
+      // comments first is approximate — it would also blank a `/*` inside a string literal — but it
+      // is approximate in the SAFE direction: it can only ever remove text, so it can produce a
+      // false red that one glance explains, never a false green that nothing reports.
+      const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+
+      for (const { symbol, definition, definedIn, citedBy } of anchors) {
+        expect(
+          definition.test(stripComments(read(definedIn))),
+          `${definedIn} no longer defines the cited \`${symbol}\``,
+        ).toBe(true)
+        for (const { file, atLeast } of citedBy) {
+          expect(
+            mentions(read(file), symbol),
+            `${file} cites \`${symbol}\` fewer times than it did — one end of a citation was renamed or misspelled`,
+          ).toBeGreaterThanOrEqual(atLeast)
+        }
+      }
+
+      // …AND THE CHECK ABOVE IS STILL THE WEAK ONE ON ITS OWN, because it asks whether the symbol
+      // appears ANYWHERE in the citing file. `asBuiltDriverCommand` is cited twice in the installer,
+      // so misspelling ONE of them leaves the other to satisfy the substring and the rot survives.
+      // Measured: that exact mutation passed the file-level check. So each SITE is checked where it
+      // sits — every backticked mention of a cited file must have a backticked identifier on its own
+      // line or the one above, and at least one of those has to exist in the file being cited.
+      //
+      // Scoped to the files the anchors above name, deliberately.
+      //
+      // WHAT THE SITE MUST NAME IS AN ANCHOR, NOT "ANYTHING THE TARGET CONTAINS". Resolving against
+      // the whole target file reads as strict and is not: the target is thousands of lines of
+      // ordinary code, so nearly any short backticked word is somewhere inside it. Measured —
+      // misspelling a symbol at one site and putting the word `bun` beside it left this GREEN,
+      // because `bun` appears in the target seven times; the identical typo without that word
+      // reddened. The rescue was a common English-ish token doing it by accident, which is the
+      // version that happens in real edits. The anchor table above is the curated list of what this
+      // cluster is entitled to cite, so a site has to name something ON it. A new legitimate
+      // citation therefore costs one row in that table — which is the point, since the row is what
+      // resolves the symbol against the target at all.
+      //
+      // AN ANCHOR IS MATCHED AS BACKTICKED TEXT, not as a bare identifier. The first version pulled
+      // identifiers out of the window with /`(\w+)`/ and compared them, which silently excluded the
+      // one anchor that is an EXPRESSION — `basename(process.execPath)` can never be a bare
+      // identifier, so its site was never really checked and only the file-wide substring stood
+      // behind it. The cross-model reviewer defeated exactly that: misspell the expression at its
+      // site, and the other citation of it further down the same file satisfies the file-wide check
+      // while the adjacent `asBuiltDriverCommand` satisfies the window.
+      //
+      // So the match is: an opening backtick, the anchor text verbatim, and then a character that
+      // cannot continue an identifier. The trailing rule is what keeps this from being the substring
+      // bug over again — without it `` `asBuiltDriverCommandd` `` contains `asBuiltDriverCommand`
+      // and the typo passes. Expressions terminate on their own punctuation and need no special case.
+      const anchorPatterns = new Map<string, Array<{ symbol: string; re: RegExp }>>()
+      for (const a of anchors) {
+        if (!anchorPatterns.has(a.definedIn)) anchorPatterns.set(a.definedIn, [])
+        anchorPatterns
+          .get(a.definedIn)!
+          .push({ symbol: a.symbol, re: new RegExp('`' + escapeRe(a.symbol) + '(?![\\p{L}\\p{N}_$])', 'u') })
+      }
+
+      /**
+       * Is this line a citation SITE for `target` — i.e. does the path appear inside a backtick span?
+       *
+       * Asking whether the line contains an exactly-backticked path was the same mistake the path
+       * checker made and had already been fixed for: a span that says anything else alongside the
+       * path stopped being a site at all, so the whole loop — window, coverage floor and all — never
+       * looked at it. The reviewer's version put a misspelled symbol in the same span as a correct
+       * path and nothing reported it. Spans are split on whitespace and the path judged as a word.
+       */
+      const words = (span: string) => span.split(/\s+/).map((w) => w.replace(/[),.;:]+$/, ''))
+      const targetSpans = (line: string, target: string) =>
+        [...line.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!).filter((s) => words(s).includes(target))
+
+      const unresolved: string[] = []
+      let sitesChecked = 0
+      for (const rel of cluster) {
+        const lines = read(rel).split('\n')
+        for (const [target, allowed] of anchorPatterns) {
+          lines.forEach((line, i) => {
+            const spans = targetSpans(line, target)
+            if (spans.length === 0) return
+            sitesChecked++
+
+            // A COMPANION INSIDE THE SAME SPAN IS PART OF THE CITATION, and is checked as one. This
+            // is the half that recognising mixed spans would otherwise have GIVEN AWAY: before, a
+            // span holding the path plus anything else was not a site at all, so it dropped the
+            // coverage floor and the floor is what reported it. Teaching the loop to see such spans
+            // removed that accident and, on its own, turned a caught mutation into a silent pass —
+            // the neighbouring line's correct anchor satisfied the window while the misspelling sat
+            // in the span unread. Measured exactly that way, which is why the check below exists:
+            // any identifier-shaped word sharing a span with the path has to BE one of the anchors.
+            for (const span of spans) {
+              for (const w of words(span)) {
+                if (w === target) continue
+                if (!/^[A-Za-z_][A-Za-z0-9_]{5,}$/.test(w)) continue
+                if (allowed.some((a) => a.symbol === w)) continue
+                unresolved.push(
+                  `${rel} line ${i + 1} — \`${w}\` shares a citation span with ${target} but is not one of its anchored symbols`,
+                )
+              }
+            }
+            // The window reaches BOTH ways. It looked only backwards at first, which made coverage
+            // depend on where the prose happened to wrap: rewording a paragraph in this very file
+            // pushed two symbols onto the line AFTER their path and the sites went unresolved, with
+            // nothing wrong with the citations at all. A one-sided window turns a reflow into a
+            // verdict.
+            //
+            // Three lines is still a WINDOW and can still be out-run — put four lines between a path
+            // and its symbol and this reports a citation that is perfectly good. That direction is
+            // chosen: the fix is to move the symbol next to the path it belongs to, which is what a
+            // reader wanted anyway, and the alternative is a paragraph-scale window that would let
+            // the misspellings this exists to catch hide two sentences away. False red costs one
+            // edit; false green costs the property.
+            const near = `${lines[i - 1] ?? ''}\n${line}\n${lines[i + 1] ?? ''}`
+            if (allowed.some((a) => a.re.test(near))) return
+            unresolved.push(
+              `${rel} line ${i + 1} cites ${target} but names none of its anchored symbols (${allowed.map((a) => a.symbol).join(', ')})`,
+            )
+          })
+        }
+      }
+      expect(unresolved, `a citation names no anchored symbol of its target:\n${unresolved.join('\n')}`).toEqual([])
+
+      // AND THE COVERAGE IS ASSERTED, because every check above is a loop over sites and a loop over
+      // zero sites passes. That is the fail-closed-on-the-safety-net shape this repository keeps
+      // writing rules about: an unrelated reflow that stopped the sites matching would take the
+      // guard silently to nothing and still print green. Measured at this commit: exactly 7 sites.
+      // The floor is what was measured, so adding a citation is free and losing one is not — and it
+      // has already paid for itself: rewording the docblock above dropped a site and this line is
+      // what said so, in the same session, before the reword was committed.
+      expect(sitesChecked, 'the site loop reached no citations — the guard is checking nothing').toBeGreaterThanOrEqual(7)
+
+      // …and a cited PATH has to exist, which is the other half of the same hole. The site loop
+      // above keys on an exact backticked target path, so misspelling the PATH means no site
+      // matches, every check skips, and the guard reports green on a citation that resolves to
+      // nothing. The file-level check cannot catch it either — the other, correctly spelled
+      // citations in the same file satisfy the substring on their own. Measured across the cluster
+      // at this commit: 13 distinct backticked repo paths, 12 of which resolve, so this starts at
+      // effectively zero noise and only ever fires on a typo or a move.
+      //
+      // The thirteenth is the one carve-out, and it is a category rather than an exception: prose
+      // about git's own behaviour names runtime artefacts under `.git/` — the lock file git writes
+      // and renames during a config write — which are BY DEFINITION never tracked paths, so
+      // "does this file exist in the repository" is not a question about them. `.github/` is a
+      // tracked directory and deliberately still checked; the skip is the `.git/` prefix exactly.
+      // The path is looked for INSIDE a backtick span rather than being required to fill one. The
+      // first version demanded the whole span be the path, which quietly skipped every citation that
+      // says anything else in the same span — the reviewer's example is the installer's
+      // `docs/AS_BUILT.md merge=union`, where misspelling the path matched no pattern at all and
+      // stayed green. Spans are split on whitespace and each word judged on its own.
+      // WHAT THIS DELIBERATELY DOES NOT COVER, and why the limit is the right one. It judges a word
+      // as a path only when it carries BOTH a slash and an extension. A bare `SOMEFILE.md`, or a
+      // slash-bearing name with no extension, is therefore not checked — the reviewer is correct
+      // that this is not "every cited path".
+      //
+      // Widening it either way was measured against this cluster and produces THIRTEEN false reds:
+      // `process.env`, `String.replace` and `Math.min` are code, `origin/main` is a git ref,
+      // `info/attributes` and `config.lock` are git's runtime, `log.txt` is a fixture invented by a
+      // test in this very file, and several are bare filenames that are real but resolve relative to
+      // some other directory. None of those is a repository path and no rule short of understanding
+      // the surrounding prose separates them from one. A guard that cries thirteen times on correct
+      // text is the guard people learn to ignore, which costs more than the narrow case it buys —
+      // so the shape stays unambiguous and the gap is recorded here rather than papered over.
+      const deadPaths: string[] = []
+      const SPAN = /`([^`\n]+)`/g
+      const PATHISH = /^[\w.-]*[\w-]\/[\w./-]+\.[A-Za-z0-9]+$/
+      for (const rel of cluster) {
+        read(rel)
+          .split('\n')
+          .forEach((line, i) => {
+            for (const span of line.matchAll(SPAN)) {
+              for (const word of span[1]!.split(/\s+/)) {
+                const p = word.replace(/[),.;:]+$/, '')
+                if (!PATHISH.test(p)) continue
+                if (p.startsWith('.git/')) continue // git's runtime dir, never a tracked path
+                if (existsSync(join(REPO_ROOT, p))) continue
+                deadPaths.push(`${rel} line ${i + 1} cites \`${p}\`, which is not in the repository`)
+              }
+            }
+          })
+      }
+      expect(deadPaths, `a citation names a path that does not exist:\n${deadPaths.join('\n')}`).toEqual([])
     }, 30_000)
   })
 })

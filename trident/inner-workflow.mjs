@@ -177,6 +177,7 @@ const {
   // thread it falls back to the repo-of-record copy (same precedent as
   // codex-review.sh below).
   checkpointScript = null,
+  codexBuildScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
   // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
   // script (dirty → preserve, clean → plain remove) rather than an LLM told to
@@ -275,6 +276,12 @@ const kimiConfigured = kimiConfiguredArg === true
 // launcher that threads those also threads checkpointScript — the repoPath
 // fallback covers only legacy callers.
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
+
+// NO repoPath fallback, deliberately — resolving the wrapper from the repo being
+// built is the defect (Open worked by coincidence, everything else 127'd or drifted);
+// a missing arg fails closed by name in forgeAgent.
+const codexBuildSh =
+  typeof codexBuildScript === 'string' && codexBuildScript.length > 0 ? codexBuildScript : null
 
 // Resolved worktree-cleanup script path (#541) — the deterministic replacement
 // for the force-removing cleanup agent. Same repoPath fallback as above.
@@ -1157,8 +1164,11 @@ const NO_PATTERN_KILL_RULE =
 // `schema: FORGE_SCHEMA` the agent ALSO returns the structured fields, but the
 // last-lines discipline is kept verbatim as the durable, parser-friendly fallback.
 // Step 1 + step 4 differ on whether the branch/PR ALREADY EXIST (`reenter`):
-//   • a FRESH round-1 run (reenter=false) CREATES the branch (`git switch -c`)
-//     and, in pr-mode, opens a PR;
+//   • a FRESH round-1 run (reenter=false) CREATES-OR-RE-ENTERS the branch (`git switch -c`),
+//     falling back to a plain `git switch` when a prior failed run of the same
+//     card left the local branch behind (measured incident d5c1e219: the
+//     collision pushed the commit onto the worktree's auto `worktree-wf_*`
+//     branch and the divergence guard refused the round);
 //   • a RE-ENTRY (reenter=true) — a crash-resume (`resuming`) OR any bounded
 //     fix round after round 1 — re-enters the EXISTING branch WITHOUT `-c`
 //     (which would collide: "branch already exists") and REUSES the PR (never a
@@ -1173,9 +1183,19 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
 function forgeStep1(reenter) {
   return reenter
     ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
+    // BOTH halves are load-bearing and this line is where they meet:
+    //  • base-pinning (#332) — branch from the sha origin/<base> had AT LAUNCH, not the
+    //    worktree's default HEAD, which can be behind;
+    //  • create-or-re-enter (#346, measured incident d5c1e219) — a leftover local branch
+    //    from a failed run of the same card must not kill the build with "branch already
+    //    exists", which sent the commit to the worktree's auto `worktree-wf_*` branch and
+    //    made the divergence guard refuse the round.
+    // The fallback deliberately does NOT repeat the pinned base: re-entering an EXISTING
+    // branch must not try to re-point it at the launch sha, which would discard the very
+    // work we are re-entering to keep.
     : pinnedBase !== null
-      ? `Run \`git switch -c ${forgeBranch} ${pinnedBase}\` as your FIRST step — ${pinnedBase.slice(0, 7)} is origin/${baseBranch} as observed at launch; do NOT branch from the worktree's default HEAD, which can be behind. (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
-      : `Run \`git switch -c ${forgeBranch}\` as your FIRST step (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+      ? `Run \`git switch -c ${forgeBranch} ${pinnedBase} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — ${pinnedBase.slice(0, 7)} is origin/${baseBranch} as observed at launch; do NOT branch from the worktree's default HEAD, which can be behind. If the branch already exists from a previous run of this card, RE-ENTER it rather than failing. (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+      : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
 }
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
@@ -1326,6 +1346,7 @@ HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from
 - There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
 - Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
 - Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
+- STEP 1 IS ALREADY DONE FOR YOU, and this REPLACES it: the wrapper that launched you checked this worktree out on ${forgeBranch} before you started. Do NOT run \`git switch -c\` (the branch exists — creating it again errors); do not switch away. Verify with \`git rev-parse --abbrev-ref HEAD\` if unsure, then build.
 - Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
 }
 
@@ -1515,7 +1536,7 @@ function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   // one won. A separate file has no ambiguity to resolve.
   const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
-  const script = `${repoPath}/trident/codex-build.sh`
+  const script = codexBuildSh
   // THE HEREDOC TERMINATOR MUST NOT OCCUR IN THE BRIEF. A brief line equal to the
   // marker would close the heredoc early and leave the REST OF THE BRIEF sitting in
   // the command as shell — and part of the brief is the owner's task text, which is
@@ -1649,6 +1670,11 @@ async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
   if (route.transport !== 'cli') {
     return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
+  }
+  if (codexBuildSh === null) {
+    throw new Error(
+      `${opts.label} is routed to the codex executor but the launcher did not thread codexBuildScript (the harness build wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
+    )
   }
   const res = await agent(
     codexBuildPrompt(
@@ -2229,6 +2255,65 @@ function classifyBlock(synthesis, deferredPeers) {
     return true
   })
   return codeFindings.length === 0 ? 'infra-only' : 'code'
+}
+
+/**
+ * THE DELTA CLASSIFIER (docs-only cheap path, T1). Pure, self-contained, and
+ * CONSERVATIVE BY CONSTRUCTION: any path it does not positively recognise as
+ * documentation forces the full path. A false "full" costs one wasted full run;
+ * a false "docs-only" ships unverified code, so every ambiguity resolves to full.
+ * Classification is by PATH, never by count or diff size (the card forbids both).
+ * Self-contained on purpose: the extraction tests evaluate it out of this file's
+ * source, so it must close over NOTHING at module scope.
+ */
+function classifyDeltaPaths(paths) {
+  const full = (reason) => ({ classification: 'full', reason, offenders: [] })
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return full('delta: no changed paths measured — taking the full path')
+  }
+  const DENY_PREFIXES = ['migrations/', '.github/']
+  const ALLOW_PREFIXES = ['.trident/plans/']
+  const offenders = []
+  for (const raw of paths) {
+    if (typeof raw !== 'string') return full('delta: unreadable path entry — taking the full path')
+    const p = raw.trim()
+    if (
+      p.length === 0 ||
+      p.startsWith('/') ||
+      p.startsWith('"') ||
+      p.includes('\\') ||
+      p.includes('..')
+    ) {
+      return full(`delta: suspicious path ${JSON.stringify(raw)} — taking the full path`)
+    }
+    if (DENY_PREFIXES.some((d) => p.startsWith(d))) { offenders.push(p); continue }
+    const lower = p.toLowerCase()
+    const isDoc = lower.endsWith('.md') || lower.endsWith('.markdown') || ALLOW_PREFIXES.some((a) => p.startsWith(a))
+    if (!isDoc) offenders.push(p)
+  }
+  if (offenders.length > 0) {
+    const shown = offenders.slice(0, 3).join(', ')
+    const more = offenders.length > 3 ? ` (+${offenders.length - 3} more)` : ''
+    return { classification: 'full', reason: `full: non-docs path(s): ${shown}${more}`, offenders }
+  }
+  return { classification: 'docs-only', reason: `docs-only: all ${paths.length} changed path(s) are documentation`, offenders: [] }
+}
+
+/**
+ * The probe half: input is the raw/exit_code report of ONE verbatim
+ * `git diff --name-only <base>...<head>` command (same report-don't-interpret
+ * shape as probePrMerged). Any hint the command did not succeed cleanly —
+ * missing/non-zero exit, git error text — is "unsure", and unsure takes the
+ * expensive path and says so.
+ */
+function classifyDeltaProbe(probe) {
+  const full = (reason) => ({ classification: 'full', reason, offenders: [] })
+  const exit = probe && typeof probe.exit_code === 'number' ? probe.exit_code : null
+  if (exit !== 0) return full(`delta: probe failed (exit=${exit === null ? 'unknown' : exit}) — taking the full path`)
+  const raw = probe && typeof probe.raw === 'string' ? probe.raw : ''
+  if (/^(fatal|error):/im.test(raw)) return full('delta: probe reported a git error — taking the full path')
+  const paths = raw.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+  return classifyDeltaPaths(paths)
 }
 
 // A SYNTHESIS WE NEVER GOT IS AN INFRA BLOCK — IT MUST NOT RE-FORGE, AND MUST NOT CRASH.

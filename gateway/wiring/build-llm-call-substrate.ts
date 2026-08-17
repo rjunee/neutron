@@ -41,6 +41,7 @@ import {
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
   type DeadTurnNotice,
+  type ModelFloorNotice,
   type RateLimitBannerNotice,
   type SettingsPermissions,
   type SizeSeverity,
@@ -342,6 +343,12 @@ export interface BuildLlmCallSubstrateInput {
   onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
+  /** Floor-clamp notice — an owner-facing spawn was resolved below the configured
+   *  best tier and held at the floor. Same routing as the three above (wired only
+   *  on `cc-agent-*`), and it exists for the same reason: without a delivered
+   *  notice the clamp is a stderr line, which is how the original degradation ran
+   *  for a working day with the owner as the only detector. */
+  onModelFloorApplied?: (notice: ModelFloorNotice) => void
   /**
    * Optional `owner_handle` keyed against `oauthRefresh.loadAccessToken`.
    * Required when `oauthRefresh` is wired; ignored otherwise.
@@ -831,6 +838,9 @@ export function buildLlmCallSubstrate(
         if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
         if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
         if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
+        if (input.onModelFloorApplied !== undefined) {
+          opts.onModelFloorApplied = input.onModelFloorApplied
+        }
         // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode: a session-
         // less dispatch on this substrate gets a fresh REPL terminated after the
         // turn, so distinct one-shot purposes never share a `--resume` transcript.

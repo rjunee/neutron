@@ -237,6 +237,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       expect(o.onDeadTurnNotice).toBeUndefined()
       expect(o.onSizeAlert).toBeUndefined()
       expect(o.onRateLimitBanner).toBeUndefined()
+      expect(o.onModelFloorApplied).toBeUndefined()
       expect(o.onRecoveredReply).toBeUndefined()
       expect(o.delivery_topic_id).toBeUndefined()
       expect(o.skip_permissions).toBe(true)
@@ -250,6 +251,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
         onDeadTurnNotice: () => {},
         onSizeAlert: () => {},
         onRateLimitBanner,
+        onModelFloorApplied: () => {},
       },
       liveAgentDeliveryTopicId: 'app:owner',
     })
@@ -278,9 +280,10 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     const onDeadTurnNotice = (): void => {}
     const onSizeAlert = (): void => {}
     const onRateLimitBanner = (): void => {}
+    const onModelFloorApplied = (): void => {}
     const onRecoveredReply = (): void => {}
     const { ctx, captured } = makeCtx({
-      liveAgentNoticeSinks: { onDeadTurnNotice, onSizeAlert, onRateLimitBanner },
+      liveAgentNoticeSinks: { onDeadTurnNotice, onSizeAlert, onRateLimitBanner, onModelFloorApplied },
       liveAgentRecoveredReplySink: onRecoveredReply,
       liveAgentDeliveryTopicId: 'app:owner',
     })
@@ -295,6 +298,10 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(agent.onDeadTurnNotice).toBe(onDeadTurnNotice)
     expect(agent.onSizeAlert).toBe(onSizeAlert)
     expect(agent.onRateLimitBanner).toBe(onRateLimitBanner)
+    // The floor-clamp notice rides the SAME wiring — it is the fourth member of
+    // the family now, and without it a clamp is a stderr line on a box the owner
+    // does not read (the silence that let the degradation run for a day).
+    expect(agent.onModelFloorApplied).toBe(onModelFloorApplied)
     expect(agent.onRecoveredReply).toBe(onRecoveredReply)
     expect(agent.delivery_topic_id).toBe('app:owner')
 
@@ -389,6 +396,14 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     // (`record.model ?? getBestModel()`), and the spawn writes the row back, so a
     // single wrong value is permanent. The owner's project chat ran a full day on
     // Haiku on that path, twice in one day.
+    //
+    // ⚠️ SCOPE, stated because the counter-assertion below reads wider than it is:
+    // this drives `wireSubstrates` ONLY. The scribe extractor, the correction judge
+    // and the consolidation pass — the deliberate fast-tier callers the counter-
+    // assertion is really about — are built by `wireMemory`, so flipping one of
+    // THEM onto the chat profile would not fail here. That half lives in
+    // `open-wiring-memory.test.ts` § "no memory substrate carries the frontier-
+    // model floor", which drives the real memory call sites.
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)
     await drain(w.liveAgentSubstrate!)
