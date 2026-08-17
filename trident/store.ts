@@ -521,6 +521,22 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /** Failed PR-mode rows eligible for startup git-truth reconciliation,
+   *  newest-advanced first and bounded so boot work stays finite. */
+  listFailedPrRuns(limit: number = 50): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, [number]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE phase = 'failed'
+            AND merge_mode = 'pr'
+          ORDER BY last_advanced_at DESC
+          LIMIT ?`,
+      )
+      .all(limit)
+      .map(rowToRun)
+  }
+
   /** Every actively running row with an external launcher generation.
    * Unbounded deliberately: liveness must not inherit the expensive sweep's
    * per-tick cap or leave newer lanes invisible behind older rows. */

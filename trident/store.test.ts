@@ -283,6 +283,32 @@ describe('TridentRunStore', () => {
     expect(store.listNonTerminal()).toEqual([])
   })
 
+  test('listFailedPrRuns filters exactly, orders newest first, and respects the limit', async () => {
+    let clock = '2026-08-17T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => clock)
+    await store.create({
+      slug: 'failed-pr-old', project_slug: 't1', repo_path: '/r', task: 't', phase: 'failed', merge_mode: 'pr',
+    })
+    clock = '2026-08-17T00:01:00.000Z'
+    await store.create({
+      slug: 'failed-local', project_slug: 't1', repo_path: '/r', task: 't', phase: 'failed', merge_mode: 'local',
+    })
+    clock = '2026-08-17T00:02:00.000Z'
+    await store.create({
+      slug: 'done-pr', project_slug: 't1', repo_path: '/r', task: 't', phase: 'done', merge_mode: 'pr',
+    })
+    clock = '2026-08-17T00:03:00.000Z'
+    await store.create({
+      slug: 'failed-pr-new', project_slug: 't1', repo_path: '/r', task: 't', phase: 'failed', merge_mode: 'pr',
+    })
+
+    expect(store.listFailedPrRuns().map((run) => run.slug)).toEqual([
+      'failed-pr-new',
+      'failed-pr-old',
+    ])
+    expect(store.listFailedPrRuns(1).map((run) => run.slug)).toEqual(['failed-pr-new'])
+  })
+
   test('latestByProjectScope returns the most-recently-advanced run, scoped', async () => {
     let clock = '2026-01-01T00:00:00.000Z'
     const store = new TridentRunStore(db, () => clock)

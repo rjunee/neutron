@@ -13,6 +13,7 @@ import {
   resolveClaimedCommit,
   resolveResumeLiveHead,
   RESUME_HEAD_RETRY_DELAYS_MS,
+  sweepStrandedFailures,
 } from './orchestrator.ts'
 import { MAX_CONFLICT_ROUNDS, runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -1925,6 +1926,75 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.worktree).toBe(runWorktreePath('/repo', final))
     expect(joined.some((c) => c.includes(`worktree add --detach --force ${final.worktree}`))).toBe(true)
     expect(joined.some((c) => c === `git -C ${final.worktree} rebase main`)).toBe(true)
+  })
+})
+
+describe('sweepStrandedFailures', () => {
+  async function failedPr(slug: string): Promise<TridentRun> {
+    const run = await store.create({
+      slug,
+      project_slug: 't1',
+      repo_path: '/repo',
+      task: 'recover the build',
+      phase: 'failed',
+      merge_mode: 'pr',
+      branch: `trident/${slug}`,
+    })
+    await store.update(run.id, { failure_reason: `${slug} failed before handoff` })
+    return store.get(run.id)!
+  }
+
+  test('persists only the salvaged PR and appended failure reason onto the failed row', async () => {
+    const row = await failedPr('persist-salvage')
+
+    await sweepStrandedFailures({
+      store,
+      reconcile: async (run) => ({
+        ...run,
+        pr: 73,
+        failure_reason: `${run.failure_reason} — build survived the failure`,
+      }),
+    })
+
+    const saved = store.get(row.id)
+    expect(saved?.phase).toBe('failed')
+    expect(saved?.pr).toBe(73)
+    expect(saved?.failure_reason).toBe(
+      'persist-salvage failed before handoff — build survived the failure',
+    )
+  })
+
+  test('a throwing row does not block later salvage, and the sweep resolves', async () => {
+    const throwing = await failedPr('throwing-row')
+    const salvageable = await failedPr('later-row')
+
+    await expect(
+      sweepStrandedFailures({
+        store,
+        reconcile: async (run) => {
+          if (run.id === throwing.id) throw new Error('broken checkout')
+          return { ...run, pr: 74, failure_reason: `${run.failure_reason} — salvaged` }
+        },
+      }),
+    ).resolves.toBeUndefined()
+
+    expect(store.get(throwing.id)?.pr).toBeNull()
+    expect(store.get(throwing.id)?.failure_reason).toBe('throwing-row failed before handoff')
+    expect(store.get(salvageable.id)?.pr).toBe(74)
+    expect(store.get(salvageable.id)?.failure_reason).toBe('later-row failed before handoff — salvaged')
+  })
+
+  test('an initial list failure is swallowed so the sweep promise never rejects', async () => {
+    const brokenStore = {
+      listFailedPrRuns: (): TridentRun[] => {
+        throw new Error('database unavailable')
+      },
+      update: async () => null,
+    }
+
+    await expect(
+      sweepStrandedFailures({ store: brokenStore, reconcile: async () => null }),
+    ).resolves.toBeUndefined()
   })
 })
 

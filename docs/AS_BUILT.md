@@ -6419,6 +6419,24 @@ Mutation checks (each production guard was removed independently and restored):
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
 
+## 2026-08-17 — a failed Trident run now asks git whether the build survived
+
+The outer orchestrator now performs git-truth salvage before committing every
+new PR-mode terminal failure: when the run's local branch exists and is ahead of
+base, the existing outer-loop publisher pushes the commit and opens or reuses its
+PR. The outcome remains honestly `failed`; the original `failure_reason` is
+preserved with an appended salvage note and PR number. A missing branch, a branch
+with no commits ahead, an already-published run, or a failed publishing attempt is
+left untouched.
+
+Gateway startup now also lists the newest failed PR-mode rows and reconciles each
+one independently after the Trident loop starts. The production module exposes
+the fire-and-forget promise as `stranded_sweep`, and a real-git composition test
+proves that removing this wiring prevents the branch publication. This startup
+sweep recovers the eleven already-stranded branches at next boot without moving
+their rows out of `failed` or introducing publishing credentials into the inner
+loop.
+
 ## 2026-08-14 — launcher-held build brief segments travel by path
 
 Task and reflection brief segments now travel by path via the `briefParts` manifest
