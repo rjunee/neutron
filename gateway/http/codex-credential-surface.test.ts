@@ -19,6 +19,7 @@ import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { codexAuthPath, codexProjectHome } from '@neutronai/trident/codex-auth.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import { createCodexCredentialSurface, type CodexCredentialSurface } from './codex-credential-surface.ts'
 
 const SLUG = 'owner'
@@ -53,7 +54,7 @@ beforeEach(() => {
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')
-  const service = new CodexCredentialService({ store, codexHome })
+  const service = new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db) })
   const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
   surface = createCodexCredentialSurface({ service, auth })
 })

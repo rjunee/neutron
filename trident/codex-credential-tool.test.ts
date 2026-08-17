@@ -14,6 +14,7 @@ import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { codexAuthPath } from './codex-auth.ts'
 import { CodexCredentialService } from './codex-credential.ts'
+import { SqliteCodexRotationStore } from './codex-rotation-store.ts'
 import {
   CODEX_CONNECT_TOOL,
   CODEX_STATUS_TOOL,
@@ -43,7 +44,7 @@ beforeEach(() => {
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')
-  service = new CodexCredentialService({ store, codexHome })
+  service = new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db) })
   registry = new ToolRegistry()
   registerCodexCredentialToolSurface(registry, { service })
 })
