@@ -269,7 +269,7 @@ all three tiers of `resolveRegistryDbPath` and both arms of `resolveOwnerHome`
 (`gateway/wiring/build-phase-spec-resolver.ts:515,520`); `resolveM2FeedbackPath`
 (`onboarding/feedback/m2-week-4-collector.ts:48`); the `--home` guard
 (`scripts/email-accounts.ts:73`); `buildPromptVars` (`prompts/template.ts:116`);
-the normalizer's own predicate (`runtime/adapters/claude-code/index.ts:304`); and
+the normalizer's own predicate (`runtime/adapters/claude-code/index.ts:331`); and
 the return-verbatim half of `resolveStatePath`
 (`gbrain-memory/gbrain-doctor.ts:216`). Each mutation was proved to have LANDED
 (`git diff` printed per mutation) and each was restored and re-verified clean.
@@ -277,7 +277,7 @@ The claim is true as written.
 
 **WHAT IS NOT TRUE IS THE SCOPE IT READS AS.** `resolveReplCwdAndHome` appears in
 that mutation-proved list, and the FUNCTION is pinned. The LINE THAT USES IT was
-not. Measured: replacing `runtime/adapters/claude-code/index.ts:340`
+not. Measured: replacing `runtime/adapters/claude-code/index.ts:367`
 
     if (resolved.cwd !== undefined) p.cwd = resolved.cwd
 
@@ -337,7 +337,7 @@ weaker reason than the docblock claimed, and the docblock is corrected in this
 change. It said every production caller resolves `cwd` through
 `resolveNeutronHome`. **There are three paths into that factory and only the
 first does**: `open/composer.ts:1296` (resolved at `:856`), then
-`open/wiring/substrates.ts:359` / `:408`, which forward a caller-supplied per-run
+`open/wiring/substrates.ts:364` / `:413`, which forward a caller-supplied per-run
 worktree path, and whose producer is `agent-dispatch/service.ts:487` —
 `req.repo_path ?? this.deps.repo_path`, and `??` keeps a blank. It is unreached
 today only because every in-tree producer independently avoids one, either by

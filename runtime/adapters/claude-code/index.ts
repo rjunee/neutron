@@ -308,7 +308,7 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
  *
  *   1. `open/composer.ts:1296` passes `owner_home`, resolved at `:856` through
  *      `resolveNeutronHome`, which cannot return blank.
- *   2. `open/wiring/substrates.ts:359` (`makeEphemeralSubstrate`) and `:408`
+ *   2. `open/wiring/substrates.ts:364` (`makeEphemeralSubstrate`) and `:413`
  *      (`makeWarmFireSubstrate`) forward a CALLER-SUPPLIED per-run path — a
  *      worktree or repo root, never `resolveNeutronHome` — through
  *      `buildLlmCallSubstrate` to this factory.
