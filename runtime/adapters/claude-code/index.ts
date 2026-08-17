@@ -124,6 +124,16 @@ export interface ClaudeCodeSubstrateOptions {
    */
   turn_inactivity_ms?: number
   /**
+   * FRONTIER-MODEL FLOOR → `PersistentReplSubstrateOptions.frontierModelFloor`.
+   * Set from `SubstrateProfile.frontier_model_floor`; absent ⇒ off, so every
+   * deliberate `FAST_MODEL` utility caller is byte-for-byte unchanged. Marks a
+   * substrate as owner-facing conversational: its spawns are clamped up to the
+   * frontier model when the resolved id names a known lower tier, whatever the
+   * REPL registry row said. See the field's docblock in `persistent/types.ts`
+   * and the mechanism in `persistent/model-floor.ts`.
+   */
+  frontier_model_floor?: boolean
+  /**
    * S3 §2 — conversational warm-pool namespace. The persistent substrate folds
    * these into its pool key so distinct (user, project) sessions never collapse
    * into one warm REPL and a credential rotation re-keys (#104). `user_id` is the
@@ -335,6 +345,13 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // self-refresh its own OAuth token from its `.credentials.json` (Codex r2 P1).
   if (options.claude_config_dir !== undefined) p.claudeConfigDir = options.claude_config_dir
   if (options.turn_inactivity_ms !== undefined) p.turnTimeoutMs = options.turn_inactivity_ms
+  // Frontier-model floor — owner-facing conversational substrates only. Dropped
+  // here would be the same silent seam that lost `appendSystemPromptFile`
+  // (`append-system-prompt-wiring.test.ts`): the profile would look correct and
+  // the spawn would still come up on Haiku, so the forward is tested end-to-end.
+  if (options.frontier_model_floor !== undefined) {
+    p.frontierModelFloor = options.frontier_model_floor
+  }
   // S3 §2 — thread the conversational identity + selected credential into the
   // pool key (closes #104; makes the substrate instance-isolation-SAFE).
   if (options.user_id !== undefined) p.user_id = options.user_id

@@ -1,0 +1,9 @@
+[
+  {
+    "version": 122,
+    "recorded_name": "work_board_items_pr",
+    "file_name": "trident_checkpoint_head",
+    "note": "An unmerged branch migration ran against the live database at 18:55:09Z. The merged 0122 migration's inner_checkpoint_head and inner_checkpoint_findings ALTERs were applied by hand at 22:04Z. The _migrations row is deliberately retained as the incident record and must never be rewritten (tracker #575).",
+    "date": "2026-08-14"
+  }
+]
