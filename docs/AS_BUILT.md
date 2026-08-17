@@ -2,6 +2,14 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — a live instance crash-looped on a migration ordinal, and the repair is now in `repairs.json`
+
+An instance refused to boot for ~3 hours (1248 uncaught exceptions) because `_migrations` recorded version 124 under one name while the deployed tree carried another at that ordinal. `migrations/runner.ts` threw rather than guess, which is the designed behaviour — the cost is a hard crash loop, so the instance served nothing and clients connected to an empty server.
+
+Resolved by a hand-verified entry in `migrations/repairs.json` (#350). The merged 0124 had in fact already run, recorded at ordinal 125, and its three ALTERs on `code_trident_runs` (`reviewed_head`, `bound_pr`, `fenced_paths`) were confirmed present via `pragma_table_info` with a positive control before the entry was written. No SQL was applied by hand and no `_migrations` row was rewritten; the rows stay as the incident record.
+
+Second occurrence of the class already documented in that file. The provenance gap it exposes — nothing records WHICH build applied a given migration, so the vector is unrecoverable after the fact — is being closed separately in #352.
+
 ## 2026-08-17 — the build wrapper resolves from the harness install
 
 `trident/inner-loop.ts` now resolves the sibling `codex-build.sh` as
@@ -142,12 +150,354 @@ cure. A test now meets that collision head-on, and it is a real discriminator
 rather than a restatement: under the separator-removal mutation it is the ONLY
 test that fails, 25 others still passing, and it passes again on restore.
 
+## 2026-08-16 — the model floor was a list of four ids, not a floor
+
+Landed via PR #344.
+
+A cross-model review of #342 came back `BLOCKERS — 1, 2`, and both were right.
+The floor shipped there matched the requested model against
+`getKnownFallbackModels()` — four literal ids — plus a trailing `-YYYYMMDD`
+strip. That is not the property the file's name claims. The `claude` CLI accepts
+the BARE ALIASES `haiku` and `sonnet`; an older generation and a future
+generation with a new base are not in the set and never will be; case and
+whitespace variants miss. And the row is not schema-validated —
+`repl-registry.ts` declares `model?: string` and never checks it — so a record
+written by another build genuinely can carry any of those. "Whatever the
+persisted record says" has to mean whatever it says.
+
+The second blocker was a guard added by the same hand a day earlier, which is
+the more useful half of the story. `BEST_MODEL` is overridable via
+`NEUTRON_BEST_MODEL`, so an operator can run an instance deliberately on a
+cheaper tier, and that guard DISABLED the floor entirely in that case to avoid
+emitting a "floor applied" event for a degradation that had not happened. The
+reviewer's objection: that honours "run cheaper" and abandons the floor — with
+the best model pinned to the middle tier, a poisoned fast-tier row sits below the
+operator's OWN configured best and stays there. The original defect wearing a
+different hat.
+
+Both collapse into one change, and it removes code rather than adding it.
+Comparison is now by TIER RANK derived from the FAMILY token of an id
+(`claude-haiku-4-5-20251001` → `haiku`, bare `haiku` → `haiku`, trimmed and
+lowercased). Clamp when the request ranks BELOW the floor, leave it alone at or
+above.
+`isBelowFrontierTier`, the snapshot regex and the `getKnownFallbackModels()`
+dependency are all gone. The alias, generation, snapshot and casing gaps close in
+one predicate with nothing left to maintain, and the same-tier case still does
+not fire the event — which was the legitimate half of the guard that was wrong.
+
+An UNRECOGNISED id still ranks at the top, deliberately: clamping it would fight
+the model-update path, which legitimately writes ids this process has never heard
+of into a record before a `--resume` respawn.
+
+Three non-blocking findings from the same review are fixed alongside, all of the
+same shape — a value that would fail the spawn rather than degrade it. A blank
+requested id (only `undefined` was rejected, so `''` reached `--model`) now
+resolves TO the floor. A non-string model in an unvalidated row would have thrown
+inside `.trim()` — inside a spawn, turning a wrong-model bug into a dead session
+— and is now coerced. And an empty `NEUTRON_BEST_MODEL` arrives as `''` because
+`BEST_MODEL` resolves with `??`, so the floor never clamps TO a blank value.
+
+Round 3 replaced the rank ORDER, and the reason is the sharpest finding of the
+whole sequence — two reviewers raised it independently. The order used to be read
+off the `runtime/models.ts` aliases rather than a hardcoded table, on the
+reasoning that a hardcoded table could be inverted by a generation bump. It could.
+What that reasoning missed is that it also left the floor able to rank exactly TWO
+families, and WHICH two was operator configuration: rank 0 was
+`familyOf(FAST_MODEL)`, rank 1 was `familyOf(SONNET_MODEL)`, everything else
+frontier. Point `NEUTRON_FAST_MODEL` at anything that is not the cheapest tier and
+a whole tier stops being ranked. With `NEUTRON_FAST_MODEL=claude-sonnet-5` both
+aliases resolve to `sonnet`, so a persisted `claude-haiku-4-5-20251001` matched
+neither rank and came back FRONTIER: no clamp, so the child spawned on the fast
+tier, `spawn.ts` rewrote the row with it, and not one of the three visibility
+surfaces fired. `NEUTRON_FAST_MODEL=claude-opus-4-5` was worse — `opus` took rank
+0, so the FLOOR itself ranked bottom and nothing could ever clamp. Reproduced
+against the branch head before fixing: 17 failures under that env, 35/35 green on
+the default one.
+
+That is the failure mode this file exists to end, rebuilt one level up. A floor
+that goes INERT under a configuration is worse than one that is absent, because
+everything downstream — the warn, the `system_events` row, the chat bubble — is
+gated on the clamp that never happens. So the order now comes from `TIER_WORDS`,
+which held the true order all along and was consulted only for membership; it is
+an ordered array and the index IS the rank. The aliases still contribute for the
+case the canonical list genuinely cannot cover — a tier name this build predates
+is seeded at the tier its alias names — and a known tier word is never
+overwritten, which is what stops a mis-pointed alias dragging `sonnet` to rank 0.
+The aliases became parameters at the same time, because `runtime/models.ts` binds
+them at import and no in-process test could otherwise reach the environment that
+produced the bug.
+
+Three smaller findings from the same round land with it. The clamp bubble now
+NAMES THE SESSION, because it does not arrive on the degraded chat: the sink
+delivers to one pinned owner topic while a project chat binds its own, so copy
+reading "this chat" was pointing at a different one. Routing the pill to the
+degraded topic is the right fix and is deliberately NOT done here — it needs a
+session-key → topic mapping the sink does not have — but copy that misidentifies
+its own subject is not an acceptable place to wait. The bubble's interpolated
+values are also sanitised through an allow-list (`[A-Za-z0-9._:/@-]`) and capped
+at 64 characters with a marked ellipsis, since the value rendered there is the
+never-schema-checked `record.model` and a backtick in it would close the code span
+early. And `getRecord` now drops an UNUSABLE `model` — a number, an object, a
+blank string — at the one reader, so that the eight spawn profiles that all spend
+it as `record?.model ?? getBestModel()` fall back to the best model as each of
+them already intends; `??` catches only null and undefined, and seven of those
+profiles have no floor in front of them.
+
+The review also CONFIRMED the load-bearing claims of #342 against the code, which
+is worth recording because they were the reason to clamp where it clamps: every
+session spawn path reaches it (cold spawn, watchdog respawn, admin force-resume,
+pending-inbound replay), the only interactive PTY launch is downstream of it,
+neither the pool key nor the reuse guard keys on the model so a resume is
+unaffected, and the single synchronous decision feeding both argv and the record
+introduces no new concurrency hazard.
+
+Mutation-proved, each with a control: reverting `familyOf` to identity (the
+pre-review exact-id matching) reddens 6 of 23; restoring the disable-when-cheap
+guard reddens 1.
+
+A second review round found four more, and the two that matter most are about
+the SAME failure mode in different clothing: a check that cannot fail for the
+reason it claims.
+
+THE FAMILY TOKEN WAS THE FIRST TOKEN, which is only correct for one of the two
+naming orders Anthropic has shipped. `claude-3-5-haiku-20241022` — real,
+published, generation first — yielded family `3`, was therefore unrecognised,
+was therefore ranked at the frontier, and sailed past the floor. Gateway and
+proxy id forms failed identically: `us.anthropic.claude-haiku-4-5-v1:0` and
+`anthropic/claude-haiku-4-5` both anchored on a vendor word. The regression test
+hid all of it by asserting on `claude-haiku-3-5-20241022`, the CURRENT order
+applied to an old generation, which nobody has ever published. A fabricated
+input made a live gap look closed. The id is now split on every non-alphanumeric
+boundary and scanned for the first token that is neither a vendor word nor a
+bare number, which lands on the tier in both orders and behind every prefix
+form. Note which way the residual error leans: a scan that lands on a lower-tier
+word by accident spends more money on a better model, while the failure this
+file exists to stop is the reverse.
+
+THE LOUDNESS HAD NO TEST AND WAS NOT LOUD. Deleting the `log.warn` left every
+test in the suite green — the assertions all ran on the return value — and even
+when it fired it was a stderr line on a server, which is not a signal to the
+person whose chat got worse. That is the identical invisibility that let the
+original defect run for a working day, twice. A clamp now takes the same
+two-surface route as the dead-turn and rate-limit notices: the structured
+operator line, AND a `ModelFloorNotice` through an injected sink wired only on
+the owner's chat substrate, which the gateway fans to a `system_events` row plus
+a chat bubble naming both the requested model and the floor. It is deliberately
+UNLATCHED, unlike its three siblings: their upstream condition persists and
+would re-fire on every scan, whereas a clamp rewrites the offending row in the
+same breath — so a second clamp means something is actively re-poisoning it,
+which is the one thing that must not be suppressed.
+
+The other two were coverage holes with the same shape. The pre-poisoned-row test
+seeded `record.model` and then passed the same id in through `spec(...)`, so the
+production readers were never exercised and deleting the seed left it green;
+there are now two tests driving the REAL readers — `pool.ts`'s replay path and
+`supervision.ts`'s resume path — with the clamp notice asserting on the seeded
+value, so the seed is load-bearing twice over. And the "only the owner's chat
+carries the floor" test built `wireSubstrates` alone, while the deliberate
+fast-tier callers it was protecting are built by `wireMemory`: flipping the
+correction judge onto the chat profile was measured to leave that test fully
+green, and now reddens two in `open-wiring-memory.test.ts`.
+
+Two nits closed alongside. The non-string coercion ran BEFORE the enabled check,
+so an unfloored substrate did not get its own value back verbatim as the
+docstring promised; the early return moved above it. And the floor normalised
+for the comparison but not for the output, so a padded id from an unvalidated
+row reached `--model` padded; the returned value is trimmed now (case is left
+alone — it is meaningful to the API).
+
+The vendor-word list the family scan skips is an ENUMERATION, and an enumeration
+is a list of the prefixes someone remembered — so the RANK deliberately does not
+depend on it. `tierRankOf` scans every token of the id and a lower-tier family
+found anywhere wins, which means one unlisted routing segment
+(`bedrock/us-east-1/claude-3-5-haiku-20241022`) cannot reproduce this same
+blocker one level up. `familyOf` keeps its positional answer, which is what the
+alias constants and a human reader want; the divergence is documented at both.
+
+A cross-model reviewer then ran against the finished branch and found a hole in
+the very mechanism that had just closed the last one, which is the most useful
+kind of finding. Databricks publishes `databricks-claude-haiku-4-5` and
+`databricks-claude-opus-4-5`; the positional scan returned `databricks` for both,
+so an instance with BOTH aliases pointed at that form derived the same family for
+the fast tier and the best tier, every rank came out equal, and the floor went
+INERT. Reproduced before fixing and re-run after (FLOOR INERT → FLOOR HELD). Note
+which half broke, because it is the half the token scan cannot protect: the
+REQUEST was still ranked correctly (its tokens contain `haiku`); it was deriving
+the ALIAS's family that collapsed. So a known tier word anywhere in an id now
+wins over position. That IS an enumeration, sitting under a comment about the
+danger of enumerations, and the trade is stated where it lives: cloud vendors
+mint routing prefixes continuously — this one was missed — while Anthropic has
+shipped three tier names in five years. The ORDER still comes off the aliases, so
+a generation bump cannot invert it.
+
+The first version of THAT test did not isolate its own fix either. The vendor
+list had also gained `databricks`, so two mechanisms closed the same instance and
+deleting the tier-word pass left the test green — a class fix mistaken for done.
+The load-bearing assertion is now a vendor prefix that is not on the list and
+never will be.
+
+The same review disproved a claim in this file's own prose, and the correction is
+kept rather than quietly dropped: the unlatched-notice rationale asserted that a
+clamp cannot repeat for the same cause because it rewrites the row in the same
+breath. That holds only on the SUCCEEDING path. The registry write happens after
+the post-spawn readiness assertion (`spawn.ts:631`) while a channel-wedged
+attempt throws before it (`spawn.ts:573`), so the bounded respawn loop re-enters
+with the row still poisoned and one bad row emits three identical notices. It
+stays unlatched on volume rather than on the false claim — both loops are
+hard-capped — but the docblock now says which.
+
+One finding is recorded and NOT fixed here, deliberately. The owner-facing bubble
+is delivered to the bare `app:<owner>` topic (`open/composer.ts:984`) while a
+project chat's socket binds `app:<owner>:<project>`
+(`gateway/http/app-ws-surface.ts:201`) and delivery is an exact-key lookup, so an
+owner sitting only in a project chat sees the bubble in General rather than where
+the degradation happened — which is precisely where it happened last time. This
+is PRE-EXISTING and shared by all four notices in the family, not introduced
+here, and the durable `system_events` row plus the operator log land either way.
+Re-routing the whole notice family is a separate change with a design question
+attached (the composer's comment claims the bare topic is the only one the live
+client binds, which the surface code appears to contradict — the aspirational-
+docblock shape), so it is written down here instead of being quietly widened.
+
+One guard in that scan is DEFENSIVE AND LABELLED AS SUCH, because the honest
+thing was measured rather than assumed. `tierRankOf` refuses the empty string on
+both sides — an empty token (a padded id) and an empty family (an alias an
+operator pinned to a tier-less id like `claude-2`) — since matching either would
+rank EVERY id as the fast tier and produce a floor that clamps its own frontier
+requests. Only the token half is reachable from a test: the aliases are
+module-level consts bound at import, so no suite can pin a tier-less one.
+Removing the token filter leaves the file green on the default aliases; an
+out-of-suite probe under `NEUTRON_FAST_MODEL=claude-2` shows `'  claude-opus-5  '`
+ranking as the fast tier without the refusals and at the frontier with them. The
+first draft of that test claimed coverage it did not have, which the mutation run
+caught — the same defect class this whole round is about.
+
+Eight mutations reddened tests, each with a control proving it landed: reverting
+the family extraction reddens 3; reverting the rank to the positional lookup
+reddens 1; removing the tier-word pass reddens 1; deleting the owner notice
+reddens 3; deleting the operator log line reddens 1; bypassing the floor at the
+spawn chokepoint reddens 4; removing the poisoned seed reddens the replay test;
+flipping a memory call site onto the chat profile reddens 2. A ninth — removing
+the empty-string refusals — is the one described above as unreachable from a
+suite, and was verified by probe instead of being counted as test coverage.
+
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
 heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
 while keeping the log's heading-uniqueness invariant. Unit and real-git tests pin union, dedupe,
 suffix collision handling, intact history, and conflict-free merging.
+
+## 2026-08-16 — the identity-trim claim was true and unexecuted, so CI now runs it
+
+Landed via PR #349.
+
+#333's review panel was still running when the PR merged, so its findings were
+re-verified here against `main` rather than inherited. **All five were already
+closed by #333 itself before it landed, and the entry below says so with the
+mutation evidence rather than repeating them as open.** What the re-audit found
+instead is one level up, and it is the reason the same defect recurred four
+times.
+
+**The audit, measured rather than asserted.** Every behaviour-changing predicate
+#333 touched was independently mutation-tested against a GREEN BASELINE control
+(139 pass / 0 fail across the nine suites before any mutation): 12 predicates
+across 9 readers — `resolveOpenDbPath` and both arms of `resolveNeutronHome`
+(`migrations/db-path.ts`), all three tiers of `resolveRegistryDbPath`
+(`gateway/boot-listener-registry.ts`), `applyEnvShim` (`open/server.ts`), both
+predicates in `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`),
+`resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`),
+`resolveReplCwdAndHome` (`runtime/adapters/claude-code/index.ts`), the `--home`
+guard (`scripts/email-accounts.ts`), `buildPromptVars` (`prompts/template.ts`)
+and the return-verbatim half of `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts`). Reverting each one turns its suite RED. The
+sentence "each trim was mutation-proved" is therefore TRUE as written, and it
+stays; the two reachability claims settle the same way —
+`resolveRegistryDbPath` is named only by two `export {}` statements
+(`gateway/index.ts`, `gateway/composer-contract.ts`) with no in-tree caller, and
+the REPL blank-`cwd` arm is genuinely unreachable because `open/composer.ts:855`
+derives its `cwd` from `resolveNeutronHome`, which cannot return blank, and
+passes it at `:1295`.
+
+**The defect that IS still live: the claim's proof was a command nothing ran.**
+`config/index.ts` bounds its "every TypeScript read treats blank as unset" claim
+with a re-runnable grep, which was the right instinct and fixed the WORDING of
+the failure rather than its MECHANISM. A command in a comment fires only when a
+reader chooses to type it, and by then the claim is already wrong — which is
+precisely how rounds 1-4 went: round 1 named three untrimmed siblings as
+trimming, round 2 called a seven-item list exhaustive while naming a file that
+contained no `trim()` at all, round 3's pattern could not match the constant-key
+reader, round 4 claimed a mutation proof for four sites pinned by nothing. Four
+rounds, one mechanism, each discovered months late. So the command is now
+EXECUTED: `tests/integration/identity-env-readers-registry.test.ts` walks the
+tree with those patterns and asserts the reader set exactly equals its
+registry — in both directions, so ANY new reader fails on the PR that adds it
+AND a row whose file stopped reading the variable fails too, which is the rot
+that produced rounds 1 and 2. **What it does NOT prove is written into the test
+and into `config/index.ts`:** the per-file notes are prose and nothing evaluates
+them, so a PR can still add an untrimmed reader plus a row claiming it trims and
+stay green. What the guard removes is the SILENT path — a new reader can no
+longer land unnoticed. That is a smaller claim than "every reader trims", and it
+is the one the file can keep; an earlier draft of this entry stated the larger
+one, which would have restaged the exact defect it documents. Mutation-proved
+four ways, each with a
+control proving the mutation landed: a new unregistered reader → RED naming the
+file; a deleted row → RED; a row for a non-reader → RED in the `stale`
+direction; and neutering the walker → RED on the anti-vacuity control, which is
+the failure a set-equality guard silently hides when it compares two empty
+lists.
+
+**The guard scans the BARE NAME, which makes it strictly broader than the
+command it executes — on purpose.** Mirroring the published grep's access forms
+would have inherited its blind spots and rebuilt round 3's bug inside the guard
+against round 3's bug: `env["NEUTRON_HOME"]`, a template-literal key, and
+`const { OWNER_HOME } = env` match none of those forms. Measured — the published
+pattern set returns **0** on a file containing both shapes while returning 1 on
+a form it does match (positive control, so the 0 is an answer rather than a
+broken grep); the widened guard flags both. The cost is that three files which
+NAME a variable without reading it now carry a registry line saying so
+(`gateway/boot-bind-policy.ts`'s wide-bind refusal message, `open/server.ts`'s
+boot banner, and `runtime/system-prompt.ts`'s `{{OWNER_HOME}}` placeholder
+rewrite). One annotated line beats a hole, and the asymmetry is the reason: a
+false positive costs a line, a false negative costs another silent
+identity-resolution bug found months later. A fully computed key
+(`env[someVar]`) stays invisible to any textual scan, and a `/*` inside a string
+literal still swallows a read as far as the regex stripper is concerned. Both
+limits are written down AND asserted as failing-by-design cases, each with a
+control proving the detector otherwise finds that read — so a boundary cannot
+drift silently: if either ever becomes detectable, the assertion breaks and the
+documented limit has to be updated in the same change. Neither is patched with a
+half-correct heuristic on purpose, because a checker that LOOKS solved while
+still missing cases is the confidently-specific failure this entry is about.
+
+**The cross-model reviewer RAN this time, and it found the detector's own blind
+spots — which is the whole reason to run it.** #333's panel had that reviewer
+deferred, so its verdict carried no quality signal; this one returned four
+findings and three were real and unaddressed. Two it confirmed independently
+while they were being fixed (the access-form false negatives, and `.tsx`/`.mts`
+sitting outside a walker whose prose claimed TypeScript — 191 such files exist,
+none name the variables today, so widening cost zero rows and closed the hole
+before it had anything in it). The third was a hole nobody had found: the
+comment stripper is a regex lexer, and a read inside a MULTI-LINE template
+literal was silently lost, because the `//` in a URL sits on a line whose
+opening backtick is on the previous line and a per-line quote-balance heuristic
+cannot see that. Backticks are now tracked across lines, and the reviewer's
+counterexample is a test fixture. The fourth (P2) was a missing pin: the
+space-padded verbatim test covered two of the three tiers, so a mutation to
+`return legacy.trim()` would have passed it — now covered, and mutation-proved
+RED. **A guard built to stop under-proved claims arrived under-proved in four
+ways, and the reviewer is what caught it.**
+
+**A pin that lives only in a distant file is indistinguishable from no pin.**
+`gateway/__tests__/resolve-registry-db-path.test.ts` advertises itself as
+pinning "all four resolution tiers" and covered `''` but never whitespace; the
+whitespace pin lived in `open/__tests__/owner-slug-agreement.test.ts`. Reverting
+all three trims left the registry's OWN suite green, and this audit's first pass
+read that green as "unpinned" and nearly filed it as a blocker — a false
+negative caused by scoping the check to the file the code lives in, which is
+where anyone would look. The whitespace cases plus per-tier controls and a
+space-padded real-path case now live beside the tiers they govern; all three
+arms fail there under mutation.
 
 ## 2026-08-16 — the merge-driver docblocks cite line numbers that moved
 
@@ -321,117 +671,6 @@ reddens 3 of 14; unsetting the chat profile's floor reddens 3; leaking the floor
 onto the memory lane reddens 4; dropping the factory forward reddens 1. That
 last one is not hypothetical — `appendSystemPromptFile` was lost at exactly that
 seam once, proven at the factory-input layer while the real factory dropped it.
-## 2026-08-16 — the identity-trim claim was true and unexecuted, so CI now runs it
-
-Landed via PR #349.
-
-#333's review panel was still running when the PR merged, so its findings were
-re-verified here against `main` rather than inherited. **All five were already
-closed by #333 itself before it landed, and the entry below says so with the
-mutation evidence rather than repeating them as open.** What the re-audit found
-instead is one level up, and it is the reason the same defect recurred four
-times.
-
-**The audit, measured rather than asserted.** Every behaviour-changing predicate
-#333 touched was independently mutation-tested against a GREEN BASELINE control
-(139 pass / 0 fail across the nine suites before any mutation): 12 predicates
-across 9 readers — `resolveOpenDbPath` and both arms of `resolveNeutronHome`
-(`migrations/db-path.ts`), all three tiers of `resolveRegistryDbPath`
-(`gateway/boot-listener-registry.ts`), `applyEnvShim` (`open/server.ts`), both
-predicates in `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`),
-`resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`),
-`resolveReplCwdAndHome` (`runtime/adapters/claude-code/index.ts`), the `--home`
-guard (`scripts/email-accounts.ts`), `buildPromptVars` (`prompts/template.ts`)
-and the return-verbatim half of `resolveStatePath`
-(`gbrain-memory/gbrain-doctor.ts`). Reverting each one turns its suite RED. The
-sentence "each trim was mutation-proved" is therefore TRUE as written, and it
-stays; the two reachability claims settle the same way —
-`resolveRegistryDbPath` is named only by two `export {}` statements
-(`gateway/index.ts`, `gateway/composer-contract.ts`) with no in-tree caller, and
-the REPL blank-`cwd` arm is genuinely unreachable because `open/composer.ts:855`
-derives its `cwd` from `resolveNeutronHome`, which cannot return blank, and
-passes it at `:1295`.
-
-**The defect that IS still live: the claim's proof was a command nothing ran.**
-`config/index.ts` bounds its "every TypeScript read treats blank as unset" claim
-with a re-runnable grep, which was the right instinct and fixed the WORDING of
-the failure rather than its MECHANISM. A command in a comment fires only when a
-reader chooses to type it, and by then the claim is already wrong — which is
-precisely how rounds 1-4 went: round 1 named three untrimmed siblings as
-trimming, round 2 called a seven-item list exhaustive while naming a file that
-contained no `trim()` at all, round 3's pattern could not match the constant-key
-reader, round 4 claimed a mutation proof for four sites pinned by nothing. Four
-rounds, one mechanism, each discovered months late. So the command is now
-EXECUTED: `tests/integration/identity-env-readers-registry.test.ts` walks the
-tree with those patterns and asserts the reader set exactly equals its
-registry — in both directions, so ANY new reader fails on the PR that adds it
-AND a row whose file stopped reading the variable fails too, which is the rot
-that produced rounds 1 and 2. **What it does NOT prove is written into the test
-and into `config/index.ts`:** the per-file notes are prose and nothing evaluates
-them, so a PR can still add an untrimmed reader plus a row claiming it trims and
-stay green. What the guard removes is the SILENT path — a new reader can no
-longer land unnoticed. That is a smaller claim than "every reader trims", and it
-is the one the file can keep; an earlier draft of this entry stated the larger
-one, which would have restaged the exact defect it documents. Mutation-proved
-four ways, each with a
-control proving the mutation landed: a new unregistered reader → RED naming the
-file; a deleted row → RED; a row for a non-reader → RED in the `stale`
-direction; and neutering the walker → RED on the anti-vacuity control, which is
-the failure a set-equality guard silently hides when it compares two empty
-lists.
-
-**The guard scans the BARE NAME, which makes it strictly broader than the
-command it executes — on purpose.** Mirroring the published grep's access forms
-would have inherited its blind spots and rebuilt round 3's bug inside the guard
-against round 3's bug: `env["NEUTRON_HOME"]`, a template-literal key, and
-`const { OWNER_HOME } = env` match none of those forms. Measured — the published
-pattern set returns **0** on a file containing both shapes while returning 1 on
-a form it does match (positive control, so the 0 is an answer rather than a
-broken grep); the widened guard flags both. The cost is that three files which
-NAME a variable without reading it now carry a registry line saying so
-(`gateway/boot-bind-policy.ts`'s wide-bind refusal message, `open/server.ts`'s
-boot banner, and `runtime/system-prompt.ts`'s `{{OWNER_HOME}}` placeholder
-rewrite). One annotated line beats a hole, and the asymmetry is the reason: a
-false positive costs a line, a false negative costs another silent
-identity-resolution bug found months later. A fully computed key
-(`env[someVar]`) stays invisible to any textual scan, and a `/*` inside a string
-literal still swallows a read as far as the regex stripper is concerned. Both
-limits are written down AND asserted as failing-by-design cases, each with a
-control proving the detector otherwise finds that read — so a boundary cannot
-drift silently: if either ever becomes detectable, the assertion breaks and the
-documented limit has to be updated in the same change. Neither is patched with a
-half-correct heuristic on purpose, because a checker that LOOKS solved while
-still missing cases is the confidently-specific failure this entry is about.
-
-**The cross-model reviewer RAN this time, and it found the detector's own blind
-spots — which is the whole reason to run it.** #333's panel had that reviewer
-deferred, so its verdict carried no quality signal; this one returned four
-findings and three were real and unaddressed. Two it confirmed independently
-while they were being fixed (the access-form false negatives, and `.tsx`/`.mts`
-sitting outside a walker whose prose claimed TypeScript — 191 such files exist,
-none name the variables today, so widening cost zero rows and closed the hole
-before it had anything in it). The third was a hole nobody had found: the
-comment stripper is a regex lexer, and a read inside a MULTI-LINE template
-literal was silently lost, because the `//` in a URL sits on a line whose
-opening backtick is on the previous line and a per-line quote-balance heuristic
-cannot see that. Backticks are now tracked across lines, and the reviewer's
-counterexample is a test fixture. The fourth (P2) was a missing pin: the
-space-padded verbatim test covered two of the three tiers, so a mutation to
-`return legacy.trim()` would have passed it — now covered, and mutation-proved
-RED. **A guard built to stop under-proved claims arrived under-proved in four
-ways, and the reviewer is what caught it.**
-
-**A pin that lives only in a distant file is indistinguishable from no pin.**
-`gateway/__tests__/resolve-registry-db-path.test.ts` advertises itself as
-pinning "all four resolution tiers" and covered `''` but never whitespace; the
-whitespace pin lived in `open/__tests__/owner-slug-agreement.test.ts`. Reverting
-all three trims left the registry's OWN suite green, and this audit's first pass
-read that green as "unpinned" and nearly filed it as a blocker — a false
-negative caused by scoping the check to the file the code lives in, which is
-where anyone would look. The whitespace cases plus per-tier controls and a
-space-padded real-path case now live beside the tiers they govern; all three
-arms fail there under mutation.
-
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 
 Landed via PR #322.
@@ -20609,11 +20848,3 @@ talking to.
 Typecheck differenced against untouched main rather than counted: all 51 tsconfigs
 fail identically on both trees in this checkout (missing type libs in a partial
 install), zero introduced.
-
-## 2026-08-17 — a live instance crash-looped on a migration ordinal, and the repair is now in `repairs.json`
-
-An instance refused to boot for ~3 hours (1248 uncaught exceptions) because `_migrations` recorded version 124 under one name while the deployed tree carried another at that ordinal. `migrations/runner.ts` threw rather than guess, which is the designed behaviour — the cost is a hard crash loop, so the instance served nothing and clients connected to an empty server.
-
-Resolved by a hand-verified entry in `migrations/repairs.json` (#350). The merged 0124 had in fact already run, recorded at ordinal 125, and its three ALTERs on `code_trident_runs` (`reviewed_head`, `bound_pr`, `fenced_paths`) were confirmed present via `pragma_table_info` with a positive control before the entry was written. No SQL was applied by hand and no `_migrations` row was rewritten; the rows stay as the incident record.
-
-Second occurrence of the class already documented in that file. The provenance gap it exposes — nothing records WHICH build applied a given migration, so the vector is unrecoverable after the fact — is being closed separately in #352.
