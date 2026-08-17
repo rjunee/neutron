@@ -943,10 +943,11 @@ export class AppWsAdapter implements ChannelAdapter {
    * one cold resume O(messages after the cursor) in rows, JSON bytes and memory
    * here, per topic — and the mobile transcript warmer opens several topics at
    * app foreground, so the amplification is multiplied, on cellular, with no
-   * server-side ceiling. A bounded window is the cheaper wrong answer and this is
-   * the one we ship.
+   * server-side ceiling. Both options are lossy, in different currencies: a window
+   * loses old messages, a drain loses the ceiling. The ceiling is the one a server
+   * must keep, so this stays a window.
    *
-   * WHAT IT COSTS, named rather than implied: above one page this delivers the
+   * WHAT IT COSTS, named rather than implied: above one window this delivers the
    * newest window and the client's cursor then advances past the rows it skipped,
    * so a middle range stays missing and no later resume can ask for it. There is
    * no seam marker in the UI. Closing that needs a "load earlier" request the
