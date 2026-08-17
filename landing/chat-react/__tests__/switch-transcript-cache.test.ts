@@ -113,8 +113,11 @@ function setup(): {
   sessions: Map<string, StallableSession>
   frames: ChatViewModel[]
   records: SwitchRecord[]
+  /** Deliver a server frame through the session the controller is holding. */
+  deliver: (topicId: string, frame: unknown) => void
 } {
   const sessions = new Map<string, StallableSession>()
+  const sinks = new Map<string, (frame: unknown) => void>()
   const frames: ChatViewModel[] = []
   const records: SwitchRecord[] = []
   const controller = new NeutronChatController({
@@ -125,7 +128,8 @@ function setup(): {
     ],
     topicForProject: (p) => (p === null ? 'app:owner' : `app:owner:${p}`),
     switchTimingEmit: (r) => records.push(r),
-    createSession: (_sinks, scope) => {
+    createSession: (sessionSinks, scope) => {
+      sinks.set(scope.topicId, sessionSinks.onFrame)
       const existing = sessions.get(scope.topicId)
       if (existing !== undefined) return existing
       const s = new StallableSession(scope.topicId)
@@ -134,7 +138,12 @@ function setup(): {
     },
   })
   controller.subscribe((vm) => frames.push(vm))
-  return { controller, sessions, frames, records }
+  const deliver = (topicId: string, frame: unknown): void => {
+    const onFrame = sinks.get(topicId)
+    if (onFrame === undefined) throw new Error(`no frame sink for ${topicId}`)
+    onFrame(frame)
+  }
+  return { controller, sessions, frames, records, deliver }
 }
 
 /** Visit a project once so its transcript is known, then leave. */
@@ -216,6 +225,11 @@ describe('a project switch does not block on the store read', () => {
     frames.length = 0
     controller.setProject('alpha')
     controller.setProject('beta')
+    // Every assertion below lives inside a per-project guard, so a run that
+    // published NO frames would satisfy all of them vacuously. Prove there was
+    // something to check first.
+    expect(frames.filter((f) => f.projectId === 'alpha').length).toBeGreaterThan(0)
+    expect(frames.filter((f) => f.projectId === 'beta').length).toBeGreaterThan(0)
     for (const f of frames) {
       const texts = f.messages.map((m) => m.text)
       if (f.projectId === 'beta') expect(texts).not.toContain('app:owner:alpha message 1')
@@ -309,6 +323,166 @@ describe('the session-changed-underfoot guard still holds', () => {
   })
 })
 
+describe('rows that are painted are rows that are read', () => {
+  it('SENDS THE READ RECEIPT FOR CACHED ROWS WITHOUT WAITING ON THE STORE', async () => {
+    // The receipt used to be sent only from the resolved read, which was fine
+    // while the switch had nothing on screen until then. Now the agent messages
+    // are visibly painted in the first frame — so a stalled read leaves rows the
+    // owner is looking at unacknowledged, the server watermark never advances, and
+    // its next `projects_changed` restores the unread badge this switch cleared.
+    const { controller, sessions } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
+      msg('app:owner:alpha', 1),
+      msg('app:owner:alpha', 2),
+    ])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    const alpha = sessions.get('app:owner:alpha')!
+    // Hold the store open for the whole switch: any receipt that arrives is one
+    // the read did not deliver.
+    alpha.stalled = true
+    alpha.readsRead.length = 0
+    controller.setProject('alpha')
+
+    expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-1', 'mid-app:owner:alpha-2'])
+    alpha.release()
+  })
+
+  it('routes those receipts through the ENTERED project’s session, never the one left', async () => {
+    // The invariant the underfoot guard exists for, on the new synchronous path.
+    const { controller, sessions } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 5)])
+
+    const alpha = sessions.get('app:owner:alpha')!
+    const beta = sessions.get('app:owner:beta')!
+    alpha.stalled = true
+    beta.stalled = true
+    alpha.readsRead.length = 0
+    beta.readsRead.length = 0
+    controller.setProject('alpha')
+
+    expect(alpha.readsRead.flat()).toContain('mid-app:owner:alpha-1')
+    expect(beta.readsRead.flat()).not.toContain('mid-app:owner:alpha-1')
+    alpha.release()
+    beta.release()
+  })
+
+  it('reports only agent rows, so a receipt cannot light the owner’s own read tick', async () => {
+    const { controller, sessions } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
+      msg('app:owner:alpha', 1, 'user'),
+      msg('app:owner:alpha', 2, 'agent'),
+    ])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [])
+
+    const alpha = sessions.get('app:owner:alpha')!
+    alpha.stalled = true
+    alpha.readsRead.length = 0
+    controller.setProject('alpha')
+
+    expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-2'])
+    alpha.release()
+  })
+})
+
+describe('the cache has a lifecycle, not just a size', () => {
+  it('A DELETED PROJECT CANNOT PAINT ITS HISTORY INTO A RECREATED ONE', async () => {
+    // `topicForProject` is a pure function of (userId, projectId), so a project
+    // deleted and recreated under the same id maps to the SAME topic — keying the
+    // cache by topic buys nothing against that, whatever the docblock used to
+    // claim. The `projects_changed` frame that reports the deletion is what
+    // invalidates it.
+    const { controller, sessions, frames, deliver } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    // Alpha is deleted while the owner sits in beta.
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'beta', label: 'Beta' }],
+      ts: 1,
+    })
+    // Recreated under the same id — and its store is empty, as a new project's is.
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'beta', label: 'Beta' }, { id: 'alpha', label: 'Alpha (new)' }],
+      ts: 2,
+    })
+    sessions.get('app:owner:alpha')!.rows = []
+
+    frames.length = 0
+    controller.setProject('alpha')
+    expect(frames[0]!.messages).toHaveLength(0)
+  })
+
+  it('keeps General and the active project, which are never deletions', async () => {
+    // The invalidation is driven by "absent from the rail". General is never on
+    // the rail and the active topic is never gone, so a naive check would evict
+    // both on every frame — a control that fails if the guard is dropped.
+    const { controller, sessions, frames, deliver } = setup()
+    await visit(controller, sessions, null, 'app:owner', [msg('app:owner', 1)])
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+
+    deliver('app:owner:alpha', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'beta', label: 'Beta' }],
+      ts: 1,
+    })
+
+    frames.length = 0
+    controller.setProject(null)
+    expect(frames[0]!.messages.map((m) => m.text)).toEqual(['app:owner message 1'])
+    frames.length = 0
+    controller.setProject('alpha')
+    expect(frames[0]!.messages.map((m) => m.text)).toEqual(['app:owner:alpha message 1'])
+  })
+
+  it('stop() drops every cached transcript — a stopped controller holds no chat', async () => {
+    const { controller, sessions, frames } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    controller.stop()
+    sessions.get('app:owner:alpha')!.stalled = true
+    frames.length = 0
+    controller.setProject('alpha')
+    expect(frames[0]!.messages).toHaveLength(0)
+    sessions.get('app:owner:alpha')!.release()
+  })
+
+  it('orders by last USE, so the project the owner keeps returning to survives', async () => {
+    // Written-once entries used to outrank read-many ones, because only the write
+    // side re-inserted. Fill the cache past its limit by writing, while re-reading
+    // one entry — and STALL that one's store so the read is the only thing that
+    // can be touching it. Without read-side recency alpha's last touch stays its
+    // first write, and 30 fillers past a 24-entry limit evict it.
+    const { controller, sessions, frames } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    const alpha = sessions.get('app:owner:alpha')!
+    alpha.stalled = true
+    for (let i = 0; i < 30; i++) {
+      const id = `filler-${i}`
+      await visit(controller, sessions, id, `app:owner:${id}`, [msg(`app:owner:${id}`, 1)])
+      // Re-entering alpha is a READ of its entry, and nothing else: its own read
+      // never resolves, so it can never re-write the entry.
+      controller.setProject('alpha')
+      expect(controller.getViewModel().messages.map((m) => m.text)).toEqual([
+        'app:owner:alpha message 1',
+      ])
+    }
+
+    frames.length = 0
+    controller.setProject('filler-29')
+    controller.setProject('alpha')
+    expect(frames.at(-1)!.messages.map((m) => m.text)).toEqual(['app:owner:alpha message 1'])
+    alpha.release()
+  })
+})
+
 describe('the switch stopwatch can no longer blame the store for the render', () => {
   it('reports frame_rendered, so a slow paint is attributable', async () => {
     const { controller, sessions, records } = setup()
@@ -323,5 +497,114 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
     expect(records.length).toBeGreaterThan(0)
     const seen = records.some((r) => r.marks.frame_rendered !== undefined)
     expect(seen).toBe(true)
+  })
+
+  it('IS STAMPED AFTER THE FRAME, NOT INSIDE THE SWITCH THAT SCHEDULED IT', async () => {
+    // ── WHY THIS TEST IS SHAPED LIKE THIS ────────────────────────────────────
+    // The only assertion that existed for `frame_rendered` checked that the mark
+    // was PRESENT. Presence is exactly what a broken implementation also has: a
+    // review mutated `afterNextFrame` to call `fn()` directly — stamping the mark
+    // synchronously, before any paint, which is the whole defect the mark exists
+    // to detect — and every test still passed. A guard that cannot fail is not a
+    // guard.
+    //
+    // What distinguishes a paint mark from a same-stack mark is WHEN it lands, and
+    // that is asserted here WITHOUT comparing real elapsed time against a
+    // threshold (ISSUES #438: such a bound measures the runner's load, not the
+    // code). Instead the schedule is driven by hand — rAF is ours, and a second
+    // `setProject` supersedes the timer, which flushes the record on demand. So
+    // each assertion is "was the mark stamped by THIS point in the schedule",
+    // which is the ordering property itself. Three mutations die on it:
+    //
+    //   fn()        → stamped inside the switch, before any frame   → fails
+    //   raf(fn)     → stamped in the rAF callback, before the paint → fails
+    //   raf(→ task) → stamped in the trailing task, after it        → passes
+    //
+    // The middle one matters on its own: a single rAF callback runs BEFORE that
+    // frame's paint, so it would time the render and not the picture.
+    const g = globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }
+    const original = g.requestAnimationFrame
+    let frameCb: (() => void) | null = null
+    g.requestAnimationFrame = (cb: () => void): number => {
+      frameCb = cb
+      return 1
+    }
+    try {
+      const { controller, sessions, records } = setup()
+      await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+      await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+      // (1) NO FRAME HAS HAPPENED. Switching away supersedes and flushes the
+      // record, so whatever it carries now was stamped inside the switch.
+      records.length = 0
+      frameCb = null
+      controller.setProject('alpha')
+      expect(frameCb).not.toBeNull()
+      controller.setProject('beta')
+      const beforeFrame = records.find((r) => r.to === 'alpha')
+      expect(beforeFrame).toBeDefined()
+      expect(beforeFrame!.marks.frame_rendered).toBeUndefined()
+
+      // (2) INSIDE THE rAF CALLBACK, which is before the paint. Run it, then
+      // flush in the SAME task so the trailing task cannot have run yet.
+      records.length = 0
+      frameCb = null
+      controller.setProject('alpha')
+      const insideFrame = frameCb
+      expect(insideFrame).not.toBeNull()
+      insideFrame!()
+      controller.setProject('beta')
+      const duringFrame = records.find((r) => r.to === 'alpha')
+      expect(duringFrame).toBeDefined()
+      expect(duringFrame!.marks.frame_rendered).toBeUndefined()
+
+      // (3) AFTER the trailing task — the first instant the frame is actually on
+      // screen. This is the positive control: the mark does arrive, so (1) and (2)
+      // are about ordering and not about a mark that never lands at all.
+      records.length = 0
+      frameCb = null
+      controller.setProject('alpha')
+      const painted = frameCb
+      expect(painted).not.toBeNull()
+      painted!()
+      await tick()
+      await tick()
+      const afterFrame = records.find((r) => r.to === 'alpha')
+      expect(afterFrame).toBeDefined()
+      expect(afterFrame!.marks.frame_rendered).toBeDefined()
+    } finally {
+      if (original === undefined) delete g.requestAnimationFrame
+      else g.requestAnimationFrame = original
+    }
+  })
+
+  it('does not hold the record open for a paint that a hidden tab never makes', async () => {
+    // rAF does not run in a backgrounded tab, so the paint mark cannot arrive.
+    // While it was REQUIRED that produced `Project switch incomplete …
+    // never_arrived=frame_rendered` after the full deadline, for a switch that
+    // completed correctly. Absent rAF entirely, so nothing schedules the stamp.
+    const g = globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }
+    const original = g.requestAnimationFrame
+    g.requestAnimationFrame = (): number => 1 // accepted, never called: no frames here
+    try {
+      const { controller, sessions, records } = setup()
+      await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+      await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+      records.length = 0
+      controller.setProject('alpha')
+      // Long enough for the paint-settle window, far short of the deadline.
+      await new Promise((r) => setTimeout(r, 400))
+
+      const record = records.find((r) => r.to === 'alpha')
+      expect(record).toBeDefined()
+      expect(record!.marks.frame_rendered).toBeUndefined()
+      // The switch DID complete. Only the picture is missing, and that is a fact
+      // about the tab, not a failure of the switch.
+      expect(record!.incomplete).toBe(false)
+      expect(record!.marks.transcript).toBeDefined()
+    } finally {
+      if (original === undefined) delete g.requestAnimationFrame
+      else g.requestAnimationFrame = original
+    }
   })
 })

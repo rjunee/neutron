@@ -31,21 +31,48 @@
  * The first four marks answered "which step is slow" with a number that was real,
  * current, and about the wrong step. `vm_published` is stamped INSIDE `publish()`,
  * so it measures notifying subscribers — not the render they cause. React flushes
- * that render synchronously inside the click (measured through the synthetic
- * discrete-event path: a 250 ms render put `render_ended` at 256.6 ms while
- * `vm_published` reported 0.2 ms), and `transcript_read` is stamped after an
- * `await`, whose continuation cannot run until that render finishes. So the whole
- * render was charged to the transcript read, and 47 real samples read
+ * that render synchronously inside the click, and `transcript_read` is stamped
+ * after an `await` whose continuation cannot run until that render finishes. So
+ * the whole render was charged to the transcript read, and 47 real samples read
  * `transcript_read` median 3283 ms / `vm_published` median 3 ms — which says
  * "rendering is instant, the store is the cost" and means the exact opposite.
- * The store read measures 0.1 ms median / 1.0 ms max over a 12-topic ×
+ * The store read itself measures 0.1 ms median / 1.0 ms max over a 12-topic ×
  * 533-message OPFS store.
  *
- * `frame_rendered` closes the hole: stamped from a `requestAnimationFrame`
- * scheduled at the end of the switch, it is the first instant at which the
- * published frame has actually been drawn. `frame_rendered ≈ transcript_read`
- * ⇒ the render is the cost. `frame_rendered ≪ transcript_read` ⇒ the store is.
- * No pair of marks in the original four could tell those apart.
+ * ⚠️ THE MISATTRIBUTION IS PROVEN; THE RENDER'S REAL MAGNITUDE IS NOT MEASURED.
+ * The proof is a CONTROL experiment, not a measurement of the owner's client: a
+ * subscriber with a deliberately INJECTED 250 ms synchronous body, driven through
+ * React's synthetic discrete-event path, put `render_ended` at 256.6 ms while
+ * `vm_published` reported 0.2 ms — and the same injected body on a plain
+ * (non-React) listener reported `transcript_read` 1.8 ms. That discriminates
+ * "the render lands inside the transcript window" from "it doesn't", which is all
+ * it was built to do. It says NOTHING about how long the owner's 533-row
+ * markdown thread actually takes to paint. Nobody has that number yet, which is
+ * exactly the gap this mark exists to close — do not quote the 250 ms as if it
+ * were it.
+ *
+ * `frame_rendered` closes the hole: stamped from a `requestAnimationFrame` plus a
+ * trailing task (a single rAF callback runs BEFORE that frame's paint), it is the
+ * first instant at which the published frame has actually been drawn.
+ * `frame_rendered ≈ transcript_read` ⇒ the render is the cost.
+ * `frame_rendered ≪ transcript_read` ⇒ the store is. No pair of marks in the
+ * original four could tell those apart.
+ *
+ * ── A PAINT THAT NEVER HAPPENS IS NOT A FAILURE ─────────────────────────────
+ * `frame_rendered`'s only in-browser source is `requestAnimationFrame`, and a
+ * BACKGROUNDED OR HIDDEN TAB does not run rAF at all. A boot deep-link can switch
+ * projects in exactly such a tab (`useNeutronChat.ts` documents the mount as
+ * possibly hidden). Treating the mark as required therefore manufactured a
+ * failure report — the switch would sit out the whole deadline and then emit
+ * `Project switch incomplete … never_arrived=frame_rendered` for a switch that
+ * completed correctly and simply had no picture to draw.
+ *
+ * ⇒ it is an OPTIONAL mark (absence = `not_painted`, a normal outcome), but one
+ * the recorder will WAIT a bounded {@link PAINT_SETTLE_MS} for once every required
+ * mark is in. Both halves are load-bearing: without the optionality a hidden tab
+ * lies, and without the settle window the mark would be dropped on essentially
+ * every switch, because the paint necessarily lands one frame AFTER the
+ * `transcript` mark that would otherwise flush the record.
  *
  * ── ALWAYS ON ──────────────────────────────────────────────────────────────
  * No flag. It is five `performance.now()` reads and one line per switch; a knob
@@ -72,18 +99,33 @@ const ALL_MARKS: readonly SwitchMark[] = [
 ]
 
 /**
- * Marks whose absence is a NORMAL OUTCOME, not a failure.
+ * Marks whose absence is a NORMAL OUTCOME, not a failure — each with the word
+ * the report uses for that outcome, because "absent" alone is not a diagnosis.
  *
  * `socket_open` does not fire when the warm cache returns a session whose socket
  * is ALREADY open — which is the win, not a fault. Reporting that as
  * `never_arrived` sent the owner a line that reads exactly like the failure case
  * ("the socket never came up") when it meant the opposite.
  *
+ * `frame_rendered` does not fire in a hidden or backgrounded tab, because rAF
+ * does not run there and there is genuinely no paint to time. Same trap, one
+ * layer along, and it would have been LOUDER: a required paint mark turns every
+ * such switch into `Project switch incomplete`.
+ *
  * ⇒ an instrument MUST distinguish "did not happen because it was unnecessary"
  * from "did not happen because it failed". One symbol for both is a lie the
  * reader has no way to detect.
  */
-const OPTIONAL_MARKS: ReadonlySet<SwitchMark> = new Set<SwitchMark>(['socket_open'])
+const ABSENCE_IS_NORMAL: ReadonlyMap<SwitchMark, string> = new Map<SwitchMark, string>([
+  ['socket_open', 'reused'],
+  ['frame_rendered', 'not_painted'],
+])
+
+/**
+ * The marks whose absence IS a failure. Derived so that adding a mark to
+ * {@link ABSENCE_IS_NORMAL} cannot leave a second list disagreeing with it.
+ */
+const REQUIRED_MARKS: readonly SwitchMark[] = ALL_MARKS.filter((m) => !ABSENCE_IS_NORMAL.has(m))
 
 export interface SwitchRecord {
   /** Project navigated FROM (`null` = General). */
@@ -110,11 +152,34 @@ export interface SwitchTimingOptions {
    * flushing first would report every slow-but-successful switch as incomplete.
    */
   deadlineMs?: number
+  /** How long to wait for `frame_rendered` alone. See {@link PAINT_SETTLE_MS}. */
+  paintSettleMs?: number
   /** How many finished records to keep for retrieval. */
   keep?: number
 }
 
-const DEFAULT_DEADLINE_MS = 8_000
+/**
+ * The deadline must exceed the SLOWEST REAL SWITCH, or it truncates exactly the
+ * samples the owner filed the complaint about. It was 8000 ms while his own 47
+ * samples ran to a max of 9198 ms — so the slowest switches, the only ones that
+ * mattered, were flushed as `incomplete` before their last mark could land and
+ * were unattributable by construction. Sized off that measurement with room over
+ * it; the only cost of waiting longer is how late a genuinely stuck switch is
+ * reported, and every mark is an absolute offset from the click, so nothing about
+ * the numbers depends on when the record flushes.
+ */
+const DEFAULT_DEADLINE_MS = 30_000
+
+/**
+ * How long the recorder holds a fully-marked switch open for `frame_rendered`.
+ *
+ * The paint lands ONE FRAME after the `transcript` mark — both are queued behind
+ * the same synchronous render — so a few tens of ms is all a visible tab needs.
+ * A hidden tab never paints, and this window is the whole price of finding that
+ * out: it expires, the record flushes `not_painted`, and no switch is misreported
+ * as incomplete for lack of a picture nobody drew.
+ */
+const PAINT_SETTLE_MS = 250
 const DEFAULT_KEEP = 50
 
 /**
@@ -126,9 +191,11 @@ export class SwitchTimer {
   private readonly now: () => number
   private readonly emit: (record: SwitchRecord) => void
   private readonly deadlineMs: number
+  private readonly paintSettleMs: number
   private readonly startedAt: number
   private readonly marks: Partial<Record<SwitchMark, number>> = {}
   private timer: ReturnType<typeof setTimeout> | null = null
+  private paintTimer: ReturnType<typeof setTimeout> | null = null
   private flushed = false
 
   constructor(
@@ -139,10 +206,9 @@ export class SwitchTimer {
     this.now = opts.now ?? (() => performance.now())
     this.emit = opts.emit ?? defaultEmit
     this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS
+    this.paintSettleMs = opts.paintSettleMs ?? PAINT_SETTLE_MS
     this.startedAt = this.now()
-    this.timer = setTimeout(() => this.flush(true), this.deadlineMs)
-    // Never hold the process open for a measurement (node/bun test runners).
-    ;(this.timer as { unref?: () => void }).unref?.()
+    this.timer = this.unrefed(setTimeout(() => this.flush(), this.deadlineMs))
   }
 
   /**
@@ -153,29 +219,55 @@ export class SwitchTimer {
     if (this.flushed) return
     if (this.marks[mark] !== undefined) return
     this.marks[mark] = round(this.now() - this.startedAt)
-    if (ALL_MARKS.every((m) => OPTIONAL_MARKS.has(m) || this.marks[m] !== undefined)) this.flush(false)
+    if (!REQUIRED_MARKS.every((m) => this.marks[m] !== undefined)) return
+    // Every required mark is in. The paint is the one absence worth waiting on:
+    // it necessarily arrives a frame AFTER `transcript`, so flushing here would
+    // drop it from every switch — and waiting forever would report every hidden
+    // tab as incomplete. Bounded wait, then report what was actually observed.
+    if (this.marks.frame_rendered !== undefined) this.flush()
+    else if (this.paintTimer === null) {
+      this.paintTimer = this.unrefed(setTimeout(() => this.flush(), this.paintSettleMs))
+    }
   }
 
   /** Abandon this switch — the user clicked somewhere else. Reports what it had. */
   supersede(): void {
-    this.flush(true)
+    this.flush()
   }
 
-  private flush(incomplete: boolean): void {
+  /**
+   * Emit exactly once, whatever brought us here.
+   *
+   * `incomplete` is DERIVED from the marks rather than passed in by the caller:
+   * every flush path (final mark, paint settle, deadline, supersede) then agrees
+   * on one definition — "a mark whose absence is a failure is missing" — and a
+   * hidden tab that reached every required mark reports complete instead of the
+   * deadline path stamping it a failure because of the clock that woke it.
+   */
+  private flush(): void {
     if (this.flushed) return
     this.flushed = true
-    if (this.timer !== null) {
-      clearTimeout(this.timer)
-      this.timer = null
-    }
+    this.timer = this.cleared(this.timer)
+    this.paintTimer = this.cleared(this.paintTimer)
     const seen = ALL_MARKS.map((m) => this.marks[m]).filter((v): v is number => v !== undefined)
     this.emit({
       from: this.from,
       to: this.to,
       marks: { ...this.marks },
       total: seen.length > 0 ? Math.max(...seen) : 0,
-      incomplete,
+      incomplete: REQUIRED_MARKS.some((m) => this.marks[m] === undefined),
     })
+  }
+
+  /** Never hold the process open for a measurement (node/bun test runners). */
+  private unrefed(handle: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> {
+    ;(handle as { unref?: () => void }).unref?.()
+    return handle
+  }
+
+  private cleared(handle: ReturnType<typeof setTimeout> | null): null {
+    if (handle !== null) clearTimeout(handle)
+    return null
   }
 }
 
@@ -209,10 +301,11 @@ function defaultEmit(r: SwitchRecord): void {
   const vm = r.marks.vm_published
   const sock = r.marks.socket_open
   const tx = r.marks.transcript
-  // Only a REQUIRED mark can be missing in the failure sense. A reused socket
-  // is reported as `reused`, which is a different fact and reads like one.
-  const missing = ALL_MARKS.filter((m) => !OPTIONAL_MARKS.has(m) && r.marks[m] === undefined)
-  const reused = ALL_MARKS.filter((m) => OPTIONAL_MARKS.has(m) && r.marks[m] === undefined)
+  // Only a REQUIRED mark can be missing in the failure sense. Every other absence
+  // gets the word for WHY it is absent — a reused socket is `reused`, a hidden tab
+  // is `not_painted` — because one symbol for "unnecessary" and "broken" is a lie
+  // the reader cannot detect.
+  const missing = REQUIRED_MARKS.filter((m) => r.marks[m] === undefined)
   const parts = [
     `to=${r.to ?? 'general'}`,
     `from=${r.from ?? 'general'}`,
@@ -223,15 +316,27 @@ function defaultEmit(r: SwitchRecord): void {
     `transcript=${fmt(tx)}`,
     `total=${fmt(r.total)}`,
   ]
-  if (reused.length > 0) parts.push(`reused=${reused.join(',')}`)
+  for (const [mark, reason] of ABSENCE_IS_NORMAL) {
+    if (r.marks[mark] === undefined) parts.push(`${reason}=${mark}`)
+  }
   if (missing.length > 0) parts.push(`never_arrived=${missing.join(',')}`)
   console.info(`[project-switch] ${parts.join(' ')}`)
 }
 
-/** Build the persisted perf report without ever accepting or embedding a bearer. */
+/**
+ * Build the persisted perf report without ever accepting or embedding a bearer.
+ *
+ * `schema: 2` because `total` SILENTLY CHANGED MEANING. It is the largest mark
+ * seen, and `frame_rendered` is normally the last one, so a v2 `total` includes
+ * the paint where a v1 `total` stopped at `transcript`. The owner has a 47-sample
+ * baseline stamped `1`; leaving the id alone would have let the two be averaged
+ * together, and the shift would have read as a regression in whatever this change
+ * touched. Nothing branches on the number — it exists so a reader can tell which
+ * definition a sample was taken under.
+ */
 export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebClientReport {
   return {
-    schema: 1,
+    schema: 2,
     report_id: `web-switch-${createdAt}-${randomId()}`,
     created_at: createdAt,
     origin: globalThis.location?.origin ?? '',

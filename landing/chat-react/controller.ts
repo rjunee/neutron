@@ -343,10 +343,23 @@ interface StreamEntry {
 /**
  * How many topics' transcripts the switch cache keeps. Deliberately LARGER than
  * `MAX_WARM_SESSIONS` (3): a session whose socket has been evicted still has a
- * transcript worth painting instantly, and the entry is a reference to rows the
- * store already holds, not a second copy of the bodies.
+ * transcript worth painting instantly.
+ *
+ * ⚠️ AN ENTRY IS A REAL RETAINED COPY OF THE ROWS, not a view onto rows the store
+ * already holds — `chat-core/store.ts:413-417` builds a fresh `{ ...m }` per
+ * message on every `list()`, and `chat-core/stores/opfs-store.ts:113-115`
+ * delegates to it, so each entry is N independent row objects. Only the body
+ * STRINGS are shared. This was documented the other way round, which made the
+ * limit look free; it is not, so it is sized rather than assumed. At the owner's
+ * largest topic (533 messages) a full cache is a few thousand small objects —
+ * still far cheaper than a re-render, and bounded either way.
+ *
+ * 24, not the 12 that shipped first: 12 was exactly the number of topics on the
+ * owner's own box, so his steady state sat on the eviction boundary and the
+ * least-recently-used project he owns would evict on any new one. Headroom is the
+ * whole point of a cache that exists to make re-entry instant.
  */
-const TRANSCRIPT_CACHE_LIMIT = 12
+const TRANSCRIPT_CACHE_LIMIT = 24
 
 /**
  * Task 6 (chat render fan-out) — a TOTAL, flat structural comparator over two
@@ -454,14 +467,32 @@ export class NeutronChatController {
    *
    * This map is what the switch reads INSTEAD, synchronously, in the same block
    * that publishes — so the first frame of a re-entered project already carries
-   * its transcript and there is one render, not two. `handleChange` keeps it
-   * current on every resolved read.
+   * its transcript instead of an empty thread the owner never asked to see.
+   * `handleChange` keeps it current on every resolved read.
    *
-   * Keyed by TOPIC, never by project: `topicForProject` is what scopes a
-   * conversation, so one project's messages cannot be served into another's
-   * frame even if the same project id were reused. Bounded by
-   * {@link TRANSCRIPT_CACHE_LIMIT} in insertion order (re-set moves an entry to
-   * the end) so a long session over many projects can't grow it without limit.
+   * ⚠️ WHAT THIS DOES AND DOES NOT BUY, measured rather than assumed. It removes
+   * the EMPTY FRAME, not the render. The resolved read still publishes a second
+   * time behind the first, and the row-construction work is unchanged in total
+   * (533 rows built once either way) — it MOVES into the click-blocking frame,
+   * which measured the synchronous `setProject` cost from 0.19 ms to 2.37 ms.
+   * The second publish's rows keep their identities (`sameRenderMessage`), so the
+   * list memo can bail on it, but "one render, not two" was the claim here before
+   * anybody counted the frames and it was false. What the owner gains is that the
+   * first thing he sees is his conversation.
+   *
+   * Keyed by TOPIC because the topic is what the store and the session are scoped
+   * by, and because it is the key the WRITE side can capture in the same instant
+   * as the session — a project id captured there could disagree with the session
+   * the rows came from. It is NOT a defence against project-id reuse:
+   * `topicForProject` is a pure function of (userId, projectId) (`config.ts`), so
+   * a recreated project with the same id maps to the same topic. Deletion is what
+   * handles that, in `handleFrame`'s `projects_changed` branch, which drops the
+   * entry for any project no longer on the rail.
+   *
+   * Bounded by {@link TRANSCRIPT_CACHE_LIMIT}, ordered by last USE — both
+   * `setProject`'s read and `handleChange`'s write move an entry to the end, so
+   * the project the owner keeps returning to is not evicted by one he wrote to
+   * once. Cleared by `stop()`: a stopped controller holds no transcript.
    */
   private readonly transcriptCache = new Map<string, { msgs: ChatMessage[]; pending: number }>()
   /** message_id → accumulated streaming text (not yet persisted). */
@@ -659,6 +690,11 @@ export class NeutronChatController {
       this.switchConnectingTimer = null
     }
     this.sessionCache.clear()
+    // A stopped controller holds no transcript. `sessionCache.clear()` was already
+    // here and the transcript cache was not, which left a stopped controller
+    // holding every visited topic's rows and able to paint them on restart —
+    // a lifecycle invariant asserted nowhere and held by nothing.
+    this.transcriptCache.clear()
   }
 
   setActive(active: boolean): void {
@@ -739,9 +775,14 @@ export class NeutronChatController {
     // block publishes already carries it. A first-ever visit has no entry and
     // falls back to empty — that switch still awaits `handleChange`, because
     // there is genuinely nothing yet to paint.
-    const entering = this.transcriptCache.get(this.topicForProject(projectId))
+    const enteringTopic = this.topicForProject(projectId)
+    const entering = this.transcriptCache.get(enteringTopic)
     this.msgs = entering?.msgs ?? []
     this.pending = entering?.pending ?? 0
+    // Reading an entry is USING it. Without this the ordering is by last write,
+    // so the project the owner switches into constantly — and never writes to —
+    // ages out behind one that took a single inbound message.
+    if (entering !== undefined) this.touchTranscript(enteringTopic, entering)
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
     this.activeWorkBoardItems = null
@@ -776,6 +817,19 @@ export class NeutronChatController {
       this.session.start()
       this.session.setActive(this.activeState)
     }
+    // THE CACHED ROWS ARE ON SCREEN, SO THEY ARE READ. `markVisibleAgentRead` used
+    // to run only from the resolved read, which was fine while the switch had
+    // nothing to show until then. Now the agent messages are visibly painted in
+    // the first frame, and a read receipt that waits on the store means a stalled
+    // read leaves them unacknowledged — the server's watermark never advances, its
+    // next `projects_changed` still counts them unread, and the badge the switch
+    // just cleared comes back on rows the owner is looking at.
+    //
+    // Routed through the session selected above, which is the ENTERED topic's:
+    // `entering` was looked up under `enteringTopic`, so the rows and the socket
+    // are the same scope. That is the invariant the underfoot guard protects, held
+    // here by construction rather than by a check.
+    if (entering !== undefined) this.markVisibleAgentRead(entering.msgs)
     // Publish the scoped VM immediately — already carrying the entered topic's
     // last-known transcript (see `transcriptCache`), so this is the frame the
     // owner actually wanted rather than an empty one to be replaced.
@@ -1225,6 +1279,22 @@ export class NeutronChatController {
           projects.push(tab)
         }
       }
+      // A PROJECT THAT LEFT THE RAIL TAKES ITS CACHED TRANSCRIPT WITH IT. Topics
+      // are a pure function of (userId, projectId), so a deleted project that is
+      // recreated under the same id maps to the same topic — and a cache keyed by
+      // topic would serve the DELETED project's messages into the new one's first
+      // frame. Dropping the entry here is what makes that impossible: this frame is
+      // the server telling us the project is gone. Over-invalidating is free (the
+      // next read refills it) and under-invalidating paints the wrong history, so
+      // the asymmetry decides where the check goes.
+      // GENERAL IS NOT ON THE RAIL AND IS NEVER DELETED, so it is live by
+      // definition — and so is whatever the owner is looking at right now.
+      const live = new Set(projects.map((p) => this.topicForProject(p.id)))
+      live.add(this.topicForProject(null))
+      live.add(this.topicForProject(this.projectId))
+      for (const topic of [...this.transcriptCache.keys()]) {
+        if (!live.has(topic)) this.transcriptCache.delete(topic)
+      }
       // Refresh the rail list; the active conversation is NOT changed here (see
       // the note above — per-project chat enters a project only via an explicit
       // `setProject`, which re-scopes the socket).
@@ -1259,8 +1329,10 @@ export class NeutronChatController {
     // MAIN THREAD IT WAITED ON. Measured (2026-08-17): the read itself is 0.1 ms
     // median / 1.0 ms max over a 12-topic × 533-message OPFS store — `list()`
     // never touches OPFS (`chat-core/stores/opfs-store.ts:113-115` delegates to
-    // the in-memory index) — while a 250 ms synchronous re-render triggered by
-    // the publish above lands INSIDE this window. Read the gap between this and
+    // the in-memory index). A subscriber with an INJECTED 250 ms synchronous body
+    // (a control, not a measurement of the real thread) lands inside this window
+    // through React's discrete-event path and outside it on a plain listener, so
+    // the window demonstrably contains the render. Read the gap between this and
     // `frame_rendered`, never this number on its own.
     this.switchTimer?.mark('transcript_read')
     this.cacheTranscript(topic, msgs, pending)
@@ -1304,14 +1376,21 @@ export class NeutronChatController {
   }
 
   /**
-   * File a resolved read under the topic it belongs to, newest-touched last, so
-   * the next `setProject` into that topic can paint it without awaiting. Bounded
-   * in insertion order: a re-set moves its entry to the end, and anything past
-   * {@link TRANSCRIPT_CACHE_LIMIT} is dropped oldest-first.
+   * File a resolved read under the topic it belongs to, so the next `setProject`
+   * into that topic can paint it without awaiting.
    */
   private cacheTranscript(topic: string, msgs: ChatMessage[], pending: number): void {
+    this.touchTranscript(topic, { msgs, pending })
+  }
+
+  /**
+   * Insert-or-move-to-end, then evict from the front. A `Map` iterates in
+   * insertion order, so deleting before setting is what makes "last" mean
+   * "most recently used" — for reads as well as writes.
+   */
+  private touchTranscript(topic: string, entry: { msgs: ChatMessage[]; pending: number }): void {
     this.transcriptCache.delete(topic)
-    this.transcriptCache.set(topic, { msgs, pending })
+    this.transcriptCache.set(topic, entry)
     while (this.transcriptCache.size > TRANSCRIPT_CACHE_LIMIT) {
       const oldest = this.transcriptCache.keys().next()
       if (oldest.done === true) break

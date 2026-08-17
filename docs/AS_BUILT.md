@@ -411,33 +411,71 @@ the one-shot `hydrate()` at boot (184 ms for a 3.8 MB snapshot) and the snapshot
 stamped after an `await` in `handleChange`, and `vm_published` is stamped *inside*
 `publish()` — so it measures notifying subscribers, not the render those subscribers
 perform. React flushes that render synchronously inside the click, and the awaited
-continuation cannot run until it finishes. Measured through React's synthetic
-discrete-event path, a 250 ms render put `render_ended` at 256.6 ms and `transcript_read`
-at 257.6 ms while `vm_published` reported 0.2 ms. The control discriminates: the same
-probe wired to a plain (non-React) listener, where React defers the render, reports
-`transcript_read` **1.8 ms** for the same 250 ms render. So the render lands inside the
-window that gets attributed to the store, and the instrument's own docblock — "if this
-mark is already hundreds of ms the problem is the paint, not the data" — had named the
-right discriminator and then put the mark on the wrong side of it.
+continuation cannot run until it finishes. The proof is a CONTROL, and is labelled as one
+everywhere it now appears: a subscriber with a deliberately **injected** 250 ms
+synchronous body, driven through React's synthetic discrete-event path, put `render_ended`
+at 256.6 ms and `transcript_read` at 257.6 ms while `vm_published` reported 0.2 ms — and
+the same injected body on a plain (non-React) listener, where React defers, reported
+`transcript_read` **1.8 ms**. That discriminates "the render lands inside the transcript
+window" from "it doesn't", which is all it was built to do. The instrument's own docblock
+— "if this mark is already hundreds of ms the problem is the paint, not the data" — had
+named the right discriminator and then put the mark on the wrong side of it.
 
-Two changes, both in `landing/chat-react/`:
+**What is NOT established, and must not be read into the above.** Nobody has measured how
+long the owner's 533-row markdown thread actually takes to paint. The 250 ms is an
+injected number, not his. So this change does not claim the 3-9 s shrinks, and no
+committed measurement here shows that it does — `frame_rendered` is precisely the
+instrument that will produce the first real answer, out of his next samples.
+
+Three changes, all in `landing/chat-react/`:
 
 - **`controller.ts` — the switch reads the transcript synchronously.** A bounded
-  per-TOPIC cache (`transcriptCache`, 12 entries, insertion-ordered) holds the last
+  per-TOPIC cache (`transcriptCache`, 24 entries, ordered by last use) holds the last
   resolved `{ msgs, pending }` for every visited topic, written by `handleChange` under
-  the topic captured in the same synchronous instant as the session. `setProject` reads
-  it before it publishes, so the FIRST frame of a re-entered project already carries that
-  project's transcript instead of an empty thread that a second render replaces. The
-  switch is off the store's critical path entirely — it no longer awaits the read at all.
-  A first-ever visit still publishes empty and fills from the read, because there is
-  genuinely nothing yet to paint.
+  the topic captured in the same synchronous instant as the session. `setProject` reads it
+  before it publishes, so the FIRST frame of a re-entered project already carries that
+  project's transcript instead of an empty thread a second render replaces. A first-ever
+  visit still publishes empty and fills from the read, because there is genuinely nothing
+  yet to paint.
 
-- **`switch-timing.ts` — a new `frame_rendered` mark, so this cannot recur.** Stamped
-  from a `requestAnimationFrame` plus a trailing task (a single rAF callback runs *before*
-  that frame's paint), it is the first instant at which the published frame has actually
-  been drawn. `frame_rendered ≈ transcript_read` ⇒ the render is the cost;
+  **This removes the empty frame, not the render.** The resolved read still publishes
+  behind it, `handleChange` is still called on every switch, and the total row-construction
+  work is unchanged — 533 rows built once either way. It MOVES into the click-blocking
+  frame, measured at 0.19 ms → 2.37 ms of synchronous `setProject` cost. What the owner
+  gains is that the first thing he sees is his conversation; what he does not gain, yet,
+  is a shorter wait for it.
+
+- **`controller.ts` — rows that are painted are rows that are read.** The read receipt for
+  the cached rows is now sent from the switch, through the entered project's session,
+  rather than only from the resolved read. Painting agent messages while acknowledging
+  nothing meant a stalled read left the server watermark un-advanced, so its next
+  `projects_changed` restored the unread badge on messages the owner was looking at.
+
+- **`switch-timing.ts` — a `frame_rendered` mark, so this cannot recur.** Stamped from a
+  `requestAnimationFrame` plus a trailing task (a single rAF callback runs *before* that
+  frame's paint), it is the first instant at which the published frame has actually been
+  drawn. `frame_rendered ≈ transcript_read` ⇒ the render is the cost;
   `frame_rendered ≪ transcript_read` ⇒ the store is. No pair of the original four marks
   could tell those apart, which is why the report pointed at the wrong subsystem.
+
+  Three things had to be true for it to be worth having, and only the first was at the
+  start. **(1)** Its absence is a NORMAL outcome, reported `not_painted` alongside
+  `socket_open`'s `reused` — rAF does not run in a hidden or backgrounded tab, and a boot
+  deep-link can switch projects in one, so a required paint mark manufactured
+  `Project switch incomplete … never_arrived=frame_rendered` for switches that completed.
+  **(2)** But the recorder still WAITS 250 ms for it once every required mark is in,
+  because the paint necessarily lands a frame after the `transcript` mark that would
+  otherwise flush the record — without that window the mark would be dropped on nearly
+  every switch. **(3)** `incomplete` is now derived from the marks inside `flush()` rather
+  than passed in by whichever timer woke it, so all four flush paths agree on one
+  definition. The deadline also rose 8 s → 30 s: it was shorter than his own measured
+  max of 9198 ms, so the slowest switches — the only ones that mattered — were truncated
+  as incomplete before their last mark could land.
+
+  `buildSwitchReport` now stamps `schema: 2`, because `total` silently changed meaning:
+  it is the largest mark seen and `frame_rendered` is normally the last, so a v2 `total`
+  includes the paint where v1 stopped at `transcript`. The owner has a 47-sample baseline
+  stamped `1`; averaging the two would have read the shift as a regression.
 
 The session-changed-underfoot guard (a real Codex P2) is untouched and now has its own
 tests: a stalled read for the topic the owner LEFT cannot clobber the topic they entered,
@@ -446,15 +484,32 @@ cache write is deliberately on the other side of that guard — the rows belong 
 captured before the await, and filing them under whatever topic happens to be active when
 a slow read lands is precisely how one project's messages would reach another's frame.
 
-`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (9 tests) pins all of it,
-and was mutation-tested both ways: reverting the synchronous cache read fails 4 of them,
-and deleting the underfoot guard fails the 2 that exist for it. Full `landing` +
-`chat-core` suites: 1147 pass / 0 fail.
+Two claims that were in this entry's first draft were **wrong**, found by review, and are
+corrected above rather than quietly dropped: "the switch is off the store's critical path
+entirely" (`handleChange` is still called on every switch) and "there is one render, not
+two" (both frames still render; the second's rows keep their identities so the list memo
+can bail, which is not the same thing). A cache entry was also documented as "a reference
+to rows the store already holds" — `chat-core/store.ts:413-417` builds a fresh `{ ...m }`
+per message, so an entry is a real retained copy and the limit is sized rather than
+assumed. And topic-keying was credited with preventing cross-project serving on id reuse;
+`topicForProject` is a pure function of (userId, projectId), so it prevents nothing of the
+sort — deletion invalidation, driven off the `projects_changed` frame, is what does.
 
-📌 The generalisable lesson is rule 13's shape one level down: **an instrument stamped
-after an `await` measures the queue, not the work.** Its number was current, real, and
-about a different subsystem than its name — and it was believed for exactly as long as
-nobody measured the two calls it claimed to be timing.
+`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (18 tests) pins all of it,
+and every guard was mutation-tested. The one that mattered most had to be rebuilt: the
+original `frame_rendered` test asserted only that the mark was PRESENT, and a review
+mutation that stamped it synchronously — the exact defect the mark exists to detect — kept
+25 of 25 tests green. Presence is what a broken implementation also has. The replacement
+asserts WHEN the mark lands, and kills both the synchronous stamp and a bare `raf(fn)`
+that would time the render instead of the picture.
+
+📌 Two lessons, and the second is the one that nearly shipped. **An instrument stamped
+after an `await` measures the queue, not the work** — the number was current, real, and
+about a different subsystem than its name. And **a guard for an ordering property must
+assert the ordering**: a presence check over an async mark passes for the async
+implementation and the synchronous one alike, so it reads as coverage while testing
+nothing. The tell is available for free — mutate the line the test exists to protect and
+watch whether anything goes red.
 
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
