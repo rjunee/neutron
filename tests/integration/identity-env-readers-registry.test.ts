@@ -80,10 +80,16 @@ import { join, relative, sep } from 'node:path'
  * months later, which is the entire history of this claim. So the scan is
  * over-inclusive on purpose and the registry absorbs the difference.
  *
- * WHAT NO TEXTUAL SCAN CAN CATCH, stated rather than implied: a fully computed
- * key (`env[someVariable]`) names nothing and is invisible here. That is a real
- * hole, it is not closeable without a type-aware pass, and pretending otherwise
- * would be the same over-claim this file exists to end.
+ * WHAT THIS STILL MISSES, stated rather than implied, and ASSERTED rather than
+ * stated — both limits below have their own failing-by-design test, so if
+ * either boundary ever moves the suite says so instead of quietly drifting:
+ *   - a fully computed key (`env[someVariable]`) names nothing and is invisible
+ *     to any textual scan; closing it needs a type-aware pass;
+ *   - a `/*` inside a string literal opens a block comment as far as the regex
+ *     stripper is concerned, so a read between it and the next marker is lost.
+ * Neither is patched with a half-correct heuristic on purpose: a checker that
+ * looks solved while still missing cases is the confidently-specific failure
+ * this whole file exists to end.
  */
 const READ_PATTERNS: ReadonlyArray<RegExp> = [
   /\bNEUTRON_HOME\b/,
@@ -357,6 +363,26 @@ describe('the detector itself, pinned against the forms that fooled earlier vers
     // The round-3 defect: a docblock hit that makes a file look audited.
     expect(namesIdentityVar('/** talks about OWNER_HOME at length */\nconst x = 1')).toBe(false)
     expect(namesIdentityVar('// resolve NEUTRON_DB_PATH later\nconst x = 1')).toBe(false)
+  })
+
+  test('a block-comment marker inside a string literal is a KNOWN residual miss', () => {
+    // The reviewer's second-order point about the same regex lexer: `/*` inside
+    // a string opens a block comment as far as this stripper is concerned, and
+    // everything to the next `*/` disappears — including a live read.
+    //
+    // NOT fixed, deliberately. Closing it properly needs a real lexer, and a
+    // half-correct string-aware heuristic is the "confidently specific" failure
+    // this repo keeps getting burned by — it would read as a solved problem
+    // while still missing cases. So the limit is asserted instead of described,
+    // which means it cannot rot into an unnoticed regression: if the stripper
+    // ever becomes string-aware, this test fails and the documented boundary
+    // has to be updated in the same change.
+    const src = 'const s = "/*"\nconst h = env.NEUTRON_HOME\nconst t = "*/"'
+    expect(namesIdentityVar(src)).toBe(false)
+
+    // CONTROL — the identical read WITHOUT the string-literal markers is found,
+    // so the assertion above pins the lexer limitation and not a broken pattern.
+    expect(namesIdentityVar('const h = env.NEUTRON_HOME')).toBe(true)
   })
 
   test('a fully computed key is NOT detected, and that limit is asserted rather than assumed', () => {

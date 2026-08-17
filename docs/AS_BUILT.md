@@ -157,10 +157,14 @@ boot banner, and `runtime/system-prompt.ts`'s `{{OWNER_HOME}}` placeholder
 rewrite). One annotated line beats a hole, and the asymmetry is the reason: a
 false positive costs a line, a false negative costs another silent
 identity-resolution bug found months later. A fully computed key
-(`env[someVar]`) stays invisible to any textual scan; that limit is written down
-in the test rather than papered over — and asserted there as a failing-by-design
-case, so if it ever becomes detectable the assertion breaks and the stated limit
-gets updated with it.
+(`env[someVar]`) stays invisible to any textual scan, and a `/*` inside a string
+literal still swallows a read as far as the regex stripper is concerned. Both
+limits are written down AND asserted as failing-by-design cases, each with a
+control proving the detector otherwise finds that read — so a boundary cannot
+drift silently: if either ever becomes detectable, the assertion breaks and the
+documented limit has to be updated in the same change. Neither is patched with a
+half-correct heuristic on purpose, because a checker that LOOKS solved while
+still missing cases is the confidently-specific failure this entry is about.
 
 **The cross-model reviewer RAN this time, and it found the detector's own blind
 spots — which is the whole reason to run it.** #333's panel had that reviewer
