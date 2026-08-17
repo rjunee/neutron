@@ -947,10 +947,12 @@ anything changed.
 timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
 being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
 which proves `wireSubstrates` routes what it is handed and says nothing about whether
-anything hands it that. One line in `open/composer.ts` does. Deleting it left 862
-tests passing across 105 files while returning the lane to a stderr-only clamp — the
-exact class of gap this repo keeps shipping, one level up from "built but never
-wired": WIRED, and the wire pinned by nothing.
+anything hands it that. One line in `open/composer.ts` does. Deleting it left the
+suite green while returning the lane to a stderr-only clamp — the review measured 862
+tests passing across 105 files under that deletion, which is its number and not one
+re-measured here; what WAS re-measured is that the deletion is now red (below). The
+class is the one this repo keeps shipping, one level up from "built but never wired":
+WIRED, and the wire pinned by nothing.
 
 `open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
 `buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
@@ -992,7 +994,9 @@ count, and floors a negative at zero.
 **The fourth park was the one nothing tested.** #375's own log claimed the fix was
 "applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
 strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
-pair left 124 tests green across four suites, because reaching that branch needs a
+pair left every existing test green (the review counted 124 across four suites; that
+is its measurement, and what is re-measured here is that the revert is now red),
+because reaching that branch needs a
 standing park LONGER than the hour — which only a `retry-after` produces — while the
 owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
 says wait two hours, in-flight turns fail their way to the threshold, and the strike
