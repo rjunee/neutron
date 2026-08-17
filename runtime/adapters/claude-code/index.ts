@@ -387,19 +387,36 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // every respawn with `invalid-cwd` because `existsSync('   ')` is false.
   // Crash recovery would fail CLOSED and silently, on exactly the malformed
   // input class this change exists to neutralise.
-  // READ ONCE, into a bag both the DECISION and the REPORT share. Argus r2
-  // raised this as a nit and it is worth taking literally: the supervision-off
-  // branch below has to say WHICH slot was blank, and an independent second
-  // `process.env['NEUTRON_HOME']` read there is a different observation of a
-  // mutable object than the one `resolveReplCwdAndHome` actually decided on.
-  // Today the two agree because this line hardcodes `process.env`, so the nit is
-  // latent rather than a live bug — but the divergence it describes is the shape
-  // this whole PR is about: a report that names a condition it did not measure.
-  // Sharing the reference costs one local and makes the report structurally
-  // unable to disagree with the decision, including for a future caller that
-  // threads a different env bag through the injectable signature.
-  const env = process.env
-  const resolved = resolveReplCwdAndHome({ cwd: options.cwd, env })
+  // THE INPUTS ARE SNAPSHOT BY VALUE, ONCE, AND BOTH THE DECISION AND THE REPORT
+  // READ ONLY THE SNAPSHOT. Argus r2 raised this as a nit — the supervision-off
+  // branch below has to say WHICH slot was blank, and it was doing its own second
+  // `process.env['NEUTRON_HOME']` lookup rather than reporting what the decision
+  // measured.
+  //
+  // AN EARLIER PASS AT THIS FIX SHARED THE CONTAINER AND CLAIMED THAT WAS ENOUGH
+  // ("`const env = process.env`, so the report is structurally unable to
+  // disagree"). A cross-model reviewer falsified it and the counterexample
+  // reproduces as a test: `process.env` is a LIVE object, so sharing the
+  // reference shares no OBSERVATION — two reads of the same proxy at two instants
+  // are still two observations. The window between them is reachable from
+  // ordinary inputs, because the option bag arrives from a caller and this
+  // function reads `options.claude_bin` a few lines below the resolve: a getter
+  // there runs between the decision and the report. Measured pre-fix — the
+  // decision saw `NEUTRON_HOME` unset and the report announced `blank`.
+  //
+  // So the fix is a snapshot of the two VALUES, which is the only form that makes
+  // the claim true: there is exactly one read of each input, and the report is
+  // arithmetic over the same two constants the decision consumed. Note this is
+  // deliberately NOT behaviour-preserving in that mid-construction case — the old
+  // code reported the later value, and reporting the later value is the defect.
+  //
+  // Pinned by 'the report describes the values the DECISION read, not a later
+  // re-read of a live object', which fails closed if that read order ever moves.
+  const rawCwd = options.cwd
+  const rawHome = process.env['NEUTRON_HOME']
+  const envSnapshot: NodeJS.ProcessEnv = {}
+  if (rawHome !== undefined) envSnapshot['NEUTRON_HOME'] = rawHome
+  const resolved = resolveReplCwdAndHome({ cwd: rawCwd, env: envSnapshot })
   if (resolved.cwd !== undefined) p.cwd = resolved.cwd
   if (options.claude_bin !== undefined) p.claude_bin = options.claude_bin
   if (options.skip_permissions !== undefined) p.skip_permissions = options.skip_permissions
@@ -562,10 +579,13 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
       substrate_instance_id: options.substrate_instance_id,
       // Which slot was blank, so the operator knows which one to set. Reported
       // as a shape, never as the value — these resolve to owner data paths.
-      cwd: options.cwd === undefined ? 'unset' : 'blank',
-      // From the SAME bag the decision above read — not a second, independent
-      // `process.env` lookup. See the note on the `const env` line.
-      neutron_home: env['NEUTRON_HOME'] === undefined ? 'unset' : 'blank',
+      // BOTH FIELDS COME FROM THE SNAPSHOT, never from a fresh read of
+      // `options` or `process.env` — see the note above `rawCwd`. `options` is a
+      // caller-supplied bag and `process.env` is live, so a second read of
+      // either is a second observation, and a report sourced from one of those
+      // can announce a condition the decision never acted on.
+      cwd: rawCwd === undefined ? 'unset' : 'blank',
+      neutron_home: rawHome === undefined ? 'unset' : 'blank',
     })
   }
   return createPersistentReplSubstrate(p)
