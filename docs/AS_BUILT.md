@@ -33,6 +33,110 @@ Its negative control removes only the new 125 acknowledgment and proves the run
 refuses before writing any later migration. A fresh-install test proves 0125
 and 0131 coexist with exactly one `base_sha` column, and a pin test makes the
 acknowledgment itself part of the contract. No `_migrations` row is rewritten.
+## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
+
+Landed via PR #388.
+
+A live instance crash-looped on boot at migration ordinal 125 — the third instance of
+one class (0122, 0124, 0125), and the first that could not be patched the way the other
+two were. The ledger recorded 125 as `code_trident_runs_fix_round_contract` (a branch
+numbered it that way; it merged as 0124) while `main` numbers 0125
+`code_trident_runs_base_sha`, whose two columns were genuinely absent —
+`pragma_table_info` showed `reviewed_head` and `bound_pr` present, `base_sha` and
+`base_behind` not.
+
+**Both per-incident remedies were checked rather than assumed, and both are wrong here.**
+A `repairs.json` entry reconciles NAMES; two real columns were missing, and no amount of
+name reconciliation creates a column. Renumbering `0125` to a free ordinal repairs the
+stuck instance and BREAKS every instance where it already applied — measured against the
+pre-fix runner on a throwaway database built from the real tree, it fails with
+`duplicate column name: base_sha`. A fix that repairs one and breaks the other is not a
+fix, in either direction.
+
+**The ordinal was never an identity.** It fixes apply ORDER and nothing else, and it is
+allocated by whoever writes the file — so across a fleet two DIFFERENT migrations
+legitimately occupy one ordinal (two branches both number theirs 0125; the second to
+merge is renumbered while the instance that already ran the first keeps 125), and ONE
+migration legitimately occupies different ordinals. Keying "has this run?" on the ordinal
+asks a question the ordinal cannot answer, and gets it wrong in both directions: a
+migration reads as APPLIED when a different one consumed its number, so its `ALTER`s
+never run and the schema silently lacks them — which is exactly ordinals 122, 124 and 125
+— and as PENDING when the same migration already ran under another number, which re-runs
+it and crashes on a duplicate column.
+
+So `migrations/runner.ts` reconciles by the migration NAME (`migrationIsRecorded`), with
+`content_sha256` as a second, name-independent identity used only to WIDEN the answer: a
+migration whose exact bytes are recorded has run, whatever it was called then. It never
+narrows one. The README's existing decision — the hash is recorded and reported, not
+enforced, because already-applied files get benign edits and a hash gate would turn each
+into a crash loop — predates this work and is untouched.
+
+**`_migrations` moved its PRIMARY KEY from `version` to `name`**, rekeyed in place
+(`rekeyLedgerOnName`, one transaction) on the first boot that has something to apply,
+preserving every row and every column value. This is the part that had no alternative:
+with `version` as the key there is no correct value to write for a migration whose
+ordinal another migration already spent. Recording at the file's ordinal is a PK
+conflict; at `max+1` it consumes a future ordinal and recreates this bug class; at a
+negative sentinel it puts a non-version in a column named `version`; rewriting the
+occupying row destroys an incident record the repairs notes say must never be rewritten;
+a second bookkeeping table is two sources of truth for one question. Keying on the name
+removes the conflict instead of choosing which field to falsify — two rows may now share
+a `version`, which is simply true of a fleet where two migrations were both written as
+0125.
+
+**The fail-closed half is kept and restated against identity.** A recorded migration that
+NO file in this build corresponds to, by name or by hash, refuses the boot, lists EVERY
+such row (one verification pass and one edit, rather than one refused boot per row), and
+prints the exact `repairs.json` entries. `repairs.json` keeps both halves of its meaning
+— it acknowledges the orphan row, and its `file_name` marks a migration as already
+applied so a hand-applied schema change is not re-run (ordinal 122's entry does exactly
+that) — and its trigger is unchanged, so an entry only speaks where its row exists and
+stays inert on a fresh install.
+
+**That guard adjudicates ONLY rows carrying a `content_sha256`, and the gate is
+load-bearing rather than lenient.** Migration files are deliberately deleted here —
+`0059_syndication_events` with the content-sync mesh rip, `0064`–`0068` in the A2
+collapse — so every long-lived database holds hashless rows naming migrations the tree no
+longer contains. Refusing on those would take down the oldest instances in the fleet over
+evidence that is a NULL, with nothing for an operator to verify. It is still strictly
+stronger than the guard it replaces, which could not see those rows at all: that one only
+ever compared a row against the one file sharing its ordinal.
+
+A false negative in the first pass of this investigation is worth recording, because it
+would have produced exactly that outage: `git log --diff-filter=D -- 'migrations/0*.sql'`
+returned nothing, which reads as "no migration file was ever deleted". The history in
+this clone is squashed to a single commit, so the query could only ever return nothing;
+`runner.test.ts:68-76` documents the deletions in as many words. The tool's silence was
+not evidence.
+
+Two controls, both against the pre-fix runner on throwaway SQLite files built by the real
+runner over the real tree, with no ledger row hand-written anywhere: the reproduced
+instance state refuses with the exact live message and boots under this change with both
+columns present; the renumber alternative fails on a healthy instance and is a no-op
+under the new runner.
+
+`migrations/__tests__/ordinal-identity.test.ts` pins the four states — the spent ordinal
+(with and without provenance recorded), a healthy instance, a fresh install, genuine
+corruption — each as a real database driven by the real runner over the real migration
+tree, plus the rekey preserving every row and hash. Two mutation proofs with green
+controls: deleting the unexplained-row throw turns the corruption case red, and breaking
+the name check re-applies a renumbered migration and crashes. (The second mutant PASSED
+on the first attempt — identical file bytes meant the hash check answered first and the
+test proved nothing — so the renumbered fixture now carries an added comment, which is
+also the realistic case.)
+
+`untracked-migration-mutation.test.ts` gained an explicit per-mutant `deaths` count in
+place of a flat "exactly one scenario dies": the two untracked throw sites collapsed into
+one, since an occupied ordinal is no longer a finding of its own, so CONTEXT is nested
+inside REFUSAL and declaring 1 and 2 keeps them distinguishable rather than silently
+loosening the assertion.
+
+`gateway/nexus/nexus-store.ts` classified its cross-process init race by matching the
+ledger's PK name inside an error string (`UNIQUE constraint failed: _migrations.version`);
+it now accepts either column, so a sidecar mid-upgrade is classified the same as one
+already converted. `migrations/expected-schema.txt` regenerated (a two-line diff).
+`migrations/README.md` gains a "The ordinal is not an identity" section;
+`docs/INVARIANTS.md` #17 now names four fail-closed refusals instead of three.
 
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
