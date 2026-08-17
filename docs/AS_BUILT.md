@@ -602,6 +602,69 @@ flipping a memory call site onto the chat profile reddens 2. A ninth — removin
 the empty-string refusals — is the one described above as unreachable from a
 suite, and was verified by probe instead of being counted as test coverage.
 
+## 2026-08-16 — a migration row names the build that applied it
+
+Landed via PR #352.
+
+`_migrations` gained two nullable columns, `content_sha256` and `applied_by_commit`, written
+inside each migration's own transaction so a row can never exist without naming what wrote it.
+The commit resolves from `NEUTRON_COMMIT_SHA` first, then from git metadata read as plain files
+(no subprocess — `git` may be absent and a subprocess on the boot path can hang), then NULL. A
+tarball or container install with no `.git` still boots and still records the content hash. The
+git search only accepts a checkout this tree owns — one whose root `package.json` names this
+package — so an install unpacked inside an unrelated repository records NULL instead of that
+repository's HEAD, which would be well-formed, plausible and wrong.
+
+Nothing is written while deciding. The ledger is read shape-tolerantly and the columns are added
+only on the path that is about to write a row, so a boot that ends in the refusal has not touched
+the schema of the database it just declared untrustworthy, and a fully-migrated database can still
+be opened read-only for inspection.
+
+The columns are bootstrapped by the runner rather than by a `NNNN_*.sql` file. The runner is the
+ledger's sole owner, and an ALTER at some ordinal would land after the rows 0001..NNNN-1 it needs
+to change, so every fresh install would come up provenance-less — reintroducing the gap this
+closes.
+
+The name-mismatch refusal is unchanged and still fail-closed; only its message changed. It now
+prints what is on disk (file + hash) against what was recorded (name, timestamp, hash, build) and
+emits the exact `repairs.json` entry that resolves it, so recovery no longer means
+reverse-engineering `repairKey()` from source. A test parses that entry back out of the thrown
+message and proves it resolves the mismatch; others pin that the guard still refuses a genuine
+mismatch, that an entry for a different version or a different name cannot launder one, and that
+pre-existing rows stay NULL.
+
+Declined: refusing a `.sql` file that is not part of the deployed tree. Such a guard *would* have
+flagged the motivating incident — an untracked file at that ordinal is exactly the condition it
+tests — but only in an install with trusted repo metadata, and it can detect nothing in the
+tarball, zip and container installs a self-hostable engine has to support. A refusal that is
+silently inert on much of the fleet trains operators to trust a check that is not running, so
+the answer here is the recorded hash, which every install carries.
+
+The ownership test is anchored, not just applied. Checking ownership wherever a `.git` happens to
+sit still lets the walk climb past this tree's own root, so a copy of it unpacked inside ANOTHER
+Neutron checkout passes ownership against the HOST's `package.json` — both are named `neutron`,
+which is precisely what a name cannot decide — and records the host's HEAD. The walk therefore
+ends at the nearest root: a `.git` that is not ours is NULL, and our root carrying no `.git` is
+also NULL rather than a reason to look one directory higher.
+
+Both guards carry kill evidence rather than a passing assertion. `toBeNull()` is a weak witness,
+since null is equally what a broken resolver, an unreadable fixture, or a walk that never arrived
+returns. Every null assertion is paired with a positive control that starts from the same nested
+directory and differs only in the root package name, and each guard is then deleted from a scratch
+copy and proved to turn its scenario red — ownership kills the stranger's-repository case,
+anchoring kills the vendored-copy case, and neither mutant kills the other's.
+
+Two behaviours are documented rather than changed, because both are deliberate. A steady-state
+boot does not reshape the ledger, so an instance that upgraded onto this build keeps the old
+column set until its next pending migration; reads are shape-tolerant and absent columns select
+as NULL, which is the honest value anyway. And an acknowledged `repairs.json` entry does write —
+it records the acknowledgement in `_migration_repairs` — so a database with acknowledged repairs
+is not one that opens read-only, which the README now says instead of promising otherwise. The
+recorded hash is likewise reported, not enforced: applied migration files get edited in place for
+benign reasons (a comment, a reflow), and gating boot on the hash would turn each into a crash
+loop, while the failure it would catch already produces a name mismatch.
+
+
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
