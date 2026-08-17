@@ -477,14 +477,33 @@ describe('app-ws resume — the truncation signal reaches the wire', () => {
     c.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0, before_seq: 2 }))
 
     await waitFor(() => c.events.some((e) => e.type === 'user_message'))
-    await new Promise((r) => setTimeout(r, 60))
+    // Exactly one row is BELOW the bound, so the page is complete the moment a message
+    // arrives — asserted against the adapter as well, where the size is a total fact
+    // rather than whatever had landed by the time the trace was read.
+    expect((await h.adapter.replayAfter(CHANNEL_TOPIC, 0, 2)).envelopes).toHaveLength(1)
     const seqs = c.events
       .filter((e): e is Extract<AppWsOutbound, { type: 'user_message' }> => e.type === 'user_message')
       .map((e) => e.seq)
     // Strictly below the bound — the row the capped forward page skipped.
     expect(seqs).toEqual([1])
-    // A page that did not fill claims no further history.
-    expect(gapsIn(c.events)).toEqual([])
+
+    // A PAGE THAT DID NOT FILL CLAIMS NO FURTHER HISTORY, and that absence is COUNTED
+    // rather than waited for. A second resume on the same socket returns a full page and
+    // therefore does gap, so the trace must end up holding EXACTLY ONE gap frame: if the
+    // backwards page above had wrongly claimed one too, this is 2.
+    //
+    // Counting is what makes it sound. The surface does not serialise per-socket
+    // handlers (Bun does not await the message callback), so nothing orders one resume's
+    // frames before another's, and no round-trip barrier can prove a late frame is not
+    // still in flight — measured, not assumed: a sentinel ping/pong barrier was built
+    // here first and a deliberately 200ms-late gap frame sailed straight through two
+    // silent round-trips. A count does not care when the frames arrive, only how many
+    // there are, so waiting for the one gap we DO expect makes the absence of a second
+    // one a complete observation.
+    c.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0 }))
+    await waitFor(() => gapsIn(c.events).length > 0)
+    await waitFor(() => c.events.filter((e) => e.type === 'user_message').length >= 501)
+    expect(gapsIn(c.events).map((g) => g.older_than)).toEqual([2])
 
     await c.close()
   })
@@ -502,8 +521,18 @@ describe('app-ws resume — the truncation signal reaches the wire', () => {
     c.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0 }))
 
     await waitFor(() => c.events.filter((e) => e.type === 'user_message').length >= 12)
-    await new Promise((r) => setTimeout(r, 60))
-    expect(gapsIn(c.events)).toEqual([])
+    // The whole topic reached the device — a positive, complete observation.
+    expect(
+      c.events
+        .filter((e): e is Extract<AppWsOutbound, { type: 'user_message' }> => e.type === 'user_message')
+        .map((e) => e.seq),
+    ).toEqual(Array.from({ length: 12 }, (_, i) => i + 1))
+    // AND THE SERVER HAS NOTHING TO CLAIM: `older_than` is null, read off the very call
+    // the emit site branches on. A 12-row topic can never produce a gap frame to count
+    // against (the counting construction is in the backwards-resume test above), so the
+    // absence is asserted where it is TOTAL — a synchronous fact about the page — rather
+    // than as a wire-trace absence after a wait, which would only measure the machine.
+    expect((await h.adapter.replayAfter(CHANNEL_TOPIC, 0)).older_than).toBeNull()
 
     await c.close()
   })
@@ -537,8 +566,10 @@ describe('app-ws resume — the truncation signal reaches the wire', () => {
       () => short.events.filter((e) => e.type === 'user_message').length >= DEFAULT_REPLAY_LIMIT - 1,
       8000,
     )
-    await new Promise((r) => setTimeout(r, 80))
-    expect(gapsIn(short.events)).toEqual([])
+    // Same reasoning as the not-full test: with one row fewer than a page there is no
+    // gap frame available to count against, so the silence is asserted against the page
+    // itself, which is a total fact.
+    expect((await h.adapter.replayAfter(CHANNEL_TOPIC, 0)).older_than).toBeNull()
     await short.close()
   })
 })
