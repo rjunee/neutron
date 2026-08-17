@@ -712,7 +712,13 @@ export function buildCoreModules(
       loop.start()
       if (reconcileStranded !== undefined) {
         const stranded_sweep = sweepStrandedFailures({ store, reconcile: reconcileStranded })
-        return { store, loop, drain, stranded_sweep }
+        // `drain` is spread conditionally, matching the line below: under
+        // exactOptionalPropertyTypes an explicit `drain: undefined` is NOT
+        // assignable to `drain?: () => Promise<void>`, which is what reddened
+        // typecheck here while every test stayed green.
+        return drain !== undefined
+          ? { store, loop, drain, stranded_sweep }
+          : { store, loop, stranded_sweep }
       }
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
