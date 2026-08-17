@@ -232,6 +232,42 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(deferrals[1]).toContain('Wire the reaper')
   })
 
+  test('the key SEPARATES its components — two items whose ids concatenate alike both speak', async () => {
+    // The separator is a NUL, written as an escape, and nothing pinned it: a
+    // mutation that removed it entirely (`${project}${item}${run}`) left every
+    // test in this file green. That is the shape where a "tidy-up" to a space —
+    // or to nothing — lands silently, and the failure it causes is one item going
+    // permanently unlogged, which is the exact defect this logging exists to cure.
+    //
+    // These two triples are chosen to COLLIDE under naive concatenation and only
+    // under it: 'ab' + 'c' and 'a' + 'bc' both flatten to 'abc' in one project, so
+    // without a separator the second deferral reads as a standing repeat of the
+    // first and is suppressed. With one, they are different keys and both speak.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    try {
+      const h = harness({
+        projects: [
+          project({
+            items: [],
+            deferred: [
+              deferral({ item_id: 'ab', run_id: 'c', title: 'First item' }),
+              deferral({ item_id: 'a', run_id: 'bc', title: 'Second item' }),
+            ],
+          }),
+        ],
+      })
+      const result = await runWorkWakeupSweep(h.deps, new Map(), new Map())
+      expect(result.deferred_to_run).toBe(2)
+    } finally {
+      lines.restore()
+    }
+    const deferrals = lines.matching('wakeup_deferred_to_live_run')
+    expect(deferrals).toHaveLength(2)
+    expect(deferrals[0]).toContain('First item')
+    expect(deferrals[1]).toContain('Second item')
+  })
+
   test('a RE-BOUND item speaks again — a new driver is not a standing deferral', async () => {
     // `attachRun` lets a later run supersede an earlier binding
     // (`work-board/store.ts:679`). Keyed on the item alone, the hand-off from R1

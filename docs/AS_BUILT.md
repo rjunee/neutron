@@ -131,6 +131,17 @@ a grep that returned nothing on a pattern that was certainly present — the
 "a tool that cannot read the format returns a negative that looks like an answer"
 shape. The gate caught it; the humans and the editors did not.
 
+Fixing it surfaced that NOTHING PINNED THE SEPARATOR. Removing it outright —
+`${project}${item}${run}` — left all 25 tests in the file GREEN, which means a
+later tidy-up to a space, or to nothing, would land silently. It is not a
+hypothetical: the components are concatenated, so `item 'ab' + run 'c'` and
+`item 'a' + run 'bc'` flatten to the same key in one project, and the second
+item's deferral is then suppressed as a standing repeat of the first — one item
+going permanently unlogged, which is the precise defect this logging exists to
+cure. A test now meets that collision head-on, and it is a real discriminator
+rather than a restatement: under the separator-removal mutation it is the ONLY
+test that fails, 25 others still passing, and it passes again on restore.
+
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
