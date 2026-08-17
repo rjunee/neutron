@@ -44,6 +44,7 @@ import { fileURLToPath } from 'node:url'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, SystemEventsStore, pushSystemEventSink } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -64,10 +65,19 @@ const SAVED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NOTIFY_SOCKET',
+  // THE HARNESS PASSES THE REAL `process.env` TO THE REAL COMPOSER, so any ambient
+  // provider selection is a live input to the thing under test. With
+  // `NEUTRON_MODEL_PROVIDER=openai` exported, the composer builds the OpenAI lanes,
+  // the injected Claude `substrateFactory` is never called, and this file fails with
+  // `waitFor timed out` — a wiring-failure message for an environment problem, which
+  // is the one wrong conclusion it must not produce. Cleared here so the run is
+  // hermetic on the Claude path it is written to test.
+  'NEUTRON_MODEL_PROVIDER',
+  'OPENAI_API_KEY',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
-let tmpDir: string
+let tmpDir: string | null = null
 
 interface Harness {
   base: string
@@ -112,6 +122,8 @@ beforeEach(() => {
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env['NOTIFY_SOCKET']
+  delete process.env['NEUTRON_MODEL_PROVIDER']
+  delete process.env['OPENAI_API_KEY']
 })
 
 afterEach(async () => {
@@ -127,7 +139,13 @@ afterEach(async () => {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
-  rmSync(tmpDir, { recursive: true, force: true })
+  // Only if setup got far enough to make one. `rmSync(undefined)` throws a
+  // `TypeError` from teardown, which REPLACES whatever setup actually failed with
+  // a message about the wrong thing entirely.
+  if (tmpDir !== null) {
+    rmSync(tmpDir, { recursive: true, force: true })
+    tmpDir = null
+  }
 })
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -168,14 +186,14 @@ async function startHarness(): Promise<Harness> {
     captured,
     close: async () => {
       await server.stop(true)
-      for (const cleanup of composition.realmode_cleanups ?? []) {
-        try {
-          cleanup()
-        } catch {
-          /* teardown is best-effort */
-        }
-      }
       await graph.shutdown()
+      // The PRODUCTION drain, not a local loop. A `realmode_cleanup` is typed
+      // `() => void | Promise<void>` and `gateway/index.ts` awaits each one before
+      // `db.close()` for a reason — the async ones have in-flight work. Calling
+      // them un-awaited here let that work reach a closed SQLite handle after the
+      // test finished. Reusing the real drain also keeps the ordering identical to
+      // boot's, which is the ordering this file claims to exercise.
+      await drainRealmodeCleanups(composition.realmode_cleanups ?? [])
       db.close()
     },
   }

@@ -371,39 +371,64 @@ export function openAiErrorTypeToStatus(type: string | undefined): number | unde
  */
 export function parseRetryAfterFromMessage(message: string): number | undefined {
   const ms = message.match(/try again in\s+([\d.]+)\s*ms/i)
-  if (ms && ms[1]) {
-    const n = Number(ms[1])
-    if (Number.isFinite(n)) return Math.max(0, Math.round(n))
-  }
+  if (ms && ms[1]) return positiveMs(Number(ms[1]))
   const s = message.match(/try again in\s+([\d.]+)\s*s/i)
-  if (s && s[1]) {
-    const n = Number(s[1])
-    if (Number.isFinite(n)) return Math.max(0, Math.round(n * 1000))
-  }
+  if (s && s[1]) return positiveMs(Number(s[1]) * 1000)
   return undefined
 }
 
 /**
- * FINITENESS IS CHECKED ON THE RESULT, not on the input. `Number.isFinite` on the
- * seconds passed `1e308`, and `1e308 * 1000` is `Infinity` — which the credential
- * pool then stored as a cooldown no finite report could shorten and no success
- * could clear, because a parked credential is never selected. The pool now clamps
- * (`MAX_PARK_MS`), and this stops the bogus value at its source as well: a header
- * that cannot be turned into a real millisecond count yields `undefined`, so the
- * caller falls back to the status default. Negative seconds are floored at 0 for
- * the same reason the date branch below already was — a park in the past is not a
- * park.
+ * THE ONE PLACE EITHER PARSER DECIDES A MILLISECOND COUNT IS REAL, so the two
+ * cannot drift apart again — they already had, in both directions:
+ *
+ *   - FINITENESS MUST BE CHECKED ON THE RESULT, not the input. `Number.isFinite`
+ *     on the seconds passes `1e308`, and `1e308 * 1000` is `Infinity`. The header
+ *     parser was fixed for that and {@link parseRetryAfterFromMessage} kept the
+ *     bug: it checked the parsed number and then multiplied. `Infinity` reaching
+ *     {@link openaiResponsesSubstrate}'s rotation back-off is not a long sleep —
+ *     bun's `setTimeout(Infinity)` fires in about 14 ms — so the back-off is
+ *     SKIPPED and we retry instantly against a provider that just rate-limited us.
+ *   - A NON-POSITIVE COUNT IS NOT A SHORT PARK, IT IS AN ABSENT ONE. Flooring at
+ *     `0` laundered `retry-after: -30` (and any past HTTP-date, which clock skew
+ *     alone produces) into a defined `0`, and a defined `0` is not the same as
+ *     `undefined` to either consumer: the credential pool parked until `now`,
+ *     which every reader in that file counts as available, so a real 429 bought
+ *     no cooldown at all. `undefined` is the honest answer — "this header told us
+ *     nothing usable".
+ *
+ * WHAT THE TWO CONSUMERS DO WITH `undefined` IS NOT THE SAME, said exactly because
+ * the looser phrasing ("routes both consumers to their own default") is only half
+ * true: the credential pool falls back to the per-status window, but the adapter's
+ * model rotation has no default — `index.ts` sleeps only when the hint is defined and
+ * positive, so `undefined` means rotate with no back-off. That is the right reading of
+ * an unusable hint on that path, because rotating moves to a DIFFERENT model rather
+ * than retrying the one that just refused, and the pool parks the credential either
+ * way.
+ *
+ * ROUNDING HAPPENS BEFORE THE POSITIVITY TEST, not after. Checked in the other order,
+ * `0.1` passed `> 0` and `Math.round` then returned a defined `0` — reintroducing the
+ * exact value this function exists to reject, for any sub-millisecond hint.
+ */
+function positiveMs(n: number): number | undefined {
+  if (!Number.isFinite(n)) return undefined
+  const ms = Math.round(n)
+  if (ms <= 0) return undefined
+  return ms
+}
+
+/**
+ * Parse an HTTP `retry-after` (delta-seconds or an HTTP-date) into milliseconds,
+ * or `undefined` when the header carries nothing this process can act on. Both
+ * rejections live in {@link positiveMs} — see there for why a `0` is as dangerous
+ * as an `Infinity`, and why neither is floored into a value the caller cannot
+ * tell apart from a real one.
  */
 function parseRetryAfterMs(value: string | null): number | undefined {
   if (!value) return undefined
   const seconds = Number(value)
-  if (Number.isFinite(seconds)) {
-    const ms = seconds * 1000
-    if (Number.isFinite(ms)) return Math.max(0, ms)
-    return undefined
-  }
+  if (Number.isFinite(seconds)) return positiveMs(seconds * 1000)
   const dt = Date.parse(value)
-  if (Number.isFinite(dt)) return Math.max(0, dt - Date.now())
+  if (Number.isFinite(dt)) return positiveMs(dt - Date.now())
   return undefined
 }
 

@@ -231,6 +231,142 @@ describe('no report can park a credential past the ceiling', () => {
     expect(c.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS - 1_000)
   })
 
+  // THE VALUE THE PRODUCTION PARSER ACTUALLY EMITTED, which is why the test above
+  // passed while the defect shipped: it fed the pool a raw `-60000`, and no
+  // adapter ever sent one. `parseRetryAfterMs` floored negatives at `0`, so the
+  // real payload for `retry-after: -30` — and for any HTTP-date already past,
+  // which clock skew alone produces — was a DEFINED ZERO. `0` passed the pool's
+  // `>= 0` boundary, `park` wrote `cooldown_until = now`, and `hasUsableCredential`
+  // /`selectCredential`/`soonestCooldownUntil` all read `<= now` as AVAILABLE. So
+  // the 429 that asked us to stop bought a zero-length cooldown. A test whose input
+  // no producer can produce is not a pin.
+  test('a ZERO retry-after buys no time — the status window still applies', () => {
+    const pool = one()
+    reportFailure(pool, 'only', 429, 0)
+    const c = pool.credentials[0]!
+    expect(hasUsableCredential(pool)).toBe(false)
+    expect(c.cooldown_reason).toBe('rate_limit_429')
+    expect(c.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS - 1_000)
+    expect(c.cooldown_until! - Date.now()).toBeLessThanOrEqual(COOLDOWN_429_MS)
+  })
+
+  test('and on the BACKGROUND lane, where the strike ledger is no backstop at all', () => {
+    // The worst version of the same report: `origin: 'background'` deliberately
+    // never touches `consecutive_failures`, so if the per-status park is zero
+    // length there is no second net under it — nothing cools, ever, however many
+    // times the timer fires.
+    const pool = one()
+    reportFailure(pool, 'only', 429, 0, 'background')
+    const c = pool.credentials[0]!
+    expect(hasUsableCredential(pool)).toBe(false)
+    expect(c.consecutive_failures).toBe(0)
+    expect(c.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS - 1_000)
+  })
+
+  test('CONTROL — one millisecond IS a positive hint, and is honoured as given', () => {
+    // The boundary is `> 0`, not "small values are suspicious". Without this, a
+    // guard written as `retry_after_ms > SOME_MINIMUM` would pass everything above
+    // while quietly overriding provider hints it judged too short.
+    const pool = one()
+    reportFailure(pool, 'only', 429, 1)
+    const c = pool.credentials[0]!
+    expect(c.cooldown_until! - Date.now()).toBeLessThanOrEqual(1)
+  })
+
+  test('the ceiling is anchored to when the park BEGAN, so nothing walks it outward', () => {
+    // `MAX_PARK_MS` was not a bound. The ceiling was re-derived from `Date.now()`
+    // on every call, and reports DO land during a park: a parked credential is
+    // never SELECTED, but turns dispatched before the park started keep reporting
+    // per error event. Each late report computed a ceiling further out and the
+    // monotonic rule adopted it. Measured before the fix: 21,600,000 ms → 39,600,000
+    // ms, six hours to eleven, with every other ceiling assertion still green.
+    const pool = one()
+    const YEAR = 365 * 24 * 60 * 60_000
+    const t0 = Date.now()
+    reportFailure(pool, 'only', 429, YEAR)
+    const c = pool.credentials[0]!
+    const first = c.cooldown_until!
+    expect(first - t0).toBeLessThanOrEqual(MAX_PARK_MS)
+
+    // A second in-flight report, five hours into the park, proposing the same
+    // over-ceiling window.
+    const realNow = Date.now
+    Date.now = () => t0 + 5 * 60 * 60_000
+    try {
+      reportFailure(pool, 'only', 429, YEAR)
+    } finally {
+      Date.now = realNow
+    }
+    expect(c.cooldown_until).toBe(first)
+    expect(c.cooldown_until! - t0).toBeLessThanOrEqual(MAX_PARK_MS)
+  })
+
+  test('a STANDING park with no anchor adopts one, instead of walking outward forever', () => {
+    // The state the first version of this fix missed, found by the cross-model
+    // review and reproduced here: anchoring only FRESH parks left a standing park
+    // that carries no `cooldown_started_at` re-deriving its ceiling from every
+    // report and never gaining an anchor to stop it. Reports at +5h/+10h/+15h took
+    // one six-hour park to 11h, 16h, 21h — unbounded. Reachable via a credential
+    // carried across a pool re-resolve from before the field existed.
+    const pool = one()
+    const c = pool.credentials[0]!
+    const t0 = Date.now()
+    c.cooldown_until = t0 + MAX_PARK_MS
+    c.cooldown_reason = 'rate_limit_429'
+    delete c.cooldown_started_at
+
+    const YEAR = 365 * 24 * 60 * 60_000
+    const realNow = Date.now
+    try {
+      // First late report adopts `now` as the anchor — the true start is unknowable,
+      // so this is allowed to land one window beyond it and no further.
+      Date.now = () => t0 + 5 * 60 * 60_000
+      reportFailure(pool, 'only', 429, YEAR)
+      const afterFirst = c.cooldown_until!
+      // Read through a widened view: the `delete` above narrows the property to
+      // `undefined` for the rest of this block, and the compiler cannot see that
+      // `reportFailure` reassigns it.
+      const anchors = c as { cooldown_started_at?: number }
+      expect(anchors.cooldown_started_at).toBe(t0 + 5 * 60 * 60_000)
+
+      // THE POINT: every later report inside that park is now bounded by the same
+      // anchor, so nothing walks. Before the fix this read 16h, then 21h.
+      Date.now = () => t0 + 10 * 60 * 60_000
+      reportFailure(pool, 'only', 429, YEAR)
+      expect(c.cooldown_until).toBe(afterFirst)
+      expect(c.cooldown_until! - c.cooldown_started_at!).toBe(MAX_PARK_MS)
+    } finally {
+      Date.now = realNow
+    }
+  })
+
+  test('CONTROL — an EXPIRED park re-anchors, so the ceiling is not a one-time budget', () => {
+    // The anchor must not outlive its park, and this is the mutation-control for
+    // the test above: anchoring on `cooldown_started_at` whenever it is merely
+    // PRESENT (rather than while a park is STANDING) keeps the ceiling frozen at
+    // the first park forever. Then a credential that was once parked can never be
+    // parked again — `>=` sees the stale ceiling, returns early, and an
+    // already-expired park is left in place while the provider is still refusing.
+    const pool = one()
+    const c = pool.credentials[0]!
+    const YEAR = 365 * 24 * 60 * 60_000
+    const t0 = Date.now()
+    reportFailure(pool, 'only', 429, YEAR)
+
+    // Seven hours later the first park has expired on its own.
+    const sevenHoursOn = t0 + 7 * 60 * 60_000
+    const realNow = Date.now
+    Date.now = () => sevenHoursOn
+    try {
+      expect(hasUsableCredential(pool)).toBe(true)
+      reportFailure(pool, 'only', 429, YEAR)
+      expect(hasUsableCredential(pool)).toBe(false)
+      expect(c.cooldown_until! - sevenHoursOn).toBe(MAX_PARK_MS)
+    } finally {
+      Date.now = realNow
+    }
+  })
+
   test('the ceiling is a floor for recovery: the clamped park is still MONOTONIC under later reports', () => {
     // The clamp must not have reopened truncation. A one-year park clamped to six
     // hours is still longer than every status window, so a later 429/401 leaves it
