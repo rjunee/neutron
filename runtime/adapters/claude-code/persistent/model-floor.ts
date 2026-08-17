@@ -11,13 +11,28 @@
 // value SELF-PERPETUATING across every respawn, restart and resume. Editing the
 // row by hand fixed it for hours; it came back.
 //
-// WHY THIS IS A FLOOR AND NOT A BUGFIX AT THE WRITER. We never identified what
-// first wrote Haiku into that row, and a fix that closed one writer would leave
-// the next one open — the owner would pay for it again, silently, and the only
-// detector we have is him noticing the answers got worse. So the property is
-// enforced where it cannot be bypassed: at the single spawn chokepoint that
-// turns a model id into the child's `--model`. Whatever wrote the record, the
-// child comes up on the frontier model.
+// WHY THIS IS A FLOOR AND NOT A BUGFIX AT THE WRITER. This was built without
+// knowing what first wrote Haiku into that row. The writer was found separately
+// — PR #340: the reminder dispatcher composed on the owner's warm chat REPL
+// passing no model, so its own `input.model ?? FAST_MODEL` default rewrote the
+// chat session's record on every fire (`open/composer.ts`). Two things keep the
+// floor load-bearing anyway, and they are the reason it stayed:
+//
+//   1. THAT FIX CLOSES ONE CALL SITE. Any future caller that dispatches on the
+//      live-agent substrate without naming a model reopens the identical hole,
+//      and the only detector this class has is the owner noticing the answers
+//      got worse. A floor makes the class unreachable, not one instance fixed.
+//   2. IT DOES NOT REPAIR AN ALREADY-POISONED ROW. Nothing else rewrites
+//      `record.model`: the sole writer is the model-update watchdog's graceful
+//      upgrade (`supervision.ts`), which fires only when a 6h-gated probe finds
+//      a genuinely NEW top-tier id. So a row already holding the fast tier keeps
+//      respawning itself on the fast tier until an upgrade lands or someone
+//      edits it by hand — the owner did edit it by hand, and it held for hours.
+//
+// So the property is enforced where it cannot be bypassed: at the single spawn
+// chokepoint that turns a model id into the child's `--model`. Whatever wrote
+// the record, the child comes up on the frontier model — and the row is
+// rewritten with the clamped value, which is what repairs it.
 //
 // WHY THE PREDICATE IS "A KNOWN LOWER TIER" AND NOT "ANYTHING ≠ BEST".
 // `getKnownFallbackModels()` (`runtime/models.ts`) already exists for exactly

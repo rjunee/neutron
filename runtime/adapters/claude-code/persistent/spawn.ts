@@ -57,7 +57,8 @@ async function spawnSession(
   // whatever wrote the record, and (b) un-poisons the row in the same breath, so
   // the value cannot self-perpetuate into the next respawn. A substrate without
   // the floor is returned verbatim — the deliberate FAST_MODEL utility callers
-  // are untouched. See the module header for why the writer was not chased.
+  // are untouched. The module header records the writer that was found (#340)
+  // and the two reasons the floor is still load-bearing without it.
   const model = applyModelFloor({
     requested: requestedModel,
     enabled: options.frontierModelFloor === true,
