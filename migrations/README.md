@@ -43,7 +43,9 @@ The last two answer *which build wrote this row*. A live instance once crash-loo
 Both are nullable, and NULL is a real answer, not a defect:
 
 - **`content_sha256` is NULL** on rows written before provenance shipped. Nothing more can be learned about them.
-- **`applied_by_commit` is NULL** when the build had no discoverable identity. Neutron Open is self-hostable, so an install may be an unpacked tarball, a zip, or a `COPY` into a container image with no `.git` and no `git` on PATH. The runner reads git metadata as plain files and never spawns a subprocess (a subprocess on the boot path can hang); when there is nothing to read it records NULL rather than a fabricated value. **Set `NEUTRON_COMMIT_SHA` when packaging a build without git metadata** and provenance stays answerable for exactly the install shape that would otherwise have none.
+- **`applied_by_commit` is NULL** when the build had no discoverable identity. Neutron Open is self-hostable, so an install may be an unpacked tarball, a zip, or a `COPY` into a container image with no `.git` and no `git` on PATH. The runner reads git metadata as plain files and never spawns a subprocess (a subprocess on the boot path can hang); when there is nothing to read it records NULL rather than a fabricated value. It also refuses to read a `.git` this tree does not own — an install unpacked inside somebody else's checkout would otherwise record *that* repository's HEAD, which is well-formed, plausible and wrong. **Set `NEUTRON_COMMIT_SHA` when packaging a build without git metadata** (or when installing inside another repository) and provenance stays answerable for exactly the install shapes that would otherwise have none.
+
+Reading the ledger never writes to it. The columns are added only on the path that is about to insert a row, so a boot that ends in the refusal below has changed nothing, and a fully-migrated database can be opened read-only for inspection.
 
 ## When the runner refuses: `repairs.json`
 

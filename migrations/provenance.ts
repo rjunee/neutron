@@ -50,6 +50,41 @@ const OBJECT_ID_RE = /^[0-9a-f]{7,64}$/i
 const GIT_SEARCH_DEPTH = 24
 
 /**
+ * The `name` in the deployed tree's root `package.json`.
+ *
+ * This is the OWNERSHIP TEST, and it is why the walk below cannot adopt a
+ * stranger's repository. Neutron Open is self-hostable, so an install may be
+ * unpacked ANYWHERE — including inside somebody else's checkout (`vendor/`, a
+ * monorepo, a scratch clone). Walking up for the first `.git` and reading its
+ * HEAD finds that enclosing repo and records its commit as the build that
+ * applied the migration: a value that is well-formed, plausible, and wrong,
+ * which is worse than the NULL this file promises. So a `.git` counts only when
+ * it sits beside the root `package.json` of THIS tree.
+ *
+ * `provenance.test.ts` asserts the repo's own root `package.json` still carries
+ * this name, so renaming the package fails a test instead of silently turning
+ * provenance off everywhere.
+ */
+const ROOT_PACKAGE_NAME = 'neutron'
+
+/**
+ * Whether `dir` is the root of the deployed Neutron tree — i.e. carries a
+ * `package.json` naming this package. Total: an unreadable or malformed
+ * `package.json` is simply not a match.
+ */
+function isDeployedTreeRoot(dir: string): boolean {
+  const path = join(dir, 'package.json')
+  if (!existsSync(path)) return false
+  try {
+    const pkg: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (typeof pkg !== 'object' || pkg === null) return false
+    return (pkg as { name?: unknown }).name === ROOT_PACKAGE_NAME
+  } catch {
+    return false
+  }
+}
+
+/**
  * SHA-256 of a migration file's contents, hex-encoded.
  *
  * The runner reads migration files as utf8 (`readFileSync(..., 'utf8')`), so
@@ -62,18 +97,27 @@ export function migrationContentHash(sql: string): string {
 
 /**
  * Locate the git metadata directory for `startDir`, or `null` if there is none
- * within `GIT_SEARCH_DEPTH` parents.
+ * within `GIT_SEARCH_DEPTH` parents that this tree actually owns.
  *
  * Handles both shapes `.git` takes: a directory (an ordinary clone) and a FILE
- * containing `gitdir: <path>` (a linked worktree or a submodule checkout). The
- * bounded loop matters — an unpacked tarball has no `.git` at any depth, and
- * this runs on the boot path.
+ * containing `gitdir: <path>` (a linked worktree or a submodule checkout). Both
+ * of those are real Neutron checkouts and both pass the ownership test, because
+ * in each the root `package.json` sits beside the `.git`.
+ *
+ * The first `.git` encountered ends the walk either way. Finding one means we
+ * have reached a repository boundary: if it is not ours, we are nested inside
+ * somebody else's repo and no ancestor above it can be ours either. Reaching
+ * that boundary without matching is a NULL, never a fallback to the next one up.
+ *
+ * The bounded loop still matters — an unpacked tarball has no `.git` at any
+ * depth, and this runs on the boot path.
  */
 function findGitDir(startDir: string): string | null {
   let dir = startDir
   for (let depth = 0; depth < GIT_SEARCH_DEPTH; depth++) {
     const candidate = join(dir, '.git')
     if (existsSync(candidate)) {
+      if (!isDeployedTreeRoot(dir)) return null
       const stat = statSync(candidate)
       if (stat.isDirectory()) return candidate
       if (stat.isFile()) {
@@ -150,8 +194,11 @@ function readHead(gitDir: string): string | null {
  *      git metadata. A packager (tarball, zip, container image) bakes the id
  *      it built from, and provenance stays answerable for exactly the install
  *      shape that would otherwise have none.
- *   2. Git metadata on disk, read as files. No subprocess: `git` may not be
- *      installed, and a subprocess on the boot path can hang.
+ *   2. Git metadata on disk, read as files, and only from a checkout THIS tree
+ *      owns (see `ROOT_PACKAGE_NAME`) — an install nested inside an unrelated
+ *      repository resolves to NULL rather than recording that repository's
+ *      HEAD. No subprocess: `git` may not be installed, and a subprocess on the
+ *      boot path can hang.
  *   3. `null`. Not an error — an install with no build identity is a supported
  *      install, and the column is nullable to say so honestly rather than
  *      record a fabricated value.

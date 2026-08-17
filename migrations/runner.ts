@@ -112,6 +112,33 @@ const PREDATES_PROVENANCE = '(not recorded — row predates migration provenance
 const NO_BUILD_IDENTITY = '(not discoverable — the build carried no git metadata)'
 
 /**
+ * The largest millisecond offset `new Date(...)` represents; anything beyond it
+ * makes `toISOString()` throw `RangeError`. Per ECMA-262 (Time Values and Time
+ * Range), ±8.64e15 ms — so ±8.64e12 in the seconds `applied_at` stores.
+ */
+const MAX_TIME_VALUE_MS = 8.64e15
+
+/**
+ * Render `applied_at` (unix seconds, REAL) as a timestamp.
+ *
+ * TOTAL BY CONSTRUCTION, and that is the whole point. This runs only while
+ * building the message for a refused boot, so a throw here would replace the
+ * one diagnostic the operator has with a bare `RangeError` — strictly worse
+ * than the message this work set out to improve. `Number.isFinite` alone is not
+ * enough: a corrupt or garbage-wide value is finite and still outside the Date
+ * range. Out-of-range prints the raw number, because a nonsense timestamp is
+ * itself forensic evidence and must not be swallowed.
+ */
+function formatAppliedAt(appliedAt: number): string {
+  if (!Number.isFinite(appliedAt)) return '(unknown)'
+  const ms = appliedAt * 1000
+  if (!Number.isFinite(ms) || Math.abs(ms) > MAX_TIME_VALUE_MS) {
+    return `(out of range — recorded as ${appliedAt})`
+  }
+  return new Date(ms).toISOString()
+}
+
+/**
  * The thrown message for a name mismatch.
  *
  * The refusal itself is unchanged and deliberately fail-closed (see the call
@@ -131,9 +158,7 @@ function formatNameMismatch(
     .split('\n')
     .map((line) => `    ${line}`)
     .join('\n')
-  const appliedAt = Number.isFinite(recorded.applied_at)
-    ? new Date(recorded.applied_at * 1000).toISOString()
-    : '(unknown)'
+  const appliedAt = formatAppliedAt(recorded.applied_at)
   return [
     `Migration version ${migration.version} was recorded as "${recorded.name}" but this code contains "${migration.name}". ` +
       'The schema may not match this code.',
@@ -170,8 +195,42 @@ const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['applied_by_commit', 'TEXT'],
 ]
 
+/** The columns `_migrations` currently carries, by name. */
+function ledgerColumns(db: Database): Set<string> {
+  return new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('_migrations')")
+      .all()
+      .map((r) => r.name),
+  )
+}
+
 /**
- * Bring `_migrations` up to the current shape.
+ * Read the ledger without requiring it to have been reshaped first.
+ *
+ * A ledger written before provenance shipped has neither column, so the select
+ * list is built from what is actually there and the rest is selected as NULL —
+ * which is also the honest value. This exists so that DECIDING costs no write:
+ * the mismatch check reads the ledger and can refuse having touched nothing.
+ */
+function readLedger(db: Database): Map<number, RecordedMigration> {
+  const present = ledgerColumns(db)
+  const provenance = PROVENANCE_COLUMNS.map(([column]) =>
+    present.has(column) ? column : `NULL AS ${column}`,
+  ).join(', ')
+  return new Map(
+    db
+      .query<RecordedMigration, []>(
+        `SELECT version, name, applied_at, ${provenance} FROM _migrations`,
+      )
+      .all()
+      .map((r) => [r.version, r] as const),
+  )
+}
+
+/**
+ * Bring `_migrations` up to the current shape. Called ONLY on the path that is
+ * about to write a row — see the call site for why that ordering is load-bearing.
  *
  * WHY THIS IS NOT A `NNNN_*.sql` MIGRATION, which is the obvious place for it:
  * `_migrations` is the ledger, and the runner is its sole owner — it is
@@ -182,8 +241,9 @@ const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
  * recorded before the ALTER at ordinal NNNN ever ran. Every fresh install
  * would come up with a provenance-less history — reintroducing the exact
  * forensic gap this work exists to close, on the population where the record
- * is easiest to get right. Bootstrapping here means row one of a brand-new
- * database carries its provenance.
+ * is easiest to get right, and on the very ordinal (124) the incident was
+ * about. Bootstrapping here means row one of a brand-new database carries its
+ * provenance; `migration-provenance.test.ts` pins that directly.
  *
  * The contract is unchanged in substance: additive, forward-only, idempotent.
  * Columns are only ever added, never dropped or renamed, and re-running is a
@@ -191,14 +251,7 @@ const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
  * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
  */
 function ensureProvenanceColumns(db: Database): void {
-  const columnNames = (): Set<string> =>
-    new Set(
-      db
-        .query<{ name: string }, []>("SELECT name FROM pragma_table_info('_migrations')")
-        .all()
-        .map((r) => r.name),
-    )
-  const present = columnNames()
+  const present = ledgerColumns(db)
   for (const [column, type] of PROVENANCE_COLUMNS) {
     if (present.has(column)) continue
     try {
@@ -209,7 +262,7 @@ function ensureProvenanceColumns(db: Database): void {
       // loser gets "duplicate column name". The post-state is what matters and
       // it is correct, so re-read rather than take down a boot over a race we
       // won either way. Anything else still throws — this widens nothing.
-      if (!columnNames().has(column)) throw err
+      if (!ledgerColumns(db).has(column)) throw err
     }
   }
 }
@@ -279,15 +332,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
        applied_at REAL NOT NULL
      )`,
   )
-  ensureProvenanceColumns(db)
-  const seen = new Map(
-    db
-      .query<RecordedMigration, []>(
-        'SELECT version, name, applied_at, content_sha256, applied_by_commit FROM _migrations',
-      )
-      .all()
-      .map((r) => [r.version, r] as const),
-  )
+  const seen = readLedger(db)
   const migrations = loadMigrations(dir)
   assertUniqueMigrationOrdinals(migrations)
   const repairs = new Map(
@@ -337,6 +382,14 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // up to the checkout's `.git`, and for a sidecar tree (`migrations/comments`)
   // it finds the same one.
   const pending = migrations.some((m) => !seen.has(m.version))
+  // ORDERING IS LOAD-BEARING, and it is the whole reason the ledger is read
+  // shape-tolerantly above. Reshaping the ledger before deciding would mean a
+  // boot that ends in the refusal had already mutated the schema of the
+  // database it just declared untrustworthy — a guard whose job is to change
+  // nothing, changing something. It would also turn `applyMigrations` from a
+  // read into a write for a fully-migrated database, which breaks opening a
+  // backup read-only to inspect it. Nothing pending, nothing written.
+  if (pending) ensureProvenanceColumns(db)
   const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
   for (const m of migrations) {
     if (seen.has(m.version)) {
