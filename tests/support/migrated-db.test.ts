@@ -17,7 +17,7 @@
  */
 import { Database } from 'bun:sqlite'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -181,6 +181,75 @@ describe('migrated-db testkit — clones are independent', () => {
       expect(schemaOf(fresh)).toEqual(controlSchema)
     } finally {
       fresh.close()
+    }
+  })
+})
+
+describe('migrated-db testkit — a reopen preserves what the last open wrote', () => {
+  // The restart-shaped fixture. `tests/integration/launcher-served.open.test.ts`
+  // boots a server, renames a launcher tile, throws the whole server away and
+  // boots again over the SAME file to prove the store is durable rather than
+  // process-local. A helper that seeded the template on every call truncated
+  // that file, and the failure read as a durability regression in the PRODUCT.
+  test('openMigratedDbAt twice on one path keeps the rows written in between', () => {
+    const path = join(tmp, 'restart.db')
+    const first = openMigratedDbAt(path)
+    first.runSync('CREATE TABLE restart_probe (id INTEGER PRIMARY KEY, v TEXT)')
+    first.runSync(`INSERT INTO restart_probe (id, v) VALUES (1, 'renamed by owner')`)
+    first.close()
+
+    const second = openMigratedDbAt(path)
+    try {
+      expect(second.get<{ v: string }>('SELECT v FROM restart_probe WHERE id = 1')?.v).toBe(
+        'renamed by owner',
+      )
+      // And it is still a fully-migrated database, not just a surviving file.
+      expect(ledgerOf(second.raw())).toEqual(controlLedger)
+    } finally {
+      second.close()
+    }
+  })
+
+  test('openMigratedDatabaseAt twice on one path keeps the rows written in between', () => {
+    const path = join(tmp, 'restart-raw.db')
+    const first = openMigratedDatabaseAt(path)
+    first.exec('CREATE TABLE restart_probe (id INTEGER PRIMARY KEY, v TEXT)')
+    first.run(`INSERT INTO restart_probe (id, v) VALUES (1, 'kept')`)
+    first.close()
+
+    const second = openMigratedDatabaseAt(path)
+    try {
+      expect(second.query<{ v: string }, []>('SELECT v FROM restart_probe').get()?.v).toBe('kept')
+      expect(ledgerOf(second)).toEqual(controlLedger)
+    } finally {
+      second.close()
+    }
+  })
+
+  test('a zero-length file at the path is seeded, not opened as an empty database', () => {
+    // `mkstemp`-style fixtures and a crashed prior run both leave 0-byte files.
+    // SQLite would happily open one as a blank database with no schema at all.
+    const path = join(tmp, 'empty.db')
+    writeFileSync(path, new Uint8Array(0))
+    const db = openMigratedDbAt(path)
+    try {
+      expect(ledgerOf(db.raw())).toEqual(controlLedger)
+    } finally {
+      db.close()
+    }
+  })
+
+  test('writeMigratedDbFile clears an orphaned -wal beside the file it replaces', () => {
+    // A stale WAL against a brand-new main file is a corruption, not a recovery.
+    const path = join(tmp, 'orphan-wal.db')
+    writeFileSync(`${path}-wal`, new Uint8Array([1, 2, 3, 4]))
+    writeMigratedDbFile(path)
+    expect(existsSync(`${path}-wal`)).toBe(false)
+    const db = openMigratedDbAt(path)
+    try {
+      expect(ledgerOf(db.raw())).toEqual(controlLedger)
+    } finally {
+      db.close()
     }
   })
 })

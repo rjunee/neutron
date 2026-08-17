@@ -66,7 +66,7 @@
  * every test in the chunk instead of being paid by each one.
  */
 import { Database } from 'bun:sqlite'
-import { writeFileSync } from 'node:fs'
+import { rmSync, statSync, writeFileSync } from 'node:fs'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, type OpenOptions } from '@neutronai/persistence/index.ts'
 
@@ -124,15 +124,59 @@ export function openMigratedDb(): ProjectDb {
 }
 
 /**
- * Write the migrated page image to `path`, replacing whatever was there.
- * Returns `path` so it composes into a fixture in one expression.
+ * Write the migrated page image to `path`, REPLACING whatever was there, and
+ * clearing any orphaned `-wal` / `-shm` beside it (a stale WAL against a
+ * brand-new main file is a corruption, not a recovery). Returns `path` so it
+ * composes into a fixture in one expression.
  *
  * The parent directory must exist — the same requirement SQLite itself imposes,
  * so the `mkdtempSync` the fixture already does still covers it.
+ *
+ * Prefer `openMigratedDbAt` / `openMigratedDatabaseAt`: they only seed a path
+ * that has no database yet. This one always overwrites.
  */
 export function writeMigratedDbFile(path: string): string {
+  rmSync(`${path}-wal`, { force: true })
+  rmSync(`${path}-shm`, { force: true })
   writeFileSync(path, migratedTemplateBytes())
   return path
+}
+
+/**
+ * Make `path` hold a fully-migrated database, whatever state it is in now.
+ *
+ * THIS IS WHERE THE EQUIVALENCE LIVES, and it is not "write the template". The
+ * fixture being replaced was `ProjectDb.open(path)` + `applyMigrations`, and on
+ * a path that ALREADY holds a database that pair is a pure read that preserves
+ * every row. Seeding unconditionally would instead truncate it — which is
+ * exactly what broke `tests/integration/launcher-served.open.test.ts`, whose
+ * restart test boots, renames a tile, throws the server away, and boots again
+ * over the SAME file to prove the store is durable rather than process-local.
+ * The rename came back as the default and the test read as a durability
+ * regression in the product, not as a change to its fixture.
+ *
+ * So: an absent or empty file gets the template (the ~7 ms fast path, and the
+ * overwhelming case, because fixtures `mkdtemp` a fresh dir per test); a path
+ * that already has a database gets the REAL runner, which is precisely what the
+ * old code did there.
+ */
+function seedMigratedDbFile(path: string): void {
+  let size = -1
+  try {
+    size = statSync(path).size
+  } catch {
+    size = -1
+  }
+  if (size <= 0) {
+    writeMigratedDbFile(path)
+    return
+  }
+  const existing = new Database(path, { create: false, readwrite: true })
+  try {
+    applyMigrations(existing)
+  } finally {
+    existing.close()
+  }
 }
 
 /**
@@ -141,17 +185,19 @@ export function writeMigratedDbFile(path: string): string {
  *
  * The resulting file is what the migration runner would have produced at that
  * path, and `db.path` is the path you passed, so anything deriving a sibling
- * file from it (sidecars, backups) behaves exactly as before.
+ * file from it (sidecars, backups) behaves exactly as before. Called twice on
+ * one path — the restart-shaped fixture — the second call PRESERVES what the
+ * first wrote.
  */
 export function openMigratedDbAt(path: string, options: OpenOptions = {}): ProjectDb {
-  writeMigratedDbFile(path)
+  seedMigratedDbFile(path)
   return ProjectDb.open(path, options)
 }
 
 /**
  * A fully-migrated raw `bun:sqlite` Database backed by a REAL FILE at `path` —
  * the drop-in replacement for `new Database(path)` followed by
- * `applyMigrations`.
+ * `applyMigrations`. Same reopen semantics as `openMigratedDbAt`.
  *
  * NOTE: unlike `ProjectDb.open`, this does NOT apply `STARTUP_PRAGMAS`, because
  * the call sites it replaces did not either — a bare `new Database(path)` has
@@ -159,6 +205,6 @@ export function openMigratedDbAt(path: string, options: OpenOptions = {}): Proje
  * tests assert. Fixtures that set their own pragmas keep doing so.
  */
 export function openMigratedDatabaseAt(path: string): Database {
-  writeMigratedDbFile(path)
+  seedMigratedDbFile(path)
   return new Database(path, { create: true })
 }

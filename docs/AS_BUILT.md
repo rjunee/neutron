@@ -121,6 +121,21 @@ re-run of the real runner against a clone finds NOTHING pending, that clones are
 independent of each other and of the template, and that the template is built once per
 process.
 
+A REOPEN OF THE SAME PATH PRESERVES WHAT THE LAST OPEN WROTE, and that is where the
+equivalence actually lives. The first cut seeded the template on every call, which
+truncated any path opened twice — the shape `tests/integration/launcher-served.open.test.ts`
+uses to prove the launcher store is durable rather than process-local (boot, rename a tile,
+throw the server away, boot again over the same file), plus the same shape in
+`kimi-panelist-wired.open.test.ts` and `onboarding-welcome-seed-once.open.test.ts`. All
+three failed on CI and read as durability regressions in the PRODUCT rather than as a
+change to their fixtures. The fix is in the helper, not the fixtures: an absent or empty
+file gets the template (the fast path, and the overwhelming case since fixtures `mkdtemp`
+per test), while a path that already holds a database gets the REAL runner — which is
+exactly what `ProjectDb.open` + `applyMigrations` did there. Seeding also clears an
+orphaned `-wal`/`-shm`, since a stale WAL against a brand-new main file is a corruption
+rather than a recovery. Four regression tests pin it, and the fix was mutation-tested:
+forcing the unconditional seed turns both reopen tests red.
+
 MEASURED, same box, back-to-back, nothing else running, `bun test work-board
 project-credentials skill-forge persistence tasks reminders channels` (146 files):
 before 2,073 tests in 608.1 s wall / 220.9 s CPU (167.6 user + 53.3 sys); after the

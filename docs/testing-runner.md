@@ -115,6 +115,12 @@ beforeEach(() => {
 | `openMigratedDbAt(path)` | file-backed `ProjectDb` | ~7 ms | the code under test reads `db.path`, or the test asserts about the file |
 | `openMigratedDatabaseAt(path)` | file-backed `Database` | ~7 ms | same, raw handle |
 
+Called **twice on one path** — the restart-shaped fixture that boots, writes,
+throws the server away and boots again — the second call **preserves** what the
+first wrote. Only an absent or empty file is seeded from the template; a path
+that already holds a database gets the real runner, exactly as
+`ProjectDb.open(p)` + `applyMigrations` did.
+
 The template is built lazily on first use by the **real** `applyMigrations`, so
 the schema is identical by construction — `tests/support/migrated-db.test.ts`
 pins that against a freshly-migrated database, ledger included. Scope is the
