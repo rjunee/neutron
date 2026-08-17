@@ -197,21 +197,101 @@ describe('resolveModelFloor — the decision', () => {
   })
 
   it('an id naming no tier at all yields an empty family, and still ranks frontier', () => {
-    // The precondition behind `tierRankOf`'s two empty-string refusals: a
-    // tier-less id yields `''`, and a padded id splits to an empty token. Match
-    // either and EVERY id would rank as the fast tier — a floor that clamps its
-    // own frontier requests.
+    // The precondition behind the two empty-string refusals: a tier-less id
+    // yields `''`, and a padded id splits to an empty token. Match either and
+    // EVERY id would rank as the fast tier — a floor that clamps its own frontier
+    // requests.
     //
-    // ⚠️ THIS TEST COVERS THE TOKEN HALF ONLY, and says so rather than implying
-    // more. Reaching the family half needs `FAST_MODEL` pinned to a tier-less id,
-    // and the aliases are module-level consts bound at import, so no suite can do
-    // it. Measured, not assumed: with the token filter removed this file stays
-    // GREEN on the default aliases and goes red only under
-    // `NEUTRON_FAST_MODEL=claude-2`. The guard is defensive; the label is the
-    // honest part.
+    // ⚠️ THE EXAMPLE ID CHANGED WITH THE CANONICAL RANK TABLE, and the reason is
+    // worth stating rather than editing away. `claude-opus-5` used to rank
+    // FRONTIER, because rank came only off the two aliases and `opus` was neither
+    // of them. It now ranks 2 — a real tier with a real rank — so it can no longer
+    // stand in for "an id naming no tier". `claude-2` genuinely names none.
     expect(familyOf('claude-2')).toBe('')
-    expect(tierRankOf('  claude-opus-5  ')).toBe(FRONTIER_RANK)
-    expect(tierRankOf('claude-opus-5')).toBe(FRONTIER_RANK)
+    expect(tierRankOf('  claude-2  ')).toBe(FRONTIER_RANK)
+    expect(tierRankOf('claude-2')).toBe(FRONTIER_RANK)
+    // The padded form of a RANKED id must also survive the empty token, which is
+    // the half this assertion actually exercises.
+    expect(tierRankOf('  claude-opus-5  ')).toBe(tierRankOf('claude-opus-5'))
+  })
+
+  it('ranks the three tiers in the canonical order, whatever the aliases say', () => {
+    // THE FIX FOR THE REPRODUCED INERTNESS BUG (Argus round 2, CONFIRMED by two
+    // reviewers). The previous `tierRankOf` derived BOTH sub-frontier ranks from
+    // the aliases — rank 0 = `familyOf(FAST_MODEL)`, rank 1 =
+    // `familyOf(SONNET_MODEL)` — so the floor recognised exactly two families and
+    // WHICH two was operator configuration.
+    expect(tierRankOf('claude-haiku-4-5-20251001')).toBe(0)
+    expect(tierRankOf('claude-sonnet-5')).toBe(1)
+    expect(tierRankOf('claude-opus-5')).toBe(2)
+    // …and the order holds under an operator env that used to erase a whole tier.
+    const asIfFastWereSonnet = { fast: 'claude-sonnet-5', sonnet: 'claude-sonnet-5' }
+    expect(tierRankOf('claude-haiku-4-5-20251001', asIfFastWereSonnet)).toBe(0)
+    expect(tierRankOf('claude-opus-5', asIfFastWereSonnet)).toBe(2)
+  })
+
+  it('still clamps the fast tier when NEUTRON_FAST_MODEL names a HIGHER tier', () => {
+    // THE LIVE REPRO, as a test. `NEUTRON_FAST_MODEL=claude-sonnet-5` made
+    // `familyOf(FAST_MODEL) === familyOf(SONNET_MODEL) === 'sonnet'`, so `haiku`
+    // matched NEITHER rank and a persisted `claude-haiku-4-5-20251001` came back
+    // FRONTIER: `clamped: false`, the child spawned on the fast tier, `spawn.ts`
+    // rewrote the row with it, and not one of the three visibility surfaces fired.
+    // The floor did not fail loudly — it went silently inert, which is the exact
+    // failure this file exists to end.
+    //
+    // The env cannot be set in-process (`runtime/models.ts` binds the aliases at
+    // import), so the aliases are injected, which is why they are parameters.
+    for (const aliases of [
+      { fast: 'claude-sonnet-5', sonnet: 'claude-sonnet-5' },
+      // Strictly worse in the old scheme: `opus` took rank 0, so the FLOOR itself
+      // ranked bottom and nothing could ever clamp.
+      { fast: 'claude-opus-4-5', sonnet: 'claude-sonnet-5' },
+    ]) {
+      const d = resolveModelFloor({
+        requested: LIVE_HAIKU_ID,
+        enabled: true,
+        best: 'claude-opus-5',
+        aliases,
+      })
+      expect(d.clamped, JSON.stringify(aliases)).toBe(true)
+      expect(d.model, JSON.stringify(aliases)).toBe('claude-opus-5')
+    }
+  })
+
+  it('an operator running deliberately on the mid tier gets a mid-tier floor, not none', () => {
+    // `BEST_MODEL` is overridable, so the floor is the CONFIGURED best rather than
+    // "the top tier". Below it clamps, at it and above it does not — an `opus` row
+    // under a `sonnet` floor is left alone rather than DOWNgraded, which is the
+    // direction that would turn a floor into a ceiling.
+    const best = 'claude-sonnet-5'
+    expect(resolveModelFloor({ requested: LIVE_HAIKU_ID, enabled: true, best }).clamped).toBe(true)
+    expect(resolveModelFloor({ requested: 'claude-sonnet-5', enabled: true, best }).clamped).toBe(
+      false,
+    )
+    expect(resolveModelFloor({ requested: 'claude-opus-5', enabled: true, best }).clamped).toBe(
+      false,
+    )
+  })
+
+  it('seeds a tier name this build predates from the alias that names it', () => {
+    // The canonical list cannot cover a tier Anthropic has not shipped yet, so the
+    // aliases still contribute: an alias family that is NOT a known tier word is
+    // seeded at that alias's tier. A KNOWN word is never overwritten, which is what
+    // stops `NEUTRON_FAST_MODEL=claude-sonnet-5` dragging `sonnet` down to rank 0.
+    const aliases = { fast: 'claude-quasar-1', sonnet: 'claude-sonnet-5' }
+    expect(tierRankOf('claude-quasar-1', aliases)).toBe(0)
+    expect(tierRankOf('claude-sonnet-5', aliases)).toBe(1)
+    expect(
+      resolveModelFloor({
+        requested: 'claude-quasar-1',
+        enabled: true,
+        best: 'claude-opus-5',
+        aliases,
+      }).clamped,
+    ).toBe(true)
+    // …and an unknown family still ranks FRONTIER when no alias names it, so this
+    // did not become "clamp anything unfamiliar" and start fighting the upgrade path.
+    expect(tierRankOf('claude-quasar-1')).toBe(FRONTIER_RANK)
   })
 
   it('reads the tier out of BOTH naming orders and every prefix shape', () => {

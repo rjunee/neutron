@@ -92,14 +92,57 @@ const RATE_LIMIT_USAGE_CAP_BODY =
   "🚧 Claude usage limit reached — your subscription window is capped and won't recover until it resets."
 const RATE_LIMIT_TEMPORARY_BODY =
   '⏳ Claude is briefly rate-limited or overloaded. It will retry on its own — no action needed.'
-/** The floor-clamp bubble NAMES BOTH MODELS. The owner's only symptom last time
- *  was that the answers got worse, and when he asked, the chat told him the lower
- *  tier was the environment default — which `runtime/models.ts` contradicts. A
- *  notice that says only "a model was corrected" would leave that same guessing
- *  game in place, so the requested id and the floor both go in the bubble. */
-const modelFloorBody = (requested: string, floor: string): string =>
-  `⚠️ This chat's saved session asked for \`${requested}\`, which is below the best model. ` +
-  `It was held at \`${floor}\` instead — no action needed, but if it keeps happening something is rewriting the session's model.`
+/**
+ * Longest run of a registry-sourced value that may reach the bubble. Chat copy,
+ * not a log line: a pathological row should not be able to push the readable part
+ * of the sentence off the screen.
+ */
+const NOTICE_VALUE_MAX = 64
+
+/**
+ * Make a registry-sourced value safe to interpolate into chat markdown.
+ *
+ * WHY THIS EXISTS AT ALL. `repl-registry.ts:74` declares `model?: string` and
+ * never schema-checks it, and this bubble is the one place that value is rendered
+ * to the owner. Dropped straight into a backtick span it could carry its own
+ * backtick and break out of the code span, or arrive long enough to bury the
+ * sentence. Neither is dangerous — the client renders chat markdown, not HTML —
+ * but the value's whole job here is to be READ, and a notice that renders as
+ * garbage is a notice that failed.
+ *
+ * ALLOW-LIST RATHER THAN DENY-LIST, and that choice is the point: a model id and
+ * a pool key are both drawn from `[A-Za-z0-9._:/@-]`, so naming what may pass
+ * needs no guess about what a corrupt row might contain. Anything else — a
+ * backtick, a newline, a control byte, an emoji — collapses to a space.
+ *
+ * The truncation is marked with `…` so a clipped id is never mistaken for a
+ * complete one; the failure this file exists to end is a wrong model id being
+ * believed. An empty result is SAID rather than rendered as an empty span, so a
+ * blank never reads as "no problem here".
+ */
+const noticeValue = (raw: unknown): string => {
+  const text = typeof raw === 'string' ? raw : ''
+  const flat = text.replace(/[^A-Za-z0-9._:/@-]+/g, ' ').trim()
+  if (flat === '') return '(empty)'
+  return flat.length > NOTICE_VALUE_MAX ? `${flat.slice(0, NOTICE_VALUE_MAX)}…` : flat
+}
+
+/** The floor-clamp bubble NAMES BOTH MODELS AND THE SESSION. The owner's only
+ *  symptom last time was that the answers got worse, and when he asked, the chat
+ *  told him the lower tier was the environment default — which `runtime/models.ts`
+ *  contradicts. A notice that says only "a model was corrected" would leave that
+ *  same guessing game in place, so the requested id and the floor both go in.
+ *
+ *  ⚠️ THE SESSION KEY IS IN THE COPY BECAUSE THE BUBBLE DOES NOT LAND ON THE
+ *  DEGRADED CHAT. `deps.owner_topic_id` is one pinned topic, while a project chat
+ *  binds its own (`gateway/http/app-ws-surface.ts`), so a clamp on a project
+ *  session surfaces on the owner's main topic instead. Routing it to the right
+ *  topic is a real improvement and is NOT done here (see `docs/AS_BUILT.md`);
+ *  what is not acceptable meanwhile is copy that says "this chat" while pointing
+ *  at a different one, so it names the session it is actually talking about. */
+const modelFloorBody = (sessionKey: string, requested: string, floor: string): string =>
+  `⚠️ Session \`${noticeValue(sessionKey)}\` resumed asking for \`${noticeValue(requested)}\`, which is below the best model. ` +
+  `It was held at \`${noticeValue(floor)}\` instead — no action needed, but if it keeps happening something is rewriting that session's model.`
 
 /**
  * Build the notice-family sinks the gateway wires into the owner's conversational
@@ -185,7 +228,7 @@ export function makeSubstrateNoticeSinks(
         requested_model: notice.requested,
         floor_model: notice.floor,
       })
-      bubble(modelFloorBody(notice.requested, notice.floor))
+      bubble(modelFloorBody(notice.sessionKey, notice.requested, notice.floor))
     },
   }
 }

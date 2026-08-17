@@ -44,11 +44,20 @@
 // schema-checks it, so a row really can hold any of those. "Whatever the record
 // says" has to mean whatever it says.
 //
-// So the comparison is by TIER RANK, derived from the FAMILY token of the id,
-// and the order is read off the `runtime/models.ts` aliases rather than a
-// hardcoded table, so a generation bump cannot silently invert it. That closes
-// the alias, generation, snapshot and casing gaps in one predicate, with nothing
-// to maintain when a tier moves generation.
+// So the comparison is by TIER RANK, derived from the FAMILY token of the id.
+// That closes the alias, generation, snapshot and casing gaps in one predicate,
+// with nothing to maintain when a tier moves generation.
+//
+// THE ORDER OF THE TIERS IS CANONICAL, NOT ALIAS-DERIVED — and this line used to
+// say the opposite. An earlier revision read rank 0 off `FAST_MODEL`'s family and
+// rank 1 off `SONNET_MODEL`'s, on the reasoning that a hardcoded table could be
+// inverted by a generation bump. The cost of that was not visible from here: it
+// left the floor able to rank only TWO families, chosen by operator environment,
+// so `NEUTRON_FAST_MODEL=claude-sonnet-5` made a persisted haiku id rank at the
+// FRONTIER and the floor went silently inert — no clamp, no warn, no event, no
+// bubble. Reproduced. The order now comes from `TIER_WORDS`, which held it all
+// along; the aliases still seed a tier name this build predates. Full account,
+// with the repro, at `tierRankTable`.
 //
 // THE FAMILY TOKEN IS NOT THE FIRST TOKEN — AND ASSUMING IT WAS LET REAL IDS
 // THROUGH. A previous revision anchored on the first dash-token after `claude-`,
@@ -114,9 +123,9 @@ const NON_TIER_TOKENS = new Set([
 ])
 
 /**
- * Anthropic's TIER NAMES — and yes, this is an enumeration, sitting two lines
- * under a comment about the danger of enumerations. The distinction is which one
- * you are forced to keep up with.
+ * Anthropic's TIER NAMES, ASCENDING — and yes, this is an enumeration, sitting
+ * two lines under a comment about the danger of enumerations. The distinction is
+ * which one you are forced to keep up with.
  *
  * A cross-model review found the hole that made this necessary. Databricks
  * publishes `databricks-claude-haiku-4-5` / `databricks-claude-opus-4-5`, and
@@ -130,12 +139,18 @@ const NON_TIER_TOKENS = new Set([
  *
  * So a KNOWN tier word anywhere in an id wins over position. The trade is
  * deliberate: cloud vendors mint routing prefixes continuously (this one was
- * missed), whereas Anthropic has shipped three tier names in five years. The
- * ORDER is still read off the aliases, so a generation bump cannot invert it —
- * only the NAMES are listed here, and a name this build has not heard of still
- * falls through to the positional scan below.
+ * missed), whereas Anthropic has shipped three tier names in five years. A name
+ * this build has not heard of still falls through to the positional scan below.
+ *
+ * ⚠️ THE ARRAY IS ORDERED AND THE ORDER IS THE RANK — index 0 is the cheapest
+ * tier. It is an array rather than a `Set` for exactly that reason, and
+ * {@link tierRankTable} reads the rank off the index. See that function for why
+ * the order stopped being derived from the aliases.
  */
-const TIER_WORDS = new Set(['haiku', 'sonnet', 'opus'])
+const TIER_WORDS: readonly string[] = ['haiku', 'sonnet', 'opus']
+
+/** Membership view of {@link TIER_WORDS} for {@link familyOf}'s first pass. */
+const TIER_WORD_SET: ReadonlySet<string> = new Set(TIER_WORDS)
 
 /**
  * The family token of a model id — the part naming the TIER rather than the
@@ -158,7 +173,7 @@ const TIER_WORDS = new Set(['haiku', 'sonnet', 'opus'])
 export function familyOf(model: string): string {
   const tokens = model.toLowerCase().split(/[^a-z0-9]+/)
   for (const token of tokens) {
-    if (TIER_WORDS.has(token)) return token
+    if (TIER_WORD_SET.has(token)) return token
   }
   for (const token of tokens) {
     if (token === '') continue
@@ -174,10 +189,67 @@ export function familyOf(model: string): string {
 export const FRONTIER_RANK = Number.MAX_SAFE_INTEGER
 
 /**
- * Order the tiers FROM THE ALIASES rather than a hardcoded table, so a
- * generation bump in `runtime/models.ts` cannot silently invert this: rank 0 is
- * whatever `FAST_MODEL`'s family is, rank 1 is whatever `SONNET_MODEL`'s is, and
- * everything else ranks above both.
+ * The family → rank table the floor compares on. Rank ascends with capability;
+ * anything absent from the table ranks {@link FRONTIER_RANK}.
+ *
+ * ⚠️ THE ORDER IS CANONICAL NOW, NOT ALIAS-DERIVED, AND THAT IS THE FIX FOR A
+ * REPRODUCED INERTNESS BUG. The previous revision derived BOTH sub-frontier ranks
+ * from the aliases — rank 0 was `familyOf(FAST_MODEL)`, rank 1 was
+ * `familyOf(SONNET_MODEL)`, everything else frontier — with a docblock claiming
+ * that made a generation bump unable to invert the order. It did do that. It also
+ * meant the floor recognised EXACTLY TWO families, and which two was operator
+ * configuration. Point `NEUTRON_FAST_MODEL` at a model that is not the cheapest
+ * tier and the fast tier stops being ranked at all:
+ *
+ *   `NEUTRON_FAST_MODEL=claude-sonnet-5` ⇒ fast family `sonnet`, sonnet family
+ *   `sonnet`, so `haiku` matched NEITHER and a persisted
+ *   `claude-haiku-4-5-20251001` ranked FRONTIER. `clamped` came back false, the
+ *   child spawned on the fast tier, the row was rewritten with it, and NOTHING
+ *   fired — no warn, no `system_events` row, no bubble. The floor did not fail
+ *   loudly; it went silently inert, which is the precise failure mode this whole
+ *   file exists to end. `NEUTRON_FAST_MODEL=claude-opus-4-5` was worse still:
+ *   `opus` took rank 0, so the FLOOR itself ranked bottom and nothing could ever
+ *   clamp. Reproduced against the unmutated head at `5691492b`:
+ *   `NEUTRON_FAST_MODEL=claude-sonnet-5 bun test model-floor.test.ts` → 17 failures,
+ *   35/35 green on the default env.
+ *
+ * So {@link TIER_WORDS} — which held the true order all along and was consulted
+ * only for MEMBERSHIP — is now the rank, by index. Anthropic's three tier names
+ * are ranked whatever the aliases say, and an operator's env can no longer
+ * silently remove a tier from the floor's vocabulary.
+ *
+ * THE ALIASES STILL CONTRIBUTE, for the case the canonical list cannot cover: a
+ * tier name this build predates. If an alias's family is not a known tier word,
+ * the alias TELLS us which tier it occupies, so it is seeded at that tier's rank
+ * (`FAST_MODEL`'s family at the fast rank, `SONNET_MODEL`'s at the mid rank). A
+ * tie is harmless — {@link tierRankOf} takes the MINIMUM matched rank and the
+ * comparison is `>=`. A known tier word is never overwritten, which is what stops
+ * `NEUTRON_FAST_MODEL=claude-sonnet-5` from dragging `sonnet` down to rank 0.
+ *
+ * Aliases are parameters, defaulted to the module consts, purely so a suite can
+ * exercise an operator env: `runtime/models.ts` binds them at import, so no
+ * in-process test can set the environment variables that produced the bug above.
+ */
+export function tierRankTable(
+  fastAlias: string = FAST_MODEL,
+  sonnetAlias: string = SONNET_MODEL,
+): ReadonlyMap<string, number> {
+  const ranks = new Map<string, number>()
+  TIER_WORDS.forEach((word, index) => ranks.set(word, index))
+  // Seed the mid rank before the fast one so that two aliases sharing one unknown
+  // family settle at the mid rank rather than the fast one — over-ranking a family
+  // costs money on a better model, under-ranking it is the degradation this file
+  // exists to stop.
+  const sonnet = familyOf(sonnetAlias)
+  if (sonnet !== '' && !ranks.has(sonnet)) ranks.set(sonnet, 1)
+  const fast = familyOf(fastAlias)
+  if (fast !== '' && !ranks.has(fast)) ranks.set(fast, 0)
+  return ranks
+}
+
+/**
+ * Rank one model id: the LOWEST tier rank any of its tokens names, else
+ * {@link FRONTIER_RANK}.
  *
  * THIS ASKS A DIFFERENT QUESTION THAN {@link familyOf}, and keeps asking it even
  * though `familyOf` now answers most of it. `familyOf` answers "which tier does
@@ -204,22 +276,22 @@ export const FRONTIER_RANK = Number.MAX_SAFE_INTEGER
  * which spends more money on a better model. The failure this file exists to
  * stop is the reverse, so the asymmetry is deliberate.
  */
-export function tierRankOf(model: string): number {
-  // BOTH SIDES OF THE EMPTY STRING ARE REFUSED, and neither line is tidiness.
-  // A leading or trailing separator splits to a `''` token, and an alias an
-  // operator pinned to a tier-less id (`NEUTRON_FAST_MODEL=claude-2`) makes
-  // `familyOf` return `''` as well. Match those two and EVERY id ranks as the
-  // fast tier — a floor that clamps its own frontier requests.
-  //
-  // ⚠️ Only the token half is reachable from a test: the aliases are module-level
-  // consts bound at import, so a suite cannot pin a tier-less one. The family
-  // half is defensive, and is labelled rather than dressed up as covered.
+export function tierRankOf(
+  model: string,
+  aliases?: { readonly fast?: string; readonly sonnet?: string },
+): number {
+  // THE EMPTY STRING IS REFUSED ON BOTH SIDES, and neither guard is tidiness. A
+  // leading or trailing separator splits to a `''` token, and an alias an operator
+  // pinned to a tier-less id (`NEUTRON_FAST_MODEL=claude-2`) makes `familyOf`
+  // return `''` too — {@link tierRankTable} drops that one, this filter drops the
+  // other. Match those two and EVERY id would rank as the fast tier: a floor that
+  // clamps its own frontier requests.
   const tokens = new Set(model.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t !== ''))
-  const fast = familyOf(FAST_MODEL)
-  const sonnet = familyOf(SONNET_MODEL)
-  if (fast !== '' && tokens.has(fast)) return 0
-  if (sonnet !== '' && tokens.has(sonnet)) return 1
-  return FRONTIER_RANK
+  let rank = FRONTIER_RANK
+  for (const [family, familyRank] of tierRankTable(aliases?.fast, aliases?.sonnet)) {
+    if (familyRank < rank && tokens.has(family)) rank = familyRank
+  }
+  return rank
 }
 
 /** The outcome of applying (or not applying) the floor to one spawn. */
@@ -249,6 +321,11 @@ export interface ModelFloorInput {
   readonly enabled: boolean
   /** The floor. Defaults to the live `getBestModel()`. */
   readonly best?: string
+  /** Tier aliases, injectable for the same reason `best` is: `runtime/models.ts`
+   *  binds `FAST_MODEL` / `SONNET_MODEL` at import, so an in-process suite cannot
+   *  set the environment variables that made the old rank derivation go inert.
+   *  Production omits this and gets the module consts. */
+  readonly aliases?: { readonly fast?: string; readonly sonnet?: string }
 }
 
 /**
@@ -288,7 +365,7 @@ export function resolveModelFloor(input: ModelFloorInput): ModelFloorDecision {
   // A blank request on a floored session resolves TO the floor: an empty
   // `--model` is a failed spawn, and the floor is the best available answer.
   if (requested === '') return { model: floor, clamped: true, requested, floor }
-  if (tierRankOf(requested) >= tierRankOf(floor)) {
+  if (tierRankOf(requested, input.aliases) >= tierRankOf(floor, input.aliases)) {
     return { model: requested, clamped: false, requested, floor }
   }
   return { model: floor, clamped: true, requested, floor }
