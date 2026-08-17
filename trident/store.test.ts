@@ -153,6 +153,32 @@ describe('TridentRunStore', () => {
     ])
   })
 
+  test('listRepoPaths returns each distinct repo across terminal and non-terminal runs', async () => {
+    const store = new TridentRunStore(db)
+    await store.create({
+      slug: 'active-a',
+      project_slug: 't1',
+      repo_path: '/repo/a',
+      task: 'active',
+    })
+    await store.create({
+      slug: 'done-a',
+      project_slug: 't1',
+      repo_path: '/repo/a',
+      task: 'done',
+      phase: 'done',
+    })
+    await store.create({
+      slug: 'failed-b',
+      project_slug: 't1',
+      repo_path: '/repo/b',
+      task: 'failed',
+      phase: 'failed',
+    })
+
+    expect(store.listRepoPaths()).toEqual(['/repo/a', '/repo/b'])
+  })
+
   test('create + get round-trips every column with defaults', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({

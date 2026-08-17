@@ -108,6 +108,19 @@ export {
 export type { RunHostCommand, MergeConflictResolver } from './merge.ts'
 
 export {
+  buildWorktreeReaperLoop,
+  sweepTridentWorktrees,
+  DEFAULT_WORKTREE_RETENTION_MS,
+  DEFAULT_REAP_INTERVAL_MS,
+  MAX_REMOVALS_PER_SWEEP,
+} from './worktree-reaper.ts'
+export type {
+  WorktreeReaperStore,
+  WorktreeReaperOptions,
+  WorktreeReapReport,
+} from './worktree-reaper.ts'
+
+export {
   buildFableArbiter,
   assertArbitrableOptions,
   isOwnerOnlyQuestion,
