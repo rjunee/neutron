@@ -866,12 +866,19 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           }
           return
         }
-        // Chat-sync foundation — gap-fill request. Replay everything after
-        // the client's cursor to THIS socket only (the requesting device),
-        // so a reconnect / cold-open fills its gap without re-broadcasting
-        // to other live devices. No-op (replayAfter returns []) when no
-        // durable log is wired. Checked BEFORE the message decoder so the
-        // user_message path keeps its narrow type.
+        // Chat-sync foundation — gap-fill request. Replay a BOUNDED window after
+        // the client's cursor to THIS socket only (the requesting device), so a
+        // reconnect / cold-open fills its gap without re-broadcasting to other
+        // live devices. Bounded means bounded: the adapter answers with at most
+        // `DEFAULT_REPLAY_LIMIT` messages — the NEWEST ones after the cursor —
+        // and nothing here pages for the rest, so a topic longer than the window
+        // arrives with its OLDEST messages missing (see
+        // `AppChatEventLogCore.rowsAfter`, and the "load earlier" gap in
+        // docs/SYSTEM-OVERVIEW.md). Do not read this as "everything after the
+        // cursor"; a previous version of this comment said that and it was the
+        // shape of the bug. No-op (replayAfter returns []) when no durable log is
+        // wired. Checked BEFORE the message decoder so the user_message path keeps
+        // its narrow type.
         const resume = decodeAppWsResume(parsed)
         if (resume !== null) {
           try {
