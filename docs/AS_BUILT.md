@@ -4,7 +4,7 @@ Running log of what shipped, newest first. One entry per merged change.
 
 ## 2026-08-17 — the shards are balanced by measured seconds, discovery stopped walking node_modules, and a build lane stopped running the whole suite on a shared machine
 
-Landed via PR #PRNUM.
+Landed via PR #403.
 
 Three findings with one cause: the suite was being paid for in the wrong places.
 
