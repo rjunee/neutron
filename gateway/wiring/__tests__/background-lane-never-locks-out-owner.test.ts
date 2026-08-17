@@ -17,6 +17,16 @@
  *
  * Each test here is paired with its INTERACTIVE control, so a regression that
  * quietly widened the exemption to every lane fails too.
+ *
+ * TWO EXEMPTIONS LIVE IN THIS FILE, and they are independent. The LANE exemption
+ * (the first three describe blocks) is about who was waiting: a background report
+ * may not touch the strike ledger. The DEAD-REPL exemption (the last block) is
+ * about what the failure IS: a process that exited is not a credential fault on
+ * either lane, so it never reaches the cooldown map at all. The dead-REPL message
+ * that opens this docblock is therefore no longer what the lane tests fire — a
+ * message the substrate classifies for itself cannot distinguish two lanes, and
+ * using it would silently disarm them. They fire a generic inferred failure, and
+ * the incident's own message is asserted directly in the last block.
  */
 
 import { describe, expect, test } from 'bun:test'
