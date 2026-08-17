@@ -285,6 +285,30 @@ The two are not ordered. The real trade is written down instead — the old guar
 was never the mechanism that fixed anything, and the false refusals it caused after a mere
 renumber had no remedy that was not worse.
 
+**Two claims the tests still could not see, now asserted.** The rekey renames the old ledger
+out of the way BEFORE creating the new one so a rekeyed instance's `sqlite_master` text is
+byte-identical to a fresh install's — a claim only a docblock made, while the schema snapshot
+compares nothing but the fresh path. A later create-then-rename refactor would therefore drift
+every rekeyed instance in the fleet with CI green, and `toContain` on one clause could not see
+it; CASE 2b now compares `ddlOf(db, '_migrations')` `.toBe` a fresh install's DDL. And CASE 6
+kills the rekey on its FIRST statement, which proves the provenance `ALTER`s never RAN rather
+than that they roll back — while rolling back is what "its shape, its columns and its rows are
+exactly what they were" actually claims. **CASE 6c** injects a `NOT NULL` violation at the row
+copy, asserts the quoted SQLite error to prove the failure landed AFTER the ALTERs, and only
+then asserts the unchanged DDL text, the still-absent provenance columns and the identical
+rows. The mutation proof was re-run at this head rather than carried over, since a proof is
+bound to the commit it was measured against: deleting the unexplained-row throw reddens CASE 4
+and CASE 4b and leaves every other case green.
+
+**`migrations/AGENTS.md` overstated idempotency and now states the measurement.** It said
+migrations are idempotent, "`CREATE TABLE IF NOT EXISTS` everywhere". Measured on this tree:
+34 of 123 files use bare `ALTER TABLE … ADD COLUMN`, which fails on a second run, and 34 use
+`CREATE TABLE IF NOT EXISTS`. Applied-once comes from the ledger plus the per-migration
+transaction, not from every statement being re-runnable — which also sharpens the collapse's
+own reasoning: the one-name-at-two-ordinals shape reaches a HEALTHY instance precisely because
+that file's body was re-runnable, while a body that could not be re-run failed loudly at that
+boot and never produced the pair.
+
 ## 2026-08-17 — the ordinal-125 mismatch is acknowledged and 0131 converges both schema paths — the repair that gates deploy xGkufirIQQKW1L
 
 This is the third instance of the #575 incident class: a migration from an
@@ -328,6 +352,7 @@ instead. The acknowledgment remains shipped and remains correct (it records the
 incident and skips an `ALTER` that 0131 rebuilds regardless), but it is an
 optimisation rather than the thing standing between the owner and a booting
 instance. Read the entry above for what the runner actually does now.
+
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
 Landed via PR #384.

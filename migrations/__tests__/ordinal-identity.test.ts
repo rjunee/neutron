@@ -63,6 +63,33 @@ function ledger(db: Database): Array<{ version: number; name: string }> {
     .all()
 }
 
+/** A table's stored DDL text, exactly as `sqlite_master` holds it. */
+function ddlOf(db: Database, table: string): string {
+  return (
+    db
+      .query<{ sql: string }, [string]>('SELECT sql FROM sqlite_master WHERE name = ?')
+      .get(table)?.sql ?? '(no such table)'
+  )
+}
+
+/**
+ * The `_migrations` DDL a FRESH install writes — the text a rekeyed instance has to
+ * reproduce exactly.
+ *
+ * Built by the real runner over a one-file tree, because the ledger's shape does not
+ * depend on the migration tree at all: `ledgerDdl` plus the provenance `ALTER`s is the
+ * whole of it, which also makes the reference cheap enough to take inline.
+ */
+function freshLedgerDdl(): string {
+  const dir = mkdtempSync(join(tmp, 'ddl-reference-'))
+  writeFileSync(join(dir, '0001_reference.sql'), 'CREATE TABLE IF NOT EXISTS ref (id TEXT);\n')
+  const fresh = new Database(':memory:')
+  applyMigrations(fresh, dir)
+  const ddl = ddlOf(fresh, '_migrations')
+  fresh.close()
+  return ddl
+}
+
 function columnsOf(db: Database, table: string): string[] {
   return db
     .query<{ name: string }, [string]>('SELECT name FROM pragma_table_info(?)')
@@ -473,6 +500,13 @@ test('CASE 2b — a healthy instance with a PENDING migration is rekeyed, losing
     db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()
       ?.sql,
   ).toContain('name TEXT NOT NULL PRIMARY KEY')
+  // BYTE-IDENTICAL TO A FRESH INSTALL'S, not merely equivalent — which is the claim
+  // `rekeyLedgerOnName` makes for renaming the old table out of the way BEFORE creating
+  // the new one (`ALTER TABLE ... RENAME TO` rewrites `sqlite_master` with the table
+  // name quoted). Asserted rather than argued, because the schema snapshot only ever
+  // sees the FRESH path: a later create-then-rename refactor would drift every rekeyed
+  // instance in the fleet with CI green, and `toContain` on one clause cannot see that.
+  expect(ddlOf(db, '_migrations')).toBe(freshLedgerDdl())
   // Every pre-existing row is still there, unchanged, ordinal included.
   for (const row of before) expect(ledger(db)).toContainEqual(row)
   for (const row of hashesBefore) {
@@ -870,6 +904,80 @@ test('CASE 6b — a real TABLE at the rekey scratch name is REFUSED, never dropp
   expect(
     db.query<{ payload: string }, []>('SELECT payload FROM operator_kept_this').all(),
   ).toEqual([{ payload: 'irreplaceable' }])
+  db.close()
+})
+
+test('CASE 6c — a rekey that fails AFTER the provenance ALTERs also leaves the ledger unchanged', () => {
+  // WHAT CASE 6 CANNOT REACH, in the other direction from 6b. CASE 6 kills the rekey on
+  // its first statement, so it proves the provenance ALTERs never RAN — not that they
+  // roll back. This is the case the function's docblock actually claims: execution
+  // reaches the ALTERs, they succeed, and a LATER statement fails. If SQLite did not
+  // roll DDL back with everything else, the ledger would come out of this carrying
+  // three new columns while the message says its shape and columns are untouched, and
+  // an operator who believed that sentence would not go looking for a half-changed
+  // ledger.
+  const db = new Database(join(tmp, 'rekey-fails-late.db'), { create: true })
+  versionKeyedRunner(db, treeWithoutPendingFile(), {
+    provenance: false,
+    appliedAt: 1_700_000_000,
+  })
+  // DELIBERATE FAULT INJECTION, and the only hand-written ledger row in this file. A
+  // legacy ledger whose `name` is nullable, carrying one NULL name, makes the ROW COPY
+  // fail — the statement after the ALTERs — because the name-keyed table it copies into
+  // declares `name TEXT NOT NULL`. This is not a claim that any instance has such a
+  // row; it is the cheapest way to fail at a chosen point, and WHERE the failure landed
+  // is asserted below rather than assumed.
+  db.exec('ALTER TABLE _migrations RENAME TO _migrations_lax')
+  db.exec(
+    'CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT, applied_at REAL NOT NULL)',
+  )
+  db.exec('INSERT INTO _migrations SELECT version, name, applied_at FROM _migrations_lax')
+  db.exec('DROP TABLE _migrations_lax')
+  db.run('INSERT INTO _migrations (version, name, applied_at) VALUES (9999, NULL, ?)', [
+    1_700_000_000,
+  ])
+
+  const ddlBefore = ddlOf(db, '_migrations')
+  const rowsBefore = db
+    .query<{ version: number; name: string | null }, []>(
+      'SELECT version, name FROM _migrations ORDER BY version',
+    )
+    .all()
+  expect(columnsOf(db, '_migrations')).not.toContain('content_sha256')
+
+  let message = ''
+  try {
+    applyMigrations(db)
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+
+  expect(message).toContain('could not be rekeyed')
+  expect(message).toContain('ledger is unchanged')
+  // WHERE THE FAILURE LANDED, asserted — this is what makes the test able to fail for
+  // the reason under test rather than for CASE 6's reason. A NOT NULL violation on
+  // `_migrations.name` can only come from the row copy, which runs after
+  // `addProvenanceColumns`, so the ALTERs demonstrably executed inside the transaction
+  // that then rolled back.
+  expect(message).toContain('NOT NULL constraint failed: _migrations.name')
+
+  // ...and the claim, verified: same DDL text, no provenance columns, same rows.
+  expect(ddlOf(db, '_migrations')).toBe(ddlBefore)
+  for (const column of ['content_sha256', 'applied_by_commit', 'tree_provenance']) {
+    expect(columnsOf(db, '_migrations')).not.toContain(column)
+  }
+  expect(
+    db
+      .query<{ version: number; name: string | null }, []>(
+        'SELECT version, name FROM _migrations ORDER BY version',
+      )
+      .all(),
+  ).toEqual(rowsBefore)
+  expect(
+    db.query("SELECT 1 FROM sqlite_master WHERE name = '_migrations_version_keyed'").get(),
+  ).toBeNull()
+  // Nothing was applied either.
+  expect(columnsOf(db, 'code_trident_runs')).not.toContain('agent_waked_at')
   db.close()
 })
 
