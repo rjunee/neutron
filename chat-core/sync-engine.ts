@@ -242,11 +242,13 @@ export class SyncEngine {
     // a byte-identical row. Applying it anyway costs an upsert AND an
     // `emitChange()` re-render at both call sites. That was almost free while the
     // resume edit replay was bounded below by the client's cursor (a caught-up
-    // device received no edit frames at all); it is not free now that the replay
-    // has NO lower bound, because every resume re-delivers every settled edit in
-    // the window — and the mobile session re-resumes on every foreground and every
-    // foregrounded push, across every warmed topic. See
-    // `AppWsAdapter.replayEditsAfter` for why the lower bound had to go.
+    // device received no edit frames at all); it is LOAD-BEARING now that the
+    // replay SWEEPS the whole range the device holds, because every resume
+    // re-delivers every settled edit in that range — and the mobile session
+    // re-resumes on every foreground and every foregrounded push, across every
+    // warmed topic. This short-circuit is what makes the sweep cost wire bytes
+    // rather than a store write and a re-render per edited message. See
+    // `AppWsAdapter.replayEditsAfter` for why the sweep is the only complete answer.
     if (existing.edit_rev !== null && existing.edit_rev !== undefined) {
       if (update.rev <= existing.edit_rev) return { applied: false }
     }

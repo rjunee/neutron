@@ -199,11 +199,15 @@ describe('SyncEngine.applyEditUpdate', () => {
   })
 
   it('drops a SETTLED (equal-rev) re-delivery, so a resume does not re-render it', async () => {
-    // The resume edit replay has no lower bound (`AppWsAdapter.replayEditsAfter`) —
-    // that is what makes a delete reach a device that was offline when it happened.
-    // The consequence is that EVERY resume re-delivers every settled edit in the
-    // window, and the mobile session re-resumes on every foreground and every
-    // foregrounded push, across every warmed topic. An equal rev carries no new
+    // The resume edit replay SWEEPS the whole range the device holds
+    // (`AppWsAdapter.replayEditsAfter`) — that is what makes a delete reach a device
+    // that was offline when it happened, and no page-shaped answer can, because the
+    // tombstone it must carry is the oldest row in the ordering. The consequence is
+    // that EVERY resume re-delivers every settled edit in that range, and the mobile
+    // session re-resumes on every foreground and every foregrounded push, across
+    // every warmed topic. So this guard is what makes the sweep cost wire bytes
+    // rather than a store write and a re-render per edited message. An equal rev
+    // carries no new
     // state (rev is monotonic per message), so applying it would buy an upsert and
     // an `emitChange()` re-render per settled edit per resume, and change nothing.
     //
