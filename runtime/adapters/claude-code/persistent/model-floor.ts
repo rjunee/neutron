@@ -147,11 +147,26 @@ export const FRONTIER_RANK = Number.MAX_SAFE_INTEGER
  * generation bump in `runtime/models.ts` cannot silently invert this: rank 0 is
  * whatever `FAST_MODEL`'s family is, rank 1 is whatever `SONNET_MODEL`'s is, and
  * everything else ranks above both.
+ *
+ * THIS DOES NOT USE {@link familyOf}'S POSITION, and the difference is the point.
+ * `familyOf` answers "which tier does this id NAME", positionally, which is what
+ * the alias constants and a human reader want. The FLOOR needs a stronger
+ * question — "can a lower tier be hiding anywhere in this string" — because the
+ * vendor-word list `familyOf` skips is an ENUMERATION, and an enumeration is a
+ * list of the prefixes someone remembered. One unlisted routing segment
+ * (`bedrock/us-east-1/claude-3-5-haiku`) would make `familyOf` return that
+ * segment, rank the id at the frontier and let the fast tier through — the exact
+ * class of miss this round is fixing, one level up. So the rank scans EVERY
+ * token, and a lower-tier family found anywhere wins.
+ *
+ * The cost is a possible false CLAMP on an id that merely contains a tier word,
+ * which spends more money on a better model. The failure this file exists to
+ * stop is the reverse, so the asymmetry is deliberate.
  */
 export function tierRankOf(model: string): number {
-  const family = familyOf(model)
-  if (family === familyOf(FAST_MODEL)) return 0
-  if (family === familyOf(SONNET_MODEL)) return 1
+  const tokens = new Set(model.toLowerCase().split(/[^a-z0-9]+/))
+  if (tokens.has(familyOf(FAST_MODEL))) return 0
+  if (tokens.has(familyOf(SONNET_MODEL))) return 1
   return FRONTIER_RANK
 }
 

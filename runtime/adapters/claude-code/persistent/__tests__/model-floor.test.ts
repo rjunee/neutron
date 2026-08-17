@@ -142,6 +142,23 @@ describe('resolveModelFloor — the decision', () => {
     }
   })
 
+  it('clamps a lower tier behind a prefix NOBODY ENUMERATED', () => {
+    // The vendor-word list is an enumeration, and an enumeration is a list of the
+    // prefixes someone remembered. So the RANK does not depend on it: it scans
+    // every token, and a lower-tier family found anywhere wins. Without that,
+    // one unlisted routing segment reproduces this round's blocker one level up.
+    for (const id of [
+      'bedrock/us-east-1/claude-3-5-haiku-20241022',
+      'my-proxy.internal/v3/claude-haiku-4-5',
+      'gateway:prod:claude-sonnet-4-6',
+    ]) {
+      expect(resolveModelFloor({ requested: id, enabled: true }).clamped, id).toBe(true)
+    }
+    // …and an unrecognised id with an unlisted prefix still ranks at the frontier,
+    // so the scan did not become "clamp anything with a slash in it".
+    expect(resolveModelFloor({ requested: 'my-proxy.internal/v3/claude-opus-6', enabled: true }).clamped).toBe(false)
+  })
+
   it('reads the tier out of BOTH naming orders and every prefix shape', () => {
     // The predicate under the clamps above, asserted directly so a failure says
     // WHICH id shape broke rather than only that a clamp stopped happening.

@@ -113,11 +113,20 @@ for the comparison but not for the output, so a padded id from an unvalidated
 row reached `--model` padded; the returned value is trimmed now (case is left
 alone — it is meaningful to the API).
 
-Six mutations, each with a control proving it landed: reverting the family
-extraction reddens 3; deleting the owner notice reddens 3; deleting the operator
-log line reddens 1; bypassing the floor at the spawn chokepoint reddens 4;
-removing the poisoned seed reddens the replay test; flipping a memory call site
-onto the chat profile reddens 2.
+The vendor-word list the family scan skips is an ENUMERATION, and an enumeration
+is a list of the prefixes someone remembered — so the RANK deliberately does not
+depend on it. `tierRankOf` scans every token of the id and a lower-tier family
+found anywhere wins, which means one unlisted routing segment
+(`bedrock/us-east-1/claude-3-5-haiku-20241022`) cannot reproduce this same
+blocker one level up. `familyOf` keeps its positional answer, which is what the
+alias constants and a human reader want; the divergence is documented at both.
+
+Seven mutations, each with a control proving it landed: reverting the family
+extraction reddens 3; reverting the rank to the positional lookup reddens 1;
+deleting the owner notice reddens 3; deleting the operator log line reddens 1;
+bypassing the floor at the spawn chokepoint reddens 4; removing the poisoned seed
+reddens the replay test; flipping a memory call site onto the chat profile
+reddens 2.
 
 ## 2026-08-16 — a stored record could pull the owner's chat below the best model
 
