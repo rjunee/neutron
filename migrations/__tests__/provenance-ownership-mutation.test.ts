@@ -24,8 +24,15 @@ import { join } from 'node:path'
 
 const MIGRATIONS_DIR = join(import.meta.dir, '..')
 
-/** The two lines under test, quoted exactly so a refactor cannot silently no-op this file. */
-const OWNERSHIP_LINE = "if (existsSync(join(dir, '.git'))) return isRoot ? gitDirAt(dir) : null"
+/**
+ * The two lines under test, quoted exactly so a refactor cannot silently no-op
+ * this file. `findCheckoutRoot` now returns the ROOT rather than the `.git` —
+ * the tracked-file check needs the root as well as the metadata directory — so
+ * the ownership line reads `dir` where it used to read `gitDirAt(dir)`. The
+ * mutation it stands for is unchanged: drop the ownership test and accept any
+ * `.git` the walk lands on.
+ */
+const OWNERSHIP_LINE = "if (existsSync(join(dir, '.git'))) return isRoot ? dir : null"
 const ANCHOR_LINE = 'if (isRoot) return null'
 
 /**
@@ -107,12 +114,16 @@ test('removing either provenance guard turns the wrong-repository scenarios red'
     for (const dir of [control, noOwnership, noAnchor]) {
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, 'ownership.test.ts'), SCENARIO)
+      // Every module `provenance.ts` imports by relative path has to come along,
+      // or the scratch copy fails to resolve and the "mutant went red" signal
+      // becomes a module-resolution error that looks identical to a pass.
+      cpSync(join(MIGRATIONS_DIR, 'git-index.ts'), join(dir, 'git-index.ts'))
     }
     cpSync(join(MIGRATIONS_DIR, 'provenance.ts'), join(control, 'provenance.ts'))
     // Ownership dropped: any `.git` is accepted, whoever it belongs to.
     writeFileSync(
       join(noOwnership, 'provenance.ts'),
-      original.replace(OWNERSHIP_LINE, "if (existsSync(join(dir, '.git'))) return gitDirAt(dir)"),
+      original.replace(OWNERSHIP_LINE, "if (existsSync(join(dir, '.git'))) return dir"),
     )
     // Anchoring dropped: our own root no longer ends the walk, so it keeps
     // climbing into whatever repository encloses us.

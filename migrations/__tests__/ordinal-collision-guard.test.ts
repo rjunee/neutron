@@ -85,7 +85,11 @@ test('duplicate ordinals name both files and apply nothing', () => {
   expect(() => applyMigrations(db, dir)).toThrow(/1.*0001_a\.sql.*0001_b\.sql/)
   expect(tableExists(db, 'a')).toBe(false)
   expect(tableExists(db, 'b')).toBe(false)
-  expect(db.query('SELECT * FROM _migrations').all()).toEqual([])
+  // Nothing at all was written — not even the ledger. `_migrations` is created on
+  // the path that writes a row and on no other, so every refusal in this runner
+  // leaves the database exactly as it found it. (Stronger than the empty-ledger
+  // assertion this replaced, which a created-then-unused table also satisfied.)
+  expect(db.query('SELECT name FROM sqlite_master').all()).toEqual([])
 })
 
 test('the live 0122 incident acknowledgment is pinned', () => {

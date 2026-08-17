@@ -401,7 +401,7 @@ CREATE TABLE _migrations (
        version INTEGER PRIMARY KEY,
        name TEXT NOT NULL,
        applied_at REAL NOT NULL
-     , content_sha256 TEXT, applied_by_commit TEXT)
+     , content_sha256 TEXT, applied_by_commit TEXT, tree_provenance TEXT)
 
 [table] api_keys (tbl=api_keys)
 CREATE TABLE api_keys (
