@@ -34,9 +34,23 @@ class FakeSocket implements SocketLike {
   onerror: ((ev?: unknown) => void) | null = null
   readonly sent: string[] = []
   closed = false
+  /**
+   * Answer the NEXT `resume` from inside `send`, then forget the hook. This is the
+   * earliest a server can possibly reply, and it is how a loopback one behaves; it
+   * exists so a test can put the client's own reaction to a page INSIDE the send that
+   * asked for it, which is where the ordering bugs live. Fires once so a backwards
+   * resume driven by that reaction cannot recurse into it.
+   */
+  answerNextResumeInsideSend: ((frame: Record<string, unknown>) => void) | null = null
   send(data: string): void {
     if (this.closed) throw new Error('closed')
     this.sent.push(data)
+    const hook = this.answerNextResumeInsideSend
+    if (hook === null) return
+    const env = JSON.parse(data) as Record<string, unknown>
+    if (env['type'] !== 'resume') return
+    this.answerNextResumeInsideSend = null
+    hook(env)
   }
   close(): void {
     this.closed = true
@@ -327,9 +341,12 @@ describe('history backfill — a capped replay converges on the whole transcript
     // as "rows remain below it" for THIS device: one already holding the range below
     // the page used to answer the frame by re-downloading it, every open.
     //
-    // MUTATION-PROVED: drop the `if (this.historyComplete) return` guard in
-    // `WebChatSession.requestHistoryBackfill` and the last assertion fails — a
-    // backwards resume goes out for seqs the store is holding.
+    // MUTATION-PROVED: drop the `historyWholeAtResume` term from the `history_gap`
+    // guard in `WebChatSession.handleInbound`, so the guard is the cursor test alone,
+    // and the last assertion fails — a backwards resume goes out for seqs the store is
+    // holding. (Named the real field: an earlier draft of this comment cited a
+    // `historyComplete` guard in `requestHistoryBackfill`, which does not exist and
+    // never did, so the recipe could not be run.)
     const { session, sockets, store } = setup()
     for (const seq of Array.from({ length: PAGE }, (_, i) => i + 1)) {
       await store.upsert({
@@ -420,5 +437,58 @@ describe('history backfill — a capped replay converges on the whole transcript
     await tick()
     await pump(next, total)
     expect(await seqsIn(store)).toEqual(Array.from({ length: total }, (_, i) => i + 1))
+  })
+
+  it('decides the guard on the store as the resume left it, not as the answer finds it', async () => {
+    // THE ORDERING, PINNED. `ws.send(resume)` is the instant the server may begin
+    // answering, and `../ws-client.ts`'s `socket.onmessage` calls the frame handler
+    // WITHOUT awaiting it, so a `history_gap` handler can run inside any `await` that
+    // follows the send. An operand read after the send is therefore read from a store
+    // the page is already landing in, and the guard decides on a mixture of before and
+    // after.
+    //
+    // This socket answers from INSIDE `send`, which is the earliest a server can and
+    // the shape of a loopback one. The device is whole (1..PAGE of a topic of PAGE*2),
+    // so the correct answer is to apply the forward page and buy nothing below it.
+    //
+    // MUTATION-PROVED: move `this.historyWholeAtResume = ...` in
+    // `WebChatSession.resumeAndFlush` back below `this.ws.send(resume)`, which is where
+    // it was, and the final assertion fails — the handler reads the field's `false`
+    // initial value and buys a backwards page for PAGE rows the store already holds.
+    const { session, sockets, store } = setup()
+    const total = PAGE * 2
+    for (const seq of Array.from({ length: PAGE }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+    // Whole down to seq 1 — the precondition the guard keys on, measured.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1)
+
+    session.start()
+    const socket = sockets[0]!
+    socket.answerNextResumeInsideSend = (frame) => {
+      for (const out of answerResume(total, frame)) socket.deliver(out)
+    }
+    socket.open()
+    socket.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+
+    // The answer really did arrive inside the send — otherwise this test is the
+    // ordinary case wearing a costume, and the mutation above would not turn it red.
+    expect(socket.answerNextResumeInsideSend).toBeNull()
+    // The forward page applied...
+    expect(await seqsIn(store)).toEqual(Array.from({ length: total }, (_, i) => i + 1))
+    // ...and nothing was re-bought below it.
+    expect(socket.backwards()).toEqual([])
   })
 })

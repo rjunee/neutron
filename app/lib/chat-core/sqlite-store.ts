@@ -214,15 +214,38 @@ const CONTIGUOUS_FLOOR_SQL = `SELECT m.seq AS floor_seq FROM ${TABLE} m
  * that actually has a hole to find, where the walk is also cheap (it stops at the
  * first run start, which is at most one hole down from the high-water mark).
  *
- * So the cost, stated for both shapes on the 1,130-row topic the owner reported:
- * contiguous → one covering index scan, no probes; holey → that scan plus a walk of
- * the newest run. Neither is per-message — the sessions call this once per forward
- * resume.
+ * THE COST, MEASURED rather than asserted, on a 1,130-row hole-free topic (the size
+ * the owner reported), `bun:sqlite` in memory, per call:
+ *
+ *   pre-filter, `COUNT(DISTINCT seq)` … ~1.9 ms   ← what this runs
+ *   pre-filter, `COUNT(*)`            … ~0.95 ms  ← unsafe, see below
+ *   descending probe walk             … ~4.2 ms   ← what it replaces
+ *
+ * So the shortcut is worth roughly 2x against the walk, not the order of magnitude an
+ * "index-only, no table access" phrasing would suggest: `COUNT(DISTINCT …)` cannot be
+ * answered from an ordered index scan alone, so SQLite adds a temp B-tree to dedupe.
+ * Both legs stay index-only (no table access on either), and the walk leg's plan has no
+ * sort — `ORDER BY seq DESC` is served by reading the index backwards.
+ *
+ * None of it is per-message: the sessions call this once per forward resume. The holey
+ * shape pays the pre-filter plus a walk of the newest run only, which stops at the
+ * first run start — at most one hole below the high-water mark.
  *
  * The three aggregates come from ONE statement rather than three so the answer
  * cannot be assembled from two different snapshots.
+ *
+ * `COUNT(DISTINCT seq)`, NOT `COUNT(*)`, and the difference is the whole safety of the
+ * shortcut. The primary key is `(topic_id, identity)` and the seq index is NOT unique
+ * (see the schema above), so two rows can structurally carry one seq. Under `COUNT(*)`
+ * a single duplicate inflates `held` by exactly the amount a one-row hole deducts, the
+ * equality holds, and the shortcut returns MIN — reporting a holey topic as contiguous
+ * and stranding the hole permanently, which is the exact failure class this read
+ * exists to end. Counting distinct seqs makes the equality mean what it says. The
+ * upsert path reconciles by identity and then `client_msg_id`, so no reachable
+ * duplicate is known today; this keeps the shortcut correct without depending on that
+ * remaining true, and `InMemoryStore` (which is keyed by seq) cannot diverge from it.
  */
-const CONTIGUOUS_PREFILTER_SQL = `SELECT COUNT(*) AS held, MIN(seq) AS min_seq, MAX(seq) AS max_seq
+const CONTIGUOUS_PREFILTER_SQL = `SELECT COUNT(DISTINCT seq) AS held, MIN(seq) AS min_seq, MAX(seq) AS max_seq
    FROM ${TABLE}
   WHERE topic_id = ? AND seq IS NOT NULL AND seq > 0`;
 
@@ -567,13 +590,13 @@ export class SqliteChatStore implements Store {
   }
 }
 
-/** Map a raw SQL row back into the canonical {@link ChatMessage}. */
 /** A SQL aggregate read as a number, 0 for NULL / non-numeric (an empty topic's
  *  `MIN`/`MAX` are NULL, and `COUNT` never is). */
 function numberOrZero(raw: SqlValue | undefined): number {
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
 }
 
+/** Map a raw SQL row back into the canonical {@link ChatMessage}. */
 function rowToMessage(row: SqlRow): ChatMessage {
   return {
     topic_id: String(row['topic_id'] ?? ''),

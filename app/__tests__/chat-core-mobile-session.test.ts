@@ -43,6 +43,28 @@ function bunExecutor(db: Database): SqliteExecutor {
   };
 }
 
+/**
+ * {@link bunExecutor} plus a log of every statement it was asked to run.
+ *
+ * Counting the statements is the only way to tell the one-pass shortcut in
+ * `contiguousFloorSeq` from the probe walk it exists to avoid: BOTH return the same
+ * floor, so a test that reads the return value cannot distinguish them, and a query
+ * plan proves only what ONE statement costs, not how many ran.
+ */
+function countingExecutor(db: Database): { exec: SqliteExecutor; ran: string[] } {
+  const inner = bunExecutor(db);
+  const ran: string[] = [];
+  return {
+    ran,
+    exec: {
+      async execute(sql: string, params: readonly SqlValue[] = []): Promise<{ rows: SqlRow[] }> {
+        ran.push(sql);
+        return inner.execute(sql, params);
+      },
+    },
+  };
+}
+
 /** A controllable fake socket implementing chat-core's SocketLike. */
 class FakeSocket implements SocketLike {
   onopen: ((ev?: unknown) => void) | null = null;
@@ -52,9 +74,24 @@ class FakeSocket implements SocketLike {
   readonly sent: string[] = [];
   closed = false;
 
+  /**
+   * Answer the NEXT `resume` from inside `send`, then forget the hook. This is the
+   * earliest a server can possibly reply, and it is how a loopback one behaves; it
+   * exists so a test can put the client's reaction to a page INSIDE the send that
+   * asked for it, which is where the ordering bugs live. Fires once so a backwards
+   * resume driven by that reaction cannot recurse into it.
+   */
+  answerNextResumeInsideSend: ((frame: Record<string, unknown>) => void) | null = null;
+
   send(data: string): void {
     if (this.closed) throw new Error('socket closed');
     this.sent.push(data);
+    const hook = this.answerNextResumeInsideSend;
+    if (hook === null) return;
+    const env = JSON.parse(data) as Record<string, unknown>;
+    if (env['type'] !== 'resume') return;
+    this.answerNextResumeInsideSend = null;
+    hook(env);
   }
   close(): void {
     this.closed = true;
@@ -960,9 +997,12 @@ describe('MobileChatSession — the backwards history walk', () => {
     // on the real limits, on every foreground, since `catchUp` re-resumes over an
     // already-open socket.
     //
-    // MUTATION-PROVED: drop the `if (this.historyComplete) return` guard in
-    // `requestHistoryBackfill` and the last assertion fails — one backwards resume
-    // goes out asking for seqs this device is holding.
+    // MUTATION-PROVED: drop the `historyWholeAtResume` term from the `history_gap`
+    // guard in `MobileChatSession.handleInbound`, so the guard is the cursor test
+    // alone, and the last assertion fails — one backwards resume goes out asking for
+    // seqs this device is holding. (Named the real field: an earlier draft of this
+    // comment cited a `historyComplete` guard in `requestHistoryBackfill`, which does
+    // not exist and never did, so the recipe could not be run.)
     const store = await freshStore();
     for (const seq of Array.from({ length: 10 }, (_, i) => i + 1)) {
       await store.upsert({
@@ -1108,13 +1148,17 @@ describe('MobileChatSession — the backwards history walk', () => {
     // pre-filter answers it in one pass — `COUNT(*) == MAX - MIN + 1` means nothing
     // between them is missing, and then the floor IS `MIN`.
     //
-    // Pinned on both legs, because a pre-filter that is merely FAST is worthless: the
-    // behavioural assertions in the interior-hole test above are what prove it still
-    // returns the right answer (20 with a hole, 1 without), and the plan below is what
-    // proves it is the cheap read it claims to be.
+    // Pinned on THREE legs, because a pre-filter that is merely FAST is worthless: the
+    // behavioural assertions in the interior-hole test above prove it still returns the
+    // right answer (20 with a hole, 1 without); the STATEMENT COUNT below proves the
+    // walk did not run at all; and the plan proves the one statement that did run is
+    // index-only. The count is the leg that was missing — the shortcut and the walk
+    // return the same floor, so no assertion on the return value can tell them apart,
+    // and a query plan describes one statement rather than how many were issued.
     const db = new Database(':memory:');
     dbs.push(db);
-    const store = await SqliteChatStore.open(bunExecutor(db));
+    const { exec, ran } = countingExecutor(db);
+    const store = await SqliteChatStore.open(exec);
 
     // The equality holds for a contiguous run that does NOT start at 1 either, so the
     // pre-filter must return MIN rather than 1. (Returning 1 would look right on every
@@ -1133,9 +1177,41 @@ describe('MobileChatSession — the backwards history walk', () => {
         status: 'acked',
       });
     }
+    // ONE statement for the whole answer, and it is the pre-filter — the probe walk
+    // never ran. MUTATION-PROVED: change the shortcut's guard at
+    // `sqlite-store.ts` `contiguousFloorSeq` from `held === max - min + 1` to
+    // `held === max - min + 2` so the equality can never hold, and this length becomes
+    // 2 with the walk's SQL as the second entry.
+    ran.length = 0;
     expect(await store.contiguousFloorSeq(TOPIC)).toBe(7);
-    // And an empty topic is 0 without either query needing to find anything.
+    expect(ran.length).toBe(1);
+    expect(ran[0]).toBe(contiguousPrefilterSql());
+
+    // And an empty topic is 0 without the walk being prepared at all.
+    ran.length = 0;
     expect(await store.contiguousFloorSeq('app:nobody')).toBe(0);
+    expect(ran.length).toBe(1);
+
+    // THE CONTROL FOR THAT COUNT: a store with a real hole DOES pay the second
+    // statement, so `1` above is the shortcut being taken and not this test failing to
+    // observe a query. Without this leg, a `contiguousFloorSeq` that never issued the
+    // walk under ANY input would pass the assertions above.
+    await store.upsert({
+      topic_id: TOPIC,
+      client_msg_id: '',
+      message_id: 'p20',
+      seq: 20,
+      role: 'agent',
+      body: 'msg-20',
+      project_id: null,
+      attachments: null,
+      created_at: 20,
+      status: 'acked',
+    });
+    ran.length = 0;
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(20);
+    expect(ran.length).toBe(2);
+    expect(ran[1]).toBe(contiguousFloorSql());
 
     const details = (
       db.prepare(`EXPLAIN QUERY PLAN ${contiguousPrefilterSql()}`).all() as Array<
@@ -1143,8 +1219,17 @@ describe('MobileChatSession — the backwards history walk', () => {
       >
     ).map((r) => String(r['detail']));
     const joined = details.join(' | ');
+    // Index-only, and NO TABLE ACCESS — the property that matters, since the row body
+    // is never needed to answer "is this contiguous".
     expect(joined).toContain('COVERING INDEX idx_chat_messages_topic_seq');
-    expect(joined).not.toContain('TEMP B-TREE');
     expect(joined).not.toContain('SCAN');
+    // The one temp B-tree here is `COUNT(DISTINCT seq)`'s dedupe, which an ordered
+    // index scan cannot supply, and it is the price of the shortcut being SAFE against
+    // a duplicated seq (see CONTIGUOUS_PREFILTER_SQL — under `COUNT(*)` one duplicate
+    // masks a one-row hole as contiguous and strands it forever). Asserted by NAME
+    // rather than waived, so a temp B-tree appearing for a SORT — the regression this
+    // assertion originally existed to catch — still turns it red.
+    expect(joined).toContain('USE TEMP B-TREE FOR count(DISTINCT)');
+    expect(joined.match(/TEMP B-TREE/g)?.length).toBe(1);
   });
 });
