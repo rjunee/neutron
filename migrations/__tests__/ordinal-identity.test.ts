@@ -680,8 +680,14 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
     appliedAt: 1_700_000_000,
   })
   // The failure, and a realistic one: an operator inspected the ledger and left a
-  // view behind on the name the rekey needs for its scratch table. `DROP TABLE IF
-  // EXISTS` refuses a view, so the rekey dies on its first statement.
+  // view behind on the name the rekey needs for its scratch table, so the rename
+  // cannot take that name and the rekey dies on its first statement.
+  //
+  // A VIEW IS THE HARMLESS HALF OF THIS SHAPE, and saying so is the point of the
+  // comment: SQLite will not let a table be renamed onto it, so the collision is
+  // reported rather than resolved, whatever the runner intends. The dangerous half is a
+  // real TABLE at that name, which the runner used to DROP — CASE 6b covers it, because
+  // this test structurally cannot.
   db.exec('CREATE VIEW _migrations_version_keyed AS SELECT version, name FROM _migrations')
 
   const ddlBefore = db
@@ -701,9 +707,10 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
   // What the message claims.
   expect(message).toContain('could not be rekeyed')
   expect(message).toContain('ledger is unchanged')
-  // Positive control on the diagnosis: it quotes what SQLite actually said, so the
-  // operator learns it was the view and not a mystery.
-  expect(message).toContain('DROP VIEW')
+  // Positive control on the diagnosis: it quotes what SQLite actually said, and names
+  // the object, so the operator learns it was the leftover and not a mystery.
+  expect(message).toContain('there is already another table or index with this name')
+  expect(message).toContain('_migrations_version_keyed')
 
   // ...and the claim, verified. Same shape, same columns, same rows.
   expect(
@@ -722,6 +729,61 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
   db.exec('DROP VIEW _migrations_version_keyed')
   expect(applyMigrations(db).applied).toEqual([127, 131])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
+  db.close()
+})
+
+test('CASE 6b — a real TABLE at the rekey scratch name is REFUSED, never dropped', () => {
+  // THE CASE THE VIEW ABOVE CANNOT REACH, and the reason it matters more. The rekey
+  // used to open with `DROP TABLE IF EXISTS _migrations_version_keyed` — a
+  // data-destroying statement guarded by nothing, inside the transaction that goes on
+  // to COMMIT. A view made that line THROW (SQLite refuses to DROP TABLE a view), which
+  // is why every existing test passed while the table case, the only one where data
+  // exists to lose, silently deleted it on a boot whose contract is that it loses no
+  // row.
+  const db = new Database(join(tmp, 'rekey-scratch-occupied.db'), { create: true })
+  versionKeyedRunner(db, treeWithoutPendingFile(), {
+    provenance: false,
+    appliedAt: 1_700_000_000,
+  })
+  // Somebody else's table on that name, with a row in it that exists nowhere else.
+  db.exec('CREATE TABLE _migrations_version_keyed (payload TEXT NOT NULL)')
+  db.run('INSERT INTO _migrations_version_keyed (payload) VALUES (?)', ['irreplaceable'])
+
+  const rowsBefore = ledger(db)
+  let message = ''
+  try {
+    applyMigrations(db)
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+
+  // It refused, and it explained itself in the terms the operator needs: the name is
+  // occupied, this cannot be our own leftover, and it was deliberately not dropped.
+  expect(message).toContain('_migrations_version_keyed')
+  expect(message).toContain('needs that name free')
+  expect(message).toContain('NOTHING HAS BEEN APPLIED')
+  expect(message).toContain('NOT a leftover from an interrupted rekey')
+  expect(message).toContain('deliberately NOT')
+
+  // THE DISCRIMINATING ASSERTION — the table and its row are still there. This is the
+  // one that goes red if the DROP comes back, and nothing else in this file does.
+  expect(
+    db.query<{ payload: string }, []>('SELECT payload FROM _migrations_version_keyed').all(),
+  ).toEqual([{ payload: 'irreplaceable' }])
+  // And the refusal really did precede every write: the ledger is untouched, the
+  // provenance columns never landed, and the pending migration never ran.
+  expect(ledger(db)).toEqual(rowsBefore)
+  expect(columnsOf(db, '_migrations')).not.toContain('content_sha256')
+  expect(columnsOf(db, 'code_trident_runs')).not.toContain('agent_waked_at')
+
+  // The remedy works, and note WHICH remedy: the operator moves their own table out of
+  // the way. The runner never does it for them.
+  db.exec('ALTER TABLE _migrations_version_keyed RENAME TO operator_kept_this')
+  expect(applyMigrations(db).applied).toEqual([127, 131])
+  expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
+  expect(
+    db.query<{ payload: string }, []>('SELECT payload FROM operator_kept_this').all(),
+  ).toEqual([{ payload: 'irreplaceable' }])
   db.close()
 })
 

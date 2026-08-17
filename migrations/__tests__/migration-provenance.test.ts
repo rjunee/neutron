@@ -585,15 +585,16 @@ test('the guard STILL REFUSES an unexplained row — no false negative', () => {
   expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build/)
 
   // WHAT DOES *NOT* HOLD, stated positively so nobody re-adds it as an assertion: an
-  // entry whose `version` is wrong still acknowledges the row. `recorded_name` is the
-  // whole match, because `name` is the ledger's primary key and therefore holds at
-  // most one row — so there is nothing wider for a name to match, and no laundering
-  // available. Requiring the PAIR is what made a shipped acknowledgement go inert on
-  // the boot after a rekey collapsed the row it named (see CASE 8 in
+  // entry whose `version` is wrong still acknowledges the row. The match is on the
+  // NAME — specifically, on the ledger recording that name at an ordinal other than
+  // the one this build assigns it, which is what an orphan like `alpha` is. Requiring
+  // the (version, name) PAIR is what made a shipped acknowledgement go inert on the
+  // boot after a rekey collapsed the row it named (see CASE 8 in
   // ordinal-identity.test.ts): the collapse keeps the earliest-applied row and drops
   // the others, which sit at a different ordinal by definition. The ordinal is kept on
   // the entry as the context it always was — it records the number the row was written
-  // under and is printed in the refusal — and it is not a key.
+  // under and is printed in the refusal — and it is not a key. The sibling test below
+  // pins the other edge, where the name alone would be too wide.
   writeFileSync(
     join(b, 'repairs.json'),
     JSON.stringify([{ version: 9, recorded_name: 'alpha', file_name: '', note: 'other', date: '2026-08-16' }]),
@@ -606,6 +607,44 @@ test('the guard STILL REFUSES an unexplained row — no false negative', () => {
   expect(db.query("SELECT version FROM _migrations WHERE name = 'alpha'").get()).toEqual({
     version: 1,
   })
+})
+
+test('a repair does NOT activate on a ledger this build fully accounts for', () => {
+  // THE OTHER EDGE, and it is the one the NAME ALONE gets wrong. A repair is about a
+  // row this build cannot account for on its own, so an entry whose `recorded_name` is
+  // a migration in THIS build, recorded at the ordinal this build gives it, describes
+  // nothing here and must stay inert.
+  //
+  // MEASURED ON THE SHIPPED DATA, not hypothesised. Entry 125's `recorded_name` is
+  // `code_trident_runs_fix_round_contract`, which is a real file in this tree at 0124.
+  // With a name-only match that entry fired on any instance that had recorded 0124 and
+  // not yet run 0125, suppressing 0125 permanently and leaving its name unrecorded in
+  // the ledger for good — on a database the incident was never about. The schema still
+  // converged, because 0131 rebuilds that table on every path, which is precisely what
+  // would have kept the widening invisible.
+  //
+  // THIS TEST CAN FAIL FOR THE REASON UNDER TEST: widen the match to the name alone and
+  // `gamma` is suppressed, so `t3` is never created.
+  const db = new Database(':memory:')
+  // `beta` is recorded at ordinal 1 — exactly where this build numbers it.
+  expect(applyMigrations(db, tree('accounted-was', { '0001_beta.sql': BETA }))).toEqual({
+    applied: [1],
+    skipped: [],
+  })
+
+  const now = tree('accounted-now', {
+    '0001_beta.sql': BETA,
+    '0002_gamma.sql': GAMMA,
+    'repairs.json': JSON.stringify([
+      { version: 1, recorded_name: 'beta', file_name: 'gamma', note: 'describes nothing here', date: '2026-08-17' },
+    ]),
+  })
+  expect(applyMigrations(db, now)).toEqual({ applied: [2], skipped: [1] })
+  // `gamma` really ran, so the entry suppressed nothing...
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't3'").get()).not.toBeNull()
+  // ...and nothing was acknowledged, so the table an acknowledgement writes to was
+  // never created at all.
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = '_migration_repairs'").get()).toBeNull()
 })
 
 test('an applied_at outside the Date range prints the raw value instead of destroying the message', () => {

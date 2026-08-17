@@ -11,8 +11,19 @@ import {
   resolveDeployedTree,
 } from './provenance.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
+import { createLogger, type LogFields } from '@neutronai/logger'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * The runner's one log sink, for the ADVISORY notices only.
+ *
+ * Every refusal in this file is thrown, not logged, and that stays true: a boot gate
+ * whose diagnosis went to a log the operator may never read would be a gate that
+ * failed quietly. This exists for what must be said WITHOUT stopping the boot — see
+ * `contentDriftFields`, which is the one such case.
+ */
+const log = createLogger('migrations')
 
 export interface Migration {
   version: number
@@ -44,6 +55,24 @@ interface RecordedMigration {
   tree_provenance: string | null
 }
 
+/**
+ * A row that RECORDED ITS CONTENT HASH, and therefore one that can be adjudicated
+ * against this build at all.
+ *
+ * The distinction is load-bearing rather than cosmetic. Only these rows reach the
+ * unexplained-row refusal and the content-drift notice, and both of them print or
+ * compare the hash — so a `string | null` there forces a `?? ''` or a redundant null
+ * test at every use, each of which reads as a mode the code can enter. It cannot: every
+ * such site sits behind `isHashed`. Naming the narrowed shape once is what lets those
+ * branches be deleted rather than commented.
+ */
+type HashedMigration = RecordedMigration & { content_sha256: string }
+
+/** Whether a row recorded its content hash. The narrowing form of `hasProvenance`. */
+function isHashed(row: RecordedMigration): row is HashedMigration {
+  return hasProvenance(row.content_sha256)
+}
+
 export function loadMigrations(dir: string = HERE): Migration[] {
   return readdirSync(dir)
     .filter((f) => /^\d{4}_.+\.sql$/.test(f))
@@ -66,9 +95,32 @@ export function loadMigrations(dir: string = HERE): Migration[] {
 export interface LedgerIdentity {
   /** Every `name` the ledger records. */
   readonly names: ReadonlySet<string>
-  /** Every non-NULL `content_sha256` the ledger records. */
-  readonly hashes: ReadonlySet<string>
+  /**
+   * Every non-NULL `content_sha256`, mapped to the NAMES of the rows carrying it.
+   *
+   * THE OWNERS ARE WHAT MAKE THE HASH SAFE TO WIDEN ON, and a bare set of hashes was
+   * not. See `classifyMigration`: "these bytes are recorded" is only evidence that
+   * THIS file has run if the row recording them is a row no file in this build already
+   * accounts for. Without the owner's name there is no way to ask that question.
+   */
+  readonly hashOwners: ReadonlyMap<string, ReadonlySet<string>>
 }
+
+/**
+ * What the ledger says about one migration file.
+ *
+ * A verdict rather than a boolean because the fourth answer exists and used to be
+ * silently folded into "recorded" — see `classifyMigration`.
+ */
+export type MigrationVerdict =
+  /** No row accounts for this file. It runs. */
+  | 'pending'
+  /** A row records this migration's NAME. The ordinary already-applied answer. */
+  | 'recorded-by-name'
+  /** A row records these exact BYTES under a name this build no longer uses. */
+  | 'recorded-by-content'
+  /** These bytes are recorded, but by a row another file in this build accounts for. */
+  | 'duplicates-an-applied-file'
 
 /**
  * Whether the ledger already records this migration — BY IDENTITY, NOT BY ORDINAL.
@@ -100,12 +152,33 @@ export interface LedgerIdentity {
  * reasons (a comment, a reflow) and turning the hash into a gate converts every
  * one of those into a crash loop. That decision predates this change and stands.
  *
+ * WIDENING ON THE HASH NEEDS THE ROW'S NAME, AND WITHOUT IT THE WIDENING WAS A
+ * SILENT-SKIP BUG. "These bytes are recorded" reads as "this file has already run",
+ * and that inference is only sound when the recording row is one no file in this build
+ * already accounts for — the rename/renumber case the widening exists for. When the
+ * row's name IS a file here, the bytes are recorded because THAT file ran, and this is
+ * a SECOND, differently-named file that happens to be byte-identical. Treating it as
+ * applied meant it never ran, never recorded, and the run reported success with the
+ * file listed under `skipped` — the same silent-missing-schema failure as the ordinal
+ * bug, arrived at through the fix for it. So that case gets its own verdict and the
+ * caller refuses on it. Two files with identical bytes is a mistake in this repository
+ * exactly as two files with one name is, and it is caught in the one place it can do
+ * damage rather than by hashing the whole tree on every boot.
+ *
  * The name is checked FIRST so a steady-state boot hashes nothing at all.
  */
-export function migrationIsRecorded(migration: Migration, ledger: LedgerIdentity): boolean {
-  if (ledger.names.has(migration.name)) return true
-  if (ledger.hashes.size === 0) return false
-  return ledger.hashes.has(migrationContentHash(migration.sql))
+export function classifyMigration(
+  migration: Migration,
+  ledger: LedgerIdentity,
+  /** Every migration NAME this build contains. */
+  treeNames: ReadonlySet<string>,
+): MigrationVerdict {
+  if (ledger.names.has(migration.name)) return 'recorded-by-name'
+  if (ledger.hashOwners.size === 0) return 'pending'
+  const owners = ledger.hashOwners.get(migrationContentHash(migration.sql))
+  if (owners === undefined) return 'pending'
+  for (const owner of owners) if (!treeNames.has(owner)) return 'recorded-by-content'
+  return 'duplicates-an-applied-file'
 }
 
 function loadMigrationRepairs(dir: string): MigrationRepair[] {
@@ -269,16 +342,32 @@ function formatAppliedAt(appliedAt: number): string {
  * evidence is a NULL, leaving the operator nothing to verify and no move except
  * pasting the entry unread — a ritual, not a check. So the guard refuses where it
  * HAS identity evidence and stays silent where it has none, and it strengthens by
- * itself as rows gain provenance. It is still strictly stronger than the guard it
- * replaces, which could not see these rows AT ALL: that one only ever compared a
- * row against the one file sharing its ordinal.
+ * itself as rows gain provenance.
+ *
+ * IT IS NOT STRICTLY STRONGER THAN THE GUARD IT REPLACES, and an earlier version of
+ * this comment claimed it was. The claim was wrong in a way worth recording, because
+ * the wrongness is the whole reason this rewrite exists. The old guard compared the row
+ * at ordinal N against the FILE at ordinal N, so it refused on a HASHLESS orphan
+ * whenever a build file occupied that orphan's number — and that is exactly how 122,
+ * 124 and 125 were noticed at all. This guard cannot see those rows: no hash, no
+ * adjudication. So the two are not ordered. What is traded is deliberate and it runs
+ * in both directions: the old guard caught hashless orphans that happened to collide
+ * with a build file, and paid for it by refusing legitimate boots on every instance
+ * where a merge had merely renumbered a migration — an unfixable refusal, because its
+ * two remedies were "acknowledge the row" (leaving the schema genuinely broken) and
+ * "renumber the file" (breaking every instance where the file HAD applied). This guard
+ * sees every orphan carrying identity evidence regardless of ordinal, and misses the
+ * hashless ones. The reason that is the better trade is that the loud failure it gives
+ * up was never the mechanism that FIXED anything, and the false refusals it removes had
+ * no remedy at all; provenance closes the gap going forward, because every row written
+ * from here on carries a hash.
  *
  * EVERY unexplained row is reported at once, not just the first. An operator
  * recovering from this needs one hand-verification pass and one edit, not one
  * refused boot per row.
  */
 function formatUnexplainedLedgerRows(
-  unexplained: ReadonlyArray<RecordedMigration>,
+  unexplained: ReadonlyArray<HashedMigration>,
   today: string,
 ): string {
   const entries = JSON.stringify(
@@ -299,7 +388,7 @@ function formatUnexplainedLedgerRows(
       `  recorded "${recorded.name}"`,
       `    ordinal ${recorded.version}`,
       `    applied ${formatAppliedAt(recorded.applied_at)}`,
-      `    sha256  ${recorded.content_sha256 ?? ''}`,
+      `    sha256  ${recorded.content_sha256}`,
       `    build   ${recorded.applied_by_commit ?? NO_BUILD_IDENTITY}`,
       // Whether the row's file was ever established as part of the tree that
       // applied it. On the incidents this work is about, that is THE question — the
@@ -325,6 +414,105 @@ function formatUnexplainedLedgerRows(
     '',
     'Never rename or delete a recorded row. It is the incident record.',
   ].join('\n')
+}
+
+/**
+ * The thrown message for a file whose BYTES are already recorded by a row that
+ * ANOTHER file in this build accounts for.
+ *
+ * WHY THIS IS A REFUSAL AND NOT A SKIP. Hash widening answers "has this migration run
+ * under a different name?", and it is sound only against a row no file here explains.
+ * When the row's name is itself a file in this tree, the honest reading of the evidence
+ * is not "this file has run" — it is "two files in this build have identical bytes, and
+ * one of them ran". Calling that applied is how a real migration comes to never run,
+ * never record, and be reported as `skipped` on a boot that exits zero: the ordinal
+ * bug's exact failure mode, re-entered through the mechanism that fixed it.
+ *
+ * IT NAMES BOTH FILES, because the operator cannot act on either one alone. Which of
+ * the two is redundant is a judgement about intent that only they can make, and the
+ * remedies differ completely: a copy-paste leftover gets deleted, while two migrations
+ * that genuinely need the same statements need one of them to differ (a comment naming
+ * what it is for is enough — the hash is over the bytes).
+ *
+ * NOT RESOLVABLE THROUGH `repairs.json`, and it says so. Those entries acknowledge a
+ * LEDGER ROW; here the ledger is fine and the duplication is in the tree.
+ */
+function formatDuplicateContentMigrations(
+  duplicates: ReadonlyArray<{ readonly migration: Migration; readonly recordedName: string }>,
+): string {
+  return [
+    `${duplicates.length} migration file(s) in this build have the same BYTES as a migration that has ` +
+      'already been applied under a different name, and the already-applied one is ALSO a file in this ' +
+      'build. Refusing, because treating these as applied would mean they never run at all.',
+    ...duplicates.flatMap(({ migration, recordedName }) => [
+      '',
+      `  ${migration.fileName}`,
+      `    sha256    ${migrationContentHash(migration.sql)}`,
+      `    identical to the applied migration recorded as "${recordedName}"`,
+    ]),
+    '',
+    'NOTHING HAS BEEN APPLIED and nothing has been written — no migration ran, no _migrations row',
+    'was written, the ledger was neither created nor reshaped, and no repair was acknowledged.',
+    '',
+    'Two files with identical content cannot be told apart by the content hash, so the runner cannot',
+    'know which one a recorded hash refers to. That is the same ambiguity two files sharing a NAME',
+    'create, and it is a mistake in this repository rather than a state of the database.',
+    '',
+    'Resolve by ONE of:',
+    '  - DELETE the redundant file, if it is a copy of a migration that has already merged under',
+    '    another name — the usual cause, and the usual remedy.',
+    '  - MAKE THEM DIFFER, if both are genuinely wanted. The hash is over the bytes, so a header',
+    '    comment naming what each one is for is enough, and is worth having anyway.',
+    '',
+    'Do NOT reach for migrations/repairs.json. Those entries acknowledge a row in the ledger; the',
+    'ledger is not the problem here and an entry would hide a duplicate that is still duplicated.',
+  ].join('\n')
+}
+
+/**
+ * The advisory line for a migration recorded under this name whose recorded bytes are
+ * NOT the bytes now on disk.
+ *
+ * A NOTICE AND DELIBERATELY NOT A GATE. Refusing here is a decision this repository
+ * has already weighed and rejected — README § "`content_sha256` is recorded and
+ * reported, not enforced", pointed at by `docs/INVARIANTS.md`: already-applied files
+ * are edited in place for benign reasons (a comment, a reflow, a typo in a string
+ * literal), none of which change the schema that landed, and a gate turns every one of
+ * those into a crash loop resolvable only through `repairs.json`. That decision stands
+ * and this does not touch it.
+ *
+ * WHAT IT FIXES IS THE SILENCE, WHICH WAS NOT PART OF THAT DECISION. The dangerous
+ * shape is a migration amended during review and renumbered by the merge: an instance
+ * that ran the earlier bytes has the name recorded, so the amended file reads as
+ * applied, its added statements never run, and the boot reports success with a schema
+ * that quietly lacks them. Both hashes are in hand at that moment and nothing was said.
+ * The runner cannot tell that case from a reflow — only the operator can — so it prints
+ * what it knows and lets the boot continue.
+ *
+ * THE ORDINAL IS CALLED OUT AS ITS OWN FIELD WHEN IT ALSO MOVED, because that
+ * combination is the one a benign in-place edit cannot produce: an edit keeps its
+ * filename, so changed bytes AND a changed number means the file that ran is not the
+ * file on disk. `renumbered=true` is therefore the line worth reading, and it is a
+ * field rather than prose so it can be grepped for.
+ *
+ * FIELDS RATHER THAN A PROSE BLOB, unlike the refusals above. Those are thrown, so
+ * they are the last thing an operator sees and can afford to be a page long; this goes
+ * through the logfmt logger, which quotes a value containing whitespace — a multi-line
+ * message would arrive as one escaped string.
+ */
+function contentDriftFields(migration: Migration, recorded: HashedMigration): LogFields {
+  const renumbered = recorded.version !== migration.version
+  return {
+    migration: migration.name,
+    recorded_sha256: recorded.content_sha256,
+    on_disk_sha256: migrationContentHash(migration.sql),
+    renumbered,
+    ...(renumbered ? { recorded_ordinal: recorded.version, on_disk: migration.fileName } : {}),
+    note: renumbered
+      ? 'bytes AND ordinal both moved, which an in-place edit cannot cause: the file that ran is not this file, so check the amended statements by hand'
+      : 'harmless if the edit was a comment or a reflow; if it added schema, those statements did NOT run here',
+    enforced: false,
+  }
 }
 
 /**
@@ -521,15 +709,34 @@ function hasProvenance(value: string | null): boolean {
  * is explained by nothing, and it still fails closed — that guard lives in
  * `applyMigrations` and this function does not touch it.
  *
- * DETERMINISTIC, AND IT LOSES NOTHING RECORDED. The surviving row is the one applied
- * EARLIEST (ties broken by ordinal, then name) because that is when the schema
- * change actually landed on this database, and `applied_at` is the field that claims
- * to say so. Provenance is then filled from any row in the group that carries it:
- * the earliest row is typically the oldest release's, written before provenance
- * shipped and therefore NULL, while the re-record carries a real hash and commit.
- * Keeping the early row's identity and the late row's provenance is strictly more
- * truth than either row alone, and discarding a recorded hash for a NULL would throw
- * away the only forensic evidence the instance has.
+ * DETERMINISTIC. The surviving row is the one applied EARLIEST (ties broken by
+ * ordinal, then name) because that is when the schema change actually landed on this
+ * database, and `applied_at` is the field that claims to say so.
+ *
+ * THE PROVENANCE TRIPLE IS ADOPTED WHOLE, FROM ONE DONOR ROW, AND THAT IS THE POINT
+ * OF THIS FUNCTION'S SECOND HALF. The earliest row is typically the oldest release's,
+ * written before provenance shipped and therefore NULL across all three columns,
+ * while the re-record carries a real hash and commit — so keeping the early row's
+ * identity and adopting a later row's provenance is more truth than either row alone,
+ * and dropping a recorded hash for a NULL would discard the only forensic evidence the
+ * instance has.
+ *
+ * What it must NOT do is fill the three columns INDEPENDENTLY. They are not three
+ * facts, they are one: `content_sha256`, `applied_by_commit` and `tree_provenance` are
+ * written together, inside a single migration's own transaction, and together they say
+ * "these bytes, from this build, verified this way". Filling each from whichever row
+ * happened to have it synthesises a tuple NO ROW EVER HAD — one row's hash beside
+ * another row's commit — which is a fabricated forensic record in the columns that
+ * exist precisely so a later investigation can trust them. A row that has to be
+ * discounted is worse than a NULL, which is the argument
+ * `TRACKED_IN_DEPLOYED_TREE` already makes about overclaiming.
+ *
+ * So the donor is a single row, and `content_sha256` is what identifies one: it is the
+ * only member of the triple the runner writes unconditionally (the other two are
+ * legitimately NULL for a tarball install, or for a build predating tree
+ * verification), so a row carrying it recorded provenance and a row without it
+ * predates provenance entirely. The first such row in the order above wins, and all
+ * three of its values are taken — NULLs included.
  */
 function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[] {
   const ordered = [...rows].sort(
@@ -542,9 +749,13 @@ function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[
       kept.set(row.name, { ...row })
       continue
     }
-    if (!hasProvenance(winner.content_sha256)) winner.content_sha256 = row.content_sha256
-    if (!hasProvenance(winner.applied_by_commit)) winner.applied_by_commit = row.applied_by_commit
-    if (!hasProvenance(winner.tree_provenance)) winner.tree_provenance = row.tree_provenance
+    // The winner already recorded its own provenance, or this row has none to give.
+    // Either way there is nothing to adopt, and mixing is what must not happen.
+    if (hasProvenance(winner.content_sha256)) continue
+    if (!hasProvenance(row.content_sha256)) continue
+    winner.content_sha256 = row.content_sha256
+    winner.applied_by_commit = row.applied_by_commit
+    winner.tree_provenance = row.tree_provenance
   }
   return [...kept.values()]
 }
@@ -577,11 +788,42 @@ function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[
  * second process racing the same upgrade gets SQLITE_BUSY rather than a half-built
  * table — and `nexus-store.ts` already classifies busy as the init race it retries,
  * where the retry finds the ledger rekeyed and does nothing.
+ *
+ * THE SCRATCH NAME IS REFUSED WHEN OCCUPIED, NEVER CLEARED. This used to open with
+ * `DROP TABLE IF EXISTS _migrations_version_keyed`, which is a data-destroying
+ * statement guarded by nothing — and because the drop is inside the transaction that
+ * goes on to COMMIT, a real table there was deleted PERMANENTLY, silently, on a boot
+ * whose whole contract is that it repairs the ledger without losing a row. The reason
+ * that line looked safe is the reason it was not: this function cannot leave one
+ * behind. The rename, the copy and the final drop are one `BEGIN IMMEDIATE`, so a
+ * crash or an error rolls the scratch table away with everything else. There is
+ * therefore no "leftover from an interrupted rekey" for the DROP to clean up — the
+ * state it was written to handle cannot occur. Anything actually sitting at that name
+ * came from somewhere else and is somebody's data, so the honest move is to fail
+ * closed and name it. Refusing costs a boot the operator can fix in one statement;
+ * dropping costs them a table with no warning and no record.
  */
 function rekeyLedgerOnName(db: Database): void {
+  // BEFORE the transaction, so the throw carries no rollback ambiguity: nothing has
+  // been attempted yet, and the message below can state that without qualification.
+  if (tableExists(db, LEDGER_LEGACY_TABLE)) {
+    throw new Error(
+      `The _migrations ledger must be rekeyed from its ordinal onto the migration name, but the ` +
+        `table ${LEDGER_LEGACY_TABLE} already exists and the rekey needs that name free. NOTHING ` +
+        'HAS BEEN APPLIED and nothing has been written — no migration ran, no row was written, the ' +
+        'ledger was neither reshaped nor read into it.\n\n' +
+        'This is NOT a leftover from an interrupted rekey. The whole rekey is one transaction, so a ' +
+        'failed or killed one rolls that table away with everything else; it can never be left ' +
+        'behind. So the table holds data this runner did not put there, and it is deliberately NOT ' +
+        'dropped — an earlier version of this code dropped it unconditionally, which silently and ' +
+        'permanently destroyed whatever was in it.\n\n' +
+        `Resolve by hand, after looking at it (\`SELECT * FROM ${LEDGER_LEGACY_TABLE} LIMIT 5\`): ` +
+        'rename it to something outside this runner\'s namespace if the contents matter, or drop it ' +
+        'yourself once you have established they do not. Then boot again.',
+    )
+  }
   db.exec('BEGIN IMMEDIATE')
   try {
-    db.exec(`DROP TABLE IF EXISTS ${LEDGER_LEGACY_TABLE}`)
     db.exec(`ALTER TABLE _migrations RENAME TO ${LEDGER_LEGACY_TABLE}`)
     db.exec(ledgerDdl('_migrations'))
     addProvenanceColumns(db, '_migrations')
@@ -624,13 +866,25 @@ function rekeyLedgerOnName(db: Database): void {
   }
 }
 
-/** Whether `_migrations` exists yet. A fresh database has no ledger at all. */
-function ledgerExists(db: Database): boolean {
+/**
+ * Whether a TABLE by this name exists. Deliberately `type = 'table'` and not a
+ * bare name lookup: `sqlite_master` also holds views, indexes and triggers, and
+ * the two callers are asking different questions that both need the narrow one —
+ * "is there a ledger to read" and "is the rekey's scratch name free".
+ */
+function tableExists(db: Database, table: string): boolean {
   return (
     db
-      .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_migrations'")
-      .get() !== null
+      .query<{ ok: number }, [string]>(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get(table) !== null
   )
+}
+
+/** Whether `_migrations` exists yet. A fresh database has no ledger at all. */
+function ledgerExists(db: Database): boolean {
+  return tableExists(db, '_migrations')
 }
 
 /**
@@ -680,18 +934,36 @@ function selectLedgerRows(db: Database, table: string): RecordedMigration[] {
 interface Ledger extends LedgerIdentity {
   readonly rows: ReadonlyArray<RecordedMigration>
   readonly byVersion: ReadonlyMap<number, RecordedMigration>
+  /**
+   * The row recording each NAME. Unlike `byVersion` this is a real index, because
+   * the name IS the identity and (once rekeyed) the primary key — at most one row can
+   * answer to it. A pre-rekey ledger can hold the same name twice, and first-write-wins
+   * over the select order is fine for the one thing that reads this: the
+   * content-drift notice, which is advisory and whose two rows would carry the same
+   * name and therefore the same question.
+   */
+  readonly byName: ReadonlyMap<string, RecordedMigration>
 }
 
 function buildLedger(rows: RecordedMigration[]): Ledger {
   const byVersion = new Map<number, RecordedMigration>()
   for (const row of rows) if (!byVersion.has(row.version)) byVersion.set(row.version, row)
+  const byName = new Map<string, RecordedMigration>()
+  for (const row of rows) if (!byName.has(row.name)) byName.set(row.name, row)
+  const hashOwners = new Map<string, Set<string>>()
+  for (const row of rows) {
+    if (!hasProvenance(row.content_sha256)) continue
+    const hash = row.content_sha256 as string
+    const owners = hashOwners.get(hash)
+    if (owners === undefined) hashOwners.set(hash, new Set([row.name]))
+    else owners.add(row.name)
+  }
   return {
     rows,
     names: new Set(rows.map((r) => r.name)),
-    hashes: new Set(
-      rows.map((r) => r.content_sha256).filter((h): h is string => h !== null && h.length > 0),
-    ),
+    hashOwners,
     byVersion,
+    byName,
   }
 }
 
@@ -823,6 +1095,16 @@ function hasOrdinalCollision(migrations: Migration[]): boolean {
   return false
 }
 
+/** Whether two files in this tree claim one migration NAME. Same shape, same reason. */
+function hasNameCollision(migrations: Migration[]): boolean {
+  const seen = new Set<string>()
+  for (const migration of migrations) {
+    if (seen.has(migration.name)) return true
+    seen.add(migration.name)
+  }
+  return false
+}
+
 /**
  * Refuse two files claiming one migration NAME.
  *
@@ -831,18 +1113,56 @@ function hasOrdinalCollision(migrations: Migration[]): boolean {
  * read as already-applied forever, and its statements never run. That is the same
  * silent-missing-schema failure the ordinal used to cause, one level over.
  *
- * Unconditional, unlike the ordinal check — it needs no tree verdict, because an
- * untracked stray sharing a slug with a tracked file is refused by the untracked
- * guard anyway, and a duplicate slug is a mistake in this repository either way.
+ * IT TAKES THE TREE VERDICT ONLY TO IMPROVE THE MESSAGE, never to stand aside, and
+ * that asymmetry with the ordinal check is the whole of what this parameter is for. The
+ * ordinal check DEFERS to the untracked refusal, and it can: a stray sharing an ordinal
+ * leaves the tracked file pending, so the refusal loop reaches it and speaks. A stray
+ * sharing a NAME cannot be deferred, because the shared name is exactly what makes the
+ * tracked file read as already-applied — so nothing is pending, the loop reaches
+ * nobody, and standing aside would mean booting on a tree with two files the ledger
+ * cannot tell apart.
+ *
+ * This used to be documented as deferring anyway. The docblock claimed "an untracked
+ * stray sharing a slug with a tracked file is refused by the untracked guard anyway",
+ * and it was aspirational: this check ran BEFORE the tree was ever resolved, so the
+ * path it described was unreachable, and what the operator actually got was the bare
+ * two-filenames line below — no mention that one of the files is not tracked, and no
+ * hint that deleting it is the remedy. So the refusal stays unconditional and gains the
+ * half it was missing: when the tree can identify a side as untracked, it says which
+ * one and what to do about it.
  */
-function assertUniqueMigrationNames(migrations: Migration[]): void {
+function assertUniqueMigrationNames(
+  migrations: Migration[],
+  verified: { readonly tracked: ReadonlySet<string> } | null,
+): void {
   const byName = new Map<string, Migration>()
   for (const migration of migrations) {
     const previous = byName.get(migration.name)
     if (previous) {
+      const strays = [previous, migration].filter(
+        (m) => verified !== null && !verified.tracked.has(m.fileName),
+      )
       throw new Error(
-        `Migration name collision on "${migration.name}": ${previous.fileName} and ${migration.fileName}. ` +
-          'The migration name is the ledger identity and must be unique across the tree.',
+        [
+          `Migration name collision on "${migration.name}": ${previous.fileName} and ${migration.fileName}. ` +
+            'The migration name is the ledger identity and must be unique across the tree.',
+          ...(strays.length === 0
+            ? []
+            : [
+                '',
+                `NOT TRACKED by git's index for this checkout: ${strays.map((m) => m.fileName).join(', ')}`,
+                strays.length === 1
+                  ? '  So this is almost certainly a stray rather than a duplicate you committed — a scratch'
+                  : '  So these are almost certainly strays rather than duplicates you committed — scratch',
+                '  copy, editor artifact, leftover from another branch, or something written into this',
+                '  directory by another process. DELETING it clears this outright. If it is a real',
+                '  migration, give it a name of its own and `git add` it — the name is the ledger identity,',
+                '  so two files may never share one whatever their ordinals are.',
+                '',
+                '  Do NOT reach for migrations/repairs.json: those entries acknowledge a row in the ledger,',
+                '  and nothing has been recorded here.',
+              ]),
+        ].join('\n'),
       )
     }
     byName.set(migration.name, migration)
@@ -896,7 +1216,6 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   db.exec('PRAGMA foreign_keys = ON')
   const ledger = readLedger(db)
   const migrations = loadMigrations(dir)
-  assertUniqueMigrationNames(migrations)
   /**
    * The repairs that SPEAK on this database, and nothing else.
    *
@@ -978,17 +1297,34 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // inspect it work.
   //
   // PENDING IS DECIDED BY IDENTITY, NOT BY ORDINAL — the change this whole file
-  // turns on. See `migrationIsRecorded`.
+  // turns on. See `classifyMigration`.
+  //
+  // Every migration NAME this build contains. `classifyMigration` needs it to tell the
+  // rename/renumber case (widen: these bytes ran under a name this build no longer
+  // uses) from two files in this tree sharing bytes (refuse: one of them would never
+  // run). It is also what the unexplained-row guard selects against further down, so it
+  // is derived once here rather than twice.
+  const treeNames = new Set(migrations.map((m) => m.name))
+  const verdicts = new Map(
+    migrations.map((m) => [m.name, classifyMigration(m, ledger, treeNames)] as const),
+  )
   const pendingMigrations = migrations.filter(
-    (m) => !repairedNames.has(m.name) && !migrationIsRecorded(m, ledger),
+    (m) => !repairedNames.has(m.name) && verdicts.get(m.name) === 'pending',
   )
   const pendingNames = new Set(pendingMigrations.map((m) => m.name))
   const pending = pendingMigrations.length > 0
   // A COLLISION NEEDS CLASSIFYING WHETHER OR NOT THERE IS WORK TO DO, so it is its
   // own trigger for the tree read below. This costs a healthy install nothing: the
-  // check is a pure pass over the already-loaded `migrations` array and a clean tree
-  // answers false, so a steady-state boot still does no filesystem work at all.
-  const collision = hasOrdinalCollision(migrations)
+  // checks are pure passes over the already-loaded `migrations` array and a clean tree
+  // answers false to both, so a steady-state boot still does no filesystem work at all.
+  //
+  // A NAME COLLISION IS A TRIGGER TOO, and for a sharper reason than the ordinal one:
+  // the refusal it leads to cannot be reached any other way. Two files sharing a slug
+  // make each other read as already-applied, so nothing is pending, so the untracked
+  // loop below never runs — and `assertUniqueMigrationNames` would have had no verdict
+  // with which to tell the operator that one of the two files is a stray. That is the
+  // gap its docblock used to paper over.
+  const collision = hasOrdinalCollision(migrations) || hasNameCollision(migrations)
   // `dir` is the search origin: for the instance tree that walks up to the
   // checkout's `.git`, and for a sidecar tree (`migrations/comments`) it finds the
   // same one. Each read happens ONCE per run.
@@ -1021,6 +1357,9 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // property of the tree rather than of the schedule, and it is why migrations being
   // idempotent by contract (`AGENTS.md`) survives contact with this guard.
   assertUniqueMigrationOrdinals(migrations, verified)
+  // AFTER the tree verdict for the same reason, and with the same effect on the
+  // message rather than on the outcome — see the function. It refuses either way.
+  assertUniqueMigrationNames(migrations, verified)
   /**
    * The tree verdict WHEN IT REFUSES this file, else null.
    *
@@ -1053,25 +1392,58 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
       )
     }
   }
+  // TWO FILES IN THIS TREE WITH ONE SET OF BYTES, one of them already applied. Refused
+  // rather than skipped, because skipping is how the second one never runs at all —
+  // see `classifyMigration` and `formatDuplicateContentMigrations`. A hand-verified
+  // repair naming the file still speaks for it, so an acknowledged duplicate stays
+  // acknowledged.
+  const duplicates = migrations
+    .filter(
+      (m) => !repairedNames.has(m.name) && verdicts.get(m.name) === 'duplicates-an-applied-file',
+    )
+    .map((migration) => ({
+      migration,
+      recordedName:
+        [...(ledger.hashOwners.get(migrationContentHash(migration.sql)) ?? [])].find((owner) =>
+          treeNames.has(owner),
+        ) ?? '',
+    }))
+  if (duplicates.length > 0) throw new Error(formatDuplicateContentMigrations(duplicates))
   // THE REMAINING FAIL-CLOSED GUARD, restated against identity: a recorded
   // migration that NO file in this build corresponds to. Hashes are computed lazily
   // and only for the rows that survive the name check, so a healthy boot hashes
   // nothing. See `formatUnexplainedLedgerRows` for why only rows carrying a
   // `content_sha256` are adjudicated, and why that is narrower rather than weaker.
-  const fileNames = new Set(migrations.map((m) => m.name))
+  //
+  // THE HASH IS NON-NULL BY CONSTRUCTION FROM HERE ON, and the type says so rather than
+  // a `?? ''` further downstream implying a NULL could arrive. `hasProvenance` is the
+  // same test `buildLedger` applies when it decides which rows own a hash, so the two
+  // cannot drift apart. Two branches for an unreachable NULL used to survive past this
+  // filter — the same "documentation of a mode the code cannot enter" the
+  // `PREDATES_PROVENANCE` constant was deleted for.
   const candidateRows = ledger.rows.filter(
-    (row) =>
-      row.content_sha256 !== null &&
-      row.content_sha256.length > 0 &&
-      !fileNames.has(row.name) &&
+    (row): row is HashedMigration =>
+      hasProvenance(row.content_sha256) &&
+      !treeNames.has(row.name) &&
       !acknowledgedNames.has(row.name),
   )
   if (candidateRows.length > 0) {
     const fileHashes = new Set(migrations.map((m) => migrationContentHash(m.sql)))
-    const unexplained = candidateRows.filter(
-      (row) => row.content_sha256 === null || !fileHashes.has(row.content_sha256),
-    )
+    const unexplained = candidateRows.filter((row) => !fileHashes.has(row.content_sha256))
     if (unexplained.length > 0) throw new Error(formatUnexplainedLedgerRows(unexplained, today))
+  }
+  // CONTENT DRIFT IS REPORTED, NEVER ENFORCED — the last thing before the writes, and
+  // deliberately not a refusal. See `formatContentDrift`: gating on a hash mismatch is
+  // a decision this repository has weighed and declined, and this closes the SILENCE
+  // that decision left rather than reopening the decision. Only names the ledger
+  // actually records are compared, and only rows carrying a hash can be, so a fresh
+  // install and a pre-provenance ledger both say nothing.
+  for (const migration of migrations) {
+    if (verdicts.get(migration.name) !== 'recorded-by-name') continue
+    const recorded = ledger.byName.get(migration.name)
+    if (recorded === undefined || !isHashed(recorded)) continue
+    if (recorded.content_sha256 === migrationContentHash(migration.sql)) continue
+    log.warn('migration_content_drift', contentDriftFields(migration, recorded))
   }
 
   // ---- Past this line, and not before it, the database is written to. ----

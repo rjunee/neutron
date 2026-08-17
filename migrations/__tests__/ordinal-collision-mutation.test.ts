@@ -102,7 +102,7 @@ test('a recorded migration this build cannot explain throws', () => {
  */
 test('breaking identity reconciliation re-applies a renumbered migration', async () => {
   const original = readFileSync(join(MIGRATIONS_DIR, 'runner.ts'), 'utf8')
-  const NAME_CHECK = 'if (ledger.names.has(migration.name)) return true'
+  const NAME_CHECK = "if (ledger.names.has(migration.name)) return 'recorded-by-name'"
   expect(original).toContain(NAME_CHECK)
   const root = join(MIGRATIONS_DIR, `.identity-mutant-${process.pid}-${Date.now()}`)
   const control = join(root, 'control')
@@ -132,7 +132,10 @@ test('a migration that merged at another ordinal is not re-applied', () => {
       writeFileSync(join(dir, 'collision.test.ts'), scenario)
     }
     writeFileSync(join(control, 'runner.ts'), original)
-    writeFileSync(join(mutant, 'runner.ts'), original.replace(NAME_CHECK, 'if (false) return true'))
+    writeFileSync(
+      join(mutant, 'runner.ts'),
+      original.replace(NAME_CHECK, "if (false) return 'recorded-by-name'"),
+    )
     const green = await runTest(control)
     expect(green.exitCode, green.output).toBe(0)
     const red = await runTest(mutant)
