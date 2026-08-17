@@ -965,3 +965,42 @@ test("this repository's own migration files are all tracked", () => {
   // Listed, not counted: a failure has to name the file to be actionable.
   expect(willApply.filter((f) => !tree.tracked.has(f))).toEqual([])
 })
+
+/**
+ * A TOLERATED STRAY MUST NOT BE ABLE TO HIDE A COLLISION BETWEEN TWO REAL FILES.
+ *
+ * The stray is deliberately spared once it has been recorded — refusing forever over a
+ * file applied long ago would be an outage with no remedy. But sparing it during the
+ * ordinal walk let it OCCUPY the slot for its ordinal, and then every tracked file
+ * sharing that ordinal compared against the stray and was spared too. Two tracked
+ * files could therefore both apply with no collision refusal at all — the guard
+ * silently absent exactly where it is the only thing standing between the operator and
+ * a schema whose contents depend on filename sort order.
+ */
+test('a recorded untracked stray does not hide a collision between two tracked files', () => {
+  const db = new Database(':memory:')
+
+  // The stray was tracked once, so it applied and is recorded. It is spared from here on.
+  const before = checkout('stray-was-tracked', {
+    files: { '0001_aaa_stray.sql': 'CREATE TABLE t_stray (id INTEGER);' },
+    tracked: ['0001_aaa_stray.sql'],
+  })
+  applyMigrations(db, before)
+  expect(db.query("SELECT 1 FROM _migrations WHERE name = 'aaa_stray'").get()).not.toBeNull()
+
+  // The release tree no longer tracks it, and two REAL migrations now claim ordinal 1.
+  // `aaa_stray` sorts first, so before the fix it held the slot and excused them both.
+  const release = checkout('two-tracked-on-one-ordinal', {
+    files: {
+      '0001_aaa_stray.sql': 'CREATE TABLE t_stray (id INTEGER);',
+      '0001_bbb.sql': 'CREATE TABLE t_bbb (id INTEGER);',
+      '0001_ccc.sql': 'CREATE TABLE t_ccc (id INTEGER);',
+    },
+    tracked: ['0001_bbb.sql', '0001_ccc.sql'],
+  })
+
+  expect(() => applyMigrations(db, release)).toThrow(/ordinal collision at version 1/)
+  // And neither of them applied, because the refusal precedes the work.
+  expect(tableExists(db, 't_bbb')).toBe(false)
+  expect(tableExists(db, 't_ccc')).toBe(false)
+})

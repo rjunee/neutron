@@ -3,7 +3,8 @@ import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations, applyProjectScopedMigrations } from '../runner.ts'
+import { applyMigrations, applyProjectScopedMigrations, classifyMigration } from '../runner.ts'
+import { migrationContentHash } from '../provenance.ts'
 
 let tmp: string
 
@@ -351,4 +352,42 @@ test('a repair naming a tree file stays inert on a row it was not written about'
   expect(
     db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='_migration_repairs'").get(),
   ).toBeNull()
+})
+
+/**
+ * AMBIGUOUS HASH OWNERSHIP TAKES THE REFUSAL, NOT THE SKIP.
+ *
+ * `recorded-by-content` says "these exact bytes already ran, under another name, and
+ * that migration is gone from the tree — so this file is that migration renamed."
+ * That reading only holds when EVERY owner of the hash is gone. With one owner still
+ * present the evidence is ambiguous, and the old loop returned on the FIRST ABSENT
+ * owner, so a genuinely new same-byte migration was reported as already recorded and
+ * skipped with no error at all.
+ *
+ * Tested directly because the state is not reachable through `applyMigrations`: the
+ * runner refuses a second same-bytes migration outright, so no ledger it writes can
+ * carry two owners for one hash. A ledger written by an older release can. This is
+ * the guard for that database, and the test is the only way to exercise it.
+ */
+test('a hash with one owner still in the tree is ambiguous, not already-recorded', () => {
+  const sql = 'CREATE TABLE tx (id INTEGER);'
+  const hash = migrationContentHash(sql)
+  const migration = { version: 3, name: 'gamma', fileName: '0003_gamma.sql', sql }
+
+  // Two names own these bytes. `alpha` is still shipped; `beta` is gone.
+  const ledger = {
+    names: new Set(['alpha', 'beta']),
+    hashOwners: new Map([[hash, new Set(['alpha', 'beta'])]]),
+  }
+  const treeNames = new Set(['alpha', 'gamma'])
+
+  expect(classifyMigration(migration as never, ledger as never, treeNames)).toBe(
+    'duplicates-an-applied-file',
+  )
+
+  // CONTROL, so this cannot pass by refusing everything: with EVERY owner gone the
+  // rename reading is sound and the same call must still say recorded-by-content.
+  expect(classifyMigration(migration as never, ledger as never, new Set(['gamma']))).toBe(
+    'recorded-by-content',
+  )
 })
