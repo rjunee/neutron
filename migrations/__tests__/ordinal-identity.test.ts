@@ -30,6 +30,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -89,6 +90,7 @@ function branchTree(): string {
     '0125_code_trident_runs_base_sha.sql',
     '0127_code_trident_runs_agent_waked_at.sql',
     '0130_work_board_items_archived_status.sql',
+    REPAIR_FILE,
   ]) {
     rmSync(join(dir, file))
   }
@@ -132,8 +134,16 @@ function asPreviousReleaseWroteIt(db: Database, options: { provenance: boolean }
 }
 
 /**
- * A copy of the real tree with `0127` removed (so it is left PENDING for the runner
- * under test) and the given files renumbered.
+ * A copy of the real tree standing in for an EARLIER RELEASE: `0127` removed (so it
+ * is left PENDING for the runner under test), and the given files renumbered.
+ *
+ * `REPAIR_FILE` comes out too, and not for convenience. It is `0131`, the repair
+ * migration that REBUILDS `code_trident_runs`, and its `INSERT ... SELECT` names
+ * `agent_waked_at` — the column `0127` adds. A tree that holds `0127` back and keeps
+ * `0131` is not a release that ever existed; it is a tree that cannot apply, and it
+ * fails with `no such column: agent_waked_at` from inside the fixture rather than
+ * from the code under test. Holding back the tail of a dependent chain means holding
+ * back the whole tail.
  */
 function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
   const dir = mkdtempSync(join(tmp, 'release-'))
@@ -142,6 +152,7 @@ function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
     cpSync(join(REAL_TREE, file), join(dir, file))
   }
   rmSync(join(dir, PENDING_FILE))
+  rmSync(join(dir, REPAIR_FILE))
   for (const [from, to] of renames) renameSync(join(dir, from), join(dir, to))
   return dir
 }
@@ -150,10 +161,26 @@ function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
 const PENDING_FILE = '0127_code_trident_runs_agent_waked_at.sql'
 const PENDING_NAME = 'code_trident_runs_agent_waked_at'
 
-/** The name whose duplicate the collapse has to resolve, and its two ordinals. */
+/**
+ * The ordinal-125 repair migration (#391), which rebuilds `code_trident_runs` so
+ * `base_sha`/`base_behind` exist whether or not `0125` was applied. Every fixture
+ * here is a tree from BEFORE it existed, so every fixture drops it — and the runner
+ * under test then applies it, which is exactly the interaction worth pinning.
+ */
+const REPAIR_FILE = '0131_code_trident_runs_base_sha_repair.sql'
+const REPAIR_NAME = 'code_trident_runs_base_sha_repair'
+
+/**
+ * The name whose duplicate the collapse has to resolve, and its two ordinals.
+ *
+ * The branch ordinal is deliberately ABOVE every ordinal the real tree uses, so this
+ * fixture cannot collide with a real file — it collided with `0131` the moment the
+ * repair migration landed, which turned a name-collapse test into an ordinal-collision
+ * failure that said nothing about the collapse.
+ */
 const RENUMBERED_NAME = 'work_board_items_archived_status'
 const RENUMBERED_FILE = '0130_work_board_items_archived_status.sql'
-const BRANCH_ORDINAL = 131
+const BRANCH_ORDINAL = 141
 const MERGED_ORDINAL = 130
 
 /**
@@ -234,7 +261,7 @@ function versionKeyedRunner(
  */
 function instanceWithOneNameAtTwoOrdinals(): Database {
   const db = new Database(join(tmp, 'renumbered.db'), { create: true })
-  versionKeyedRunner(db, treeWithoutPendingFile([[RENUMBERED_FILE, `0131_${RENUMBERED_NAME}.sql`]]), {
+  versionKeyedRunner(db, treeWithoutPendingFile([[RENUMBERED_FILE, `0${BRANCH_ORDINAL}_${RENUMBERED_NAME}.sql`]]), {
     provenance: false,
     appliedAt: 1_700_000_000,
   })
@@ -255,13 +282,11 @@ function liveInstanceBefore(options: { provenance: boolean }): Database {
 
 // ------------------------------------------------------- 1. the live instance
 
-test('CASE 1 — an ordinal spent by another migration still applies, and fixes the schema', () => {
+test('CASE 1 — an ordinal spent by another migration still boots, and the schema converges', () => {
   const db = liveInstanceBefore({ provenance: false })
 
   // THE PRECONDITION, MEASURED RATHER THAN ASSUMED. Ordinal 125 is recorded under
-  // another name, and the two columns 0125 adds are absent — which is why no
-  // repairs.json entry could ever have fixed this: a repair reconciles names, and
-  // no amount of name reconciliation creates a column.
+  // another name, and the two columns 0125 adds are absent.
   expect(ledger(db).find((r) => r.version === 125)?.name).toBe(
     'code_trident_runs_fix_round_contract',
   )
@@ -272,11 +297,18 @@ test('CASE 1 — an ordinal spent by another migration still applies, and fixes 
 
   const result = applyMigrations(db)
 
-  // The migration numbered 0125 in this tree ran, at last.
-  expect(result.applied).toContain(125)
+  // THE COLUMNS EXIST, WHICH IS THE ONLY THING THE OWNER CARES ABOUT — and note WHICH
+  // migration puts them there now. The shipped `repairs.json` acknowledges ordinal 125
+  // and names `code_trident_runs_base_sha` as already-applied, so identity
+  // reconciliation honours that and SKIPS 0125; `0131`, the repair migration, rebuilds
+  // the table and converges the schema on every path. Both fixes are on `main` and
+  // this is the assertion that they compose rather than fight.
   const after = columnsOf(db, 'code_trident_runs')
   expect(after).toContain('base_sha')
   expect(after).toContain('base_behind')
+  expect(result.skipped).toContain(125)
+  expect(result.applied).not.toContain(125)
+  expect(result.applied).toContain(131)
   // Everything else that the instance had never seen ran too, in one pass.
   expect(result.applied).toContain(127)
   expect(result.applied).toContain(130)
@@ -287,21 +319,62 @@ test('CASE 1 — an ordinal spent by another migration still applies, and fixes 
   expect(result.skipped).toContain(124)
   expect(result.skipped).toContain(126)
 
-  // Ordinal 125 now legitimately carries TWO rows: the migration the branch put
-  // there, and the one this tree numbers 0125. That is the truth about a fleet where
-  // two different migrations were both written as 0125, and it is only expressible
-  // because the ledger is keyed on the name.
-  const at125 = ledger(db)
-    .filter((r) => r.version === 125)
-    .map((r) => r.name)
-  expect(at125).toEqual(['code_trident_runs_base_sha', 'code_trident_runs_fix_round_contract'])
   // No row was renamed, renumbered or removed. The branch migration's row survives
-  // as the incident record.
+  // as the incident record, at the ordinal it was written under.
   expect(ledger(db).find((r) => r.name === 'dispatch_dependencies_and_claims')?.version).toBe(124)
+  expect(ledger(db).find((r) => r.version === 125)?.name).toBe(
+    'code_trident_runs_fix_round_contract',
+  )
 
   // Idempotent: a second boot is a no-op, which is what makes the deploy safe to
   // repeat and proves the applied migrations were actually recorded.
   expect(applyMigrations(db).applied).toEqual([])
+  db.close()
+})
+
+test('CASE 1c — WITHOUT the shipped 125 acknowledgment the boot still succeeds', () => {
+  // THE POINT OF THIS WHOLE CHANGE, stated as a test. Before it, an ordinal recorded
+  // under another name refused the boot, and the ONLY way out was a hand-written
+  // `repairs.json` entry — one per incident, each needing an operator to verify the
+  // live schema by hand at the moment the instance is down. Reconciling by identity
+  // removes the refusal: the migration is simply not recorded, so it applies.
+  //
+  // The acknowledgment therefore stops being a PRECONDITION for booting and becomes an
+  // optimisation — it skips an `ALTER` whose columns `0131` would rebuild anyway. That
+  // is the difference between the two fixes on `main`, and it is worth a test rather
+  // than a paragraph.
+  const db = liveInstanceBefore({ provenance: false })
+  const tree = join(tmp, 'no-125-entry')
+  mkdirSync(tree, { recursive: true })
+  for (const file of readdirSync(REAL_TREE)) {
+    if (!/^\d{4}_.+\.sql$/.test(file)) continue
+    cpSync(join(REAL_TREE, file), join(tree, file))
+  }
+  const withoutThe125Entry = (
+    JSON.parse(readFileSync(join(REAL_TREE, 'repairs.json'), 'utf8')) as Array<{ version: number }>
+  ).filter((repair) => repair.version !== 125)
+  // Control on the fixture: the entry really was there to remove.
+  expect(withoutThe125Entry).toHaveLength(
+    (JSON.parse(readFileSync(join(REAL_TREE, 'repairs.json'), 'utf8')) as unknown[]).length - 1,
+  )
+  writeFileSync(join(tree, 'repairs.json'), JSON.stringify(withoutThe125Entry, null, 2))
+
+  const result = applyMigrations(db, tree)
+
+  // It applied 0125 itself this time, and the schema is the same either way.
+  expect(result.applied).toContain(125)
+  expect(columnsOf(db, 'code_trident_runs')).toContain('base_sha')
+  expect(columnsOf(db, 'code_trident_runs')).toContain('base_behind')
+  // Ordinal 125 now carries TWO rows: what the branch put there, and what this tree
+  // numbers 0125. That is the truth about a fleet where two different migrations were
+  // both written as 0125, and it is only expressible because the key is the name.
+  expect(
+    ledger(db)
+      .filter((r) => r.version === 125)
+      .map((r) => r.name)
+      .sort(),
+  ).toEqual(['code_trident_runs_base_sha', 'code_trident_runs_fix_round_contract'])
+  expect(applyMigrations(db, tree).applied).toEqual([])
   db.close()
 })
 
@@ -321,8 +394,13 @@ test('CASE 1b — the same instance with provenance recorded boots on the shippe
   ).toBe(1)
 
   const result = applyMigrations(db)
-  expect(result.applied).toContain(125)
+  // Same convergence as CASE 1, and by the same route: the shipped `repairs.json`
+  // entry marks ordinal 125's migration already-applied, so it is SKIPPED, and `0131`
+  // rebuilds the table so the columns exist either way.
+  expect(result.skipped).toContain(125)
+  expect(result.applied).toContain(131)
   expect(columnsOf(db, 'code_trident_runs')).toContain('base_sha')
+  expect(columnsOf(db, 'code_trident_runs')).toContain('base_behind')
   // The acknowledgement was audited rather than applied silently.
   expect(
     db
@@ -537,7 +615,8 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
   const result = applyMigrations(db)
 
   // IT BOOTED, and the pending migration actually ran.
-  expect(result.applied).toEqual([127])
+  // Both migrations this fixture's release predates — `0127` and the `0131` repair.
+  expect(result.applied).toEqual([127, 131])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   expect(
     db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()
@@ -573,7 +652,7 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
 
   // No other row was collapsed, dropped or duplicated by the pass.
   const namesAfter = ledger(db).map((r) => r.name)
-  expect(new Set(namesAfter)).toEqual(new Set([...namesBefore, PENDING_NAME]))
+  expect(new Set(namesAfter)).toEqual(new Set([...namesBefore, PENDING_NAME, REPAIR_NAME]))
   expect(namesAfter).toHaveLength(new Set(namesAfter).size)
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name LIKE '_migrations_%'").get()).toBeNull()
 
@@ -640,7 +719,7 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
 
   // And the remedy the message points at actually works: drop the view, boot.
   db.exec('DROP VIEW _migrations_version_keyed')
-  expect(applyMigrations(db).applied).toEqual([127])
+  expect(applyMigrations(db).applied).toEqual([127, 131])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   db.close()
 })

@@ -210,7 +210,33 @@ the unexplained-row throw turns CASE 4 and CASE 4b red and leaves the new cases 
 (the fail-closed guard was not weakened to make the collapse work); making the collapse a
 pass-through turns CASE 5 red with the original `UNIQUE constraint failed` error; and
 restoring the pre-fix ALTER ordering turns CASE 6 red on the still-absent-columns
-assertion alone.
+assertion alone. All three were re-run after main was integrated, against the new
+baseline, rather than carried over from the pre-integration run.
+
+**Integrating #391 (the ordinal-125 repair migration, `0131`) changed what two tests may
+assert, and both changes are semantic rather than cosmetic.** The fixtures here stand in
+for releases that predate `0131`, so they drop it and the runner under test applies it —
+which means `0131` rebuilding `code_trident_runs` is now what converges
+`base_sha`/`base_behind`, and the shipped `repairs.json` entry SKIPS `0125` rather than
+applying it. CASE 1 and CASE 1b assert that convergence instead of asserting that `0125`
+ran; a new CASE 1c pins the case with the 125 acknowledgment REMOVED, because that is the
+one that shows the acknowledgment has stopped being a precondition for booting. The
+duplicate-name fixture's branch ordinal also moved off `0131` (it now sits above every
+ordinal the real tree uses) — it collided with the real repair file the moment that
+migration landed, which turned a name-collapse test into an ordinal-collision failure that
+said nothing about the collapse.
+
+**#391's own negative test now asserts the opposite of what it did, deliberately.**
+`live-ledger-125-repair.test.ts` required that removing the ordinal-125 entry made the boot
+REFUSE — the acknowledgment was a PRECONDITION, and a missing one was an outage whose only
+remedy was an operator verifying a live schema by hand while the instance was down. That
+refusal compared the ledger's recorded name at ordinal 125 against whatever file sits at
+125 in this build, and that comparison is exactly what this change removes. With no entry
+the migration is simply not recorded, so it applies and the boot succeeds. The entry is not
+now pointless — it remains the incident record, `_migration_repairs` still audits it, and it
+still skips an `ALTER` that `0131` would rebuild anyway — but it is an optimisation, not the
+thing standing between the owner and a booting instance. The fail-closed half is untouched
+and CASE 4 still pins it.
 
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
