@@ -1433,7 +1433,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     if (unexplained.length > 0) throw new Error(formatUnexplainedLedgerRows(unexplained, today))
   }
   // CONTENT DRIFT IS REPORTED, NEVER ENFORCED — the last thing before the writes, and
-  // deliberately not a refusal. See `formatContentDrift`: gating on a hash mismatch is
+  // deliberately not a refusal. See `contentDriftFields`: gating on a hash mismatch is
   // a decision this repository has weighed and declined, and this closes the SILENCE
   // that decision left rather than reopening the decision. Only names the ledger
   // actually records are compared, and only rows carrying a hash can be, so a fresh
