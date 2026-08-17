@@ -980,12 +980,17 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             // that DID exist was larger and elsewhere: a device holding 1..500 of 1000
             // resumed at 500, got the 501..1000 page with `older_than: 501`, and asked
             // for the page below 501 — 500 rows it already held — on every mobile
-            // foreground. The sessions now answer a gap from their own store
-            // (`SyncEngine.backfillFrom` over `Store.contiguousFloorSeq`) rather than
-            // from the seq the server happened to name, so a device whose transcript is
-            // already whole below the gap asks for nothing. A page that is not full
-            // still says nothing either way, so a short transcript's wire trace is
-            // unchanged.
+            // foreground.
+            //
+            // The sessions now GATE that request; they do not re-derive its bound. When
+            // they do walk they still pass THIS `older_than` verbatim
+            // (`requestHistoryBackfill(historyGap)` in both sessions) — the store read
+            // (`SyncEngine.backfillFrom` over `Store.contiguousFloorSeq`, cached at
+            // resume time) only decides WHETHER the frame is worth answering, paired with
+            // the resume cursor. So a device whose transcript is already whole below the
+            // gap asks for nothing, and a device that is not asks for exactly the range
+            // this frame names. A page that is not full still says nothing either way,
+            // so a short transcript's wire trace is unchanged.
             if (page.older_than !== null) {
               const gap: AppWsOutbound = {
                 v: 1,

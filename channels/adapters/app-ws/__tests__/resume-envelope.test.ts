@@ -42,14 +42,24 @@ describe('decodeAppWsResume — resume control frame', () => {
       })
     })
 
-    it('clamps a negative / fractional bound the same way the cursor is clamped', () => {
-      // An unclamped bound reaches SQL as the upper end of a range query.
-      expect(
-        decodeAppWsResume({ v: 1, type: 'resume', after_seq: 0, before_seq: -9 })?.before_seq,
-      ).toBe(0)
+    it('truncates a fractional bound, and DROPS a negative one', () => {
+      // An untruncated bound reaches SQL as the upper end of a range query.
       expect(
         decodeAppWsResume({ v: 1, type: 'resume', after_seq: 0, before_seq: 12.7 })?.before_seq,
       ).toBe(12)
+
+      // A negative bound is dropped, NOT clamped to 0, which is the posture the
+      // malformed-bound case below states. The bound reaches SQL as `AND seq < ?`, so a
+      // clamp to 0 turns garbage into a well-formed request for an EMPTY page — the
+      // client asked to walk backwards, received nothing, and cannot tell that from
+      // "there is nothing below". Dropping it leaves the frame as the plain forward
+      // resume it otherwise is, exactly as a non-numeric bound already behaved.
+      //
+      // MUTATION-PROVED: restore `Math.max(0, Math.trunc(raw_before))` and both
+      // assertions here fail — the key is present and 0.
+      const negative = decodeAppWsResume({ v: 1, type: 'resume', after_seq: 5, before_seq: -9 })
+      expect(negative).toEqual({ v: 1, type: 'resume', after_seq: 5 })
+      expect('before_seq' in (negative ?? {})).toBe(false)
     })
 
     it('DROPS a malformed bound instead of rejecting the frame', () => {

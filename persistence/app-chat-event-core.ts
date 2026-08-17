@@ -112,14 +112,34 @@ export function rowReplaySql(table: string, columns: string, bounded = false): s
  *
  * SO THE COST IS STATED INSTEAD OF BOUNDED. Rows returned = rows in `table` for this
  * topic at or below `max_seq` — for the edits table, one per message the owner has
- * ever edited or deleted inside the range the device holds. It is an index range scan
- * on `(topic_id, seq)` with no sort and no table access beyond the covered columns, so
- * the per-row cost is small; the count is proportional to real edits, not to the
- * transcript. On the longest topic the owner has reported (1,130 rows) a handful of
- * deletes is a handful of rows. A topic with thousands of edited messages pays
- * thousands of rows per forward resume — and that is the honest trade, because the
- * only way to send fewer is to send an incomplete answer, and an incomplete answer
- * here is content the owner deleted staying readable.
+ * ever edited or deleted inside the range the device holds.
+ *
+ * It is an index range scan on `(topic_id, seq)` with NO SORT, PLUS ONE TABLE ROW FETCH
+ * PER MATCHED ROW. Not a covering scan, and an earlier version of this paragraph
+ * claimed it was: `idx_app_chat_edits_topic_seq` indexes `(topic_id, seq)` only
+ * (`migrations/0087_app_chat_edits.sql`) while the sweep selects `message_id`, `rev`,
+ * `body`, `deleted` and `edited_at`, so SQLite must visit the table for every row.
+ * Measured, with a control that can tell the two apart: the real projection plans as
+ * `SEARCH … USING INDEX`, and the same query narrowed to `seq` alone plans as `USING
+ * COVERING INDEX`. Making it covering would mean indexing the body, which is the
+ * largest column in the table, to save a lookup on a query whose row count is already
+ * proportional to real edits — so the fetch stays and the claim is corrected instead.
+ *
+ * The count is proportional to real edits, not to the transcript. On the longest topic
+ * the owner has reported (1,130 rows) a handful of deletes is a handful of rows. A topic
+ * with thousands of edited messages pays thousands of rows per forward resume — and that
+ * is the honest trade, because the only way to send fewer is to send an incomplete
+ * answer, and an incomplete answer here is content the owner deleted staying readable.
+ *
+ * AND `max_seq` COMES FROM THE CLIENT, so the worst case is not merely eventual — it is
+ * reachable on demand. A resume frame carries its own `after_seq`
+ * (`channels/adapters/app-ws/envelope.ts`), so any socket can ask for a sweep of the
+ * WHOLE topic by naming a cursor above the high-water mark, and pay the full edit count
+ * rather than the count below what it actually holds. That is bounded — by this topic's
+ * own edit rows, never by the transcript — and the socket is authenticated to a single
+ * owner's own topic, so the party who can drive the maximum is the party whose data it
+ * is. Worth knowing rather than worth gating: a limit here is the starvation budget the
+ * paragraphs above exist to reject.
  *
  * ASCENDING here rather than DESC-then-reverse: with no `LIMIT` there is no page to
  * reverse, and the index already yields this order, so the plan has no sort either

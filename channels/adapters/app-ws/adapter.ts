@@ -1120,11 +1120,18 @@ export class AppWsAdapter implements ChannelAdapter {
    * terminates because the bound strictly descends and the last page comes back
    * short.
    *
-   * A FULL PAGE IS A HEURISTIC, deliberately. It does not prove older rows exist —
-   * a topic holding exactly one page reports the same thing as one holding a page
-   * and a half — and the cost of being wrong is one empty round trip at the exact
-   * boundary. The alternative is an existence query on every resume, which costs
-   * more, every time, to save that one.
+   * A FULL PAGE IS A HEURISTIC, deliberately. It does not prove older rows exist — a
+   * topic holding exactly one page reports the same thing as one holding a page and a
+   * half. The alternative is an existence query on every resume, which costs more, every
+   * time, to save that.
+   *
+   * AND BEING WRONG AT THE BOUNDARY COSTS NOTHING, which is not what this used to say:
+   * it costed the false positive as "one empty round trip". There is no round trip. A
+   * topic of exactly one page reports `older_than: 1`, and both sessions drop a bound of
+   * 1 or less (`requestHistoryBackfill` returns early), so the client never asks. The
+   * cost that DID exist was elsewhere and larger — a device re-buying a page it already
+   * held on every foreground — and it is the client-side gate, not this heuristic, that
+   * removed it (`gateway/http/app-ws-surface.ts` at the emit site has the full account).
    *
    * STILL NOT DRAINED. Nothing here pages on the server's own initiative (the shape
    * {@link replayReceiptsAfter} and {@link replayReactionsAfter} use): that would

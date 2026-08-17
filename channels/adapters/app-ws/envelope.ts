@@ -128,13 +128,22 @@ export function decodeAppWsResume(raw: unknown): AppWsInboundResume | null {
   const raw_after = e['after_seq']
   if (typeof raw_after !== 'number' || !Number.isFinite(raw_after)) return null
   const out: AppWsInboundResume = { v: 1, type: 'resume', after_seq: Math.max(0, Math.trunc(raw_after)) }
-  // The BACKWARDS bound (see `AppWsInboundResume.before_seq`). Clamped the same
-  // way as the cursor so a malformed value can't drive a negative/fractional
-  // query; a non-number is simply DROPPED rather than rejecting the frame, so an
-  // older client's plain forward resume keeps working byte for byte.
+  // The BACKWARDS bound (see `AppWsInboundResume.before_seq`). Truncated to an
+  // integer so it can't drive a fractional range query, and a non-number is DROPPED
+  // rather than rejecting the frame, so an older client's plain forward resume keeps
+  // working byte for byte.
+  //
+  // A NEGATIVE BOUND IS DROPPED TOO, NOT CLAMPED TO 0, and the difference is the
+  // posture being consistent. The bound reaches SQL as `AND seq < ?`, so clamping -1
+  // to 0 turns garbage into a well-formed request for an empty page — the client asked
+  // to walk backwards, got nothing, and has no way to tell that from "there is nothing
+  // below". Dropping it means the frame is treated as the plain forward resume it
+  // otherwise is, which is exactly what a non-numeric bound already did. One kind of
+  // malformed value should not cost more than another.
   const raw_before = e['before_seq']
   if (typeof raw_before === 'number' && Number.isFinite(raw_before)) {
-    out.before_seq = Math.max(0, Math.trunc(raw_before))
+    const bound = Math.trunc(raw_before)
+    if (bound >= 0) out.before_seq = bound
   }
   return out
 }

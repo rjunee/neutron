@@ -2201,9 +2201,16 @@ nothing, so that path is unchanged.
 
 The sweep is UNBOUNDED IN COUNT deliberately, and that is the trade: any limit is a
 starvation budget for the oldest row, and the oldest row is the one that must survive.
-The cost is stated instead — one index range scan on `(topic_id, seq)`, no sort, no
-table access beyond the covered columns, returning one row per message the owner has
-ever edited or deleted inside the range the device holds. That is proportional to real
+The cost is stated instead — one index range scan on `(topic_id, seq)`, no sort, plus
+one table row fetch per matched row, returning one row per message the owner has
+ever edited or deleted inside the range the device holds. NOT a covering scan, which an
+earlier version of this paragraph claimed: the index carries `(topic_id, seq)` only while
+the sweep selects the message id, revision, body, delete flag and timestamp, so the table
+is visited for every row. Measured with a control that can separate the two — the real
+projection plans as `USING INDEX`, the same query narrowed to `seq` plans as `USING
+COVERING INDEX`. `max_seq` also comes from the client, so the worst case is reachable on
+demand rather than merely eventual; it stays bounded by this topic's own edit rows, and
+the socket is the owner's. That is proportional to real
 edits and not to the transcript: a handful of deletes on the longest topic reported
 (1,130 rows) is a handful of rows. A topic with thousands of edited messages pays
 thousands of rows per forward resume, which is the honest cost of the only answer that
@@ -2275,6 +2282,35 @@ actually left behind" when it is sent on every FULL page — there the COMMENT w
 wrong, not the code, because a full page is a deliberate heuristic whose alternative
 is an existence query on every resume.
 
+Review then found two more docstrings describing modes the code never enters, both in
+this PR's own additions. The surface claimed the sessions "answer a gap from their own
+store rather than from the seq the server happened to name" — they do not; both pass the
+server's `older_than` through verbatim, and the resume-time store read only GATES whether
+to ask at all. And the adapter still costed a boundary false positive as "one empty round
+trip", which the surface had already disproved one file away: at exactly one page
+`older_than` is 1, both sessions drop a bound of 1 or less, so the client never asks and
+the cost is zero.
+
+**A negative `before_seq` is now DROPPED rather than clamped to 0.** The bound reaches SQL
+as `AND seq < ?`, so clamping garbage to 0 produced a well-formed request for an empty
+page: the client asked to walk backwards, received nothing, and could not distinguish that
+from "there is nothing below". A non-numeric bound was already dropped, leaving the frame
+as the plain forward resume it otherwise is; one kind of malformed value should not cost
+more than another.
+
+**Three absence assertions in the new end-to-end suite slept 60–80ms after bursts of up
+to 501 frames**, which measures the machine's load rather than the server — the same
+construct this branch had already removed once. A sentinel round-trip barrier was built
+first and it does not work: a deliberately 200ms-late gap frame sailed through two proven
+silent ping/pong trips, because the surface does not serialise per-socket handlers, so a
+pong overtakes a resume still suspended in a replay query. That was measured, not assumed,
+and it is the reason the barrier was abandoned. What works is COUNTING, which does not
+care when frames arrive: the backwards-resume test issues a second resume that must gap,
+waits for that gap, and asserts the trace holds exactly one. Where no gap exists to count
+against, the silence is asserted against the page itself — a total synchronous fact about
+the same call the emit site branches on. The 200ms-late mutation reds the counting test,
+and inverting the fullness condition reds all three.
+
 The cost that comment then named was ALSO wrong, in the direction that flatters the
 code, and correcting it turned up a real waste. It costed the false positive as "one
 empty round trip", which cannot happen: a topic of exactly one page reports
@@ -2289,26 +2325,61 @@ transcript was contiguous at resume time, AND the page starts where the held run
 there sees an arbitrary prefix of the page it is reacting to, and it fails in the
 direction that DECLINES a walk the device needs.
 
+**That "before any response could arrive" was not true when it was first written, and
+review caught it.** The operands were captured AFTER `ws.send(resume)`, with awaits in
+between — a queue drain on mobile, the contiguity read on both — so the very race the
+paragraph above rules out was open, and the comments in both sessions asserted the
+opposite invariant. It loses in both directions: a stale `false` re-buys the page the
+guard exists to avoid buying, and after a store clear a stale high cursor with a stale
+`true` SUPPRESSES a real gap, leaving the fresh transcript's prefix missing until the next
+open. The capture now sits above the send in both sessions; only the backwards REQUEST
+stays behind the queue drain, since the decision to make it was already taken. Pinned on
+both surfaces by a socket that answers from inside `send` — the earliest a server can —
+and mutation-proved by moving the capture back down.
+
 The cursor term is not decoration, and the first draft of this fix did not have it. A
 device that WAS whole can be holed by the very page it is reacting to: holding an old
 prefix of a topic that has since grown by more than one page, its forward resume returns
 the NEWEST page, which does not join on. "Was I whole?" alone answers yes — it was, before
 the page — and would have deferred the walk to the next open. Both terms are
-mutation-proved separately, on both sessions. The truncation threshold itself is now
+mutation-proved separately, on both sessions — which was ALSO claimed before it was
+earned: the cursor term had an adversarial fixture on the web session only, and the
+mobile test's mutation recipe named a `historyComplete` guard that has never existed in
+either session, so it could not be run. The mobile session now has its own adversarial
+fixture over the real on-device SQLite store, and both recipes name the real field. The
+truncation threshold itself is now
 pinned on BOTH sides (exactly one page
 claims a gap, one row fewer is silent), and the test that used to be named "when the
 transcript fits in one page" says "when the page is not full", which is the actual
 trigger.
 
 The hole-free store — the common case, and the expensive one for a per-row predecessor
-probe — now short-circuits on one index-only `COUNT/MIN/MAX` pass, since `COUNT(*)`
-equals `MAX - MIN + 1` exactly when nothing between them is missing and the floor is then
-`MIN`. The probe walk runs only when the counts disagree, where it is also cheap. Both
-legs pinned: the behavioural fixtures prove it still answers 20 with a hole and 1 without
-(and `MIN` rather than 1 for a contiguous run that starts at 7), the plan proves it is
-index-only. The plan guard also now states what it is: a measurement on `bun:sqlite`,
-which is not the engine the device runs, kept because it discriminates rather than because
-it is a device number.
+probe — now short-circuits on one `COUNT/MIN/MAX` pass, since the held count equals
+`MAX - MIN + 1` exactly when nothing between them is missing and the floor is then `MIN`.
+The probe walk runs only when the counts disagree, where it is also cheap.
+
+`COUNT(DISTINCT seq)`, not `COUNT(*)`, and review is why. The primary key is
+`(topic_id, identity)` and the seq index is not unique, so two rows can structurally carry
+one seq; under `COUNT(*)` a single duplicate inflates the count by exactly what a one-row
+hole deducts, the equality holds, the shortcut returns `MIN`, and a holey topic reports as
+contiguous — stranding the hole permanently, which is the failure class this whole read
+exists to end. No reachable duplicate path is known (the upsert reconciles by identity then
+`client_msg_id`), so it was latent rather than live; the distinct count makes the equality
+mean what it says without depending on that staying true.
+
+The cost is now measured rather than asserted, because `COUNT(DISTINCT …)` cannot come out
+of an ordered index scan and SQLite adds a temp B-tree to dedupe. On a 1,130-row hole-free
+topic under `bun:sqlite`: 1.9ms for the distinct pre-filter, 0.95ms for the unsafe star
+one, 4.2ms for the probe walk it replaces. So the shortcut is worth about 2x, not the
+order of magnitude an "index-only" phrasing implied. Three legs pinned rather than two:
+the behavioural fixtures prove it still answers 20 with a hole and 1 without (and `MIN`
+rather than 1 for a contiguous run that starts at 7); a wrapping executor COUNTS the
+statements, which is the only way to tell the shortcut from the walk since both return the
+same floor, with a holey store as the control proving the second statement is observable;
+and the plan proves the one statement that runs touches no table and sorts nothing, with
+its single temp B-tree asserted BY NAME so a sort regression still reds. The plan guard
+also states what it is: a measurement on `bun:sqlite`, which is not the engine the device
+runs, kept because it discriminates rather than because it is a device number.
 
 And a guard that compared two constants
 (`DEFAULT_EDIT_REPLAY_LIMIT >= DEFAULT_REPLAY_LIMIT`) is replaced by an adversarial
