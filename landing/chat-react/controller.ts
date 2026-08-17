@@ -1342,10 +1342,10 @@ export class NeutronChatController {
     // data PLUS the publish that renders it.
     //
     // ⚠️ THIS MARK IS STAMPED AFTER AN `await`, SO IT CHARGES THE READ FOR THE
-    // MAIN THREAD IT WAITED ON. Measured (2026-08-17): the read itself is 0.1 ms
-    // median / 1.0 ms max over a 12-topic × 533-message OPFS store — `list()`
-    // never touches OPFS (`chat-core/stores/opfs-store.ts:113-115` delegates to
-    // the in-memory index). A subscriber with an INJECTED 250 ms synchronous body
+    // MAIN THREAD IT WAITED ON. The read cannot be the cost for a structural
+    // reason you can check rather than a benchmark you must trust: `list()` never
+    // touches OPFS (`chat-core/stores/opfs-store.ts:113-115` delegates to the
+    // in-memory index). A subscriber with an INJECTED 250 ms synchronous body
     // (a control, not a measurement of the real thread) lands inside this window
     // through React's discrete-event path and outside it on a plain listener, so
     // the window demonstrably contains the render. Read the gap between this and
