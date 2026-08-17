@@ -10,6 +10,7 @@ import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim
 import {
   buildTridentOrchestrator,
   isTridentHarvestTerminal,
+  remoteAlreadyAtPublishHead,
   resolveClaimedCommit,
   resolveResumeLiveHead,
   RESUME_HEAD_RETRY_DELAYS_MS,
@@ -63,6 +64,7 @@ const ghPrDiffTo = (joined: string, body: string): HostCommandResult => {
 
 interface Harness {
   loop: TridentTickLoop
+  step: import('./orchestrator.ts').TridentStep
   /** Flush queued workflow completions (write their `inner_result` to the DB). */
   complete: () => Promise<void>
   hostCalls: string[][]
@@ -134,7 +136,7 @@ function buildHarness(opts: {
     step: orch.step,
     ...(opts.on_terminal !== undefined ? { on_terminal: opts.on_terminal } : {}),
   })
-  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
+  return { loop, step: orch.step, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
 }
 
 /** Tick, then simulate the in-flight workflow finishing (write its result), so a
@@ -164,8 +166,8 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
-    // The remote must be BEHIND the local head, or the zero-ahead gate ("nothing was built")
-    // correctly refuses to publish a branch that is already fully pushed.
+    // The remote is BEHIND the local head, so this exercises the real lease push; a remote
+    // already AT the head is the no-op-success path, tested below.
     const stale = '9'.repeat(40)
     let fires = 0
     let prLists = 0
@@ -1872,20 +1874,46 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     }
   })
 
-  test('zero commits ahead of the remote still fails — "nothing was built" is a real outcome', async () => {
-    // Reading the head from git must not convert a build that committed nothing into a
-    // publish of the remote back onto itself.
-    const { h } = publishFixture({ publishHead: null }, true)
+  test('a branch already fully on origin publishes as a NO-OP success — the work was simply already published', async () => {
+    // 3 occurrences 2026-08-17 (runs 26ed32c1 / 88efe1ca / 95fcfb91): the remote already at
+    // the built sha used to be refused as "the build left no new commits to publish", failing
+    // a finished build and inviting a relaunch that rebuilds pushed work. The publisher now
+    // resolves to that commit and continues; the genuine nothing-built outcome is the
+    // EMPTY-DIFF refusal, tested above.
+    const { h, head } = publishFixture({ publishHead: null }, true)
     const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
     const calls = h.hostCalls.map((c) => c.join(' '))
 
-    expect(final.phase).toBe('failed')
-    expect(final.failure_reason).toContain('no new commits')
-    expect(final.failure_reason).toContain('feat-x')
-    expect(final.failure_reason).not.toContain('Argus')
-    expect(calls.some((c) => c.includes(' push '))).toBe(false)
-    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
-    expect(h.inputs).toHaveLength(1)
+    expect(final.phase).toBe('done')
+    expect(final.failure_reason).toBeNull()
+    // The publisher RESOLVED to the already-published commit and re-fired review on it:
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+    // …without performing the push it did not have to perform:
+    expect(calls.some((c) => c.includes('--force-with-lease'))).toBe(false)
+  })
+
+  test('the no-op publish is visible in the record — the note says the push was a no-op because the ref was already correct', async () => {
+    const { h, head } = publishFixture({ publishHead: null }, true)
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce() // fire the inner workflow
+    await h.complete()     // it writes the publish-requested terminal result
+    const outcome = await h.step(store.get(run.id)!) // harvest → the publish transition
+    expect(outcome.note).toContain('push no-op')
+    expect(outcome.note).toContain('the ref was already correct')
+    expect(outcome.note).toContain(head)
+  })
+
+  describe('remoteAlreadyAtPublishHead — the push-necessity predicate', () => {
+    const H = 'abcdef0123456789abcdef0123456789abcdef01'
+    test('remote already exactly at the head to publish → no-op', () => {
+      expect(remoteAlreadyAtPublishHead(H, H)).toBe(true)
+    })
+    test('an empty observation is a FIRST PUSH, never a no-op', () => {
+      expect(remoteAlreadyAtPublishHead('', H)).toBe(false)
+    })
+    test('a stale remote still needs the real lease push', () => {
+      expect(remoteAlreadyAtPublishHead('9'.repeat(40), H)).toBe(false)
+    })
   })
 
   test('pr mode: fires, harvests inner_result, merges PR, persists inner_verdict', async () => {

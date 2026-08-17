@@ -45,6 +45,48 @@ export const MAX_CONSECUTIVE_FAILURES = 5
 export const CONSECUTIVE_COOLDOWN_MS = 60 * 60_000
 
 /**
+ * CEILING on any single park, and the only bound this pool has.
+ *
+ * Cooldowns became MONOTONIC under failure (see {@link park}) so a short park
+ * could not release a long one. That fix has a cost nobody had priced: with no
+ * ceiling, one absurd park is UNSHORTENABLE. `>=` rejects every finite
+ * replacement, and {@link reportSuccess} — the one release — has no way to be
+ * called: {@link selectCredential} and {@link hasUsableCredential} both filter a
+ * cooled credential out, so no NEW dispatch happens, so no new success can be
+ * reported. On a single-credential box, which every Open install is, that is the
+ * product silent until the process restarts.
+ *
+ * Precisely: NEW dispatches, not all of them. A turn dispatched BEFORE the park
+ * started can still complete and report success afterwards, and that does clear the
+ * park (see {@link reportSuccess}). It is not a release the pool can rely on, because
+ * it exists only while such a turn happens to be in flight — which is why the ceiling
+ * is the guarantee and the in-flight success is luck.
+ *
+ * The value that gets there is not exotic. `retry-after: 31536000` is one year
+ * and a legal HTTP header. `retry-after: 1e308` is worse: the OpenAI adapter's
+ * `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and then
+ * multiplied by 1000, so the pool received `Infinity`. Either way an upstream
+ * value we do not control decides how long the owner's box stays dark.
+ *
+ * SIX HOURS because it clears the reset window the owner actually waits out and
+ * stops short of every window indistinguishable from a brick. A Claude
+ * subscription quota window is five hours, so the longest park with an everyday
+ * cause fits under the ceiling untouched.
+ *
+ * SAID EXACTLY, because the looser claim ("past every reset window we honour")
+ * was FALSE and this repo's own surfaces disprove it: `gateway/http/app-usage-
+ * surface.ts` meters a 7-day window alongside the 5-hour one, so a weekly-cap
+ * `retry-after` IS clamped, and after six hours we probe a credential whose quota
+ * has not reset. That cost is already priced below — one failed request every six
+ * hours — and it is the cost we choose over a park nothing in the process can end.
+ *
+ * This is a CLAMP, not a rejection: a park longer than the ceiling still parks
+ * for the ceiling. Refusing it outright would hand back a credential the
+ * provider just told us to stop using.
+ */
+export const MAX_PARK_MS = 6 * 60 * 60_000
+
+/**
  * WHOSE turn produced a failure report. `'background'` marks a timer-driven lane
  * with nobody waiting on it (proactive nudge composition); everything else is
  * `'interactive'`. See {@link reportFailure} for what it changes and why.
@@ -65,6 +107,13 @@ export interface PooledCredential {
   /** Epoch-ms; falsy / past = available. */
   cooldown_until?: number
   cooldown_reason?: CooldownReason
+  /**
+   * Epoch-ms at which the CURRENT park began — the anchor {@link MAX_PARK_MS} is
+   * measured from, so the ceiling bounds the whole park rather than each report
+   * that lands during it. Set when a park starts, preserved while it is extended,
+   * cleared by {@link reportSuccess} along with the park itself.
+   */
+  cooldown_started_at?: number
   consecutive_failures: number
 }
 
@@ -213,9 +262,9 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
 }
 
 /**
- * A cooldown is a FLOOR on when this credential may be dispatched again, so
- * {@link reportFailure} may only ever push it LATER. `park` is what makes that
- * true: it takes the max of the standing park and the proposed one, and leaves
+ * A cooldown is a FLOOR AGAINST FAILURE REPORTS: {@link reportFailure} may only
+ * ever push it LATER. `park` is what makes that true: it takes the max of the
+ * standing park and the proposed one, and leaves
  * `cooldown_reason` describing whichever park actually governs. The plain
  * assignment it replaces had a THIRD failure direction nobody had named — a
  * SHORT park silently TRUNCATING a long one — and the release it handed out was
@@ -240,10 +289,52 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
  *
  * `>=` rather than `>` so an equal-length park does not RELABEL a standing one:
  * the first reason to explain a given expiry is the one that keeps it.
+ *
+ * THE CEILING IS APPLIED HERE, not at the call sites, because monotonicity is
+ * what makes an unbounded park permanent and this is the one line monotonicity
+ * lives on — see {@link MAX_PARK_MS}.
+ *
+ * THE CEILING IS ANCHORED TO WHEN THE PARK BEGAN, not to the clock of whichever
+ * report happens to be speaking. Re-deriving it per call made `MAX_PARK_MS` not a
+ * bound at all: reports DO arrive during a park — a parked credential is never
+ * SELECTED, but {@link reportFailure} is called per error event by turns already
+ * dispatched before the park started, and each one recomputes a ceiling further
+ * out, so the monotonic rule below adopts it. Measured on this file: two
+ * over-ceiling reports five hours apart walked one park from 21,600,000 ms to
+ * 39,600,000 ms — six hours to eleven — while every assertion about the ceiling
+ * still passed. Anchoring makes the second report re-derive the SAME ceiling, so
+ * `>=` returns early and the park expires six hours after it started, once.
+ *
+ * A NON-FINITE proposal collapses to the ceiling rather than being written
+ * through, because `NaN` is falsy and `NaN > now` is false, so writing it would
+ * make a PARKED credential read as available at every reader in this file — the
+ * failure direction that hammers a provider asking us to stop. Said honestly:
+ * NOTHING IN PRODUCTION REACHES THAT ARM TODAY. {@link reportFailure} filters a
+ * non-finite `retry_after_ms` before it gets here and every other call site passes
+ * `now + <constant>`, so this is a belt on an untrusted-arithmetic path and not a
+ * live defence — the adapters upstream have shipped `Infinity` twice, which is why
+ * the belt stays rather than being deleted as dead. Do not credit it with catching
+ * anything the guard above already catches.
  */
 function park(c: PooledCredential, until: number, reason: CooldownReason): void {
-  if (c.cooldown_until !== undefined && c.cooldown_until >= until) return
-  c.cooldown_until = until
+  const now = Date.now()
+  const standing = c.cooldown_until !== undefined && c.cooldown_until > now
+  // ADOPT AN ANCHOR WHENEVER ONE IS MISSING, standing park or not. Anchoring only
+  // fresh parks left the exact walk-outward hole it was meant to close, one step
+  // further in: a STANDING park with no `cooldown_started_at` re-derived the ceiling
+  // from every report and never gained an anchor to stop it. Measured on this
+  // function: reports at +5h/+10h/+15h against a standing six-hour park walked it to
+  // 11h, 16h, then 21h, unbounded. That state is reachable — a credential carried
+  // across a pool re-resolve from before this field existed, or any `cooldown_until`
+  // written by another path — so the missing-anchor case has to be handled rather
+  // than assumed away. The park's true start is unknowable by then, and `now` is the
+  // honest conservative answer: it may run up to one window past six hours from the
+  // real beginning, and never further.
+  if (!standing || c.cooldown_started_at === undefined) c.cooldown_started_at = now
+  const ceiling = c.cooldown_started_at + MAX_PARK_MS
+  const capped = Number.isFinite(until) ? Math.min(until, ceiling) : ceiling
+  if (c.cooldown_until !== undefined && c.cooldown_until >= capped) return
+  c.cooldown_until = capped
   c.cooldown_reason = reason
 }
 
@@ -258,7 +349,10 @@ function park(c: PooledCredential, until: number, reason: CooldownReason): void 
  *
  * `retry_after_ms` (parsed from upstream `retry-after` header) overrides the
  * default 429 cooldown — adapters MUST honor it so we play nice with provider
- * back-pressure signals.
+ * back-pressure signals. It is honoured up to {@link MAX_PARK_MS} and no further,
+ * and a non-finite or negative value is discarded in favour of the status default
+ * rather than believed: the number is an upstream one, and the cost of believing a
+ * bad one is a credential nothing can release.
  *
  * `origin` says WHOSE turn failed, and it changes only the STRIKE COUNTER:
  *
@@ -317,8 +411,35 @@ export function reportFailure(
   const c = pool.credentials.find((x) => x.id === id)
   if (!c) return
   const now = Date.now()
+  // `retry_after_ms` IS UNTRUSTED ARITHMETIC, not a number we computed. It comes
+  // from an upstream header an adapter parsed, and the parsers have already shipped
+  // `Infinity` (finiteness checked on the seconds, then multiplied by 1000) — a
+  // value that used to park the credential until the process restarted.
+  //
+  // `> 0`, NOT `>= 0`, and the difference is the whole guard. `0` is what the
+  // header parser used to hand us for `retry-after: -30` and for any HTTP-date
+  // already in the past (clock skew alone produces those), because it floored
+  // negatives instead of rejecting them. A `0` passes a `>= 0` test, so the park
+  // became `now + 0` — and `now` is not a park: `hasUsableCredential`,
+  // `soonestCooldownUntil` and `selectCredential` all treat `cooldown_until <= now`
+  // as AVAILABLE, so a real 429 bought no cooldown whatsoever and we answered the
+  // provider's back-pressure with an immediate retry. Worst on the background lane,
+  // which by design never touches the strike ledger and so has no second net under
+  // it. The parser now returns `undefined` for the same values; this is the boundary
+  // that holds even if a future adapter forgets.
+  //
+  // THE TWO GUARDS ARE NOT REDUNDANT. `park`'s clamp bounds an `Infinity` at the
+  // six-hour ceiling, which stops the brick; this boundary decides that a value
+  // that is not a positive number of milliseconds buys no extra time AT ALL, so a
+  // garbage header gets the 60-second default instead of the maximum park the pool
+  // allows. And it is the only one of the two that can see a `NaN` for what it is:
+  // by the time `now + NaN` reaches `park` the origin is gone.
+  const retry_after =
+    retry_after_ms !== undefined && Number.isFinite(retry_after_ms) && retry_after_ms > 0
+      ? retry_after_ms
+      : undefined
   if (status === 429) {
-    park(c, now + (retry_after_ms ?? COOLDOWN_429_MS), 'rate_limit_429')
+    park(c, now + (retry_after ?? COOLDOWN_429_MS), 'rate_limit_429')
   } else if (status === 402) {
     park(c, now + COOLDOWN_402_MS, 'billing_402')
   } else if (status === 401) {
@@ -340,6 +461,16 @@ export function reportFailure(
  * Report a successful dispatch. Resets the failure counter + clears any
  * cooldown so a temporary 429 stops parking the credential after we've
  * confirmed it's working again.
+ *
+ * UNCONDITIONAL, and that is the deliberate half of the FLOOR rule described on
+ * {@link park}: no comparison, so a success clears even a park a provider asked
+ * for. Reachable — a turn dispatched before the park started can complete 200
+ * after it, and that success wipes a two-hour `retry-after`. It stays
+ * unconditional because a completed request is the only DIRECT evidence the
+ * credential works, and the alternative fails in the direction this pool cannot
+ * see its way out of: a park nothing releases on a single-credential box, which
+ * every Open install is. A cleared park that should have stood costs one more
+ * failed request, which re-parks it.
  */
 export function reportSuccess(pool: CredentialPool, id: string): void {
   const c = pool.credentials.find((x) => x.id === id)
@@ -347,4 +478,5 @@ export function reportSuccess(pool: CredentialPool, id: string): void {
   c.consecutive_failures = 0
   delete c.cooldown_until
   delete c.cooldown_reason
+  delete c.cooldown_started_at
 }

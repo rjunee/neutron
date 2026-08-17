@@ -474,7 +474,10 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     // Why two sinks and not one: the chat lane's sink BUBBLES into the owner's chat,
     // which is right when he is sitting in the conversation that degraded and wrong
     // when a timer fired it. The nudge lane takes the journal-only sink, so the clamp
-    // is durably recorded without a background lane pushing anything into his chat.
+    // is RECORDED — best-effort, said exactly: `emitSystemEventSafe` swallows a write
+    // failure and an unregistered ambient sink is a no-op, so what the split buys is
+    // an attempt at a findable row, not a guaranteed one — without a background lane
+    // pushing anything into his chat.
     // If a future edit hands the nudge lane `liveAgentNoticeSinks` instead, the
     // identity assertions below fail rather than shipping a timer-driven bubble.
     const liveFloor = (): void => {}
