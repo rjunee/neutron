@@ -76,6 +76,28 @@ cwd turning supervision OFF entirely rather than misplacing it, is pinned there 
 it was previously asserted as a returned `undefined`, which is not the same claim as
 "the registry, the respawns, the watchdog and the heartbeat are all skipped".
 
+**THE CROSS-MODEL REVIEWER RAN, WHICH IS THE OTHER HALF OF WHY #333'S FINDINGS
+SAT UNACTIONED — ON THAT PANEL IT WAS DEFERRED, so its REQUEST_CHANGES carried no
+quality signal at all.** Here it ran and returned four findings. **It could not
+refute the fix, and it could not refute the "previously unpinned" claim.** All
+four are corrections to what this change SAYS ABOUT ITSELF, which is the same
+defect class the change is about: (1) "nothing is started here" was false —
+constructing the factory arms `startReplWatchdog` and
+`startModelUpdateWatchdogForInstance`, real timers; only the REPL CHILD is not
+spawned. (2) The third test's prose claimed registry, respawns, watchdog and
+heartbeat were pinned; it observes REGISTRATION only, which is a PROXY for the
+shared `if (home !== undefined)` block being entered and stops holding if that
+block is ever split. (3) "Nothing downstream re-checks" was self-contradictory —
+this function IS the re-check. (4) The three legs were conflated, corrected
+above. Each is now written as what holds. **The test isolation finding was the
+one with teeth beyond wording**: the runner executes many files concurrently
+INSIDE ONE PROCESS (`scripts/run-tests.sh:9`), so `process.env` is shared and a
+file-level `afterEach` restoring a module-load snapshot could overwrite another
+suite's `NEUTRON_HOME` while that suite sat suspended at an `await`. Env mutation
+is now confined to a helper that sets, calls and restores with NO intervening
+`await`, so single-threaded execution makes the interleaving impossible rather
+than unlikely.
+
 **A METHOD NOTE THAT IS PART OF THE RESULT.** The first pass of this audit
 produced **eighteen consecutive REDs and every one was false.** The harness took
 its suite list as `"$@"` from a `zsh` caller, where an unquoted `$VAR` is not
