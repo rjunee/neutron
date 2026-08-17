@@ -3,7 +3,12 @@ import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '../../wiring/build-live-agent-turn.ts'
-import { buildTerminalBuildWakeObserver, buildTerminalBuildWakePrompt, type TerminalBuildWakeDeps } from '../terminal-build-wake.ts'
+import {
+  buildTerminalBuildWakeObserver,
+  buildTerminalBuildWakePrompt,
+  TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS,
+  type TerminalBuildWakeDeps,
+} from '../terminal-build-wake.ts'
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
   return makeTridentRun({
@@ -16,21 +21,24 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
 }
 
 function harness(error?: Error) {
-  const specs: AgentSpec[] = [], claims: string[] = [], posts: boolean[] = [], logs: unknown[] = []
+  const specs: AgentSpec[] = [], optsSeen: Array<{ timeout_ms?: number } | undefined> = []
+  const claims: string[] = [], posts: boolean[] = [], logs: unknown[] = []
   const deps: TerminalBuildWakeDeps = {
     claimWake: async (id) => { claims.push(id); return true }, boardItemIdForRun: async () => 'board-9',
-    llm: { compose: async (spec) => { specs.push(spec); if (error) throw error; return 'Acted.' } },
+    llm: { compose: async (spec, opts) => { specs.push(spec); optsSeen.push(opts); if (error) throw error; return 'Acted.' } },
     projectChatScope: () => 'acme-scope',
     post: async (_run, _reply, opts) => { posts.push(opts.loud); return true },
     logger: { error: (_message, fields) => logs.push(fields) },
   }
-  return { deps, specs, claims, posts, logs }
+  return { deps, specs, optsSeen, claims, posts, logs }
 }
 
 describe('terminal build wake', () => {
   test('done run makes one scoped, quiet turn with all facts', async () => {
     const h = harness(); await buildTerminalBuildWakeObserver(h.deps)(run())
     expect(h.claims).toEqual(['run-123']); expect(h.specs).toHaveLength(1); expect(h.posts).toEqual([false])
+    expect(h.optsSeen).toEqual([{ timeout_ms: TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS }])
+    expect(TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS).toBeGreaterThan(90_000)
     expect(h.specs[0]!.metering_context?.project_id).toBe('acme-scope')
     expect(h.specs[0]!.tools.map((tool) => tool.name)).toEqual([...LIVE_AGENT_TOOL_NAMES])
     for (const fact of ['run-123', 'board-9', 'done', 'trident/wake', 'Repair terminal delivery']) expect(h.specs[0]!.prompt).toContain(fact)
@@ -64,9 +72,10 @@ describe('terminal build wake', () => {
   test('prompt renders only positive PR and omits null failure', () => {
     for (const pr of [0, null]) {
       const prompt = buildTerminalBuildWakePrompt({ run: run({ pr }), board_item_id: null })
-      expect(prompt).not.toMatch(/\bPR\b/); expect(prompt).not.toContain('Failure reason'); expect(prompt).toContain('none')
+      expect(prompt).not.toContain('PR #'); expect(prompt).not.toContain('Failure reason'); expect(prompt).toContain('none')
     }
     const prompt = buildTerminalBuildWakePrompt({ run: run(), board_item_id: 'item' })
     expect(prompt).toContain('PR #42'); expect(prompt).toContain('act immediately'); expect(prompt).toContain('concrete action now')
+    expect(prompt).toContain('work_board_start'); expect(prompt).toContain('owns GitHub')
   })
 })
