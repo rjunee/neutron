@@ -2,6 +2,52 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — Forge checkpoints at artifact time
+
+Forge and fix-round contracts now write their existing semantic checkpoint through
+`checkpoint.sh` immediately after the commit and reviewer diff land. The command
+records the branch, an empty findings set, and the real `HEAD` resolved by the
+agent's shell; the post-return checkpoint remains the authoritative re-stamp.
+This closes the measured 31-minute blind window in run 6f794290, where finished
+artifacts existed locally while the run row still looked dead. Dry workflows with
+no database path or run id omit the durability step entirely.
+
+## 2026-08-16 — a fired reminder was rewriting the owner's chat down to the fast tier
+
+Landed via PR #340.
+
+The owner's project chat answered on Haiku twice in one day. He reported it both
+times; a hand-repointed registry record held for hours and then reverted, which is
+what made it look like an environment default rather than a write.
+
+It was a write. `open/composer.ts` wires the reminder dispatcher onto
+`liveAgentSubstrate` — the owner's WARM chat REPL, by design, so "a reminder fires
+into the normal session" is literally true. The call site already passes
+`tool_names: LIVE_AGENT_TOOL_NAMES` verbatim for exactly this reason, with a
+comment explaining that a differing `--tools` surface EVICTS AND RESPAWNS the warm
+child. **The model is the same class of shared session property and was missed.**
+`reminders/dispatcher.ts` resolves `const model = input.model ?? FAST_MODEL`, the
+composer passed no `model`, and the persistent pool writes the spawned model back
+into the session's registry record — where `record?.model ?? getBestModel()` lets
+it OVERRIDE the best model rather than fall back to it. So every fired reminder
+left the owner's next chat turn on Haiku, durably across restarts.
+
+Measured on the live instance: of 26 session records exactly one held
+`claude-haiku-4-5-…` — the `cc-agent-*` session of the project whose reminders had
+fired — while every other session, including that same project's `cc-compose-*`
+lane, held an Opus id.
+
+The fix is one key, `model: getBestModel()`. Note the ritual lane two fields down
+already passed `resolve_ritual_model: getBestModel` "so it tracks the chat agent's
+model instead of pinning a stale id" — the same lesson, learned once and not
+carried across. A cheaper tier for reminder composition is still available, but it
+needs its own substrate: it cannot be taken out of the session the owner is
+talking to.
+
+Typecheck differenced against untouched main rather than counted: all 51 tsconfigs
+fail identically on both trees in this checkout (missing type libs in a partial
+install), zero introduced.
+
 ## 2026-08-16 — a stored record could pull the owner's chat below the best model
 
 Landed via PR #342.
@@ -85,237 +131,6 @@ onto the memory lane reddens 4; dropping the factory forward reddens 1. That
 last one is not hypothetical — `appendSystemPromptFile` was lost at exactly that
 seam once, proven at the factory-input layer while the real factory dropped it.
 
-## 2026-08-16 — the refusal warning was invisible to the instance it protects
-
-Landed via PR #322.
-
-The scope direction guard shipped in #273 works. Its only observable signal did
-not reach anybody.
-
-When an anonymous process boots on the bare fallback handle and the guard
-refuses to migrate the live instance's rows, the refusal was journalled with
-`project_slug` = the FALLBACK handle. Three facts make that row unreadable
-forever, and each was verified in the code rather than reasoned about:
-the refusal deliberately returns before the ledger write
-(`migrations/scope-rekey.ts:641-657`), so the next explicit boot takes the
-ledger-agrees fast path (`:596-609`) and never sweeps `system_events` back even
-though it is a swept table (`:165`); and the owner's diagnostics feed is
-strictly `WHERE project_slug = ?` by design
-(`persistence/system-events.ts:337-349`, via
-`gateway/diagnostics/instance-sources.ts:104`). So the guard's one signal was
-scoped to a handle no owner ever opens a page under — the same silent-failure
-class the guard exists to close.
-
-THE DECISION, written down because the row genuinely has several candidate
-scopes and the owner can only ever read one: a refusal belongs to the handle the
-OWNER READS UNDER — the `instance_scope_ledger`'s handle (authoritative: it
-names a handle THIS database has committed to inside the re-key transaction, so
-someone can open its feed — note that a fallback boot with nothing stranded also
-seeds it, so "explicit boots only" is not a property this rests on) or, absent a
-ledger, `onboarding_state`'s. Never the
-anonymous handle that attempted the move, and never a FROZEN credential handle.
-The attempting handle is preserved in `payload.attempted_by_slug`. Applied to
-BOTH reconcilers: `instance_scope_rekey_refused` and `credential_scope_orphaned`
-when it carries `refused_direction` (`gateway/index.ts`, via
-`gateway/scope-refusal-journal.ts`). The ordinary ambiguous credential orphan is
-unchanged — there the boot handle already IS the explicit live handle.
-
-The "never a FROZEN credential handle" clause is the second version of this fix,
-and the first version was wrong in a way worth recording. It journalled the
-credential refusal under `credentialScope.stale_handles`, reasoning that those
-are the handles whose rows were at stake. They are — but they are the handles
-frozen into `secrets.project_slug` / `project_credentials.owner_slug` at write
-time (`auth/secrets-store.ts`), and the reconciler's entire premise is that the
-frozen handle has DIVERGED from the live one. So on the shape the card is
-actually about — a rename — the warning moved from one unreadable scope to
-another. It read as fixed because the regression seeded the same string for both
-sides. `gateway/__tests__/boot-refusal-scope.test.ts` now uses the divergent
-shape, and asserts BOTH unreadable scopes empty as the control.
-
-Two more properties the journal has to hold, both in
-`gateway/scope-refusal-journal.ts` with the reasoning:
-
-- NARROWED PER SCOPE. One row per readable scope, each naming its own handle;
-  every other handle is a COUNT, never a name. A per-handle fan-out of the full
-  multi-handle payload puts one scope's keys and volumes into another scope's
-  instance-scoped feed — the cross-scope disclosure `listRecentForScope`'s own
-  docblock exists to prevent.
-- EDGE-TRIGGERED. `SystemEventsStore.listVisibleForScopeAndName` +
-  `shouldJournal`
-  skip a repeat the owner can still SEE, because his window is the newest 50 events and
-  `system_events` has no retention sweep: two unconditional rows per anonymous
-  boot is a way for this warning to evict every other degrade event out of the
-  report it is trying to appear in.
-- AND THE PAYLOAD DESCRIBES THE CONDITION, NEVER ITS VOLUME. The trigger above is
-  only as stable as the payload it hashes, so a field that moves with ordinary
-  owner activity re-arms it on every boot and restores the starvation in full.
-  `instance_scope_rekey_refused` carried `stranded_rows` — a `COUNT(*)` over ~40
-  swept tables including `tasks` and `reminders` — and did exactly that:
-  measured on this branch, four anonymous boots with one task created between
-  each wrote FOUR rows, with the count climbing 1 → 3 → 4. Every dedup test in
-  the suite passed anyway, because each boots against a database nobody is
-  using, which freezes the payload by construction. The same field was also
-  false: once the row moved to the LIVE handle, `stranded_slug` was the reader's
-  OWN handle and `stranded_rows` his own healthy data, which the guard had just
-  protected — rendered in his feed as a worsening data-loss condition. Both are
-  gone; the payload is now `targeted_slug` / `other_targeted_handles` /
-  `attempted_by_slug`, and the row count lives in the (unbounded) log lines.
-  `gateway/__tests__/boot-refusal-scope.test.ts` "ORDINARY OWNER ACTIVITY
-  between boots" is the regression, with the credential feed as the in-run
-  control.
-
-And one thing measurement caught that reasoning did not: the refusal's row count
-must EXCLUDE `system_events`. `system_events` is a swept table, so the count of
-"rows at stake" under the live handle included the refusal rows THEMSELVES —
-1 → 3 → 4 across three identical boots. That is a wrong number wherever it is
-reported. The exclusion is in `countStrandedRows` (`migrations/scope-rekey.ts`);
-the sweep still carries `system_events` forward on a legitimate rename.
-
-Also fixed here: a BLANK `NEUTRON_INSTANCE_SLUG`. `NEUTRON_INSTANCE_SLUG=` (or
-whitespace) reached the resolver as `''`, not `undefined`, and the old
-`!== undefined` test called that CONFIGURED — so the direction guard, which arms
-only on `'fallback'`, stayed disarmed and the boot re-keyed every owner row onto
-the handle `''`, a scope no owner ever passes to `listRecentForScope`. A deploy
-that failed to set the slug is exactly "nobody told me who I am": blank now
-resolves to `'fallback'`, and a padded value is trimmed, as the `.url_slug`
-branch always did.
-
-Also closed: the provenance boundary had no direct coverage.
-`resolveOwnerSlugSourceFromConfig`'s `source` field
-(`gateway/index.ts:205-218`) is the highest-precedence input to both guards,
-and nothing asserted it — every existing test asserted the SLUG, which is the
-same string whatever the provenance. `gateway/__tests__/owner-slug-provenance
-.test.ts` pins the matrix over all three inputs plus a file-driven forward
-re-key through a real `boot()`, because getting `'file'` wrong is the exact
-inverse of the guard's purpose: a real rename would be refused and the owner's
-old-scope rows stranded.
-
-MEASURED, not assumed. The review card predicted `source: 'file'` → `'fallback'`
-survives the suite; it does not — `gateway/__tests__/boot-credential-scope.test
-.ts` (a3) already kills it, and so does `'env'` → `'fallback'` on
-`open/__tests__/open-scope-rekey-boot.test.ts`. The mutant that DID survive all
-38 existing tests is `'file'` → `'env'`, and the new file kills it 3 ways.
-
-FIVE WAYS THE FIRST TWO ROUNDS OF THIS FIX WERE THEMSELVES WRONG, each found by
-review and each recorded because the shape repeats. Every one of them was a rule
-that held where it was watched and broke where it was not:
-
-- THE COINCIDENCE IS NOT THE ANONYMITY. Round 2 excluded the attempting handle
-  from the readable scopes by string equality. But the guard arms on the
-  SOURCE of the slug, not on its value — an owner who sets
-  `NEUTRON_INSTANCE_SLUG=dev` is configured, his ledger says `dev`, and `dev` is
-  the only string he ever passes to `listRecentForScope`. Excluding it sent the
-  row to the frozen credential handle instead: unreadable, i.e. worse than main
-  on this fix's own axis. Readability now comes from the EVIDENCE (ledger, else
-  `onboarding_state`), never from a string comparison with the booting process.
-- SUPPRESSION MEASURED AGAINST HISTORY IS SUPPRESSION FOREVER. The edge trigger
-  compared against `latestForScopeAndName` — `LIMIT 1` over the whole table —
-  while the owner sees the newest 50 rows and `system_events` has no retention
-  sweep. Refusal, 50 unrelated events, refusal again: the dedup matched a row
-  that had rotated off the page and skipped the write, permanently and
-  silently. It is now `listVisibleForScopeAndName(scope, event, 50)` —
-  bounded to the same window the feed returns, sharing
-  `DEFAULT_MAX_RECENT_EVENTS` with the reader rather than restating it.
-- A FALLBACK NOBODY EXERCISES IS A RULE THAT DOES NOT HOLD. "Never a frozen
-  credential handle" was in the invariant while the last-resort branch of
-  `planCredentialRefusalRows` keyed rows to exactly those handles — reachable on
-  a fallback boot with no instance anchors. The parameter is gone; the floor is
-  the attempting handle, which is what shipped before this fix and can only be
-  as bad as that.
-- A BEST-EFFORT READ THAT CAN THROW IS A BOOT ABORT. The dedup read ran
-  synchronously on the boot path, before `bootFailureCleanup` exists, and
-  `rowToPersisted` parses `payload_json` with `onCorrupt: 'throw'`. One corrupt
-  historical row would have killed the instance to save a duplicate row.
-  `shouldJournal` owns the try/catch: a failed read means "assume the owner
-  cannot see it" — write.
-- EDGE-TRIGGERING ONE BRANCH TRIGGERS NEITHER. The ordinary ambiguous credential
-  orphan wrote unconditionally under the SAME `(scope, event_name)` key the
-  refused branch dedups on, so a box alternating between the two shapes wrote a
-  row every boot — the exact starvation this fix claims to close. Both branches
-  now trigger.
-
-Two smaller ones from the same review, both "a name is not a contract" in
-miniature: `canonical()` used `JSON.stringify`'s array replacer, which
-allowlists keys RECURSIVELY, so two payloads differing only inside a nested
-object compared EQUAL (the ordinary orphan payload already nests); and the
-narrowed row trimmed the SCOPE but looked its counts up under the UNTRIMMED key,
-so a legacy padded handle reported the reader zero rows of his own and counted
-them as somebody else's. And one layer out: `neutron doctor` resolved its scope
-from the env var verbatim and never read `.url_slug`, so on a padded value or
-any renamed box it queried a scope no row is written under — the same
-invisibility, in the reader instead of the writer. It now mirrors boot's
-precedence exactly.
-
-The gap this branch recorded as OPEN is now CLOSED, by #320, which merged while
-this PR was parked. `migrateOrphanedCredentialScope` — the EXPLICIT repair the
-integrations surface offers — took `(db, boot_handle)` with no provenance
-argument, so an anonymous process reaching that surface was not refused and the
-boot guard was bypassable in one step. It now takes a REQUIRED provenance
-argument and refuses on `slug_is_fallback`
-(`auth/credential-scope-reconcile.ts:509-539`). Required rather than
-optional-defaulting-to-false so the next surface cannot reintroduce the gap by
-omission: forgetting it is a type error. INVARIANTS #116(a) therefore goes back
-to reading "on any surface", and now names all THREE guards rather than two —
-the honest coverage note this branch added is deleted because it has stopped
-being true, which is the only reason a note like that should ever be deleted.
-
-Two further things this branch had to give back to #320 on the merge, both
-cases of the same shape — code hand-copied here while the real fix was landing
-elsewhere. The slug resolver: this branch carried its own corrected copy of
-`resolveOwnerSlugSourceFromConfig` on `gateway/index.ts` plus a second
-hand-rolled precedence chain in `open/owner-identity.ts`. #320 moved the one
-resolver down to `config/index.ts` (the entry module was in the Open composer's
-import graph, which `gateway/composer-contract.ts` forbids) and made both other
-call sites delegate. Both copies here are deleted; `open/owner-identity.ts` is
-now byte-identical to main. A third copy of "who am I" is exactly the defect
-these two files spent three rounds fixing, so re-adding one to preserve a merge
-would have been the joke telling itself.
-
-And the boot path stopped being able to abort on a diagnostic read.
-`resolveOwnerReadableScopes` runs from `boot()` at a point where
-`bootFailureCleanup` does not exist yet — the sink is registered at
-`gateway/index.ts:327` and the cleanup is declared at `:664` — so a throw out of
-its two SELECTs escaped `boot()` with the project DB open and this boot's
-`SystemEventsStore` still on the ambient sink stack, the half-open boot the
-hand-rolled guards at `:310` and `:360` each exist to prevent. It is now called
-through `readOwnerReadableScopes`, which catches and returns `[]`; `[]` routes
-to the documented FLOOR (the attempting handle), so the degraded outcome is
-exactly what shipped before this module existed. Same trade `shouldJournal`
-already makes one function away, and for the same reason: losing the narrowing
-costs a row of precision, losing the boot costs the instance.
-
-A later round found the edge trigger was still starvable, by a route neither
-this branch nor the review that added the trigger had a test for. The trigger
-compared the payload against the NEWEST row for its `(scope, event_name)` pair —
-and `credential_scope_orphaned` is written in TWO payload shapes under that one
-key: the direction refusal (an anonymous boot) and the ordinary ambiguous census
-(an explicit boot). A unit that intermittently loses its slug env alternates
-between them, so each shape saw the OTHER as the newest row and every boot wrote
-— unbounded, into a window that is 50 rows deep with no retention sweep behind
-it. Six alternating boots produced six rows; the same six now produce two.
-Making both branches edge-trigger, which was the previous round's fix, could not
-close it, because the hole was in the COMPARISON rather than in the coverage.
-`persistence/system-events.ts` `latestVisibleForScopeAndName` is therefore
-`listVisibleForScopeAndName` — it returns the matching rows inside the window
-instead of the newest one — and `isNewJournalState` asks whether this payload is
-already ANYWHERE on the page the owner is looking at. That is also the sentence
-the trigger always meant, it generalises to any third shape added later, and it
-keeps the window bound that makes a rotated-out row new information again.
-
-And the EXPLICIT owner-driven migration was journalling its refusal under the
-handle that asked (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`).
-That surface refuses ONLY when the handle is the anonymous fallback — that is
-the guard's whole condition — so the audit row for the one security-relevant
-outcome landed in exactly the unreadable place the boot half of this entry
-exists to fix, on a surface INVARIANTS #116 already claimed ("on ANY surface").
-It now resolves its scope through the same planner boot uses, with the same
-narrowing and the same floor, and keeps its two deliberate differences: it is
-not deduped, because a repeated owner ATTEMPT is what an audit trail is for, and
-it carries `surface: 'explicit_migrate'` so one query finds both rows and can
-still tell them apart. The invariant's opening sentence was absolute where the
-code had two lawful paths to the attempting handle; it now names that floor in
-the first sentence, because a claim of coverage the code does not have is the
-sentence the next reviewer trusts instead of reading the code.
 ## 2026-08-16 — file presence is not authorization, and this log stops losing entries quietly
 
 Landed via PR #323.
@@ -869,6 +684,55 @@ against history under `ok:true` while the docblock asserts they are preserved
 blocks but not raw HTML, so an entry body containing a raw HTML block can have an
 addition spliced inside it (`scripts/git/as-built-log-merge.ts`).
 
+## 2026-08-16 — publish replay heals shallow checkouts at the boundary
+
+`rebaseOntoObservedBase` now probes checkout depth before even observing the remote base and
+unshallows on use. This is the durable boundary: an install-time repair cannot reach hand-made
+clones, which produced both 2026-08-15 incidents. A failed heal stops before replay and reports
+the measured depth, shallow boundary, checkout path, and fetch failure.
+
+The old framing that the shared checkout *is* shallow is retired. Shallowness is a defect to
+repair; the load-bearing rule remains unchanged even with full history: never run `git rebase`
+in the shared working tree, because a failed operation there poisons every concurrent lane.
+
+The real-git fixture now creates branch and main history before the depth-1 clone and proves the
+fork-point pre-image blob is absent. Its PR-path mutation check, with the heal call removed,
+failed with `repository lacks the necessary blob to perform 3-way merge`, followed by a direct
+`lib.txt: patch does not apply`; restoring the guard makes the same server-side fork-point patch
+replay cleanly.
+
+## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
+
+Landed via PR #331.
+
+The owner's sentence was the spec: *"my sessions need to wake up and check every 5min … and
+actually take actions to get this moving."* The thing that makes the reference agent work all
+night is a SERVER-SIDE tick, not a session-side timer — and this tree already wrote that lesson
+down once (`trident/tick.ts` replaced the legacy ScheduleWakeup driver with an in-process sweep,
+for the same reason: a session-bound schedule dies with its session, silently). So the new
+`work-wakeup` loop (`gateway/proactive/work-wakeup.ts`, 12th composer loop) sweeps every five
+minutes: each Work Board item `in_progress` with no live bound run gets its project's warm chat
+session re-entered with a continue-work turn — the same substrate entry, session keying
+(`metering_context.project_id`) and `--tools` surface as a fired reminder, which is what lands
+the turn ON the owner's session instead of evicting it. Arming is the board itself: no second
+queue, durable across restarts, and the trident tick keeps sole custody of items a run is
+already driving.
+
+**Quiet on progress, loud on trouble.** Reports post as durable inert chat rows with the device
+buzz suppressed — the deliver envelope grew an explicit `notify: 'suppress'` opt-out
+(`gateway/http/deliver.ts`), a narrow exception that keeps "forgetting still notifies" true. A
+`BLOCKED:` reply and a wakeup mechanism failure buzz normally (first failure and every sixth).
+An owner-activity grace window (30 min, person-only watermark) keeps the loop out of a session
+he is actively driving.
+
+**And a degraded reminder now names its route.** Three fired reminders degraded in one night
+and the journal carried only the downstream `nudge_refused` guard — the per-route diagnostics
+sat on the debug level the production `info` filter drops, so no one could tell WHICH of the
+three degrade routes fired. Each route now emits one structured `warn`
+(`event=nudge_degraded`, `route=no_llm|compose_failed|over_max_body_chars`, bounded reason,
+zero bytes of stored intent), so the next degraded cycle diagnoses itself instead of inviting
+another guess.
+
 ## 2026-08-16 — the disk manifest is the single authority for a by-path Codex brief
 
 The launcher now composes reflection guidance ONCE. `trident/inner-loop.ts`
@@ -1023,38 +887,355 @@ moved onto the rule. It has no fallback chain to copy — trimming there would t
 `'   '` into `'/skills'`, the filesystem root, which is worse than the junk path — so
 the self-description was corrected instead.
 
-## 2026-08-16 — sessions wake every five minutes and act, because the wakeup lives on the server
+## 2026-08-16 — the guard that proved the gate runs accepted `|| true`
 
-Landed via PR #331.
+Every fix below closes a route to the SAME outcome — the gate prints ✅, or CI
+prints a green check, while the property is violated. Two were reproduced
+independently by two reviewers against the live branch before any of this was
+written.
 
-The owner's sentence was the spec: *"my sessions need to wake up and check every 5min … and
-actually take actions to get this moving."* The thing that makes the reference agent work all
-night is a SERVER-SIDE tick, not a session-side timer — and this tree already wrote that lesson
-down once (`trident/tick.ts` replaced the legacy ScheduleWakeup driver with an in-process sweep,
-for the same reason: a session-bound schedule dies with its session, silently). So the new
-`work-wakeup` loop (`gateway/proactive/work-wakeup.ts`, 12th composer loop) sweeps every five
-minutes: each Work Board item `in_progress` with no live bound run gets its project's warm chat
-session re-entered with a continue-work turn — the same substrate entry, session keying
-(`metering_context.project_id`) and `--tools` surface as a fired reminder, which is what lands
-the turn ON the owner's session instead of evicting it. Arming is the board itself: no second
-queue, durable across restarts, and the trident tick keeps sole custody of items a run is
-already driving.
+**The workflow guard was a string search wearing a docblock.**
+`scripts/ci/ci-workflow.test.ts` asserted the gate step "runs, unconditionally,
+with its exit code honoured" and checked only for `if:` and
+`continue-on-error:`. Appending `|| true` to the `- run:` line satisfies both,
+leaves the step present and running, and turns the check green whatever the gate
+decides. Reproduced against the branch: the mutation landed, the suite stayed
+0-fail, and the deleted-step control still went red — so the suite proved a
+string was in a file. `whyNotGating` now requires the gate to be the WHOLE shell
+command (nothing before it, no `|`, `;` or `&` after it), and six shell bypasses
+join the six YAML ones as permanent mutations: `|| true`, `|| :`, `; true`, a
+pipe, a trailing `&`, and a `set +e` prefix.
 
-**Quiet on progress, loud on trouble.** Reports post as durable inert chat rows with the device
-buzz suppressed — the deliver envelope grew an explicit `notify: 'suppress'` opt-out
-(`gateway/http/deliver.ts`), a narrow exception that keeps "forgetting still notifies" true. A
-`BLOCKED:` reply and a wakeup mechanism failure buzz normally (first failure and every sixth).
-An owner-activity grace window (30 min, person-only watermark) keeps the loop out of a session
-he is actively driving.
+**The installer could report success over the state it calls fatal.**
+`scripts/install-merge-drivers.sh` runs `set -uo pipefail` with no `-e`, and
+neither `git config` call nor the attributes append was checked, so a failure
+fell through to `echo "merge drivers: installed"` and exit 0. Measured here on
+git 2.50.1 (Apple Git-155), same repo, two branches conflicting on a path bound
+to `merge=as-built-log`: `.name` set with `.driver` unset is
+`fatal: custom merge driver as-built-log lacks command line.` (exit 128), and
+`.driver` set with `.name` unset merges fine at exit 0. That asymmetry is the
+fix, not just the checks — `.driver` is now written FIRST, so an interruption
+between the two leaves a clone that merges rather than one that cannot. Every
+step is checked and a failure rolls the pair back and exits 1. A first draft
+also re-read both halves before printing success; mutating that block away left
+the whole suite green, because every reachable failure is already caught at the
+write, so it is deleted rather than kept — the same call, for the same reason, as
+the empty-`--template=` dance dropped from the attributes probe one round ago.
+A test makes `.git` read-only (the config
+LOCK file is what needs the directory, not the config file's own mode: measured
+`could not lock config file .git/config: Permission denied`, exit 255) and
+asserts the installer fails loudly leaving neither key set.
 
-**And a degraded reminder now names its route.** Three fired reminders degraded in one night
-and the journal carried only the downstream `nudge_refused` guard — the per-route diagnostics
-sat on the debug level the production `info` filter drops, so no one could tell WHICH of the
-three degrade routes fired. Each route now emits one structured `warn`
-(`event=nudge_degraded`, `route=no_llm|compose_failed|over_max_body_chars`, bounded reason,
-zero bytes of stored intent), so the next degraded cycle diagnoses itself instead of inviting
-another guess.
+**A local `refs/replace/*` forged the committed floor.** Object reads honour
+replace refs, so `git show HEAD:.gitattributes` can return a blob the commit does
+not contain. Measured: a repo whose committed attributes file is
+`# broken, no union rule`, with that blob replaced by a healthy one, answers
+`docs/AS_BUILT.md merge=union` to `git show` — while `GIT_NO_REPLACE_OBJECTS=1`
+and a fresh `git clone` both return the broken file. `clone` does not carry
+`refs/replace/*` and neither does `actions/checkout`, so this is a reading that
+travels nowhere, the same class as a machine-global attributes file.
+`GIT_NO_REPLACE_OBJECTS=1` is now part of `CHECK_ATTR_ISOLATION_ENV`, with the
+clone as the control.
 
+**The probe inherited case-insensitivity from `$TMPDIR`.** `git init` probes the
+filesystem and writes `core.ignorecase = true` on macOS, so the throwaway probe
+matched a wrong-case rule that no case-sensitive clone honours. Measured:
+`docs/as_built.md merge=union` resolves `union` for `docs/AS_BUILT.md` by
+default and `unspecified` under `-c core.ignorecase=false`. The pin is applied to
+the PROBE only and deliberately not to `localEffectiveMergeDrivers`, which
+reports what this clone really does and must not describe a repository the
+developer is not using. The test reads `core.ignorecase` rather than asserting
+it, because on a case-sensitive runner there is no poison to defeat and
+demanding one would red CI for the platform being right.
+
+**A committed-but-not-checked-out `SPEC.md` turned the whole gate off.**
+Governedness was a disk read — the previous entry says "`SPEC.md` stays a disk
+read on purpose", and that is now wrong: under a sparse checkout the spec is in
+the tree and not on disk, and the gate exited 0 with "not a governed repo" over a
+floor nothing had looked at. It is now the UNION of disk and the committed tree,
+since each alone fails silently in a different direction (tree alone would drop
+the first commit of a new repo, and every fixture in the gate's own tests).
+
+**`presentAsBuiltLogs` was the module's one fail-OPEN path.** Its
+`catch { return [] }` reached the caller as "no append-only build log found —
+nothing to enforce" and exit 0, so an unreadable governed repo read as a clean
+bill of health. It now throws, and the test proves the read really is broken
+(`git ls-files` exit 128) before asserting the throw.
+
+Three diagnostics said things about git that are not true. `unset` was reported
+as "your `<path> -merge` rule", but the built-in `binary` MACRO expands to
+`-diff -merge -text` and produces the same `unset` from a line with no `merge`
+token in it — measured — so both spellings are now named. Duplicate exact rules
+beaten by a later WILDCARD were listed under "the LAST wins", pointing the reader
+at a line whose edit changes nothing; that heading is now used only when the last
+collected rule is what git actually resolved. And the local-clone note credited
+`scripts/install-merge-drivers.sh` for any overlay naming its driver without
+checking whether the driver is configured at all — i.e. it described a broken
+clone as a sanctioned upgrade. It now reads BOTH `merge.as-built-log.driver` and
+`.name`, because the three config states are three different git outcomes and the
+first draft of this very fix got that wrong: reading only `.driver` cannot tell
+`.name`-without-`.driver` (the exit-128 `lacks command line` abort) from no
+config at all (an ordinary exit-1 content conflict), and it would have printed
+"exit 128" over the second — a new confident wrong sentence about git, inside the
+change whose subject is confident wrong sentences about git. Each state now has
+its own message and its own test.
+
+Two test-quality fixes with no behaviour change: `AS_BUILT_CANDIDATES` was
+asserted only to contain the substring `BUILT`, which is satisfied by any three
+of the four and by names that are not logs, and is now pinned as the exact set;
+and every fixture commit pins `commit.gpgsign=false`, so the suite does not reach
+for a signing key on a maintainer's machine or block on a pinentry prompt in a
+run that is supposed to be unattended.
+
+Eleven mutations were run with the unmutated suite green as the control, each
+reverting exactly one property above: `|| true` on the workflow step, the
+`GIT_NO_REPLACE_OBJECTS` pin, the probe's case pin, `presentAsBuiltLogs` failing
+open, governedness back to disk-only, the installer's `.name`-first ordering with
+unchecked writes, the half-install note reading only `.driver`, the wildcard
+override back to "the LAST wins", a dropped `AS_BUILT_CANDIDATES` entry, and the
+`-merge` diagnostic losing the macro spelling. Ten turn a test red. The eleventh
+is the deleted verification block above, and its deletion is the finding.
+
+The version acceptance test asserted `git version 2.` under a docblock claiming
+it existed "because 'measured on 2.50.1' stops being a true statement the moment
+the runner's git differs" — it accepts every git of the decade, so the promise
+and the assertion were different claims. Pinning the number is the wrong repair:
+it would red this suite on the Linux runner for a reason unrelated to the
+property, and a version string is not a behaviour anyway. The guarantee comes
+from the six real merges in the same file, which re-measure every claim on
+whatever git is present. `2.50.1` in the docblocks is provenance; the merges are
+what keep it true.
+## 2026-08-16 — the refusal warning was invisible to the instance it protects
+
+Landed via PR #322.
+
+The scope direction guard shipped in #273 works. Its only observable signal did
+not reach anybody.
+
+When an anonymous process boots on the bare fallback handle and the guard
+refuses to migrate the live instance's rows, the refusal was journalled with
+`project_slug` = the FALLBACK handle. Three facts make that row unreadable
+forever, and each was verified in the code rather than reasoned about:
+the refusal deliberately returns before the ledger write
+(`migrations/scope-rekey.ts:641-657`), so the next explicit boot takes the
+ledger-agrees fast path (`:596-609`) and never sweeps `system_events` back even
+though it is a swept table (`:165`); and the owner's diagnostics feed is
+strictly `WHERE project_slug = ?` by design
+(`persistence/system-events.ts:337-349`, via
+`gateway/diagnostics/instance-sources.ts:104`). So the guard's one signal was
+scoped to a handle no owner ever opens a page under — the same silent-failure
+class the guard exists to close.
+
+THE DECISION, written down because the row genuinely has several candidate
+scopes and the owner can only ever read one: a refusal belongs to the handle the
+OWNER READS UNDER — the `instance_scope_ledger`'s handle (authoritative: it
+names a handle THIS database has committed to inside the re-key transaction, so
+someone can open its feed — note that a fallback boot with nothing stranded also
+seeds it, so "explicit boots only" is not a property this rests on) or, absent a
+ledger, `onboarding_state`'s. Never the
+anonymous handle that attempted the move, and never a FROZEN credential handle.
+The attempting handle is preserved in `payload.attempted_by_slug`. Applied to
+BOTH reconcilers: `instance_scope_rekey_refused` and `credential_scope_orphaned`
+when it carries `refused_direction` (`gateway/index.ts`, via
+`gateway/scope-refusal-journal.ts`). The ordinary ambiguous credential orphan is
+unchanged — there the boot handle already IS the explicit live handle.
+
+The "never a FROZEN credential handle" clause is the second version of this fix,
+and the first version was wrong in a way worth recording. It journalled the
+credential refusal under `credentialScope.stale_handles`, reasoning that those
+are the handles whose rows were at stake. They are — but they are the handles
+frozen into `secrets.project_slug` / `project_credentials.owner_slug` at write
+time (`auth/secrets-store.ts`), and the reconciler's entire premise is that the
+frozen handle has DIVERGED from the live one. So on the shape the card is
+actually about — a rename — the warning moved from one unreadable scope to
+another. It read as fixed because the regression seeded the same string for both
+sides. `gateway/__tests__/boot-refusal-scope.test.ts` now uses the divergent
+shape, and asserts BOTH unreadable scopes empty as the control.
+
+Two more properties the journal has to hold, both in
+`gateway/scope-refusal-journal.ts` with the reasoning:
+
+- NARROWED PER SCOPE. One row per readable scope, each naming its own handle;
+  every other handle is a COUNT, never a name. A per-handle fan-out of the full
+  multi-handle payload puts one scope's keys and volumes into another scope's
+  instance-scoped feed — the cross-scope disclosure `listRecentForScope`'s own
+  docblock exists to prevent.
+- EDGE-TRIGGERED. `SystemEventsStore.listVisibleForScopeAndName` +
+  `shouldJournal`
+  skip a repeat the owner can still SEE, because his window is the newest 50 events and
+  `system_events` has no retention sweep: two unconditional rows per anonymous
+  boot is a way for this warning to evict every other degrade event out of the
+  report it is trying to appear in.
+- AND THE PAYLOAD DESCRIBES THE CONDITION, NEVER ITS VOLUME. The trigger above is
+  only as stable as the payload it hashes, so a field that moves with ordinary
+  owner activity re-arms it on every boot and restores the starvation in full.
+  `instance_scope_rekey_refused` carried `stranded_rows` — a `COUNT(*)` over ~40
+  swept tables including `tasks` and `reminders` — and did exactly that:
+  measured on this branch, four anonymous boots with one task created between
+  each wrote FOUR rows, with the count climbing 1 → 3 → 4. Every dedup test in
+  the suite passed anyway, because each boots against a database nobody is
+  using, which freezes the payload by construction. The same field was also
+  false: once the row moved to the LIVE handle, `stranded_slug` was the reader's
+  OWN handle and `stranded_rows` his own healthy data, which the guard had just
+  protected — rendered in his feed as a worsening data-loss condition. Both are
+  gone; the payload is now `targeted_slug` / `other_targeted_handles` /
+  `attempted_by_slug`, and the row count lives in the (unbounded) log lines.
+  `gateway/__tests__/boot-refusal-scope.test.ts` "ORDINARY OWNER ACTIVITY
+  between boots" is the regression, with the credential feed as the in-run
+  control.
+
+And one thing measurement caught that reasoning did not: the refusal's row count
+must EXCLUDE `system_events`. `system_events` is a swept table, so the count of
+"rows at stake" under the live handle included the refusal rows THEMSELVES —
+1 → 3 → 4 across three identical boots. That is a wrong number wherever it is
+reported. The exclusion is in `countStrandedRows` (`migrations/scope-rekey.ts`);
+the sweep still carries `system_events` forward on a legitimate rename.
+
+Also fixed here: a BLANK `NEUTRON_INSTANCE_SLUG`. `NEUTRON_INSTANCE_SLUG=` (or
+whitespace) reached the resolver as `''`, not `undefined`, and the old
+`!== undefined` test called that CONFIGURED — so the direction guard, which arms
+only on `'fallback'`, stayed disarmed and the boot re-keyed every owner row onto
+the handle `''`, a scope no owner ever passes to `listRecentForScope`. A deploy
+that failed to set the slug is exactly "nobody told me who I am": blank now
+resolves to `'fallback'`, and a padded value is trimmed, as the `.url_slug`
+branch always did.
+
+Also closed: the provenance boundary had no direct coverage.
+`resolveOwnerSlugSourceFromConfig`'s `source` field
+(`gateway/index.ts:205-218`) is the highest-precedence input to both guards,
+and nothing asserted it — every existing test asserted the SLUG, which is the
+same string whatever the provenance. `gateway/__tests__/owner-slug-provenance
+.test.ts` pins the matrix over all three inputs plus a file-driven forward
+re-key through a real `boot()`, because getting `'file'` wrong is the exact
+inverse of the guard's purpose: a real rename would be refused and the owner's
+old-scope rows stranded.
+
+MEASURED, not assumed. The review card predicted `source: 'file'` → `'fallback'`
+survives the suite; it does not — `gateway/__tests__/boot-credential-scope.test
+.ts` (a3) already kills it, and so does `'env'` → `'fallback'` on
+`open/__tests__/open-scope-rekey-boot.test.ts`. The mutant that DID survive all
+38 existing tests is `'file'` → `'env'`, and the new file kills it 3 ways.
+
+FIVE WAYS THE FIRST TWO ROUNDS OF THIS FIX WERE THEMSELVES WRONG, each found by
+review and each recorded because the shape repeats. Every one of them was a rule
+that held where it was watched and broke where it was not:
+
+- THE COINCIDENCE IS NOT THE ANONYMITY. Round 2 excluded the attempting handle
+  from the readable scopes by string equality. But the guard arms on the
+  SOURCE of the slug, not on its value — an owner who sets
+  `NEUTRON_INSTANCE_SLUG=dev` is configured, his ledger says `dev`, and `dev` is
+  the only string he ever passes to `listRecentForScope`. Excluding it sent the
+  row to the frozen credential handle instead: unreadable, i.e. worse than main
+  on this fix's own axis. Readability now comes from the EVIDENCE (ledger, else
+  `onboarding_state`), never from a string comparison with the booting process.
+- SUPPRESSION MEASURED AGAINST HISTORY IS SUPPRESSION FOREVER. The edge trigger
+  compared against `latestForScopeAndName` — `LIMIT 1` over the whole table —
+  while the owner sees the newest 50 rows and `system_events` has no retention
+  sweep. Refusal, 50 unrelated events, refusal again: the dedup matched a row
+  that had rotated off the page and skipped the write, permanently and
+  silently. It is now `listVisibleForScopeAndName(scope, event, 50)` —
+  bounded to the same window the feed returns, sharing
+  `DEFAULT_MAX_RECENT_EVENTS` with the reader rather than restating it.
+- A FALLBACK NOBODY EXERCISES IS A RULE THAT DOES NOT HOLD. "Never a frozen
+  credential handle" was in the invariant while the last-resort branch of
+  `planCredentialRefusalRows` keyed rows to exactly those handles — reachable on
+  a fallback boot with no instance anchors. The parameter is gone; the floor is
+  the attempting handle, which is what shipped before this fix and can only be
+  as bad as that.
+- A BEST-EFFORT READ THAT CAN THROW IS A BOOT ABORT. The dedup read ran
+  synchronously on the boot path, before `bootFailureCleanup` exists, and
+  `rowToPersisted` parses `payload_json` with `onCorrupt: 'throw'`. One corrupt
+  historical row would have killed the instance to save a duplicate row.
+  `shouldJournal` owns the try/catch: a failed read means "assume the owner
+  cannot see it" — write.
+- EDGE-TRIGGERING ONE BRANCH TRIGGERS NEITHER. The ordinary ambiguous credential
+  orphan wrote unconditionally under the SAME `(scope, event_name)` key the
+  refused branch dedups on, so a box alternating between the two shapes wrote a
+  row every boot — the exact starvation this fix claims to close. Both branches
+  now trigger.
+
+Two smaller ones from the same review, both "a name is not a contract" in
+miniature: `canonical()` used `JSON.stringify`'s array replacer, which
+allowlists keys RECURSIVELY, so two payloads differing only inside a nested
+object compared EQUAL (the ordinary orphan payload already nests); and the
+narrowed row trimmed the SCOPE but looked its counts up under the UNTRIMMED key,
+so a legacy padded handle reported the reader zero rows of his own and counted
+them as somebody else's. And one layer out: `neutron doctor` resolved its scope
+from the env var verbatim and never read `.url_slug`, so on a padded value or
+any renamed box it queried a scope no row is written under — the same
+invisibility, in the reader instead of the writer. It now mirrors boot's
+precedence exactly.
+
+The gap this branch recorded as OPEN is now CLOSED, by #320, which merged while
+this PR was parked. `migrateOrphanedCredentialScope` — the EXPLICIT repair the
+integrations surface offers — took `(db, boot_handle)` with no provenance
+argument, so an anonymous process reaching that surface was not refused and the
+boot guard was bypassable in one step. It now takes a REQUIRED provenance
+argument and refuses on `slug_is_fallback`
+(`auth/credential-scope-reconcile.ts:509-539`). Required rather than
+optional-defaulting-to-false so the next surface cannot reintroduce the gap by
+omission: forgetting it is a type error. INVARIANTS #116(a) therefore goes back
+to reading "on any surface", and now names all THREE guards rather than two —
+the honest coverage note this branch added is deleted because it has stopped
+being true, which is the only reason a note like that should ever be deleted.
+
+Two further things this branch had to give back to #320 on the merge, both
+cases of the same shape — code hand-copied here while the real fix was landing
+elsewhere. The slug resolver: this branch carried its own corrected copy of
+`resolveOwnerSlugSourceFromConfig` on `gateway/index.ts` plus a second
+hand-rolled precedence chain in `open/owner-identity.ts`. #320 moved the one
+resolver down to `config/index.ts` (the entry module was in the Open composer's
+import graph, which `gateway/composer-contract.ts` forbids) and made both other
+call sites delegate. Both copies here are deleted; `open/owner-identity.ts` is
+now byte-identical to main. A third copy of "who am I" is exactly the defect
+these two files spent three rounds fixing, so re-adding one to preserve a merge
+would have been the joke telling itself.
+
+And the boot path stopped being able to abort on a diagnostic read.
+`resolveOwnerReadableScopes` runs from `boot()` at a point where
+`bootFailureCleanup` does not exist yet — the sink is registered at
+`gateway/index.ts:327` and the cleanup is declared at `:664` — so a throw out of
+its two SELECTs escaped `boot()` with the project DB open and this boot's
+`SystemEventsStore` still on the ambient sink stack, the half-open boot the
+hand-rolled guards at `:310` and `:360` each exist to prevent. It is now called
+through `readOwnerReadableScopes`, which catches and returns `[]`; `[]` routes
+to the documented FLOOR (the attempting handle), so the degraded outcome is
+exactly what shipped before this module existed. Same trade `shouldJournal`
+already makes one function away, and for the same reason: losing the narrowing
+costs a row of precision, losing the boot costs the instance.
+
+A later round found the edge trigger was still starvable, by a route neither
+this branch nor the review that added the trigger had a test for. The trigger
+compared the payload against the NEWEST row for its `(scope, event_name)` pair —
+and `credential_scope_orphaned` is written in TWO payload shapes under that one
+key: the direction refusal (an anonymous boot) and the ordinary ambiguous census
+(an explicit boot). A unit that intermittently loses its slug env alternates
+between them, so each shape saw the OTHER as the newest row and every boot wrote
+— unbounded, into a window that is 50 rows deep with no retention sweep behind
+it. Six alternating boots produced six rows; the same six now produce two.
+Making both branches edge-trigger, which was the previous round's fix, could not
+close it, because the hole was in the COMPARISON rather than in the coverage.
+`persistence/system-events.ts` `latestVisibleForScopeAndName` is therefore
+`listVisibleForScopeAndName` — it returns the matching rows inside the window
+instead of the newest one — and `isNewJournalState` asks whether this payload is
+already ANYWHERE on the page the owner is looking at. That is also the sentence
+the trigger always meant, it generalises to any third shape added later, and it
+keeps the window bound that makes a rotated-out row new information again.
+
+And the EXPLICIT owner-driven migration was journalling its refusal under the
+handle that asked (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`).
+That surface refuses ONLY when the handle is the anonymous fallback — that is
+the guard's whole condition — so the audit row for the one security-relevant
+outcome landed in exactly the unreadable place the boot half of this entry
+exists to fix, on a surface INVARIANTS #116 already claimed ("on ANY surface").
+It now resolves its scope through the same planner boot uses, with the same
+narrowing and the same floor, and keeps its two deliberate differences: it is
+not deduped, because a repeated owner ATTEMPT is what an audit trail is for, and
+it carries `surface: 'explicit_migrate'` so one query finds both rows and can
+still tell them apart. The invariant's opening sentence was absolute where the
+code had two lawful paths to the attempting handle; it now names that floor in
+the first sentence, because a claim of coverage the code does not have is the
+sentence the next reviewer trusts instead of reading the code.
 ## 2026-08-16 — the review-readiness gate stops failing open
 
 Three defects in the gate that resolves which status checks a PR's base branch
@@ -1343,151 +1524,281 @@ can still only ever disable the fast-fail.
 Recorded because the review lane that raised the first of these had itself timed
 out on the previous round: a mandatory reviewer that did not RUN is not a pass,
 and the finding it was carrying turned out to be real.
-## 2026-08-16 — Forge checkpoints at artifact time
+## 2026-08-16 — the staged-marker gate catches the bare separator
 
-Forge and fix-round contracts now write their existing semantic checkpoint through
-`checkpoint.sh` immediately after the commit and reviewer diff land. The command
-records the branch, an empty findings set, and the real `HEAD` resolved by the
-agent's shell; the post-return checkpoint remains the authoritative re-stamp.
-This closes the measured 31-minute blind window in run 6f794290, where finished
-artifacts existed locally while the run row still looked dead. Dry workflows with
-no database path or run id omit the durability step entirely.
+The publish-path staged-byte scan (`stagedMarkerFiles` in `trident/orchestrator.ts`) matched
+`<<<<<<<` and `>>>>>>>` and nothing else. A partially hand-resolved conflict — both sides kept,
+the two outer markers deleted, the `=======` between them left behind — read as CLEAN to the
+gate and to `--diff-filter=U` alike, so it got committed and force-pushed to the shared branch.
+That is the residue MOST likely to survive a sloppy resolution, precisely because the outer
+markers are the visually obvious lines and the separator is not. The gate that exists to stop
+conflict text reaching a shared branch was blind to the one form of conflict text a human is
+most likely to leave.
 
-## 2026-08-16 — the guard that proved the gate runs accepted `|| true`
+The rule now: an ADDED line that is EXACTLY a run of `=` — `CONFLICT_SEPARATOR_ADDED =
+/^\+={4,}\r?$/` — is residue. Exact, because git's separator never carries a label, unlike the
+outer markers which are followed by a branch name; anything suffixed (`=======trailing`,
+`const banner = "======="`) or indented is legitimate content and does not match. Four is a
+fail-closed false-positive boundary, not git's minimum: smaller configured markers remain a known
+tradeoff, while wider markers are caught. `\r?` covers a CRLF file. For `.md`/`.markdown`, the
+exemption requires the actual Setext shape in the resulting file: a nonblank title immediately
+before the underline and a blank line or EOF immediately after it. This admits both an underline
+edit and a newly added heading, while a separator followed directly by surviving conflict-side
+content is refused. A conflict that happens to form that exact Markdown shape is inherently
+indistinguishable from legitimate Setext using staged bytes alone. Each genuinely-unmerged
+candidate is scanned separately with a literal pathspec, so path quoting and glob characters
+cannot misattribute it.
 
-Every fix below closes a route to the SAME outcome — the gate prints ✅, or CI
-prints a green check, while the property is violated. Two were reproduced
-independently by two reviewers against the live branch before any of this was
-written.
+The diff3 base marker `|||||||` remains unmatched; a repo with
+`merge.conflictStyle=diff3` can leave the same class of residue, and catching it (same exact-line
+plus width rule, with its own real-git proof under diff3) is a follow-up card. The scan already
+runs only over paths that were genuinely unmerged in this replay, which bounds false positives
+further. Proven both ways: stub-host tests in `trident/orchestrator.test.ts` (bare separator in a
+code file refused; setext underline in a resolved `.md` publishes; suffixed and indented runs
+publish) and a real-git proof in `trident/publish-rebase-realgit.test.ts` where the resolver
+performs exactly the sloppy resolution and the branch ref never moves.
 
-**The workflow guard was a string search wearing a docblock.**
-`scripts/ci/ci-workflow.test.ts` asserted the gate step "runs, unconditionally,
-with its exit code honoured" and checked only for `if:` and
-`continue-on-error:`. Appending `|| true` to the `- run:` line satisfies both,
-leaves the step present and running, and turns the check green whatever the gate
-decides. Reproduced against the branch: the mutation landed, the suite stayed
-0-fail, and the deleted-step control still went red — so the suite proved a
-string was in a file. `whyNotGating` now requires the gate to be the WHOLE shell
-command (nothing before it, no `|`, `;` or `&` after it), and six shell bypasses
-join the six YAML ones as permanent mutations: `|| true`, `|| :`, `; true`, a
-pipe, a trailing `&`, and a `set +e` prefix.
+## 2026-08-16 — the union gate asks git instead of re-deriving it
 
-**The installer could report success over the state it calls fatal.**
-`scripts/install-merge-drivers.sh` runs `set -uo pipefail` with no `-e`, and
-neither `git config` call nor the attributes append was checked, so a failure
-fell through to `echo "merge drivers: installed"` and exit 0. Measured here on
-git 2.50.1 (Apple Git-155), same repo, two branches conflicting on a path bound
-to `merge=as-built-log`: `.name` set with `.driver` unset is
-`fatal: custom merge driver as-built-log lacks command line.` (exit 128), and
-`.driver` set with `.name` unset merges fine at exit 0. That asymmetry is the
-fix, not just the checks — `.driver` is now written FIRST, so an interruption
-between the two leaves a clone that merges rather than one that cannot. Every
-step is checked and a failure rolls the pair back and exits 1. A first draft
-also re-read both halves before printing success; mutating that block away left
-the whole suite green, because every reachable failure is already caught at the
-write, so it is deleted rather than kept — the same call, for the same reason, as
-the empty-`--template=` dance dropped from the attributes probe one round ago.
-A test makes `.git` read-only (the config
-LOCK file is what needs the directory, not the config file's own mode: measured
-`could not lock config file .git/config: Permission denied`, exit 255) and
-asserts the installer fails loudly leaving neither key set.
+#315 added a CI gate asserting this log carries `merge=union`, and decided that
+by PARSING `.gitattributes` and taking the FIRST exact-path `merge=` assignment.
+git takes the LAST one, and a later WILDCARD beats an earlier exact path.
+Measured here on git 2.50.1: a file containing `docs/AS_BUILT.md merge=union`
+followed by `docs/AS_BUILT.md merge=as-built-log` resolves in git to
+`as-built-log`, and the shipped gate printed `✅ … (already-union)` and exited 0
+over it. Same with a following `docs/*.md merge=binary`. So the floor this gate
+exists to hold could be removed with the gate reporting green — the regression
+it was written to prevent, wearing its own ✅.
 
-**A local `refs/replace/*` forged the committed floor.** Object reads honour
-replace refs, so `git show HEAD:.gitattributes` can return a blob the commit does
-not contain. Measured: a repo whose committed attributes file is
-`# broken, no union rule`, with that blob replaced by a healthy one, answers
-`docs/AS_BUILT.md merge=union` to `git show` — while `GIT_NO_REPLACE_OBJECTS=1`
-and a fresh `git clone` both return the broken file. `clone` does not carry
-`refs/replace/*` and neither does `actions/checkout`, so this is a reading that
-travels nowhere, the same class as a machine-global attributes file.
-`GIT_NO_REPLACE_OBJECTS=1` is now part of `CHECK_ATTR_ISOLATION_ENV`, with the
-clone as the control.
+The verdict now comes from `git check-attr`, asked in a THROWAWAY repository
+seeded with EVERY tracked attributes file that can reach the log. The isolation
+is the design, not tidiness: the entry-aware driver binds itself in the untracked
+`$GIT_COMMON_DIR/info/attributes`, which OUTRANKS the tracked file, so a machine
+that ran `scripts/install-merge-drivers.sh` answers `as-built-log` for a repo
+whose tracked line is gone. Asking the local clone would pass that repo. The
+gate now asks two separate questions — is the FLOOR every fresh clone gets
+intact (decides), and does THIS clone additionally carry the opt-in upgrade
+(printed, never decisive).
 
-**The probe inherited case-insensitivity from `$TMPDIR`.** `git init` probes the
-filesystem and writes `core.ignorecase = true` on macOS, so the throwaway probe
-matched a wrong-case rule that no case-sensitive clone honours. Measured:
-`docs/as_built.md merge=union` resolves `union` for `docs/AS_BUILT.md` by
-default and `unspecified` under `-c core.ignorecase=false`. The pin is applied to
-the PROBE only and deliberately not to `localEffectiveMergeDrivers`, which
-reports what this clone really does and must not describe a repository the
-developer is not using. The test reads `core.ignorecase` rather than asserting
-it, because on a case-sensitive runner there is no poison to defeat and
-demanding one would red CI for the platform being right.
+Seeding the probe with the ROOT `.gitattributes` alone was the same bug one level
+up, and it survived the first fix. git consults a `.gitattributes` in the path's
+own directory and every ancestor, deeper beating shallower. Measured on git
+2.50.1: a root `docs/AS_BUILT.md merge=union` plus a tracked `docs/.gitattributes`
+saying `AS_BUILT.md merge=binary` resolves to `binary` — in the repo AND in a
+fresh clone of it, verified by cloning — while a root-only probe answers `union`
+and the gate prints ✅. The probe now collects `.gitattributes` for the path's
+directory and each ancestor (a bounded, provably complete set), reads them from
+the COMMITTED TREE rather than the working tree so an uncommitted or untracked
+file cannot manufacture a floor that reaches no clone, and reproduces the
+directory layout in the scratch repo so git applies its own precedence.
 
-**A committed-but-not-checked-out `SPEC.md` turned the whole gate off.**
-Governedness was a disk read — the previous entry says "`SPEC.md` stays a disk
-read on purpose", and that is now wrong: under a sparse checkout the spec is in
-the tree and not on disk, and the gate exited 0 with "not a governed repo" over a
-floor nothing had looked at. It is now the UNION of disk and the committed tree,
-since each alone fails silently in a different direction (tree alone would drop
-the first commit of a new repo, and every fixture in the gate's own tests).
+Reading a tree is right only at the repository TOP LEVEL, and getting that
+wrong reintroduces the same bug the fix was for. A tree path is always spelled
+from the top level, so for a governed tree nested inside a larger repo
+`git show HEAD:docs/.gitattributes` returns the OUTER repo's file — a confident
+answer to a different question. The check compares `rev-parse --show-toplevel`
+against the directory being asked about, through `realpathSync` on both sides,
+because macOS hands out `/var/...` paths that resolve to `/private/var/...` and a
+raw string compare would call the top level "nested" and fall back to disk for
+every temp-dir fixture. Nested trees read from disk.
 
-**`presentAsBuiltLogs` was the module's one fail-OPEN path.** Its
-`catch { return [] }` reached the caller as "no append-only build log found —
-nothing to enforce" and exit 0, so an unreadable governed repo read as a clean
-bill of health. It now throws, and the test proves the read really is broken
-(`git ls-files` exit 128) before asserting the throw.
+The isolation itself was asserted rather than real. `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM` and `GIT_ATTR_NOSYSTEM` do not close the door: measured on
+git 2.50.1 against an attributes-free repo whose control answer is `unspecified`,
+each of `GIT_CONFIG_PARAMETERS` (what `git -c` exports to every child, hook and
+alias), `GIT_CONFIG_COUNT`+`GIT_CONFIG_KEY_n`/`VALUE_n`, `GIT_DIR` pointing at
+another repository, and `GIT_ATTR_SOURCE=HEAD` steered the answer straight past
+the pins. The CI step runs from a clean runner env, but this repo already runs
+`scripts/ci` gates from git hooks, where git has exported `GIT_DIR` itself, and
+the failure mode is a silent PASS. Those variables plus the numbered config keys
+are now DELETED from the probe env — deleted, not set to `undefined`, since
+`GIT_DIR=undefined` is a path. Each has a test with an unpinned control proving
+the poison lands without the fix, alongside the pre-existing
+`core.attributesFile` and `init.templateDir` controls.
 
-Three diagnostics said things about git that are not true. `unset` was reported
-as "your `<path> -merge` rule", but the built-in `binary` MACRO expands to
-`-diff -merge -text` and produces the same `unset` from a line with no `merge`
-token in it — measured — so both spellings are now named. Duplicate exact rules
-beaten by a later WILDCARD were listed under "the LAST wins", pointing the reader
-at a line whose edit changes nothing; that heading is now used only when the last
-collected rule is what git actually resolved. And the local-clone note credited
-`scripts/install-merge-drivers.sh` for any overlay naming its driver without
-checking whether the driver is configured at all — i.e. it described a broken
-clone as a sanctioned upgrade. It now reads BOTH `merge.as-built-log.driver` and
-`.name`, because the three config states are three different git outcomes and the
-first draft of this very fix got that wrong: reading only `.driver` cannot tell
-`.name`-without-`.driver` (the exit-128 `lacks command line` abort) from no
-config at all (an ordinary exit-1 content conflict), and it would have printed
-"exit 128" over the second — a new confident wrong sentence about git, inside the
-change whose subject is confident wrong sentences about git. Each state now has
-its own message and its own test.
+The gate's stated rationale was also wrong about git and is corrected to what
+was measured. It claimed a custom driver named in a tracked file is fatal in
+every fresh clone (`lacks command line`, exit 128). It is not: with NO
+`merge.<name>.*` config, git falls back to the ordinary text merge — exit 1,
+`CONFLICT (content)`, markers in the file. The exit-128 abort needs
+`merge.<name>.name` defined WITHOUT `.driver`; with both keys set the driver
+runs and exits 0. All three states measured with real two-branch merges. A
+custom driver in the tracked file is still rejected, because it is not union,
+but the remediation text now describes the symptom a reader will actually meet.
 
-Two test-quality fixes with no behaviour change: `AS_BUILT_CANDIDATES` was
-asserted only to contain the substring `BUILT`, which is satisfied by any three
-of the four and by names that are not logs, and is now pinned as the exact set;
-and every fixture commit pins `commit.gpgsign=false`, so the suite does not reach
-for a signing key on a maintainer's machine or block on a pinentry prompt in a
-run that is supposed to be unattended.
+The same false claim was load-bearing prose in three more places, all corrected
+to the measurement: `scripts/install-merge-drivers.sh`,
+`scripts/git/as-built-merge-driver.ts` and `CONTRIBUTING.md` each justified
+keeping the driver's binding untracked by saying a tracked one would hard-fail
+every clone. The conclusion is right and the reason was not. The true reason is
+better: `docs/AS_BUILT.md merge=union` IS tracked and is the floor, so a
+committed `merge=as-built-log` would OVERRIDE that floor with a driver nobody
+has configured and quietly return the log to conflicting — precisely the
+regression this gate now catches.
 
-Eleven mutations were run with the unmutated suite green as the control, each
-reverting exactly one property above: `|| true` on the workflow step, the
-`GIT_NO_REPLACE_OBJECTS` pin, the probe's case pin, `presentAsBuiltLogs` failing
-open, governedness back to disk-only, the installer's `.name`-first ordering with
-unchecked writes, the half-install note reading only `.driver`, the wildcard
-override back to "the LAST wins", a dropped `AS_BUILT_CANDIDATES` entry, and the
-`-merge` diagnostic losing the macro spelling. Ten turn a test red. The eleventh
-is the deleted verification block above, and its deletion is the finding.
+`git check-attr` also answers `set` for a bare `<path> merge` rule and `unset`
+for `<path> -merge`. Neither is a driver name, and both were being reported as
+"a CUSTOM driver" with a remediation naming `merge.set.*` — a config key git has
+never had. Both are now described as the states they are, with what git measurably
+does: `set` is the ordinary text merge (exit 1, markers); `unset` makes git treat
+the file as BINARY (`Cannot merge binary files`, ours kept whole, the other
+side's entries absent from the working file). Both still fail the gate.
 
-The version acceptance test asserted `git version 2.` under a docblock claiming
-it existed "because 'measured on 2.50.1' stops being a true statement the moment
-the runner's git differs" — it accepts every git of the decade, so the promise
-and the assertion were different claims. Pinning the number is the wrong repair:
-it would red this suite on the Linux runner for a reason unrelated to the
-property, and a version string is not a behaviour anyway. The guarantee comes
-from the six real merges in the same file, which re-measure every claim on
-whatever git is present. `2.50.1` in the docblocks is provenance; the merges are
-what keep it true.
-## 2026-08-16 — publish replay heals shallow checkouts at the boundary
+The informational local-clone note used to attribute ANY divergence to "an
+untracked overlay", named whether or not that file existed — reassurance at the
+moment something unaccounted-for is rewriting a developer's merges. It now reads
+the real `$GIT_COMMON_DIR/info/attributes` and attributes the divergence by
+ASKING GIT: the probe is re-run with that overlay layered on, and the overlay is
+credited only for paths whose local answer it actually reproduces. A substring
+search would have mis-reported a `docs/*.md` glob binding as unexplained on every
+machine running the installer; that case has a test. Anything the overlay does
+not explain is now reported as unexplained, pointing at the usual cause (an
+uncommitted `.gitattributes` edit) rather than at the installer.
 
-`rebaseOntoObservedBase` now probes checkout depth before even observing the remote base and
-unshallows on use. This is the durable boundary: an install-time repair cannot reach hand-made
-clones, which produced both 2026-08-15 incidents. A failed heal stops before replay and reports
-the measured depth, shallow boundary, checkout path, and fetch failure.
+Two more things this turned up. The gate had NO workflow step — it ran nowhere,
+in any repository, since it merged; it is now a step in the `layering` job, with
+a job-scoped test in `scripts/ci/ci-workflow.test.ts` anchored to a real `- run:`
+key so deleting the step fails CI (mutation-proved) rather than passing it.
+And another built-in driver on the log (`binary`, `text`) used to PASS, inherited
+from the fixer's "don't overwrite somebody's choice" rule: correct for a fixer,
+wrong for a gate, since neither one union-merges. A fixer must not overwrite; a
+gate must not bless.
 
-The old framing that the shared checkout *is* shallow is retired. Shallowness is a defect to
-repair; the load-bearing rule remains unchanged even with full history: never run `git rebase`
-in the shared working tree, because a failed operation there poisons every concurrent lane.
+The fixer itself is gone. `planUnionAttribute`/`ensureUnionAttribute` and their
+filesystem probe lost their last production caller when the gate stopped parsing,
+leaving ~150 lines of module and ~90 lines of test that only their own tests
+referenced, under a docblock describing them as live behaviour — the shape of
+thing that reads as a feature for months. The module is now only the question the
+gate asks.
 
-The real-git fixture now creates branch and main history before the depth-1 clone and proves the
-fork-point pre-image blob is absent. Its PR-path mutation check, with the heal call removed,
-failed with `repository lacks the necessary blob to perform 3-way merge`, followed by a direct
-`lib.txt: patch does not apply`; restoring the guard makes the same server-side fork-point patch
-replay cleanly.
+The isolation reached the last step in the chain and not the ones feeding it,
+which isolates nothing. `resolveTrackedMergeDrivers` ran under a scrubbed
+environment; `collectTrackedAttributesFiles` — which decides WHICH
+`.gitattributes` that probe is then shown — ran `git show :<path>` under the
+caller's. Measured end to end on git 2.50.1 against a governed repo whose union
+line had been deleted: with `GIT_DIR` pointed at a healthy repo, the gate exited
+0 and printed `✅ governed-repo attributes OK`; the same with `GIT_INDEX_FILE`
+plus `GIT_OBJECT_DIRECTORY`. The probe was answering correctly about a different
+repository. Every git read in the module now carries the same isolation, and the
+regression tests for it run the gate as a SUBPROCESS under each poisoned
+environment, because an in-process test hands the poison in explicitly and
+therefore cannot see an inherited one — dropping the `env` argument leaves the
+in-process tests green and turns the four subprocess ones red, which is exactly
+how this shipped.
 
+`GIT_CONFIG_GLOBAL=/dev/null` does not disable git's global attributes file,
+because that file has a DEFAULT needing no config at all:
+`$XDG_CONFIG_HOME/git/attributes`, falling back to `~/.config/git/attributes`.
+Measured: with `docs/AS_BUILT.md merge=union` in that file, the gate passed a
+repo tracking no such rule. Every `check-attr` now runs with
+`-c core.attributesFile=/dev/null`, which outranks every config FILE including a
+repo-local one — and that also closes an init TEMPLATE whose `config` sets
+`core.attributesFile`, measured as the same false PASS. A draft carried a second
+mechanism for the template case (an empty `--template=` plus stripping
+`GIT_TEMPLATE_DIR`); mutating both away left the whole suite green, so they were
+removed rather than kept as a defence no test can distinguish from its absence.
+
+Log PRESENCE was read from disk while the RULE reaching it was read from the
+index. An untracked `AS-BUILT.md` in a working tree therefore failed a repo whose
+tracked floor was perfect — loud rather than silent, but still the gate answering
+about a file that reaches no clone. Presence now comes from `git ls-files` at the
+top level, disk only outside a repository. `SPEC.md` stays a disk read on
+purpose: it decides only WHETHER to run.
+
+The workflow guard proved the step's TEXT was present, nothing more. Adding
+`if: false` or `continue-on-error: true` to that same step left it green while
+the gate decided nothing — one-word edits that read as configuration rather than
+as deletion, and the exact edits a red gate tempts someone into. The check is now
+a pure function over the YAML, and the four bypasses (delete the step, disable
+the step, swallow its exit code, disable the whole job) are run against it as
+tests, each asserting its mutation landed before asserting it was caught.
+
+Nothing performed a real merge. Every "measured on git 2.50.1" sentence in this
+subsystem — including the one that had already been WRONG in shipped remediation
+text — was prose checked once by hand. Six real two-branch merges now pin them:
+`union` keeps both entries at exit 0 with no markers; a custom driver with no
+config is an ordinary `CONFLICT (content)` at exit 1 WITH markers and explicitly
+not 128; `merge.<name>.name` without `.driver` is the exit-128
+`lacks command line`; a bare `merge` rule is the ordinary text merge; `-merge`
+and `merge=binary` both make git treat the file as binary, keeping ours whole and
+dropping the other side's entries with no marker to notice them by.
+
+The local-clone note credited ANY overlay rule to `install-merge-drivers.sh`, so
+a hand-written `merge=binary` in someone's `info/attributes` was reported as the
+sanctioned upgrade — a driver that DROPS the other side's entries, described as
+harmless, pointing at a script that never wrote it. The installer's driver name
+is now a single exported constant pinned by a test against the shell script's
+`DRIVER_NAME`, and only that driver earns the installer's name in the note.
+
+Tests went 41 → 108 across the three files. The two that carry the gate went
+17 → 78 (51 module + 27 gate); the workflow-wiring file went 24 → 30. All 17
+originals passed over every false success above, because they only ever
+exercised pure helpers and an in-memory probe — the bug was never in a helper, it
+was in deciding a verdict from one. There are now subprocess tests running the
+real gate against throwaway trees (union present, rule missing, no attributes
+file, another built-in, a custom driver, `merge`/`-merge` states, duplicate
+rules, overriding wildcard, SUBDIRECTORY override, an untracked subdirectory
+override that must NOT fail, an untracked LOG that must NOT fail, two logs,
+governed, ungoverned, an overlay over a broken floor, an overlay over an intact
+one, a glob overlay, a non-installer overlay, an unexplained divergence, and a
+broken floor under each of four poisoned environments with an intact floor as
+the positive control) plus real-`git check-attr` boundary tests and real merges,
+with clone-verified controls.
+
+The "checks EVERY log" test was itself vacuous: the candidate ordering made the
+first present log the broken one, so a gate checking only `present[0]` stayed
+green through it. The fixture now makes the FIRST log conformant and a LATER one
+broken, and that mutation now fails. Every safety property here was mutated with
+the unmutated suite green as the control — root-only attributes collection,
+isolation-strips-nothing, `present[0]`-only, set/unset-as-custom-driver,
+overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo, the
+collector inheriting the ambient environment, the collector reading an unscrubbed
+one, dropping the `core.attributesFile` argv pin, presence read from disk,
+crediting every overlay to the installer, and disabling the step-scope half of
+the workflow guard — and every one turns a test red. The workflow guard's own six
+bypasses live IN the test file as permanent mutations (delete the step, `if:` or
+`continue-on-error:` before the `run:` key and again after it, disable the whole
+job), each asserting its mutation landed before asserting it was caught.
+
+One mutation did NOT fail, and that is why the code it removed is absent from
+this change: deleting the empty-`--template=` dance left the entire suite green,
+the `-c core.attributesFile` pin having already covered it.
+
+Building the guard's pattern by escaping a constant into a `new RegExp` was
+itself a defect — an incomplete escape (`/` and `.` handled, `\` not), which
+CodeQL flags high as `js/incomplete-sanitization` and which had no reason to
+exist, since the thing being matched is a literal. It is a static regex for the
+line SHAPE plus a plain substring for the command.
+
+The last false PASS was one word wide. "Read from the index, because only that
+answers what a fresh clone gets" was written in the gate's own header and is
+false: the index also holds STAGED work, and staged work travels nowhere.
+Measured on git 2.50.1 against a repo whose committed `.gitattributes` reads
+`# the union line was deleted` with `docs/AS_BUILT.md merge=union` staged on top
+— `git clone` of it, then `check-attr` in the clone, answers `unspecified`,
+while the gate printed `✅ governed-repo attributes OK` and exited 0. Every read
+that decides the verdict now names the COMMITTED TREE: `git show HEAD:<path>`
+for the attributes, `git ls-tree -r HEAD` for which logs exist. Presence and rule
+must come from ONE source or they disagree in the other direction too — a
+staged-only `AS-BUILT.md` is listed by `ls-files` and absent from `ls-tree`, so
+reading the index for presence demands a floor for a file no clone has.
+
+The one case with no tree to read is an UNBORN HEAD, and it falls back to the
+index deliberately. `git rev-parse --verify --quiet HEAD` exits 1 in a freshly
+`init`ed repo and `ls-tree -r HEAD` there is `fatal: Not a valid object name
+HEAD`; refusing to answer would print "no append-only build log found" and exit 0
+over a repo whose first commit is about to ship a broken floor, which is a
+silent pass, and silent passes are the thing this gate keeps being fixed for.
+
+Three more mutations, each with its landing proved before the suite was run and
+the unmutated suite green as the control: reverting the attributes read to
+`git show :<path>` reds the staged-only reproduction and its mirror; reverting
+presence to `ls-files` reds the staged-only-log and unborn-HEAD cases; and
+returning `HEAD` for an unborn repo instead of the index reds all three unborn
+cases. The reproduction and its mirror are both there on purpose — a gate that
+also failed a developer mid-edit on a file every clone still resolves correctly
+would be strictness, not correctness, so the committed-floor-intact-with-a-
+staged-deletion case asserts exit 0, with a real `git clone` as its control.
 ## 2026-08-16 — the guard was on the automatic path only, so the explicit one still moved the rows
 
 A review of the merged #266 found it and the repro is two lines: seed a credential row
@@ -1786,247 +2097,6 @@ are not decorative. The positive control re-appends the first heading NOT alread
 duplicated: the scenario it models is a union merge doubling the newest entry, and
 re-appending an already-doubled heading takes it from two occurrences to three without
 changing the duplicate count at all.
-## 2026-08-16 — the union gate asks git instead of re-deriving it
-
-#315 added a CI gate asserting this log carries `merge=union`, and decided that
-by PARSING `.gitattributes` and taking the FIRST exact-path `merge=` assignment.
-git takes the LAST one, and a later WILDCARD beats an earlier exact path.
-Measured here on git 2.50.1: a file containing `docs/AS_BUILT.md merge=union`
-followed by `docs/AS_BUILT.md merge=as-built-log` resolves in git to
-`as-built-log`, and the shipped gate printed `✅ … (already-union)` and exited 0
-over it. Same with a following `docs/*.md merge=binary`. So the floor this gate
-exists to hold could be removed with the gate reporting green — the regression
-it was written to prevent, wearing its own ✅.
-
-The verdict now comes from `git check-attr`, asked in a THROWAWAY repository
-seeded with EVERY tracked attributes file that can reach the log. The isolation
-is the design, not tidiness: the entry-aware driver binds itself in the untracked
-`$GIT_COMMON_DIR/info/attributes`, which OUTRANKS the tracked file, so a machine
-that ran `scripts/install-merge-drivers.sh` answers `as-built-log` for a repo
-whose tracked line is gone. Asking the local clone would pass that repo. The
-gate now asks two separate questions — is the FLOOR every fresh clone gets
-intact (decides), and does THIS clone additionally carry the opt-in upgrade
-(printed, never decisive).
-
-Seeding the probe with the ROOT `.gitattributes` alone was the same bug one level
-up, and it survived the first fix. git consults a `.gitattributes` in the path's
-own directory and every ancestor, deeper beating shallower. Measured on git
-2.50.1: a root `docs/AS_BUILT.md merge=union` plus a tracked `docs/.gitattributes`
-saying `AS_BUILT.md merge=binary` resolves to `binary` — in the repo AND in a
-fresh clone of it, verified by cloning — while a root-only probe answers `union`
-and the gate prints ✅. The probe now collects `.gitattributes` for the path's
-directory and each ancestor (a bounded, provably complete set), reads them from
-the COMMITTED TREE rather than the working tree so an uncommitted or untracked
-file cannot manufacture a floor that reaches no clone, and reproduces the
-directory layout in the scratch repo so git applies its own precedence.
-
-Reading a tree is right only at the repository TOP LEVEL, and getting that
-wrong reintroduces the same bug the fix was for. A tree path is always spelled
-from the top level, so for a governed tree nested inside a larger repo
-`git show HEAD:docs/.gitattributes` returns the OUTER repo's file — a confident
-answer to a different question. The check compares `rev-parse --show-toplevel`
-against the directory being asked about, through `realpathSync` on both sides,
-because macOS hands out `/var/...` paths that resolve to `/private/var/...` and a
-raw string compare would call the top level "nested" and fall back to disk for
-every temp-dir fixture. Nested trees read from disk.
-
-The isolation itself was asserted rather than real. `GIT_CONFIG_GLOBAL`,
-`GIT_CONFIG_SYSTEM` and `GIT_ATTR_NOSYSTEM` do not close the door: measured on
-git 2.50.1 against an attributes-free repo whose control answer is `unspecified`,
-each of `GIT_CONFIG_PARAMETERS` (what `git -c` exports to every child, hook and
-alias), `GIT_CONFIG_COUNT`+`GIT_CONFIG_KEY_n`/`VALUE_n`, `GIT_DIR` pointing at
-another repository, and `GIT_ATTR_SOURCE=HEAD` steered the answer straight past
-the pins. The CI step runs from a clean runner env, but this repo already runs
-`scripts/ci` gates from git hooks, where git has exported `GIT_DIR` itself, and
-the failure mode is a silent PASS. Those variables plus the numbered config keys
-are now DELETED from the probe env — deleted, not set to `undefined`, since
-`GIT_DIR=undefined` is a path. Each has a test with an unpinned control proving
-the poison lands without the fix, alongside the pre-existing
-`core.attributesFile` and `init.templateDir` controls.
-
-The gate's stated rationale was also wrong about git and is corrected to what
-was measured. It claimed a custom driver named in a tracked file is fatal in
-every fresh clone (`lacks command line`, exit 128). It is not: with NO
-`merge.<name>.*` config, git falls back to the ordinary text merge — exit 1,
-`CONFLICT (content)`, markers in the file. The exit-128 abort needs
-`merge.<name>.name` defined WITHOUT `.driver`; with both keys set the driver
-runs and exits 0. All three states measured with real two-branch merges. A
-custom driver in the tracked file is still rejected, because it is not union,
-but the remediation text now describes the symptom a reader will actually meet.
-
-The same false claim was load-bearing prose in three more places, all corrected
-to the measurement: `scripts/install-merge-drivers.sh`,
-`scripts/git/as-built-merge-driver.ts` and `CONTRIBUTING.md` each justified
-keeping the driver's binding untracked by saying a tracked one would hard-fail
-every clone. The conclusion is right and the reason was not. The true reason is
-better: `docs/AS_BUILT.md merge=union` IS tracked and is the floor, so a
-committed `merge=as-built-log` would OVERRIDE that floor with a driver nobody
-has configured and quietly return the log to conflicting — precisely the
-regression this gate now catches.
-
-`git check-attr` also answers `set` for a bare `<path> merge` rule and `unset`
-for `<path> -merge`. Neither is a driver name, and both were being reported as
-"a CUSTOM driver" with a remediation naming `merge.set.*` — a config key git has
-never had. Both are now described as the states they are, with what git measurably
-does: `set` is the ordinary text merge (exit 1, markers); `unset` makes git treat
-the file as BINARY (`Cannot merge binary files`, ours kept whole, the other
-side's entries absent from the working file). Both still fail the gate.
-
-The informational local-clone note used to attribute ANY divergence to "an
-untracked overlay", named whether or not that file existed — reassurance at the
-moment something unaccounted-for is rewriting a developer's merges. It now reads
-the real `$GIT_COMMON_DIR/info/attributes` and attributes the divergence by
-ASKING GIT: the probe is re-run with that overlay layered on, and the overlay is
-credited only for paths whose local answer it actually reproduces. A substring
-search would have mis-reported a `docs/*.md` glob binding as unexplained on every
-machine running the installer; that case has a test. Anything the overlay does
-not explain is now reported as unexplained, pointing at the usual cause (an
-uncommitted `.gitattributes` edit) rather than at the installer.
-
-Two more things this turned up. The gate had NO workflow step — it ran nowhere,
-in any repository, since it merged; it is now a step in the `layering` job, with
-a job-scoped test in `scripts/ci/ci-workflow.test.ts` anchored to a real `- run:`
-key so deleting the step fails CI (mutation-proved) rather than passing it.
-And another built-in driver on the log (`binary`, `text`) used to PASS, inherited
-from the fixer's "don't overwrite somebody's choice" rule: correct for a fixer,
-wrong for a gate, since neither one union-merges. A fixer must not overwrite; a
-gate must not bless.
-
-The fixer itself is gone. `planUnionAttribute`/`ensureUnionAttribute` and their
-filesystem probe lost their last production caller when the gate stopped parsing,
-leaving ~150 lines of module and ~90 lines of test that only their own tests
-referenced, under a docblock describing them as live behaviour — the shape of
-thing that reads as a feature for months. The module is now only the question the
-gate asks.
-
-The isolation reached the last step in the chain and not the ones feeding it,
-which isolates nothing. `resolveTrackedMergeDrivers` ran under a scrubbed
-environment; `collectTrackedAttributesFiles` — which decides WHICH
-`.gitattributes` that probe is then shown — ran `git show :<path>` under the
-caller's. Measured end to end on git 2.50.1 against a governed repo whose union
-line had been deleted: with `GIT_DIR` pointed at a healthy repo, the gate exited
-0 and printed `✅ governed-repo attributes OK`; the same with `GIT_INDEX_FILE`
-plus `GIT_OBJECT_DIRECTORY`. The probe was answering correctly about a different
-repository. Every git read in the module now carries the same isolation, and the
-regression tests for it run the gate as a SUBPROCESS under each poisoned
-environment, because an in-process test hands the poison in explicitly and
-therefore cannot see an inherited one — dropping the `env` argument leaves the
-in-process tests green and turns the four subprocess ones red, which is exactly
-how this shipped.
-
-`GIT_CONFIG_GLOBAL=/dev/null` does not disable git's global attributes file,
-because that file has a DEFAULT needing no config at all:
-`$XDG_CONFIG_HOME/git/attributes`, falling back to `~/.config/git/attributes`.
-Measured: with `docs/AS_BUILT.md merge=union` in that file, the gate passed a
-repo tracking no such rule. Every `check-attr` now runs with
-`-c core.attributesFile=/dev/null`, which outranks every config FILE including a
-repo-local one — and that also closes an init TEMPLATE whose `config` sets
-`core.attributesFile`, measured as the same false PASS. A draft carried a second
-mechanism for the template case (an empty `--template=` plus stripping
-`GIT_TEMPLATE_DIR`); mutating both away left the whole suite green, so they were
-removed rather than kept as a defence no test can distinguish from its absence.
-
-Log PRESENCE was read from disk while the RULE reaching it was read from the
-index. An untracked `AS-BUILT.md` in a working tree therefore failed a repo whose
-tracked floor was perfect — loud rather than silent, but still the gate answering
-about a file that reaches no clone. Presence now comes from `git ls-files` at the
-top level, disk only outside a repository. `SPEC.md` stays a disk read on
-purpose: it decides only WHETHER to run.
-
-The workflow guard proved the step's TEXT was present, nothing more. Adding
-`if: false` or `continue-on-error: true` to that same step left it green while
-the gate decided nothing — one-word edits that read as configuration rather than
-as deletion, and the exact edits a red gate tempts someone into. The check is now
-a pure function over the YAML, and the four bypasses (delete the step, disable
-the step, swallow its exit code, disable the whole job) are run against it as
-tests, each asserting its mutation landed before asserting it was caught.
-
-Nothing performed a real merge. Every "measured on git 2.50.1" sentence in this
-subsystem — including the one that had already been WRONG in shipped remediation
-text — was prose checked once by hand. Six real two-branch merges now pin them:
-`union` keeps both entries at exit 0 with no markers; a custom driver with no
-config is an ordinary `CONFLICT (content)` at exit 1 WITH markers and explicitly
-not 128; `merge.<name>.name` without `.driver` is the exit-128
-`lacks command line`; a bare `merge` rule is the ordinary text merge; `-merge`
-and `merge=binary` both make git treat the file as binary, keeping ours whole and
-dropping the other side's entries with no marker to notice them by.
-
-The local-clone note credited ANY overlay rule to `install-merge-drivers.sh`, so
-a hand-written `merge=binary` in someone's `info/attributes` was reported as the
-sanctioned upgrade — a driver that DROPS the other side's entries, described as
-harmless, pointing at a script that never wrote it. The installer's driver name
-is now a single exported constant pinned by a test against the shell script's
-`DRIVER_NAME`, and only that driver earns the installer's name in the note.
-
-Tests went 41 → 108 across the three files. The two that carry the gate went
-17 → 78 (51 module + 27 gate); the workflow-wiring file went 24 → 30. All 17
-originals passed over every false success above, because they only ever
-exercised pure helpers and an in-memory probe — the bug was never in a helper, it
-was in deciding a verdict from one. There are now subprocess tests running the
-real gate against throwaway trees (union present, rule missing, no attributes
-file, another built-in, a custom driver, `merge`/`-merge` states, duplicate
-rules, overriding wildcard, SUBDIRECTORY override, an untracked subdirectory
-override that must NOT fail, an untracked LOG that must NOT fail, two logs,
-governed, ungoverned, an overlay over a broken floor, an overlay over an intact
-one, a glob overlay, a non-installer overlay, an unexplained divergence, and a
-broken floor under each of four poisoned environments with an intact floor as
-the positive control) plus real-`git check-attr` boundary tests and real merges,
-with clone-verified controls.
-
-The "checks EVERY log" test was itself vacuous: the candidate ordering made the
-first present log the broken one, so a gate checking only `present[0]` stayed
-green through it. The fixture now makes the FIRST log conformant and a LATER one
-broken, and that mutation now fails. Every safety property here was mutated with
-the unmutated suite green as the control — root-only attributes collection,
-isolation-strips-nothing, `present[0]`-only, set/unset-as-custom-driver,
-overlay-attributed-by-substring, top-level-guard-reverted-to-inside-a-repo, the
-collector inheriting the ambient environment, the collector reading an unscrubbed
-one, dropping the `core.attributesFile` argv pin, presence read from disk,
-crediting every overlay to the installer, and disabling the step-scope half of
-the workflow guard — and every one turns a test red. The workflow guard's own six
-bypasses live IN the test file as permanent mutations (delete the step, `if:` or
-`continue-on-error:` before the `run:` key and again after it, disable the whole
-job), each asserting its mutation landed before asserting it was caught.
-
-One mutation did NOT fail, and that is why the code it removed is absent from
-this change: deleting the empty-`--template=` dance left the entire suite green,
-the `-c core.attributesFile` pin having already covered it.
-
-Building the guard's pattern by escaping a constant into a `new RegExp` was
-itself a defect — an incomplete escape (`/` and `.` handled, `\` not), which
-CodeQL flags high as `js/incomplete-sanitization` and which had no reason to
-exist, since the thing being matched is a literal. It is a static regex for the
-line SHAPE plus a plain substring for the command.
-
-The last false PASS was one word wide. "Read from the index, because only that
-answers what a fresh clone gets" was written in the gate's own header and is
-false: the index also holds STAGED work, and staged work travels nowhere.
-Measured on git 2.50.1 against a repo whose committed `.gitattributes` reads
-`# the union line was deleted` with `docs/AS_BUILT.md merge=union` staged on top
-— `git clone` of it, then `check-attr` in the clone, answers `unspecified`,
-while the gate printed `✅ governed-repo attributes OK` and exited 0. Every read
-that decides the verdict now names the COMMITTED TREE: `git show HEAD:<path>`
-for the attributes, `git ls-tree -r HEAD` for which logs exist. Presence and rule
-must come from ONE source or they disagree in the other direction too — a
-staged-only `AS-BUILT.md` is listed by `ls-files` and absent from `ls-tree`, so
-reading the index for presence demands a floor for a file no clone has.
-
-The one case with no tree to read is an UNBORN HEAD, and it falls back to the
-index deliberately. `git rev-parse --verify --quiet HEAD` exits 1 in a freshly
-`init`ed repo and `ls-tree -r HEAD` there is `fatal: Not a valid object name
-HEAD`; refusing to answer would print "no append-only build log found" and exit 0
-over a repo whose first commit is about to ship a broken floor, which is a
-silent pass, and silent passes are the thing this gate keeps being fixed for.
-
-Three more mutations, each with its landing proved before the suite was run and
-the unmutated suite green as the control: reverting the attributes read to
-`git show :<path>` reds the staged-only reproduction and its mirror; reverting
-presence to `ls-files` reds the staged-only-log and unborn-HEAD cases; and
-returning `HEAD` for an unborn repo instead of the index reds all three unborn
-cases. The reproduction and its mirror are both there on purpose — a gate that
-also failed a developer mid-edit on a file every clone still resolves correctly
-would be strictness, not correctness, so the committed-floor-intact-with-a-
-staged-deletion case asserts exit 0, with a real `git clone` as its control.
 ## 2026-08-16 — dead Trident launchers are detected externally in seconds
 
 Trident now polls the recorded launcher generation every 15 seconds in the supervised
@@ -2103,40 +2173,6 @@ and turns it red with the production error. The parser round-trips this
 17,000-line file byte-for-byte — 300+ entries, four verbatim-duplicated headings
 and ten undated sections included — because a merge driver that cannot reproduce
 its own input is a corruption engine.
-
-## 2026-08-16 — the staged-marker gate catches the bare separator
-
-The publish-path staged-byte scan (`stagedMarkerFiles` in `trident/orchestrator.ts`) matched
-`<<<<<<<` and `>>>>>>>` and nothing else. A partially hand-resolved conflict — both sides kept,
-the two outer markers deleted, the `=======` between them left behind — read as CLEAN to the
-gate and to `--diff-filter=U` alike, so it got committed and force-pushed to the shared branch.
-That is the residue MOST likely to survive a sloppy resolution, precisely because the outer
-markers are the visually obvious lines and the separator is not. The gate that exists to stop
-conflict text reaching a shared branch was blind to the one form of conflict text a human is
-most likely to leave.
-
-The rule now: an ADDED line that is EXACTLY a run of `=` — `CONFLICT_SEPARATOR_ADDED =
-/^\+={4,}\r?$/` — is residue. Exact, because git's separator never carries a label, unlike the
-outer markers which are followed by a branch name; anything suffixed (`=======trailing`,
-`const banner = "======="`) or indented is legitimate content and does not match. Four is a
-fail-closed false-positive boundary, not git's minimum: smaller configured markers remain a known
-tradeoff, while wider markers are caught. `\r?` covers a CRLF file. For `.md`/`.markdown`, the
-exemption requires the actual Setext shape in the resulting file: a nonblank title immediately
-before the underline and a blank line or EOF immediately after it. This admits both an underline
-edit and a newly added heading, while a separator followed directly by surviving conflict-side
-content is refused. A conflict that happens to form that exact Markdown shape is inherently
-indistinguishable from legitimate Setext using staged bytes alone. Each genuinely-unmerged
-candidate is scanned separately with a literal pathspec, so path quoting and glob characters
-cannot misattribute it.
-
-The diff3 base marker `|||||||` remains unmatched; a repo with
-`merge.conflictStyle=diff3` can leave the same class of residue, and catching it (same exact-line
-plus width rule, with its own real-git proof under diff3) is a follow-up card. The scan already
-runs only over paths that were genuinely unmerged in this replay, which bounds false positives
-further. Proven both ways: stub-host tests in `trident/orchestrator.test.ts` (bare separator in a
-code file refused; setext underline in a resolved `.md` publishes; suffixed and indented runs
-publish) and a real-git proof in `trident/publish-rebase-realgit.test.ts` where the resolver
-performs exactly the sloppy resolution and the branch ref never moves.
 
 ## 2026-08-15 — the gateway had no idea whether he was looking, and the two ways to fake it both end in silence
 
@@ -20226,39 +20262,12 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
+# 2026-08-16 — Fresh build branches pin the fetched origin base
 
-## 2026-08-16 — a fired reminder was rewriting the owner's chat down to the fast tier
-
-Landed via PR #340.
-
-The owner's project chat answered on Haiku twice in one day. He reported it both
-times; a hand-repointed registry record held for hours and then reverted, which is
-what made it look like an environment default rather than a write.
-
-It was a write. `open/composer.ts` wires the reminder dispatcher onto
-`liveAgentSubstrate` — the owner's WARM chat REPL, by design, so "a reminder fires
-into the normal session" is literally true. The call site already passes
-`tool_names: LIVE_AGENT_TOOL_NAMES` verbatim for exactly this reason, with a
-comment explaining that a differing `--tools` surface EVICTS AND RESPAWNS the warm
-child. **The model is the same class of shared session property and was missed.**
-`reminders/dispatcher.ts` resolves `const model = input.model ?? FAST_MODEL`, the
-composer passed no `model`, and the persistent pool writes the spawned model back
-into the session's registry record — where `record?.model ?? getBestModel()` lets
-it OVERRIDE the best model rather than fall back to it. So every fired reminder
-left the owner's next chat turn on Haiku, durably across restarts.
-
-Measured on the live instance: of 26 session records exactly one held
-`claude-haiku-4-5-…` — the `cc-agent-*` session of the project whose reminders had
-fired — while every other session, including that same project's `cc-compose-*`
-lane, held an Opus id.
-
-The fix is one key, `model: getBestModel()`. Note the ritual lane two fields down
-already passed `resolve_ritual_model: getBestModel` "so it tracks the chat agent's
-model instead of pinning a stale id" — the same lesson, learned once and not
-carried across. A cheaper tier for reminder composition is still available, but it
-needs its own substrate: it cannot be taken out of the session the owner is
-talking to.
-
-Typecheck differenced against untouched main rather than counted: all 51 tsconfigs
-fail identically on both trees in this checkout (missing type libs in a partial
-install), zero introduced.
+Fresh PR-mode launches now fetch `origin/<base>` before firing, record the resolved
+`base_sha` and the local branch's measured `base_behind`, and make Forge create its
+branch and review diff from that exact commit. This prevents the measured 16-commit
+staleness of the shared checkout from accumulating until publish-time repair. Two
+failed fetch attempts are a named pre-fire infrastructure terminal; the workflow is
+never fired against a silently stale fallback. P2 Codex parity, P3 surfacing, and P4
+infra-vs-verdict presentation remain follow-ups.

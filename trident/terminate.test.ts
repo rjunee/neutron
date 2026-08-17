@@ -32,6 +32,8 @@ function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
     ralph_round: 0,
     max_ralph_rounds: 20,
     branch: null,
+    base_sha: null,
+    base_behind: null,
     pr: null,
     merge_mode: 'local',
     subagent_run_id: null,

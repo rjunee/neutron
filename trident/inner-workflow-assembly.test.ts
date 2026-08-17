@@ -89,6 +89,7 @@ interface RunOpts {
   /** `'pr'` stops the run at the durable publisher handoff, which is where the build's
    *  claim and the review panel end up in DIFFERENT PROCESSES. */
   mergeMode?: 'pr' | 'local'
+  baseSha?: string
 }
 
 async function runWorkflow(
@@ -162,6 +163,7 @@ async function runWorkflow(
     repoPath: '/repo',
     task: opts.task ?? 'build the feature',
     baseBranch: 'main',
+    ...(opts.baseSha !== undefined ? { baseSha: opts.baseSha } : {}),
     slug: 'test-run',
     maxRounds: 3,
     ralph: opts.ralph === true,
@@ -821,6 +823,21 @@ describe('AS-BUILT: TEST EXECUTION strategy threading (executed prompt capture)'
     const prompt = forgeBuildPrompt(captured)
     expect(prompt.indexOf(MARKER)).toBeLessThan(prompt.indexOf('\nCONTRACT\n'))
     expect(prompt.indexOf('WORKTREE=<your worktree pwd>')).toBeGreaterThan(prompt.indexOf(MARKER))
+  })
+})
+
+describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
+  test('pins branch creation and the reviewer diff when baseSha is present', async () => {
+    const sha = 'a'.repeat(40)
+    const prompt = forgeBuildPrompt((await runWorkflow('', { baseSha: sha })).captured)
+    expect(prompt).toContain(`git switch -c trident/test-run ${sha}`)
+    expect(prompt).toContain(`git diff ${sha}..HEAD`)
+  })
+
+  test('keeps the legacy branch and diff strings when baseSha is absent', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('')).captured)
+    expect(prompt).toContain('git switch -c trident/test-run` as your FIRST step')
+    expect(prompt).toContain('git diff main..HEAD')
   })
 })
 

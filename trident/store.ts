@@ -70,6 +70,10 @@ export interface TridentRun {
   ralph_round: number
   max_ralph_rounds: number
   branch: string | null
+  /** The origin/<base> commit the build branch was cut from, read in code at launch; null for legacy rows/local-mode failures. */
+  base_sha: string | null
+  /** How many commits local <base> was behind origin/<base> at cut time; observability only. */
+  base_behind: number | null
   pr: number | null
   merge_mode: MergeMode
   subagent_run_id: string | null
@@ -217,6 +221,8 @@ export interface TridentRunUpdate {
   round?: number
   ralph_round?: number
   branch?: string | null
+  base_sha?: string | null
+  base_behind?: number | null
   pr?: number | null
   merge_mode?: MergeMode
   subagent_run_id?: string | null
@@ -248,6 +254,8 @@ interface TridentRunDbRow {
   ralph_round: number
   max_ralph_rounds: number
   branch: string | null
+  base_sha: string | null
+  base_behind: number | null
   pr: number | null
   merge_mode: MergeMode
   subagent_run_id: string | null
@@ -282,12 +290,14 @@ export const COLS =
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at, harvested_at, crash_recoveries, ' +
-  'reviewed_head, bound_pr, fenced_paths'
+  'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind'
 
-// Derived from COLS so placeholder-count = column-count BY CONSTRUCTION. A
+// The nullable launch-pin columns deliberately backfill through their database
+// NULL default; all inserted columns still derive their placeholders here. A
 // hand-miscounted `?` list silently corrupts every insert and no type error
 // catches it — so the list is never typed by hand.
-const INSERT_PLACEHOLDERS = COLS.split(', ')
+const INSERT_COLS = COLS.split(', ').filter((col) => col !== 'base_sha' && col !== 'base_behind')
+const INSERT_PLACEHOLDERS = INSERT_COLS
   .map(() => '?')
   .join(', ')
 
@@ -343,6 +353,8 @@ export class TridentRunStore {
       ralph_round: 0,
       max_ralph_rounds: input.max_ralph_rounds ?? 20,
       branch: input.branch ?? null,
+      base_sha: null,
+      base_behind: null,
       pr: null,
       merge_mode: input.merge_mode ?? 'local',
       subagent_run_id: null,
@@ -369,7 +381,7 @@ export class TridentRunStore {
       fenced_paths: input.fenced_paths ?? null,
     }
     await this.db.run(
-      `INSERT INTO code_trident_runs (${COLS})
+      `INSERT INTO code_trident_runs (${INSERT_COLS.join(', ')})
        VALUES (${INSERT_PLACEHOLDERS})`,
       [
         run.id,
@@ -632,6 +644,8 @@ export class TridentRunStore {
     if (patch.round !== undefined) push('round', patch.round)
     if (patch.ralph_round !== undefined) push('ralph_round', patch.ralph_round)
     if (patch.branch !== undefined) push('branch', patch.branch)
+    if (patch.base_sha !== undefined) push('base_sha', patch.base_sha)
+    if (patch.base_behind !== undefined) push('base_behind', patch.base_behind)
     if (patch.pr !== undefined) push('pr', patch.pr)
     if (patch.merge_mode !== undefined) push('merge_mode', patch.merge_mode)
     if (patch.subagent_run_id !== undefined) push('subagent_run_id', patch.subagent_run_id)
@@ -789,6 +803,7 @@ export class TridentRunStore {
               merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
               worktree = ?, failure_reason = ?, workflow_run_id = ?,
               inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+              base_sha = ?, base_behind = ?,
               last_advanced_at = ?
         WHERE id = ?`,
       [
@@ -806,6 +821,8 @@ export class TridentRunStore {
         run.inner_checkpoint,
         run.inner_verdict,
         run.harvested_at,
+        run.base_sha,
+        run.base_behind,
         this.now(),
         run.id,
       ],
@@ -835,6 +852,7 @@ export class TridentRunStore {
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+                base_sha = ?, base_behind = ?,
                 last_advanced_at = ?
           WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
             AND (subagent_status IS NOT 'crashed' OR ? = 'crashed')
@@ -861,6 +879,8 @@ export class TridentRunStore {
           run.inner_checkpoint,
           run.inner_verdict,
           run.harvested_at,
+          run.base_sha,
+          run.base_behind,
           this.now(),
           run.id,
           run.subagent_status,
@@ -905,6 +925,8 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     ralph_round: row.ralph_round,
     max_ralph_rounds: row.max_ralph_rounds,
     branch: row.branch,
+    base_sha: row.base_sha,
+    base_behind: row.base_behind ?? null,
     pr: row.pr,
     merge_mode: row.merge_mode,
     subagent_run_id: row.subagent_run_id,
