@@ -40,6 +40,7 @@ import {
   hasUsableCredential,
   newCredentialPool,
   reportFailure,
+  reportSuccess,
   selectCredential,
   type CredentialPool,
 } from '@neutronai/runtime/credential-pool.ts'
@@ -254,6 +255,156 @@ describe('a REAL provider status still cools on either lane', () => {
     reportFailure(pool, 'anthropic:only', 429)
     expect(cred.cooldown_reason).toBe('consecutive_failures')
     expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(CONSECUTIVE_COOLDOWN_MS / 2)
+  })
+})
+
+describe('a background report cannot TRUNCATE a park that is still standing', () => {
+  // THE THIRD DIRECTION, and the one the two tests above cannot see. Both of them
+  // do `cred.cooldown_until = Date.now() - 1` before the background report — they
+  // RETIRE the park first, so they only ever prove what happens on a credential
+  // that is already selectable again. The dangerous case is the report arriving
+  // while the hour is STILL RUNNING: a background turn selected the credential
+  // before the interactive lane benched it, and lands its failure afterwards.
+  //
+  // A plain assignment made that report RELEASE the credential — 401 rewrote an
+  // hour of `consecutive_failures` down to five minutes, 429 down to one, and
+  // relabelled the reason on the way out. Handing the owner's lane a credential
+  // his own strike counter had just judged unfit is worse than either of the
+  // failures the counter exists to prevent, and the label made the timeline lie
+  // about why. `park` takes the max instead, so a failure only ever extends.
+
+  /** An hour-long `consecutive_failures` park, set the way production sets it. */
+  function parkedPool(): { pool: CredentialPool; cred: CredentialPool['credentials'][number] } {
+    const pool = onePool()
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) reportFailure(pool, 'anthropic:only', 429)
+    const cred = pool.credentials[0]!
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    expect(hasUsableCredential(pool)).toBe(false)
+    return { pool, cred }
+  }
+
+  test('a background 401 leaves the standing hour untouched, clock AND label', () => {
+    const { pool, cred } = parkedPool()
+    const until = cred.cooldown_until!
+
+    reportFailure(pool, 'anthropic:only', 401, undefined, 'background')
+
+    expect(cred.cooldown_until).toBe(until)
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    // The credential stays benched. Before `park` it became selectable 55 minutes
+    // early, which is the whole defect.
+    expect(hasUsableCredential(pool)).toBe(false)
+    expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_401_MS)
+  })
+
+  test('a background 429 leaves it untouched too — the shortest window of all', () => {
+    const { pool, cred } = parkedPool()
+    const until = cred.cooldown_until!
+
+    reportFailure(pool, 'anthropic:only', 429, undefined, 'background')
+
+    expect(cred.cooldown_until).toBe(until)
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    expect(hasUsableCredential(pool)).toBe(false)
+    expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS)
+  })
+
+  test('and the strike counter is still neither incremented nor re-read', () => {
+    // The property PR #356 established, re-asserted here so a fix to truncation
+    // cannot be mistaken for permission to touch the ledger from a timer.
+    const { pool, cred } = parkedPool()
+    expect(cred.consecutive_failures).toBe(MAX_CONSECUTIVE_FAILURES)
+
+    reportFailure(pool, 'anthropic:only', 401, undefined, 'background')
+    reportFailure(pool, 'anthropic:only', 429, undefined, 'background')
+
+    expect(cred.consecutive_failures).toBe(MAX_CONSECUTIVE_FAILURES)
+  })
+
+  test('a LONGER background park still applies — this is a floor, not a freeze', () => {
+    // The rule must not become "a standing park wins", or a real two-hour
+    // `retry-after` would be swallowed by whatever short park happened to be
+    // running and we would hammer a provider that told us not to.
+    //
+    // ⚠️ THIS IS ALSO THE TEST THAT DISPROVED THE DOCBLOCK. `reportFailure` used to
+    // claim a background report "can neither trip the hour-long park nor EXTEND
+    // one"; the assertion below is a background report extending one. The half that
+    // is true — no route to the strike ledger — is asserted separately above, and
+    // the comment now says that instead. A property a test contradicts is not a
+    // property, and the docblock was the thing that had to change.
+    const { pool, cred } = parkedPool()
+    const twoHours = 2 * 60 * 60_000
+
+    reportFailure(pool, 'anthropic:only', 429, twoHours, 'background')
+
+    expect(cred.cooldown_reason).toBe('rate_limit_429')
+    expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(CONSECUTIVE_COOLDOWN_MS)
+  })
+
+  test('NOT SELF-COMPOUNDING — repeated background reports never walk the park outward', () => {
+    // The bound the docblock now claims, made mechanical. A longer PROVIDER status
+    // may extend a park (the test above), so the guarantee cannot be "a background
+    // report never moves the expiry". It is that a background report cannot move it
+    // by REPEATING: each one proposes `now + <its own status window>`, and once a
+    // park outlasts that window every later report is a no-op. This is what stops
+    // the "same outage with a slower fuse" the docblock warns about.
+    const { pool, cred } = parkedPool()
+    const until = cred.cooldown_until!
+
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES * 4; i++) {
+      reportFailure(pool, 'anthropic:only', 401, undefined, 'background')
+      reportFailure(pool, 'anthropic:only', 429, undefined, 'background')
+      reportFailure(pool, 'anthropic:only', 402, undefined, 'background')
+    }
+
+    // Forty reports later the hour has neither grown nor been relabelled, and the
+    // credential is still on track to become selectable when it always was.
+    expect(cred.cooldown_until).toBe(until)
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    expect(cred.consecutive_failures).toBe(MAX_CONSECUTIVE_FAILURES)
+  })
+
+  test('an INTERACTIVE report cannot truncate a standing park either', () => {
+    // Same defect, same fix, no lane condition. A 30-minute `billing_402` park is
+    // a statement about the credential that a 60-second 429 has no standing to
+    // overrule — and unlike the strike park there is no threshold re-check
+    // downstream to accidentally repair it.
+    const pool = onePool()
+    reportFailure(pool, 'anthropic:only', 402)
+    const cred = pool.credentials[0]!
+    const until = cred.cooldown_until!
+    expect(cred.cooldown_reason).toBe('billing_402')
+
+    reportFailure(pool, 'anthropic:only', 429)
+
+    expect(cred.cooldown_until).toBe(until)
+    expect(cred.cooldown_reason).toBe('billing_402')
+  })
+
+  test('CONTROL — reportSuccess is still the ONE thing that releases a park', () => {
+    // Monotonic under FAILURE only. If a confirmed working dispatch stopped
+    // clearing the park, the fix would have turned every cooldown into a
+    // sentence the credential cannot appeal.
+    const { pool, cred } = parkedPool()
+    reportSuccess(pool, 'anthropic:only')
+    expect(cred.cooldown_until).toBeUndefined()
+    expect(cred.cooldown_reason).toBeUndefined()
+    expect(cred.consecutive_failures).toBe(0)
+    expect(hasUsableCredential(pool)).toBe(true)
+  })
+
+  test('CONTROL — an EXPIRED park is not a park, so a fresh report still cools', () => {
+    // The guard reads `cooldown_until >= proposed`, and a past timestamp never
+    // is. If it compared truthiness instead, a credential whose hour had elapsed
+    // would stop honouring the provider's next 429 entirely.
+    const { pool, cred } = parkedPool()
+    cred.cooldown_until = Date.now() - 1
+
+    reportFailure(pool, 'anthropic:only', 429, undefined, 'background')
+
+    expect(cred.cooldown_reason).toBe('rate_limit_429')
+    expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(0)
+    expect(cred.cooldown_until! - Date.now()).toBeLessThanOrEqual(COOLDOWN_429_MS)
   })
 })
 

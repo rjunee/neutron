@@ -990,6 +990,21 @@ export function buildOpenGraphComposer(
             project_slug,
           })
         : undefined
+    // THE SAME JOURNAL, NO CHAT SEAM — for the timer-driven nudge substrate. It
+    // shares `PROFILE_WARM_CHAT`, so it carries `frontier_model_floor` and its
+    // clamp was landing on stderr only. `deliver: () => undefined` is the sink's
+    // documented no-bubble path (`makeSubstrateNoticeSinks`'s `bubble` returns on
+    // an unresolved deliver), so the clamp is journalled to `system_events` — a
+    // best-effort write, as everywhere else this sink is used — while the lane keeps
+    // its promise not to interrupt his chat from a timer.
+    const backgroundNoticeSinks =
+      llmPool !== null
+        ? makeSubstrateNoticeSinks({
+            deliver: () => undefined,
+            owner_topic_id: ownerNoticeTopic,
+            project_slug,
+          })
+        : undefined
     const liveAgentRecoveredReplySink =
       llmPool !== null
         ? makeRecoveredReplySink({
@@ -1022,6 +1037,7 @@ export function buildOpenGraphComposer(
       prewarmSubstrate,
       ...conversationalProviderCtx,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
+      ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
         ? {
             liveAgentRecoveredReplySink,
