@@ -1249,6 +1249,23 @@ describe('the installer under a locked config — the FATAL half-state must be i
      * that an exemption nothing can check is worth less than no exemption. The one historical
      * citation now names its commit and the config write, and gives up its line number.
      *
+     * WHO THIS IS DEFENDING AGAINST, because that decides when it is finished. The adversary is an
+     * ORDINARY EDIT — a rename, a reflow, a typo, a merge that grows a file above a citation. It is
+     * not a hostile author, and it cannot be: every check here is a regex over prose, and three
+     * rounds of an adversarial cross-model reviewer produced a fresh encoding every time — a path
+     * spelled `trident/./orchestrator.ts`, a zero-width joiner inside an identifier, a decoy
+     * declaration inside a template literal, a non-ASCII filename. Each is real and none is reachable
+     * by the failure this exists to catch. Chasing them buys encodings and costs the thing that makes
+     * a guard useful, which is that a red means something. Thirteen mutations drawn from the ordinary
+     * class are pinned by this test, each measured red with a control and a clean baseline.
+     *
+     * The known false REDS are left in on the same reasoning, since they cost one edit and announce
+     * themselves: prose naming a host with a port after it parses as a line locator, and a citation
+     * whose symbol sits more than one line from its path is reported unresolved. The first of those
+     * was demonstrated by writing this paragraph — spelling the example out literally reddened the
+     * suite, which is the check working and the reason it is described in words. False red costs an
+     * edit; false green costs the property.
+     *
      * WHAT THIS DELIBERATELY DOES NOT MATCH: the prose form, "line 715 of `orchestrator.ts`". Narrative
      * that DESCRIBES a citation is not a citation, and the paragraphs above are made of exactly that
      * — a check that flagged them would flag the explanation of its own rule. The machine-readable
@@ -1342,7 +1359,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
       }> = [
         {
           symbol: 'asBuiltDriverCommand',
-          definition: /^function asBuiltDriverCommand\(/m,
+          definition: /^function asBuiltDriverCommand\s*\(/m,
           definedIn: 'trident/orchestrator.ts',
           citedBy: [
             { file: 'scripts/install-merge-drivers.sh', atLeast: 3 },
@@ -1351,7 +1368,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
         },
         {
           symbol: 'rebaseOntoObservedBase',
-          definition: /^export async function rebaseOntoObservedBase\(/m,
+          definition: /^export async function rebaseOntoObservedBase\s*\(/m,
           definedIn: 'trident/orchestrator.ts',
           citedBy: [{ file: 'scripts/git/as-built-merge-realgit.test.ts', atLeast: 2 }],
         },
