@@ -55,6 +55,38 @@ decoration:
 Each is asserted identical BEFORE its mutation, so the failure is caused by the mutation
 and not by a pre-existing difference.
 
+**Measured, matched A/B** — 21 converted test files (work-board, cores runtime, auth,
+channels), same machine, same `node_modules`, back to back, `origin/main`'s content for
+exactly those files as the BEFORE leg:
+
+| | tests | user CPU | sys | wall |
+| --- | --- | --- | --- | --- |
+| before | 369 | 42.84s | 12.04s | 89.9s |
+| after | 369 | **1.27s** | 1.31s | **6.7s** |
+
+**369 tests on both sides — no coverage was removed.** One test is GREEN only after: a
+`ButtonStore` same-millisecond-tiebreak case that was timing out at the 5000 ms budget
+because the replay ate it. The implied per-replay cost, 41.6 s over 369 tests, is
+**~113 ms of CPU** — which independently reproduces the ~110-137 ms figure this work was
+planned against, from a completely different measurement than the one that produced it.
+
+Full suite, from CI's own shard wall-clock (immutable checkout, same runner class) —
+`main` at the commit this branched from, against this branch:
+
+| | slowest shard | sum of 8 shards |
+| --- | --- | --- |
+| before | 221s | 1431s |
+| after | **182s** | **918s** |
+
+Total shard time falls 36%; the SLOWEST shard, which is what a PR actually waits on, falls
+only 18% — and two shards got slower. That gap is worth naming: `scripts/run-tests.sh`
+bin-packs the general lane by a cost model whose only real signal is the number of
+`applyMigrations(` calls a file's CONTENT contains. This change removes 334 of them, so
+nearly every file now weighs the same flat base cost and the packing degenerates toward
+round-robin — the spread widens from 150-221s to 67-182s. The runner is deliberately NOT
+touched here (one concern per change), but its weighting is now measuring something that
+has largely gone away, and rebalancing it is the obvious follow-up.
+
 `seedMigratedDb` REFUSES a non-empty target and deliberately has no fallback to a slow
 path: seeding is only equivalent to a replay on a fresh database, so the one case where it
 would not be, it throws. That is what makes a wrongly-converted call site fail loudly

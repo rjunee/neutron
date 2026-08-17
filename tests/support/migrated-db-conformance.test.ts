@@ -229,11 +229,14 @@ test('seedMigratedDb refuses an in-memory target instead of writing a file named
   // `:memory:` in the working directory and leaves the in-memory database the
   // caller opens completely empty. Assert both halves — it throws, and nothing
   // was written.
-  expect(() => seedMigratedDb(':memory:')).toThrow(/cannot seed the in-memory database/)
-  expect(() => seedMigratedDb('file::memory:?cache=shared')).toThrow(
-    /cannot seed the in-memory database/,
-  )
-  expect(existsSync(':memory:')).toBe(false)
+  // Both spellings, and the stray file checked for EACH of them: the first
+  // version of the guard matched only `mode=memory`, so the URI spelling walked
+  // past it and left a 1.1 MB `file::memory:?cache=shared` on disk. Asserting the
+  // throw alone would not have caught that; asserting the file would.
+  for (const target of [':memory:', 'file::memory:?cache=shared', 'file:x.db?mode=memory']) {
+    expect(() => seedMigratedDb(target)).toThrow(/cannot seed the in-memory database/)
+    expect(existsSync(target)).toBe(false)
+  }
 })
 
 test('seedMigratedDb accepts a zero-length placeholder file', () => {
