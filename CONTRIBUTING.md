@@ -52,7 +52,14 @@ instead, which runs the same suite to completion in bounded memory:
 bash scripts/run-tests.sh          # the whole suite, bounded memory (what CI runs)
 bun test path/to/dir               # a subset while iterating (fine, cheap)
 bun test path/to/file.test.ts      # a single file (fine, cheap)
+bash scripts/select-tests-for-changes.sh main 40 | xargs bun test   # just what you changed
 ```
+
+The last one is the fast local pass: it prints the test files covering your
+working tree's changes (changed test files, the tests beside each changed module,
+then tests that name a changed module — capped). It is the right default while
+iterating, especially on a busy machine. CI runs the whole suite on every push
+regardless, so it is a way of finding breakage sooner, never a way of skipping it.
 
 See `docs/testing-runner.md` for tuning knobs (chunk size, concurrency, the
 PGLite quarantine lane) if a run is slow or your box has limited RAM.
@@ -158,8 +165,11 @@ without anyone remembering.
 - Keep PRs focused: one concern per PR.
 - Include tests for new behavior and bug fixes (a regression test that fails
   before your fix and passes after).
-- Run `bash scripts/ci/typecheck-all.sh` and `bash scripts/run-tests.sh` before
-  pushing (see [Tests](#tests) above) — these are the same commands CI runs.
+- Run `bash scripts/ci/typecheck-all.sh` before pushing, plus
+  `bash scripts/select-tests-for-changes.sh main 40 | xargs bun test` for the
+  tests covering your change (see [Tests](#tests) above). `bash scripts/run-tests.sh`
+  is the whole suite and CI runs it on every push; run it locally when you want it,
+  not because you have to.
 - Match the style of the surrounding code (formatting, naming, comment density).
 - Write clear commit messages explaining the why, not just the what.
 

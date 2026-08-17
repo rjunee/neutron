@@ -8309,6 +8309,38 @@ silent truncation. For a single file, bare `bun test <file>` is fine.
   per-file working set. Contended box / CI: `CHUNK_SIZE=60 JOBS=1` (bounded
   memory). Quiet dev box: `JOBS=4` (faster, more RAM). Full knob matrix +
   recipes in `docs/testing-runner.md`.
+- **Discovery is PRUNED, not filtered** (`scripts/lib/discover-test-files.sh`). It
+  prunes `node_modules` and dot-directories out of the `find` walk instead of
+  filtering them from the results — the old `-not -path` form discarded matches
+  `find` had already visited, so every invocation walked all of `node_modules` and
+  every `.claude/worktrees/` clone. Measured on the main checkout 2026-08-17:
+  **2 m 59 s → 0.69 s, byte-for-byte identical output**, and each of the four CI
+  shards paid that once. The prune is `-type d` only (a top-level hidden test FILE
+  was included before and still is) and matches `.?*` not `.*`, because `.*`
+  matches the starting directory and pruning it yields an empty suite with exit 0.
+- **Cross-runner shards, balanced by measured DURATION.** CI splits the suite
+  four ways (`NEUTRON_TEST_SHARD=<i>/4`). The slice is not a round-robin over the
+  file list — equal file counts over a suite where a handful of files dominate
+  gave 204 s / 304 s / 412 s across the four runners, and wall-clock is set by the
+  worst one. Each file is charged an observed cost from the committed manifest
+  `scripts/test-timings.json` and handed **longest-first to whichever shard is
+  currently lightest**; every shard derives the same assignment from the same
+  three inputs (discovered files, manifest, `n`) without coordinating. The
+  manifest is an optimisation and never an authority — a file it does not name
+  costs `NEUTRON_TEST_DEFAULT_FILE_SECONDS` and is still assigned, an entry for a
+  deleted file is never looked up, and no manifest at all makes every cost equal
+  (which is the old round-robin). Regenerate with
+  `NEUTRON_TEST_TIMINGS_OUT=scripts/test-timings.json bash scripts/run-tests.sh`.
+- **Build lanes run only what they touched** (`scripts/select-tests-for-changes.sh`).
+  A trident lane in a worktree does NOT run this suite: several lanes on one
+  machine saturate it, and a saturated machine manufactures failures (six on a 5 s
+  timeout boundary in one session; an A/B of one file across two worktrees came out
+  with the CONTROL slower). The helper prints the test files covering the working
+  tree's changes — changed test files, then tests beside each changed module, then
+  tests naming a changed module, capped and dropping a whole tier rather than
+  trimming one. `trident/test-strategy.ts` discovers whether the project runs its
+  suite in CI and renders the build contract accordingly; a project with no CI
+  suite keeps the local full run unchanged. Nothing is verified less before merge.
 
 ## Reachability gate — can the owner still DO it? (`*/__tests__/reachability*`)
 
