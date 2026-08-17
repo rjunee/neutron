@@ -299,7 +299,11 @@ that no longer existed. That is not the fatal half the installer's own docblock
 enumerates and defends against; it is a third state the docblock does not cover,
 because the path was valid when it was written. The measured behaviour is the
 worst available one: the merge takes one side, drops the other entry, and reports
-**no conflict**. Two as-built entries had already been lost this way. The
+**no conflict**. One such loss is recorded above in this same entry (PR #370's
+row, absent from the file after a rebase); the resume brief for this round reports
+a second, which is repeated here as a report rather than as a measurement — the
+cross-model reviewer asked for that number's provenance and it does not have one
+this round could re-derive. The
 installer's `--uninstall` path is the repair — both config keys and the attribute
 line, never `--unset` on the driver alone, which leaves the genuinely fatal
 `merge.<name>.name`-without-`.driver` state the docblock measures at exit 128.
@@ -320,16 +324,43 @@ additive and PR #364's `withEnvHome` seam, its describe-scoped `afterEach` and
 its cwd-forward case all survive. `bun test` on that file reports 14 pass, which
 is the same number arrived at independently.
 
-One nit closed, in the direction this entry is about. The supervision-off report
-in `runtime/adapters/claude-code/index.ts` derived `neutron_home` from its own
-second `process.env` lookup while the DECISION came from
-`resolveReplCwdAndHome({ cwd, env })` — a report naming a condition it did not
-itself measure. Not reachable as a bug today, because that call hardcodes
-`process.env`, and fixed anyway: one shared `env` local feeds both, so the report
-is structurally unable to disagree with the decision, including for a future
-caller that threads a different bag through the injectable signature. The
-existing per-field test (`cwd=unset` with `neutron_home=blank`, which forces the
-two classifications to differ) covers it unchanged.
+**ONE NIT CLOSED, AND THE FIRST ATTEMPT AT CLOSING IT WAS THIS ENTRY'S OWN
+SUBJECT FOR THE THIRD TIME** — landed via PR #383, a follow-up, because #351
+merged while this round was still running and its merged head carried the first
+attempt without the correction. The supervision-off report in
+`runtime/adapters/claude-code/index.ts` derived `neutron_home` from its own second
+`process.env` lookup while the DECISION came from `resolveReplCwdAndHome` — a
+report naming a condition it did not itself measure. The first fix hoisted
+`const env = process.env`, passed it to the resolver, and claimed the report was
+therefore "structurally unable to disagree" with the decision.
+
+**A cross-model reviewer falsified that claim, and it reproduces as a test.**
+`process.env` is a LIVE object, so sharing the CONTAINER shares no OBSERVATION:
+two reads of the same proxy at two instants are still two observations. The window
+between them is reachable from ordinary inputs — the option bag arrives from a
+caller, and the factory reads `options.claude_bin` a few lines below the resolve,
+so a getter there runs between the decision and the report. Measured: the decision
+saw `NEUTRON_HOME` unset and the report announced `blank`. `cwd` had the same
+defect, reading `options.cwd` a second time. So the claim was wider than its
+mechanism, which is precisely what this whole PR is about, arrived at while fixing
+an instance of it.
+
+The fix is a snapshot of the two VALUES rather than of their containers: exactly
+one read of each input, and the report is arithmetic over the same two constants
+the decision consumed. Stated plainly because it matters — this is deliberately
+NOT behaviour-preserving in the mid-construction-mutation case. The old code
+reported the LATER value, and reporting the later value is the defect.
+
+**The reviewer's second finding was that the claim was unpinned, which was also
+correct**: the existing per-field test fixes the environment for the whole
+synchronous call, so reverting the sourcing left it green. It is pinned now, by
+`the report describes the values the DECISION read, not a later re-read of a live
+object`, and mutation-proved twice — red against the container-sharing version
+(14 of 15 green), and red again under the exact one-line revert the reviewer
+named, with the same 14 controls green. The test opens the window with a
+`claude_bin` getter and asserts the getter fired, so it cannot pass vacuously; and
+it FAILS CLOSED if that read order ever moves, because then the decision sees the
+blank too and the report says `blank`.
 
 The TSX arm of the prefilter was re-proved by mutation this round rather than
 carried on the previous round's word: dropping `JSX_ENTITY_SHAPE.test(src)` from
@@ -395,6 +426,19 @@ nothing about a commit. `docs/INVARIANTS.md` moved with the precedence change.
 Round 2's codex cross-model review was deferred and no kimi reviewer was
 attached, so this landed without that pass; recorded here rather than left in a
 review thread.
+**THE CROSS-MODEL REVIEWER RAN THIS ROUND TOO**, and this is worth recording
+because the round-4 panel's second blocker was that the lane had NOT run and had
+been reported as deferred. `codex-cli 0.147.0`, invoked without the `timeout(1)`
+wrapper that produced the earlier exit 127 on this platform, returned two IMPORTANT
+findings — the two above — and no blockers. It independently reproduced every
+count in this block that its sandbox allowed (342/341 headings, zero deleted lines,
+7 of 7 `main` test titles preserved out of 14, the identity-registry file green at
+19/19) and confirmed the merge-driver fatal-state characterisation. Two things it
+marked UNVERIFIED are recorded as such rather than as agreement: its workspace was
+read-only, so it could not re-run either mutation itself, and five of the 14 tests
+in the repl-home file failed in its sandbox purely because `mkdtemp` was denied.
+Both were run here with write access, and the numbers in this block are from those
+runs.
 
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 

@@ -587,4 +587,60 @@ describe('supervision-off is ANNOUNCED, not just decided', () => {
     // `… cwd=unset neutron_home=blank` — a shape, not a path.
     expect(line).not.toContain(secret)
   })
+
+  test('the report describes the values the DECISION read, not a later re-read of a live object', () => {
+    // THE PIN THE PREVIOUS ROUND DID NOT HAVE, and its absence was the finding.
+    // Round 5 hoisted `const env = process.env` and claimed that made the report
+    // "structurally unable to disagree" with the decision. A cross-model reviewer
+    // falsified the claim and it reproduces here: `process.env` is a LIVE object,
+    // so sharing the CONTAINER shares no observation at all. The decision reads
+    // `NEUTRON_HOME` at one instant and the report read it at a later one, and
+    // anything running in between moved the answer.
+    //
+    // The window is real rather than theoretical, and this test opens it the way
+    // the reviewer did: the factory reads `options.claude_bin` AFTER it resolves
+    // the home, so a getter on that property runs between the two reads. Option
+    // bags reach this factory from callers, so a getter is a legal input.
+    //
+    // WHAT THIS ASSERTS: the environment gains a blank `NEUTRON_HOME` mid
+    // construction, so the DECISION saw it unset (and turned supervision off for
+    // that reason). The report must therefore say `unset`. Pre-fix it said
+    // `blank` — describing a condition that was not the one it acted on, which is
+    // this whole PR's subject reproduced inside the fix for it, for the second
+    // time in this file.
+    //
+    // IT FAILS CLOSED under a refactor, which is the property that keeps it
+    // honest: if the `claude_bin` read ever moves BEFORE the resolve, the
+    // decision sees the blank too, the report says `blank`, and this goes red
+    // rather than passing vacuously.
+    let getterFired = false
+    const lines = errorLines(() => {
+      withEnv(undefined, 'error', () => {
+        build({
+          substrate_instance_id: 'cc-supervision-snapshot-probe',
+          // Returns a real value rather than `undefined` because
+          // `exactOptionalPropertyTypes` is on and `claude_bin?: string` does not
+          // accept one. The value is irrelevant — this factory only maps it onto
+          // an option bag and never starts a REPL — while the SIDE EFFECT is the
+          // whole point.
+          get claude_bin(): string {
+            getterFired = true
+            process.env['NEUTRON_HOME'] = '   '
+            return 'claude'
+          },
+        })
+      })
+    })
+
+    // CONTROL — the window actually opened. Without this the assertion below
+    // could pass because nothing ever mutated the environment, which would pin
+    // nothing at all.
+    expect(getterFired).toBe(true)
+
+    const emitted = lines.find((e) => e.includes(DISABLED))
+    expect(emitted).toBeDefined()
+    const line = emitted as string
+    expect(line).toMatch(/\bneutron_home=unset\b/)
+    expect(line).not.toMatch(/\bneutron_home=blank\b/)
+  })
 })
