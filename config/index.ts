@@ -545,12 +545,55 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * exactly would have rebuilt round 3's blind spot inside the guard against
  * round 3's blind spot. The cost is that a file merely NAMING a variable (an
  * error string, a schema key, a template placeholder) also registers, which is
- * one annotated line instead of a hole. A fully computed key (`env[someVar]`)
- * remains invisible to any textual scan; that is stated there rather than
- * papered over. ANY new reader — trimmed or not — fails on the PR that adds it,
- * and a registry row whose file stopped reading the variable fails too, so the
- * list cannot rot into a description of a tree that no longer exists, the way
- * rounds 1 and 2 went wrong.
+ * one annotated line instead of a hole.
+ *
+ * THE RESIDUAL LIMIT IS A CLASS, NOT ONE CASE, and it is stated as a class
+ * because an earlier draft of this paragraph called a computed key "the only
+ * residual limit left" and a reviewer measured three more. What the detector
+ * reads is COOKED PROGRAM TEXT — identifier, string and template `.text`, JSX
+ * text and attributes after entity decoding, and regex `.text`. So any spelling
+ * that no single one of those nodes contains WHOLE is invisible to it, however
+ * plainly it names the variable at runtime. Measured on this tree, each with a
+ * passing positive control in the same run: `env[someVar]` (a computed key),
+ * `env['NEUTRON' + '_HOME']` (a concatenation, whose two literals are separate
+ * nodes), `` /NEUTRON[_]HOME/ `` and a regex spelling the same character with a
+ * `_` escape (a regex whose PATTERN matches the name at RUNTIME while its
+ * `.text` — the only form the parser exposes — does not contain it; note that
+ * the plain `` /NEUTRON_HOME/ `` IS detected, measured, because there the raw
+ * pattern does contain the name), and
+ * `<p>NEUTRON{'_'}HOME</p>` (a JSX split across text and an expression). All
+ * five are pinned as failing-by-design fixtures in the suite, so the boundary is
+ * a check rather than a sentence and cannot move without a test going red.
+ *
+ * That class is narrow and it is deliberate: widening it means evaluating the
+ * program instead of parsing it. What the parser DOES buy is the class of miss
+ * it ENDS: the two hand-written comment strippers that preceded it both lost
+ * live reads silently (a regex literal containing `/*`, a
+ * carriage-return line terminator, a unicode-escaped identifier, a desynced
+ * template flag); comments are now excluded structurally, as trivia the parse
+ * tree does not contain, and an unparseable file FAILS OPEN to a raw match. The
+ * file list comes from `git ls-files` rather than a directory walk, so sibling
+ * checkouts under `.worktrees/` cannot be audited as if they were this tree
+ * (they were: 62 phantom readers on the owner's clone) and the answer does not
+ * depend on where the suite was invoked from. A new reader that spells the name
+ * the ordinary way, in a file not already in the registry, fails on the PR that
+ * adds it — asserted directly against every unregistered file rather than
+ * argued. THE GUARD IS FILE-LEVEL:
+ * a SECOND predicate added inside an already-registered file does not change
+ * the file set and does not fail, which is the correct scope (that file's own
+ * suite owns its predicates) and is pinned as such rather than left implied.
+ *
+ * A registry row also fails once its file stops NAMING the variable — which is a
+ * weaker statement than "stopped reading it", and the difference is worth the
+ * sentence because the stronger one was written here first. The detector matches
+ * the bare NAME on purpose (see above), so a file that deletes its read but keeps
+ * an error message, schema key or comment-free string mentioning `NEUTRON_HOME`
+ * still registers, and its row survives as a description of a read that is gone.
+ * What the check kills is the row whose file no longer mentions the variable at
+ * all. That still stops the list rotting into a description of a tree that no
+ * longer exists — the way rounds 1 and 2 went wrong, where NAMED files were
+ * claimed to trim and did not — but it does not detect a read quietly removed
+ * from a file that goes on talking about it.
  *
  * WHAT IT DOES NOT PROVE, said here so this docblock does not restage its own
  * defect one layer up: the registry's per-file notes are PROSE and nothing

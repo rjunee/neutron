@@ -2,6 +2,293 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the guard against unproved claims was itself unproved, in four ways
+
+Landed via PR #351.
+
+Round-2 and round-3 fixes for the review panel on #349, which merged while its
+own panel was still running — the second time in this sequence, and the reason
+this is a separate entry rather than an edit to that one.
+
+**The guard failed on the owner's own clone, for two reasons at once.** Its
+walker was `readdirSync` recursion rooted at `process.cwd()` with a
+hand-written skip-list, and `.worktrees/` / `.claude/worktrees/` hold full
+copies of this same tree. Measured there: **62 phantom readers** — the same repo
+audited several times over — plus **7111 ms** of wall clock, past bun's 5000 ms
+per-test timeout, so it failed for a second reason that masked the first. A
+clean worktree passed, which is how a defect like this survives review. Now
+`git ls-files` with a module-relative root: the repo's own answer to what is in
+the tree, no denylist to fall behind, cwd-independent. Verified both ways —
+`git ls-files` returns **0** paths under those directories on the same clone,
+and the suite passes when run from `/tmp`.
+
+**THE DETECTOR NO LONGER HAS A HAND-WRITTEN LEXER, AND THAT IS THE REAL RESULT
+OF THIS ROUND.** Three implementations were tried and the first two both lost
+live reads silently:
+
+- Round 1 balanced quotes per line. Round 2 replaced that with a cumulative
+  `inTemplate` flag, which was unbounded file-scope state — one stray backtick
+  in a sentence changed how every following line was treated, to the end of the
+  file. **24 of 1156 non-test files ended the scan desynchronised**, two of them
+  registered readers.
+- Round 3 was a mode-stack lexer that claimed to FAIL OPEN — to be incapable of
+  losing a read. **A cross-model reviewer falsified that claim three ways in one
+  pass, and all three reproduced exactly**: a regex literal containing `/*` with
+  a later one containing the closing marker (the span between them was eaten as
+  a comment); a CARRIAGE RETURN, which ends a line comment in JavaScript while
+  the lexer scanned on to the next `\n`; and a unicode-escaped identifier, which
+  is the same property to the language and invisible to any pattern over raw
+  text.
+
+Every one of those is legal TypeScript that Bun executes, and every one produced
+a silent false negative — the exact failure the guard exists to end, rebuilt
+inside the guard for the third round running. **The lesson is not that the lexer
+had bugs; it is that a hand-written lexer for a language this size will always
+have bugs, and the ones that matter are invisible.** So `namesIdentityVar` now
+parses with `ts.createSourceFile` and walks nodes that carry program text.
+Comments are trivia and never appear in that walk, so they are excluded
+structurally rather than by a pattern that has to be right; regex literals, line
+terminators, nested templates and JSX are the parser's problem. An unparseable
+file still fails open to a raw match. Same dependency and same reasoning as
+`gbrain-memory/__tests__/raw-op-seam-ban.test.ts`.
+
+The rewrite immediately caught a false negative in itself: omitting regex
+literals from the walk dropped `runtime/system-prompt.ts`, which matches its
+`{{OWNER_HOME}}` placeholder with `/\{\{OWNER_HOME\}\}/g`. The registry test
+moved it into `stale` on the first run — the guard catching its own detector,
+which is the arrangement worth having.
+
+Several limits this log had recorded as permanent are now gone. Each had been
+written as a failing-by-design test with the note that if the boundary ever
+moved the assertion would break and the prose would have to move with it. It
+did, they did, and they were replaced by their positive cases. **That mechanism
+working is worth more than the assertions it replaced**, and it is the whole
+argument for writing a limit as an assertion rather than a sentence — the
+sentences would still be sitting here describing a checker that no longer
+exists.
+
+**One reported blocker did not reproduce, and is recorded as not reproducing.**
+The panel reported that a new unregistered reader could land green depending on
+which file it was added to. Running the exact mutation gave 6 pass / 1 fail —
+detected — and the stated mechanism runs the other way, since a desynced flag
+keeps lines verbatim and therefore over-detects. Not treated as "fine": a guard
+whose answer depends on which file you pick is worthless if that is ever true,
+so it is now measured on every run rather than argued. `THERE IS NO BLIND FILE`
+appends a canonical reader to every audited file that is **not already in the
+registry** — 1146 of the 1161, checked as a per-file false→true transition — and
+names any that fails to detect it. It is deliberately not the whole audited set:
+for a file the registry already names, "detected" is true before the probe is
+added, so those fifteen would have contributed a vacuous pass. This entry said
+"every audited file" in its first form, and a reviewer was right that the
+sentence claimed a wider set than the code walks.
+
+**Two pins lived only in distant files** — the same shape as the defect the
+change is about. `migrations/db-path.ts` had no test of its own: dropping
+`.trim()` left `bun test migrations/` at **73 pass / 0 fail**, with only a suite
+three packages away reddening. `resolveOwnerHome` (the second resolver in
+`gateway/boot-listener-registry.ts`) survived mutation of BOTH its tiers at
+**8 pass / 0 fail**, in a suite whose docblock advertised "all four resolution
+tiers" — true of the function it named, read as true of the file. Both now
+pinned beside the code they govern; the db-path failure prints the real defect,
+`"  /project.db"`, a database under a two-space directory.
+
+**Supervision turning itself off is now audible — AT `error`, WHICH IS THE
+WHOLE POINT.** With no `cwd` and no `NEUTRON_HOME`, the substrate skips its
+entire supervision block: no watchdog, no crash respawn, no heartbeat, no
+model-update probe. The decision was deliberate and pinned; the silence was not,
+and an unsupervised REPL is indistinguishable from a healthy one until the first
+crash nothing recovers. The first fix emitted a `warn` and its test span
+`console.warn` without touching `NEUTRON_LOG_LEVEL` — so under the most common
+production setting, `NEUTRON_LOG_LEVEL=error`, the line was dropped at
+`logger/index.ts:263` before any sink ran, **and the test could not see it**. A
+report an ordinary log-level choice switches off is the original silence wearing
+a log call. It now emits at `error`, the quietest rank the logger has and the
+only one nothing suppresses, and every assertion runs with the level pinned to
+`error` rather than inherited. Mutation: `.error(` → `.warn(` turns four tests
+red, against 13 pass / 0 fail for the control.
+
+**A UNIVERSAL CLAIM EVIDENCED BY A SAMPLE IS NOT EVIDENCE — TWICE, THEN A THIRD
+TIME.** `resolveReplCwdAndHome` asserted that "every in-repo production caller
+supplies a real `cwd`" while citing ONE site. Corrected to an enumeration of
+four, with the conclusion "no live caller can deliver a blank" — and a
+cross-model reviewer found more. The corrected enumeration was then wrong again,
+in the same direction, which is the point at which counting stopped being the
+method. What is true by construction rather than by census: every route reaches
+this factory through `buildLlmCallSubstrate`, which copies `cwd` onto the
+options bag unexamined, and the callers divide in two — those passing the
+resolved owner home (`open/wiring/substrates.ts:189`, `:244`, `:329`,
+`open/wiring/memory.ts:145`, `:288`, `:393`, `open/composer.ts:1296`, which is
+the history-import/synthesis REPL and was previously mislabelled as the
+conversational one), which cannot be blank; and those passing an ARBITRARY
+per-run path (`makeEphemeralSubstrate` at `:373` and `makeWarmFireSubstrate` at
+`:423`), where nothing guarantees non-blank. The blank arms are therefore not
+provably unreachable, and no docblock says they are.
+
+**Which sites are hardening and which are live fixes**, because "brought onto
+the rule" and "fixed a reachable defect" are different claims and this log
+should not blur them. `resolveRegistryDbPath` has **no in-tree caller at all** —
+verified this round with `git grep` over `*.ts`, `*.tsx`, `*.mts`: the
+definition (`gateway/boot-listener-registry.ts:67`), two re-export statements
+(`gateway/index.ts:61`, `gateway/composer-contract.ts:41`) and its tests, and
+nothing else. Its trim is hardening on a published surface, not a live-path fix.
+`resolveSkillsDir`'s `skill-forge/registrar.ts` twin is the same:
+`registrar.ts:29-49` now says so in place of the "mirror of `resolveSkillsDir`"
+claim it used to carry — the claim was false the moment the upstream was
+widened, and the copy is deliberately NOT widened because a trim there would
+resolve `'   '` to `/skills`, the filesystem root.
+
+**The registry test's own claim was wider than its body, in three ways, and all
+three are narrowed rather than argued away.** Its title read "…is a registered,
+TRIMMING reader" while the body compares two lists of filenames and executes no
+predicate; the title now says what it checks, which is MEMBERSHIP. Its scope was
+pinned by counts (`> 500` files, readers `>=` registry size) that stay green if
+the `.tsx` / `.mts` pathspecs are dropped, because every registered reader
+happens to be a `.ts` file — 191 files would have left the audit silently. The
+enumeration is now compared against an independently computed one (`git ls-files`
+with no pathspec, filtered by extension in TypeScript), and dropping those two
+pathspecs fails with `Expected - 191`. And a registry note that cites a pinning
+suite is now checked to cite one that EXISTS; renaming a cited path in the note
+turns it red.
+
+**The guard's own budget, measured rather than raised.** A reviewer's run failed
+this file at **64056 ms against a 60000 ms budget** while the same commit runs in
+~2.1 s standalone — not a contradiction, because `scripts/run-tests.sh` loads
+~100 files into one process at core-count concurrency, so wall clock there is a
+property of the box's load. Both halves changed: the detector now skips the
+parser for any file that cannot possibly name one of the variables (a file with
+no backslash and none of the three names in its raw bytes — sound, because only
+an escape can put a character in cooked text that the source lacks), which is
+724 of 1161 files and ~27% off the run; and the budget went to five minutes.
+Sampling the blind-file probe would have been cheaper and was refused: this
+file's history is four rounds of a proof narrower than its claim.
+
+Also fixed: a docblock calling `open/server.ts` "correctly absent from the
+registry" while it sat in that registry seventy lines above; a "no blind file"
+assertion that included already-registered files, for which it held vacuously; a
+supervision report that fired per construction rather than once per instance;
+and a test control that started real watchdogs against a fixed `/tmp` path and
+never shut them down — now stopped by name (`activeWatchdogs` /
+`activeModelWatchdogs` keyed by paths under a tmpdir this file owns) rather than
+through the global `shutdownAllPersistentRepls()`, which SIGTERMs every warm
+REPL in a process that runs suites concurrently.
+
+**The cross-model reviewer RAN, and it is the reason this entry says what it
+says.** #333's panel had it deferred and #349's first pass failed to launch (the
+pinned model is not available on the account in use; re-running on the default
+model worked). It returned four blockers and four majors. Three blockers were
+falsifications of this change's own central safety claim, each with a
+copy-pasteable input, and each reproduced on the first try. Two more findings —
+the per-construction log flood and the vacuous half of the blind-file test —
+were independently correct. **A change whose entire subject is claims that
+outrun their proofs shipped a claim that outran its proof, three ways, and the
+reviewer is what caught it.** That is the argument for the lane, stated plainly
+because the two rounds before this one approved around its absence.
+
+**AND IT RAN AGAIN ON THE FIXES, WHERE IT FOUND THE SAME DEFECT ONE LAYER IN.**
+The round-3 pass returned one blocker and it was the sharpest finding in the
+whole sequence: **`FAIL OPEN` was itself a false negative.** The detector
+returned a raw pattern match the moment the parser reported any diagnostic and
+never walked the recovered tree — but TypeScript RECOVERS from most syntax
+errors, so a file that BOTH fails to parse AND spells the name with a unicode
+escape has a perfectly good identifier node reading `NEUTRON_HOME` while its raw
+text matches nothing. Reproduced exactly as reported: three diagnostics, a
+recovered identifier with the real name, final answer **false**. The arm whose
+entire purpose was to make a silent miss impossible was the silent miss. The walk
+now runs first and unconditionally, with the raw match as an additional arm, and
+the reviewer's input is a fixture — built by concatenating a lone backslash,
+because the literal escape in a nearby docblock had already been normalised back
+into a plain letter once, which the reviewer also caught.
+
+Four more of its findings were correct and are fixed: the suite's teardown called
+the GLOBAL `resetLoggerStateForTests()`, which clears every subsystem's latches
+and can re-arm a concurrently-suspended sibling's (now cleared per key); the
+file's seam block still called the global `shutdownAllPersistentRepls()` after
+each test, which SIGTERMs every warm REPL in a process that runs suites
+concurrently (now removes only its own timers, registry entries and latches, by
+name); the `once` latch never re-armed, so an instance that reported once, was
+then constructed WITH a home, and later lost it again went **silent** — the armed
+branch now clears the key, and the reviewer's three-construction sequence is a
+test that goes red without it; and the emission's comment claimed "the REPL still
+runs and still answers" at a point where no child exists yet, since this is the
+factory and `.start()` spawns. Two of its minors were wording that claimed more
+than the code does — the `--` separator makes no difference to the pathspec
+comparison, measured — and both are narrowed here rather than argued.
+
+Verification differenced against untouched `main` rather than counted — 51
+tsconfigs with an identical single pre-existing `app/` failure, lint rc=0 on
+seven gates, and a whole-tree leak-gate comparison (empty branch-unique set)
+which caught a denylisted brand word this change had introduced and a summary
+count would have hidden.
+
+**Round 4 integrated the branch by REBASE rather than merge, and the rebase is
+where the interesting failure was.** The branch had been integrated twice with
+merge commits; history is now linear on top of `main`. Resolving `docs/AS_BUILT.md`
+by hand was mandatory, not cautious: the repo-configured as-built merge driver
+points at a path in a worktree that no longer exists, so it fails and leaves the
+file at OUR side alone — which silently drops whatever entries `main` gained.
+It did exactly that here, twice.
+
+**The check that caught it was a disagreement between two tools, and the lesson
+is that the counting check this entry's own procedure specifies is the one that
+works.** A plain `diff main working` reported ZERO deleted lines while
+`git diff` reported 87, and `git` was right: PR #370's entry was absent from the
+file. `diff` had found an alignment that read the loss as a move. The proof that
+now stands is git's, run against the exact `origin/main` SHA being rebased onto:
+zero `^-` lines in `docs/AS_BUILT.md`, and a heading count of 342 = 341 on `main`
+plus this entry. The second half of that failure was a moving target — `main`
+advanced from `90288f76` to `cedb40ba` mid-rebase, so the first snapshot of it
+was already stale when it was verified against; the count is now taken after a
+fresh fetch, immediately before the push.
+
+Round 4 also closed four review findings, each mutation-proved with a passing
+control in the same run. `auditedSources()` silently `continue`d past any tracked
+file it could not read, behind a comment ASSERTING such a file is "a checkout
+race, not a reader" — an unreadable file is one nobody looked at, so that is a
+guess failing in the unsafe direction, and the only cardinality check here is a
+`> 500` floor a single omission cannot trip. Unreadable paths are now collected
+and asserted empty (recorded as path plus errno code, never the thrown message,
+which Node builds around the absolute path). Mutating one file to throw turns
+that test red naming `config/index.ts (EMUTANT)` and reds two membership tests
+with it, which is the fail-open demonstrated rather than argued. The docblock in
+`config/index.ts` called a computed key "the only residual limit left"; four more
+undetected spellings were measured (a concatenation, a regex character class, a
+regex `_` escape, and a JSX name split across text and an expression), so the
+limit is now stated as a CLASS — a spelling no single AST node contains whole —
+and all five are failing-by-design fixtures with two positive controls, so a
+detector that answered `false` for everything could not pass them. A test titled
+"every TypeScript file" excluded tracked test files and now says NON-TEST; the
+line-terminator test claimed EVERY terminator without exercising the ordinary
+line feed, which it now does. The three `repl_supervision_disabled_no_home` lines
+that reached CI stderr unasserted are captured and asserted.
+
+**The cross-model reviewer DID run this round** — the previous round's panel
+recorded it as deferred on a failed call, and the first attempt here exited 127
+because `timeout(1)` does not exist on this platform, which is a shell failure
+wearing a review failure's clothes. Re-run without it, `codex-cli 0.147.0`
+returned four findings and explicitly cleared three questions it was asked to
+attack: the prefilter is SOUND relative to the walk (no source it skips would
+have matched, which is the one defect that would make this file worthless), the
+new unreadable-file assertion can genuinely fail, and it exposes no absolute
+path. All four findings were the same shape as this entry's subject — a claim
+wider than its check — and all four are fixed rather than answered:
+
+- The test titled "a new reader in any UNREGISTERED file is detected" promised
+  every spelling and checks one. `process.env['NEUTRON' + '_HOME']` in a new
+  unregistered file leaves the suite green. The title now names the property it
+  actually proves — FILE-INDEPENDENCE for a plainly-spelled read — and the file's
+  own header, which claimed a new file "can no longer land unnoticed", carries
+  the counterexample.
+- `config/index.ts` claimed "a registry row whose file stopped reading the
+  variable fails too". It fails only once the file stops NAMING it, so a file
+  that deletes its read but keeps a string mentioning the variable holds a row
+  describing a read that is gone. Narrowed, with the gap stated.
+- The unreadable-file test added THIS round was itself titled "EVERY tracked
+  TypeScript file" while `isTestPath` filters test files out before the read —
+  the same overclaim, on the commit that fixed it elsewhere.
+- "the report fires ONCE per instance" is disproved by the test 27 lines above
+  it, which pins the deliberate re-arm after an armed construction. The property
+  is once per continuously-disabled run.
+
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
 Landed via PR #370.
