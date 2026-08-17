@@ -128,7 +128,7 @@ Verify by hand *before* writing an entry. Establish what that migration did to t
 Two traps worth naming:
 
 - **`file_name` holds a migration's slug, not a filename on disk** — `trident_checkpoint_head`, not `0122_trident_checkpoint_head.sql`. "Correcting" it stops the entry doing its job, and the failure is invisible.
-- **An entry only takes effect where its row exists.** `version` + `recorded_name` must match a real row, which is what keeps these entries inert on every other instance — a fresh install must still run migration 0122, and it does.
+- **An entry only takes effect where its row exists.** `recorded_name` must match a name the ledger records, which is what keeps these entries inert on every other instance — a fresh install must still run migration 0122, and it does. `version` is context, not part of the match: the ledger is keyed on the name, one migration can legitimately be recorded at more than one ordinal before the rekey collapses it, and matching on the pair meant an entry naming the row that did not survive that collapse quietly stopped working on the next boot.
 
 Entries are permanent incident records. They are never rewritten or removed.
 

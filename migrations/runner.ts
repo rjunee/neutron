@@ -117,21 +117,6 @@ function loadMigrationRepairs(dir: string): MigrationRepair[] {
 }
 
 /**
- * A repair identifies the LEDGER ROW it acknowledges: ordinal plus recorded name.
- *
- * It deliberately does NOT include `file_name`. A repair says two things, and both
- * are about the row rather than about whatever file happens to sit at that ordinal
- * in this build: the row is an acknowledged orphan, and the migration named by
- * `file_name` is already applied on this instance (see `activeRepairs`). Keying on
- * the ordinal + recorded name keeps both shipped entries matching unchanged, and
- * stops a repair from silently ceasing to apply the next time a merge renumbers
- * the file that used to collide with it.
- */
-function repairKey(version: number, recordedName: string): string {
-  return `${version}\0${recordedName}`
-}
-
-/**
  * The `repairs.json` entry that would acknowledge this exact ledger row.
  *
  * READ THE FIELD NAMES CAREFULLY. `recorded_name` is the name in the ledger — the
@@ -141,7 +126,14 @@ function repairKey(version: number, recordedName: string): string {
  * for the file `0122_trident_checkpoint_head.sql`). "Correcting" either to a real
  * filename stops the entry matching, and the failure is invisible: the ledger looks
  * repaired while the runner keeps refusing to boot. This builder exists so the
- * operator never has to infer the convention from the key function.
+ * operator never has to infer the convention from the matcher — `recorded_name` is
+ * what the entry is matched on (see `activeRepairs`), and getting it wrong is the one
+ * mistake that silently does nothing.
+ *
+ * `version` IS EMITTED AS CONTEXT, NOT AS PART OF THE MATCH. It records the ordinal
+ * the row was written under, and it is copied into `_migration_repairs` for the audit
+ * trail, so an entry whose ordinal is stale still activates rather than quietly
+ * ceasing to.
  *
  * `file_name` is left for the operator to fill because only they can answer it —
  * the runner knows which row it cannot explain, but not which of this build's
@@ -788,6 +780,11 @@ function treeProvenanceOf(tree: DeployedTree | null): string | null {
  * apart (`verified` null): what changes is only which remedy the operator is
  * handed. Deferring cannot mean "apply it": the loop refuses every untracked
  * pending file, which is why standing aside here is safe.
+ *
+ * THE VERDICT MUST BE RESOLVED ON EVERY BOOT THAT HAS A COLLISION, and the caller
+ * does that — see `hasOrdinalCollision`. A verdict resolved only when something is
+ * pending would make this function's answer depend on whether there was work to do,
+ * which is the one thing a classification must not depend on.
  */
 function assertUniqueMigrationOrdinals(
   migrations: Migration[],
@@ -806,6 +803,24 @@ function assertUniqueMigrationOrdinals(
     }
     byVersion.set(migration.version, migration)
   }
+}
+
+/**
+ * Whether two files in this tree claim one ordinal.
+ *
+ * A PURE IN-MEMORY CHECK OVER THE ALREADY-LOADED TREE, and that is what makes it
+ * usable as the trigger for resolving the tree verdict. It touches no filesystem, so
+ * a healthy tree — which has no collision — still resolves nothing and a steady-state
+ * boot still does no filesystem work at all. Only a tree that has something to
+ * classify pays for the classification.
+ */
+function hasOrdinalCollision(migrations: Migration[]): boolean {
+  const seen = new Set<number>()
+  for (const migration of migrations) {
+    if (seen.has(migration.version)) return true
+    seen.add(migration.version)
+  }
+  return false
 }
 
 /**
@@ -885,17 +900,55 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   /**
    * The repairs that SPEAK on this database, and nothing else.
    *
-   * An entry only takes effect when the row it names is actually present — an
-   * ordinal carrying exactly that recorded name. This is the property that keeps
-   * `repairs.json` inert on every instance it is not about, a FRESH INSTALL above
-   * all: entry 122 says `trident_checkpoint_head` is already applied on the one
-   * instance where it was applied by hand, and on a new database that migration
-   * must obviously run. Gating on the row's presence is what distinguishes the two,
-   * and it is the same trigger condition the ordinal-based version had.
+   * An entry only takes effect when the ledger actually RECORDS the name it names.
+   * This is the property that keeps `repairs.json` inert on every instance it is not
+   * about, a FRESH INSTALL above all: entry 122 says `trident_checkpoint_head` is
+   * already applied on the one instance where it was applied by hand, and on a new
+   * database that migration must obviously run. Gating on the row's presence is what
+   * distinguishes the two, and that argument is unchanged — a fresh install records
+   * none of these names, so none of these entries activate.
+   *
+   * WHAT CHANGED, AND WHY: the trigger used to require an exact (version, name) PAIR,
+   * which is an ordinal-as-identity assumption — the very thing this file deletes —
+   * left behind in repair matching. It broke on the one shape it most needed to
+   * survive. A ledger may legitimately record ONE name at TWO ordinals (see
+   * `collapseLedgerRowsByName`), the rekey keeps the earliest-applied row and drops
+   * the other, and the dropped row sits at a DIFFERENT ordinal by definition. So an
+   * entry naming the non-surviving row activated on the rekey boot and went INERT on
+   * every boot after it — silently un-suppressing a hand-verified migration whose
+   * `ALTER`s then re-run, and un-acknowledging an orphan the boot then refuses over.
+   * Both consequences land hardest on the databases repairs exist for.
+   *
+   * AND IT MUST NOT OVER-ACTIVATE EITHER, which is why the name alone is not the
+   * whole condition. A repair is about a row this build cannot account for on its
+   * own, so the trigger is: the ledger records that name at an ordinal OTHER than the
+   * one this build assigns it — which includes the case where this build has no file
+   * of that name at all, the orphan the entries are usually written for. Measured, not
+   * assumed: entry 125's `recorded_name` is `code_trident_runs_fix_round_contract`,
+   * which IS a file here (`0124_…`), so a name-only trigger fired on any healthy
+   * instance that had recorded 0124 and not yet run 0125 — suppressing 0125 forever on
+   * a database the incident was never about, and leaving its name permanently
+   * unrecorded. The schema still converged (`0131` rebuilds the table either way),
+   * which is exactly what would have made the widening invisible.
+   *
+   * THAT COMPARISON IS FORENSICS, NOT IDENTITY. It does not ask "has this migration
+   * run?" — `migrationIsRecorded` owns that question and answers it by name. It asks
+   * whether the ledger's record of a name is what a normal apply of THIS build would
+   * have written, and a mismatch is precisely the incident these entries describe.
+   *
+   * The `version` field is kept on the entry as CONTEXT rather than as a key: it
+   * records the ordinal the row was written under, it is printed in the refusal
+   * message that emits these entries, and it is still written into
+   * `_migration_repairs` as part of the audit trail. An entry whose `version` has gone
+   * stale — because the row it named was the one a collapse dropped — therefore keeps
+   * working instead of quietly ceasing to.
    */
+  const treeOrdinalByName = new Map(migrations.map((m) => [m.name, m.version] as const))
   const activeRepairs = loadMigrationRepairs(dir).filter((repair) =>
     ledger.rows.some(
-      (row) => row.version === repair.version && row.name === repair.recorded_name,
+      (row) =>
+        row.name === repair.recorded_name &&
+        row.version !== treeOrdinalByName.get(repair.recorded_name),
     ),
   )
   // WHAT AN ACTIVE REPAIR ASSERTS, in two independent halves — the shipped entries
@@ -904,10 +957,15 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // was applied by hand and never recorded, so identity reconciliation would
   // otherwise re-run its `ALTER`s and fail on duplicate columns. (2) The row itself
   // is an acknowledged orphan, so the refusal below stays silent about it.
+  //
+  // BOTH HALVES ARE KEYED ON THE NAME, and the second one has to be or the fix is
+  // half a fix. The unexplained-row guard selects its candidates by NAME
+  // (`!fileNames.has(row.name)`), so an acknowledgement keyed on (version, name)
+  // could fail to exempt a row the guard had already selected — the surviving row of
+  // a collapsed pair, same name, different ordinal. Keying both on the name puts the
+  // exemption in the same terms as the selection.
   const repairedNames = new Set(activeRepairs.map((repair) => repair.file_name))
-  const acknowledgedRows = new Set(
-    activeRepairs.map((repair) => repairKey(repair.version, repair.recorded_name)),
-  )
+  const acknowledgedNames = new Set(activeRepairs.map((repair) => repair.recorded_name))
 
   // EVERY REFUSAL IS DECIDED BEFORE THE FIRST WRITE, and the whole block below is
   // ordered around that. Nothing here mutates the database: the ledger has not
@@ -926,19 +984,42 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   )
   const pendingNames = new Set(pendingMigrations.map((m) => m.name))
   const pending = pendingMigrations.length > 0
-  // Both provenance reads happen ONCE per run, and only when something is pending,
-  // so a steady-state boot does no filesystem work at all. `dir` is the search
-  // origin: for the instance tree that walks up to the checkout's `.git`, and for a
-  // sidecar tree (`migrations/comments`) it finds the same one.
+  // A COLLISION NEEDS CLASSIFYING WHETHER OR NOT THERE IS WORK TO DO, so it is its
+  // own trigger for the tree read below. This costs a healthy install nothing: the
+  // check is a pure pass over the already-loaded `migrations` array and a clean tree
+  // answers false, so a steady-state boot still does no filesystem work at all.
+  const collision = hasOrdinalCollision(migrations)
+  // `dir` is the search origin: for the instance tree that walks up to the
+  // checkout's `.git`, and for a sidecar tree (`migrations/comments`) it finds the
+  // same one. Each read happens ONCE per run.
+  //
+  // THE COMMIT READ STAYS GATED ON `pending` ALONE, and the asymmetry is deliberate:
+  // `deployedCommit` only ever stamps rows this run writes and captions the untracked
+  // refusal, which iterates pending files — nothing pending, nothing that value can
+  // reach. The tree verdict is different in kind, because a classification is
+  // consulted on every boot.
   const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
-  const tree = pending ? resolveDeployedTree(dir) : null
+  const tree = pending || collision ? resolveDeployedTree(dir) : null
   // The tracked-file list, or null when there is none to compare against. A
   // `null` here is "cannot verify" and refuses nothing — see `resolveDeployedTree`.
   const verified = tree !== null && tree.kind === 'verified' ? tree : null
-  // AFTER the tree verdict, not before it, so a stray colliding with a tracked
-  // file is diagnosed as the stray it is. A collision always leaves at least one of
-  // the two files pending — a stray was never recorded — so the verdict above is
-  // never null for the reason that matters here. See the function for the argument.
+  // AFTER the tree verdict, not before it, so a stray colliding with a tracked file
+  // is diagnosed as the stray it is.
+  //
+  // WHAT THE VERDICT MUST NOT DEPEND ON, stated as the invariant this line rests on:
+  // whether anything is pending. This comment used to argue the opposite — that a
+  // collision "always leaves at least one of the two files pending, because a stray
+  // was never recorded" — and that premise is false. It holds only for the boot that
+  // finds the collision first. A RECORDED untracked stray is a supported state: the
+  // refusal loop below checks pending files only, deliberately sparing a stray applied
+  // long ago (refusing forever over one would be an outage with no remedy), and
+  // ordinals 122 and 124 on the live instance are exactly that. So the sequence is:
+  // boot one has the tracked side pending, resolves the tree, classifies the stray and
+  // stands aside; boot two has nothing pending, and a `pending`-gated verdict would be
+  // null — turning a tolerated collision into a hard refusal on every boot after a
+  // SUCCESSFUL upgrade. Gating the read on `collision` too is what keeps the answer a
+  // property of the tree rather than of the schedule, and it is why migrations being
+  // idempotent by contract (`AGENTS.md`) survives contact with this guard.
   assertUniqueMigrationOrdinals(migrations, verified)
   /**
    * The tree verdict WHEN IT REFUSES this file, else null.
@@ -983,7 +1064,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
       row.content_sha256 !== null &&
       row.content_sha256.length > 0 &&
       !fileNames.has(row.name) &&
-      !acknowledgedRows.has(repairKey(row.version, row.name)),
+      !acknowledgedNames.has(row.name),
   )
   if (candidateRows.length > 0) {
     const fileHashes = new Set(migrations.map((m) => migrationContentHash(m.sql)))
@@ -1017,7 +1098,10 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   const applied: number[] = []
   const skipped: number[] = []
   // NULL when nothing is pending, which is also the only case where no row is
-  // written — see `treeProvenanceOf`.
+  // written — see `treeProvenanceOf`. The `pending` gate is kept EXPLICIT rather than
+  // left to `tree` being null, because `tree` is now also resolved for a collision:
+  // "no run happened" must stay a statement about the run, not a side effect of which
+  // reads the run happened to need.
   const treeProvenance = pending ? treeProvenanceOf(tree) : null
   // The ledger is created and reshaped HERE, on the path that is about to write a
   // row, and nowhere earlier — which is the whole reason it is read

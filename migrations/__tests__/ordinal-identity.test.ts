@@ -40,6 +40,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations, loadMigrations, splitPragmaPreamble } from '../runner.ts'
 import { migrationContentHash } from '../provenance.ts'
+import { encodeIndex } from './git-index-fixture.ts'
 
 const REAL_TREE = join(import.meta.dir, '..')
 
@@ -721,5 +722,216 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
   db.exec('DROP VIEW _migrations_version_keyed')
   expect(applyMigrations(db).applied).toEqual([127, 131])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
+  db.close()
+})
+
+// --------------- 7. a tolerated collision, on the boot AFTER the upgrade worked
+
+/**
+ * The real tree inside a checkout whose `.git` index is laid out by hand, so the tree
+ * verdict is `verified` and every file's tracked-ness is under the test's control.
+ *
+ * WHY THE OTHER FIXTURES HERE CANNOT BE USED FOR THIS. A tmp copy of the tree has no
+ * git metadata above it, so `resolveDeployedTree` answers `unverifiable` and the
+ * runner cannot tell a stray from a committed file at all — which is precisely the
+ * distinction CASE 7 turns on. The index encoder is the one from
+ * `git-index-fixture.ts` that `untracked-migration.test.ts` already uses, and the root
+ * `package.json` is not decoration: it is the ownership test the resolver applies
+ * before reading anything.
+ */
+function realTreeInCheckout(
+  name: string,
+  options: { files?: Record<string, string>; untracked?: readonly string[] } = {},
+): string {
+  const root = join(tmp, name)
+  const dir = join(root, 'migrations')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'neutron' }))
+  mkdirSync(join(root, '.git'), { recursive: true })
+  writeFileSync(join(root, '.git', 'HEAD'), `${'a'.repeat(40)}\n`)
+  const fromRealTree = readdirSync(REAL_TREE).filter((f) => /^\d{4}_.+\.sql$/.test(f))
+  for (const file of fromRealTree) cpSync(join(REAL_TREE, file), join(dir, file))
+  cpSync(join(REAL_TREE, 'repairs.json'), join(dir, 'repairs.json'))
+  for (const [file, contents] of Object.entries(options.files ?? {})) {
+    writeFileSync(join(dir, file), contents)
+  }
+  const untracked = new Set(options.untracked ?? [])
+  writeFileSync(
+    join(root, '.git', 'index'),
+    encodeIndex([
+      { path: 'package.json' },
+      ...[...fromRealTree, ...Object.keys(options.files ?? {})]
+        .filter((f) => !untracked.has(f))
+        .map((f) => ({ path: `migrations/${f}` })),
+    ]),
+  )
+  return dir
+}
+
+/** The unmerged branch migration that landed on ordinal 122, as a file. */
+const STRAY_FILE = '0122_dispatch_claims_from_an_unmerged_branch.sql'
+const STRAY_NAME = 'dispatch_claims_from_an_unmerged_branch'
+const STRAY_SQL = 'CREATE TABLE IF NOT EXISTS branch_only_claims (id TEXT PRIMARY KEY);\n'
+
+test('CASE 7 — a tolerated ordinal collision still boots on the NEXT boot, with nothing pending', () => {
+  // THE TWO-RUN SEQUENCE, WHICH IS THE WHOLE BUG. A recorded untracked stray sharing
+  // an ordinal with a tracked file is a SUPPORTED state — the untracked refusal checks
+  // pending files only, deliberately sparing a stray applied long ago — and it is the
+  // live 122/124 incident class. The collision is therefore classified and stood aside
+  // from, and run 1 upgrades cleanly.
+  //
+  // Run 2 is the one that used to die. With nothing pending the tree verdict was not
+  // resolved at all, so the classifier saw `verified === null`, could not tell the
+  // stray from a committed duplicate, and threw. A SUCCESSFUL upgrade then refused to
+  // boot on every subsequent boot, for as long as the stray file sat on disk — an
+  // idempotent runner (`AGENTS.md`) that is not idempotent, and the brick-the-boot
+  // outcome this whole change exists to prevent.
+
+  // The stray, applied from the branch checkout where it WAS tracked. That is how the
+  // row came to exist on the live instance, and it is why no ledger row is hand-written
+  // here either.
+  const branchRoot = join(tmp, 'branch-checkout')
+  const branchDir = join(branchRoot, 'migrations')
+  mkdirSync(branchDir, { recursive: true })
+  writeFileSync(join(branchRoot, 'package.json'), JSON.stringify({ name: 'neutron' }))
+  mkdirSync(join(branchRoot, '.git'), { recursive: true })
+  writeFileSync(join(branchRoot, '.git', 'HEAD'), `${'a'.repeat(40)}\n`)
+  writeFileSync(join(branchDir, STRAY_FILE), STRAY_SQL)
+  writeFileSync(
+    join(branchRoot, '.git', 'index'),
+    encodeIndex([{ path: 'package.json' }, { path: `migrations/${STRAY_FILE}` }]),
+  )
+  const db = new Database(join(tmp, 'tolerated.db'), { create: true })
+  expect(applyMigrations(db, branchDir).applied).toEqual([122])
+
+  // The merged checkout: the whole real tree, tracked, with the stray still on disk and
+  // NOT tracked — the state a `git checkout` of the merge leaves behind.
+  const dir = realTreeInCheckout('merged-checkout', {
+    files: { [STRAY_FILE]: STRAY_SQL },
+    untracked: [STRAY_FILE],
+  })
+
+  // THE PRECONDITION, MEASURED. Two files claim ordinal 122, the stray is recorded,
+  // and the migration this build numbers 0122 is not.
+  expect(
+    readdirSync(dir).filter((f) => f.startsWith('0122_')).sort(),
+  ).toEqual([STRAY_FILE, '0122_trident_checkpoint_head.sql'])
+  expect(ledger(db)).toEqual([{ version: 122, name: STRAY_NAME }])
+
+  const run1 = applyMigrations(db, dir)
+  // It upgraded, and the tracked side of the collision ran.
+  expect(run1.applied).toContain(122)
+  expect(run1.applied.length).toBeGreaterThan(100)
+  expect(ledger(db).filter((r) => r.version === 122).map((r) => r.name).sort()).toEqual([
+    STRAY_NAME,
+    'trident_checkpoint_head',
+  ])
+
+  // AND THE NEXT BOOT, with nothing left pending, does not refuse. This is the
+  // discriminating assertion: before the fix it threw
+  // "Migration ordinal collision at version 122".
+  const boot2 = applyMigrations(db, dir)
+  expect(boot2.applied).toEqual([])
+  // Every file in the tree was skipped, the stray included — so ordinal 122 appears
+  // TWICE, which is the collision being tolerated rather than merely not looked at.
+  expect(boot2.skipped).toEqual(
+    readdirSync(dir)
+      .filter((f) => /^\d{4}_.+\.sql$/.test(f))
+      .sort()
+      .map((f) => Number.parseInt(f.slice(0, 4), 10)),
+  )
+  expect(boot2.skipped.filter((v) => v === 122)).toHaveLength(2)
+  // A third boot too — the point is a fixed point, not a one-off reprieve.
+  expect(applyMigrations(db, dir).applied).toEqual([])
+  db.close()
+})
+
+// -------------------- 8. a repair that must not go inert after the rekey
+
+test('CASE 8 — a repair naming the row the collapse DROPS keeps acknowledging afterwards', () => {
+  // The rekey used to silently deactivate a repair. `activeRepairs` required an exact
+  // (version, name) pair, and `collapseLedgerRowsByName` keeps the EARLIEST-applied row
+  // of a duplicated name and drops the others — which sit at a different ordinal by
+  // definition. So an entry naming the non-surviving row activated on the rekey boot
+  // and went inert on every boot after it. That matcher was itself an
+  // ordinal-as-identity holdover, left behind in repair matching by the change that
+  // deleted the assumption everywhere else.
+  //
+  // Both halves of what an active repair asserts break, independently:
+  //   - the hand-verified migration stops being suppressed, so its `ALTER`s re-run;
+  //   - the orphan row stops being acknowledged, so the unexplained-row guard refuses
+  //     the boot. Note the asymmetry that makes this one bite: the guard selects
+  //     candidates by NAME, so the SURVIVING row — same name, different ordinal — was
+  //     never exempted by a (version, name) acknowledgement.
+  //
+  // Synthetic tree rather than the real one, because the fixture needs a name recorded
+  // at two ordinals that corresponds to NO file in this build, and only an unmerged
+  // branch migration is that. Same idiom as CASE 4.
+  const ghost = (file: string): string => {
+    const dir = mkdtempSync(join(tmp, 'ghost-'))
+    writeFileSync(join(dir, file), 'CREATE TABLE IF NOT EXISTS ghost (id TEXT PRIMARY KEY);\n')
+    return dir
+  }
+  const build = mkdtempSync(join(tmp, 'build-'))
+  writeFileSync(join(build, '0001_beta.sql'), 'CREATE TABLE IF NOT EXISTS t2 (id INTEGER);\n')
+  writeFileSync(join(build, '0002_gamma.sql'), 'CREATE TABLE IF NOT EXISTS t3 (id INTEGER);\n')
+  // The entry names ordinal 501 — the row the collapse DROPS, because 500 was applied
+  // earlier. A real operator writes whichever ordinal the refusal message printed, and
+  // the message prints the row it could not explain.
+  writeFileSync(
+    join(build, 'repairs.json'),
+    JSON.stringify([
+      {
+        version: 501,
+        recorded_name: 'ghost',
+        file_name: 'beta',
+        note: 'hand-verified: the branch table is unused, and beta already ran here',
+        date: '2026-08-17',
+      },
+    ]),
+  )
+
+  // The prior state, written by the runner that wrote every ledger in the field: one
+  // branch migration renumbered between two branch builds, so the ordinal-keyed dedup
+  // applied and recorded it twice. Release 1 predates provenance, so the EARLIEST row —
+  // the one the collapse keeps — is the one with no hash, and it inherits release 2's.
+  const db = new Database(join(tmp, 'inert-repair.db'), { create: true })
+  versionKeyedRunner(db, ghost('0500_ghost.sql'), {
+    provenance: false,
+    appliedAt: 1_700_000_000,
+  })
+  versionKeyedRunner(db, ghost('0501_ghost.sql'), {
+    provenance: true,
+    appliedAt: 1_760_000_000,
+  })
+  // THE PRECONDITION, MEASURED: one name, two ordinals, and the entry names the later.
+  expect(ledger(db)).toEqual([
+    { version: 500, name: 'ghost' },
+    { version: 501, name: 'ghost' },
+  ])
+
+  // Boot 1 — the rekey boot. The repair activates (both rows are still visible), `beta`
+  // is suppressed, and the collapse drops row 501.
+  expect(applyMigrations(db, build)).toEqual({ applied: [2], skipped: [1] })
+  expect(ledger(db)).toEqual([
+    { version: 2, name: 'gamma' },
+    { version: 500, name: 'ghost' },
+  ])
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+
+  // BOOT 2 — the discriminating one. Before the fix this threw
+  // "NO migration file in this build corresponds to" over the surviving `ghost` row,
+  // AND re-applied `beta`. Both halves are asserted.
+  const boot2 = applyMigrations(db, build)
+  expect(boot2.skipped).toContain(1)
+  expect(boot2.applied).not.toContain(1)
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+  // The acknowledgement was audited on this boot too, at the ordinal the entry carries
+  // — `version` is still recorded, it is simply no longer what the entry is matched on.
+  expect(
+    db.query('SELECT version, recorded_name, file_name FROM _migration_repairs').all(),
+  ).toEqual([{ version: 501, recorded_name: 'ghost', file_name: 'beta' }])
+  // And it is a fixed point.
+  expect(applyMigrations(db, build).applied).toEqual([])
   db.close()
 })

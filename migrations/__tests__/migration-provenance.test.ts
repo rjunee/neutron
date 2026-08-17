@@ -13,7 +13,7 @@
  * install that has no git metadata at all. And the refusal, which must stay
  * exactly as fail-closed as it was, now prints its own recovery: the last test
  * group takes the entry out of the thrown message and proves it resolves the
- * mismatch, so nobody has to reverse-engineer `repairKey` from source again.
+ * mismatch, so nobody has to reverse-engineer the matcher from source again.
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -530,7 +530,7 @@ test('a row with a hash but no commit is reported as an unidentifiable BUILD, no
 })
 
 test('the entries printed in the message are the entries that resolve the refusal', () => {
-  // Recovery must not require reverse-engineering repairKey() from source. So take
+  // Recovery must not require reverse-engineering the repair matcher from source. So take
   // the JSON the runner printed, paste it in, and the same tree must boot.
   const { db, b } = unexplainedRow()
   const message = messageOf(() => applyMigrations(db, b))
@@ -584,12 +584,23 @@ test('the guard STILL REFUSES an unexplained row — no false negative', () => {
   )
   expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build/)
 
-  // Nor an entry at a different ordinal.
+  // WHAT DOES *NOT* HOLD, stated positively so nobody re-adds it as an assertion: an
+  // entry whose `version` is wrong still acknowledges the row. `recorded_name` is the
+  // whole match, because `name` is the ledger's primary key and therefore holds at
+  // most one row — so there is nothing wider for a name to match, and no laundering
+  // available. Requiring the PAIR is what made a shipped acknowledgement go inert on
+  // the boot after a rekey collapsed the row it named (see CASE 8 in
+  // ordinal-identity.test.ts): the collapse keeps the earliest-applied row and drops
+  // the others, which sit at a different ordinal by definition. The ordinal is kept on
+  // the entry as the context it always was — it records the number the row was written
+  // under and is printed in the refusal — and it is not a key.
   writeFileSync(
     join(b, 'repairs.json'),
     JSON.stringify([{ version: 9, recorded_name: 'alpha', file_name: '', note: 'other', date: '2026-08-16' }]),
   )
-  expect(() => applyMigrations(db, b)).toThrow(/NO migration file in this build/)
+  // `file_name` is "", so the entry acknowledges the row ALONE and suppresses nothing:
+  // both migrations this build contains then apply.
+  expect(applyMigrations(db, b)).toEqual({ applied: [1, 2], skipped: [] })
 
   // And the recorded row is untouched through all of it.
   expect(db.query("SELECT version FROM _migrations WHERE name = 'alpha'").get()).toEqual({
