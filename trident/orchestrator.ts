@@ -1549,6 +1549,32 @@ export function innerTerminalFailureReason(
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
 }
 
+/**
+ * GIT-TRUTH FOR THE CLAIM, NOT ONLY THE BRANCH (card 2026-08-16). A model-relayed
+ * sha that names NO git object is not a disagreement with the real head — there is
+ * only one candidate commit, git's — so it resolves to ABSENT (null), never to a
+ * refusal. Measured: hallucinated claim '924b42906950' (git cat-file: not a valid
+ * object name) refused a good build and stranded 924b4290ea81….
+ * A claim is a sha, never a refname: non-hex input returns null WITHOUT asking git,
+ * so 'HEAD'/branch names cannot resolve by accident (4 = git's minimum abbreviation).
+ * `--end-of-options` keeps hostile-shaped input from being read as a flag.
+ */
+export async function resolveClaimedCommit(
+  run_host: RunHostCommand,
+  repo_path: string,
+  claim: string | null,
+): Promise<string | null> {
+  if (claim === null) return null
+  const c = claim.trim().toLowerCase()
+  if (!/^[0-9a-f]{4,40}$/.test(c)) return null
+  const res = await run_host(
+    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${c}^{commit}`],
+    repo_path,
+  )
+  const oid = res.stdout.trim()
+  return res.ok && /^[0-9a-f]{40}$/.test(oid) ? oid : null
+}
+
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
@@ -1616,7 +1642,10 @@ export function buildTridentOrchestrator(
    * A COMMIT OID IS READ, NOT REPORTED. `claimedHead` is whatever the build SAID it
    * committed — possibly abbreviated, possibly absent. The head that actually gets
    * published is the one git resolves for the branch the inner loop named (a name a
-   * model cannot plausibly mangle). A claim is only ever a CHECK against that.
+   * model cannot plausibly mangle). A claim is only ever a CHECK against that. The
+   * claim is itself resolved through git first (`resolveClaimedCommit`): unresolvable
+   * = ABSENT; only two real, DIFFERENT OIDs refuse, and only after the push, so a
+   * refusal never strands the commit.
    */
   async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
@@ -1633,14 +1662,15 @@ export function buildTridentOrchestrator(
         `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
       )
     }
-    // THE CLAIM IS A CHECK, NEVER THE SOURCE. `startsWith` makes a full 40-char claim an
-    // equality test and a 7-char one a prefix test. A disagreement is a real signal (wrong
-    // branch, wrong worktree) and names BOTH values — neither is silently preferred.
-    if (claimedHead !== null && !resolvedHead.startsWith(claimedHead.toLowerCase())) {
-      throw new Error(
-        `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
-      )
-    }
+    // THE CLAIM IS A CHECK, NEVER THE SOURCE — and it is RESOLVED before it may check
+    // anything. A claim naming no git object is ABSENT, not a conflict (there is only
+    // one candidate commit: git's). Resolved OIDs are compared for EQUALITY — a prefix
+    // compare is wrong both ways: a hallucinated prefix refused a good build, and a
+    // short sha of the right commit is only honored by resolving it. The refusal
+    // itself is DEFERRED until after the push (see below) so it can never strand the
+    // commit; it remains only for two real, resolvable, DIFFERENT commits.
+    const resolvedClaim = await resolveClaimedCommit(opts.run_host, run.repo_path, claimedHead)
+    const claimConflict = resolvedClaim !== null && resolvedClaim !== resolvedHead
     // FIX-ROUND ANCESTRY GATE (mandated by the Fable arbitration on #289 vs #318).
     // A fix round carries the head the review verdict was ABOUT; the head it produced
     // must DESCEND from it. Run fec4d3aa rebuilt from main with no ancestry of the
@@ -1769,6 +1799,17 @@ export function buildTridentOrchestrator(
     const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
     if (remoteHead !== headToPublish) {
       throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
+    }
+
+    // THE REFUSAL FIRES ONLY AFTER THE PUSH IS CONFIRMED (defect 2, 2026-08-14: the
+    // throw preceded the push, so a wrong refusal left the commit unreachable —
+    // 924b4290ea81… was stranded). A refusal is about which commit to REVIEW, not
+    // about whether the work may exist: the branch is on origin for inspection; only
+    // the PR / review dispatch is refused.
+    if (claimConflict) {
+      throw new Error(
+        `outer publisher refused: the build reported commit '${claimedHead}' (resolves to '${resolvedClaim}') but branch ${branch} resolved to '${resolvedHead}' before publish — the branch was pushed to origin for inspection; no PR or review was dispatched`,
+      )
     }
 
     let pr = prBefore

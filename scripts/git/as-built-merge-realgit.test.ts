@@ -123,6 +123,45 @@ function scenario(): { repo: string; forkPoint: string } {
   return { repo, forkPoint }
 }
 
+function sameHeadingScenario(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'as-built-same-heading-realgit-'))
+  created.push(repo)
+  git(repo, 'init', '-q', '-b', 'main')
+  git(repo, 'config', 'user.email', 'trident-test@neutron.local')
+  git(repo, 'config', 'user.name', 'Trident Test')
+  git(repo, 'config', 'commit.gpgsign', 'false')
+  mkdirSync(join(repo, 'docs'), { recursive: true })
+  mkdirSync(join(repo, 'scripts', 'git'), { recursive: true })
+  cpSync(join(REPO_ROOT, 'scripts', 'install-merge-drivers.sh'), join(repo, 'scripts', 'install-merge-drivers.sh'))
+  cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-merge-driver.ts'), join(repo, 'scripts', 'git', 'as-built-merge-driver.ts'))
+  cpSync(join(REPO_ROOT, 'scripts', 'git', 'as-built-log-merge.ts'), join(repo, 'scripts', 'git', 'as-built-log-merge.ts'))
+  writeLog(repo, HISTORY)
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'base')
+  git(repo, 'checkout', '-q', '-b', 'ours')
+  writeLog(repo, [...entry('2026-08-16', 'same concurrent title', 'Body from ours.'), ...HISTORY])
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'ours')
+  git(repo, 'checkout', '-q', '-b', 'theirs', 'main')
+  writeLog(repo, [...entry('2026-08-16', 'same concurrent title', 'Body from theirs.'), ...HISTORY])
+  git(repo, 'add', '-A')
+  git(repo, 'commit', '-qm', 'theirs')
+  git(repo, 'checkout', '-q', 'ours')
+  return repo
+}
+
+test('real git unions different additions under one heading without conflict markers', () => {
+  const repo = sameHeadingScenario()
+  expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
+  const merged = run(repo, ['git', 'merge', '--no-edit', 'theirs'])
+  expect(merged.ok).toBe(true)
+  const text = readFileSync(join(repo, 'docs', 'AS_BUILT.md'), 'utf8')
+  expect(text).not.toContain('<<<<<<<')
+  expect(text).toContain('## 2026-08-16 — same concurrent title\n\nBody from ours.')
+  expect(text).toContain('## 2026-08-16 — same concurrent title (2)\n\nBody from theirs.')
+  for (const body of ['History that must survive.', 'More history that must survive.']) expect(text).toContain(body)
+}, 30_000)
+
 /**
  * Replay build two onto the moved `main` exactly as the publisher does: take the branch's own diff
  * from its fork point and `git apply --3way` it in a throwaway detached worktree.
