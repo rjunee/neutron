@@ -656,6 +656,9 @@ export function buildCoreModules(
         // crashed launcher is instead relaunched as a continuation from its pushed
         // branch/PR/checkpoint, bounded by the durable `crash_recoveries` budget.
         orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
+        // "An infrastructure failure must retry itself" — atomically spend the
+        // durable executor/transport retry budget and release the run slot.
+        orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({
           store,
