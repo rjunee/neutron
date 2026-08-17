@@ -617,6 +617,30 @@ export class TridentRunStore {
   }
 
   /**
+   * TERMINAL AGENT-WAKE CLAIM (migration 0125) — atomically claim the right to
+   * dispatch this run's ONE terminal agent-wake turn. Returns true exactly once
+   * per run (the winning claim); false when already claimed, when the run is not
+   * terminal, or when the id does not exist — so redelivery, retry, and a
+   * gateway boot that re-runs terminal observers can never fan out duplicate
+   * agent turns. SINGLE WRITER of `agent_waked_at`: the column is DELIBERATELY
+   * absent from `TridentRun`, `TridentRunUpdate`, `update()`, `save()` and
+   * `saveIfActive()` (same ownership discipline as `crash_recoveries`), so no
+   * full-snapshot save can ever un-claim a delivered wake.
+   */
+  async claimAgentWake(id: string): Promise<boolean> {
+    return this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET agent_waked_at = ?
+          WHERE id = ? AND agent_waked_at IS NULL
+            AND phase IN ${TERMINAL_PHASE_SQL}`,
+        [Date.now(), id],
+      )
+      return res.changes > 0
+    })
+  }
+
+  /**
    * Apply a partial update by id, re-stamping `last_advanced_at`. Only the
    * provided fields are written. Returns the reloaded row (or `null` if
    * the id no longer exists).
