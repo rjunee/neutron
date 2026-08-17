@@ -285,6 +285,7 @@ import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
 } from '@neutronai/gateway/proactive/work-wakeup.ts'
+import { selectWakeupWork } from '@neutronai/gateway/proactive/work-wakeup-selection.ts'
 import { resolveLocalTimezone } from '@neutronai/gateway/proactive/local-timezone.ts'
 import { readSessionCookie } from '@neutronai/landing/session-cookie.ts'
 
@@ -3977,9 +3978,30 @@ export function buildOpenGraphComposer(
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
       // SAFETY INVARIANT — nothing may mark an item done while its build runs.
       // `boardRunStore` is the same store the tick loop reconciles from, so this
-      // reads the one authoritative phase. A run that has VANISHED (get → null)
+      // reads the one authoritative row. A run that has VANISHED (get → null)
       // counts as not-live: it cannot be reconciled either, so refusing forever
       // would strand the card. See `WorkBoardStoreOptions.isRunLive`.
+      //
+      // DELIBERATELY *NOT* THE WAKEUP'S `runDrivingVerdict`, though a round of this
+      // change made it so and it reads like the obviously-consistent choice.
+      // WAKEABILITY AND COMPLETION-LEGALITY ARE DIFFERENT QUESTIONS and they fail
+      // in opposite directions. "Is anyone driving this?" may be answered from a
+      // stale clock, because guessing wrong costs a duplicated turn. "Did this
+      // work ship?" may not, because guessing wrong asserts a falsehood about the
+      // world — the 2026-08-11 incident above, which the owner called "horribly
+      // bad and confusing UX that should never have existed".
+      //
+      // A run whose `last_advanced_at` has gone quiet is very often STILL BUILDING:
+      // the field only moves at checkpoint boundaries (`liveness.ts:46-59`), which
+      // is the whole reason the wakeup needed a generous threshold. Completing on
+      // that signal would let an agent mark an item done while its build runs —
+      // and `complete()` only writes the board row (`work-board/store.ts:598`); it
+      // does not stop the build, so the claim would simply be false.
+      //
+      // The cost is real and accepted: an item the wakeup takes stays uncompletable
+      // by this path until its run reaches a terminal phase. That is a LOUD refusal
+      // (`WorkBoardRunStillLiveError`), not a silent one, and the right fix is to
+      // reap the stalled run — not to loosen the assertion that work shipped.
       isRunLive: (run_id: string): boolean => {
         const run = boardRunStore.get(run_id)
         return run !== null && run !== undefined && !isTerminalPhase(run.phase)
@@ -5881,33 +5903,24 @@ export function buildOpenGraphComposer(
     // `listOutstanding` returns [] and every tick is a cheap no-op, so a
     // credential added later starts waking work without a restart.
     const workWakeup = buildWorkWakeupLoop({
+      // An item a live run is driving already has a wakeup driver (the trident
+      // tick) — waking it here would double-drive one work item. "Live" is
+      // measured, not assumed: a run that has stopped advancing is not a driver,
+      // and deferring to one is how this loop went silent after a single firing.
+      // The policy + the evidence live in `work-wakeup-selection.ts`.
       listOutstanding: (): WakeupProjectWork[] => {
         // LLM-less probe — read the substrate this loop actually composes on.
+        // It is `cc-nudge-*`, not the owner's chat REPL: this loop is
+        // timer-driven, so it moved onto the background lane along with the fired
+        // reminder. Probing `liveAgentSubstrate` here would be reading a
+        // different substrate's availability than the one the compose needs.
         if (reminderComposeSubstrate === null) return []
-        const grouped = new Map<string, WakeupProjectWork>()
-        for (const item of workBoardStore.listAllActive()) {
-          if (item.status !== 'in_progress') continue
-          // An item a live run is driving already has a wakeup driver (the
-          // trident tick) — waking it here would double-drive one work item.
-          if (item.linked_run_id !== null) {
-            const run = boardRunStore.get(item.linked_run_id)
-            if (run !== null && run !== undefined && !isTerminalPhase(run.phase)) continue
-          }
-          const key = item.project_slug
-          const project_id = workBoardProjectIdForKey(project_slug, key)
-          const entry = grouped.get(key) ?? {
-            project_key: key,
-            // The live-chat session scope: 'general' for the General board,
-            // the project id verbatim otherwise (`turn.project_id ?? 'general'`,
-            // `gateway/wiring/build-live-agent-turn.ts`).
-            chat_scope: project_id ?? 'general',
-            label: project_id === undefined ? 'your General workspace' : `project "${project_id}"`,
-            items: [],
-          }
-          entry.items.push({ title: item.title })
-          grouped.set(key, entry)
-        }
-        return [...grouped.values()]
+        return selectWakeupWork({
+          items: workBoardStore.listAllActive(),
+          lookupRun: (run_id: string) => boardRunStore.get(run_id),
+          owner_slug: project_slug,
+          now_ms: Date.now(),
+        })
       },
       // Most recent GENUINE owner turn in this project's chat, across both
       // topic roots — the same person-only watermark the idle-nudge sweep

@@ -57,12 +57,20 @@ async function spawnSession(
   // whatever wrote the record, and (b) un-poisons the row in the same breath, so
   // the value cannot self-perpetuate into the next respawn. A substrate without
   // the floor is returned verbatim — the deliberate FAST_MODEL utility callers
-  // are untouched. See the module header for why the writer was not chased.
+  // are untouched. The module header records the writer that was found (#340)
+  // and the two reasons the floor is still load-bearing without it.
   const model = applyModelFloor({
     requested: requestedModel,
     enabled: options.frontierModelFloor === true,
     sessionKey,
     source: resume !== undefined ? 'resume' : 'spawn',
+    // The OWNER-FACING half of "make it loud". Without this the clamp is a
+    // stderr line on a box nobody reads — the same invisibility that let the
+    // degradation run for a day. Wired only on the owner's chat substrate
+    // (`open/wiring/substrates.ts`), which is also the only substrate floored.
+    ...(options.onModelFloorApplied !== undefined
+      ? { notify: options.onModelFloorApplied }
+      : {}),
   })
   // Respawn-is-always-resume (brief § 0 / § 2): when a resume directive is
   // present (from the registry on a post-crash next-turn, or from the watchdog /

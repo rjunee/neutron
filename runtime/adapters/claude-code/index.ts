@@ -36,6 +36,7 @@ import {
   type RecoveredReply,
 } from './persistent/persistent-repl-substrate.ts'
 import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+import type { ModelFloorNotice } from './persistent/model-floor.ts'
 import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 import type { SettingsPermissions } from './persistent/build-settings.ts'
 
@@ -46,6 +47,7 @@ export { injectPersistentReplActiveTurn } from './persistent/persistent-repl-sub
 // the `onDeadTurnNotice` / `onSizeAlert` sinks imports them from THIS adapter
 // boundary (never a deep `persistent/*` path).
 export type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+export type { ModelFloorNotice } from './persistent/model-floor.ts'
 export type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 // Task 6 (T5 write-containment) — surface the per-session `permissions` shape at
 // the adapter boundary so a gateway caller wiring a ritual write-containment
@@ -133,6 +135,15 @@ export interface ClaudeCodeSubstrateOptions {
    * and the mechanism in `persistent/model-floor.ts`.
    */
   frontier_model_floor?: boolean
+  /**
+   * FLOOR-CLAMP NOTICE → `PersistentReplSubstrateOptions.onModelFloorApplied`.
+   * Fired when the floor above actually refused a lower-tier model. Forwarded
+   * here for the same reason as the other notice seams: a caller built through
+   * `createClaudeCodeSubstrateAuto` could otherwise not deliver it, and the clamp
+   * would degrade to a stderr line the owner never sees — which is exactly how
+   * the original degradation stayed invisible.
+   */
+  onModelFloorApplied?: (notice: ModelFloorNotice) => void
   /**
    * S3 §2 — conversational warm-pool namespace. The persistent substrate folds
    * these into its pool key so distinct (user, project) sessions never collapse
@@ -287,14 +298,46 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
  * under whatever CWD systemd chose is how two instances end up sharing a
  * registry that names neither. The REPL still runs; only recovery is absent.
  * That direction is pinned in
- * `runtime/adapters/claude-code/__tests__/repl-home-normalization.test.ts` so it
- * is a decision rather than an accident.
+ * `runtime/adapters/claude-code/__tests__/repl-home-normalization.test.ts`, at
+ * the SEAM (whether the supervision block arms) and not only as a returned
+ * value, so it is a decision rather than an accident.
  *
- * Exported for that test. Every in-repo production caller supplies a real `cwd`
- * (`open/composer.ts` resolves it through `resolveNeutronHome` before passing
- * it), so the blank arms are hardening against a future caller, not a live
- * defect — stated plainly here because an unreachable branch that reads as a
- * bug fix is its own kind of wrong docblock.
+ * Exported for that test. WHAT REACHES `cwd` IN PRODUCTION — THREE INDEPENDENT
+ * LEGS, not one. An earlier revision named only the first; the revision after
+ * that named three but conflated two of them, and a cross-model review caught
+ * it. Both errors pointed the same way — toward believing the blank arms could
+ * not be reached, and therefore need not be pinned.
+ *
+ *   1. THE OWNER'S CONVERSATIONAL SUBSTRATE. `open/composer.ts:1296` passes
+ *      `owner_home`, resolved at `:856` through `resolveNeutronHome`, which
+ *      cannot return blank.
+ *   2. THE EPHEMERAL PER-DISPATCH LEG. `open/wiring/substrates.ts:364`
+ *      (`makeEphemeralSubstrate`) forwards a caller-supplied path via
+ *      `buildLlmCallSubstrate` (`gateway/wiring/build-llm-call-substrate.ts:778`
+ *      copies it onto the options bag unexamined). Its producer is
+ *      `agent-dispatch/service.ts:487` — `req.repo_path ?? this.deps.repo_path`,
+ *      and `??` KEEPS a blank, so a caller that passed `'   '` would land one
+ *      here. No stage BETWEEN that producer and this function re-checks it;
+ *      THIS function is the re-check, which is the point of the normalization.
+ *   3. THE WARM FIRE LEG, which is NOT fed by the one above — a distinction the
+ *      previous revision got wrong. `open/wiring/substrates.ts:413`
+ *      (`makeWarmFireSubstrate`) is wired at `open/composer.ts:1045` and takes
+ *      its cwd from `trident/inner-loop.ts:702`, `run.worktree ?? run.repo_path`.
+ *      It is also MEMOIZED per cwd rather than fresh per run, so a blank would
+ *      be cached under the blank key and reused.
+ *
+ * WHY IT IS UNREACHED TODAY, stated as what actually holds rather than as a
+ * property of the whole family. Leg 2's real callers — the dispatch tool and its
+ * slash command — OMIT `repo_path` entirely, so the `??` falls through to
+ * `this.deps.repo_path`, which `open/composer.ts:1122` binds to `owner_home`,
+ * i.e. back to `resolveNeutronHome`. (A separate core rejects a blank
+ * `repo_path` at its own boundary — `cores/free/code-gen/src/backend.ts:278` —
+ * but that guards ITS input, not this leg, and citing it as though it protected
+ * this one was part of the same conflation.) So the arms are unreached by
+ * CONSTRUCTION AT THE CALLERS, not by any check on the path itself, and one
+ * caller electing to pass a computed `repo_path` reopens it. That is a weaker
+ * claim than "unreachable" on purpose: the stronger sentence is exactly what
+ * tells the next reader not to bother pinning the seam.
  */
 export function resolveReplCwdAndHome(input: {
   cwd?: string | undefined
@@ -351,6 +394,11 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // the spawn would still come up on Haiku, so the forward is tested end-to-end.
   if (options.frontier_model_floor !== undefined) {
     p.frontierModelFloor = options.frontier_model_floor
+  }
+  // …and the clamp NOTICE alongside it, for the same reason the floor itself is
+  // forwarded here: a dropped seam looks correct and delivers nothing.
+  if (options.onModelFloorApplied !== undefined) {
+    p.onModelFloorApplied = options.onModelFloorApplied
   }
   // S3 §2 — thread the conversational identity + selected credential into the
   // pool key (closes #104; makes the substrate instance-isolation-SAFE).
