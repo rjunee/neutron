@@ -115,6 +115,7 @@ beforeEach(() => {
       NOTIFY_SOCKET: undefined,
     },
   })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
 })
 
 const openHarnesses: Harness[] = []
@@ -130,7 +131,9 @@ afterEach(async () => {
  *  twice by the restart test, over the SAME file, to simulate a gateway
  *  restart. */
 async function boot(): Promise<Harness> {
-  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+  // The database is seeded once per test, in `beforeEach`. Seeding here would
+  // break the restart test named right above this line: the second boot has to
+  // find what the first one persisted.
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   const composer = buildOpenGraphComposer({
     env: process.env,

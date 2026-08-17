@@ -59,6 +59,12 @@ beforeEach(() => {
       KIMI_API_KEY: undefined,
     },
   })
+  // Once per test, here — not inside the helpers below. Both of them open the
+  // SAME database, and more than one of them runs in most tests: the point of
+  // several of these tests is that a key stored through one helper is still
+  // there when the other reads it. A per-helper seed would either wipe that or
+  // (with `seedMigratedDb`'s non-empty refusal) throw.
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
 })
 
 afterEach(() => {
@@ -67,7 +73,6 @@ afterEach(() => {
 
 /** File a key under the `kimi` service exactly as the settings pane does. */
 async function storeKimiKeyInSettings(value: string): Promise<void> {
-  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   const secrets = new SecretsStore({ data_dir: process.env['NEUTRON_HOME']!, db })
   const creds = new ProjectCredentialStore(db, { crypto: secrets })
@@ -80,7 +85,6 @@ async function storeKimiKeyInSettings(value: string): Promise<void> {
 }
 
 async function resolverFromComposer(): Promise<() => boolean> {
-  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   const composition = await buildOpenGraphComposer({ env: process.env })({
     db,

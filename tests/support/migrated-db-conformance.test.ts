@@ -38,7 +38,7 @@
  * diff's ability to FAIL is itself part of the suite.
  */
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -221,6 +221,19 @@ test('seedMigratedDb refuses a target that already has content', () => {
   seedMigratedDb(path)
 
   expect(() => seedMigratedDb(path)).toThrow(/already exists and is non-empty/)
+})
+
+test('seedMigratedDb refuses an in-memory target instead of writing a file named for it', () => {
+  // The failure this prevents is not a wrong error message, it is a STRAY FILE:
+  // `copyFileSync(template, ':memory:')` creates a real 1.1 MB file called
+  // `:memory:` in the working directory and leaves the in-memory database the
+  // caller opens completely empty. Assert both halves — it throws, and nothing
+  // was written.
+  expect(() => seedMigratedDb(':memory:')).toThrow(/cannot seed the in-memory database/)
+  expect(() => seedMigratedDb('file::memory:?cache=shared')).toThrow(
+    /cannot seed the in-memory database/,
+  )
+  expect(existsSync(':memory:')).toBe(false)
 })
 
 test('seedMigratedDb accepts a zero-length placeholder file', () => {

@@ -113,6 +113,19 @@ process.on('exit', () => {
  * database, so the one case where it would not be, it refuses.
  */
 export function seedMigratedDb(path: string): void {
+  // An in-memory database has no file to copy onto, and `copyFileSync` would
+  // happily create a FILE LITERALLY NAMED `:memory:` in the working directory
+  // while the database the test then opens stays empty — a silent miss that
+  // surfaces far away as "no such table". Refuse it here, where the diagnosis is
+  // still local. (Observed for real on one converted call site: a 1.1 MB `:memory:`
+  // file appeared at the repo root and the suite failed on a missing table.)
+  if (path === ':memory:' || /[?&]mode=memory\b/.test(path)) {
+    throw new Error(
+      `seedMigratedDb: cannot seed the in-memory database ${path}. Seeding copies a ` +
+        'template FILE, so there is no in-memory target to copy onto. Use the real ' +
+        'runner for an in-memory database: applyMigrations(db.raw()).',
+    )
+  }
   if (existsSync(path) && statSync(path).size > 0) {
     throw new Error(
       `seedMigratedDb: refusing to seed ${path} — it already exists and is non-empty. ` +

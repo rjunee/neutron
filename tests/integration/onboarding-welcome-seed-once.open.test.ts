@@ -120,7 +120,11 @@ async function waitFor(pred: () => boolean, timeoutMs = 20_000): Promise<void> {
  * state — same persisted store.
  */
 async function startHarness(): Promise<Harness> {
-  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+  // The database is seeded ONCE per test, in `beforeEach` — deliberately not
+  // here. This function is called twice to simulate a process restart, and the
+  // restart must find the SAME persisted store the first boot wrote. Seeding per
+  // call would either wipe it or (with `seedMigratedDb`'s non-empty refusal)
+  // throw, and either way the test would stop testing what it is named for.
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
 
   const specs: AgentSpec[] = []
@@ -236,6 +240,7 @@ beforeEach(() => {
       NOTIFY_SOCKET: undefined,
     },
   })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
 })
 
 const openHarnesses: Harness[] = []
