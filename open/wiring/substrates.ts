@@ -427,7 +427,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   //     that clamp was a stderr line on a box nobody reads — the same invisibility
   //     that let a lower tier serve the owner for a working day. So it takes
   //     `ctx.backgroundNoticeSinks`: the same `system_events` journal, built with no
-  //     chat-delivery seam, so a clamp here leaves a durable row and no bubble. The
+  //     chat-delivery seam, so a clamp here is journalled (best-effort, as
+  //     everywhere else that sink is used) and never bubbled. The
   //     other three notice seams stay omitted — they describe a chat turn's health
   //     and there is no chat turn here.
   // The line this lane draws is between REPORTING to the owner and INTERRUPTING him.
@@ -442,9 +443,16 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           project_slug,
           profile: PROFILE_WARM_CHAT,
           enableToolBridge: true,
-          // BACKGROUND LANE — a failure here must not park the shared credential
-          // pool against the owner's INTERACTIVE turns. See
-          // `gateway/wiring/build-llm-call-substrate.ts` `credential_failure_lane`.
+          // BACKGROUND LANE — a failure here cannot reach the STRIKE LEDGER, so it
+          // can never park the shared credential pool for the hour that locked the
+          // owner out of chat. Stated that narrowly on purpose: a real 401/402/429
+          // from THIS lane still sets its own per-status cooldown on the shared
+          // credential, and that cooldown is shared with his interactive turns. It
+          // has to be — a provider status is a fact about the credential, not about
+          // the lane that discovered it. What the lane cannot do is INVENT one, or
+          // compound several into the hour-long park. See
+          // `gateway/wiring/build-llm-call-substrate.ts` `credential_failure_lane`
+          // and `runtime/credential-pool.ts` `reportFailure`.
           credential_failure_lane: 'background',
           // The journal-only floor notice — see the `model-floor clamp` bullet above.
           ...(ctx.backgroundNoticeSinks !== undefined

@@ -325,6 +325,13 @@ describe('a background report cannot TRUNCATE a park that is still standing', ()
     // The rule must not become "a standing park wins", or a real two-hour
     // `retry-after` would be swallowed by whatever short park happened to be
     // running and we would hammer a provider that told us not to.
+    //
+    // ⚠️ THIS IS ALSO THE TEST THAT DISPROVED THE DOCBLOCK. `reportFailure` used to
+    // claim a background report "can neither trip the hour-long park nor EXTEND
+    // one"; the assertion below is a background report extending one. The half that
+    // is true — no route to the strike ledger — is asserted separately above, and
+    // the comment now says that instead. A property a test contradicts is not a
+    // property, and the docblock was the thing that had to change.
     const { pool, cred } = parkedPool()
     const twoHours = 2 * 60 * 60_000
 
@@ -332,6 +339,29 @@ describe('a background report cannot TRUNCATE a park that is still standing', ()
 
     expect(cred.cooldown_reason).toBe('rate_limit_429')
     expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(CONSECUTIVE_COOLDOWN_MS)
+  })
+
+  test('NOT SELF-COMPOUNDING — repeated background reports never walk the park outward', () => {
+    // The bound the docblock now claims, made mechanical. A longer PROVIDER status
+    // may extend a park (the test above), so the guarantee cannot be "a background
+    // report never moves the expiry". It is that a background report cannot move it
+    // by REPEATING: each one proposes `now + <its own status window>`, and once a
+    // park outlasts that window every later report is a no-op. This is what stops
+    // the "same outage with a slower fuse" the docblock warns about.
+    const { pool, cred } = parkedPool()
+    const until = cred.cooldown_until!
+
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES * 4; i++) {
+      reportFailure(pool, 'anthropic:only', 401, undefined, 'background')
+      reportFailure(pool, 'anthropic:only', 429, undefined, 'background')
+      reportFailure(pool, 'anthropic:only', 402, undefined, 'background')
+    }
+
+    // Forty reports later the hour has neither grown nor been relabelled, and the
+    // credential is still on track to become selectable when it always was.
+    expect(cred.cooldown_until).toBe(until)
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    expect(cred.consecutive_failures).toBe(MAX_CONSECUTIVE_FAILURES)
   })
 
   test('an INTERACTIVE report cannot truncate a standing park either', () => {

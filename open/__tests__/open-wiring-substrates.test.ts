@@ -505,8 +505,15 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(nudge.onModelFloorApplied).not.toBe(agent.onModelFloorApplied)
 
     // The lane's other promise is unchanged: the three CHAT-TURN notice seams and
-    // the recovered-reply/delivery seams stay omitted, so nothing else from a timer
-    // can reach his chat. Only the floor clamp crossed, and only to the journal.
+    // the recovered-reply/delivery seams stay omitted, so no NOTICE from a timer
+    // reaches his chat. Only the floor clamp crossed, and only to the journal.
+    //
+    // ⚠️ NOT "nothing from a timer reaches an owner surface" — that would be false
+    // and this test cannot prove it. `enableToolBridge` also installs the Activity
+    // Inspector tap, which fans tool activity to the owner's app socket. That is
+    // pre-existing, deliberate, and argued in the block comment above this lane in
+    // `substrates.ts`: a read-only record of work done on his behalf. The scope of
+    // what is asserted here is the NOTICE family and the delivery seams.
     expect(nudge.onDeadTurnNotice).toBeUndefined()
     expect(nudge.onSizeAlert).toBeUndefined()
     expect(nudge.onRateLimitBanner).toBeUndefined()

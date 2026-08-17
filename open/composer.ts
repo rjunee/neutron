@@ -994,8 +994,9 @@ export function buildOpenGraphComposer(
     // shares `PROFILE_WARM_CHAT`, so it carries `frontier_model_floor` and its
     // clamp was landing on stderr only. `deliver: () => undefined` is the sink's
     // documented no-bubble path (`makeSubstrateNoticeSinks`'s `bubble` returns on
-    // an unresolved deliver), so the clamp becomes a durable `system_events` row
-    // while the lane keeps its promise not to interrupt his chat from a timer.
+    // an unresolved deliver), so the clamp is journalled to `system_events` — a
+    // best-effort write, as everywhere else this sink is used — while the lane keeps
+    // its promise not to interrupt his chat from a timer.
     const backgroundNoticeSinks =
       llmPool !== null
         ? makeSubstrateNoticeSinks({

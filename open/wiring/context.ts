@@ -108,8 +108,12 @@ export interface OpenWiringContext {
   /**
    * The JOURNAL-ONLY notice sinks for the timer-driven nudge substrate
    * (`cc-nudge-*`), built over the same `system_events` journal but with NO chat
-   * delivery seam — so a notice from that lane becomes a durable row and never a
-   * bubble in the owner's chat.
+   * delivery seam — so a notice from that lane is journalled and never becomes a
+   * bubble in the owner's chat. Journalling is BEST-EFFORT, like every other caller
+   * of this sink: an unregistered ambient sink is a no-op and a write failure is
+   * swallowed, so this buys an attempt at a queryable row, not a guarantee of one.
+   * That is still the difference between a clamp being findable and it existing
+   * only on a stderr stream nobody reads.
    *
    * WHY A SECOND SET RATHER THAN REUSING `liveAgentNoticeSinks`. The nudge lane
    * shares `PROFILE_WARM_CHAT`, so it carries `frontier_model_floor` and CAN be

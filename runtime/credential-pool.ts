@@ -252,8 +252,9 @@ function park(c: PooledCredential, until: number, reason: CooldownReason): void 
  * status code and increments `consecutive_failures`. After
  * `MAX_CONSECUTIVE_FAILURES` strikes the credential is parked for an hour.
  *
- * Every cooldown write here goes through {@link park}, so a failure can only
- * EXTEND a standing park, never shorten or relabel it. See that docblock.
+ * Every cooldown write here goes through {@link park}, so a failure can only push
+ * a standing park LATER — never shorten it, and never relabel one it does not
+ * outlast. See that docblock.
  *
  * `retry_after_ms` (parsed from upstream `retry-after` header) overrides the
  * default 429 cooldown — adapters MUST honor it so we play nice with provider
@@ -268,14 +269,28 @@ function park(c: PooledCredential, until: number, reason: CooldownReason): void 
  *   - `'background'` — a timer-driven lane (proactive nudge composition). The
  *     per-status cooldown still applies, because a real 429/402/401 is the
  *     provider's own back-pressure and ignoring it would be rude and useless.
- *     But the strike counter is untouched — NOT incremented, and NOT re-read —
- *     so a background report can neither TRIP the hour-long park nor EXTEND one
- *     an interactive turn already tripped. Both halves matter: gating only the
- *     increment still lets a background failure re-stamp `cooldown_until` an
- *     hour into the future every time it fires, which is the same outage with a
- *     slower fuse. The THIRD direction — TRUNCATING a standing park — is closed
- *     by {@link park} for every caller, not just this lane, and that is the one
- *     that handed the owner's lane a credential it had already benched.
+ *     But the strike counter is untouched — NOT incremented, and NOT re-read — so
+ *     a background report can neither TRIP the hour-long park nor RE-ARM one an
+ *     interactive turn already tripped. Both halves matter: gating only the
+ *     increment still lets a background failure re-stamp `cooldown_until` an hour
+ *     into the future every time it fires, which is the same outage with a slower
+ *     fuse.
+ *
+ *     ⚠️ SAID EXACTLY, because the looser phrasing ("a background report cannot
+ *     EXTEND a park") was WRONG and this file's own test disproves it. What a
+ *     background report cannot do is reach {@link CONSECUTIVE_COOLDOWN_MS} — it
+ *     has no route to the strike ledger. It CAN still push the expiry later when
+ *     its own PROVIDER STATUS parks longer than whatever stands: a `retry-after`
+ *     of two hours outlasts the hour-long strike park, so {@link park} keeps the
+ *     two hours and relabels to `rate_limit_429`. That is correct and deliberate
+ *     — a provider telling us to wait two hours is a fact about the credential,
+ *     not an escalation this lane invented, and ignoring it would hammer someone
+ *     who asked us not to. The bound that matters is that nothing a background
+ *     lane does is SELF-COMPOUNDING.
+ *
+ *     The THIRD direction — TRUNCATING a standing park — is closed by
+ *     {@link park} for every caller, not just this lane, and that is the one that
+ *     handed the owner's lane a credential it had already benched.
  *
  * WHY THE ASYMMETRY (incident, live instance 2026-08-17). This counter is
  * PER-CREDENTIAL but the consequence is POOL-WIDE on a single-credential box —
