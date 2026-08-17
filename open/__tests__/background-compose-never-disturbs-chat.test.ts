@@ -98,8 +98,20 @@ function warmPoolModel(): {
 
 /** A turn whose prompt asks it to hang: it never settles until someone cancels. */
 const HANG = 'HANG'
-/** A turn whose prompt asks it to die the way the incident's REPL child died. */
-const DEAD_REPL = 'DEAD_REPL'
+/**
+ * A turn whose prompt asks it to fail with a cooldown the substrate can only
+ * INFER — unstamped, retryable, no HTTP status, and matching none of the substrate
+ * fast-paths, so `mapStatusForPoolCooldown(null, true)` guesses 429 and the LANE is
+ * the only thing deciding whether that guess cools the credential.
+ *
+ * Deliberately NOT the incident's `persistent-repl: REPL process exited`, which
+ * these tests used to carry: `detectReplProcessExited` now suppresses that message's
+ * cooldown on BOTH lanes, so it can no longer distinguish them — a lane test driven
+ * by it would pass no matter which lane the wiring passed, taking the mutation-kill
+ * below with it. That message's own guarantee is covered in
+ * `gateway/wiring/__tests__/background-lane-never-locks-out-owner.test.ts`.
+ */
+const INFERRED_FAIL = 'INFERRED_FAIL'
 
 function makeCtx(): {
   ctx: OpenWiringContext
@@ -126,10 +138,14 @@ function makeCtx(): {
             })
             return
           }
-          if (spec.prompt.includes(DEAD_REPL)) {
-            // The incident's own failure: retryable, UNSTAMPED, no HTTP status, so
-            // the cooldown mapper can only guess — and it guesses 429.
-            yield { kind: 'error', message: 'persistent-repl: REPL process exited', retryable: true }
+          if (spec.prompt.includes(INFERRED_FAIL)) {
+            // Retryable, UNSTAMPED, no HTTP status, no substrate fast-path — so the
+            // cooldown mapper can only guess, and it guesses 429.
+            yield {
+              kind: 'error',
+              message: 'cc-llm-call: upstream stream ended unexpectedly',
+              retryable: true,
+            }
             return
           }
           // The generation that served this turn — a respawn is observable as a bump.
@@ -272,10 +288,11 @@ describe('background composition runs on its own REPL', () => {
   test('the WIRED nudge substrate is declared a background credential lane', async () => {
     // The other half of the outage, asserted where it is actually configured. The
     // isolation above stops a failed compose from evicting the owner's child; it
-    // does nothing about the credential pool, which is shared. Five composes that
-    // fail the incident's way used to reach `MAX_CONSECUTIVE_FAILURES` and park the
-    // box's ONE credential for an hour, after which every owner turn died instantly
-    // with "all Anthropic credentials are in cooldown".
+    // does nothing about the credential pool, which is shared. Five composes whose
+    // failure the substrate can only INFER a status for used to reach
+    // `MAX_CONSECUTIVE_FAILURES` and park the box's ONE credential for an hour, after
+    // which every owner turn died instantly with "all Anthropic credentials are in
+    // cooldown".
     //
     // MUTATION-KILL: delete `credential_failure_lane: 'background'` from the nudge
     // substrate in `open/wiring/substrates.ts` → this goes RED. Nothing else in the
@@ -286,7 +303,7 @@ describe('background composition runs on its own REPL', () => {
     const w = wireSubstrates(ctx)
     const cred = credPool.credentials[0]!
     for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 2; i++) {
-      await turn(w.reminderComposeSubstrate!, DEAD_REPL)
+      await turn(w.reminderComposeSubstrate!, INFERRED_FAIL)
       // Wall clock past any short per-status cooldown, exactly as the real timeline
       // does: a fire cools for a minute, the next reminder comes due later.
       if (cred.cooldown_until !== undefined) cred.cooldown_until = Date.now() - 1
@@ -303,7 +320,7 @@ describe('background composition runs on its own REPL', () => {
     const w = wireSubstrates(ctx)
     const cred = credPool.credentials[0]!
     for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
-      await turn(w.liveAgentSubstrate!, DEAD_REPL)
+      await turn(w.liveAgentSubstrate!, INFERRED_FAIL)
       if (cred.cooldown_until !== undefined) cred.cooldown_until = Date.now() - 1
     }
     expect(cred.cooldown_reason).toBe('consecutive_failures')

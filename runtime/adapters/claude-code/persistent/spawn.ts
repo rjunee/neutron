@@ -143,17 +143,22 @@ async function spawnSession(
   // land in `--settings`. Absent ⇒ the Stop-hook-only write, unchanged.
   buildSettings({
     settingsPath,
-    // WAVE 3.5 task B — wire the TodoWrite→Work Board PostToolUse hook ONLY on the
-    // owner's warm conversational REPL (the one that opts into the Neutron tool
-    // bridge). The disposable Trident build REPLs + the untrusted history-import
-    // REPL never enable the bridge, so their TodoWrite stays build-internal and
-    // never lands on the owner's board. The sink is already started (above), so
-    // its port/token are bound here.
-    // ACTIVITY INSPECTOR — the tool tap rides the same gate for the same reason:
-    // it is wired ONLY on the owner's warm conversational REPL (the one that opts
-    // into the Neutron tool bridge), never on the disposable Trident build REPLs or
-    // the untrusted history-import REPL, so a build's internal tool churn never
-    // lands on the owner's project panel.
+    // WAVE 3.5 task B — wire the TodoWrite→Work Board PostToolUse hook on the REPLs
+    // that opt into the Neutron tool bridge. The disposable Trident build REPLs + the
+    // untrusted history-import REPL never enable the bridge, so their TodoWrite stays
+    // build-internal and never lands on the owner's board. The sink is already
+    // started (above), so its port/token are bound here.
+    // ACTIVITY INSPECTOR — the tool tap rides the same gate for the same reason,
+    // never on the disposable Trident build REPLs or the untrusted history-import
+    // REPL, so a build's internal tool churn never lands on the owner's project panel.
+    //
+    // NB "the bridge REPLs" is no longer a synonym for "the owner's chat REPL": the
+    // background proactive-compose lane (`cc-nudge-*`, `open/wiring/substrates.ts`)
+    // also enables the bridge, deliberately, so a ritual can reach the same tools the
+    // owner's chat can. So these two hooks ride onto that lane as well. That is
+    // intended — both are OWNER-FACING REPORTING of work done for the owner, not a
+    // chat interruption — and it is why this gate is described by what it grants
+    // rather than by which single session used to carry it.
     ...(options.enableToolBridge === true
       ? {
           todoSync: { sinkPort: sink.port, sinkToken: sink.token, sessionId },

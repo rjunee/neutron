@@ -267,10 +267,19 @@ export interface BuildLlmCallSubstrateInput {
    *      HTTP status" → 429 default; a parsed status the mapper REWRITES (a
    *      retryable `HTTP 503` also becomes a 429); and `detectCliAuthFailure`,
    *      which fires on the substring `401` appearing anywhere in the prose. On
-   *      this lane those are usually a crashed REPL child, a wedged channel, or a
-   *      compose that timed out. An interactive turn keeps the guess because a
-   *      person is blocked and backing off is the safer error. A background turn
-   *      has nobody blocked, so guessing only costs the owner his next chat turn.
+   *      this lane those are usually a wedged channel or a compose that timed out.
+   *      An interactive turn keeps the guess because a person is blocked and
+   *      backing off is the safer error. A background turn has nobody blocked, so
+   *      guessing only costs the owner his next chat turn.
+   *
+   * NOT EVERY FIX IS A LANE RULE. The substrate fast-paths above this
+   * classification — {@link detectBinaryNotFound}, {@link detectChannelWedged},
+   * {@link detectTurnTimeout}, {@link detectReplProcessExited} — suppress the
+   * cooldown on BOTH lanes, because none of them is a statement about the
+   * credential no matter who was waiting. The dead-REPL one matters most here: in
+   * the incident below the strikes that actually parked the pool were the owner's
+   * own retries against a respawning child, so no lane distinction could have
+   * caught them.
    *
    * A REAL provider status still cools the credential on either lane: a 429/402/401
    * the provider actually returned is back-pressure, not an inference, and the
@@ -974,6 +983,31 @@ export function buildLlmCallSubstrate(
                 yield ev
                 continue
               }
+              // ROOT-CAUSE FIX (2026-08-17 chat-lockout, the incident this branch
+              // is named for): the warm REPL's CHILD PROCESS DIED mid-turn
+              // (`persistent-repl: REPL process exited`, retryable, no HTTP
+              // status). A dead process is a local substrate fact and says nothing
+              // about the credential — but with no status to read, the `else`
+              // branch below maps `mapStatusForPoolCooldown(null, true)` → 429 →
+              // `reportFailure`, and five of those park the box's ONE credential
+              // for an hour behind "all Anthropic credentials are in cooldown".
+              //
+              // THIS ONE IS NOT FIXED BY THE LANE SPLIT, which is why it needs its
+              // own fast-path: in the incident the compose failure only KILLED the
+              // shared child, and the five strikes that actually parked the pool
+              // were the OWNER'S OWN RETRIES — interactive by definition. Giving
+              // the background lane its own REPL stops it reaching his session;
+              // this stops his session's respawn window from cashing itself in as
+              // an hour of quota lie. Both are needed.
+              //
+              // Classify BEFORE the cooldown map (mirrors binary-not-found /
+              // channel-wedged / turn-timeout) and re-emit UNCHANGED (retryable:
+              // true) so the turn retries on the same healthy credential once the
+              // pool has respawned a clean child.
+              if (stampedCode === undefined && detectReplProcessExited(ev.message)) {
+                yield ev
+                continue
+              }
               // AUTH-INVALID (2026-07-24 dogfood): the warm REPL's `claude` child
               // reported an invalid/expired OAuth token in its PTY output (the
               // auth-failure output-scan signature fired) and the turn was abandoned
@@ -1628,6 +1662,43 @@ export function detectChannelWedged(message: string): boolean {
  */
 export function detectTurnTimeout(message: string): boolean {
   return /persistent-repl:\s*turn timeout/i.test(message)
+}
+
+/**
+ * Detect the warm REPL's child PROCESS DYING mid-turn. `ReplSession.onDeath`
+ * fails the in-flight turn with `persistent-repl: REPL process exited`
+ * (retryable:true, no HTTP status) — see
+ * `runtime/adapters/claude-code/persistent/repl-session.ts` `onDeath`.
+ *
+ * A dead child is a LOCAL SUBSTRATE fact, not a statement about the credential.
+ * Nothing about a `claude` process exiting says the token is rate-limited,
+ * unpaid, or invalid — and rotating to a different credential cannot revive a
+ * process. Yet with no status to read, the classification below can only guess,
+ * and `mapStatusForPoolCooldown(null, retryable=true)` guesses 429.
+ *
+ * THAT GUESS IS THE OUTAGE (live instance, 2026-08-17). The journal ran: a
+ * reminder compose aborted → the warm chat child was evicted as abandon-poisoned
+ * → the owner's own next turns died `persistent-repl: REPL process exited`. Each
+ * of those was an INTERACTIVE turn, so each counted a strike; five reached
+ * {@link MAX_CONSECUTIVE_FAILURES} and parked the box's ONE credential for an
+ * hour. From then on every chat turn failed instantly with "all Anthropic
+ * credentials are in cooldown (429/402/401)" — naming a cause that was not true,
+ * for a box whose credential was never the problem.
+ *
+ * Note the shape: the owner RETRYING is what closed the trap. Each retry hit the
+ * still-respawning REPL, drew another strike, and bought an hour of silence. So
+ * the lane split alone cannot fix this one — the failures are on the interactive
+ * lane by definition — which is why this is a detector and not a lane rule.
+ *
+ * Callers MUST check this BEFORE the cooldown classification and MUST NOT call
+ * `reportFailure` when it returns true, on EITHER lane. Like
+ * {@link detectTurnTimeout} (and unlike {@link detectBinaryNotFound} /
+ * {@link detectChannelWedged}) it stays RETRYABLE: the pool already evicts the
+ * poisoned session and respawns a clean child, so the retry lands on a healthy
+ * REPL and the SAME healthy credential.
+ */
+export function detectReplProcessExited(message: string): boolean {
+  return /persistent-repl:\s*REPL process exited/i.test(message)
 }
 
 /**

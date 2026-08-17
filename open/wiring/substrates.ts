@@ -400,6 +400,20 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // credential-failure lane, and the owner-facing notice/delivery sinks — which are
   // omitted, so a failed background compose cannot push a banner or a recovered
   // reply into his chat. That is a reduction in NOISE, not in capability.
+  //
+  // WHAT STILL REACHES AN OWNER SURFACE, stated precisely because "the owner-facing
+  // sinks are omitted" would otherwise read as broader than it is. `enableToolBridge`
+  // is one gate that installs THREE things (`persistent/spawn.ts`, the `buildSettings`
+  // call): the tool bridge itself, the TodoWrite→Work Board sync, and the Activity
+  // Inspector tool tap. Turning the bridge on here necessarily turns on the other two.
+  //   - todo sync: UNREACHABLE in practice — `TodoWrite` is not in this lane's
+  //     `--tools` surface (`LIVE_AGENT_TOOL_NAMES`, which is what both callers pass),
+  //     so the hook is installed and nothing can fire it.
+  //   - activity tap: REACHABLE and kept. A nudge compose's tool calls do land in the
+  //     owner's Activity Inspector. That is a READ-ONLY record of work done on his
+  //     behalf, not an interruption of a chat turn, and seeing why a nudge said what
+  //     it said is worth more than the silence. Not a leak: same owner, same project.
+  // The line this lane draws is between REPORTING to the owner and INTERRUPTING him.
   const reminderComposeSubstrate =
     conversationalAvailable
       ? buildLlmCallSubstrate({

@@ -47,17 +47,38 @@ function onePool(): CredentialPool {
 }
 
 /**
+ * The persistent REPL's child dying mid-turn — `ReplSession.onDeath`'s exact
+ * wording. Retryable, unstamped, no HTTP status. This is the incident's own
+ * failure, and `detectReplProcessExited` now suppresses its cooldown on BOTH
+ * lanes (see the last describe block), so it is NO LONGER a usable vehicle for
+ * testing the lane distinction.
+ */
+const DEAD_REPL_MESSAGE = 'persistent-repl: REPL process exited'
+
+/**
+ * A generic unstamped retryable failure carrying no HTTP status and matching no
+ * substrate fast-path — so `mapStatusForPoolCooldown(null, true)` guesses 429 and
+ * the LANE is the only thing that decides whether it cools. This is the vehicle
+ * for every lane-distinction test below; using a message the substrate classifies
+ * for itself would prove nothing about the lane.
+ */
+const INFERRED_FAILURE_MESSAGE = 'cc-llm-call: upstream stream ended unexpectedly'
+
+/**
+ * A failure whose ONLY claim to being an auth condition is the substring `401`
+ * sitting in prose — `detectCliAuthFailure`'s weakest rule. Deliberately carries
+ * no substrate fast-path prefix, so the LANE decides whether it cools.
+ */
+const PROSE_401_MESSAGE = 'cc-llm-call: tool call failed with 401 while composing'
+
+/**
  * A substrate whose every turn fails with `message` — UNSTAMPED, exactly like the
  * legacy adapter errors this cooldown path was built for.
- *
- * The default is the incident's own failure: the persistent REPL's child exited,
- * retryable and carrying no HTTP status, so the cooldown mapper can only GUESS,
- * and it guesses 429.
  */
 function failingSubstrate(
   pool: CredentialPool,
   lane: 'interactive' | 'background',
-  message = 'persistent-repl: REPL process exited',
+  message = INFERRED_FAILURE_MESSAGE,
   retryable = true,
 ): Substrate {
   const substrateFactory = (_opts: ClaudeCodeSubstrateOptions): Substrate => ({
@@ -84,9 +105,15 @@ function failingSubstrate(
   return sub!
 }
 
-/** The incident's failure shape, kept under its old name for the tests below. */
+/** A turn that fails with a cooldown the substrate can only INFER. */
+const inferredFailureSubstrate = (
+  pool: CredentialPool,
+  lane: 'interactive' | 'background',
+): Substrate => failingSubstrate(pool, lane)
+
+/** A turn that dies because the REPL child exited — the incident's own shape. */
 const deadReplSubstrate = (pool: CredentialPool, lane: 'interactive' | 'background'): Substrate =>
-  failingSubstrate(pool, lane)
+  failingSubstrate(pool, lane, DEAD_REPL_MESSAGE)
 
 /**
  * Fire `n` failing turns, letting the WALL CLOCK move past whatever short
@@ -110,9 +137,9 @@ async function failNTurns(pool: CredentialPool, sub: Substrate, n: number): Prom
 }
 
 describe('a background lane cannot park the owner’s credential', () => {
-  test('N dead-REPL background failures leave the pool selectable', async () => {
+  test('N inferred background failures leave the pool selectable', async () => {
     const pool = onePool()
-    await failNTurns(pool, deadReplSubstrate(pool, 'background'), MAX_CONSECUTIVE_FAILURES + 2)
+    await failNTurns(pool, inferredFailureSubstrate(pool, 'background'), MAX_CONSECUTIVE_FAILURES + 2)
 
     // The owner's next chat turn resolves a credential instead of dying with
     // "all Anthropic credentials are in cooldown (429/402/401)".
@@ -126,7 +153,7 @@ describe('a background lane cannot park the owner’s credential', () => {
     // The exemption is for background lanes only. If this ever goes green, the
     // fix above stopped being a lane distinction and became a hole.
     const pool = onePool()
-    await failNTurns(pool, deadReplSubstrate(pool, 'interactive'), MAX_CONSECUTIVE_FAILURES)
+    await failNTurns(pool, inferredFailureSubstrate(pool, 'interactive'), MAX_CONSECUTIVE_FAILURES)
     expect(pool.credentials[0]!.cooldown_reason).toBe('consecutive_failures')
     expect(hasUsableCredential(pool)).toBe(false)
   })
@@ -136,7 +163,7 @@ describe('a background lane cannot park the owner’s credential', () => {
     const substrateFactory = (_opts: ClaudeCodeSubstrateOptions): Substrate => ({
       start(): SessionHandle {
         const events = (async function* (): AsyncGenerator<Event, void, void> {
-          yield { kind: 'error', message: 'persistent-repl: REPL process exited', retryable: true }
+          yield { kind: 'error', message: INFERRED_FAILURE_MESSAGE, retryable: true }
         })()
         return {
           events,
@@ -256,12 +283,7 @@ describe('the substrate THREADS the lane into reportFailure, not just past it', 
     // a crashed background REPL whose tail happened to contain those three digits
     // walked straight through the exemption and cooled the owner's only credential.
     const pool = onePool()
-    const sub = failingSubstrate(
-      pool,
-      'background',
-      'persistent-repl: REPL process exited; last stderr line: tool call failed with 401',
-      false,
-    )
+    const sub = failingSubstrate(pool, 'background', PROSE_401_MESSAGE, false)
     await failNTurns(pool, sub, MAX_CONSECUTIVE_FAILURES + 2)
     const cred = pool.credentials[0]!
     expect(cred.cooldown_reason).toBeUndefined()
@@ -271,12 +293,7 @@ describe('the substrate THREADS the lane into reportFailure, not just past it', 
 
   test('CLAUDE PATH CONTROL — that same prose still cools an INTERACTIVE turn', async () => {
     const pool = onePool()
-    const sub = failingSubstrate(
-      pool,
-      'interactive',
-      'persistent-repl: REPL process exited; last stderr line: tool call failed with 401',
-      false,
-    )
+    const sub = failingSubstrate(pool, 'interactive', PROSE_401_MESSAGE, false)
     await failNTurns(pool, sub, 1)
     expect(pool.credentials[0]!.cooldown_reason).toBe('auth_401')
   })
@@ -330,5 +347,92 @@ describe('the substrate THREADS the lane into reportFailure, not just past it', 
     })!
     await failNTurns(openai, sub, MAX_CONSECUTIVE_FAILURES)
     expect(openai.credentials[0]!.cooldown_reason).toBe('consecutive_failures')
+  })
+})
+
+describe('a dead REPL child never cools a credential, on EITHER lane', () => {
+  // THE HALF THE LANE SPLIT CANNOT REACH. Giving the nudge lane its own REPL stops
+  // a background compose from tearing down the owner's session. It does NOT stop
+  // what actually parked the pool in the incident: once his warm child had been
+  // poisoned and evicted, HIS OWN next turns failed with `persistent-repl: REPL
+  // process exited` — interactive by definition, so every one of them drew a
+  // strike. Five retries bought an hour of "all Anthropic credentials are in
+  // cooldown (429/402/401)" on a box whose credential was never the problem.
+  //
+  // A dead process is a local substrate fact. It carries no HTTP status, so the
+  // mapper can only guess, and it guesses 429 — laundering a crash into a quota
+  // lie. The pool already self-heals by respawning a clean child, and that recovery
+  // only works if the credential is not parked underneath it.
+
+  test('the owner retrying into a respawning REPL never parks his own credential', async () => {
+    const pool = onePool()
+    await failNTurns(pool, deadReplSubstrate(pool, 'interactive'), MAX_CONSECUTIVE_FAILURES + 2)
+
+    const cred = pool.credentials[0]!
+    expect(cred.consecutive_failures).toBe(0)
+    expect(cred.cooldown_reason).toBeUndefined()
+    expect(cred.cooldown_until).toBeUndefined()
+    // The next turn resolves a credential instead of dying instantly on a lie.
+    expect(hasUsableCredential(pool)).toBe(true)
+    expect(selectCredential(pool)).not.toBeNull()
+  })
+
+  test('and neither does the background lane', async () => {
+    const pool = onePool()
+    await failNTurns(pool, deadReplSubstrate(pool, 'background'), MAX_CONSECUTIVE_FAILURES + 2)
+
+    const cred = pool.credentials[0]!
+    expect(cred.consecutive_failures).toBe(0)
+    expect(cred.cooldown_until).toBeUndefined()
+    expect(hasUsableCredential(pool)).toBe(true)
+  })
+
+  test('the error still SURFACES retryable — suppressed cooldown, not a swallowed failure', async () => {
+    const pool = onePool()
+    const sub = deadReplSubstrate(pool, 'interactive')
+    const seen: Event[] = []
+    const handle = sub.start({ prompt: 'hi', tools: [], model_preference: ['sonnet'] })
+    for await (const ev of handle.events) seen.push(ev)
+
+    const err = seen.find((e) => e.kind === 'error')
+    expect(err).toBeDefined()
+    // Unchanged and retryable, so the caller retries onto the respawned child —
+    // NOT rewritten into a terminal "credentials in cooldown" message.
+    expect(err!.kind === 'error' && err!.message).toBe(DEAD_REPL_MESSAGE)
+    expect(err!.kind === 'error' && err!.retryable).toBe(true)
+  })
+
+  test('a dead REPL whose stderr tail merely MENTIONS 401 still cools nothing', async () => {
+    // Precedence: the process death is the authoritative fact, and
+    // `detectCliAuthFailure`'s substring rule is the weakest inference in the file.
+    // A tool call inside the turn returning 401 says nothing about the credential
+    // the turn was dispatched on.
+    const pool = onePool()
+    const sub = failingSubstrate(
+      pool,
+      'interactive',
+      `${DEAD_REPL_MESSAGE}; last stderr line: tool call failed with 401`,
+      false,
+    )
+    await failNTurns(pool, sub, MAX_CONSECUTIVE_FAILURES)
+    const cred = pool.credentials[0]!
+    expect(cred.cooldown_reason).toBeUndefined()
+    expect(hasUsableCredential(pool)).toBe(true)
+  })
+
+  test('CONTROL — the exemption is for THIS shape only, not retryable errors at large', async () => {
+    // If this ever goes green, the fast-path stopped being a classification and
+    // became a blanket amnesty for every unstamped retryable failure.
+    const pool = onePool()
+    await failNTurns(pool, inferredFailureSubstrate(pool, 'interactive'), MAX_CONSECUTIVE_FAILURES)
+    expect(pool.credentials[0]!.cooldown_reason).toBe('consecutive_failures')
+    expect(hasUsableCredential(pool)).toBe(false)
+  })
+
+  test('CONTROL — a REAL provider 429 on the interactive lane still cools', async () => {
+    const pool = onePool()
+    const sub = failingSubstrate(pool, 'interactive', 'HTTP 429: too many requests', true)
+    await failNTurns(pool, sub, 1)
+    expect(pool.credentials[0]!.cooldown_reason).toBe('rate_limit_429')
   })
 })
