@@ -51,6 +51,7 @@ function runWith(overrides: Partial<TridentRun> = {}): TridentRun {
     last_advanced_at: '2026-01-01T01:00:00.000Z',
     harvested_at: null,
     crash_recoveries: 0,
+    infra_retries: 0,
     reviewed_head: null,
     bound_pr: null,
     fenced_paths: null,

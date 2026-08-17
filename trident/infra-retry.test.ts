@@ -178,7 +178,9 @@ describe('(c) retry budget and backoff are separate from fix rounds', () => {
       await writeResult(run.id, infraResult())
       await h.loop.runOnce()
       if (attempt < 2) {
-        clockMs += INFRA_RETRY_BACKOFF_MS[attempt] + 1
+        const backoffMs = INFRA_RETRY_BACKOFF_MS[attempt]
+        if (backoffMs === undefined) throw new Error(`no backoff configured for attempt ${attempt}`)
+        clockMs += backoffMs + 1
         await h.loop.runOnce()
       }
     }
@@ -208,7 +210,9 @@ describe('(c) retry budget and backoff are separate from fix rounds', () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       await writeResult(run.id, infraResult())
       await h.loop.runOnce()
-      clockMs += INFRA_RETRY_BACKOFF_MS[attempt] + 1
+      const backoffMs = INFRA_RETRY_BACKOFF_MS[attempt]
+      if (backoffMs === undefined) throw new Error(`no backoff configured for attempt ${attempt}`)
+      clockMs += backoffMs + 1
       await h.loop.runOnce()
     }
 
