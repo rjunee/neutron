@@ -86,6 +86,8 @@ last one is not hypothetical — `appendSystemPromptFile` was lost at exactly th
 seam once, proven at the factory-input layer while the real factory dropped it.
 ## 2026-08-16 — the identity-trim claim was true and unexecuted, so CI now runs it
 
+Landed via PR #349.
+
 #333's review panel was still running when the PR merged, so its findings were
 re-verified here against `main` rather than inherited. **All five were already
 closed by #333 itself before it landed, and the entry below says so with the
