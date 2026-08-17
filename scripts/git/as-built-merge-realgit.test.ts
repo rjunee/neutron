@@ -1288,11 +1288,17 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // letter first, which the cross-model reviewer defeated with `.markdown` (eight) and `.7z`
       // (leading digit). A cap is an enumeration wearing a different hat — it fails the same way,
       // just less obviously — so there is no cap and no leading-character rule.
-      const LOCATOR = /([\w./-]+\.[A-Za-z0-9]+)(?::|#L)(\d+)/
+      // The hash-L form is ALSO matched on its own, with nothing required before it. Requiring it to
+      // sit directly against a file extension meant a permalink carrying a query string in between —
+      // the shape the hosting provider's own "copy permalink to line" button produces — slipped past
+      // the ban entirely. That form is a line locator wherever it appears and whatever precedes it,
+      // so it is judged alone. (Written in words, not spelled out, for the reason given above.)
+      const LOCATOR = /([\w./-]+\.[A-Za-z0-9]+)(?::)(\d+)/
+      const FRAGMENT = /#L\d+/
       const offenders: string[] = []
       for (const rel of cluster) {
         read(rel).split('\n').forEach((line, i) => {
-          if (!LOCATOR.test(line)) return
+          if (!LOCATOR.test(line) && !FRAGMENT.test(line)) return
           offenders.push(`${rel} line ${i + 1} — ${line.trim()}`)
         })
       }
@@ -1358,12 +1364,27 @@ describe('the installer under a locked config — the FATAL half-state must be i
       ]
       const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       /** A BACKTICKED mention of exactly this symbol — the trailing rule is what stops a typo that
-       *  merely CONTAINS the symbol (`…Commandd`) from counting as a citation of it. */
+       *  merely CONTAINS the symbol from counting as a citation of it. The class it must not admit
+       *  is "the symbol plus one more identifier character", so the lookahead covers `$` and any
+       *  Unicode letter or digit as well as ASCII: the reviewer got through an ASCII-only version
+       *  with a `$` in the middle of a name, which is legal in an identifier here. */
       const mentions = (text: string, symbol: string) =>
-        [...text.matchAll(new RegExp('`' + escapeRe(symbol) + '(?![A-Za-z0-9_])', 'g'))].length
+        [...text.matchAll(new RegExp('`' + escapeRe(symbol) + '(?![\\p{L}\\p{N}_$])', 'gu'))].length
+
+      // A DEFINITION IS CHECKED AGAINST CODE WITH THE COMMENTS TAKEN OUT. Anchoring the pattern to
+      // the start of a line was not enough: the reviewer left the old declaration inside a block
+      // comment, on its own line at column zero, and the anchor matched the corpse. Presence is not
+      // definition, and a comment is the cheapest way to be present. Stripping block and line
+      // comments first is approximate — it would also blank a `/*` inside a string literal — but it
+      // is approximate in the SAFE direction: it can only ever remove text, so it can produce a
+      // false red that one glance explains, never a false green that nothing reports.
+      const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
 
       for (const { symbol, definition, definedIn, citedBy } of anchors) {
-        expect(definition.test(read(definedIn)), `${definedIn} no longer defines the cited \`${symbol}\``).toBe(true)
+        expect(
+          definition.test(stripComments(read(definedIn))),
+          `${definedIn} no longer defines the cited \`${symbol}\``,
+        ).toBe(true)
         for (const { file, atLeast } of citedBy) {
           expect(
             mentions(read(file), symbol),
@@ -1407,8 +1428,23 @@ describe('the installer under a locked config — the FATAL half-state must be i
       const anchorPatterns = new Map<string, Array<{ symbol: string; re: RegExp }>>()
       for (const a of anchors) {
         if (!anchorPatterns.has(a.definedIn)) anchorPatterns.set(a.definedIn, [])
-        anchorPatterns.get(a.definedIn)!.push({ symbol: a.symbol, re: new RegExp('`' + escapeRe(a.symbol) + '(?![A-Za-z0-9_])') })
+        anchorPatterns
+          .get(a.definedIn)!
+          .push({ symbol: a.symbol, re: new RegExp('`' + escapeRe(a.symbol) + '(?![\\p{L}\\p{N}_$])', 'u') })
       }
+
+      /**
+       * Is this line a citation SITE for `target` — i.e. does the path appear inside a backtick span?
+       *
+       * Asking whether the line contains an exactly-backticked path was the same mistake the path
+       * checker made and had already been fixed for: a span that says anything else alongside the
+       * path stopped being a site at all, so the whole loop — window, coverage floor and all — never
+       * looked at it. The reviewer's version put a misspelled symbol in the same span as a correct
+       * path and nothing reported it. Spans are split on whitespace and the path judged as a word.
+       */
+      const words = (span: string) => span.split(/\s+/).map((w) => w.replace(/[),.;:]+$/, ''))
+      const targetSpans = (line: string, target: string) =>
+        [...line.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!).filter((s) => words(s).includes(target))
 
       const unresolved: string[] = []
       let sitesChecked = 0
@@ -1416,13 +1452,40 @@ describe('the installer under a locked config — the FATAL half-state must be i
         const lines = read(rel).split('\n')
         for (const [target, allowed] of anchorPatterns) {
           lines.forEach((line, i) => {
-            if (!line.includes(`\`${target}\``)) return
+            const spans = targetSpans(line, target)
+            if (spans.length === 0) return
             sitesChecked++
+
+            // A COMPANION INSIDE THE SAME SPAN IS PART OF THE CITATION, and is checked as one. This
+            // is the half that recognising mixed spans would otherwise have GIVEN AWAY: before, a
+            // span holding the path plus anything else was not a site at all, so it dropped the
+            // coverage floor and the floor is what reported it. Teaching the loop to see such spans
+            // removed that accident and, on its own, turned a caught mutation into a silent pass —
+            // the neighbouring line's correct anchor satisfied the window while the misspelling sat
+            // in the span unread. Measured exactly that way, which is why the check below exists:
+            // any identifier-shaped word sharing a span with the path has to BE one of the anchors.
+            for (const span of spans) {
+              for (const w of words(span)) {
+                if (w === target) continue
+                if (!/^[A-Za-z_][A-Za-z0-9_]{5,}$/.test(w)) continue
+                if (allowed.some((a) => a.symbol === w)) continue
+                unresolved.push(
+                  `${rel} line ${i + 1} — \`${w}\` shares a citation span with ${target} but is not one of its anchored symbols`,
+                )
+              }
+            }
             // The window reaches BOTH ways. It looked only backwards at first, which made coverage
             // depend on where the prose happened to wrap: rewording a paragraph in this very file
             // pushed two symbols onto the line AFTER their path and the sites went unresolved, with
             // nothing wrong with the citations at all. A one-sided window turns a reflow into a
             // verdict.
+            //
+            // Three lines is still a WINDOW and can still be out-run — put four lines between a path
+            // and its symbol and this reports a citation that is perfectly good. That direction is
+            // chosen: the fix is to move the symbol next to the path it belongs to, which is what a
+            // reader wanted anyway, and the alternative is a paragraph-scale window that would let
+            // the misspellings this exists to catch hide two sentences away. False red costs one
+            // edit; false green costs the property.
             const near = `${lines[i - 1] ?? ''}\n${line}\n${lines[i + 1] ?? ''}`
             if (allowed.some((a) => a.re.test(near))) return
             unresolved.push(
@@ -1460,6 +1523,19 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // says anything else in the same span — the reviewer's example is the installer's
       // `docs/AS_BUILT.md merge=union`, where misspelling the path matched no pattern at all and
       // stayed green. Spans are split on whitespace and each word judged on its own.
+      // WHAT THIS DELIBERATELY DOES NOT COVER, and why the limit is the right one. It judges a word
+      // as a path only when it carries BOTH a slash and an extension. A bare `SOMEFILE.md`, or a
+      // slash-bearing name with no extension, is therefore not checked — the reviewer is correct
+      // that this is not "every cited path".
+      //
+      // Widening it either way was measured against this cluster and produces THIRTEEN false reds:
+      // `process.env`, `String.replace` and `Math.min` are code, `origin/main` is a git ref,
+      // `info/attributes` and `config.lock` are git's runtime, `log.txt` is a fixture invented by a
+      // test in this very file, and several are bare filenames that are real but resolve relative to
+      // some other directory. None of those is a repository path and no rule short of understanding
+      // the surrounding prose separates them from one. A guard that cries thirteen times on correct
+      // text is the guard people learn to ignore, which costs more than the narrow case it buys —
+      // so the shape stays unambiguous and the gap is recorded here rather than papered over.
       const deadPaths: string[] = []
       const SPAN = /`([^`\n]+)`/g
       const PATHISH = /^[\w.-]*[\w-]\/[\w./-]+\.[A-Za-z0-9]+$/

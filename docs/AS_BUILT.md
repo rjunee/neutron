@@ -175,15 +175,41 @@ occurs seven times in the target); it matched a definition as a prefix, so any
 rename that appended — V2, Impl — passed; it keyed sites on an exact path, so
 misspelling the path skipped every check; and it asserted nothing about its own
 coverage, which matters because every check in it is a loop over sites and a loop
-over zero sites passes. A cross-model reviewer then defeated the repairs four more
-ways: an extension cap that missed `.markdown` and `.7z`, a path check that only
-saw a backtick span holding nothing else, a definition check a commented-out
-corpse of the old declaration satisfied, and an anchor that is an expression
-rather than an identifier and so was never really checked at its site. Nine
-mutations in total, each measured green before and red after, each with a control
-proving the mutation landed and a clean baseline proving it is not a false
-positive. The coverage assertion earned its place during the work: rewording a
-docblock dropped a citation site and the assertion is what said so.
+over zero sites passes.
+
+A cross-model reviewer then defeated the repairs across two further rounds: an
+extension cap that missed long and digit-leading extensions, a path check that
+only saw a backtick span holding nothing else, a definition check that a
+commented-out corpse of the old declaration satisfied, an anchor that is an
+expression rather than an identifier and so was never really checked at its site,
+a permalink form that carries a query string before its line fragment, an
+identifier boundary that did not count `$`, and site discovery that had the same
+whole-span assumption the path check had already been fixed for. Each measured
+green before and red after, with a control proving the mutation landed and a clean
+baseline proving it is not a false positive. The coverage assertion earned its
+place during the work: rewording a docblock dropped a citation site and the
+assertion is what said so, before the reword was committed.
+
+One of those repairs briefly made the guard WORSE, and only measuring caught it.
+The reviewer reported that a misspelled symbol sharing a backtick span with a
+correct path would pass; run against the code, it did not — the span stopped
+counting as a citation site at all, so the coverage floor fired and reported it.
+Teaching the loop to read mixed spans removed that accident, and on its own turned
+a mutation the guard had been catching into a silent pass. The fix was safe in
+isolation and a regression in context, which is only visible if the mutation is
+re-run after the change rather than reasoned about. Companions inside a citation
+span are now checked as part of the citation, and the mutation is red again.
+
+Two of its findings were declined on measurement rather than fixed, and the limits
+are written into the test beside the checks. Requiring every backticked path to
+resolve produces thirteen false reds in this cluster — `process.env`, `origin/main`,
+`Math.min`, a fixture filename invented by a test in the same file — because no
+rule short of reading the prose separates those from a repository path, so the
+check keeps the unambiguous shape and states what it does not cover. A near-miss
+detector over cited symbols was measured too: it closes the same class and flags
+four legitimate sites, three of them docblocks that discuss a rename in order to
+explain the check. Buying a guard by making its own explanation unwritable is the
+wrong trade.
 
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 
