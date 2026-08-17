@@ -119,7 +119,12 @@ export function seedMigratedDb(path: string): void {
   // surfaces far away as "no such table". Refuse it here, where the diagnosis is
   // still local. (Observed for real on one converted call site: a 1.1 MB `:memory:`
   // file appeared at the repo root and the suite failed on a missing table.)
-  if (path === ':memory:' || /[?&]mode=memory\b/.test(path)) {
+  // Both spellings SQLite accepts: the bare `:memory:`, and a `file:` URI that
+  // either names `:memory:` or asks for `mode=memory`. Matching on the substring
+  // rather than on equality is deliberate — `file::memory:?cache=shared` is
+  // in-memory too, and the first version of this guard tested only for
+  // `mode=memory`, which let that spelling straight through.
+  if (path.includes(':memory:') || path.includes('mode=memory')) {
     throw new Error(
       `seedMigratedDb: cannot seed the in-memory database ${path}. Seeding copies a ` +
         'template FILE, so there is no in-memory target to copy onto. Use the real ' +
