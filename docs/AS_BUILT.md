@@ -28,11 +28,13 @@ one-shot 3.8 MB `hydrate()`. No benchmark was added to the suite deliberately: a
 timing assertion measures the runner's load, which is the class `scripts/ci/lint.sh`
 CHECK 5 exists to keep out of the tree.
 
-**The mark charges the read for the main thread it waited on.** `transcript_read` is
-stamped after an `await` in `handleChange`, and `vm_published` is stamped *inside*
-`publish()` — so it measures notifying subscribers, not the render those subscribers
-perform. React flushes that render synchronously inside the click, and the awaited
-continuation cannot run until it finishes. The proof is a CONTROL, and is labelled as one
+**The mark charges the read for the main thread it waited on.** `vm_published` is stamped
+the instant `publish()` returns, and `publish()` only *schedules* the render: it computes
+the VM and notifies subscribers, and React flushes the resulting render synchronously at
+the END of the discrete event — after `setProject` has already returned. So `vm_published`
+contains none of the paint. `transcript_read` is stamped after an `await` in
+`handleChange`, whose continuation is a microtask, and microtasks cannot run until that
+flush completes — so it contains all of it. The proof is a CONTROL, and is labelled as one
 everywhere it now appears: a subscriber with a deliberately **injected** 250 ms
 synchronous body, driven through React's synthetic discrete-event path, put `render_ended`
 at 256.6 ms and `transcript_read` at 257.6 ms while `vm_published` reported 0.2 ms — and

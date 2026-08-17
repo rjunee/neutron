@@ -29,11 +29,14 @@
  *
  * ── WHY `frame_rendered` EXISTS (2026-08-17) ────────────────────────────────
  * The first four marks answered "which step is slow" with a number that was real,
- * current, and about the wrong step. `vm_published` is stamped INSIDE `publish()`,
- * so it measures notifying subscribers — not the render they cause. React flushes
- * that render synchronously inside the click, and `transcript_read` is stamped
- * after an `await` whose continuation cannot run until that render finishes. So
- * the whole render was charged to the transcript read, and 47 real samples read
+ * current, and about the wrong step. `vm_published` is stamped the instant
+ * `publish()` RETURNS, and `publish()` only SCHEDULES the render — it computes the
+ * VM and notifies subscribers, and React flushes the resulting render synchronously
+ * at the END of the discrete event, after `setProject` has already returned. So
+ * `vm_published` contains none of the paint. `transcript_read` is stamped after an
+ * `await` whose continuation is a microtask, and microtasks cannot run until that
+ * flush finishes — so it contains all of it. The whole render was charged to the
+ * transcript read, and 47 real samples read
  * `transcript_read` median 3283 ms / `vm_published` median 3 ms — which says
  * "rendering is instant, the store is the cost" and means the exact opposite.
  * The store read cannot be the cost, and the reason is structural, not a benchmark:

@@ -592,9 +592,10 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
     // `vm_published` median 3 ms, and the conclusion everyone drew from that —
     // "rendering is instant, the store read is the whole cost" — is wrong in both
     // halves. The reason lived only in a comment until this test: `vm_published`
-    // is stamped INSIDE `publish()`, so it measures notifying subscribers and not
-    // the render they perform, and `transcript_read` is stamped after an `await`
-    // whose continuation cannot run until that render finishes.
+    // is stamped the instant `publish()` RETURNS, and `publish()` only schedules
+    // the render, so that mark contains none of the paint — while
+    // `transcript_read` is stamped after an `await` whose continuation is a
+    // microtask, and microtasks cannot run until the render has flushed.
     //
     // A fake clock makes it exact rather than approximate, and keeps the assertion
     // off real elapsed time (ISSUES #438). The ORDERING is what has to be faithful:
