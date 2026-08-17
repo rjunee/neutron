@@ -5030,6 +5030,160 @@ phrased strictly as measurements rather than an asserted cause, per #240. And
 harvest-before-reap is preserved: a crashed row that already carries a terminal
 `inner_result` still harvests on the next tick, with zero relaunches spent.
 
+## 2026-08-14 — inline activity is derived from evidence; the stored flag is a hint
+
+A Work Board card's `inline_active` used to be a promise the agent had to both make
+and retract. It now reads the world: every read boundary maps its items through one
+deriver (`makeInlineActivityDeriver`, `work-board/inline-activity.ts`) before they
+leave the server — the project-rail extras, the WS `work_board_changed` frame, the
+HTTP list / reorder / create / update / complete responses
+(`gateway/http/work-board-surface.ts`), the per-turn `<work_board>` fragment the
+agent is grounded on, and the agent's own `work_board_list` tool. The stored column
+is untouched by any read; where the flag and the evidence disagree, the evidence
+wins.
+
+WHAT COUNTS AS EVIDENCE, precisely: the inspector's THIRD clock,
+`lastWriteActivityAt(scope)` — advanced only by a row a mapper classified
+write-class (`isWriteClassTool`: the file-mutating tools, and a shell call whose
+command mutates — `git commit`, `rm`, `sed -i`, an output redirect). It is
+deliberately NOT `last_real_activity_at`, the wedge clock, which every `turn_start`,
+every status notice and the agent's own reply advance: wired to that clock, asking
+the agent an unrelated question marked every runless in-progress card as being
+worked on for 90 s, which is the stored flag's original lie with an extra step. The
+classifier fails CLOSED — an unrecognised shell form is not write-class, so the
+board under-claims rather than over-claims (acceptance (c) beats acceptance (a) on a
+tie).
+
+Evidence is TIER 1 ONLY: one O(1) in-memory `ActivityInspector` Map read per board
+render, keyed by `inspectorScopeKey(project_id)`, fed by the PreToolUse/PostToolUse
+tap that was already running. Never per row, never a shell-out, no I/O on the read
+path — the helper is BATCH-shaped precisely so the reader cannot be called inside the
+per-item loop. Tiers 2 and 3 of the card (commits on the card's branch, a dirty
+worktree) are recorded non-goals; they would shell out per row per render. The
+freshness window is `INLINE_EVIDENCE_WINDOW_MS = 90_000`, held equal to the
+inspector's `WEDGE_AFTER_MS` by a test (the module is a dependency-free leaf and
+cannot import it).
+
+GRANULARITY, AND WHY IT IS CAPPED AT ONE ROW. The clock is per PROJECT, because a
+card carries no session binding — a write cannot say WHICH of two in-progress cards
+it belongs to. Left unbounded, one write marked every runless in-progress card of the
+project active and, because both clients suppress ▶ on `inline_active`, hid
+Start/Retry BOARD-WIDE for the window: one read-only tool call could take the play
+control off three unrelated cards. So status-only derivation is RATIONED — at most
+ONE card per board may go active on project evidence alone (rule R5), the most
+recently touched eligible in-progress card, which is the card the agent moved into
+`in_progress` before it started writing. Cards whose stored flag is set are
+unaffected: that is an explicit claim, and it is still corroborated by evidence. A
+real card↔session binding on the row would replace the heuristic and is a separate
+change.
+
+RUN-BOUND CARDS FOLLOW `isLinkedRunning`, NOT MERE BINDING. R2 defers to the fork
+lane only while the bound run is LIVE; a card bound to a TERMINAL run — the
+retry-after-failure card someone is now fixing inline — reads its inline evidence
+again. The composer passes the SAME "is this run live" predicate the store's
+`isRunLive` safety invariant uses, so "bound and running" means one thing everywhere,
+and a throwing/absent run store degrades to "live" rather than inventing activity.
+
+TWO CLASSIFIER CORRECTIONS the first cut got wrong, both in the over-claiming
+direction that acceptance (c) exists to prevent. A `>` inside QUOTES is an argument,
+not a redirect (`grep -rn "a > b" src`, `awk '{if (a > b) print}'`), so quoted spans
+are blanked before the redirect is looked for; and a redirect whose target is a
+discard or scratch path (`/dev/null`, `2>&1`, `/tmp/…`, `/var/tmp/…`) writes nothing
+the board cares about — the agent is instructed to send verbose build/test output to
+a scratch log, so counting it would have made "quiet means quiet" fail on every test
+run. Separately, the tap CLIPS its rendered arguments at 2000 chars, so a long
+multi-key Bash call (`git commit -m "<long message>"`) arrives as unparseable JSON;
+the command is now recovered textually from the clipped body instead of being
+classified as `{`, i.e. as nothing.
+
+WHAT THE WRITE CLOCK CANNOT SEE, stated rather than hidden: read-only inline work.
+A research/analysis card, or a card whose inline turn is ten minutes of `bun test`,
+records no write and reads NOT active — and after 90 s of reads a genuinely live
+inline card goes quiet again, EVEN WITH THE FLAG SET. That is deliberate: the flag
+gets no exemption from the freshness check, because "the evidence wins" only means
+something in the direction that costs something. Two obligations follow, and both are
+now honoured in the code: callers describe the signal as RECENT WRITE ACTIVITY rather
+than "an inline action is executing" (both `canPlay` headers), and the operating
+doctrine + `work_board_update` description tell the agent the truth — read-only work
+is carried by the card's STATUS, not by the flag.
+
+The crashed-session heal is by construction, not by a reconciler: the inspector's
+buffer dies with the process, so after a restart evidence reads 0 and every stale
+flag reads not-active. A late-bound `inlineEvidenceReader` holder in `open/composer.ts`
+gives the same fail-soft answer before the inspector exists (unset ⇒ evidence 0 ⇒ not
+active), which is why construction order does not matter at any of the five call sites.
+
+THE ON EDGE IS PUSHED; THE OFF EDGE IS POLLED. `fanWorkBoardChanged` is driven by
+store writes and run transitions, and inline work makes NEITHER — so on an
+already-open board nothing would announce that work started, and acceptance (a) would
+hold only at server READ boundaries (reload, mutation, reconnect). The tool tap
+therefore fans ONE board frame on the rising edge of the write clock
+(`isInlineEvidenceEdge`: the first write for the scope, or the first after the signal
+expired). It is edge-only by construction, so a burst of tool calls inside an already
+active window costs nothing.
+
+Expiry, in contrast, produces no event at all, so both clients re-poll every 15 s
+while any card reads inline-active (`landing/chat-react/WorkBoardTab.tsx`,
+`app/app/projects/[id]/workboard.tsx`); the existing live-run poll cannot cover it,
+since a derived-inline card is runless-or-terminal by construction (rule R2). A quiet
+board still polls nothing. That poll is QUIET on both clients — the mobile screen
+renders `loading` as a full-screen spinner that REPLACES the board, so a loud 15 s
+poll blanked the board for exactly as long as the feature was on.
+
+ONE DELIBERATE ASYMMETRY: the HTTP echoes of create/update/complete derive, while
+the AGENT-TOOL mutation echoes (`work-board/agent-tool.ts`) return the raw stored
+hint. Those echoes are transactional acks of the write just performed — the agent
+asked for a value and gets back what was stored — whereas the HTTP echo is what a
+client paints straight into the board. The read surfaces the agent sees (the
+`<work_board>` fragment and `work_board_list`) do derive.
+
+Nothing here blocks, denies, delays or gates a tool call — this is the display-only
+salvage of the cancelled PreToolUse-gate plan, and the agent-tool dep is threaded as
+an optional opt (absent ⇒ byte-identical raw passthrough on legacy boxes). Mutant
+pins: `work-board/inline-activity.test.ts` (unconditional-true, the latch, the exact
+window boundary, and the deriver's scope-key + per-call-clock contract),
+`open/activity-inspector.test.ts` (the write clock vs the wedge clock on a
+no-write turn, the keepalive mutant, the classifier, the window equality),
+`work-board/agent-tool.test.ts` (activation with no `work_board_update` in the path,
+the stale-flag heal, the no-latch expiry, dep-absent passthrough, the General scope
+id, and an `inline_active` write still returning `ok`),
+`gateway/http/work-board-surface.test.ts` (acceptance a–e per response shape, with
+(d) asserting the mutations actually landed and (e) also pinning that five
+in-progress cards do not all light from one write),
+`app/__tests__/workboard-inline-activity-poll.test.ts` (the mobile poll is quiet and
+a failed quiet poll leaves the board standing) and
+`open/__tests__/inline-activity-wiring.test.ts` (real tap → real inspector → real
+deriver for a–c, plus every composer call site pinned BY NAME rather than by a call
+count, the late binding, the tap's evidence edge, and the `build-core-modules.ts`
+threading).
+
+## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
+
+`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
+build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
+>30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
+the host-held part files into a temp dir, the real workflow composes the forge:build
+prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
+by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
+then concatenated in the listed order and measured against the prompt's
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
+recomputes before it spends a token. Chained with the by-path suite in
+`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
+reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
+agent retyping anywhere in the path. Test-only; no production file changed.
+
+Two findings from building it. First, the chunk blocks may NOT have their paths
+rewritten wholesale: the coda forming the `.a2` segment names
+`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
+bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
+the assembled brief is asserted to mention neither segment path. Second, dropping the
+trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
+`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
+newline; the sensitivity check therefore uses mutations that move a real byte. Under a
+one-character head-slice shift and under a one-character tail edit, both new tests go
+RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
+gap this task existed to close.
+
 ## 2026-08-15 — a pr-mode build rebases onto observed main before review
 
 `trident/orchestrator.ts` `publishBuiltCommit` now rebases the built branch onto
@@ -5133,33 +5287,6 @@ re-run rebuilds, because there is no resume-a-terminal-run path (see above). Wid
 window trades a longer stall on every genuinely-dead branch for a rarer manual re-run; the
 numbers live in one exported constant so that trade can be made with evidence rather than
 by guess.
-
-## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
-
-`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
-build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
->30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
-the host-held part files into a temp dir, the real workflow composes the forge:build
-prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
-by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
-then concatenated in the listed order and measured against the prompt's
-`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
-recomputes before it spends a token. Chained with the by-path suite in
-`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
-reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
-agent retyping anywhere in the path. Test-only; no production file changed.
-
-Two findings from building it. First, the chunk blocks may NOT have their paths
-rewritten wholesale: the coda forming the `.a2` segment names
-`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
-bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
-the assembled brief is asserted to mention neither segment path. Second, dropping the
-trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
-`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
-newline; the sensitivity check therefore uses mutations that move a real byte. Under a
-one-character head-slice shift and under a one-character tail edit, both new tests go
-RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
-gap this task existed to close.
 
 ## 2026-08-14 — credentials scoped to a previous owner handle migrate at boot, and a scope miss is no longer "not connected"
 

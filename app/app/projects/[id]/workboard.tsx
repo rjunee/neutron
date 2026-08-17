@@ -152,10 +152,17 @@ function WorkBoardBody({
   // Monotonic guard so a slow fetch can't land after a fresher live snapshot.
   const seq = useRef(0);
 
-  const refresh = useCallback((): void => {
+  // `quiet` (a BACKGROUND refetch) skips the loading flip and swallows the error
+  // path, because this screen renders `loading` as a FULL-SCREEN spinner that
+  // replaces the whole board — a periodic poll on the loud path would blank the
+  // board every interval, and a single flaky poll would empty it. Mirrors
+  // `refresh(quiet)` in landing/chat-react/WorkBoardTab.tsx.
+  const refresh = useCallback((quiet = false): void => {
     const mine = (seq.current += 1);
-    setLoading(true);
-    setListError(null);
+    if (!quiet) {
+      setLoading(true);
+      setListError(null);
+    }
     client
       .list(projectId)
       .then((rows) => {
@@ -165,8 +172,9 @@ function WorkBoardBody({
       })
       .catch((err: unknown) => {
         if (mine !== seq.current) return;
-        setItems([]);
         setLoading(false);
+        if (quiet) return;
+        setItems([]);
         // NEVER `err.message`. This screen used to paint the raw throw, which is
         // how a gateway validator string became the entire General pane.
         setListError(boardErrorCopy(err, 'load'));
@@ -238,6 +246,22 @@ function WorkBoardBody({
       clearInterval(t);
     };
   }, [activityClient, projectId]);
+
+  // The board's own slow poll, for the same reason and only while it is needed:
+  // `inline_active` arrives DERIVED from a 90 s evidence window, so it expires by
+  // the clock with no write to push a fresh snapshot. Without this the pane would
+  // hold the last frame it was sent — a card pulsing with ▶ suppressed on a board
+  // where nothing is happening. Gated on a card actually reading inline-active,
+  // so a quiet board never polls — and QUIET (`refresh(true)`), because the loud
+  // path replaces the entire board with a spinner and this fires every 15 s.
+  const hasInlineActive = items.some((it) => it.inline_active);
+  useEffect(() => {
+    if (!hasInlineActive) return;
+    const t = setInterval(() => {
+      refresh(true);
+    }, ACTIVITY_POLL_MS);
+    return () => clearInterval(t);
+  }, [hasInlineActive, refresh]);
 
   const activityState: ActivityState = workActivityState({
     snapshot: activitySnapshot,
@@ -341,7 +365,12 @@ function WorkBoardBody({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Retry loading the work board"
-            onPress={refresh}
+            // Wrapped, NOT passed by reference: `refresh` now takes `quiet` and a
+            // Pressable hands its press event to the first argument, which would
+            // make the owner's explicit Retry the silent one.
+            onPress={() => {
+              refresh();
+            }}
             style={({ pressed }) => [styles.retryBtn, pressed && styles.pressed]}
             testID="workboard-retry"
           >

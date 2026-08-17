@@ -645,6 +645,17 @@ with cross-references noted inline.
     `trident/store.test.ts`.
     Protects: the fix-round budget from being spent on infrastructure failures that are not the
     agent's fault.
+116. The Work Board's `inline_active` is DISPLAY-ONLY and EVIDENCE BEATS THE STORED FLAG. Every
+    read boundary maps items through the one deriver (`work-board/inline-activity.ts`
+    `makeInlineActivityDeriver`, wired in `open/composer.ts`); the stored column is never written
+    by a read and is only ever a hint. The flag gets NO exemption from the freshness check — a
+    crashed session's stuck flag reads not-active — and the derivation must never grow a branch
+    that blocks, denies, delays or gates a tool call (it is the display-only salvage of the
+    cancelled PreToolUse-gate plan). Evidence is tier 1 only: ONE O(1) `ActivityInspector` map
+    read per board, never per row, never a shell-out. `work-board/inline-activity.test.ts` +
+    `open/__tests__/inline-activity-wiring.test.ts`.
+    Protects: the board from re-becoming a promise the agent has to remember to keep, and the
+    read path from growing per-row I/O.
 116. External launcher liveness acts only on positive death evidence: `alive`, `unknown`, or a
     throwing probe does nothing; malformed pids and disagreement between registry homes are
     ambiguous. Every running launcher is probed without the advancement sweep's 50-row cap. A
@@ -758,6 +769,10 @@ with cross-references noted inline.
 
 - **111 invariants** extracted from the 11 critic reports' load-bearing-subtleties /
   fail-soft-invariant / must-not-break sections (`critic-security-config.md` has no dedicated
+  section; its "what exists and is fine" items are folded into §11 above). Four further items
+  (#112–#115) were added post-synthesis for the gateway-restart crash-recovery build, and #116 for
+  the derived-inline-activity build; they are appended at the end of their sections rather than
+  renumbered in, so numbering is not strictly sequential within §3 and §9.
   section; its "what exists and is fine" items are folded into §11 above). Five further items
   (#112–#116) were added post-synthesis — #112–#115 for the gateway-restart crash-recovery build,
   #116 for the boot scope direction guard (2026-08-16); they are appended at the end of their
