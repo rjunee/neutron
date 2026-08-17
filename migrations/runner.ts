@@ -894,10 +894,20 @@ function formatOccupiedRekeyScratch(): string {
  * put it after this boot's `_migration_repairs` acknowledgements, so on the one
  * population it is written for — an instance mid-incident, carrying repairs — its claim
  * that nothing had been written was false as the operator read it. A guard whose job is
- * to change nothing cannot be reached through a write. This function is therefore only
- * ever CALLED with the name free, and the condition it is called under
- * (`ledgerIsVersionKeyed`) is the same pure read that decides the rekey is needed at
- * all. This used to open with
+ * to change nothing cannot be reached through a write. The preflight evaluates exactly
+ * the conditions this function is called under (`ledgerExists` + `ledgerIsVersionKeyed`),
+ * so the refusal fires on precisely the boots it used to and no others.
+ *
+ * WHAT THE PREFLIGHT CANNOT PROMISE, stated rather than implied: that the name is STILL
+ * free by the time execution arrives here. Only a foreign process creating a table at
+ * this exact name inside that window could do it — a concurrent rekey cannot, because
+ * the whole rekey is one `BEGIN IMMEDIATE` and the loser gets SQLITE_BUSY. That case
+ * lands in the catch below, whose message says the ledger rolled back and quotes what
+ * SQLite reported, which is the honest answer for a race nothing here can see. It is not
+ * routed back to the friendly message, because a check re-run inside the transaction
+ * would be a second copy of the same guard.
+ *
+ * This used to open with
  * `DROP TABLE IF EXISTS _migrations_version_keyed`, which is a data-destroying
  * statement guarded by nothing — and because the drop is inside the transaction that
  * goes on to COMMIT, a real table there was deleted PERMANENTLY, silently, on a boot
