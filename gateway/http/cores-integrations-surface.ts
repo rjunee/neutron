@@ -5,6 +5,10 @@
  *
  *   - `GET    /api/cores/integrations`        → unified status: per-Core
  *       Google OAuth accounts + standalone API-key slots (no secrets).
+ *   - `POST   /api/cores/integrations/migrate-orphaned` → move credential rows
+ *       scoped to a PREVIOUS owner handle onto this one (collision-guarded;
+ *       returns counts only). The UI twin of the `integrations_migrate_orphaned`
+ *       chat tool — both call the same brain.
  *   - `POST   /api/cores/api-keys/<label>`    → store/rotate a `byo_api_key`.
  *   - `DELETE /api/cores/api-keys/<label>`    → clear a stored key.
  *
@@ -31,6 +35,7 @@ import { jsonResponse, ownerSlugMismatch, resolveBearer } from './surface-kit.ts
 import {
   buildIntegrationsStatus,
   deleteApiKey,
+  migrateOrphanedCredentials,
   setApiKey,
   IntegrationsError,
   type IntegrationsRegistryView,
@@ -38,6 +43,7 @@ import {
 import type { OAuthTokenManager } from '../cores/oauth-token-manager.ts'
 
 const INTEGRATIONS_PATH = '/api/cores/integrations'
+const MIGRATE_PATH = '/api/cores/integrations/migrate-orphaned'
 const API_KEYS_BASE = '/api/cores/api-keys'
 
 export interface CoresIntegrationsSurfaceOptions {
@@ -55,6 +61,12 @@ export interface CoresIntegrationsSurfaceOptions {
   db?: ProjectDb
   /** Frozen owner_handle for this instance. */
   project_slug: string
+  /**
+   * True when `project_slug` is the bare FALLBACK rather than a configured
+   * handle. Threaded to the credential brain, which refuses to migrate rows
+   * onto an anonymous process — see `auth/credential-scope-reconcile.ts`.
+   */
+  slug_is_fallback: boolean
   /** App bearer resolver. */
   auth: AppWsAuthResolver
 }
@@ -69,6 +81,10 @@ export interface CoresIntegrationsSurface {
 function ownsPath(pathname: string): boolean {
   return (
     pathname === INTEGRATIONS_PATH ||
+    // Explicit: the migrate route is a SUB-path of INTEGRATIONS_PATH (an exact
+    // match above) and shares no prefix with API_KEYS_BASE, so without this
+    // clause it falls straight through to the other surfaces and 404s.
+    pathname === MIGRATE_PATH ||
     pathname === API_KEYS_BASE ||
     pathname.startsWith(`${API_KEYS_BASE}/`)
   )
@@ -77,7 +93,7 @@ function ownsPath(pathname: string): boolean {
 export function createCoresIntegrationsSurface(
   opts: CoresIntegrationsSurfaceOptions,
 ): CoresIntegrationsSurface {
-  const { registry, tokens, secretsStore, db, project_slug, auth } = opts
+  const { registry, tokens, secretsStore, db, project_slug, slug_is_fallback, auth } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -100,6 +116,29 @@ export function createCoresIntegrationsSurface(
         })
       }
 
+      if (pathname === MIGRATE_PATH) {
+        if (req.method !== 'POST') {
+          return jsonResponse(405, {
+            ok: false,
+            code: 'method_not_allowed',
+            message: `${req.method} not allowed on ${pathname}`,
+          })
+        }
+        if (db === undefined) {
+          return jsonResponse(409, {
+            ok: false,
+            code: 'db_unavailable',
+            message:
+              'credential migration requires the project DB; this deployment did not wire one',
+          })
+        }
+        // The migration is a metadata move over the credential tables' scope
+        // columns — same brain the chat tool calls; the result already carries
+        // `ok: true` and counts only (never a secret value).
+        const result = await migrateOrphanedCredentials({ db, project_slug, slug_is_fallback })
+        return jsonResponse(200, result)
+      }
+
       if (pathname === INTEGRATIONS_PATH) {
         if (req.method !== 'GET') {
           return jsonResponse(405, {
@@ -113,6 +152,10 @@ export function createCoresIntegrationsSurface(
           tokens,
           secretsStore,
           project_slug,
+          slug_is_fallback,
+          // Threaded so the panel distinguishes "scoped to a previous owner
+          // handle" from "not connected" (card 2026-08-14).
+          ...(db !== undefined ? { db } : {}),
         })
         return jsonResponse(200, {
           ok: true,

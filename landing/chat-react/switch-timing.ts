@@ -35,10 +35,29 @@
 import type { WebClientReport } from './diagnostics-client.ts'
 
 /** Independently observed instants in a switch; their relative order is not assumed. */
-export type SwitchMark = 'vm_published' | 'socket_open' | 'transcript'
+export type SwitchMark = 'vm_published' | 'socket_open' | 'transcript_read' | 'transcript'
 
 /** Every mark a complete switch reaches. Used to decide "done" and name missing marks. */
-const ALL_MARKS: readonly SwitchMark[] = ['vm_published', 'socket_open', 'transcript']
+const ALL_MARKS: readonly SwitchMark[] = [
+  'vm_published',
+  'socket_open',
+  'transcript_read',
+  'transcript',
+]
+
+/**
+ * Marks whose absence is a NORMAL OUTCOME, not a failure.
+ *
+ * `socket_open` does not fire when the warm cache returns a session whose socket
+ * is ALREADY open — which is the win, not a fault. Reporting that as
+ * `never_arrived` sent the owner a line that reads exactly like the failure case
+ * ("the socket never came up") when it meant the opposite.
+ *
+ * ⇒ an instrument MUST distinguish "did not happen because it was unnecessary"
+ * from "did not happen because it failed". One symbol for both is a lie the
+ * reader has no way to detect.
+ */
+const OPTIONAL_MARKS: ReadonlySet<SwitchMark> = new Set<SwitchMark>(['socket_open'])
 
 export interface SwitchRecord {
   /** Project navigated FROM (`null` = General). */
@@ -108,7 +127,7 @@ export class SwitchTimer {
     if (this.flushed) return
     if (this.marks[mark] !== undefined) return
     this.marks[mark] = round(this.now() - this.startedAt)
-    if (ALL_MARKS.every((m) => this.marks[m] !== undefined)) this.flush(false)
+    if (ALL_MARKS.every((m) => OPTIONAL_MARKS.has(m) || this.marks[m] !== undefined)) this.flush(false)
   }
 
   /** Abandon this switch — the user clicked somewhere else. Reports what it had. */
@@ -164,15 +183,20 @@ function defaultEmit(r: SwitchRecord): void {
   const vm = r.marks.vm_published
   const sock = r.marks.socket_open
   const tx = r.marks.transcript
-  const missing = ALL_MARKS.filter((m) => r.marks[m] === undefined)
+  // Only a REQUIRED mark can be missing in the failure sense. A reused socket
+  // is reported as `reused`, which is a different fact and reads like one.
+  const missing = ALL_MARKS.filter((m) => !OPTIONAL_MARKS.has(m) && r.marks[m] === undefined)
+  const reused = ALL_MARKS.filter((m) => OPTIONAL_MARKS.has(m) && r.marks[m] === undefined)
   const parts = [
     `to=${r.to ?? 'general'}`,
     `from=${r.from ?? 'general'}`,
     `vm=${fmt(vm)}`,
     `socket=${fmt(sock)}`,
+    `transcript_read=${fmt(r.marks.transcript_read)}`,
     `transcript=${fmt(tx)}`,
     `total=${fmt(r.total)}`,
   ]
+  if (reused.length > 0) parts.push(`reused=${reused.join(',')}`)
   if (missing.length > 0) parts.push(`never_arrived=${missing.join(',')}`)
   console.info(`[project-switch] ${parts.join(' ')}`)
 }
@@ -212,11 +236,25 @@ export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebC
 export function createSwitchTimingEmitter(
   send: (report: WebClientReport) => Promise<unknown>,
 ): (record: SwitchRecord) => void {
+  // Latch: one console error per failing REASON, not one per switch. A broken
+  // ingest fails on every single switch, and a message repeated forty times
+  // reads as noise and gets scrolled past — which is the same invisibility this
+  // is here to end, one layer up.
+  let reported = ''
   return (record) => {
     defaultEmit(record)
     void Promise.resolve()
       .then(() => send(buildSwitchReport(record)))
-      .catch(() => undefined)
+      .catch((err: unknown) => {
+        // NEVER swallow. `.catch(() => undefined)` here, plus a client that
+        // discarded its Response, is why switch timings reached nobody for a
+        // day while the owner hand-pasted them into chat. The report itself is
+        // droppable; the fact that it dropped is not.
+        const reason = err instanceof Error ? err.message : String(err)
+        if (reason === reported) return
+        reported = reason
+        console.error(`[project-switch] timing report NOT delivered — ${reason}`)
+      })
   }
 }
 

@@ -42,6 +42,7 @@ import {
   type ReminderLlm,
   type ReminderOutbound,
 } from './dispatcher.ts'
+import { MAX_NUDGE_BODY_CHARS } from './message-shape.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 
 /**
@@ -433,6 +434,38 @@ describe('bundled ritual approved fire — composes on the shared session and po
     expect(row.ended_at).not.toBeNull()
     expect(row.output_summary).toBe('brief done')
     expect(posted).toEqual([{ topic_id: 'app:owner-topic', body: 'brief done' }])
+  })
+
+  // The nudge bound (#293 defect B, `MAX_NUDGE_BODY_CHARS`) caps what a fired
+  // REMINDER may post, because a 3.4k "nudge" is a composition failure. A ritual
+  // is the opposite case: a morning brief is SUPPOSED to be long, it composes on
+  // its own `RITUAL_MAX_TOKENS` budget, and it has no literal body to degrade to.
+  // So the ritual path is exempt, and this pins that it stayed exempt.
+  test('an approved ritual body far over MAX_NUDGE_BODY_CHARS posts in full — the bound is nudge-only', async () => {
+    seedBundledRituals({ rituals_dir: ritualsDir })
+    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+    registerBundledRituals(registry)
+    const longBrief = 'A long, legitimate morning brief.'.repeat(200)
+    expect(longBrief.length).toBeGreaterThan(MAX_NUDGE_BODY_CHARS)
+
+    const posted: string[] = []
+    const stack = buildFireStack({
+      registry,
+      approved: true,
+      mint: 'run-long',
+      outbound: {
+        post: async (m) => {
+          posted.push(m.body)
+          return true
+        },
+      },
+      compose: async () => longBrief,
+    })
+
+    await stack.dispatch(await ritualRow('morning-brief'))
+
+    expect(posted).toEqual([longBrief])
+    expect(runs.get('run-long')!.status).toBe('finished')
   })
 
   // The thing a bundled kaizen can silently get wrong: the report goes nowhere.

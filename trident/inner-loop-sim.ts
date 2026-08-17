@@ -45,6 +45,10 @@ export interface SimResult {
   prMerged?: boolean
   publishRequested?: boolean
   publishHead?: string | null
+  /** The build's Forge reported it deviated from the Ralph exec spec. Emitted only
+   *  when the test sets it (the workflow writes it on the publish handoff), so the
+   *  absent-field default keeps every other test on the unsuffixed checkpoint. */
+  deviatedFromSpec?: boolean
 }
 
 /** The stand-in reviewed head OID a simulated workflow records (#545). Real
@@ -69,6 +73,7 @@ export function simResultJson(sim: SimResult): string {
     ...(sim.prMerged !== undefined ? { prMerged: sim.prMerged } : {}),
     ...(sim.publishRequested !== undefined ? { publishRequested: sim.publishRequested } : {}),
     ...(sim.publishHead !== undefined ? { publishHead: sim.publishHead } : {}),
+    ...(sim.deviatedFromSpec !== undefined ? { deviatedFromSpec: sim.deviatedFromSpec } : {}),
     // #545 — production ALWAYS records the reviewed head, so the default models
     // that; an explicit null models the workflow that failed to (and the pr-mode
     // merge must then refuse rather than merge an unpinned head).

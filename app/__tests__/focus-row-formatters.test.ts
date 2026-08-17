@@ -18,8 +18,10 @@ import {
   PROJECT_CHIP_MAX_CHARS,
   priorityChipKind,
   projectChipLabel,
+  GENERAL_CHIP_LABEL,
   INSTANCE_CHIP_LABEL,
 } from '../lib/focus-row-formatters';
+import { RAIL_GENERAL_ID } from '../lib/general-scope';
 import { THEME } from '../lib/theme';
 
 function makeItem(extra: Partial<FocusItem> = {}): FocusItem {
@@ -178,5 +180,30 @@ describe('integration smoke', () => {
     expect(projectChipLabel(it1)).toBe(INSTANCE_CHIP_LABEL);
     expect(isInstanceLevel(it1)).toBe(true);
     expect(bucketDotColor(it1.bucket)).toBe(THEME.danger);
+  });
+
+  it('names the General scope instead of showing its routing sentinel', () => {
+    // A General reminder created from the app carries `topic_id =
+    // 'app-project:~general'`, and the Focus surface's
+    // `extractProjectIdFromTopic` decodes that straight back to the sentinel —
+    // so this is the literal string the row is handed. Rendering it raw put
+    // `~general` on screen as if it were a project the owner had named.
+    const it1 = makeItem({
+      kind: 'reminder',
+      project_id: RAIL_GENERAL_ID,
+      bucket: 'today',
+    });
+    expect(projectChipLabel(it1)).toBe(GENERAL_CHIP_LABEL);
+    expect(projectChipLabel(it1)).not.toContain('~');
+    // NOT owner-level: General is a routable scope, and `isInstanceLevel` is
+    // what sends the tap to General's Reminders tab rather than the project
+    // list. Flipping this to `true` would silently change where the row goes.
+    expect(isInstanceLevel(it1)).toBe(false);
+  });
+
+  it('leaves a project merely STARTING with the sentinel alone', () => {
+    // The match is exact. A prefix test here would rename an unrelated project
+    // to "General" on the Focus screen.
+    expect(projectChipLabel(makeItem({ project_id: '~generalize' }))).toBe('~generalize');
   });
 });

@@ -60,7 +60,9 @@
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
-import { writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -71,6 +73,7 @@ import {
 import {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  MAX_CONFLICT_ROUNDS,
   runWorktreePath,
   TridentMergeConflictEscalation,
   type MergeConflictResolver,
@@ -78,6 +81,7 @@ import {
 } from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
+import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
@@ -96,6 +100,10 @@ export interface BuildTridentOrchestratorOptions {
   run_host: RunHostCommand
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
+  /** Injectable wait, used to SPACE the resume head-read retries
+   *  (`resolveResumeLiveHead`). Production leaves it unset and really sleeps; the
+   *  suite passes a no-op so a retried read still costs nothing. */
+  sleep?: SleepMs
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
   /** Static Codex credential dir (CODEX_HOME) threaded into the inner workflow —
@@ -159,6 +167,26 @@ export interface BuildTridentOrchestratorOptions {
    */
   resolve_reflection_context?: (run: TridentRun) => string | null
   /**
+   * The count of trident runs currently IN A BUILD PHASE (`forge-init`/`forge-fix`),
+   * INCLUDING the one launching — the live test-running fan-out. Wired from the run
+   * store in `gateway/composition/build-core-modules.ts` (the orchestrator holds no
+   * store; the composer does).
+   *
+   * Consumed by `computeTestJobs` as its RAISE-ONLY term. The bound itself comes from
+   * the CONSTANT `DEFAULT_BUILD_FANOUT`, because a launch-time snapshot cannot bound a
+   * STAGGERED fan-out: the value is frozen into a prompt string, so the run that
+   * launched onto an idle box would keep all the cores for an hour while later runs
+   * divided the same box again (read `computeTestJobs`'s docblock). This count only
+   * shrinks the budget FURTHER, when more builds than planned are genuinely running.
+   *
+   * BEST-EFFORT: a throwing resolver or a non-finite result degrades to 1
+   * (sequential-safe) and NEVER fails the launch. And it must actually be WIRED —
+   * `resolve_phase_models` is the history here: a complete seam whose producer was
+   * missing shipped an inert feature that no test could catch, because every piece
+   * worked in isolation.
+   */
+  resolve_active_runs?: () => number
+  /**
    * Is a Kimi K3 key configured? Called PER LAUNCH so a key added after boot is
    * honoured without a restart. Absent → the Kimi panelist never runs, which is
    * the graceful (never-blocking) path.
@@ -180,12 +208,15 @@ export interface BuildTridentOrchestratorOptions {
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /**
-   * Bounded Forge merge-conflict resolver (#342). Threaded into the default
-   * `buildMergeCleanupDeps` so a LOCAL-mode merge that hits a rebase conflict
-   * (a 2nd/3rd same-project build replaying onto a sibling's merge) is
-   * auto-resolved rather than hard-failing. Ignored when `merge_deps` is
-   * supplied (the override owns its own resolver). Absent → a conflict
-   * escalates to chat immediately (no auto-resolve).
+   * Bounded Forge merge-conflict resolver (#342). Serves BOTH conflict paths:
+   *   - LOCAL mode — threaded into the default `buildMergeCleanupDeps`, so a merge
+   *     that hits a rebase conflict (a 2nd/3rd same-project build replaying onto a
+   *     sibling's merge) is auto-resolved rather than hard-failing. Ignored when
+   *     `merge_deps` is supplied (the override owns its own resolver).
+   *   - PR mode — threaded into `rebaseOntoObservedBase` (the AUTONOMOUS publish
+   *     path), where a conflicting replay is resolved in the scratch worktree
+   *     before it can become a `TridentRebaseConflict`.
+   * Absent → a conflict escalates immediately on both paths (no auto-resolve).
    */
   resolve_conflict?: MergeConflictResolver
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
@@ -262,7 +293,9 @@ export interface BuildTridentOrchestratorOptions {
    * checkpoint (`forge-done`, `argus-*`, `fix-round-N`), so it never trips this;
    * only a genuinely wedged agent() (or a stalled orphan) does. This is
    * deliberately SHORTER than `max_inflight_ms` (the 2h absolute ceiling, kept
-   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (25 min).
+   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (90 min —
+   * `trident/liveness.ts`; this comment said 25 min long after the constant was
+   * raised, which is exactly the kind of drift that makes a reader distrust it).
    */
   no_advance_hang_ms?: number
   /**
@@ -426,14 +459,119 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
     : `outer publisher could not ${step} branch ${branch}: ${said}`
 }
 
+/** The publish-failure classes readable from a STORED reason alone (card rbbjj2, acceptance a).
+ *  'publish-credential' is the first member of the auto-retry class list (card 01KZZQ2J9MJFG0PXC8AA6D6EV4);
+ *  'publish-ref-rejected' and 'publish-unknown' must NEVER auto-retry. */
+export type PublishFailureClass = 'publish-credential' | 'publish-ref-rejected' | 'publish-unknown'
+
+export const PUBLISH_CREDENTIAL_CLASS = 'publish-credential' as const
+
+/** Pure, total, case-insensitive. REJECTION EVIDENCE OUTRANKS CREDENTIAL EVIDENCE: a server that
+ *  rejected a ref did authenticate, so mixed evidence is a rejection and stays terminal. Anything
+ *  unrecognised is 'publish-unknown' — conservatism here is what keeps a genuine failure from
+ *  ever entering an auto-retry loop. Matches WORDS only (never bare numbers — a 40-hex sha can
+ *  contain '401'). */
+export function classifyPublishFailure(text: string): PublishFailureClass {
+  const t = text.toLowerCase()
+  const refRejected = ['[rejected]', 'non-fast-forward', 'stale info'].some((p) => t.includes(p))
+  if (refRejected) return 'publish-ref-rejected'
+  const credential = [
+    'could not read username',
+    'could not read password',
+    'authentication failed',
+    'bad credentials',
+    'invalid username or',
+    'terminal prompts disabled',
+    'http basic: access denied',
+  ].some((p) => t.includes(p))
+  if (credential) return 'publish-credential'
+  return 'publish-unknown'
+}
+
+/**
+ * A line of `git diff --cached` output that ADDS a conflict marker. `<<<<<<<` and `>>>>>>>` only —
+ * these are the labelled markers, which carry a branch name after the run and so end in a space
+ * or a tab. A bare `=======` separator is caught separately by `CONFLICT_SEPARATOR_ADDED` below
+ * (exact-line, and exempt in markdown, where it is a setext underline). `|||||||` remains
+ * unmatched: it only appears under `merge.conflictStyle=diff3`, and catching it is a follow-up.
+ *
+ * Four or more catches the narrowest marker width this gate deliberately supports as well as
+ * git's default and wider configured markers. Because candidates are paths known to have
+ * conflicted in this replay, an added four-wide labelled run fails closed as residue.
+ */
+const CONFLICT_MARKER_ADDED = /^\+(?:<{4,}|>{4,})(?: |\t|\r?$)/
+
+/**
+ * A `git diff --cached -U1` line that ADDS git's bare conflict SEPARATOR. Unlike `<<<<<<<` and
+ * `>>>>>>>`, the separator line git writes carries NO label — it is exactly a run of `=` and
+ * nothing else — so anything with trailing content (a heredoc sentinel, a quoted string, an
+ * indented docstring underline) never matches. Git permits `conflict-marker-size` to narrow the
+ * marker as well as widen it; four is the fail-closed lower bound shared with the outer-marker
+ * scan. Shorter punctuation remains ordinary generated content. `\r?` covers
+ * a CRLF file. This is the residue MOST likely to
+ * survive a sloppy hand-resolution: the outer markers
+ * are the visually obvious ones, and deleting them while leaving `=======` used to pass this
+ * gate entirely.
+ */
+const CONFLICT_SEPARATOR_ADDED = /^\+={4,}\r?$/
+
+/**
+ * Markdown permits an all-`=` Setext H1 underline. Text around it cannot safely corroborate that
+ * interpretation: conflict sides can have the identical title/blank/paragraph shape. The narrow
+ * exemption therefore requires affirmative diff evidence that the resolver added the nonblank
+ * title immediately before the underline, and that the resulting next line is blank or EOF.
+ * Surviving conflict-side content immediately after the separator is therefore refused. Scanning
+ * each candidate separately avoids decoding git-quoted path headers.
+ */
+const SETEXT_UNDERLINE_PATHS = /\.(?:md|markdown)$/i
+
+function stagedDiffAddsConflictMarker(diff: string, path: string): boolean {
+  const lines = diff.split('\n')
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? ''
+    if (CONFLICT_MARKER_ADDED.test(line)) return true
+    if (!CONFLICT_SEPARATOR_ADDED.test(line)) continue
+    if (!SETEXT_UNDERLINE_PATHS.test(path)) return true
+
+    const addedTitle = /^\+(.+)\r?$/.exec(lines[i - 1] ?? '')?.[1] ?? ''
+    if (addedTitle.trim() === '') return true
+
+    // Removed lines do not exist in the staged result. The first context/added line after them is
+    // the line after the underline; a hunk/file boundary means the underline is at EOF.
+    let after = i + 1
+    while ((lines[after] ?? '').startsWith('-') && !lines[after]?.startsWith('---')) after += 1
+    const next = lines[after]
+    const atEof = next === undefined || next === '' || next.startsWith('@@') || next.startsWith('diff --git ')
+    const followedByBlank = next === '+' || next === '+\r' || next === ' ' || next === ' \r'
+    if (!atEof && !followedByBlank) return true
+  }
+  return false
+}
+
 /**
  * A rebase that CONFLICTS is an ATTENTION state, never a verdict.
  *
  * A branch conflicting with its base is a MERGEABILITY fact about the branch's relationship to
  * `main` — not a judgement about the code. Recording it as `REQUEST_CHANGES` tells the owner his
  * build was rejected when no reviewer read a line of it. So this is a typed failure carrying the
- * conflicting paths, and NOTHING on this path invokes the `resolve_conflict` resolver (that
- * belongs to local-mode merges, where a human asked for a merge).
+ * conflicting paths.
+ *
+ * AND THIS IS THE PATH THAT RESOLVES FIRST. A configured `resolve_conflict` resolver is invoked
+ * here, in the scratch worktree `git apply --3way` just left the markers in, bounded by
+ * `MAX_CONFLICT_ROUNDS` AND by a per-round progress requirement. The local-mode merge path has a
+ * human present who could reconcile the branch by hand; this one is autonomous and has nobody, so
+ * it is exactly where auto-resolution earns its keep. `TridentRebaseConflict` remains the outcome
+ * when no resolver is configured, when the resolver declines/escalates, when a round makes no
+ * progress, when the round bound is exhausted, and when a "resolution" empties the branch's delta.
+ *
+ * THE RESOLVER'S WORD IS NEVER THE EVIDENCE. A claimed RESOLVED is checked against git twice —
+ * the unmerged set (`--diff-filter=U`) AND the staged bytes (`--cached`, scanned for added
+ * conflict markers), because `git add` clears the unmerged bit for a path whose markers are still
+ * inside it.
+ *
+ * A RESOLVED REBASE IS NOT AN APPROVED ONE. Resolution is a MERGEABILITY operation, not a
+ * verdict — the branch still faces the full review gate afterwards, exactly as an unconflicted
+ * replay does.
  */
 export class TridentRebaseConflict extends Error {
   constructor(
@@ -447,13 +585,320 @@ export class TridentRebaseConflict extends Error {
   }
 }
 
+/** The path the entry-aware driver is bound to, and the git config name it is bound under. */
+const AS_BUILT_LOG_PATH = 'docs/AS_BUILT.md'
+const AS_BUILT_DRIVER_NAME = 'as-built-log'
+
+/**
+ * The environment variables the merge driver is run WITHOUT.
+ *
+ * `GH_TOKEN` is the owner's credential, the one that publishes every PR; the `GIT_CONFIG_*` triple
+ * is the credential helper that reads it back out (`github/credential.ts` `githubProcessEnv`), so
+ * leaving those behind would hand a child `git` the same access under a different name.
+ * `GITHUB_TOKEN` is not set by this codebase and is unset anyway because CI and developer shells
+ * commonly do set it. A merge driver reads three files and writes one — none of this belongs in it.
+ */
+const CREDENTIAL_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']
+
+/**
+ * THIS INSTALLATION's copy of the merge driver — never the checkout's.
+ *
+ * Walks up from this module rather than joining a fixed `..`, because trident is a workspace
+ * package: depending on whether the resolver hands back the real path or the
+ * `node_modules/@neutronai/trident` symlink, the tree root is one hop up or three. Bounded, and a
+ * `null` return simply means "do not install", which is the same outcome as not calling this.
+ */
+function ownAsBuiltMergeDriver(): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let hop = 0; hop < 8; hop++) {
+    const candidate = join(dir, 'scripts', 'git', 'as-built-merge-driver.ts')
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+/** Single-quote a path for the shell string git stores as `merge.<name>.driver`. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/**
+ * The command git will run for a merge, built so the TARGET CHECKOUT CANNOT INJECT CODE INTO IT.
+ *
+ * ⚠️ GIT RUNS A MERGE DRIVER WITH ITS CWD AT THE TOP OF THE WORKING TREE BEING MERGED, AND BUN
+ * READS `bunfig.toml` FROM ITS CWD. So naming a trusted script is NOT on its own enough: a
+ * `bunfig.toml` committed in the target repository with `preload = ["./anything.ts"]` runs that
+ * file inside our driver process, before a line of our code, every time git merges this path.
+ * That process is a child of the publisher's `run_host`, whose environment carries `GH_TOKEN`
+ * (`open/composer.ts` `makeLazyCredentialedHostRunner` → `github/credential.ts` `githubProcessEnv`),
+ * so the payload reads the owner's credential straight out of `process.env`. Reproduced on bun
+ * 1.3.9: with the preload present the child printed `EXFIL GH_TOKEN=<the value>`; with
+ * `--config=/dev/null` in front of the script it printed nothing and the script still ran. Round 1
+ * closed the "which script runs" hole and left this one open, which is the same class of mistake
+ * one layer down — the interpreter's own configuration is part of what an untrusted checkout
+ * supplies.
+ *
+ * `--config=/dev/null` names an empty TOML file, so the checkout's `bunfig.toml` supplies no
+ * `preload`, no `loader` and no registry override. The driver needs none of that: it reads three
+ * files and writes one. (Scope, stated rather than overclaimed: what was MEASURED is the cwd
+ * `bunfig.toml`, which is the one an untrusted checkout controls. Whether the flag also displaces a
+ * `$HOME/.bunfig.toml` was not measured and nothing here depends on it — `$HOME` on the publisher
+ * host is as trusted as the interpreter itself.)
+ *
+ * …AND `--env-file=/dev/null`, BECAUSE `--config` DOES NOT COVER `.env`. bun auto-loads a `.env`
+ * from its cwd, which under a merge driver is the checked-out repository, and it does so
+ * INDEPENDENTLY of `bunfig.toml` — measured on bun 1.3.9: with `--config=/dev/null` alone, a `.env`
+ * sitting in the cwd still reached `process.env` inside the driver; with `--env-file=/dev/null` in
+ * front of it, it did not. No escalation from that injection was demonstrated (the inherited `PATH`
+ * wins over one supplied this way), so this is closing an input rather than a proven exploit — but
+ * the property this code is FOR is that nothing the checkout ships decides anything inside the
+ * driver process, and an environment it writes is such a thing.
+ *
+ * AND THE CREDENTIAL IS TAKEN OUT OF SCOPE ENTIRELY. `env -u GH_TOKEN …` prefixes the command, so
+ * the owner's token — and the `GIT_CONFIG_*` triple whose credential helper reads it
+ * (`github/credential.ts` `githubProcessEnv`) — is simply not in the environment of a process whose
+ * whole job is to read three files and write one. The isolation above is about what the checkout
+ * can INJECT; this is about what is there to steal if some future injection succeeds anyway. Two
+ * independent controls, because "nothing can get in" is a claim that has already been wrong twice
+ * on this code path.
+ *
+ * `null` when the interpreter is not bun. The driver is a `.ts` module, so nothing else can run it
+ * anyway, and rather than infer that some other interpreter would honour a `--config` flag with the
+ * same meaning, this refuses to install — which leaves the checkout merging the log exactly as it
+ * does today.
+ *
+ * KNOWN LIMIT, AND IT FAILS IN THE SAFE DIRECTION. Both `/dev/null` flags and `/usr/bin/env` are
+ * POSIX paths; a host without them would fail the merge (exit non-zero → git reports a conflict)
+ * rather than merge wrongly. Trident runs on macOS and Linux, where all three exist.
+ */
+function asBuiltDriverCommand(driver: string): string | null {
+  if (basename(process.execPath).replace(/\.exe$/i, '') !== 'bun') return null
+  // An absolute `env`, not a bare one, so the lookup does not depend on a PATH at all. POSIX puts
+  // it at `/usr/bin/env` and both hosts trident runs on have it there; the bare name is a fallback
+  // rather than a guess, and a host with neither fails the merge loudly instead of quietly.
+  const env = existsSync('/usr/bin/env') ? '/usr/bin/env' : 'env'
+  const scrubbed = CREDENTIAL_ENV.map((name) => `-u ${name}`).join(' ')
+  return `${env} ${scrubbed} ${shellQuote(process.execPath)} --config=/dev/null --env-file=/dev/null ${shellQuote(driver)} %O %A %B %L %P`
+}
+
+/**
+ * Bind the entry-aware `docs/AS_BUILT.md` merge driver in a build checkout, where it applies.
+ *
+ * ⚠️ FILE PRESENCE IN THE TARGET CHECKOUT IS NOT AUTHORIZATION, AND NOTHING FROM THE TARGET
+ * CHECKOUT IS EXECUTED HERE. The first cut of this took the presence of
+ * `scripts/install-merge-drivers.sh` as its condition and then ran it: `run_host(['bash',
+ * installer])`. The production `run_host` is `makeLazyCredentialedHostRunner` (`open/composer.ts`),
+ * whose environment carries `GH_TOKEN` (`github/credential.ts` `githubProcessEnv`) — the owner's
+ * credential, the one that publishes every PR. So any repository the publisher checked out that
+ * happened to contain a file at that path got that file EXECUTED on the publisher host with the
+ * token readable from its environment. "We only ever check out our own repositories" is an
+ * assumption about how trident is pointed, not a control over it, and it is not the assumption a
+ * credential should rest on.
+ *
+ * WHAT REPLACES IT. The two halves the installer wrote — the `merge.<name>.driver` config and the
+ * `$GIT_COMMON_DIR/info/attributes` binding — are written directly from here, and the command they
+ * name is THIS installation's `scripts/git/as-built-merge-driver.ts` under the interpreter already
+ * running this process. Nothing under `repoPath` is executed, at install time or at merge time, so
+ * a same-named script in a target repo is inert: it is never read, never run, and never named in
+ * the config. That also closes the second half of the same hole — the old installer configured the
+ * TARGET's driver script, which git would then have run under the same credential on every merge
+ * touching this path.
+ *
+ * …AND NEITHER IS THE INTERPRETER'S CONFIGURATION, WHICH IS THE THIRD WAY IN. Naming a trusted
+ * script is not sufficient while the checkout still supplies the `bunfig.toml` and the `.env` that
+ * script starts under — see `asBuiltDriverCommand`, where the `--config=/dev/null` and
+ * `--env-file=/dev/null` that close those live, with the reproductions. The property to hold onto
+ * is the one this whole docblock is about: NOTHING the target checkout contains — not a script, not
+ * a config, not an environment file, not a `PATH` — decides what RUNS on the publisher host. And
+ * because that property has been stated confidently and been incomplete twice already, the
+ * credential itself is now taken out of the driver's environment as a second, independent control.
+ *
+ * "WHAT RUNS" IS THE EXACT CLAIM, AND IT IS NOT "NOTHING FROM THE CHECKOUT REACHES THE DRIVER".
+ * The word was load-bearing and the sentence above used to lack it, which made it false: git
+ * substitutes `%L` from the merged path's `conflict-marker-size` attribute, and a TRACKED
+ * `.gitattributes` in the checkout sets that. Verified by configuring a driver that does nothing but
+ * print `%L` — a committed `conflict-marker-size=2000000` arrived intact. It selects no code and
+ * executes nothing, but it did size a buffer: the conflict `as-built-merge-driver.ts` constructs
+ * grew from 302 bytes to 6,000,281 on that value, linearly. It is clamped there now
+ * (`MAX_MARKER_SIZE`), on BOTH conflict paths — the first clamp covered only the constructed
+ * conflict and left the delegated one forwarding `%L` to `git merge-file`, which a cross-model
+ * reviewer caught: the exemption rested on the delegated path being byte-for-byte an unconfigured
+ * repo, and without this driver the path is `merge=union`, which never conflicts and writes no
+ * markers at all. So the one checkout-supplied input the driver takes is bounded wherever it lands.
+ * The general lesson is worth more than the fix: an absolute claim about a boundary should be read
+ * against every argument that crosses it, and `%O %A %B %L %P` had five — and an EXEMPTION from a
+ * bound needs its justification checked as hard as the bound itself, because this one was a
+ * confident sentence about behaviour a file in this repository already contradicted.
+ *
+ * ONLY WHERE IT APPLIES. Two conditions, both read as DATA and neither executed: the checkout has
+ * the log, and it carries this log's merge contract (`scripts/git/as-built-log-merge.ts`), which is
+ * what distinguishes a repo using this layout from one that merely has a file by that name. A repo
+ * failing either is left completely untouched, so nothing here imposes one repo's changelog layout
+ * on another (Argus, round 1). Presence still decides APPLICABILITY — but applicability now
+ * authorises only "merge this one path with our own reviewed code, or conflict", which is a
+ * decision an untrusted repo is welcome to make.
+ *
+ * ORDER IS LOAD-BEARING, AND IT IS CHOSEN SO THE FATAL HALF-STATE CANNOT BE REACHED AT ALL.
+ * `merge.<name>.driver` is written FIRST, `merge.<name>.name` — which is only a human-readable
+ * description — second, and the attribute last, skipped entirely unless the driver landed. Measured
+ * on git 2.50.1: a lone `.driver` with NO `.name` merges perfectly (the driver ran, exit 0), while a
+ * lone `.name` with no `.driver` is `fatal: custom merge driver as-built-log lacks command line`,
+ * exit 128. Round 1 wrote `.name` first and rolled it back by hand when `.driver` failed, which
+ * meant the fatal state existed for a moment and its cleanup was a second write that the very
+ * condition causing the failure (a held `config.lock`) would also have blocked. Writing the
+ * load-bearing half first deletes the state instead of cleaning up after it, so there is no
+ * rollback to fail. Attribute-without-driver stays fatal, and driver-without-attribute stays inert,
+ * which is why the attribute is still last. Same rule as the standalone installer, for the same
+ * reason.
+ *
+ * BEST EFFORT, NEVER FATAL. A failure to install leaves the checkout merging exactly as it does
+ * today, which is the same outcome as not calling this at all. Publishing must not be blocked by an
+ * optimisation to publishing.
+ *
+ * WHAT "EXACTLY AS IT DOES TODAY" ACTUALLY IS, IN THIS REPOSITORY, SAID PRECISELY. It is NOT a
+ * conflict: `.gitattributes` carries `docs/AS_BUILT.md merge=union`, which never conflicts and
+ * interleaves the two sides line by line — the failure this driver exists to replace. The attribute
+ * written here lives in `$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE the tracked
+ * `.gitattributes` (measured: with both present, `git check-attr merge -- <path>` reports the
+ * info/attributes value), so a successful install genuinely displaces `union`. An UNSUCCESSFUL one
+ * leaves `union` in charge — worse than a conflict, and the honest floor, which is why it is written
+ * here rather than a nicer sentence about conflict markers. The tracked line stays because deleting
+ * it would hand every fresh clone, outside contributor and CI job the conflict storm it was added to
+ * stop; displacing it where the driver IS installed is the whole mechanism.
+ *
+ * Returns whether the driver is installed and usable afterwards.
+ */
+export async function ensureAsBuiltMergeDriver(
+  run_host: RunHostCommand,
+  repoPath: string,
+): Promise<boolean> {
+  if (!existsSync(join(repoPath, ...AS_BUILT_LOG_PATH.split('/')))) return false
+  if (!existsSync(join(repoPath, 'scripts', 'git', 'as-built-log-merge.ts'))) return false
+
+  const driver = ownAsBuiltMergeDriver()
+  if (driver === null) return false
+
+  // `process.execPath` is the interpreter already running trident, so the driver is reached without
+  // consulting the target checkout's PATH for a `bun` it might supply itself — and `--config` stops
+  // it reading the checkout's `bunfig.toml`. `null` means "not bun": do not install.
+  const command = asBuiltDriverCommand(driver)
+  if (command === null) return false
+
+  try {
+    // THE LOAD-BEARING HALF FIRST. A lone `.driver` is a working driver; a lone `.name` is fatal.
+    const configured = await run_host(
+      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.driver`, command],
+      repoPath,
+    )
+    if (!configured.ok) return false
+    // Cosmetic, and deliberately unchecked: it is what `git config --get-regexp merge.` prints to a
+    // human, and its absence changes nothing about how the merge runs.
+    await run_host(
+      ['git', '-C', repoPath, 'config', `merge.${AS_BUILT_DRIVER_NAME}.name`, 'entry-aware merge for the AS_BUILT log'],
+      repoPath,
+    )
+
+    // The COMMON git dir, not the per-worktree one: a linked worktree reads attributes from the
+    // common one, which is what the publisher's throwaway rebase worktree depends on.
+    //
+    // AND `--path-format=absolute` NEEDS A FALLBACK, because it arrived in git 2.31 and a `git`
+    // that predates it exits non-zero on the flag rather than ignoring it. Returning false there
+    // would be the silent-regression shape this file keeps finding: `merge.<driver>.driver` is
+    // ALREADY written by the time this runs, so a bare `return false` leaves the config half-placed
+    // and the attribute unwritten, and the replay then proceeds under the tracked `merge=union`
+    // while trident reports the driver as unavailable. The shell installer has always had this
+    // fallback (`scripts/install-merge-drivers.sh`); this call site did not.
+    let commonDir = ''
+    const common = await run_host(
+      ['git', '-C', repoPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      repoPath,
+    )
+    if (common.ok) commonDir = common.stdout.trim()
+    else {
+      // AND THE FALLBACK'S ANSWER IS CHECKED, BECAUSE A RELATIVE ONE IS NOT RELATIVE TO WHAT YOU
+      // WOULD GUESS. In a LINKED worktree the common dir is recorded in
+      // `<main>/.git/worktrees/<name>/commondir` as `../..` — relative to THAT file's directory, not
+      // to the working tree. Measured here: modern git normalises the `-C` form to an absolute path
+      // (`/…/neutron-open/.git`) so this branch never runs, but the whole point of this branch is a
+      // git old enough not to have `--path-format`, and resolving `../..` against `repoPath` would
+      // land two levels above the WORKTREE — a real directory, outside the repository, where an
+      // attributes file would be silently inert. So the resolved directory has to prove it is a git
+      // dir before anything is written into it; if it cannot, this returns false and the caller is
+      // exactly where it was. Writing to the wrong place is worse than not writing.
+      const plain = await run_host(['git', '-C', repoPath, 'rev-parse', '--git-common-dir'], repoPath)
+      if (!plain.ok) return false
+      const raw = plain.stdout.trim()
+      if (raw === '') return false
+      const resolved = isAbsolute(raw) ? raw : join(repoPath, raw)
+      if (!existsSync(join(resolved, 'HEAD'))) return false
+      commonDir = resolved
+    }
+    if (commonDir === '') return false
+
+    const attributes = join(commonDir, 'info', 'attributes')
+    const line = `${AS_BUILT_LOG_PATH} merge=${AS_BUILT_DRIVER_NAME}`
+    const existing = existsSync(attributes) ? readFileSync(attributes, 'utf8') : ''
+    if (existing.split('\n').includes(line)) return true
+
+    // Per-process scratch file + rename, because two lanes can reach this on one checkout at the
+    // same moment and a shared scratch path is its own concurrency bug (a racing reader would see
+    // a half-written attributes file). Same construction as the standalone installer.
+    mkdirSync(dirname(attributes), { recursive: true })
+    const scratch = `${attributes}.tmp.${process.pid}`
+    writeFileSync(scratch, existing === '' || existing.endsWith('\n') ? `${existing}${line}\n` : `${existing}\n${line}\n`)
+    renameSync(scratch, attributes)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Heal a shallow checkout before replay. On 2026-08-15 five builds died because a depth-1
+ * checkout cannot `git apply --3way`: the blobs named by the diff's index lines do not exist,
+ * and every failure was misreported as `REBASE CONFLICT … (paths unreadable)`.
+ */
+export async function healShallowCheckout(run_host: RunHostCommand, repoPath: string): Promise<void> {
+  const probe = await run_host(['git', '-C', repoPath, 'rev-parse', '--is-shallow-repository'], repoPath)
+  if (!probe.ok) {
+    throw new Error(publishFailureReason('probe the checkout depth of', repoPath, probe.stderr))
+  }
+  if (probe.stdout.trim() === 'false') return
+  if (probe.stdout.trim() !== 'true') {
+    throw new Error(publishFailureReason('probe the checkout depth of', repoPath, `unexpected answer: ${probe.stdout.trim()}`))
+  }
+
+  const fetch = await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
+  if (fetch.ok) return
+
+  let depth = 'unreadable'
+  let boundary = 'unreadable'
+  try {
+    const measured = await run_host(['git', '-C', repoPath, 'rev-list', '--count', 'HEAD'], repoPath)
+    if (measured.ok && measured.stdout.trim() !== '') depth = measured.stdout.trim()
+  } catch {}
+  try {
+    const path = await run_host(['git', '-C', repoPath, 'rev-parse', '--git-path', 'shallow'], repoPath)
+    if (path.ok && path.stdout.trim() !== '') {
+      const read = await run_host(['cat', path.stdout.trim()], repoPath)
+      if (read.ok && read.stdout.trim() !== '') boundary = read.stdout.trim()
+    }
+  } catch {}
+  throw new Error(
+    `Could not heal shallow checkout ${repoPath} (depth ${depth}, shallow boundary ${boundary}): ${redactPushError(fetch.stderr)}; a shallow checkout cannot 3-way replay — the blobs the diff names do not exist`,
+  )
+}
+
 /**
  * Replay `branch` onto the ls-remote-OBSERVED tip of `base`, shallow-safely.
  *
- * ⚠️ THE SHARED BUILD CHECKOUT IS SHALLOW (governance #574/#571). `.git/shallow` is present, so
- * `merge-base` LIES there: a naive `git rebase` replays the entire history and conflicts on every
- * file. Hence NO `git rebase` here, ever, and never in the shared working tree (other lanes share
- * it). Instead: take the branch's own diff from a source that knows the true merge-base — the
+ * The shared build checkout MAY arrive shallow: install.sh used to clone at depth 1, and hand-made
+ * clones still can. `healShallowCheckout` repairs that defect at entry. Regardless of depth, NO
+ * `git rebase` runs here, ever, and never in the shared working tree: other lanes share it and a
+ * failed rebase there poisons every lane. Instead: take the branch's own diff from its true merge-base — the
  * FORGE (`gh pr diff <n>`, computed server-side against a full history) when a PR exists, or the
  * two-dot `git diff <base>..<branch>` for a first publish — and `git apply --3way` it onto the
  * observed base tip in a THROWAWAY detached worktree. The branch ref then moves by
@@ -461,6 +906,12 @@ export class TridentRebaseConflict extends Error {
  * refuse rather than force.
  *
  * The replay SQUASHES the branch into one commit. Deliberate — the PR merge is `--squash` anyway.
+ *
+ * RETURNS THE OBSERVED BASE TIP as well as the head, because the caller needs BOTH to describe
+ * what was built: the review diff is `<baseSha>..<head>`, and `baseSha` is the only value in the
+ * process that is guaranteed to be the tip the head sits on. `''` means the remote has no such
+ * base branch at all. See the review-diff comment in `publishBuiltCommit` for what taking the
+ * LOCAL `<base>` ref instead cost.
  */
 export async function rebaseOntoObservedBase(
   run_host: RunHostCommand,
@@ -469,9 +920,21 @@ export async function rebaseOntoObservedBase(
   base: string,
   pr: number | null,
   scratchDir: string,
-): Promise<{ head: string; rebased: boolean }> {
+  /** Optional bounded auto-resolution for a conflicting replay. Absent → a conflict throws. */
+  resolve?: { run: TridentRun; resolve_conflict: MergeConflictResolver },
+): Promise<{ head: string; rebased: boolean; baseSha: string }> {
+  // Heal on use — no install-time fix reaches a hand-made clone, and both 2026-08-15 incidents came from hand-made clones.
+  await healShallowCheckout(run_host, repoPath)
   // (a) The base tip as OBSERVED on the remote — the same kind of observation the lease uses, and
   //     for the same reason: a remote-tracking ref is whatever the last fetch left behind.
+  //
+  //     THIS OBSERVATION AGES. Auto-resolution can now sit between here and the commit for minutes
+  //     (a Forge turn is bounded at 8 of them), so the published head can be based on a `main` that
+  //     has since moved. That is SAFE but not free: the branch move is still a compare-and-swap and
+  //     the lease push re-observes the branch, so nothing is overwritten — the branch simply
+  //     arrives at review stale and gets replayed again on the next publish, which is the ordinary
+  //     behaviour for any branch cut before a sibling landed. It is the reason the resolution loop
+  //     below bails on the FIRST round that makes no progress instead of spending the full bound.
   const observedBase = await run_host(
     ['git', '-C', repoPath, 'ls-remote', '--heads', 'origin', `refs/heads/${base}`],
     repoPath,
@@ -486,7 +949,7 @@ export async function rebaseOntoObservedBase(
   }
   let baseSha = observedBase.stdout.trim().split(/\s+/)[0] ?? ''
   // No remote base at all → there is nothing to rebase ONTO. Not an error (a brand-new origin).
-  if (baseSha === '') return { head: await readHead(), rebased: false }
+  if (baseSha === '') return { head: await readHead(), rebased: false, baseSha: '' }
 
   // (b) The branch tip we are about to move, captured BEFORE anything touches it — it is the
   //     compare-and-swap expectation in (h).
@@ -499,10 +962,13 @@ export async function rebaseOntoObservedBase(
     ['git', '-C', repoPath, 'merge-base', '--is-ancestor', baseSha, `refs/heads/${branch}`],
     repoPath,
   )
-  if (contains.ok) return { head: oldHead, rebased: false }
+  //     `contains.ok` also PROVES `baseSha` is a local object — git could only answer the
+  //     ancestry question by reading it — which is what makes it safe to hand back as a
+  //     diff base on a shallow checkout that never reaches the fetch below.
+  if (contains.ok) return { head: oldHead, rebased: false, baseSha }
 
-  // (d) Make the base tip a real local object. `--no-tags` and NOT `--unshallow`: deepening the
-  //     shared checkout is minutes of network for every lane on this box.
+  // (d) The entry guard already unshallowed the checkout; this fetch only makes the just-observed
+  //     tip local. Keep `--no-tags` because tags are irrelevant to replay.
   const fetchBase = async () => run_host(['git', '-C', repoPath, 'fetch', '--no-tags', 'origin', base], repoPath)
   let fetched = await fetchBase()
   let present = await run_host(['git', '-C', repoPath, 'rev-parse', '--verify', `${baseSha}^{commit}`], repoPath)
@@ -524,18 +990,120 @@ export async function rebaseOntoObservedBase(
   // (e) The branch's own changes, from a source with an HONEST merge-base. Never a local
   //     three-dot diff — that is exactly the computation the shallow boundary corrupts.
   const diffFile = `/tmp/trident-rebase-${branch.replace(/[^A-Za-z0-9._-]/g, '-')}.diff`
-  const patch =
-    pr !== null
-      ? await run_host(['gh', 'pr', 'diff', String(pr)], repoPath)
-      : await run_host(['git', '-C', repoPath, 'diff', `refs/heads/${base}..refs/heads/${branch}`], repoPath)
-  if (!patch.ok) throw new Error(publishFailureReason('read the diff of', branch, patch.stderr))
-  if (patch.stdout.trim() === '') throw new Error('outer publisher refused to rebase an empty diff')
-  // RESTORE THE TRAILING NEWLINE. `spawnCapture` TRIMS command output, which is harmless for every
-  // other reader — and fatal here: a patch whose last hunk line lost its newline is not a patch,
-  // and `git apply` rejects the whole thing with `corrupt patch at line N` (exit 128). That is
-  // indistinguishable, upstream, from a genuine conflict, so EVERY rebase would have been reported
-  // as an attention state. Caught by the real-git suite; the stubbed host never wrote a file.
-  writeFileSync(diffFile, patch.stdout.endsWith('\n') ? patch.stdout : `${patch.stdout}\n`)
+  // THE BRANCH'S OWN WORK IS `<fork point>..<branch>`, AND THE FORK POINT IS THE MERGE-BASE —
+  // not either ref's tip. Both tips are wrong, in opposite directions:
+  //
+  //   `refs/heads/<base>..<branch>`  — the local ref, which step (d) NEVER moves (it fetches into
+  //       `refs/remotes/origin/<base>`). MEASURED 2026-08-15: `refs/heads/main` sat at d8324cc
+  //       while the observed tip was d5ba62b, so the diff carried 103 files instead of the
+  //       branch's own 22 — 236 commits of already-merged work. Applied onto the observed tip,
+  //       every already-present hunk fails, `git apply` stages NOTHING as conflicted, and the
+  //       caller reports `conflicts with main in: (paths unreadable)` — naming a conflict that
+  //       does not exist. Five builds died on this in one day, across two projects.
+  //
+  //   `<baseSha>..<branch>`  — the observed tip. A two-dot diff is "how to turn A into B", so
+  //       this also REVERSES everything the base gained since the fork: replaying it DELETES
+  //       main's own new files, and a genuine conflict applies cleanly as a revert instead of
+  //       raising. `publish-rebase-realgit.test.ts` catches both (a lost `docs.txt`, and a
+  //       conflict that returned null). Do not "simplify" back to it.
+  //
+  // The merge-base is what `gh pr diff` computes server-side, which is why the PR path above has
+  // never had this bug.
+  //
+  // NO FALLBACK TO `refs/heads/<base>` — IT FAILS CLOSED. CODEX REVIEW [Blocker]: the first cut
+  // fell back to the local ref when merge-base could not answer, which is EXACTLY the shallow
+  // checkout this function expects. That reinstated the defective base in precisely the condition
+  // that produced it, and would have shipped a fix that silently does the broken thing whenever it
+  // matters most. A fork point that cannot be established is an INFRASTRUCTURE fault about the
+  // checkout — deepen it (see the shallow-provisioning card) — not a licence to replay a diff we
+  // know to be wrong. Better a named refusal than a false conflict nobody can read.
+  //
+  // COMPUTED ONLY ON THE PATH THAT NEEDS IT. `gh pr diff` already resolves the fork point
+  // server-side against a full history, so a PR-mode replay must not be made to depend on — or be
+  // refused by — the local checkout's depth.
+  const localForkPoint = async (): Promise<string> => {
+    const read = async () =>
+      run_host(['git', '-C', repoPath, 'merge-base', baseSha, `refs/heads/${branch}`], repoPath)
+    let forkPoint = await read()
+    if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
+      // Belt-and-braces behind the entry guard: one bounded deepen, then re-ask. Modern git rejects
+      // `--unshallow` on a complete repo; that harmless failure is followed by the decisive re-read.
+      await run_host(['git', '-C', repoPath, 'fetch', '--no-tags', '--unshallow', 'origin'], repoPath)
+      forkPoint = await read()
+    }
+    if (!forkPoint.ok || forkPoint.stdout.trim() === '') {
+      throw new Error(
+        publishFailureReason(
+          'establish the fork point of',
+          branch,
+          `no merge-base between ${baseSha} and refs/heads/${branch} even after deepening — the build checkout cannot describe this branch's own changes, so replaying it would send already-merged work through review`,
+        ),
+      )
+    }
+    return forkPoint.stdout.trim()
+  }
+  // PATCH BYTES ARE NOT TEXT TO BE TIDIED — `--output` WRITES THEM, NOTHING ROUND-TRIPS A STRING.
+  //
+  // `spawnCapture` returns `stdout.trim()`. That is harmless for every other reader and FATAL for
+  // a patch: a unified diff whose final line is a context line for a BLANK line ends `" \n"` —
+  // space, newline. `.trim()` removes BOTH, and restoring only the newline cannot put the space
+  // back. The last hunk is then one line short of its `@@` count, `git apply` exits 128 with
+  // `corrupt patch at line N`, and — because nothing was ever staged — `--diff-filter=U` names no
+  // files, so the caller reported `REBASE CONFLICT … (paths unreadable)`.
+  //
+  // MEASURED by neutron-enterprise on run 578fa30e against deployed trident d5ba62b7: the real
+  // patch was 19,222 bytes ending `…each other.\n \n`; trimmed it was 19,220 ending
+  // `…each other.\n`. Untrimmed it applied cleanly against four separate bases; trimmed it gave
+  // `corrupt patch at line 42, rc=128, unmerged=[]`. A plain `git rebase` of the same branch
+  // succeeded with no intervention — the patch was never in conflict at all.
+  //
+  // The previous comment here believed the trailing-newline restore had closed this. It had not:
+  // it addressed a missing `\n` and could never address a stripped `" "`. The existing real-git
+  // fixture's last line is non-blank, which is exactly why the half-fix looked complete.
+  // AND THE FIX ABOVE LANDED ON ONLY ONE BRANCH OF THIS `if`. #292 converted the `pr === null`
+  // path to `--output` and left the PR path — the COMMON one, taken on every round after the first
+  // — still doing `writeFileSync(diffFile, patch.stdout…)` over a TRIMMED capture. It failed
+  // exactly as the comment above predicts, six hours later: run 63b16fb1 (PR #295, 2026-08-15
+  // 20:36Z) died with `corrupt patch at line 746`, and its replay patch cbcfb65..26c19dd is 746
+  // lines whose final line is `" \n"`. Regenerated through `--output` the same patch applies
+  // CLEANLY onto both its fork point and the observed tip. The comment was right and the code
+  // under it was still wrong; the reason it read as fixed is that the diff of #292 showed the
+  // comment and the `else` together.
+  //
+  // So there is NO STRING PATH LEFT ON EITHER BRANCH. The PR path keeps `gh pr diff` — it resolves
+  // the fork point server-side against a full history, which is deliberately independent of this
+  // checkout's depth — but REDIRECTS it to the file instead of capturing it. `spawnCapture` never
+  // sees the bytes, so it cannot trim them. Nothing here may pass patch bytes through a JS string
+  // again; if a future reader needs the diff's content, read it back off disk.
+  if (pr !== null) {
+    const written = await run_host(
+      ['sh', '-c', `gh pr diff ${Number(pr)} > ${JSON.stringify(diffFile)}`],
+      repoPath,
+    )
+    if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
+  } else {
+    // `--output` hands the bytes to git, which writes them verbatim. No capture, no trim, no
+    // reconstruction. Do not "simplify" this back to reading stdout.
+    const written = await run_host(
+      ['git', '-C', repoPath, 'diff', `--output=${diffFile}`, `${await localForkPoint()}..refs/heads/${branch}`],
+      repoPath,
+    )
+    if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
+  }
+  if (!existsSync(diffFile) || readFileSync(diffFile, 'utf8').trim() === '')
+    throw new Error('outer publisher refused to rebase an empty diff')
+
+  // (e2) TEACH THIS CHECKOUT TO MERGE THE AS_BUILT LOG BEFORE ANY REPLAY TOUCHES IT.
+  //      The log is newest-first and every build prepends at the same offset under the same three
+  //      header lines, so two concurrent builds conflict on it by construction — three publishes
+  //      died on that file and nothing else on 2026-08-15T23:20Z. The entry-aware driver in
+  //      `scripts/git/as-built-merge-driver.ts` unions whole entries instead, and `git apply
+  //      --3way` below DOES consult it (verified against real git, not assumed). Installed here
+  //      rather than assumed present because the binding lives in `.git/info/attributes`, which is
+  //      untracked by design — see the driver's docblock for why committing it would be fatal.
+  //      This binds THIS installation's driver and runs nothing out of `repoPath`; see the
+  //      docblock on `ensureAsBuiltMergeDriver` for what running the checkout's own script cost.
+  await ensureAsBuiltMergeDriver(run_host, repoPath)
 
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
   //     poison every other lane's build.
@@ -549,21 +1117,147 @@ export async function rebaseOntoObservedBase(
     await run_host(['git', '-C', repoPath, 'worktree', 'remove', '--force', scratchDir], repoPath)
   }
   try {
+    /** Non-null once auto-resolution landed, carrying every path it ever touched (for diagnosis). */
+    let autoResolved: string[] | null = null
     const applied = await run_host(['git', '-C', scratchDir, 'apply', '--3way', '--index', diffFile], scratchDir)
     if (!applied.ok) {
-      // Best-effort: name the files a human has to look at. Failing to read them is not itself
-      // a different failure — the conflict is the event.
-      let paths: string[] = []
-      try {
-        const unmerged = await run_host(
-          ['git', '-C', scratchDir, 'diff', '--name-only', '--diff-filter=U'],
-          scratchDir,
+      // Name the files a human has to look at. Read in a LOOP now: this is also how a claimed
+      // resolution is VERIFIED, and that second role is why it must not fail open.
+      //
+      // AN UNREADABLE CONFLICT STATE IS NOT AN EMPTY ONE. This used to swallow the command's
+      // failure and return `[]`, which the post-resolution check at the bottom of the loop reads
+      // as "nothing unmerged — the resolver succeeded". A `git diff` that never ran would have
+      // been accepted as git's own evidence that the tree is clean, and the loop would go on to
+      // commit and force-push whatever the resolver left behind. The resolver's word is never the
+      // evidence; if git cannot be asked, there IS no evidence, and the only safe answer is to
+      // refuse. Same reasoning as the wholesale-apply carve-out below: never report one condition
+      // in the costume of another.
+      //
+      // `-z` + `core.quotePath=false` BECAUSE THIS LIST IS MACHINE-CONSUMED. It becomes the
+      // resolver's `CONFLICTED FILES` and the literal pathspec of the staged-marker scan below; git's
+      // default C-quoting renders `ünicode file.txt` as `"\303\274nicode file.txt"` — a name that
+      // opens nothing and matches no pathspec. `-z` emits the raw bytes, NUL-separated.
+      const unreadableConflictState = (detail: string): Error =>
+        new Error(
+          publishFailureReason(
+            'read the conflict state of',
+            branch,
+            `${detail} — git could not be asked which paths are unmerged, so a claimed resolution CANNOT be verified; refusing rather than treating an unreadable index as a clean one`,
+          ),
         )
-        if (unmerged.ok) paths = unmerged.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
-      } catch {
-        // paths stay empty; the message says so.
+      const readUnmerged = async (): Promise<string[]> => {
+        let unmerged
+        try {
+          unmerged = await run_host(
+            ['git', '-C', scratchDir, '-c', 'core.quotePath=false', 'diff', '-z', '--name-only', '--diff-filter=U'],
+            scratchDir,
+          )
+        } catch (err) {
+          throw unreadableConflictState(err instanceof Error ? err.message : String(err))
+        }
+        if (!unmerged.ok) throw unreadableConflictState(unmerged.stderr || 'git diff --diff-filter=U failed with no output')
+        return unmerged.stdout.split('\0').filter((l) => l !== '')
       }
-      throw new TridentRebaseConflict(branch, base, paths)
+      /**
+       * THE UNMERGED BIT IS NOT PROOF OF RESOLUTION. `git add <path>` clears the unmerged bit for
+       * the WHOLE path regardless of what is still inside the file, so a resolver that fixes hunk
+       * 1 of 2 and stages reads as RESOLVED to `--diff-filter=U` — and the orchestrator would then
+       * commit `<<<<<<<` and force-push it to the shared branch. Realistic, not theoretical: the
+       * resolver's own contract tells it to `git add` every conflicted file.
+       *
+       * So the STAGED CONTENT is scanned too: any candidate path whose staged delta ADDS a
+       * conflict-marker line is still unresolved and goes back into the loop. Only ADDED lines
+       * count (a marker that was already in the base is the base's problem, not this replay's),
+       * and only the paths that ever conflicted are scanned (a fixture elsewhere in the repo that
+       * legitimately contains marker text is none of our business).
+       *
+       * AND IT FAILS CLOSED, for the same reason `readUnmerged` does: a scan that could not run
+       * found no markers in exactly the way a clean tree does, and the difference is a `<<<<<<<`
+       * on the shared branch.
+       */
+      const stagedMarkerFiles = async (candidates: string[]): Promise<string[]> => {
+        if (candidates.length === 0) return []
+        const marked: string[] = []
+        // Deliberate per-path subprocesses: markdown classification needs the candidate path, and
+        // literal pathspecs avoid parsing quoted diff headers. Conflict sets are normally tiny.
+        for (const candidate of candidates) {
+          let res
+          try {
+            res = await run_host(
+              ['git', '-C', scratchDir, 'diff', '--cached', '-U1', '--', `:(literal)${candidate}`],
+              scratchDir,
+            )
+          } catch (err) {
+            throw unreadableConflictState(err instanceof Error ? err.message : String(err))
+          }
+          if (!res.ok) throw unreadableConflictState(res.stderr || 'git diff --cached failed with no output')
+          if (stagedDiffAddsConflictMarker(res.stdout, candidate)) marked.push(candidate)
+        }
+        return marked
+      }
+      let paths = await readUnmerged()
+      // A FAILED APPLY WITH NOTHING UNMERGED IS NOT A CONFLICT. `git apply` refuses a malformed or
+      // unappliable patch WHOLESALE (`corrupt patch at line N`, exit 128) without staging anything,
+      // so `--diff-filter=U` legitimately names no files. Reporting that as a conflict produced the
+      // single most expensive message of 2026-08-15: `conflicts with main in: (paths unreadable)`,
+      // which sent two projects hunting for a merge conflict that did not exist while the actual
+      // cause — a truncated patch, and separately a stale diff base — sat in git's own stderr,
+      // discarded. The empty path list WAS the diagnosis and it read like a footnote.
+      //
+      // So: `TridentRebaseConflict` is reserved for the case where at least one file is genuinely
+      // unmerged. Anything else surfaces git's own words. THE RESOLVER IS NEVER INVOKED HERE either
+      // — there is nothing unmerged for it to reconcile, so handing it this failure would only
+      // relabel a wrong patch as a conflict, which is the exact defect this carve-out fixed.
+      if (paths.length === 0) {
+        throw new Error(
+          publishFailureReason(
+            'apply the replay patch for',
+            branch,
+            `${applied.stderr || 'git apply failed with no output'} — the apply failed WHOLESALE and left nothing unmerged, so this is NOT a merge conflict; the patch or its base is wrong`,
+          ),
+        )
+      }
+      // No resolver configured → the attention state, byte-identical to the behaviour before
+      // auto-resolution existed.
+      if (resolve === undefined) throw new TridentRebaseConflict(branch, base, paths)
+      // Bounded auto-resolution, mirroring `rebaseBranchOntoBase`. `repo_path` is the SCRATCH
+      // worktree — the tree holding the markers — never the shared checkout other lanes build in.
+      // Re-reading the unresolved set after a claimed RESOLVED is the lie-detector: the resolver's
+      // word is never the evidence, git's index and git's staged bytes are.
+      const everConflicted = new Set(paths)
+      let rounds = 0
+      while (paths.length > 0) {
+        if (rounds >= MAX_CONFLICT_ROUNDS) throw new TridentRebaseConflict(branch, base, paths)
+        rounds++
+        const outcome = await resolve.resolve_conflict({
+          repo_path: scratchDir,
+          branch,
+          base_branch: base,
+          run: resolve.run,
+          conflicted_files: paths,
+          // The tree is a detached replay worktree, NOT a rebase in progress, and it has no
+          // installed dependencies. The resolver's contract differs on both counts.
+          mode: 'replay',
+        })
+        if (!outcome.resolved) throw new TridentRebaseConflict(branch, base, paths)
+        const remaining = [
+          ...new Set([...(await readUnmerged()), ...(await stagedMarkerFiles([...everConflicted]))]),
+        ]
+        // EVERY ROUND MUST SHRINK THE SET. `rebaseBranchOntoBase` can afford 12 rounds because
+        // each one is a DIFFERENT commit that `git rebase --continue` advanced onto; here there is
+        // exactly one apply, so a round that leaves the same work undone will leave it undone
+        // twelve times. Each round is a real Forge turn bounded at 8 minutes, awaited inside the
+        // serial tick sweep — so 12 no-progress rounds is ~96 minutes during which no other run in
+        // the process makes any progress at all. Zero progress once is the answer.
+        if (remaining.length > 0 && remaining.length >= paths.length)
+          throw new TridentRebaseConflict(branch, base, remaining)
+        for (const p of remaining) everConflicted.add(p)
+        paths = remaining
+      }
+      // Resolved: fall through to the ordinary commit + compare-and-swap below. The resolver's
+      // contract has it `git add` its resolutions and forbids committing, so the replay commits
+      // exactly as an unconflicted apply would — and still faces the full review gate.
+      autoResolved = [...everConflicted]
     }
     const committed = await run_host(
       [
@@ -580,7 +1274,27 @@ export async function rebaseOntoObservedBase(
       ],
       scratchDir,
     )
-    if (!committed.ok) throw new Error(publishFailureReason('commit the rebase of', branch, committed.stderr))
+    if (!committed.ok) {
+      // GIT'S DIAGNOSIS, WHEREVER GIT PUT IT. `git commit` writes "nothing to commit" to STDOUT,
+      // and forwarding only stderr collapsed the single most informative failure on this path into
+      // a bare `outer publisher could not commit the rebase of branch X` — no cause, and the
+      // `finally` below has already deleted the tree that held it. Same defect class as the
+      // wholesale-apply carve-out above: never discard what git actually said.
+      const said = [committed.stderr, committed.stdout]
+        .map((s) => s.trim())
+        .filter((s) => s !== '')
+        .join(' — ')
+      // A RESOLUTION THAT LEFT NOTHING TO COMMIT IS AN ATTENTION STATE, NOT A GIT FAILURE. It means
+      // the resolver took the base's side of every hunk verbatim, so the branch now contributes
+      // nothing — exactly the silent-tautology outcome the #290 hand-resolution shows is the
+      // dangerous one. It is a mergeability fact about the branch, so it gets the same non-verdict
+      // typed failure the conflict it came from would have got.
+      if (autoResolved !== null && /nothing (?:added )?to commit|no changes added/i.test(said))
+        throw new TridentRebaseConflict(branch, base, autoResolved)
+      throw new Error(
+        publishFailureReason('commit the rebase of', branch, said || `git commit exited ${committed.exit_code}`),
+      )
+    }
     const replayed = await run_host(['git', '-C', scratchDir, 'rev-parse', 'HEAD'], scratchDir)
     if (!replayed.ok) throw new Error(publishFailureReason('read the replayed tip of', branch, replayed.stderr))
     const newHead = replayed.stdout.trim()
@@ -592,7 +1306,7 @@ export async function rebaseOntoObservedBase(
       repoPath,
     )
     if (!swapped.ok) throw new Error(publishFailureReason('advance', branch, swapped.stderr))
-    return { head: newHead, rebased: true }
+    return { head: newHead, rebased: true, baseSha }
   } finally {
     await dropScratch()
   }
@@ -614,20 +1328,70 @@ export async function rebaseOntoObservedBase(
  *                              is gone from the authority, so a rebuild is correct and
  *                              can be named truthfully (`head-branch-absent`).
  *   - `''`                   → the read FAILED after 3 attempts. Reserved exclusively
- *                              for "could not read", never for "not there", so Part 2b
- *                              of this card can give it a bounded STOP consequence.
+ *                              for "could not read", never for "not there" — and
+ *                              `classifyResume` now GIVES it a bounded STOP
+ *                              (`{ mode: 'stop', reason: 'head-unreadable' }`): the run
+ *                              ends naming the branch and the recorded OID instead of
+ *                              rebuilding work that is already committed.
  *
  * The authority split mirrors the workflow's own `readBranchHead`: in `pr` mode the
  * REMOTE is the authority (an unpushed local branch is not the shared truth); in
- * `local` mode the local ref is. Retries are attempt-only (no sleeps) — `run_host` is
- * the seam, and the tests must stay fast.
+ * `local` mode the local ref is.
+ *
+ * THE RETRIES ARE SPACED, AND THE SPACING IS AN INJECTED SEAM. In `pr` mode the read is
+ * `git ls-remote` — a NETWORK call — and the consequence of `''` is a terminal, non-
+ * self-healing run failure at the fast-exit in `launch()`. Three attempts fired back to
+ * back complete inside a few milliseconds, which is short enough that one dropped packet
+ * fails all three and kills a run whose work is intact. So the attempts are separated by
+ * `RESUME_HEAD_RETRY_DELAYS_MS`, through an injected `sleep` the tests replace with a
+ * no-op — the delay is real in production and free in the suite. `run_host` remains the
+ * seam for the READ; this is the seam for the WAIT.
+ *
+ * THE WINDOW IS ~1.25 s IN TOTAL, AND IT IS NOT CLAIMED TO BE MORE. It covers a sub-second
+ * blip; it does not outlive a sustained outage, and this docblock previously said otherwise.
+ *
+ * IT IS SPENT ON THE TICK THREAD, AND THAT COST IS SERIAL (Argus r5). `tick.ts` steps runs
+ * ONE AT A TIME (`per_tick_limit` 50) and this wait is awaited from `launch()`, so an origin
+ * blip that hits N resuming runs at once adds ~1.25 s × N to that tick. The constant is left
+ * small partly for this reason: it bounds a SHARED thread, not just one run. Making the tick
+ * concurrent is a change to `tick.ts`, not to this function — recorded here so the next
+ * person tempted to raise the constant knows what else it multiplies.
+ *
+ * WHAT THE FAILURE IT LEAVES BEHIND ACTUALLY COSTS, STATED WITHOUT THE CLAIM THIS COMMENT USED
+ * TO MAKE (Argus r4): the run is terminal, and re-running the card is a FRESH DISPATCH — a new
+ * row with NULL checkpoint columns (`store.ts` `create`), because a terminal row is never
+ * advanced again (`step()` short-circuits on `isTerminalPhase`). So the re-run REBUILDS. The
+ * checkpoint columns preserved on the failed row are evidence for a human, not an input to
+ * anything. There is no resume-a-terminal-run path today; adding one is a separate card
+ * (IMPLEMENTATION_PLAN.md, follow-ups).
+ *
+ * THAT IS STILL THE TRADE THIS CARD ASKED FOR, and it is deliberate rather than free: before
+ * this change the same blip rebuilt AUTOMATICALLY, so the regression is availability, not work
+ * lost — the branch and its commits are untouched. "Could not tell" must not silently spend a
+ * max-effort rebuild of already-pushed work (measured: 3,813 → 84,875 → 133,169 output tokens on
+ * the neutron-enterprise run), so the rebuild now needs a human to ask for it. The number here
+ * is left small rather than grown by guess: every second is also a second a genuinely-dead
+ * branch stalls, and the constant is exported so the trade can be made with evidence.
  */
+export const RESUME_HEAD_RETRY_DELAYS_MS = [250, 1000] as const
+
+/** Injectable wait. Production sleeps; the suite passes a no-op so 3 attempts still
+ *  cost nothing. */
+export type SleepMs = (ms: number) => Promise<void>
+
+const realSleep: SleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 export async function resolveResumeLiveHead(
   run_host: RunHostCommand,
   run: { repo_path: string; branch: string; merge_mode: 'local' | 'pr' },
+  sleep: SleepMs = realSleep,
 ): Promise<string> {
   const ref = `refs/heads/${run.branch}`
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const attempts = RESUME_HEAD_RETRY_DELAYS_MS.length + 1
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    // Between attempts only — never before the first read, and never after the last
+    // (a run that is about to be failed must not also be made to wait for it).
+    if (attempt > 0) await sleep(RESUME_HEAD_RETRY_DELAYS_MS[attempt - 1] ?? 0)
     if (run.merge_mode === 'pr') {
       const res = await run_host(
         ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', ref],
@@ -661,6 +1425,47 @@ export async function resolveResumeLiveHead(
     }
   }
   return ''
+}
+
+/**
+ * Does the LIVE HEAD decide what this resume checkpoint means?
+ *
+ * The launcher's fast-exit (in `launch()`) exists only to avoid spending a fire whose
+ * outcome is already known: `classifyResume` would return the bounded
+ * `{ mode: 'stop', reason: 'head-unreadable' }`. It must therefore fire — not exit —
+ * for every checkpoint `classifyResume` answers WITHOUT consulting the head, or it
+ * pre-empts a decision it does not share. Those are:
+ *
+ *   • `''` — no checkpoint at all → `rebuild`, and nothing recorded to preserve.
+ *   • `pr-merged` → `merged`; the head branch may already be deleted.
+ *   • `forge-done` in RALPH mode → `rebuild` ('ralph-progress-unknown'), and
+ *     any name `classifyResume` does not recognise — `ralph-task-built` above all —
+ *     → `rebuild` ('unknown-checkpoint'). Both are the answer on EVERY head, so a
+ *     read failure changed nothing (Argus r5). Stopping these terminally would let
+ *     one transient `ls-remote` blip kill every resuming ralph re-fire.
+ *
+ * MIRRORS `classifyResume`/`resumeOnUnchangedHead` in `inner-workflow.mjs`, which is
+ * a `.mjs` Workflow script this module cannot import; `inner-workflow-resume.test.ts`
+ * executes BOTH and asserts they agree on every name, so the pair cannot drift
+ * silently.
+ */
+export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
+  const name = checkpoint.trim()
+  if (name === '' || name === 'pr-merged') return false
+  if (name === 'forge-done' && ralph) return false
+  return (
+    name === 'argus-approved' ||
+    name === 'argus-request-changes' ||
+    name === 'forge-done' ||
+    /^argus-request-changes-round-\d+$/.test(name) ||
+    /^fix-round-\d+$/.test(name) ||
+    // The `:deviated` suffix (#291's taskDeviated carry) is part of the PRODUCTION
+    // checkpoint vocabulary — `classifyResume` accepts it at inner-workflow.mjs:2472.
+    // Rejecting it here made the launcher spend a whole workflow fire on a checkpoint
+    // it should have fast-exited on. The suffix says nothing about whether THIS
+    // invocation may skip its rebuild, so a deviated publish decides exactly as a clean one.
+    /^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)
+  )
 }
 
 export function innerTerminalFailureReason(
@@ -700,14 +1505,74 @@ export function innerTerminalFailureReason(
   // unauthenticated `gh` made the readiness probe say `gh auth login`, no review seat ever
   // ran, and this function reported ten rounds' worth of review that never happened. So the
   // specific message ships WITH that measured signal, and ONLY with it: the branch below is
-  // the one permitted specific message, gated on BOTH the block kind and a non-null cause.
+  // the one permitted specific message, gated on a non-null cause.
   // Everything else — every inferred cause, every result carrying no measurement — still
   // gets the generic sentence above, for all the reasons R1/R2 record.
-  if (result.block_kind === 'infra-only' && result.terminal_cause !== null) {
-    return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${redactPushError(result.terminal_cause)}`
+  // …and ONLY when the cause survives redaction with something left to read. An
+  // over-redacted (or whitespace-only) cause is not a measurement, and appending a
+  // dangling colon to the sentence would report one where none exists.
+  //
+  // 2026-08-15 — A THROWN WORKFLOW ALSO MEASURES A CAUSE, and it was being discarded.
+  // `block_kind: 'infra-only'` is emitted only by the review-stop paths, so requiring it
+  // meant every exit that THREW — including the one this card was raised for — fell through
+  // to the sentence below. Run 3d2696c3 threw "forge:build completed without a full local
+  // commit OID for the outer publisher" and the operator was told "…without Argus APPROVE"
+  // about a run Argus never saw. The catch path now carries the sentence the workflow
+  // composed where the fact was known, with NO block kind (a throw is not a review verdict).
+  //
+  // THE GATE WIDENS BY EXACTLY THAT ONE VALUE — `null` — and no further. 'code',
+  // 'round-lost' and 'none' are REVIEW verdicts, whose findings describe the DIFF; quoting
+  // one as a terminal cause would re-invent the inference this function refuses to make, so
+  // they keep the generic sentence (see the test that pins each of them).
+  //
+  // `null` IS NOT ONLY "THE CATCH PATH" — and an earlier revision of this comment said it
+  // was (Argus r4). `parseInnerResult` decodes `block_kind` FAIL-CLOSED: the four strings the
+  // workflow writes decode, and ANY other value — garbled, truncated, from a future writer —
+  // becomes `null` too. Which is precisely why this branch is safe to widen to it: the
+  // sentence `null` selects states the failure and quotes the measured cause, and claims
+  // NOTHING about the review panel. Only 'infra-only' licenses "review never ran", and only
+  // an exact-match decode produces it. A garbled kind therefore lands in the honest sentence,
+  // never the specific one (pinned by the garbled-kind test).
+  //
+  // The kind also decides WHICH sentence, because it is the only thing that licenses the
+  // claim "review never ran". Without it the reason states the failure and quotes the
+  // measurement, and says nothing at all about the review panel.
+  if (result.terminal_cause !== null && (result.block_kind === 'infra-only' || result.block_kind === null)) {
+    const cause = redactPushError(result.terminal_cause).trim()
+    if (cause !== '') {
+      return result.block_kind === 'infra-only'
+        ? `review never ran (infra-only) at round ${reported} of ${ceiling}: ${cause}`
+        : `inner workflow failed at round ${reported} of ${ceiling}: ${cause}`
+    }
   }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
+}
+
+/**
+ * GIT-TRUTH FOR THE CLAIM, NOT ONLY THE BRANCH (card 2026-08-16). A model-relayed
+ * sha that names NO git object is not a disagreement with the real head — there is
+ * only one candidate commit, git's — so it resolves to ABSENT (null), never to a
+ * refusal. Measured: hallucinated claim '924b42906950' (git cat-file: not a valid
+ * object name) refused a good build and stranded 924b4290ea81….
+ * A claim is a sha, never a refname: non-hex input returns null WITHOUT asking git,
+ * so 'HEAD'/branch names cannot resolve by accident (4 = git's minimum abbreviation).
+ * `--end-of-options` keeps hostile-shaped input from being read as a flag.
+ */
+export async function resolveClaimedCommit(
+  run_host: RunHostCommand,
+  repo_path: string,
+  claim: string | null,
+): Promise<string | null> {
+  if (claim === null) return null
+  const c = claim.trim().toLowerCase()
+  if (!/^[0-9a-f]{4,40}$/.test(c)) return null
+  const res = await run_host(
+    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${c}^{commit}`],
+    repo_path,
+  )
+  const oid = res.stdout.trim()
+  return res.ok && /^[0-9a-f]{40}$/.test(oid) ? oid : null
 }
 
 export function buildTridentOrchestrator(
@@ -744,6 +1609,10 @@ export function buildTridentOrchestrator(
   // Run ids redispatched in THIS process — the per-process bound on orphan
   // recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
+  // Deliberately in-memory: a restart replaces the failing pool/generation, while
+  // each individual process still bounds launch faults and cannot retry forever.
+  const launchFaults = new Map<string, { count: number; last: string }>()
+  const MAX_LAUNCH_FAULTS = 3
   // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
   // seconds; the build itself runs detached and is NOT tracked here.
   const inflight = new Set<Promise<void>>()
@@ -773,11 +1642,39 @@ export function buildTridentOrchestrator(
     return null
   }
 
+  /** Best-effort, read-only probe for a PR that already reached MERGED while its
+   *  launcher was unavailable. No evidence is never treated as a merge. */
+  async function detectMergedPr(run: TridentRun): Promise<number | null> {
+    if (run.merge_mode !== 'pr') return null
+    try {
+      if (run.pr !== null) {
+        const res = await opts.run_host(
+          ['gh', 'pr', 'view', String(run.pr), '--json', 'state,number', '--jq', '.state'],
+          run.repo_path,
+        )
+        return res.ok && res.stdout.trim() === 'MERGED' ? run.pr : null
+      }
+      const branch = run.branch ?? `trident/${run.slug}`
+      const res = await opts.run_host(
+        ['gh', 'pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number', '--jq', '.[0].number // empty'],
+        run.repo_path,
+      )
+      if (!res.ok) return null
+      const n = parseInt(res.stdout.trim(), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    } catch {
+      return null
+    }
+  }
+
   /**
    * A COMMIT OID IS READ, NOT REPORTED. `claimedHead` is whatever the build SAID it
    * committed — possibly abbreviated, possibly absent. The head that actually gets
    * published is the one git resolves for the branch the inner loop named (a name a
-   * model cannot plausibly mangle). A claim is only ever a CHECK against that.
+   * model cannot plausibly mangle). A claim is only ever a CHECK against that. The
+   * claim is itself resolved through git first (`resolveClaimedCommit`): unresolvable
+   * = ABSENT; only two real, DIFFERENT OIDs refuse, and only after the push, so a
+   * refusal never strands the commit.
    */
   async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
@@ -794,13 +1691,43 @@ export function buildTridentOrchestrator(
         `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
       )
     }
-    // THE CLAIM IS A CHECK, NEVER THE SOURCE. `startsWith` makes a full 40-char claim an
-    // equality test and a 7-char one a prefix test. A disagreement is a real signal (wrong
-    // branch, wrong worktree) and names BOTH values — neither is silently preferred.
-    if (claimedHead !== null && !resolvedHead.startsWith(claimedHead.toLowerCase())) {
-      throw new Error(
-        `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
+    // THE CLAIM IS A CHECK, NEVER THE SOURCE — and it is RESOLVED before it may check
+    // anything. A claim naming no git object is ABSENT, not a conflict (there is only
+    // one candidate commit: git's). Resolved OIDs are compared for EQUALITY — a prefix
+    // compare is wrong both ways: a hallucinated prefix refused a good build, and a
+    // short sha of the right commit is only honored by resolving it. The refusal
+    // itself is DEFERRED until after the push (see below) so it can never strand the
+    // commit; it remains only for two real, resolvable, DIFFERENT commits.
+    const resolvedClaim = await resolveClaimedCommit(opts.run_host, run.repo_path, claimedHead)
+    const claimConflict = resolvedClaim !== null && resolvedClaim !== resolvedHead
+    // FIX-ROUND ANCESTRY GATE (mandated by the Fable arbitration on #289 vs #318).
+    // A fix round carries the head the review verdict was ABOUT; the head it produced
+    // must DESCEND from it. Run fec4d3aa rebuilt from main with no ancestry of the
+    // reviewed head 4523107b and was silently published as a new PR — this gate makes
+    // that a REFUSAL. Evaluated on the PRE-rebase produced head: the replay below
+    // rewrites shas onto the observed base, so this is the only point where "did the
+    // build abandon the reviewed branch?" is still measurable. `--is-ancestor` passes
+    // on equality, so a legitimate RESUME republishing or continuing the reviewed
+    // head passes with no exemption (the recovery-card interaction).
+    if (run.reviewed_head !== null) {
+      const pin = run.reviewed_head.trim().toLowerCase()
+      if (!/^[0-9a-f]{40}$/.test(pin)) {
+        throw new Error(
+          `fix-round refused: the reviewed-head pin '${run.reviewed_head}' is not a 40-hex commit; refusing to publish ${resolvedHead} unverified`,
+        )
+      }
+      const ancestry = await opts.run_host(
+        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', pin, resolvedHead],
+        run.repo_path,
       )
+      if (!ancestry.ok) {
+        const detail = ancestry.stderr.trim()
+        throw new Error(
+          detail === ''
+            ? `fix-round refused: produced head ${resolvedHead} of branch ${branch} does not descend from the reviewed head ${pin} — the round abandoned the reviewed branch`
+            : `fix-round refused: could not verify that produced head ${resolvedHead} descends from reviewed head ${pin} (${detail}); refusing to publish unverified`,
+        )
+      }
     }
     const runWithRetries = async (command: string[], attempts = 3) => {
       let result = await opts.run_host(command, run.repo_path)
@@ -819,13 +1746,15 @@ export function buildTridentOrchestrator(
     // written against the tree it merges into. That is the closest to "before build" the
     // credential boundary allows.
     //
-    // ON CONFLICT. An ATTENTION state (`TridentRebaseConflict`), never `REQUEST_CHANGES` and never
-    // auto-resolved. The failure names the conflicting paths and says plainly that no reviewer
-    // judged the code; the `resolve_conflict` resolver is NEVER invoked on this path.
+    // ON CONFLICT. A configured `resolve_conflict` resolver is tried FIRST, in the scratch
+    // worktree, bounded by `MAX_CONFLICT_ROUNDS` — this is the autonomous path, so there is no
+    // human here to reconcile the branch by hand. Absent, declining, or exhausted → an ATTENTION
+    // state (`TridentRebaseConflict`) exactly as before: never `REQUEST_CHANGES`, naming the
+    // conflicting paths and saying plainly that no reviewer judged the code. And a RESOLVED
+    // conflict shortcuts nothing — the replay is published and review is re-fired as usual.
     //
-    // SHALLOW (governance #574). The shared build checkout has a `.git/shallow` boundary, where
-    // `merge-base` lies and a naive `git rebase` conflicts on every file. So this is a diff-replay
-    // in a throwaway worktree — never `git rebase`, never the shared working tree.
+    // The replay heals a shallow checkout on entry (`healShallowCheckout`) and still uses a
+    // diff-replay in a throwaway worktree — never `git rebase`, never the shared working tree.
     //
     // The PR probe moves UP so the replay can use `gh pr diff` (a server-side, shallow-immune
     // merge-base); its result is reused by the "open a PR if none" step below, unchanged.
@@ -837,6 +1766,7 @@ export function buildTridentOrchestrator(
       await resolveBase(run),
       prBefore,
       `${run.repo_path}/.trident-worktrees/rebase-${run.id}`,
+      opts.resolve_conflict !== undefined ? { run, resolve_conflict: opts.resolve_conflict } : undefined,
     )
     // Everything downstream publishes the REBASED head: the post-push confirm, the review diff,
     // and the `outer-published:<head>` checkpoint the re-fired workflow reads back.
@@ -900,6 +1830,17 @@ export function buildTridentOrchestrator(
       throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
     }
 
+    // THE REFUSAL FIRES ONLY AFTER THE PUSH IS CONFIRMED (defect 2, 2026-08-14: the
+    // throw preceded the push, so a wrong refusal left the commit unreachable —
+    // 924b4290ea81… was stranded). A refusal is about which commit to REVIEW, not
+    // about whether the work may exist: the branch is on origin for inspection; only
+    // the PR / review dispatch is refused.
+    if (claimConflict) {
+      throw new Error(
+        `outer publisher refused: the build reported commit '${claimedHead}' (resolves to '${resolvedClaim}') but branch ${branch} resolved to '${resolvedHead}' before publish — the branch was pushed to origin for inspection; no PR or review was dispatched`,
+      )
+    }
+
     let pr = prBefore
     if (pr === null) {
       const base = await resolveBase(run)
@@ -912,7 +1853,22 @@ export function buildTridentOrchestrator(
     if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
 
     const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
-    const base = await resolveBase(run)
+    // THE REVIEW DIFF IS TAKEN AGAINST THE OBSERVED BASE TIP, NOT AGAINST THE LOCAL `main` REF.
+    //
+    // MEASURED (Argus r4, run 25b2327d): the published artifact was 15,154 lines across ~100
+    // files while the branch's own work was 20 files / 1,738 lines. The shared build checkout's
+    // local `main` was 8 merges behind `origin/main`, and `git diff main..<head>` on a branch
+    // built from CURRENT origin therefore shows every commit merged in between as part of this
+    // card. ~87% of that artifact was already-merged unrelated code — one reviewer diffed the
+    // stale base, vetoed the branch over bugs in files it does not touch, and the round was lost.
+    //
+    // `rebaseOntoObservedBase` already `ls-remote`s the base tip (the same observation the push
+    // lease uses) and the head it returns is replayed directly onto it, so that sha is the exact
+    // left-hand side of this branch's own diff. It is a local object on BOTH paths that return a
+    // non-empty one: the replay fetches it, and the already-contains path could only have been
+    // answered by reading it. An empty one means there is no remote base at all (a brand-new
+    // origin), which is the one case the base NAME is still the best available answer.
+    const base = rebased.baseSha !== '' ? rebased.baseSha : await resolveBase(run)
     const changed = await opts.run_host(
       ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${headToPublish}`],
       run.repo_path,
@@ -961,7 +1917,7 @@ export function buildTridentOrchestrator(
     // `outer-published:<oid>:r:t` capture takes precedence over the checkpoint column.
     const published =
       typeof resume_checkpoint === 'string'
-        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
+        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)(:deviated)?$/)
         : null
     const recorded = (published?.[1] ?? resume_checkpoint_head ?? '').trim().toLowerCase()
     // Only read when the answer can change a decision: no checkpoint, no recorded OID
@@ -972,14 +1928,63 @@ export function buildTridentOrchestrator(
       /^[0-9a-f]{40}$/.test(recorded) &&
       typeof run.branch === 'string' &&
       run.branch.length > 0
-        ? await resolveResumeLiveHead(opts.run_host, {
-            repo_path: run.repo_path,
-            branch: run.branch,
-            merge_mode: run.merge_mode,
-          })
+        ? await resolveResumeLiveHead(
+            opts.run_host,
+            {
+              repo_path: run.repo_path,
+              branch: run.branch,
+              merge_mode: run.merge_mode,
+            },
+            // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
+            // network call and the consequence of `''` is terminal, so the attempts are
+            // spread over real time in production and collapsed to nothing in the suite.
+            opts.sleep,
+          )
         : undefined
+    // PART 2b, OUTER FAST-EXIT — the launcher itself just failed 3 code reads of the
+    // head. Firing the workflow now would spend a fire only to have `classifyResume`
+    // return the bounded stop ({ mode: 'stop', reason: 'head-unreadable' }) for every
+    // checkpoint except 'pr-merged' (resolved to `merged` BEFORE the head check —
+    // exempted here for exactly that reason). classifyResume stays the single semantic
+    // decider; this is only the cheap exit for the one case whose outcome is already
+    // known at this boundary. `failedRun` spreads `run`, so inner_checkpoint /
+    // inner_checkpoint_head / inner_checkpoint_findings survive untouched — which
+    // preserves the EVIDENCE (what was built, and where), and nothing more: a re-run is
+    // a fresh dispatch with null checkpoints, so it rebuilds. See `resolveResumeLiveHead`
+    // for why that is the trade, and IMPLEMENTATION_PLAN.md for the resume follow-up.
+    //
+    // SOME CHECKPOINT NAMES ARE EXEMPT, each because classifyResume does not consult
+    // the head for them, so this exit would pre-empt a decision it does not share:
+    // 'pr-merged' (resolved to `merged`) and the empty name (resolved to `rebuild`,
+    // reason 'no-checkpoint' — there is nothing recorded to preserve) are answered
+    // before the head check; the head-INDEPENDENT names rebuild on every head. See
+    // `resumeHeadDecides`.
+    const resume_checkpoint_name = (resume_checkpoint ?? '').trim()
+    // THE PR LINK IS RESOLVED BEFORE THE EXIT, NOT AFTER IT (Argus r5). This used to sit
+    // below, so the one path that ends a run WITHOUT ever firing recorded a terminal row
+    // with `pr: null` — and "re-run when the read succeeds" is advice a human follows by
+    // opening the PR the recorded work is on. The exit is rare and already terminal; one
+    // `gh pr view` to make the record point at the work is worth more than the call saved.
     const existingPr = run.pr ?? (await detectExistingPr(run))
     const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
+    if (resume_live_head === '' && resumeHeadDecides(resume_checkpoint_name, run.ralph)) {
+      const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
+      return {
+        run: failedRun(
+          launchRun,
+          innerTerminalFailureReason(launchRun, {
+            round: launchRun.round,
+            checkpoint: resume_checkpoint,
+            block_kind: 'infra-only',
+            terminal_cause: cause,
+          }),
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${launchRun.phase} → failed (resume head unreadable — bounded stop, no fire)`,
+      }
+    }
 
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
@@ -1006,6 +2011,47 @@ export function buildTridentOrchestrator(
       } catch {
         reflection_context = null
       }
+    }
+
+    // The TEST EXECUTION block, derived here for the same reason and with the same
+    // never-fails shape as the reflection resolve above: it needs the LIVE run count
+    // (the launcher does not hold one) and the host's core/RAM budget, and a build must
+    // never fail because the strategy could not be derived. Null → the workflow's
+    // contract is byte-identical legacy.
+    let test_strategy: string | null = null
+    // The numbers behind that block, carried into this launch's AdvanceOutcome note so
+    // the divisor and the chosen jobs value are VISIBLE. Round-3 review: a box with
+    // enough parked runs to pin every build at `jobs=1` logged nothing at all and was
+    // indistinguishable from a healthy one.
+    let test_strategy_summary: string | null = null
+    try {
+      let active = 1
+      if (opts.resolve_active_runs) {
+        try {
+          const n = opts.resolve_active_runs()
+          if (Number.isFinite(n) && n >= 1) active = Math.floor(n)
+        } catch {
+          // A store hiccup costs the RAISE-ONLY term, not the whole block, and not the
+          // bound: `computeTestJobs` still divides by the constant fan-out, so a lost
+          // count means "assume the planned fan-out" rather than "assume an idle box".
+          // The build also still gets its stage-1 gate and its full-suite rule. The
+          // outer catch below is the last-resort backstop that keeps ANY failure here
+          // from failing the launch.
+          active = 1
+        }
+      }
+      const budget = readHostBudget()
+      const detail = buildTestStrategyDetail(launchRun.repo_path, {
+        cores: budget.cores,
+        active_runs: active,
+        mem_available_bytes: budget.mem_available_bytes,
+        base_branch: base,
+      })
+      test_strategy = detail.block
+      test_strategy_summary = detail.summary
+    } catch {
+      test_strategy = null
+      test_strategy_summary = null
     }
 
     // FIRE the workflow. The launching turn settles in seconds; the build runs
@@ -1048,6 +2094,9 @@ export function buildTridentOrchestrator(
       // resolver / nothing learned / a
       // read failed.
       reflection_context,
+      // The rendered TEST EXECUTION block (derived best-effort above), spliced by the
+      // workflow into the FORGE build contract only — never the argus review gate.
+      test_strategy,
       // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
       // and OMITS the argument when nothing valid is configured, so an untouched
       // instance produces byte-identical workflow args.
@@ -1096,7 +2145,9 @@ export function buildTridentOrchestrator(
       run: next,
       changed: true,
       waiting: true,
-      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}`,
+      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}${
+        test_strategy_summary !== null ? ` [${test_strategy_summary}]` : ''
+      }`,
     }
   }
 
@@ -1220,7 +2271,13 @@ export function buildTridentOrchestrator(
         // The handoff is the BRANCH NAME; a relayed sha is only a check. A build that
         // reported no OID is still published — `publishBuiltCommit` reads the head from git.
         const published = await publishBuiltCommit(run, result.publish_head ?? null)
-        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}`
+        // FORMAT OWNED IN LOCKSTEP by this builder and three readers — the
+        // resume-launch regex below, `inner-workflow.mjs`'s resume parse, and its
+        // `classifyResume`. The optional `:deviated` suffix carries the previous
+        // Forge's deviation across the process boundary so the resumed invocation
+        // writes the `ralph-task-built-deviated` checkpoint and the NEXT iteration
+        // full-plans; without it the string is byte-identical to the old format.
+        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}${result.deviated_from_spec ? ':deviated' : ''}`
         const resetPatch: TridentRunUpdate = {
           inner_result: null,
           subagent_run_id: null,
@@ -1405,6 +2462,7 @@ export function buildTridentOrchestrator(
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
+      launchFaults.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
@@ -1458,6 +2516,39 @@ export function buildTridentOrchestrator(
       //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
       //     unchanged reap below, byte-stable for legacy callers.
       if (run.subagent_status === 'crashed' && beginCrashRecovery !== undefined) {
+        // MEASURED 2026-08-16 23:21 gateway restart: recovery blindly relaunched
+        // finished PRs #336/#337 and the owner hand-cancelled both. A merged PR is
+        // terminal and outranks the recovery budget, but the claim MUST precede the
+        // return: it clears the crash latch whose save veto would otherwise silently
+        // discard done/completed. The claim spending one recovery unit is harmless
+        // because the run ends terminal. Nothing was harvested, so do NOT stamp
+        // `harvested_at` (applyResult remains its sole writer).
+        const mergedPr = await detectMergedPr(run)
+        if (mergedPr !== null) {
+          const claimed = await beginCrashRecovery(run.id)
+          if (claimed === null) {
+            return { run, changed: false, waiting: true, note: 'crash-recovery claim lost — re-read next tick' }
+          }
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const adopted: TridentRun = {
+            ...claimed,
+            phase: 'done',
+            pr: mergedPr,
+            branch: claimed.branch ?? run.branch,
+            inner_checkpoint: 'pr-merged',
+            inner_verdict: 'APPROVE',
+            subagent_status: 'completed',
+            failure_reason: null,
+            last_advanced_at: now(),
+          }
+          return {
+            run: adopted,
+            changed: true,
+            waiting: false,
+            note: `PR #${mergedPr} already merged — adopted after launcher crash → done (no relaunch)`,
+          }
+        }
         if (run.crash_recoveries >= maxCrashRecoveries) {
           fired.delete(run.id)
           redispatched.delete(run.id)
@@ -1492,7 +2583,33 @@ export function buildTridentOrchestrator(
         redispatched.delete(run.id)
         // CONTINUATION, not a restart: `launch()` folds `inner_checkpoint`/`pr`/`branch`
         // so the workflow resumes on the pushed branch and reuses the PR.
-        return launch(claimed)
+        try {
+          const out = await launch(claimed)
+          launchFaults.delete(run.id)
+          return out
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+          launchFaults.set(run.id, { count, last: msg })
+          if (count < MAX_LAUNCH_FAULTS) {
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+            }
+          }
+          launchFaults.delete(run.id)
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+          return {
+            run: failedRun(run, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (launch kept throwing)`,
+          }
+        }
       }
       // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
       //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes
@@ -1577,7 +2694,33 @@ export function buildTridentOrchestrator(
 
     // (3) Launch-if-needed — the single fire site (null-guarded).
     if (run.subagent_run_id === null) {
-      return launch(run)
+      try {
+        const out = await launch(run)
+        launchFaults.delete(run.id)
+        return out
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+        launchFaults.set(run.id, { count, last: msg })
+        if (count < MAX_LAUNCH_FAULTS) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+          }
+        }
+        launchFaults.delete(run.id)
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+        return {
+          run: failedRun(run, reason, false),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (launch kept throwing)`,
+        }
+      }
     }
 
     // (4) In flight (fired by THIS process, no result yet). Reap a stalled

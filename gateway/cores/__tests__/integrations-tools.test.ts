@@ -46,7 +46,7 @@ function byName(tools: ToolRegistration[], name: string): ToolRegistration {
   return t
 }
 
-async function makeBench() {
+async function makeBench(opts: { slug_is_fallback?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'neutron-integrations-tools-'))
   cleanups.push(() => rmSync(home, { recursive: true, force: true }))
   const dbDir = join(home, 'db')
@@ -96,6 +96,7 @@ async function makeBench() {
     tokens,
     secretsStore: secrets,
     project_slug: OWNER,
+    slug_is_fallback: opts.slug_is_fallback ?? false,
     db,
     startOAuth,
   })
@@ -259,4 +260,56 @@ test('integrations_connect rejects an unknown label', async () => {
   await expect(
     byName(b.built, 'integrations_connect').handler({ label: 'nope' }, CTX),
   ).rejects.toThrow(/not declared/)
+})
+
+// ── THE AGENT-FACING BOUNDARY OF THE DIRECTION GUARD ──────────────────────
+/**
+ * The tool is the surface an AGENT reaches, and it is the one that most needs
+ * the refusal: the whole point of a fallback handle is that nothing has
+ * established whose instance this is, so nothing has established whose
+ * credentials these are. Driven through the registered tool's own handler
+ * rather than the shared brain it calls.
+ */
+test('integrations_migrate_orphaned refuses on a fallback boot', async () => {
+  const b = await makeBench({ slug_is_fallback: true })
+  const STALE = asOwnerHandle('dev-old')
+  await b.secrets.put({
+    owner_handle: STALE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+
+  const out = (await byName(b.built, 'integrations_migrate_orphaned').handler({}, CTX)) as {
+    refused_direction?: true
+    total_moved: number
+    message: string
+  }
+  expect(out.total_moved).toBe(0)
+  // STRUCTURAL, so an edit to the sentence cannot quietly disarm the guard the
+  // agent surface most needs. (Was `out.message).toContain('Refused')`.)
+  expect(out.refused_direction).toBe(true)
+  // Read the row back rather than trusting the count.
+  expect(await b.secrets.get({ owner_handle: STALE, kind: 'byo_api_key', label: 'tavily' })).toBe(
+    'tvly-stale',
+  )
+  expect(
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBeNull()
+
+  // POSITIVE CONTROL — same fixture, configured boot, the tool migrates. Without
+  // it this passes equally against a tool that is simply broken.
+  const ok = await makeBench()
+  await ok.secrets.put({
+    owner_handle: STALE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+  const moved = (await byName(ok.built, 'integrations_migrate_orphaned').handler({}, CTX)) as {
+    refused_direction?: true
+    total_moved: number
+  }
+  expect(moved.total_moved).toBeGreaterThan(0)
+  expect(moved.refused_direction).toBeUndefined()
 })

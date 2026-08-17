@@ -12,6 +12,7 @@ import {
   formatRitualCompletionFallback,
   formatRitualEscalationNotice,
   formatRitualFailureNotice,
+  formatRitualUnplannableNotice,
   shouldEscalate,
 } from './ritual-delivery.ts'
 import type { RitualRunStatus } from './ritual-runs.ts'
@@ -58,6 +59,23 @@ describe('ritual notice formatters', () => {
   test('completion fallback: one line with id + run id', () => {
     const s = formatRitualCompletionFallback({ ritual_id: 'morning-brief', run_id: 'r-9' })
     expect(s).toBe("Ritual 'morning-brief' finished (run r-9): no output.")
+    expect(s).not.toContain('—')
+  })
+
+  test('unplannable notice: names the ritual and the cause, cites NO run id', () => {
+    const s = formatRitualUnplannableNotice({ ritual_id: 'kaizen' })
+    expect(s).toContain("Ritual 'kaizen' did not run")
+    expect(s).toContain('no model configured')
+    // The occurrence was retired, and the notice has to say so — otherwise the
+    // owner cannot tell it apart from one that is still pending.
+    expect(s).toContain('skipped, not retried')
+    // NO fabricated run id: the planner that mints them is the missing piece, so
+    // there is no `code_ritual_runs` row for `rituals_status` to show.
+    expect(s).not.toMatch(/\(run /)
+    // It posts as an ordinary chat message, so it must never carry the dispatch
+    // token the whole lane exists to keep off the owner's lock screen.
+    expect(s).not.toContain('ritual:')
+    expect(s).not.toContain('\n')
     expect(s).not.toContain('—')
   })
 

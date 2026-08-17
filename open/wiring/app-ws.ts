@@ -62,6 +62,7 @@ import {
   type AppWsSurface,
 } from '@neutronai/gateway/http/app-ws-surface.ts'
 import { persistOwnerTimezoneIfChanged } from '@neutronai/gateway/storage/owner-metadata.ts'
+import type { WebPresenceReporter } from '@neutronai/gateway/push/web-presence.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { AppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import type { ChatCommandFilter } from '@neutronai/contracts/chat-command-filter.ts'
@@ -108,6 +109,7 @@ import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
 import type { ChannelKind } from '@neutronai/channels/types.ts'
+import { parseAppWsSendMarker } from './app-ws-marker.ts'
 
 /**
  * X5 — the single `ChannelKind` every Open outbound run carries. Open is
@@ -312,6 +314,13 @@ export interface WireAppWsDeps {
   buildClarifyPoster: { post?: (chatId: string, text: string) => void }
   /** The single-owner app-ws session registry (socket fan-out). */
   appWsRegistry: AppWsSessionRegistry
+  /**
+   * Web presence (2026-08-15) — where a WEB client's foreground/background
+   * declarations land. The SAME tracker the composer's push sink reads through
+   * `suppressPushWhileWebForeground`, which is what makes "don't buzz his phone
+   * while he's reading it in the browser" one decision rather than two.
+   */
+  webPresence: WebPresenceReporter
   /** The live-agent turn runner, or null on an LLM-less box. */
   appWsChatTurn: ((turn: LiveAgentTurnRequest) => Promise<LiveAgentTurnResult>) | null
   /** The entity-scribe user-turn hook (undefined on an LLM-less box). */
@@ -433,6 +442,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     appWsImportProgressRouter,
     buildClarifyPoster,
     appWsRegistry,
+    webPresence,
     appWsChatTurn,
     scribeOnUserTurn,
     attachmentTranscript,
@@ -823,8 +833,10 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         return {
           message_id: prompt.prompt_id,
           // Neither a `dropped` (persisted-but-offline) nor a `lost` (captured
-          // nowhere) marker is a live delivery.
-          was_new: !id.startsWith('app-ws:dropped:') && !id.startsWith('app-ws:lost:'),
+          // nowhere) marker is a live delivery. Parsed in ONE place now
+          // (`app-ws-marker.ts`) — this predicate had three independent copies,
+          // and every one of them discarded the `<id>` the marker carries.
+          was_new: parseAppWsSendMarker(id).delivered_live,
         }
       }
       // Ordering + de-dupe fix (import_running status bubble, M1 2026-06-30):
@@ -858,8 +870,10 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         return {
           message_id: prompt.prompt_id,
           // Neither a `dropped` (persisted-but-offline) nor a `lost` (captured
-          // nowhere) marker is a live delivery.
-          was_new: !id.startsWith('app-ws:dropped:') && !id.startsWith('app-ws:lost:'),
+          // nowhere) marker is a live delivery. Parsed in ONE place now
+          // (`app-ws-marker.ts`) — this predicate had three independent copies,
+          // and every one of them discarded the `<id>` the marker carries.
+          was_new: parseAppWsSendMarker(id).delivered_live,
         }
       }
       const ok = emitOnboardingPrompt(topic_id, toEmit)
@@ -1121,6 +1135,10 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     registry: appWsRegistry,
     auth: appOwnerAuth,
     project_slug,
+    // Web presence — record which WEB sockets say the owner is looking at them,
+    // so the push sink (built over this same tracker in the composer) can skip
+    // the phone buzz for a message already on his screen.
+    web_presence: webPresence,
     // S0 (b) — require the per-boot token on browser-origin WS upgrades.
     app_ws_token: appWsToken,
     // S2 (b) — on a WIDE bind, Origin-less clients must present the token too

@@ -55,7 +55,15 @@ const EXPECTED_RUNNING_LOOPS = [
   'reflect-consolidation',
   'reminders',
   'trident',
+  // Trident's 2 s wake-on-change detector and 15 s launcher liveness probe.
+  'trident-liveness',
+  'trident-watch',
   'watchdog',
+  // The 5-minute server-side continuation tick: re-enters a project's warm chat
+  // session with a continue-work turn for every in-progress Work Board item
+  // with no live bound run. Armed UNCONDITIONALLY (an LLM-less box enumerates
+  // nothing and every tick is a cheap no-op) — `gateway/proactive/work-wakeup.ts`.
+  'work-wakeup',
 ] as const
 /** The D-7 dormant loops (built, never started). */
 const EXPECTED_DORMANT_LOOPS = ['agent-watcher', 'project-backup-scheduler'] as const
@@ -193,9 +201,9 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all nine running loops + the dormant set', () => {
+test('the ONE boot line names all eleven running loops + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('9 loop(s) running')
+  expect(line).toContain('12 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

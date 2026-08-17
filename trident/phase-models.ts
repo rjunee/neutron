@@ -166,7 +166,12 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     key: 'decomposition',
     label: 'Decomposition',
     description: 'Reads the task and the spec, then breaks the work into ordered steps.',
-    labels: [{ label: 'plan:fable' }],
+    // `plan:next` is the CONTINUATION planner: on a Ralph iteration that is picking
+    // the next task off the plan its own previous iteration committed, it replaces
+    // `plan:fable` and skips the whole-repo survey. Same phase and same default
+    // deliberately — it does the same job with less input, so an owner who moves
+    // decomposition to a tier moves BOTH iterations of a card, not just the first.
+    labels: [{ label: 'plan:fable' }, { label: 'plan:next' }],
     default: { tier: 'fable', effort: 'max' },
     dispatchGroups: ['claude'],
     dispatchConstraint: 'This step stays on Claude until the planner protocol has a CLI decomposition wrapper.',
@@ -279,8 +284,10 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'terminal-result' },
       { label: 'cleanup:worktree' },
       { label: 'head-probe-round-', dynamic: true },
+      { label: 'build-trailer-probe-', dynamic: true },
       { label: 'ci-probe-round-', dynamic: true },
       { label: 'review-readiness-r', dynamic: true },
+      { label: 'required-checks-r', dynamic: true },
       { label: 'merge-probe-round-', dynamic: true },
       // The mid-loop resume's diff regeneration: one `git diff <base>..<oid>`
       // redirected to a file, reporting only the byte count. Same shape as the
@@ -288,6 +295,11 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       // cheap tier rather than in the silent, expensive fallback that probe
       // spent its whole life in.
       { label: 'resume-diff' },
+      // The continuation planner's gate: `git show <branch>:IMPLEMENTATION_PLAN.md`
+      // plus a `grep -c` of its unchecked tasks, reported verbatim. Same shape as
+      // the head probe — fixed commands, a body and a number — and the decision it
+      // feeds is made in the workflow's own code, not by this agent.
+      { label: 'plan:probe' },
     ],
     default: { tier: 'fast', effort: 'low' },
     dispatchGroups: ['claude'],

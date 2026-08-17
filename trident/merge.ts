@@ -3,9 +3,11 @@
  *
  * Fills in the `MergeCleanupDeps` bodies the PR-2 `cleanupAfterMerge`
  * seam (git-mode.ts) calls on the `argus APPROVE → done` transition.
- * Both modes are host-command sequences over an injected runner (the
- * same `(cmd, cwd) => HostCommandResult` shape `defaultGitModeProbe`
- * uses), so tests assert the exact git/gh calls without shelling out.
+ * Both modes are host-command sequences over an injected runner (a
+ * `(cmd, cwd) => HostCommandResult`; `defaultGitModeProbe` takes the same
+ * shape widened with an env parameter, so it can inject the publisher's
+ * credential into its own capability call), so tests assert the exact
+ * git/gh calls without shelling out.
  *
  *   • `'pr'`    → `gh pr merge <pr> --squash --match-head-commit <reviewed OID>`,
  *                 then delete the REMOTE branch (`git push origin --delete`) +
@@ -106,11 +108,24 @@ export interface MergeConflictResolver {
     run: TridentRun
     /** Files with unresolved conflict markers (`--diff-filter=U`). */
     conflicted_files: string[]
+    /**
+     * HOW THE CONFLICTED TREE WAS MADE — the two call sites differ in ways the resolver's
+     * contract depends on, and a contract that describes the wrong one is worse than none.
+     *   - `'rebase'` (default, `rebaseBranchOntoBase`): the repo's OWN working tree, part-way
+     *     through a real `git rebase`, with dependencies installed. The outer loop runs
+     *     `git rebase --continue`; the resolver can and should run the tests.
+     *   - `'replay'` (`rebaseOntoObservedBase`): a THROWAWAY DETACHED worktree at the base tip
+     *     that `git apply --3way --index` just conflicted in. No rebase is in progress, the outer
+     *     publisher commits the tree itself, and there is no `node_modules` — a test run there
+     *     either fails for unrelated reasons or resolves modules out of a DIFFERENT checkout that
+     *     other lanes are building in.
+     */
+    mode?: 'rebase' | 'replay'
   }): Promise<{ resolved: true } | { resolved: false; question: string }>
 }
 
 /** Bound the rebase-continue loop so a pathological history can't spin forever. */
-const MAX_CONFLICT_ROUNDS = 12
+export const MAX_CONFLICT_ROUNDS = 12
 
 /**
  * Resolve the base branch to merge into. Tries `origin/HEAD`'s symbolic
@@ -639,14 +654,20 @@ function isRebaseConflict(res: HostCommandResult): boolean {
   )
 }
 
-/** The files with unresolved conflict markers (`git diff --diff-filter=U`). */
+/**
+ * The files with unresolved conflict markers (`git diff --diff-filter=U`).
+ *
+ * `-z` + `core.quotePath=false` because this list is MACHINE-CONSUMED — it becomes the resolver's
+ * `CONFLICTED FILES`. Git's default C-quoting renders `ünicode file.txt` as
+ * `"\303\274nicode file.txt"`, naming a file the resolver cannot open.
+ */
 async function listConflictedFiles(run_host: RunHostCommand, repo: string): Promise<string[]> {
-  const res = await run_host(['git', '-C', repo, 'diff', '--name-only', '--diff-filter=U'], repo)
+  const res = await run_host(
+    ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '-z', '--name-only', '--diff-filter=U'],
+    repo,
+  )
   if (!res.ok) return []
-  return res.stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+  return res.stdout.split('\0').filter((s) => s.length > 0)
 }
 
 /** Abort an in-progress rebase and return the working tree to `base`. Best-effort. */

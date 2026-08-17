@@ -27,9 +27,35 @@ import { resolveNeutronHome, resolveOpenDbPath, resolveOwnerSlug } from './owner
 export function collectCliDiagnostics(env: NodeJS.ProcessEnv = process.env):
   | { ok: true; report: DiagnosticsReport }
   | { ok: false; error: string } {
-  const dbPath = resolveOpenDbPath(env)
-  const owner_home = resolveNeutronHome(env)
-  const project_slug = resolveOwnerSlug(env)
+  // INSIDE THE `{ok:false}` CONTRACT, NOT ABOVE IT. These three lines sat above
+  // every try in this function, so anything they threw escaped the documented
+  // return shape and hit the operator as a stack trace. It has happened twice
+  // on the same statement: first a `ZodError` (an unrelated `NEUTRON_PORT=bad`,
+  // back when the slug resolver validated the whole environment), then EACCES /
+  // EISDIR from the `.url_slug` read that `existsSync` cannot rule out. Both
+  // were fixed by narrowing what the RESOLVER does — and both times the escape
+  // hatch was still here, waiting for the third kind of throw.
+  //
+  // A diagnostic must survive the broken configuration it exists to report, so
+  // the fix belongs at the call site and not only at each cause. Note what is
+  // deliberately NOT done: substituting a fallback slug and reporting on. The
+  // slug filters every event and job in the report, so a substituted one
+  // renders a healthy instance as empty — a diagnostic that quietly lies, which
+  // is worse than one that says it cannot tell. `{ok:false}` with the errno is
+  // the honest answer and is exactly what `main` returned before this branch.
+  let dbPath: string
+  let owner_home: string
+  let project_slug: string
+  try {
+    dbPath = resolveOpenDbPath(env)
+    owner_home = resolveNeutronHome(env)
+    project_slug = resolveOwnerSlug(env)
+  } catch (err) {
+    return {
+      ok: false,
+      error: `could not resolve this instance's identity: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
 
   let db: ProjectDb
   try {

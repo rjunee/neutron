@@ -27,6 +27,7 @@ import type {
   AppWsInboundReaction,
   AppWsInboundEdit,
   AppWsInboundButtonChoice,
+  AppWsInboundPresence,
 } from '@neutronai/wire-types'
 
 // L6 — re-export the full envelope wire-type union (owned by
@@ -39,6 +40,7 @@ export type {
   AppWsInboundReaction,
   AppWsInboundEdit,
   AppWsInboundButtonChoice,
+  AppWsInboundPresence,
   AppWsOutbound,
   AppWsOutboundSessionReady,
   AppWsOutboundUserMessageEcho,
@@ -272,6 +274,28 @@ export function decodeAppWsButtonChoice(raw: unknown): AppWsInboundButtonChoice 
     out.freeform_text = freeform_text
   }
   return out
+}
+
+/**
+ * Web presence (2026-08-15) — decode a `{ v:1, type:'presence', state }` frame.
+ * SEPARATE from the message / resume / receipt / reaction / edit / button
+ * decoders so each path keeps its narrow type. Returns `null` for anything
+ * malformed, INCLUDING an unrecognised `state`.
+ *
+ * REJECTING AN UNKNOWN `state` IS THE POINT, not pedantry. This decoder's only
+ * consumer suppresses a notification when it reads `foreground`, so a permissive
+ * default (`anything that isn't 'background' means present`) would let a typo or a
+ * future third state silence the owner's phone. The suppressing value has to be
+ * spelled exactly; everything else falls through to the surface's
+ * `malformed_envelope` reply, which is loud.
+ */
+export function decodeAppWsPresence(raw: unknown): AppWsInboundPresence | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['v'] !== 1) return null
+  if (e['type'] !== 'presence') return null
+  if (e['state'] !== 'foreground' && e['state'] !== 'background') return null
+  return { v: 1, type: 'presence', state: e['state'] }
 }
 
 /**

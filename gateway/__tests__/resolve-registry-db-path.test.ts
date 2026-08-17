@@ -60,18 +60,78 @@ describe('resolveRegistryDbPath', () => {
     )
   })
 
-  test('empty-string env values do NOT win — they fall through to the next tier', () => {
+  test('BLANK env values do NOT win — empty AND whitespace-only fall through to the next tier', () => {
     // Bash `Environment=NEUTRON_REGISTRY_DB_PATH=` (no value) lands as
     // the empty string. Treat it as unset so a misconfigured unit
     // doesn't open `''` and crash with a confusing SQLite error.
-    const env = {
-      NEUTRON_REGISTRY_DB_PATH: '',
-      NEUTRON_HOME: '',
-      NEUTRON_REGISTRY_DB_PATH_RW: '/legacy.db',
-    }
+    //
+    // WHITESPACE IS BLANK TOO, and it is asserted HERE, beside the tiers it
+    // governs. All three predicates trim, but until now the only test that said
+    // so lived in `open/__tests__/owner-slug-agreement.test.ts` — so this file,
+    // which advertises itself as pinning "all four resolution tiers", covered
+    // `''` and stopped. Reverting every trim in `resolveRegistryDbPath` left
+    // THIS suite green, and a reviewer mutation-testing the resolver from its
+    // own test file read that green as "unpinned" and nearly filed it. A pin
+    // that lives only in a distant file is indistinguishable from no pin at the
+    // place anyone looks; whitespace is one keystroke from empty, and
+    // `'   /registry.db'` is a directory named three spaces on the read that
+    // decides a booting instance's identity.
     const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      expect(resolveRegistryDbPath(env)).toBe('/legacy.db')
+      for (const blank of ['', '   ', '\t\n']) {
+        expect(
+          resolveRegistryDbPath({
+            NEUTRON_REGISTRY_DB_PATH: blank,
+            NEUTRON_HOME: blank,
+            NEUTRON_REGISTRY_DB_PATH_RW: '/legacy.db',
+          }),
+        ).toBe('/legacy.db')
+
+        // Each tier independently, so a failure names the arm that broke rather
+        // than "one of three".
+        expect(
+          resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: blank, NEUTRON_HOME: '/srv/neutron' }),
+        ).toBe('/srv/neutron/registry.db')
+        expect(
+          resolveRegistryDbPath({ NEUTRON_HOME: blank, NEUTRON_REGISTRY_DB_PATH_RW: '/legacy.db' }),
+        ).toBe('/legacy.db')
+        expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH_RW: blank })).toBe(
+          join(homedir(), '.local', 'share', 'neutron', 'registry.db'),
+        )
+      }
+
+      // CONTROLS — so a failure above means "a blank was honoured" and not "the
+      // variable stopped being read at all", which is a different bug wearing
+      // the same green.
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: '/tier-1.db' })).toBe('/tier-1.db')
+      expect(resolveRegistryDbPath({ NEUTRON_HOME: '/srv/neutron' })).toBe(
+        '/srv/neutron/registry.db',
+      )
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH_RW: '/legacy.db' })).toBe('/legacy.db')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  test('a REAL path whose blankness is only leading/trailing keeps its bytes', () => {
+    // The predicate trims to DECIDE; the value is not rewritten. Leading and
+    // trailing spaces are legal in a POSIX path, so trimming the RETURN would
+    // silently relocate a real directory — the family rule this resolver shares
+    // with `resolveNeutronHome` (`migrations/db-path.ts`) and `resolveStatePath`
+    // (`gbrain-memory/gbrain-doctor.ts`).
+    const spaced = ' /real/dir '
+    expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: spaced })).toBe(spaced)
+    expect(resolveRegistryDbPath({ NEUTRON_HOME: spaced })).toBe(join(spaced, 'registry.db'))
+
+    // THE LEGACY TIER RETURNS VERBATIM TOO, and it is asserted because a
+    // cross-model reviewer measured that it was not: the first version of this
+    // test covered the two canonical tiers and stopped, so a mutation to
+    // `return legacy.trim()` would have passed it. Every tier of this resolver
+    // returns bytes; the pin now says so for every tier rather than for the two
+    // that came to mind.
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH_RW: spaced })).toBe(spaced)
     } finally {
       warnSpy.mockRestore()
     }

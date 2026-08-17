@@ -359,6 +359,150 @@ Each carries an acceptance criterion; all in `neutron-open`.
       rejection is distinguishable from an auth failure by reading the reason alone. **And it must not
       become a disclosure surface** — assert the stored reason never contains credential material, with
       a positive control proving that assertion can fail.
+- [ ] **A gateway restart destroys every in-flight build, and the work it already pushed is
+      abandoned rather than resumed** (measured 2026-08-14; owner-confirmed cause: *"it was the
+      deploys I was doing in another session that restarted the gateway"*). The inner Forge→Argus
+      loop runs DETACHED inside a warm `cc-trident-fire-*` REPL. That REPL's child dies with the
+      gateway, `onChildCrash` (`open/wiring/substrates.ts`) stamps every run it owned
+      `subagent_status='crashed'`, and the tick reaps them to `failed`
+      (`trident/orchestrator.ts` §1a) — whose own comment states the current position outright:
+      *"A crashed launcher is a DEAD RUN whether or not we ever learned its subagent id."*
+      **That is the defect. A dead launcher is not a dead build.**
+      MEASURED, three times, two different cards: gateway boots at `06:19:56`, `06:26:51`,
+      `07:13:00` (`.restart-markers.json`, and `open/server.ts` start time) each killed a build
+      ~90s later — one watchdog tick. Runs `00b3d1cf`, `8ddca917` (card: brief-by-PATH) and
+      `bb3c8c8e` (#217). Two of the three died at the SAME checkpoint, `ralph-task-built`.
+      **The abandoned work was real and is still on the remote.** `8ddca917` pushed
+      `trident/the-build-brief-must-not-be-retyped` and opened PR #261 — 2 commits, 7 files,
+      +434/−17, last pushed `07:04:23`, NINE MINUTES before its launcher died at `07:13:00`. The
+      build was healthy and progressing. Nothing was wrong with it except where its supervisor lived.
+      The durable state needed to continue is ALREADY on the row: `branch`, `pr`,
+      `inner_checkpoint`, `round`, `ralph_round`. The tick discards it anyway.
+      **Do NOT reach for the Workflow tool's `resumeFromRunId`** — it is same-session only, and a
+      gateway restart is exactly the event that destroys the session. The persisted
+      `workflow_run_id` is a Neutron id, not a `wf_`-shaped CC run id. Recovery must be built from
+      the DURABLE artifacts (the pushed branch + the PR), which are the only things that survived.
+      Acceptance:
+      (a) A launcher crash on a run with a live branch is RELAUNCHED as a continuation from its
+          checkpoint, not reaped. Assert the already-pushed commits are neither lost nor duplicated —
+          a "recovery" that re-does landed work is a different bug, not a fix.
+      (b) It is BOUNDED and visible. A crash-recovery budget SEPARATE from the fix-round counter,
+          because these are not the agent's failures and must not consume its rounds. A deploy loop
+          (the live cause here — three restarts in 53 minutes) must not spin builds forever: past
+          the budget the run fails with a reason naming the budget. Assert the cap holds.
+      (c) Harvest still wins. A workflow that wrote a terminal result and only then lost its
+          launcher still harvests — the existing ordering guarantee must not regress.
+      (d) An unrecoverable launcher crash reports the MEASURED cause. `inner workflow child
+          crashed: pooled child exited` tells a reader nothing about why; the stored reason must
+          carry the gateway boot timestamp that killed it. Per #240: measure the cause, do not
+          assert one — and having measured it, do not throw it away either.
+      (e) The board does not read `failed` while a recovery is in flight.
+- [ ] **An infrastructure failure needs a human to notice and say "retry" — so a build that nothing
+      was wrong with sits dead until someone looks** (owner-instructed 2026-08-14: *"if there's an
+      infrastructure failure like that we need to automatically retry not wait for me to say
+      something"*). MEASURED, run `76bb4eca`: the build phase is routed to the codex executor by an
+      owner phase-override (`tag=reasoning`), codex returned `codexStatus=deferred` — configured,
+      called, no answer — and the inner loop THREW rather than silently falling back to Claude.
+      **The refusal is correct and must be preserved**; a silent downgrade would produce a build
+      attributed to a reviewer that never ran. What is wrong is what happens next: the run is
+      terminal, no branch, no commits, and it waits for a human.
+      **It is transient, which is what makes the manual wait indefensible.** The sibling run
+      `9bb31a2e` took the SAME codex route minutes apart and built fine (PR #262); the same
+      deferral cleared on relaunch the previous day. Nothing was wrong with the card.
+      **Classification is blocked on a lie in the reason field.** `76bb4eca` stored *"inner workflow
+      ended at round 1 of 10 at checkpoint 'inner-error' without Argus APPROVE"* — Argus NEVER RAN.
+      That is the #240 defect again: it asserts a cause it did not measure. Nothing can classify a
+      failure it mislabels, so the reason must be fixed FIRST or the retry gate keys off fiction.
+      Acceptance:
+      (a) A failure classified INFRASTRUCTURE retries with no human in the loop. The classes are
+          named and closed: executor deferred/timeout, transport 5xx, launcher crash.
+      (b) A GENUINE failure never auto-retries — `REQUEST_CHANGES`, failing tests, a compile error
+          are the agent's own work and must stay terminal. This is the rule most likely to be
+          implemented too broadly; assert a `REQUEST_CHANGES` does NOT retry, with a mutant that
+          goes red.
+      (c) Bounded, with backoff, on a budget SEPARATE from the fix-round counter — these are not
+          the agent's rounds to spend. Past the budget it fails with a reason naming the budget.
+      (d) Visible: the board reads retrying-with-attempt-count, not `failed`; the owner is told
+          ONCE, not once per attempt.
+      (e) The stored reason names the measured cause (`codexStatus=deferred`), never a cause that
+          did not occur.
+      NOTE the boundary with the launcher-crash entry above: that one recovers a build whose
+      SUPERVISOR died mid-flight from its pushed branch; this one re-attempts a build that never
+      started because an EXECUTOR did not answer. They share the classifier and must not both
+      rewrite it — sequence them.
+- [ ] **The push credential can vanish mid-run, and when it does a FINISHED, REVIEWED build is
+      thrown away** (measured 2026-08-14 overnight, runs `9bb31a2e` and `9e0f1a8b`). Both reached
+      `forge-done` — the work was built and reviewed — and then died at the publish rung with git's
+      own words: `fatal: could not read Username for 'https://github.com': No such device or
+      address`. That is the publisher holding NO GitHub credential at push time.
+      **It is intermittent, not absent.** The same publisher pushed successfully three times earlier
+      the same night (08:38, 08:42, and the push behind PR #262, MERGED 08:49:02Z) and could not
+      push at 09:04 and 09:10. So a credential that was live at 08:49 was gone by 09:04. The gateway
+      process carries `NEUTRON_GITHUB_CLIENT_ID` (device-flow OAuth) and no static token, so the
+      token is fetched per push and its expiry/refresh is the suspect. NOT MEASURED: which of expiry,
+      revocation or a failed refresh — do not assert one without reading the fetch path.
+      **The credit where due:** the reason above is READABLE ONLY because of the stderr-carrying fix
+      in #259. Before it, this was indistinguishable from the non-fast-forward failure it replaced —
+      both said `outer publisher could not push branch <b>` and nothing else.
+      **THE REAL COST IS THE DISCARD.** A build that is complete and reviewed should not be
+      destroyed by a credential blink. Verified: the commits survive on LOCAL branches
+      (`trident/work-board-row-state-a-card-must-no` at `a96eb95`, unpushed) — so the work exists and
+      nothing retries it. The run is stamped `failed`, the card reads failed, and a human must
+      notice. Relaunching is the WRONG remedy: it rebuilds from scratch and hits the same wall.
+      Acceptance:
+      (a) A publish that fails for a MISSING/REJECTED credential is distinguished from one that
+          fails for a rejected ref, by reading the stored reason alone. Assert both, and assert the
+          reason still never contains credential material (the #259 disclosure guard must hold).
+      (b) The built commit is NOT discarded. A publish-credential failure leaves the run in a state
+          that can publish LATER without rebuilding — the commit is already made; only the push
+          failed. Assert a re-publish after the credential returns produces the same sha, and does
+          not re-run Forge.
+      (c) `publish-credential` joins the auto-retry class list in the entry above, with a backoff
+          long enough to outlast a token refresh.
+      (d) When it is genuinely unrecoverable, the owner is told WHICH surface reconnects GitHub —
+          never a shell command, per the credential doctrine.
+      NOTE for whoever builds this: dispatching more builds while the credential is down is waste —
+      every one of them will build, review, and then fail at the same rung. Whatever fixes this
+      should also make that state visible enough that a queue is not fed into a wall.
+- [ ] **Every credential the owner connected before his instance was provisioned is invisible to it,
+      and the instance reports that as "not connected"** (measured + REPAIRED by hand 2026-08-14;
+      the code fix is what this entry asks for). `secrets.project_slug` and
+      `project_credentials.owner_slug` both hold the FROZEN `owner_handle`
+      (`auth/secrets-store.ts` header), and `open/composer.ts:839` sets
+      `owner_handle = project_slug` from the boot slug. On this box every row was written under
+      `dev` (the pre-provisioning dogfood handle) while the unit boots
+      `NEUTRON_INSTANCE_SLUG=juno` — so all 15 `secrets` rows and all 3 `project_credentials` rows
+      were unreachable. **BLAST RADIUS, all one bug:** `readGitHubToken` → `githubProcessEnv(null)`
+      → `{}` → every trident publish died `fatal: could not read Username for 'https://github.com'`
+      (runs `9bb31a2e` 09:04Z, `9e0f1a8b` 09:10Z, plus `09f1ac41`/`835c3625`/`3da6fde2` blocked at
+      the same rung until the 90-min hang watchdog killed all three at 10:13Z); `integrations_list`
+      reported gmail/calendar/workspace `connected:false` on top of live, refreshing OAuth rows;
+      the codex bundle could not be seen at all — after the re-scope `codex_status` immediately
+      returned the TRUE state, `expired`. Repair was a metadata move (`UPDATE … SET
+      project_slug='juno'`), which is safe precisely because `encrypt(key, plaintext)` binds no AAD.
+      **This is the OTHER HALF of the 2026-05-12 rename-canonicalisation fix.** That one froze the
+      handle so a RENAME could not orphan rows. Nothing covers rows written before PROVISIONING
+      froze a different handle. **The failure mode is what makes it expensive: it is silent and
+      indistinguishable from "never connected"** — `readGitHubToken` normalises a miss to `null` by
+      design, so a wrong-scope lookup and an un-connected instance take the same branch and print
+      the same sentence. An entire night of builds was diagnosed as a blinking GitHub token.
+      Acceptance:
+      (a) Boot DETECTS credential rows scoped to an owner handle other than the boot handle and
+          migrates them (or refuses to boot naming the mismatch — either is defensible, silence is
+          not). Assert against a DB seeded under an old handle: the token reads back after boot and
+          the ciphertext bytes are unchanged.
+      (b) A miss is DISTINGUISHABLE. When rows exist under a different handle the surface says
+          orphaned/needs-migration, never "not connected". Guard against a fake test here: a test
+          that only asserts null-on-miss passes with the bug present — it needs a positive control
+          where the same lookup succeeds under the right handle, and deleting the migration must
+          turn a test red.
+      (c) The migration covers EVERY member of `SHARED_KEY_ENCRYPTED_TABLES`. Moving `secrets` and
+          not `project_credentials` leaves codex and the host-deploy token orphaned; assert both.
+      (d) No secret material reaches a log, an error, or the migration's own audit row.
+      NOTE, same orphan class and deliberately NOT in scope: `reminders` rows also carry the stale
+      `dev` slug, which is why `reminders_cancel` answered `ok:false` for a live pending row and a
+      cancelled overnight watch kept firing every 30 minutes. Whoever builds this should say
+      whether the scope key belongs on that table at all before moving those rows too.
 - [ ] Wire `ProjectBackupScheduler` (dormant loop today) — a scheduled per-project backup fires on its interval. (D-7)
       Do NOT resolve this one alone: see the code-repo-vs-vault entry below. Wiring the scheduler without
       deciding the model would start snapshotting trees that contain nested code repos and live SQLite.
@@ -651,6 +795,17 @@ Each carries an acceptance criterion; all in `neutron-open`.
       an explicit terminal cause on every terminal path; the orchestrator reports THAT; and
       `delivery.ts` regains a specific summary per cause. Until then the generic message is
       correct and MUST NOT be re-specialised.
+      PROGRESS 2026-08-14/15, two of the terminal paths now emit one, and BOTH ship with the
+      measurement rather than before it. (1) An `infra-only` review stop carries the probe's
+      own words (PR #240). (2) A THROWN workflow carries the sentence it threw — the catch
+      used to persist `{checkpoint: 'inner-error'}` with no cause, so run `3d2696c3`
+      (a finished, committed build whose OID was not relayed) was reported to the owner as
+      "…without Argus APPROVE" on a path Argus never reached. It carries NO block kind,
+      because a throw is not a review verdict, and `innerTerminalFailureReason` reports it as
+      *"inner workflow failed at round N of M: `<cause>`"* — saying nothing about the review
+      panel, which only `infra-only` is licensed to do. STILL OPEN: the review-verdict paths
+      ('code' / 'round-lost' / 'none') emit no cause — a finding title describes the DIFF, not
+      why the loop stopped — and `delivery.ts` still has one summary for all of them.
       OWNER'S RULE (2026-08-13, verbatim): *"If it's a generic catchall make the error message generic."*
       This is the governing principle and it is broader than this line: **a message must not assert a cause
       it did not measure.** A branch that catches N causes says something true of all N, and the specific

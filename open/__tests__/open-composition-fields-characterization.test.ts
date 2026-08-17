@@ -191,15 +191,15 @@ const EXPECTED_COMPOSITION_KEYS = [
   'onboarding_overnight_cron',
   'platform',
   'project_slug',
-  // The reminder-fired push hook (`ReminderTickLoop.on_fired`). Registering a
-  // device was only ever half of push; this is the delivery half, and its
-  // absence is why `createPushDispatcher` had no non-test call site.
-  'push_dispatcher',
   'realmode_cleanups',
   'reminder_dispatcher',
   // Executor-mode reminders (plan task 4) — ritual executor factory, set when
   // a credential resolves (llmPool !== null), like `agent_dispatch`/`trident`.
   'skill_forge',
+  // The PROVENANCE of `project_slug`, travelling with it: a fallback 'dev' and a
+  // configured 'dev' are the same string and opposite situations, and only the
+  // boot resolver can tell them apart.
+  'slug_is_fallback',
   'tasks',
   'topic_handler',
   'trident',

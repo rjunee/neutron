@@ -23,8 +23,10 @@ fire-time text is composed at fire time, never pre-rendered.
   `PATTERN:`) composed with live context, degrading to a literal fallback so a
   reminder ALWAYS delivers. For a ritual: the approved prompt from the fire plan,
   a wider budget, no literal fallback (a failure is recorded + noticed instead).
-  BOTH compose through the SAME `llm.compose` call on the owner's warm chat
-  substrate and post through the SAME outbound, which is the whole point.
+  BOTH compose through the SAME `llm.compose` call on the warm BACKGROUND compose
+  substrate (`cc-nudge-*` — same grants as the owner's chat, its own session, so an
+  aborted compose cannot evict the child he is talking to) and post through the SAME
+  outbound, which is the whole point.
 - `ritual-fire.ts` — the ritual FIRE PLAN: given a due row, "what does this compose
   from and what must be recorded?" as data plus a settle hook. Owns no substrate,
   spawns nothing, never posts.

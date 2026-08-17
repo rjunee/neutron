@@ -62,14 +62,22 @@ import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
-import { TridentTickLoop, type TridentTerminalHook, type TridentTransitionHook } from '@neutronai/trident/tick.ts'
+import {
+  TridentTickLoop,
+  type TridentDeadLauncherLatch,
+  type TridentLivenessProbe,
+  type TridentTerminalHook,
+  type TridentTransitionHook,
+} from '@neutronai/trident/tick.ts'
 import { stubAdvanceDeps } from '@neutronai/trident/state-machine.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
   buildFocusScoreRecomputeHandler,
@@ -388,11 +396,11 @@ export function buildCoreModules(
     deps: ['approval'],
     init: (ctx) => {
       const store = new ReminderStore(input.db)
-      // P5.6 — when a push dispatcher is wired, attach it as the
-      // tick loop's `on_fired` hook so every fired reminder also
-      // emits a native push to every registered Expo device for the
-      // instance. The hook is failure-safe inside the tick loop, so a
-      // push outage cannot stop reminders from being marked fired.
+      // (The P5.6 note that used to sit here described attaching the push
+      // dispatcher as the tick's `on_fired` hook. That wiring is GONE — see the
+      // "what is NOT here any more" note below, which is now the only account of
+      // it. Leaving both left one file describing the wiring and contradicting
+      // itself twenty-five lines later.)
       const loopOpts: ConstructorParameters<typeof ReminderTickLoop>[0] = {
         store,
         dispatcher: input.reminder_dispatcher,
@@ -415,16 +423,32 @@ export function buildCoreModules(
           return tz !== null && isValidIanaTimezone(tz) ? tz : null
         },
       }
-      if (input.push_dispatcher !== undefined) {
-        loopOpts.on_fired = input.push_dispatcher
-      }
+      // NOTE what is NOT here any more: a reminder-fired PUSH hook. Until
+      // 2026-08-09 the composition's `push_dispatcher` was attached to the tick's
+      // `on_fired` and composed a notification from the reminder ROW — which for a
+      // ritual is the dispatch token `ritual:<id>`, so the owner's lock screen read
+      // `ritual:kaizen`. The tick cannot see the message the fire posted, so it was
+      // never a place a truthful chat notification could be built. It is composed
+      // by the ONE out-of-turn delivery seam instead (`gateway/http/deliver.ts` →
+      // its `notify` sink), which knows the posted text and the durable row id AND
+      // is shared by every producer, so a brief and a nudge notify the same way a
+      // fired reminder does.
       // Rituals (ISSUES #504) — install the ritual fire PLANNER now that the
       // graph's ApprovalManager exists. NOTE what is NOT here: the tick loop gets
       // no ritual option, because a ritual is not a special kind of fire. The
       // planner installs into the ONE `reminder_dispatcher` the composer already
       // built, which composes a ritual and a nudge through the same substrate call
-      // and posts both through the same delivery seam. Absent (LLM-less box) →
-      // every row composes as an ordinary nudge, which is fail-closed.
+      // and posts both through the same delivery seam.
+      //
+      // Absent (LLM-less box) → a row with NO `ritual_id` composes as an ordinary
+      // nudge; a RITUAL row is refused outright — it composes nothing, logs at error
+      // level and posts one plain-language notice (`reminders/dispatcher.ts:508`).
+      // This sentence used to read "every row composes as an ordinary nudge, which is
+      // fail-closed", which was true of the approved PROMPT and false of the
+      // NOTIFICATION: a ritual row's stored `message` IS the dispatch token
+      // `ritual:<id>`, so nudging it is how `ritual:kaizen` reached the owner's lock
+      // screen. Corrected in `dispatcher.ts` and `open/composer.ts` first; this was
+      // the third copy of the same claim and it was missed.
       if (input.init_ritual_planner !== undefined) {
         input.init_ritual_planner({
           approvals: ctx.graph.get<ApprovalManager>('approval'),
@@ -520,6 +544,27 @@ export function buildCoreModules(
         runTransitionObserver === undefined
           ? {}
           : { on_transition: { onTransition: (run) => runTransitionObserver(run) } }
+      // The wake-on-change watcher's cadence, when the composition set one. Spread
+      // conditionally for the same reason as `on_transition`: absent means "the 2 s
+      // default", not "0". This is what makes the cadence CONFIGURABLE in production
+      // rather than only on the options type (Argus r3).
+      const watchOpt: { watch_interval_ms?: number } =
+        tridentWiring?.watch_interval_ms === undefined
+          ? {}
+          : { watch_interval_ms: tridentWiring.watch_interval_ms }
+      // The external signal observes the warm launcher, not the detached build.
+      // Route it through #267's durable crash latch so harvest-first continuation
+      // remains authoritative across gateway restarts.
+      const livenessOpt: {
+        probe_launcher_alive?: TridentLivenessProbe
+        latch_launcher_dead?: TridentDeadLauncherLatch
+      } =
+        tridentWiring?.probe_launcher_alive === undefined
+          ? {}
+          : {
+              probe_launcher_alive: tridentWiring.probe_launcher_alive,
+              latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
+            }
       let loop: TridentTickLoop
       // §F1 — the orchestrator's `drain()` (previously destructured away and
       // never called) settles every in-flight FIRE turn on shutdown. Captured
@@ -587,6 +632,17 @@ export function buildCoreModules(
         if (tridentWiring.resolve_reflection_context !== undefined) {
           orchestratorOpts.resolve_reflection_context = tridentWiring.resolve_reflection_context
         }
+        // THE LIVE FAN-OUT the TEST EXECUTION budget divides the box by, when it
+        // exceeds the planned fan-out (`DEFAULT_BUILD_FANOUT`, which is the constant
+        // that carries the guarantee — see `computeTestJobs`). Counts the launching
+        // run's OWN row too, so the divisor is the true number of builds sharing these
+        // cores. Without this line the whole chain is inert (the `resolve_phase_models`
+        // lesson — an unwired producer ships a feature whose every part works and which
+        // as a whole does nothing).
+        //
+        // ONLY THE BUILD PHASES COUNT — see `countActiveBuildRuns`, which is where the
+        // rule and its known over-count live, and which is unit-tested behaviourally.
+        orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome
@@ -607,13 +663,30 @@ export function buildCoreModules(
         // branch/PR/checkpoint, bounded by the durable `crash_recoveries` budget.
         orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
-        loop = new TridentTickLoop({ store, step: orchestrator.step, on_terminal, ...transitionOpt })
+        loop = new TridentTickLoop({
+          store,
+          step: orchestrator.step,
+          on_terminal,
+          ...transitionOpt,
+          ...watchOpt,
+          ...livenessOpt,
+        })
         drain = orchestrator.drain
       } else {
-        loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
+        loop = new TridentTickLoop({
+          store,
+          deps: stubAdvanceDeps(),
+          on_terminal,
+          ...transitionOpt,
+          ...watchOpt,
+          ...livenessOpt,
+        })
       }
       // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
-      loopRegistry.register(loop.describe())
+      // `describeAll`, not `describe`: trident owns up to THREE timers — the 90 s sweep,
+      // the 2 s wake-on-change watcher, and the 15 s liveness probe — and an
+      // unregistered timer is one the inventory reports as healthy by never mentioning it.
+      for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       loop.start()
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
@@ -842,6 +915,16 @@ export function buildCoreModules(
         const overnightCfg = input.onboarding_overnight_cron
         const handler = buildOvernightEngineHandler({
           db: input.db,
+          // Merge-mode detection needs the PUBLISHER'S credential, not the
+          // gateway's ambient `gh` state (which is empty by design — the token
+          // is injected per spawn). A composer that supplied no overnight config
+          // gets the honest "nothing wired" source, which refuses a GitHub-backed
+          // overnight build by NAME instead of asking a bare `gh` and getting a
+          // truthful answer about the wrong process. It is given no handle
+          // deliberately: the project slug is not an owner handle, and passing it
+          // here made the refusal name an identity that was never looked up.
+          publisher_credential:
+            overnightCfg?.publisher_credential ?? unwiredPublisherCredential(),
           ...(overnightCfg?.deliver !== undefined ? { deliver: overnightCfg.deliver } : {}),
           // The composer's topic beats the onboarding-row read (ISSUES #443 —
           // on Open that row never carries one, so the brief was skipped).

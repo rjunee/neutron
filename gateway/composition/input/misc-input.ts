@@ -6,30 +6,35 @@ export interface MiscCompositionInput {
   db: ProjectDb
   project_slug: string
   /**
-   * P5.6 — optional reminder-fired push hook. When supplied, the
-   * reminders module wires this hook into `ReminderTickLoop.on_fired`
-   * so an Expo Push notification fans out at the same instant the
-   * substrate dispatcher fires the Telegram message.
+   * True when {@link project_slug} is the bare FALLBACK — nothing configured it,
+   * so the process does not actually know who it is.
    *
-   * `push_dispatcher.onFired(reminder)` is called AFTER the tick
-   * loop has advanced the row (markFired for one-shot, advanceRecurrence
-   * for recurring). Failure-safe: thrown errors are caught and logged
-   * but never block the tick from advancing to the next reminder.
+   * It travels WITH the slug rather than being re-derived downstream because a
+   * fallback `'dev'` and a configured `'dev'` are the same string and opposite
+   * situations; only the resolver can tell them apart, and only at boot. The
+   * credential surfaces refuse to move rows onto an unnamed process, which is a
+   * decision they cannot make from the handle alone.
    *
-   * `open/composer.ts` wires `createPushDispatcher(...)`
-   * (`gateway/push/dispatcher.ts`) over the SAME `DevicePushTokenStore` the
-   * `/api/app/devices/register` surface writes to, so a registered device is a
-   * delivered device. Test/dev paths leave this unset so the reminder tick
-   * behaves exactly as it did before push existed.
-   *
-   * (This comment claimed "Production wires createPushDispatcher" for months
-   * while NO composer set the field and the function had no non-test call site.
-   * It is true as of the wiring above; do not let it drift back — the assertion
-   * that holds it is `tests/integration/reminders-tab-and-push.open.test.ts`.)
+   * OPTIONAL, and ABSENT MEANS FALLBACK. "This composition did not say where its
+   * handle came from" and "this process does not know who it is" are the same
+   * statement, so the wiring reads `undefined` as anonymous and the credential
+   * surfaces refuse. That keeps a composer that forgets it FAIL-CLOSED — loudly
+   * unable to migrate — instead of silently doing the unguarded thing, which is
+   * the failure this whole guard exists for. It also spares every composition
+   * test from asserting a provenance it does not care about.
    */
-  push_dispatcher?: {
-    onFired(reminder: import('@neutronai/reminders/store.ts').Reminder): Promise<void>
-  }
+  slug_is_fallback?: boolean
+  // LOOKING FOR `push_dispatcher`? It was DELETED on 2026-08-09, along with the
+  // `ReminderTickLoop.on_fired` hook it fed. It composed a native notification
+  // from the reminder ROW, and the row is the wrong source — a ritual's stored
+  // `message` is the dispatch token `ritual:<id>`, which is literally what the
+  // owner's phone displayed. The notification for a chat message is now composed
+  // by the ONE out-of-turn delivery seam (`gateway/http/deliver.ts` → its `notify`
+  // sink → `gateway/push/chat-message-push.ts`), which is the only place that
+  // knows the posted text AND its durable row id AND is shared by every producer
+  // — a fired reminder, a ritual, the morning brief, the idle nudge, a system
+  // notice. The Expo transport itself (`gateway/push/dispatcher.ts`) is unchanged
+  // and still built by the composer.
   /**
    * P1.5 / Sprint 21 — wiring cleanup callbacks. The realmode
    * composer opens auxiliary DB handles (e.g. RW registry/identity for
@@ -174,6 +179,25 @@ export interface MiscCompositionInput {
      * fans live to any open socket). Absent → the module falls back to the router.
      */
     delivery_sink?: import('@neutronai/trident/delivery.ts').OutboundSink
+    /**
+     * Wake-on-change watcher cadence, in ms (`TridentTickOptions.watch_interval_ms`;
+     * default 2_000, `<= 0` disables it). The watcher runs ONE cheap
+     * `changeSignature()` query per cadence and wakes the 90 s sweep only when a run
+     * actually advanced, so an out-of-process checkpoint is picked up in seconds.
+     *
+     * Plumbed here because "2 s default, CONFIGURABLE" is only true if a production
+     * composition can set it (Argus r3): a knob that exists on the options type and
+     * nowhere on the wiring is a knob no operator has. Absent → the 2 s default.
+     */
+    watch_interval_ms?: number
+    /**
+     * PULL half of launcher-death detection: an EXTERNAL per-run probe of
+     * whether the recorded launcher generation (`workflow_run_id`) is still a
+     * live process. Three-valued (`alive`/`dead`/`unknown`): only positive
+     * `dead` evidence acts. Absent means no `trident-liveness` loop and preserves
+     * prior behaviour byte-for-byte. The trident module owns the durable latch.
+     */
+    probe_launcher_alive?: import('@neutronai/trident/tick.ts').TridentLivenessProbe
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
@@ -334,7 +358,16 @@ export interface MiscCompositionInput {
      *  `<home>/Projects/<slug>/code` workspace under it (see `board-dispatch.ts`). */
     repo_path: string
     resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-    resolveMergeMode?: (repo_path: string) => Promise<import('@neutronai/trident/store.ts').MergeMode>
+    /**
+     * The merge-mode PROBE, REQUIRED. The composer owns the GitHub credential,
+     * so it owns this. Optional here once meant the tool surface fell through to
+     * an uncredentialed `gh auth status` probe (`trident/board-dispatch.ts`).
+     *
+     * A probe rather than a `(repo_path) => MergeMode` function on purpose: the
+     * probe carries `publisher`, so which credential this seam closes over is
+     * assertable at the boot-wiring test instead of merely being a function.
+     */
+    merge_mode_probe: import('@neutronai/trident/git-mode.ts').GitModeProbe
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number

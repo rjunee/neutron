@@ -98,6 +98,30 @@ async function runWorkflow(script: Script): Promise<RunOut> {
         ? { raw: '[{"name":"test","state":"SUCCESS","link":"x"}]\n___EXIT=0', exit_code: 0 }
         : script.ciProbe(n)
     }
+    // What the base branch requires, in the five-section shape the probe transcribes:
+    // protection 404, the branch read PROVING that 404 means unprotected, no rulesets,
+    // and the names this repo emits as both check runs and classic commit statuses.
+    //
+    // THE BRANCH READ IS LOAD-BEARING, not decoration. A 404 from the protection
+    // endpoint is also how GitHub answers a credential without Administration-read, so
+    // `protected:false` is what distinguishes "there is no protection" from "you may
+    // not ask" — without it the gate correctly refuses to assume the permissive rule
+    // and this healthy run defers. See `classifyRequiredChecksProbe`.
+    //
+    // The produced lists carry `n` beside `names`: that is GitHub's `total_count`, and
+    // a count larger than the array means the page was truncated and the list is
+    // evidence of nothing.
+    if (label.startsWith('required-checks-r')) {
+      return {
+        raw:
+          'gh: Not Found (HTTP 404)\n___PROT_EXIT=1\n' +
+          '___SECTION=BRANCH\n{"protected":false,"protectionEnabled":false}\n___BRANCH_EXIT=0\n' +
+          '___SECTION=RULES\n[]\n___RULES_EXIT=0\n' +
+          '___SECTION=RUNS\n{"n":3,"names":["test","lint","typecheck"]}\n___RUNS_EXIT=0\n' +
+          '___SECTION=STATUSES\n{"n":0,"names":[]}\n___STATUSES_EXIT=0\n___EXIT=0',
+        exit_code: 0,
+      }
+    }
     if (label.startsWith('review-readiness-r')) {
       return {
         raw: JSON.stringify({
@@ -114,7 +138,9 @@ async function runWorkflow(script: Script): Promise<RunOut> {
     // The branch moved iff a Forge round ran, so a fix round LANDS and the loop can
     // reach its second review (`roundLanded`).
     if (label === 'head-probe-round-resume') return { head: '0123456789abcdef0123456789abcdef01234567' }
-    if (label.startsWith('head-probe-round-')) return { head: `sha-${calls['forge'] ?? 0}` }
+    // ONE stub for both head probes (`head-probe-round-built-r1` and `head-probe-round-2`):
+    // the prefix below matches both and they want the same answer here.
+    if (label.startsWith('head-probe-round-')) return { head: String(calls['forge'] ?? 0).padStart(40, '0') }
     return ''
   }
   // Promise.all, exactly as the runtime does it — so a thunk that REJECTS rejects the

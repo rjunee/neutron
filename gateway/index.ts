@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
@@ -6,12 +6,24 @@ import {
   reconcileInstanceScopeOnProjectDb,
   type ScopeReconcileResult,
 } from '@neutronai/migrations/scope-rekey.ts'
+import { reconcileCredentialScope } from '@neutronai/auth/credential-scope-reconcile.ts'
 import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import {
   ProjectDb,
   SystemEventsStore,
   pushSystemEventSink,
 } from '@neutronai/persistence/index.ts'
+import {
+  planCredentialRefusalRows,
+  planInstanceRefusalRows,
+  readOwnerReadableScopes,
+  shouldJournal,
+} from './scope-refusal-journal.ts'
+// The journal's edge trigger is measured against the SAME window the owner's
+// diagnostics feed returns, so the constant is imported rather than restated —
+// a dedup bounded to a different window than the reader either suppresses rows
+// the owner cannot see or writes rows he can (Argus r2, 2026-08-16).
+import { DEFAULT_MAX_RECENT_EVENTS } from './diagnostics/instance-sources.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
@@ -22,7 +34,13 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // (signup/, provisioning/, identity/, proxy/).
 import { composeProductionGraph, DORMANT_LOOPS, type ComposedProductionGraph, type MemoryHealthProvider } from './composition.ts'
 import { LoopRegistry } from '@neutronai/loop'
-import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
+import {
+  resolveBootConfig,
+  resolveIdentityConfig,
+  resolveOwnerSlugSourceFromConfig,
+  type BootConfig,
+  type OwnerSlugResolution,
+} from '@neutronai/config/index.ts'
 import { assertWideBindPolicy } from './boot-bind-policy.ts'
 
 
@@ -143,15 +161,28 @@ export interface BootServer {
  * returns the new value on the next boot.
  */
 export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
-  const ownerHome = env['OWNER_HOME']
-  if (ownerHome !== undefined && ownerHome !== '') {
-    const slugFile = join(ownerHome, '.url_slug')
-    if (existsSync(slugFile)) {
-      const fromFile = readFileSync(slugFile, 'utf8').trim()
-      if (fromFile.length > 0) return fromFile
-    }
-  }
-  return env['NEUTRON_INSTANCE_SLUG'] ?? 'dev'
+  // DELEGATES. This used to be a hand-copied duplicate of the resolver below,
+  // and its docblock claimed "identical precedence" — which held right up until
+  // one of them learned to trim an empty slug and the other did not. Three
+  // copies of "who am I" existed at once; a review found two of them disagreeing
+  // with boot, and `neutron doctor` reading one of the wrong ones would report
+  // an empty instance for a system running perfectly well.
+  //
+  // A duplicated answer is not redundancy, it is a second opinion nobody asked
+  // for. There is now ONE implementation and the others call it.
+  // The CONFIG resolver feeds the SLUG resolver. Hand-building a partial config
+  // from raw env kept being not-quite-right in a new way each round: first it
+  // dropped NEUTRON_HOME, then it still skipped the DEFAULT home that
+  // `resolveNeutronHome` materialises when neither variable is set — so with a
+  // renamed instance and no env at all, boot read `~/neutron/.url_slug` and this
+  // returned `dev`.
+  //
+  // There is no version of "copy the inputs correctly" that stays correct. Use
+  // the same function boot uses to decide what the inputs ARE — but only the
+  // IDENTITY slice of it. Delegating to the full `resolveBootConfig` also
+  // inherited its validation of every unrelated numeric knob, which turned
+  // `NEUTRON_PORT=bad` into a throw out of `neutron doctor`.
+  return resolveOwnerSlugSourceFromConfig(resolveIdentityConfig(env)).slug
 }
 
 /**
@@ -163,25 +194,38 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
  * independent `process.env` read. This keeps the composer + boot from
  * desyncing on the resolved slug (the hazard the C1 brief flags).
  *
- * The `.url_slug` lookup uses the EFFECTIVE owner home — `config.ownerHome ??
- * config.neutronHome` — i.e. the exact value {@link envShimFromBootConfig}
- * publishes to `OWNER_HOME`. This preserves the old Open flow bit-for-bit: the
+ * The `.url_slug` lookup uses the EFFECTIVE owner home — `effectiveOwnerHome`
+ * (`config/index.ts`), i.e. the exact value {@link envShimFromBootConfig}
+ * publishes to `OWNER_HOME`; they call the SAME function, because the sentence
+ * "the exact value" was written while each computed its own `??` expression and
+ * they disagreed on `OWNER_HOME=''`. This preserves the old Open flow: the
  * legacy `open/server.ts` mutated `process.env.OWNER_HOME ||= neutronHome`
  * BEFORE `boot()` read it, so an `OWNER_HOME`-unset box with `<NEUTRON_HOME>/
  * .url_slug` resolved the slug from that file. Reading raw `config.ownerHome`
  * alone would silently ignore the rename file on such a box.
  */
 export function resolveOwnerSlugFromConfig(config: BootConfig): string {
-  const ownerHome = config.ownerHome ?? config.neutronHome
-  if (ownerHome !== undefined && ownerHome !== '') {
-    const slugFile = join(ownerHome, '.url_slug')
-    if (existsSync(slugFile)) {
-      const fromFile = readFileSync(slugFile, 'utf8').trim()
-      if (fromFile.length > 0) return fromFile
-    }
-  }
-  return config.instanceSlug ?? 'dev'
+  return resolveOwnerSlugSourceFromConfig(config).slug
 }
+
+// THE SLUG RESOLVER MOVED DOWN TO `config/index.ts` AND IS RE-EXPORTED HERE.
+// It was DEFINED on this entry module, and `open/owner-identity.ts` imported it
+// from here — which put `gateway/index.ts` into the Open composer's own import
+// graph. `gateway/composer-contract.ts` forbids exactly that: "the composer
+// graph must NOT contain the entry module (`gateway/index.ts`) at all",
+// because an entry↔composer edge is the top-level-await cycle that completes
+// under Bun's current loader and can deadlock under a strict reading of the
+// ESM TLA spec (and prod bun is PATH-pinned, not version-pinned). depcruise
+// permits `open → gateway` wholesale, so no mechanical gate catches this; the
+// contract is prose and the fix is to not need the edge. Its inputs are an
+// `IdentityConfig` and the filesystem, so the identity leaf is its real home.
+// `open/composer.ts`'s freedom from this module is pinned by
+// `open/__tests__/composer-graph-excludes-gateway-entry.test.ts`.
+export {
+  resolveOwnerSlugSourceFromConfig,
+  OwnerSlugUnreadableError,
+} from '@neutronai/config/index.ts'
+export type { OwnerSlugSource, OwnerSlugResolution } from '@neutronai/config/index.ts'
 
 
 export interface BootOptions {
@@ -259,8 +303,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // the just-registered sink. Guard the DB (the one resource open so far) so a
   // slug-read failure closes it before propagating.
   let project_slug: string
+  let slugResolution: OwnerSlugResolution
   try {
-    project_slug = resolveOwnerSlugFromConfig(config)
+    slugResolution = resolveOwnerSlugSourceFromConfig(config)
+    project_slug = slugResolution.slug
   } catch (err) {
     db.close()
     throw err
@@ -302,7 +348,15 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // mirrors the guards above (`bootFailureCleanup` is not declared yet here).
   let scopeReconcile: ScopeReconcileResult
   try {
-    scopeReconcile = reconcileInstanceScopeOnProjectDb(db, project_slug, { dbPath })
+    // `currentSlugIsFallback` is the DIRECTION half of the reconcile decision:
+    // a slug nobody configured may never pull the live instance's rows onto
+    // itself (defect 2026-08-14). It degrades to noop-and-log, never a refused
+    // boot — a headless box that refuses to boot has no surface left to explain
+    // itself.
+    scopeReconcile = reconcileInstanceScopeOnProjectDb(db, project_slug, {
+      dbPath,
+      currentSlugIsFallback: slugResolution.source === 'fallback',
+    })
   } catch (err) {
     clearOwnedSystemEventSink()
     await systemEventSink.drain()
@@ -339,6 +393,243 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         },
       }),
     )
+  }
+  // The direction guard fired: an unconfigured identity found rows under a real
+  // handle and left them alone. Nothing is broken, but the box is running under
+  // the wrong name against someone else's database, and that must be visible
+  // without anyone having gone looking — the expensive part of this class of bug
+  // is that the symptom surfaces three layers away as "not connected".
+  //
+  // WHICH SCOPE THE ROW BELONGS TO (decision 2026-08-16, INVARIANTS #116(b)).
+  // The owner can only ever read ONE scope — the diagnostics feed is strictly
+  // `WHERE project_slug = ?` (persistence/system-events.ts, deliberately so) —
+  // and the handle this process is booting under is not it. Scoped to the
+  // attempting handle the row is unreadable FOREVER: the fallback handle is
+  // anonymous by construction, nobody opens a diagnostics page under it, and the
+  // refusal also never re-keys the ledger, so the next explicit boot takes the
+  // ledger-agrees fast path (migrations/scope-rekey.ts) and never sweeps the row
+  // back. The guard's only observable signal would be invisible to exactly the
+  // instance it protects — the silent-failure class the guard exists to close.
+  //
+  // So it is journalled under the handles this database records as its OWN
+  // (ledger first, `onboarding_state` when the ledger is absent), one narrowed
+  // row each, edge-triggered. Note that "its own" is decided by the EVIDENCE in
+  // those tables and not by string-inequality with `project_slug`: an owner
+  // whose instance really is called `dev` reads under `dev`, and dropping that
+  // scope because the booting process resolved to the same string moved the row
+  // to an unreadable one (Argus r2, 2026-08-16). All of that reasoning —
+  // including why a foreign handle's NAME may not appear in another scope's row,
+  // and why a repeat is not re-written — lives in `./scope-refusal-journal.ts`.
+  // Computed ONCE here and shared with the credential reconciler below, which
+  // needs the same answer and must not disagree with this one.
+  // BEST-EFFORT, and that is load-bearing at THIS position: `bootFailureCleanup`
+  // is not declared until far below, so a throw out of these two SELECTs would
+  // escape `boot()` with the DB open and this boot's sink still on the ambient
+  // stack — the exact half-open boot the hand-rolled guards above exist to
+  // prevent. `readOwnerReadableScopes` degrades to the documented FLOOR instead
+  // (see `./scope-refusal-journal.ts`), which is what shipped before this module.
+  let ownerScopesMemo: string[] | null = null
+  const ownerReadableScopes = (): string[] => (ownerScopesMemo ??= readOwnerReadableScopes(db))
+  if (scopeReconcile.refused_direction !== undefined) {
+    const refusal = scopeReconcile.refused_direction
+    log.warn('instance_scope_rekey_refused', {
+      current_slug: scopeReconcile.current_slug,
+      stranded_keys: refusal.stranded_keys.join(','),
+      stranded_rows: refusal.stranded_rows,
+    })
+    // `refusal.stranded_rows` is deliberately NOT passed on. It is a `COUNT(*)`
+    // over ~40 swept tables, so it moves whenever the owner creates a task —
+    // and a journal payload that moves is a journal payload that is written
+    // every boot, which drains the 50-row window this trigger exists to protect
+    // (Argus r2 blocker, 2026-08-16). It rides in the log line above instead,
+    // where nothing competes for space. See `./scope-refusal-journal.ts`.
+    for (const row of planInstanceRefusalRows({
+      owner_scopes: ownerReadableScopes(),
+      stranded_keys: refusal.stranded_keys,
+      attempted_by_slug: scopeReconcile.current_slug,
+    })) {
+      if (
+        !shouldJournal(
+          () =>
+            systemEventSink.listVisibleForScopeAndName(
+              row.scope,
+              'instance_scope_rekey_refused',
+              DEFAULT_MAX_RECENT_EVENTS,
+            ),
+          row.payload,
+        )
+      )
+        continue
+      fireAndForget(
+        'gateway.scope_rekey_refused_journal',
+        systemEventSink.record({
+          event: 'instance_scope_rekey_refused',
+          module: 'gateway',
+          level: 'warn',
+          project_slug: row.scope,
+          payload: row.payload,
+        }),
+      )
+    }
+  }
+
+  // CREDENTIAL SCOPE RECONCILIATION (card 2026-08-14) — the OTHER half of the
+  // scope problem, and the reason it must run separately from #451 above.
+  // `secrets.project_slug` / `project_credentials.owner_slug` hold the FROZEN
+  // owner handle, so a credential written BEFORE provisioning froze a different
+  // handle (`dev` on a dogfood box) is unreachable once the unit boots as
+  // `juno` — and the #451 reconciler cannot see it, because the ledger AGREES
+  // with the boot slug and its every-boot path is a single SELECT. Unambiguous
+  // (one stale handle, zero rows under the boot handle) ⇒ migrate; ambiguous ⇒
+  // touch nothing and journal the orphan counts, so the integrations surface
+  // can say "scoped to a previous handle" instead of "not connected".
+  //
+  // DELIBERATE CONTRAST WITH #451 ABOVE: that one FAILS THE BOOT, because
+  // serving half a database is its defect. This one NEVER fails the boot. This
+  // box is headless — refusing to boot over unreachable credentials removes the
+  // only surface that could explain why, and the owner discovers it as
+  // "everything is dead". A throw here degrades to "credentials stay orphaned",
+  // which the surface reports; no cleanup cascade runs.
+  try {
+    // Same DIRECTION input as the #451 reconciler above, and for the same
+    // reason: these are two sweeps over two different table sets, so the guard
+    // has to be given to both or the anonymous boot simply takes the rows the
+    // other one refused.
+    const credentialScope = await reconcileCredentialScope(db, project_slug, {
+      slug_is_fallback: slugResolution.source === 'fallback',
+    })
+    if (credentialScope.action === 'migrated') {
+      log.warn('credential_scope_migrated', {
+        to: credentialScope.boot_handle,
+        from: credentialScope.stale_handles.join(','),
+        tables: credentialScope.moved.map((m) => `${m.table}:${m.rows}`).join(' '),
+      })
+      fireAndForget(
+        'gateway.credential_scope_journal',
+        systemEventSink.record({
+          event: 'credential_scope_migrated',
+          module: 'gateway',
+          level: 'warn',
+          project_slug,
+          payload: {
+            from: credentialScope.stale_handles,
+            tables: credentialScope.moved,
+          },
+        }),
+      )
+    } else if (credentialScope.action === 'orphaned') {
+      // WHY the reason is on the line and not just in the return value: these
+      // two situations need opposite responses and were rendering identically.
+      // AMBIGUOUS data says "look at your credential rows"; a REFUSED direction
+      // says "this process has no configured handle — set it and restart", and
+      // an operator handed the generic sentence was being pointed at the
+      // migration, which is the one action that must not be taken here.
+      log.warn('credential_scope_orphaned', {
+        boot_handle: credentialScope.boot_handle,
+        handles: credentialScope.stale_handles.join(','),
+        tables: credentialScope.orphan_counts
+          .map((o) => `${o.table}@${o.handle}:${o.rows}`)
+          .join(' '),
+        reason:
+          credentialScope.refused_direction === true
+            ? 'fallback_boot_handle_refused_direction'
+            : 'ambiguous_census',
+      })
+      // Same scope decision as the re-key refusal above (INVARIANTS #116(b)),
+      // and it has to be repeated here for the same reason the guard itself is:
+      // this is a SECOND reconciler over a DIFFERENT table set, so scoping one
+      // of them readably scopes nothing. TWO CASES, deliberately different:
+      //   - refused by DIRECTION → `project_slug` is the anonymous fallback and
+      //     no owner can ever read it, so the row goes under the handles this
+      //     database records as its own. Note it does NOT go under the STALE
+      //     credential handles: those are FROZEN owner handles
+      //     (auth/secrets-store.ts), and the reconciler's whole premise is that
+      //     the frozen handle has DIVERGED from the live one — scoping the
+      //     warning there is the same invisibility in a different costume
+      //     (Argus r1 blocker, 2026-08-16).
+      //   - ordinary AMBIGUOUS orphan → the boot handle IS the explicit, live
+      //     handle whose integrations surface reports it. Scope unchanged — but
+      //     it is edge-triggered too (Argus r2, 2026-08-16). An unconditional
+      //     write here lands under the SAME `(scope, event_name)` key the
+      //     refused branch dedups on, so a box that alternates between the two
+      //     shapes writes a row every boot and defeats the whole trigger. Both
+      //     branches edge-trigger, or neither does.
+      //     AND THAT WAS NOT SUFFICIENT ON ITS OWN (Argus r1 on PR #322,
+      //     2026-08-16): with the trigger comparing against the NEWEST row only,
+      //     an alternating box still wrote every boot, because the newest row is
+      //     the OTHER shape every single time. Repro: an anonymous boot then an
+      //     explicit boot then anonymous… gave `{ambiguous_after_refused: true,
+      //     refused_after_ambiguous: true}` — a row per boot, unbounded, against
+      //     a 50-row window with no retention sweep. The trigger now asks
+      //     whether the payload is already ANYWHERE in the visible window
+      //     (`./scope-refusal-journal.ts` `isNewJournalState`), which settles the
+      //     feed at one row per distinct shape and needs no per-branch knowledge.
+      if (credentialScope.refused_direction === true) {
+        for (const row of planCredentialRefusalRows({
+          owner_scopes: ownerReadableScopes(),
+          orphan_counts: credentialScope.orphan_counts,
+          attempted_by_slug: project_slug,
+        })) {
+          if (
+            !shouldJournal(
+              () =>
+                systemEventSink.listVisibleForScopeAndName(
+                  row.scope,
+                  'credential_scope_orphaned',
+                  DEFAULT_MAX_RECENT_EVENTS,
+                ),
+              row.payload,
+            )
+          )
+            continue
+          fireAndForget(
+            'gateway.credential_scope_journal',
+            systemEventSink.record({
+              event: 'credential_scope_orphaned',
+              module: 'gateway',
+              level: 'warn',
+              project_slug: row.scope,
+              payload: row.payload,
+            }),
+          )
+        }
+      } else {
+        // `reason` rides the PAYLOAD, not just the log line (#320): the two
+        // situations need opposite operator responses and rendered identically
+        // without it. It is also inside the value `shouldJournal` compares, so
+        // a box that flips between the two shapes re-journals rather than
+        // suppressing the second one as a duplicate of the first.
+        const payload: Record<string, unknown> = {
+          from: credentialScope.stale_handles,
+          orphan_counts: credentialScope.orphan_counts,
+          reason: 'ambiguous_census',
+        }
+        if (
+          shouldJournal(
+            () =>
+              systemEventSink.listVisibleForScopeAndName(
+                project_slug,
+                'credential_scope_orphaned',
+                DEFAULT_MAX_RECENT_EVENTS,
+              ),
+            payload,
+          )
+        ) {
+          fireAndForget(
+            'gateway.credential_scope_journal',
+            systemEventSink.record({
+              event: 'credential_scope_orphaned',
+              module: 'gateway',
+              level: 'warn',
+              project_slug,
+              payload,
+            }),
+          )
+        }
+      }
+    }
+  } catch (err) {
+    log.error('credential_scope_reconcile_failed', { error: errText(err) })
   }
 
   // Compose the module graph if the caller supplied a composer. We capture
@@ -415,7 +706,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   }
   if (options.composer !== undefined) {
     try {
-      const composition = await options.composer({ db, project_slug })
+      const composition = await options.composer({
+        db,
+        project_slug,
+        slug_is_fallback: slugResolution.source === 'fallback',
+      })
       if (composition.realmode_cleanups !== undefined) {
         realmode_cleanups = composition.realmode_cleanups
       }

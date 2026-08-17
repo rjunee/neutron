@@ -31,9 +31,10 @@ import {
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import { isTerminalPhase } from './state-machine.ts'
+import { detectMergeMode, type GitModeProbe } from './git-mode.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { WorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
-import type { MergeMode, TridentRunStore } from './store.ts'
+import type { TridentRunStore } from './store.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
 export const WORK_BOARD_START_TOOL = 'work_board_start'
@@ -91,7 +92,19 @@ export interface TridentBuildToolDeps {
   repo_path: string
   /** Resolve the per-project git workspace; defaults to `ensureProjectBuildWorkspace`. */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
+  /**
+   * The merge-mode probe, NOT a resolver function. REQUIRED.
+   *
+   * The distinction is the whole guard. An opaque `(repo_path) => MergeMode`
+   * satisfies its type whether or not it carries the publisher's credential, so
+   * a wiring test could only assert `typeof … === 'function'` — which the buggy
+   * composition passed too. A {@link GitModeProbe} carries `publisher`, so the
+   * composition root's choice of credential is INSPECTABLE at the seam
+   * `work_board_start` actually runs through, and
+   * `open/__tests__/open-trident-prod-boot-wiring.test.ts` asserts it is the
+   * live secrets store rather than the `unwiredPublisherCredential` placeholder.
+   */
+  merge_mode_probe: GitModeProbe
   resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
@@ -199,7 +212,7 @@ export function registerTridentBuildToolSurface(
         project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
-        ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
+        resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
@@ -309,7 +322,7 @@ export function registerTridentBuildToolSurface(
         project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
-        ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
+        resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),

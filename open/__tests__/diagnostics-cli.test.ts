@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -245,6 +245,235 @@ describe('collectCliDiagnostics', () => {
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.error).toContain('could not open project.db')
+  })
+
+  /**
+   * THE DIAGNOSTIC MUST SURVIVE THE BROKEN CONFIGURATION IT EXISTS TO REPORT.
+   *
+   * A round of this branch made `resolveOwnerSlug` delegate to the full
+   * `resolveBootConfig` so it could no longer disagree with boot about
+   * `.url_slug` or the default home. Correct about the inputs — and it inherited
+   * the validation of every unrelated numeric knob. `diagnostics-cli-impl.ts:32`
+   * calls the resolver OUTSIDE the try that produces `{ok:false}`, so a single
+   * bad `NEUTRON_PORT` made `neutron doctor` throw a ZodError at the operator
+   * instead of printing the state of their box.
+   *
+   * Reproduced before the fix: `NEUTRON_PORT=bad` → `ZodError: NEUTRON_PORT="bad"
+   * is not an integer`.
+   */
+  it('does NOT throw when an UNRELATED setting is malformed', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+
+    // CONTROL — the same env without the bad knob works, so a pass below cannot
+    // come from the fixture being broken in some other way.
+    const clean = collectCliDiagnostics(envFor(dbPath))
+    expect(clean.ok).toBe(true)
+
+    const env = { ...envFor(dbPath), NEUTRON_PORT: 'bad' } as NodeJS.ProcessEnv
+    const result = collectCliDiagnostics(env)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // …and the identity is still the RIGHT one. A `doctor` that survived by
+    // resolving the wrong slug would report an empty instance, which is the
+    // failure mode the slug work on this branch exists to close.
+    expect(result.report.project_slug).toBe('demo')
+  })
+
+  /**
+   * THE SAME CONTRACT, THE OTHER WAY OUT OF THE SAME LINE.
+   *
+   * The round above closed the ZodError escape and left a filesystem one open
+   * on the very next statement: the resolver does an UNGUARDED
+   * `readFileSync(join(ownerHome, '.url_slug'))` behind an `existsSync` check.
+   * `existsSync` is true for a chmod-000 file and for a DIRECTORY of that name,
+   * and the read then throws EACCES / EISDIR — past the same `{ok:false}`
+   * contract, from the same call site (`diagnostics-cli-impl.ts`, outside the
+   * try). EACCES on `.url_slug` is a recorded real failure mode, not a
+   * hypothetical.
+   *
+   * The guard above cannot see this: it varies only `NEUTRON_PORT`, so it stays
+   * green while the filesystem axis throws. Both variants were reproduced
+   * against the unfixed resolver — `EACCES: permission denied, open
+   * '<home>/.url_slug'` and `EISDIR: illegal operation on a directory, read`.
+   *
+   * ⚠️ THE CONTRACT IS `{ok:false}`, NOT `{ok:true}` WITH A SUBSTITUTED SLUG.
+   * The first fix made the resolver swallow the read error and answer with
+   * `NEUTRON_INSTANCE_SLUG`, and these tests asserted `ok:true` — which pinned
+   * a doctor that reports an identity it could not actually confirm, and, far
+   * worse, handed the same fabricated `source:'env'` to the credential
+   * direction guard, which then migrated rows onto the stale handle. The slug
+   * filters every event and job in this report, so answering with the wrong one
+   * renders a healthy instance empty. `{ok:false}` carrying the errno is the
+   * honest answer, is what `main` returns, and is what the printed contract
+   * says. Not throwing was always the requirement; `ok:true` never was.
+   */
+  it('returns {ok:false} — not a throw — when `.url_slug` cannot be read (EACCES)', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+
+    const slugFile = join(tmp, '.url_slug')
+    writeFileSync(slugFile, 'renamed\n', 'utf8')
+    // CONTROL — readable, the file WINS over the env slug. Without this a pass
+    // below could mean the resolver never looks at `.url_slug` at all.
+    const readable = collectCliDiagnostics(envFor(dbPath))
+    expect(readable.ok).toBe(true)
+    if (!readable.ok) return
+    expect(readable.report.project_slug).toBe('renamed')
+
+    chmodSync(slugFile, 0o000)
+    // `chmod 000` is advisory against root. The previous version of this test
+    // bailed with a bare `return` when the mode did not bite, so a test NAMED
+    // for the EACCES axis passed green on a root runner having asserted
+    // nothing. Assert the correct outcome for whichever world we are in
+    // instead: root still reads the file, and then the file must WIN.
+    let denied = false
+    try {
+      readFileSync(slugFile, 'utf8')
+    } catch {
+      denied = true
+    }
+    if (!denied) {
+      const asRoot = collectCliDiagnostics(envFor(dbPath))
+      expect(asRoot.ok).toBe(true)
+      if (!asRoot.ok) return
+      expect(asRoot.report.project_slug).toBe('renamed')
+      return
+    }
+
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    // The operator's next action is a `chmod`, so the error has to name the
+    // file and the reason — not just "something went wrong".
+    expect(result.error).toContain('.url_slug')
+    expect(result.error).toContain('identity')
+    // And it must NOT be the stale env handle wearing the costume of an answer.
+    expect(result.error).not.toContain('project_slug=demo')
+  })
+
+  it('returns {ok:false} — not a throw — when `.url_slug` is a directory (EISDIR)', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+
+    // CONTROL — the same env with no `.url_slug` at all already returns ok.
+    // A directory denies root as well, so this case runs everywhere.
+    const before = collectCliDiagnostics(envFor(dbPath))
+    expect(before.ok).toBe(true)
+
+    mkdirSync(join(tmp, '.url_slug'))
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error).toContain('.url_slug')
+  })
+
+  /**
+   * AN EMPTY `OWNER_HOME` MUST NOT BLIND THE DIAGNOSTIC EITHER.
+   *
+   * `neutron doctor` filters events and jobs by the slug it resolves, so a
+   * resolver that collapses to `'dev'` reports an empty instance for a system
+   * running perfectly well — the exact failure this file's other cases exist to
+   * prevent, reached through a different input.
+   */
+  it('reads `.url_slug` under NEUTRON_HOME when OWNER_HOME is the empty string', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+    writeFileSync(join(tmp, '.url_slug'), 'renamed\n', 'utf8')
+
+    const env = { ...envFor(dbPath), OWNER_HOME: '' } as NodeJS.ProcessEnv
+    const result = collectCliDiagnostics(env)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('renamed')
+  })
+})
+
+/**
+ * THE DOCTOR MUST READ THE SCOPE BOOT WROTE UNDER (Argus r2, 2026-08-16).
+ * `system_events` is read strictly `WHERE project_slug = ?`, so any disagreement
+ * between `resolveOwnerSlug` here and `resolveOwnerSlugSourceFromConfig` at boot
+ * is a silently empty report — on exactly the degrade events whose defect was
+ * being unreadable in the first place.
+ */
+describe('collectCliDiagnostics — the CLI scope agrees with the boot scope', () => {
+  function seedRefusalUnder(dbPath: string, scope: string): void {
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.runSync(
+      `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+       VALUES ('r1', 700, 'warn', 'gateway', 'instance_scope_rekey_refused', ?, ?, NULL)`,
+      [JSON.stringify({ targeted_slug: scope, attempted_by_slug: 'dev' }), scope],
+    )
+    db.close()
+  }
+
+  it('TRIMS a padded NEUTRON_INSTANCE_SLUG, as boot does', () => {
+    const dbPath = join(tmp, 'project.db')
+    seedRefusalUnder(dbPath, 'alpha')
+    const result = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: tmp,
+      NEUTRON_INSTANCE_SLUG: '  alpha  ',
+    } as NodeJS.ProcessEnv)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('alpha')
+    expect(result.report.recent_events.events?.[0]).toMatchObject({
+      event: 'instance_scope_rekey_refused',
+      project_slug: 'alpha',
+    })
+  })
+
+  it('a blank NEUTRON_INSTANCE_SLUG means ABSENT → the same fallback boot uses', () => {
+    const dbPath = join(tmp, 'project.db')
+    seedRefusalUnder(dbPath, 'dev')
+    const result = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: tmp,
+      NEUTRON_INSTANCE_SLUG: '   ',
+    } as NodeJS.ProcessEnv)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('dev')
+    expect(result.report.recent_events.events).toHaveLength(1)
+  })
+
+  it('the .url_slug rename file WINS over the env var, as it does at boot', () => {
+    // The rename orchestrator writes this file and restarts the unit; boot has
+    // always preferred it. A doctor that ignored it reported under the
+    // PRE-rename handle — i.e. found nothing on every renamed box.
+    const dbPath = join(tmp, 'project.db')
+    seedRefusalUnder(dbPath, 'renamed')
+    writeFileSync(join(tmp, '.url_slug'), 'renamed\n')
+    const result = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: tmp,
+      NEUTRON_INSTANCE_SLUG: 'old-handle',
+    } as NodeJS.ProcessEnv)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.project_slug).toBe('renamed')
+    expect(result.report.recent_events.events).toHaveLength(1)
+    // CONTROL — the pre-rename handle really is a different, empty scope, so
+    // the assertion above is about the resolver and not about a lax reader.
+    const stale = collectCliDiagnostics({
+      NEUTRON_DB_PATH: dbPath,
+      NEUTRON_HOME: mkdtempSync(join(tmpdir(), 'o5-cli-nofile-')),
+      NEUTRON_INSTANCE_SLUG: 'old-handle',
+    } as NodeJS.ProcessEnv)
+    expect(stale.ok).toBe(true)
+    if (!stale.ok) return
+    expect(stale.report.project_slug).toBe('old-handle')
+    expect(stale.report.recent_events.events).toEqual([])
   })
 })
 

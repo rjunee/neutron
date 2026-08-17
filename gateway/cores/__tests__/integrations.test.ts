@@ -137,6 +137,7 @@ test('buildIntegrationsStatus reflects connected OAuth account + stored API key'
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   expect(status.oauth.every((o) => !o.connected)).toBe(true)
   expect(status.api_keys.find((k) => k.label === 'tavily')?.connected).toBe(false)
@@ -156,6 +157,7 @@ test('buildIntegrationsStatus reflects connected OAuth account + stored API key'
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   const cal = status.oauth.find((o) => o.label === 'google_calendar')
   expect(cal?.connected).toBe(true)
@@ -258,6 +260,7 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   const slotBefore = before.api_keys.find((k) => k.label === 'openai_api_key')
   expect(slotBefore).toBeDefined()
@@ -289,6 +292,7 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   expect(after.api_keys.find((k) => k.label === 'openai_api_key')!.connected).toBe(true)
 

@@ -103,12 +103,15 @@ describe('declared-composition-fields — the parser agrees with the type checke
       expect(f.line).toBeGreaterThan(0)
       expect(readFileSync(resolve(REPO_ROOT, f.file), 'utf8').length).toBeGreaterThan(0)
     }
-    // Spot-check the citation end to end on the field that motivated the gate:
-    // the line the reader points at must be the line the field is on.
-    const sample = fields.find((f) => f.name === 'push_dispatcher')
+    // Spot-check the citation end to end: the line the reader points at must be the
+    // line the field is on. The field that MOTIVATED this gate was `push_dispatcher`
+    // — declared, consumed, set by no composer — and it was deleted on 2026-08-09
+    // (its notification is composed at delivery now, not on the reminder tick), so
+    // the sample moved to another `misc-input.ts` object field of the same shape.
+    const sample = fields.find((f) => f.name === 'work_board')
     expect(sample).toBeDefined()
     const lines = readFileSync(resolve(REPO_ROOT, sample!.file), 'utf8').split('\n')
-    expect(lines[sample!.line - 1]).toContain('push_dispatcher')
+    expect(lines[sample!.line - 1]).toContain('work_board')
   })
 })
 

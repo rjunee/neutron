@@ -105,6 +105,41 @@ describe('repl-registry — disk persistence (survives a gateway restart)', () =
     expect(loadRegistry(path, (r) => (reason = r))).toEqual({})
     expect(reason).toContain('json-parse-error')
   })
+
+  it('getRecord drops an UNUSABLE `model` so every reader falls back to the best model', () => {
+    // `model` is declared optional and never schema-checked, and eight spawn
+    // profiles spend it identically — `record?.model ?? getBestModel()`
+    // (`pool.ts:176` is the shared reader) — straight into a child's `--model`
+    // argv. `??` only catches null/undefined, so a row carrying a number, an
+    // object or a blank string would reach the CLI verbatim on the seven profiles
+    // that have no floor in front of them. Reducing unusable to ABSENT is what
+    // makes each of those `??` mean what it already says.
+    const path = tmpRegistry()
+    const unusable: unknown[] = [42, null, '', '   ', { id: 'x' }, ['claude-opus-5']]
+    const reg: ReplRegistry = {}
+    unusable.forEach((model, i) => {
+      reg[`k${i}`] = { ...rec({ sessionKey: `k${i}` }), model } as ReplRegistryRecord
+    })
+    reg['good'] = { ...rec({ sessionKey: 'good' }), model: 'claude-opus-5' }
+    reg['none'] = rec({ sessionKey: 'none' })
+    saveRegistry(path, reg)
+
+    unusable.forEach((_model, i) => {
+      const got = getRecord(path, `k${i}`)
+      expect(got, `k${i}`).toBeDefined()
+      expect(got?.model, `k${i}`).toBeUndefined()
+      // Only `model` is dropped — the rest of the row is untouched, so a bad model
+      // never costs the session its id or its cwd.
+      expect(got?.sessionId, `k${i}`).toBe(`uuid-k${i}`)
+      expect(got?.cwd, `k${i}`).toBe('/home/x')
+    })
+    // A USABLE model is passed through byte-for-byte: this is a coercion of the
+    // unusable, not a second floor. (`null` above survives the JSON round-trip
+    // where `undefined` would not, which is why it is in the list.)
+    expect(getRecord(path, 'good')?.model).toBe('claude-opus-5')
+    expect(getRecord(path, 'none')?.model).toBeUndefined()
+    expect(getRecord(path, 'absent')).toBeUndefined()
+  })
 })
 
 describe('repl-registry — lock-guarded mutations', () => {

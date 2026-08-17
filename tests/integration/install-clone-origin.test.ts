@@ -149,6 +149,34 @@ describe('install.sh clone-origin guard (#316)', () => {
     expect(guardAt).toBeLessThan(pullAt)
   })
 
+  test('fresh installs clone the complete NEUTRON_REPO history', async () => {
+    const src = await Bun.file(INSTALL_SH).text()
+    const cloneLine = src
+      .split('\n')
+      .find((line) => line.includes('git clone') && line.includes('"$NEUTRON_REPO"'))
+
+    expect(cloneLine).toBeDefined()
+    expect(cloneLine).not.toMatch(/(?:^|\s)--depth(?:[=\s]|$)/)
+  })
+
+  test('existing shallow installs are unshallowed before pulling', async () => {
+    const src = await Bun.file(INSTALL_SH).text()
+    const probe = 'git -C "$CLONE_DIR" rev-parse --is-shallow-repository'
+    const unshallow = 'git -C "$CLONE_DIR" fetch --unshallow origin'
+    const pull = 'git -C "$CLONE_DIR" pull --ff-only'
+    const probeAt = src.indexOf(probe)
+    const conditionalAt = src.indexOf(`if [ "$(${probe})" = "true" ]; then`)
+    const unshallowAt = src.indexOf(unshallow)
+    const conditionalEndAt = src.indexOf('fi', unshallowAt)
+    const pullAt = src.indexOf(pull)
+
+    expect(probeAt).toBeGreaterThan(-1)
+    expect(conditionalAt).toBe(probeAt - 'if [ "$('.length)
+    expect(unshallowAt).toBeGreaterThan(probeAt)
+    expect(conditionalEndAt).toBeGreaterThan(unshallowAt)
+    expect(pullAt).toBeGreaterThan(conditionalEndAt)
+  })
+
   test('NEUTRON_REPO is honoured — a deliberate fork install is not blocked', () => {
     // The escape hatch the error message advertises has to actually work,
     // otherwise the guard is a dead end for anyone installing from a fork.

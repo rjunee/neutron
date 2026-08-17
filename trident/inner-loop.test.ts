@@ -17,13 +17,18 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { existsSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   buildWorkflowFirer,
   buildWorkflowArgs,
   buildSubstrateWorkflowFire,
+  CODEX_BUILD_SCRIPT_PATH,
+  CODEX_REVIEW_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
+  TERMINAL_CAUSE_MAX,
   WORKFLOW_FIRE_TOOL_NAMES,
   type FireInnerWorkflow,
   type FireInnerWorkflowInput,
@@ -70,6 +75,9 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     last_advanced_at: '1970-01-01T00:00:00.000Z',
     harvested_at: null,
     crash_recoveries: 0,
+    reviewed_head: null,
+    bound_pr: null,
+    fenced_paths: null,
     ...over,
   }
 }
@@ -136,6 +144,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: 'argus-approved',
       remaining_tasks: 0,
       pr_merged: false,
+      deviated_from_spec: false,
       publish_requested: false,
       publish_head: null,
       block_kind: null,
@@ -160,6 +169,28 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', prMerged: false }))?.pr_merged).toBe(
       false,
     )
+  })
+  // The deviation flag decides whether the NEXT Ralph iteration pays for the full
+  // whole-repo survey (~287 s) or takes the cheap `plan:next` continuation. It is
+  // fail-closed in the direction that costs money, not correctness: a truthy
+  // stand-in read as `true` would re-plan from scratch every iteration forever,
+  // silently undoing the saving this card exists for.
+  test('decodes deviatedFromSpec; absent or any non-boolean → false', () => {
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', deviatedFromSpec: true }))
+        ?.deviated_from_spec,
+    ).toBe(true)
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.deviated_from_spec).toBe(false)
+    for (const bogus of ['true', 1, 'yes', {}, [], null]) {
+      expect(
+        parseInnerResult(JSON.stringify({ verdict: 'APPROVE', deviatedFromSpec: bogus }))
+          ?.deviated_from_spec,
+      ).toBe(false)
+    }
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'APPROVE', deviatedFromSpec: false }))
+        ?.deviated_from_spec,
+    ).toBe(false)
   })
   test('decodes remainingTasks (the #362 Ralph re-fire signal); absent → null', () => {
     const withRemaining = parseInnerResult(
@@ -205,9 +236,39 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     }
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.terminal_cause).toBeNull()
   })
+  /**
+   * THE TWO CAPS MUST AGREE, AND NOTHING WAS CHECKING THAT (Argus r4). `TERMINAL_CAUSE_MAX`
+   * is declared HERE and hand-mirrored in `inner-workflow.mjs` (a Workflow script cannot
+   * import TS), and the SMALLER of the two is what actually decides — so a drift is silent
+   * and one-directional. It has already cost the round-1 unreadable-head cause its only
+   * actionable clause at the previous 300/300 pair. The mirror is scraped from the .mjs
+   * rather than restated, the same way `inner-workflow-built-head.test.ts` reads
+   * `BUILT_HEAD_READ_ATTEMPTS`.
+   */
+  test('the .mjs mirror of TERMINAL_CAUSE_MAX is the same number', () => {
+    const src = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+    const mirrored = /const TERMINAL_CAUSE_MAX = (\d+)/.exec(src)?.[1]
+    expect(mirrored).toBeDefined()
+    expect(Number(mirrored)).toBe(TERMINAL_CAUSE_MAX)
+  })
   test('a cause is clamped — it is persisted and then read in a chat row', () => {
-    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(400)}  ` }))
-    expect(out?.terminal_cause?.length).toBe(300)
+    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(900)}  ` }))
+    expect(out?.terminal_cause?.length).toBe(TERMINAL_CAUSE_MAX)
+  })
+  /**
+   * THE CLAMP MUST NOT CUT A REAL CAUSE OFF AT THE KNEES. At 300 the workflow's round-1
+   * unreadable-head sentence — 331 chars with the longest branch name `slugify-task` can
+   * produce — lost its trailing "re-run when the read succeeds", i.e. the clamp deleted
+   * the only actionable clause in it. This is the composed sentence, at full length.
+   */
+  test('the longest realistic composed cause survives the clamp whole', () => {
+    const branch = `trident/${'x'.repeat(35)}` // slugify-task caps the slug at 35
+    const cause =
+      `could not read the head of refs/heads/${branch} after forge:build (3 attempts) — re-run when the read succeeds; ` +
+      `this run rebuilt, published and reviewed nothing; the build reported '${'a'.repeat(40)}' and wrote a diff to /tmp/${branch.replace('/', '-')}.diff`
+    const out = parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', terminalCause: cause }))
+    expect(out?.terminal_cause).toBe(cause)
+    expect(out?.terminal_cause).toContain('re-run when the read succeeds')
   })
   // A COMMIT OID IS READ, NOT REPORTED (defect 2026-08-14). `publishHead` is the build's
   // CLAIM, kept only so the outer publisher can CHECK it against `rev-parse`. Requiring a
@@ -246,6 +307,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: null,
       remaining_tasks: null,
       pr_merged: false,
+      deviated_from_spec: false,
       publish_requested: false,
       publish_head: null,
       block_kind: null,
@@ -265,6 +327,17 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       reflectionIntegrity: '5:87654321',
     }
     expect(buildWorkflowArgs(input(), parts).briefParts).toBe(parts)
+  })
+
+  /**
+   * The durable re-fire counter. The workflow gates its cheap `plan:next`
+   * continuation planner (and the every-Kth full re-plan) on it, so a launcher that
+   * dropped it would silently pay the full whole-repo survey on every Ralph task —
+   * exactly the waste that planner exists to remove, and invisible from either side.
+   */
+  test('the Ralph round counter is threaded from the run row', () => {
+    expect(buildWorkflowArgs(input()).ralphRound).toBe(0)
+    expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
   })
 
   /**
@@ -298,7 +371,7 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       writes.push(opts)
       return parts
     }
-    const reflection_context = '<learned_corrections>use TS</learned_corrections>'
+    const reflection_context = '<learned_corrections>use TS — preserve … and 🚀</learned_corrections>'
     const run = makeRun({ id: 'run-parts', task: 'exact task' })
     const firer = buildWorkflowFirer({ fire, write_brief_parts })
     expect(await firer(input({ run, reflection_context }))).toEqual({ status: 'fired', error: null })
@@ -310,6 +383,8 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       },
     ])
     expect(calls[0]!.prompt).toContain(`"briefParts":${JSON.stringify(parts)}`)
+    const args = JSON.parse(calls[0]!.prompt.match(/^   args = (.+)$/m)?.[1] ?? '{}')
+    expect(args.reflectionGuidance).toBe(writes[0]!.reflectionGuidance)
   })
 
   test('a failed part write never prevents the fire and omits the manifest', async () => {
@@ -411,6 +486,30 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // containing a space. fileURLToPath decodes; new URL(...).pathname does not.
     expect(threaded).not.toContain('%')
     expect(threaded.startsWith('/')).toBe(true)
+  })
+
+  test('args thread the harness codexBuildScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexBuildScript":"([^"]*\/trident\/codex-build\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_BUILD_SCRIPT_PATH)
+  })
+
+  test('args thread the harness codexReviewScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexReviewScript":"([^"]*\/trident\/codex-review\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_REVIEW_SCRIPT_PATH)
   })
 
   test('args thread the checked-in worktreeCleanupScript abs path (#541 — no LLM in the destructive path)', async () => {
@@ -517,6 +616,21 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // never a bare wrapper that would perturb the prompt.
     await firer(input({ reflection_context: '   \n\t  ' }))
     expect(calls[0]!.prompt).toContain('"reflectionGuidance":""')
+  })
+
+  // The TEST EXECUTION block rides the SAME carriage as `reflectionGuidance`, but is
+  // derived one layer up (the orchestrator holds the live run count + host budget), so
+  // this layer's whole job is to pass it through verbatim as a string.
+  test('args carry the orchestrator-composed testStrategy verbatim', () => {
+    const args = buildWorkflowArgs(input({ test_strategy: 'TEST EXECUTION\nX' }))
+    expect(args['testStrategy']).toBe('TEST EXECUTION\nX')
+  })
+
+  test('args carry an EMPTY testStrategy when none was composed (byte-identical legacy contract)', () => {
+    // '' — never undefined and never null: the `.mjs` compares against '' to decide
+    // whether to splice, and an absent arg must reproduce the pre-existing prompt.
+    expect(buildWorkflowArgs(input()).testStrategy).toBe('')
+    expect(buildWorkflowArgs(input({ test_strategy: null })).testStrategy).toBe('')
   })
 
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {

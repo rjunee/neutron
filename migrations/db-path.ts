@@ -33,10 +33,19 @@ import { join } from 'node:path'
  * unit env, so the bare default only ever serves the OSS self-host case.)
  */
 export function resolveNeutronHome(env: NodeJS.ProcessEnv = process.env): string {
+  // WHITESPACE IS UNSET, exactly as the empty string already was. A `length > 0`
+  // guard answers `'   '` as a home, and the caller then resolves
+  // `'   /project.db'` and looks for `'   /.url_slug'` — a real box with a
+  // blank-but-present variable silently gets a different database and an
+  // anonymous identity. `effectiveOwnerHome` (`config/index.ts`) was fixed in
+  // the same change; the two are documented as agreeing about what empty means,
+  // and a review measured them disagreeing on this exact value.
+  // The RETURN stays verbatim (§ "wins verbatim" above) — blank means unset, a
+  // real path is passed through byte-for-byte.
   const explicit = env['NEUTRON_HOME']
-  if (typeof explicit === 'string' && explicit.length > 0) return explicit
+  if (typeof explicit === 'string' && explicit.trim().length > 0) return explicit
   const ownerHome = env['OWNER_HOME']
-  if (typeof ownerHome === 'string' && ownerHome.length > 0) return ownerHome
+  if (typeof ownerHome === 'string' && ownerHome.trim().length > 0) return ownerHome
   return join(homedir(), 'neutron')
 }
 
@@ -54,7 +63,21 @@ export function resolveNeutronHome(env: NodeJS.ProcessEnv = process.env): string
  * otherwise migrate a different database than the one that boots.
  */
 export function resolveOpenDbPath(env: NodeJS.ProcessEnv = process.env): string {
+  // BLANK IS UNSET HERE TOO — the same rule `resolveNeutronHome` applies above,
+  // to the same kind of variable, two functions apart in the same file. This one
+  // kept `length > 0` through the change that fixed its neighbour, so
+  // `NEUTRON_DB_PATH='   '` returned `'   '` — SQLite then opens a file named
+  // three spaces, relative to the process CWD, which is wherever systemd
+  // happened to start it. Measured: `resolveOpenDbPath({NEUTRON_DB_PATH:'   '})`
+  // -> `'   '` while `resolveOwnerHome` (`gateway/boot-listener-registry.ts`)
+  // and `resolveOwnerHomeFromEnv` (`onboarding/overnight/register.ts`) both read
+  // that SAME variable, both trim, and both fell back — one variable, three
+  // readers, two answers, and the migration runner writing a different database
+  // than the one that boots. That divergence is the whole failure this family of
+  // resolvers exists to prevent.
+  // The RETURN stays verbatim (§ "wins verbatim" above) — blank means unset, a
+  // real path is passed through byte-for-byte.
   const pinned = env['NEUTRON_DB_PATH']
-  if (typeof pinned === 'string' && pinned.length > 0) return pinned
+  if (typeof pinned === 'string' && pinned.trim().length > 0) return pinned
   return join(resolveNeutronHome(env), 'project.db')
 }

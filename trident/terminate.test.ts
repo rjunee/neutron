@@ -53,6 +53,9 @@ function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
     last_advanced_at: '2026-07-14T00:00:00.000Z',
     harvested_at: null,
     crash_recoveries: 0,
+    reviewed_head: null,
+    bound_pr: null,
+    fenced_paths: null,
     ...over,
   }
 }

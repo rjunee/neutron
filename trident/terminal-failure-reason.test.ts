@@ -36,8 +36,14 @@
  * unchanged; only the supply of measurements changed.
  */
 import { describe, expect, test } from 'bun:test'
-import { innerTerminalFailureReason, publishFailureReason, redactPushError } from './orchestrator.ts'
+import {
+  classifyPublishFailure,
+  innerTerminalFailureReason,
+  publishFailureReason,
+  redactPushError,
+} from './orchestrator.ts'
 import { interpretFailure } from './delivery.ts'
+import { parseInnerResult } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
 
 const run = (over: Partial<TridentRun> = {}): TridentRun =>
@@ -235,10 +241,21 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     expect(innerTerminalFailureReason(run({ round: 1 }), infraOnly(null))).toBe(GENERIC)
   })
 
-  test('a cause WITHOUT infra-only is still the generic sentence — the pair gates together', () => {
+  test('a cause that is empty (or redacts away to nothing) is NOT a measurement — no dangling colon', () => {
+    // '' is not null, so the specific branch used to fire and emit
+    // "review never ran (infra-only) at round 1 of 10: " — a sentence that promises a
+    // cause and then names none. Reachable whenever the redactor eats the whole string.
+    for (const cause of ['', '   ', '\n']) {
+      const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly(cause))
+      expect(reason).toBe(GENERIC)
+      expect(reason.endsWith(': ')).toBe(false)
+    }
+  })
+
+  test('a cause on a REVIEW verdict is still the generic sentence — a finding title is not a terminal cause', () => {
     // A code rejection carries findings too. Their titles describe the DIFF, and quoting
     // one as the terminal cause would re-invent the inference this function refuses to make.
-    for (const kind of ['code', 'round-lost', 'none', null] as const) {
+    for (const kind of ['code', 'round-lost', 'none'] as const) {
       expect(
         innerTerminalFailureReason(run({ round: 1 }), {
           round: 1,
@@ -269,10 +286,126 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     expect(reason).toContain('could not read Password')
   })
 
+  test('a bounded resume STOP names the branch and the recorded OID, never the round sentence', () => {
+    // Part 2b: an unreadable head stops the run instead of rebuilding committed work.
+    // What lands in the row must be the two facts that make it re-runnable.
+    const OID = 'a'.repeat(40)
+    const reason = innerTerminalFailureReason(
+      run({ max_rounds: 10, round: 1, inner_checkpoint: 'forge-done' }),
+      {
+        round: 3,
+        checkpoint: 'forge-done',
+        block_kind: 'infra-only',
+        terminal_cause: `could not read the head of trident/x; the recorded work is at ${OID}; re-run when the read succeeds`,
+      },
+    )
+    expect(reason).toContain('could not read the head of trident/x')
+    expect(reason).toContain(OID)
+    // Argus was never reached, so the round sentence would be a lie.
+    expect(reason).not.toContain('without Argus APPROVE')
+  })
+
   test('it does not read as a review outcome to the owner', () => {
     // The misclassification the whole card is about: nobody rejected this work.
     const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly('REVIEW DEFERRED — gh auth login'))
     expect(interpretFailure(run({ failure_reason: reason })).klass).not.toBe('review-unresolved')
+  })
+})
+
+/**
+ * A THROWN WORKFLOW MEASURED A CAUSE TOO — and it used to be dropped on the floor.
+ *
+ * MEASURED, run `3d2696c3` (2026-08-14): the build was written, staged and committed, the
+ * inner loop threw "forge:build completed without a full local commit OID for the outer
+ * publisher", and the card was filed REQUEST_CHANGES reading *"…at checkpoint 'inner-error'
+ * without Argus APPROVE"*. Argus never ran. The workflow's catch path now carries the
+ * sentence it composed where the fact was known (`terminalCause`), with NO `blockKind`,
+ * because a throw is not a review verdict — and this function stops throwing it away.
+ */
+describe('innerTerminalFailureReason — a THROW reports what it threw, not the review panel', () => {
+  const thrown = (cause: string | null) => ({
+    round: 1,
+    checkpoint: 'inner-error' as string | null,
+    block_kind: null,
+    terminal_cause: cause,
+  })
+
+  test('HEADLINE: run 3d2696c3 reads as the build failure it was', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1, inner_checkpoint: 'inner-error' }),
+      thrown('forge:build completed but produced no commit on trident/x — nothing was built'),
+    )
+    expect(reason).toContain('nothing was built')
+    expect(reason).toContain('at round 1 of 10')
+    expect(reason).not.toContain('without Argus APPROVE')
+    // …and it does not claim the review panel refused to run either — that is a fact this
+    // path did not measure. Only the infra-only stop is licensed to say that.
+    expect(reason).not.toContain('review never ran')
+  })
+
+  test('the "not measured" clause survives the trip to the row', () => {
+    // The clause the empty-build throw adds when the head read FAILED. It exists to stop
+    // the sentence asserting a missing commit nobody looked for — useless if it is dropped
+    // between the workflow and the operator.
+    const reason = innerTerminalFailureReason(
+      run({ round: 1 }),
+      thrown(
+        'forge:build completed but produced no diffFile (the head read failed, so whether a commit exists was not measured) — nothing was built',
+      ),
+    )
+    expect(reason).toContain('whether a commit exists was not measured')
+  })
+
+  test('a throw that measured NOTHING is still the generic sentence, verbatim', () => {
+    expect(innerTerminalFailureReason(run({ round: 1 }), thrown(null))).toBe(
+      "inner workflow ended at round 1 of 10 at checkpoint 'inner-error' without Argus APPROVE",
+    )
+  })
+
+  test('a credential in a thrown message never reaches the persisted reason', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1 }),
+      thrown("push failed: https://x-access-token:ghp_abc123@github.com/o/r"),
+    )
+    expect(reason).not.toContain('ghp_abc123')
+    expect(reason).toContain('***@')
+  })
+
+  test('it does not read as a review outcome to the owner either', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1 }),
+      thrown('plan:fable returned null (planner terminal error)'),
+    )
+    expect(interpretFailure(run({ failure_reason: reason })).klass).not.toBe('review-unresolved')
+  })
+
+  /**
+   * `null` IS NOT ONLY THE CATCH PATH (Argus r4). `parseInnerResult` decodes `block_kind`
+   * FAIL-CLOSED — the four strings the workflow writes decode and ANY other value becomes
+   * `null` — so a garbled/truncated/future kind enters the SAME widened branch as a throw.
+   * The comment above the branch used to claim only the catch path could produce it. The
+   * behaviour is safe, and this pins WHY: the sentence `null` selects quotes the measured
+   * cause and says nothing about the review panel, which only 'infra-only' licenses.
+   */
+  test('a GARBLED block kind decodes to null and gets the honest sentence, never "review never ran"', () => {
+    const raw = JSON.stringify({
+      verdict: 'REQUEST_CHANGES',
+      round: 2,
+      checkpoint: 'forge-done',
+      blockKind: 'INFRA-ONLY-ish',
+      terminalCause: 'could not read the head of refs/heads/trident/x after forge:build (3 attempts)',
+    })
+    const decoded = parseInnerResult(raw)
+    expect(decoded?.block_kind).toBeNull() // the fail-closed decode, not an assumption
+    const reason = innerTerminalFailureReason(run({ round: 2 }), {
+      round: decoded?.round ?? 0,
+      checkpoint: decoded?.checkpoint ?? null,
+      block_kind: decoded?.block_kind ?? null,
+      terminal_cause: decoded?.terminal_cause ?? null,
+    })
+    expect(reason).toContain('could not read the head of refs/heads/trident/x')
+    expect(reason).not.toContain('review never ran')
+    expect(reason).not.toContain('without Argus APPROVE')
   })
 })
 
@@ -407,5 +540,63 @@ describe('publishFailureReason — names the step, quotes the cause, invents not
     const a = publishFailureReason('push', 'feat-x', '')
     const b = publishFailureReason('read the remote state of', 'feat-x', '')
     expect(a).not.toBe(b)
+  })
+})
+
+describe('classifyPublishFailure — credential vs ref rejection, from the stored reason alone', () => {
+  test('classifies a measured credential failure from the stored reason', () => {
+    const reason = publishFailureReason(
+      'push',
+      'trident/work-board-row-state-a-card-must-no',
+      "fatal: could not read Username for 'https://github.com': No such device or address",
+    )
+    expect(classifyPublishFailure(reason)).toBe('publish-credential')
+  })
+
+  test('classifies a measured ref rejection from the stored reason', () => {
+    const reason = publishFailureReason(
+      'push',
+      'trident/x',
+      '! [rejected]        trident/x -> trident/x (non-fast-forward)\nerror: failed to push some refs',
+    )
+    expect(classifyPublishFailure(reason)).toBe('publish-ref-rejected')
+  })
+
+  test('rejection evidence wins over credential evidence', () => {
+    const reason = publishFailureReason('push', 'b', 'Authentication failed; non-fast-forward')
+    // A retry must never fire on a rejection.
+    expect(classifyPublishFailure(reason)).toBe('publish-ref-rejected')
+  })
+
+  test('unrecognised evidence stays unknown', () => {
+    expect(classifyPublishFailure('')).toBe('publish-unknown')
+    expect(
+      classifyPublishFailure(publishFailureReason('push', 'b', 'error: remote hung up unexpectedly')),
+    ).toBe('publish-unknown')
+  })
+
+  test('bare numbers in object ids are not credential evidence', () => {
+    const reason = publishFailureReason(
+      'push',
+      'b',
+      'error: object 9bb31a2e401ffffffffffffffffffffffffffff0 broken',
+    )
+    expect(classifyPublishFailure(reason)).toBe('publish-unknown')
+  })
+
+  test('redaction removes a basic-auth token without removing credential evidence', () => {
+    const raw =
+      "fatal: Authentication failed for 'https://x-access-token:ghp_SECRET123@github.com/o/r/'"
+    expect(raw.includes('ghp_SECRET123')).toBe(true)
+    const stored = publishFailureReason('push', 'b', raw)
+    expect(stored).not.toContain('ghp_SECRET123')
+    expect(classifyPublishFailure(stored)).toBe('publish-credential')
+  })
+
+  test('redacts single-value userinfo without removing credential evidence', () => {
+    const raw = "fatal: could not read Password for 'https://ghp_SECRET456@github.com'"
+    const stored = publishFailureReason('push', 'b', raw)
+    expect(stored).not.toContain('ghp_SECRET456')
+    expect(classifyPublishFailure(stored)).toBe('publish-credential')
   })
 })
