@@ -101,6 +101,16 @@ export function resolveModelFloor(input: ModelFloorInput): ModelFloorDecision {
   const requested = input.requested
   if (!input.enabled) return { model: requested, clamped: false, requested, floor }
   const lowerTiers = input.lowerTiers ?? getKnownFallbackModels()
+  // AN OPERATOR WHO PINS A LOWER TIER AS THE BEST MODEL MEANS IT. `BEST_MODEL`
+  // is overridable via `NEUTRON_BEST_MODEL` (`runtime/models.ts:52-53`) so an
+  // operator can deliberately run the whole instance on a cheaper tier. If the
+  // floor itself is a known lower tier, clamping would be a no-op that swapped
+  // one lower-tier id for another AND emitted a "floor applied" event naming a
+  // degradation that did not happen — a misleading signal in the one subsystem
+  // whose whole point is that the signal is trustworthy. Defer to the operator.
+  if (isBelowFrontierTier(floor, lowerTiers)) {
+    return { model: requested, clamped: false, requested, floor }
+  }
   if (!isBelowFrontierTier(requested, lowerTiers)) {
     return { model: requested, clamped: false, requested, floor }
   }

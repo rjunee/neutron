@@ -114,6 +114,17 @@ describe('resolveModelFloor — the decision', () => {
     expect(d.model).toBe(FAST_MODEL)
   })
 
+  it('defers to an operator who PINNED a lower tier as the best model', () => {
+    // `NEUTRON_BEST_MODEL` can deliberately put the whole instance on a cheaper
+    // tier (`runtime/models.ts:52-53`). Clamping then would swap one lower-tier
+    // id for another AND emit a "floor applied" event naming a degradation that
+    // did not happen — noise in the one subsystem whose value is a trustworthy
+    // signal. `best` is injected here rather than mutating process-wide state.
+    const d = resolveModelFloor({ requested: FAST_MODEL, enabled: true, best: SONNET_MODEL })
+    expect(d.clamped).toBe(false)
+    expect(d.model).toBe(FAST_MODEL)
+  })
+
   it('reuses the SAME lower-tier set the watchdog refuses to adopt', () => {
     // The guard already existed one layer up (`getKnownFallbackModels`, the
     // `--fallback-model` trap); the gap was that nothing mirrored it on the
