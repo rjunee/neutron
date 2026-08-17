@@ -784,6 +784,54 @@ if [ "$codex_auth_ok" -ne 1 ]; then
   exit 3
 fi
 
+# ── BIND THE WORKTREE TO THE RUN'S BRANCH, BEFORE ANY TOKEN IS SPENT ──────
+# A failed bind is DEFERRED here, before codex launches, so it costs a round but no
+# tokens. This is the measured d5c1e219 incident: a worktree-wf_ auto branch plus a
+# leftover local run branch made the prompt's `git switch -c` collide, and the build
+# committed on the branch the run could not merge.
+LAUNCH_HEAD_BEFORE_BIND="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
+if [ -n "$BRANCH" ]; then
+  current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [ "$current_branch" != "$BRANCH" ]; then
+    bind_err="${TMPDIR:-/tmp}/trident-codex-build-bind.$$"
+    rm -f "$bind_err"
+    if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      if ! git switch "$BRANCH" 2>"$bind_err"; then
+        bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+        rm -f "$bind_err"
+        echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+        exit 3
+      fi
+    elif is_pr_mode && has_origin; then
+      _tip="$(remote_tip "$BRANCH" 3)"
+      if [ "$_tip" = 'unknown' ]; then
+        rm -f "$bind_err"
+        echo "CODEX_BUILD_BRANCH_UNBOUND: git ls-remote never answered, so this worktree cannot know whether the run's branch '${BRANCH}' exists remotely before creating it locally. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+        exit 3
+      elif [ -n "$_tip" ]; then
+        bounded /dev/null 30 env GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$BRANCH" || true
+        if ! git switch -c "$BRANCH" "$_tip" 2>"$bind_err"; then
+          bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+          rm -f "$bind_err"
+          echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}' at remote tip '${_tip}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+          exit 3
+        fi
+      elif ! git switch -c "$BRANCH" 2>"$bind_err"; then
+        bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+        rm -f "$bind_err"
+        echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not create the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+        exit 3
+      fi
+    elif ! git switch -c "$BRANCH" 2>"$bind_err"; then
+      bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+      rm -f "$bind_err"
+      echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not create the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+      exit 3
+    fi
+    rm -f "$bind_err"
+  fi
+fi
+
 # ── Run the build SYNCHRONOUSLY (never backgrounded) ──────────────────────────
 # The prompt goes in on STDIN (`codex exec -`), never as an argv entry: the brief
 # carries the whole task text and a long one in a single argument can exceed the OS
@@ -794,8 +842,10 @@ fi
 # the build's, and the trailer's "did it commit" question is answered by comparing
 # against this set. All three tips, because the brief tells a re-entry to
 # `git switch <branch>` and that moves HEAD onto the previous round's commit without
-# producing one (header: THE TWO SHAS).
+# producing one (header: THE TWO SHAS). After the bind, HEAD is the branch tip; retain
+# the pre-bind parked base sha too so it can never be reported as this build's commit.
 for _pre in \
+  "$LAUNCH_HEAD_BEFORE_BIND" \
   "$(git rev-parse --verify HEAD 2>/dev/null || true)" \
   "$(git rev-parse --verify "refs/heads/${BRANCH}" 2>/dev/null || true)"; do
   _pre="$(sha_or_empty "$_pre")"

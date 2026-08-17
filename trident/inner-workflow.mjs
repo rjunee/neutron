@@ -1317,6 +1317,7 @@ HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from
 - There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
 - Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
 - Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
+- STEP 1 IS ALREADY DONE FOR YOU, and this REPLACES it: the wrapper that launched you checked this worktree out on ${forgeBranch} before you started. Do NOT run \`git switch -c\` (the branch exists — creating it again errors); do not switch away. Verify with \`git rev-parse --abbrev-ref HEAD\` if unsure, then build.
 - Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
 }
 

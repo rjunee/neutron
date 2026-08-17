@@ -73,6 +73,12 @@ const briefIntegrity = loadBriefIntegrity()
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
 
 interface RunOpts {
+  /** Branch used by `git init -b`; defaults to the wrapper argv branch. */
+  initBranch?: string
+  /** Create the wrapper argv branch at the base commit while remaining on initBranch. */
+  leftoverBranch?: boolean
+  /** Check the leftover branch out in a second worktree, making it unbindable here. */
+  holdLeftoverBranch?: boolean
   /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
   checkpointExit?: number
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
@@ -363,7 +369,7 @@ exit 1
     const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
     if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
   }
-  git('init', '-q', '-b', branch, ...(opts.objectFormat === undefined ? [] : ['--object-format', opts.objectFormat]))
+  git('init', '-q', '-b', opts.initBranch ?? branch, ...(opts.objectFormat === undefined ? [] : ['--object-format', opts.objectFormat]))
   git('config', 'user.email', 'build@localhost')
   git('config', 'user.name', 'build')
   let baseHead = ''
@@ -377,6 +383,11 @@ exit 1
     const bare = join(dir, 'origin.git')
     spawnSync('git', ['init', '-q', '--bare', bare])
     git('remote', 'add', 'origin', bare)
+  }
+  if (opts.leftoverBranch === true) git('branch', branch)
+  if (opts.holdLeftoverBranch === true) {
+    if (opts.leftoverBranch !== true) git('branch', branch)
+    git('worktree', 'add', join(dir, 'holder'), branch)
   }
   if (opts.pushUrl !== undefined) git('remote', 'set-url', '--push', 'origin', opts.pushUrl)
   if (opts.credentialHelper === true) {
@@ -518,6 +529,37 @@ const FAKE_BUILD_NO_DIFF = `cat >/dev/null; ${NARRATE}; echo built >> built.txt;
 /** A build that RUNS and edits but never commits — the case that must report nothing. */
 const FAKE_NO_COMMIT = `cat >/dev/null; ${NARRATE}; echo edited > built.txt`
 const FAKE_FAIL = `cat >/dev/null; ${NARRATE}; echo "boom" >&2; exit 7`
+
+describe("the wrapper BINDS the worktree to the run's branch — the binding is measured setup, not the model's job", () => {
+  test('a fresh auto-named worktree branch is bound before the build commits', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(branchHead).toBe(r.trailer['NEUTRON_CODEX_BUILD_HEAD'])
+  })
+
+  test('the measured leftover-local-branch incident re-enters and advances that branch', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', leftoverBranch: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', r.baseHead, 'refs/heads/trident/a-run'], { cwd: r.dir })
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(branchHead).toBe(r.trailer['NEUTRON_CODEX_BUILD_HEAD'])
+    expect(ancestor.status).toBe(0)
+  })
+
+  test('an unbindable branch defers before codex receives the brief', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_BRANCH_UNBOUND')
+    expect(r.codexStdin).toBe('')
+  })
+})
 
 describe('artifact-time checkpoint', () => {
   test('records the measured HEAD after commit and diff', () => {
@@ -1472,10 +1514,9 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     // …and the trailer says it produced nothing, which is the truth.
     expect(second.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
     expect(second.trailerRaw).not.toContain(roundOne)
-    // It took three asks to establish the baseline, and the witness was never reached
-    // (there is no head of our own to witness) — so this is the baseline's retry being
-    // measured, not the witness's.
-    expect(probes()).toBe(3)
+    // It took three asks to bind at the remote tip, then one to capture that bound tip
+    // in the baseline. The witness was never reached because there is no new head.
+    expect(probes()).toBe(4)
   })
 
   test('a baseline probe that NEVER answers DEFERS the build instead of starting it blind', () => {

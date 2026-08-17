@@ -491,6 +491,11 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
 })
 
 describe('inner-workflow.mjs — codex cross-model review panelist', () => {
+  test('the codex build coda pins both halves of the host-side branch binding', () => {
+    expect(SRC).toContain('STEP 1 IS ALREADY DONE FOR YOU')
+    expect(SRC).toContain('Stay on branch ${forgeBranch}')
+  })
+
   test('destructures codexHome from args (per-project CODEX_HOME) + gates on codexConfigured', () => {
     expect(SRC).toContain('codexHome = null')
     expect(SRC).toContain('const codexConfigured =')
