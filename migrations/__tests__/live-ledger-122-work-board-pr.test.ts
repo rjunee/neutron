@@ -51,9 +51,9 @@ function copyTree(name: string, include: (version: number) => boolean): string {
   return dir
 }
 
-test('the live v122 work_board_items_pr row skips renumbered 0132 by name', () => {
+test('the live v122 work_board_items_pr row skips renumbered 0133 by name', () => {
   const db = new Database(join(tmp, 'live-replica.db'), { create: true })
-  const withoutBranchMigration = copyTree('without-0132', (version) => version !== 132)
+  const withoutBranchMigration = copyTree('without-0133', (version) => version !== 133)
   applyMigrations(db, withoutBranchMigration)
 
   // Model the 2026-08-14 incident exactly: the schema landed by hand and the
@@ -67,17 +67,17 @@ test('the live v122 work_board_items_pr row skips renumbered 0132 by name', () =
     [Math.floor(Date.now() / 1000)],
   )
 
-  const fullDir = copyTree('with-0132', () => true)
+  const fullDir = copyTree('with-0133', () => true)
   let result: ReturnType<typeof applyMigrations> | undefined
   // The red condition is `duplicate column name: pr`: an ordinal-keyed runner, or
-  // changing the migration slug, would try to apply 0132 and throw here.
+  // changing the migration slug, would try to apply 0133 and throw here.
   expect(() => {
     result = applyMigrations(db, fullDir)
   }).not.toThrow()
 
   expect(result).toBeDefined()
   expect(result!.applied).toEqual([])
-  expect(result!.skipped).toContain(132)
+  expect(result!.skipped).toContain(133)
   expect(
     db
       .query<{ name: string }, []>("SELECT name FROM pragma_table_info('work_board_items')")
