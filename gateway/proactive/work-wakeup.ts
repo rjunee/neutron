@@ -215,6 +215,22 @@ export interface WakeupSweepResult {
   deferred_to_run: number
 }
 
+/**
+ * The deferral log's rate-limit key: project + item + THE RUN CURRENTLY DRIVING IT.
+ *
+ * The run belongs in the key even though the item alone bounds the map. An item's
+ * `linked_run_id` can be superseded — `attachRun` re-binds an item to a later run
+ * (`work-board/store.ts:679`) — and a re-bind is exactly the transition an operator
+ * needs to see. Keyed on the item alone, a hand-off from R1 to R2 inside the
+ * half-hour window would be suppressed as a "standing" deferral and the last line
+ * on record would still name R1: stale attribution, which is the specific kind of
+ * wrong that is worse than silence. Including the run gives the new driver its own
+ * window, and the prune still drops the old key on the same sweep.
+ */
+function deferralLogKey(project_key: string, d: WakeupDeferredItem): string {
+  return `${project_key} ${d.item_id} ${d.run_id}`
+}
+
 /** Truncate for a prompt line / a log field — bounded, marked, never thrown. */
 function bound(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`
@@ -284,7 +300,7 @@ export async function runWorkWakeupSweep(
   // is CURRENTLY deferred, which is the same discipline the streak map fifteen
   // lines up already follows.
   const deferredKeys = new Set(
-    projects.flatMap((p) => p.deferred.map((d) => `${p.project_key}:${d.item_id}`)),
+    projects.flatMap((p) => p.deferred.map((d) => deferralLogKey(p.project_key, d))),
   )
   for (const key of [...deferralLog.keys()]) {
     if (!deferredKeys.has(key)) deferralLog.delete(key)
@@ -304,7 +320,7 @@ export async function runWorkWakeupSweep(
     // where all three per-item lines are inside their window.
     for (const d of project.deferred) {
       result.deferred_to_run += 1
-      const logKey = `${project.project_key}:${d.item_id}`
+      const logKey = deferralLogKey(project.project_key, d)
       const lastLoggedAt = deferralLog.get(logKey)
       if (lastLoggedAt !== undefined && now() - lastLoggedAt < WAKEUP_DEFERRAL_LOG_WINDOW_MS) {
         continue

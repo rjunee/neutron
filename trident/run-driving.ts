@@ -31,21 +31,33 @@
  * The timer cannot tell that case from a wedge, so it must not be the mechanism
  * that decides it.
  *
- * {@link WAKEUP_STAND_DOWN_MS} makes it not decide it. The reaper fires at
- * `NO_ADVANCE_HANG_MS` for every run it can reach — `subagent_run_id !== null`
- * (`orchestrator.ts:2570`) — on a sweep that runs every 90 s (`tick.ts:344`).
- * Standing down for a further margin past that means: by the time this timer is
- * even consulted, any run the reaper can reach has ALREADY been flipped terminal,
- * and this function answers `terminal` — a FACT about the row — instead of
- * guessing from a stale clock. The timer therefore only ever decides the runs the
- * reaper cannot reach, which is precisely the reported incident: runs parked at
+ * {@link WAKEUP_STAND_DOWN_MS} buys the reaper the first word. The reaper fires
+ * at `NO_ADVANCE_HANG_MS` for every run it can reach — `subagent_run_id !== null`
+ * (`orchestrator.ts:2570`) — on a sweep whose nominal cadence is 90 s
+ * (`tick.ts:344`). Standing down a further margin past that means that in the
+ * ordinary case the run has already been flipped terminal by the time this timer
+ * is consulted, so the answer comes from `terminal` — a FACT about the row —
+ * rather than from a stale clock, and the timer is left deciding the runs the
+ * reaper cannot reach. That is precisely the reported incident: runs parked at
  * `forge-init` carrying no dispatch id at all.
  *
- * The one world where the timer does decide a run with a dispatch id is a world
- * where the trident tick is not running — and in that world there is no second
- * driver to collide with, because the tick IS the other driver. Double-driving
- * requires a live peer; a live peer reaps first. That is why the margin, not a
- * cleverer signal, closes the hole.
+ * WHAT THE MARGIN DOES NOT BUY, because an earlier draft of this comment claimed
+ * it did and a cross-model review disproved it: it is NOT true that "the reaper
+ * always answers first". 90 s is a cadence, not a bound on reap latency. The
+ * sweep is single-flight (`loop/index.ts:258-262`) and steps runs sequentially
+ * (`tick.ts:719-721`), so one run wedged inside `step` — an unsettled launch,
+ * whose post-cancel drain is unbounded (`inner-loop.ts:774-786`) — stalls the
+ * whole sweep, and a second run's reap check is never reached however long it
+ * waits. In that state this timer CAN release a run that is genuinely building.
+ *
+ * Two things bound that residue, and neither is this constant. A live inner
+ * workflow re-stamps `last_advanced_at` ITSELF, out of process and independent of
+ * the tick (`checkpoint.sh:196`), so a working build stays "advancing" across a
+ * wedged sweep as long as it reaches checkpoints at all. What remains is a build
+ * that checkpoints less often than the threshold — the known mid-phase heartbeat
+ * gap, ISSUES #534 — which is the same false positive the reaper already has.
+ * This module narrows that window; it does not close it, and nothing here should
+ * be read as mutual exclusion.
  *
  * ── WHY THERE IS NO `never-launched` FAST PATH ────────────────────────────────
  *
@@ -60,7 +72,11 @@
  * read as "never launched", and the wakeup would invite a second dispatch onto a
  * run whose launch is live. No finite bound on that window exists to read off the
  * row, so the row cannot prove the negative and the rule is gone. Such a run now
- * falls to the same conservative timer as everything else.
+ * falls to the same conservative timer as everything else — which means a launch
+ * that stays unsettled past the stand-down threshold is itself eventually released.
+ * That is a deliberate trade and not an oversight: a finite bound is wrong in one
+ * direction or the other, and releasing after 100 minutes of a launch that never
+ * settled is the direction whose failure is visible and recoverable.
  *
  * ── WHAT THIS STILL DOES NOT SOLVE ───────────────────────────────────────────
  *

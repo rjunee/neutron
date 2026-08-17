@@ -494,7 +494,6 @@ import {
   workBoardScopeKey,
   type WorkBoardItem,
 } from '@neutronai/work-board/store.ts'
-import { runDrivingVerdict } from '@neutronai/trident/run-driving.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import {
@@ -3980,17 +3979,29 @@ export function buildOpenGraphComposer(
       // counts as not-live: it cannot be reconciled either, so refusing forever
       // would strand the card. See `WorkBoardStoreOptions.isRunLive`.
       //
-      // "LIVE" IS THE SAME MEASURED QUESTION THE WAKEUP ASKS, and it has to be,
-      // or the two halves of this change contradict each other. The wakeup now
-      // takes an item whose run stopped advancing (`work-wakeup-selection.ts`);
-      // every such item is by construction still bound to a NON-TERMINAL run, so
-      // a phase-only test here would refuse the completion of exactly the items
-      // the wakeup just handed to an agent — work made reachable and then made
-      // impossible to close. One definition, `runDrivingVerdict`, for both.
+      // DELIBERATELY *NOT* THE WAKEUP'S `runDrivingVerdict`, though a round of this
+      // change made it so and it reads like the obviously-consistent choice.
+      // WAKEABILITY AND COMPLETION-LEGALITY ARE DIFFERENT QUESTIONS and they fail
+      // in opposite directions. "Is anyone driving this?" may be answered from a
+      // stale clock, because guessing wrong costs a duplicated turn. "Did this
+      // work ship?" may not, because guessing wrong asserts a falsehood about the
+      // world — the 2026-08-11 incident above, which the owner called "horribly
+      // bad and confusing UX that should never have existed".
+      //
+      // A run whose `last_advanced_at` has gone quiet is very often STILL BUILDING:
+      // the field only moves at checkpoint boundaries (`liveness.ts:46-59`), which
+      // is the whole reason the wakeup needed a generous threshold. Completing on
+      // that signal would let an agent mark an item done while its build runs —
+      // and `complete()` only writes the board row (`work-board/store.ts:598`); it
+      // does not stop the build, so the claim would simply be false.
+      //
+      // The cost is real and accepted: an item the wakeup takes stays uncompletable
+      // by this path until its run reaches a terminal phase. That is a LOUD refusal
+      // (`WorkBoardRunStillLiveError`), not a silent one, and the right fix is to
+      // reap the stalled run — not to loosen the assertion that work shipped.
       isRunLive: (run_id: string): boolean => {
         const run = boardRunStore.get(run_id)
-        if (run === null || run === undefined) return false
-        return runDrivingVerdict(run, Date.now()).driving
+        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
       },
     })
     // M2 task 3 — bind the `/status` snapshot reader now that every source store

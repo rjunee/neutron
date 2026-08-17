@@ -232,6 +232,32 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(deferrals[1]).toContain('Wire the reaper')
   })
 
+  test('a RE-BOUND item speaks again — a new driver is not a standing deferral', async () => {
+    // `attachRun` lets a later run supersede an earlier binding
+    // (`work-board/store.ts:679`). Keyed on the item alone, the hand-off from R1
+    // to R2 inside the half-hour window was suppressed, leaving the last line on
+    // record naming R1 — stale attribution, which is worse than silence.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    const deferralLog = new Map<string, number>()
+    try {
+      const first = harness({
+        projects: [project({ items: [], deferred: [deferral({ run_id: 'run-1' })] })],
+      })
+      await runWorkWakeupSweep(first.deps, new Map(), deferralLog)
+      lines.clear()
+      const second = harness({
+        projects: [project({ items: [], deferred: [deferral({ run_id: 'run-2', phase: 'argus' })] })],
+      })
+      await runWorkWakeupSweep(second.deps, new Map(), deferralLog)
+    } finally {
+      lines.restore()
+    }
+    const deferrals = lines.matching('wakeup_deferred_to_live_run')
+    expect(deferrals).toHaveLength(1)
+    expect(deferrals[0]).toContain('run-2')
+  })
+
   test('the deferral window map is PRUNED to what is currently deferred', async () => {
     // The window is owned by the loop rather than taken from `log.rateLimited`,
     // whose module-global map is never pruned in production
@@ -300,6 +326,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
           deferred: [
             {
               title: 'Ship the importer',
+              item_id: 'item-1',
               run_id: 'run-1',
               phase: 'forge-init',
               since_advance_ms: 1_000,

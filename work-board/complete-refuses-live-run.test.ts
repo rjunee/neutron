@@ -99,27 +99,22 @@ describe('complete() refuses while the bound run is live', () => {
 })
 
 /**
- * THE GUARD AND THE WAKEUP MUST ANSWER "LIVE" THE SAME WAY.
+ * THE GUARD DELIBERATELY DISAGREES WITH THE WAKEUP SELECTOR.
  *
- * `isRunLive` used to be `!isTerminalPhase(run.phase)` — the exact test the
- * wakeup selector stopped trusting. Every item the wakeup newly hands to an agent
- * is, by construction, still bound to a NON-TERMINAL run, so a phase-only guard
- * here refuses the completion of precisely the work that was just made reachable:
- * woken, worked, and then impossible to close by the documented path. One
- * definition — `runDrivingVerdict` — for both, wired at `open/composer.ts`.
+ * A round of the stalled-driver change moved `isRunLive` onto the wakeup's
+ * `runDrivingVerdict`, so that items the wakeup newly takes could also be closed.
+ * A cross-model review refused it, and was right: the two questions fail in
+ * opposite directions. A stale `last_advanced_at` is weak evidence that nobody is
+ * driving — good enough to risk a duplicate turn — and NO evidence that the build
+ * finished. `complete()` writes the board row and does not stop the build
+ * (`store.ts:598`), so completing on that signal asserts something false.
+ *
+ * These tests pin the disagreement so it cannot be "fixed" back into agreement.
  */
-describe('isRunLive agrees with the wakeup selector', () => {
-  /** The composer's predicate verbatim, over a fixed clock. */
-  const predicate =
-    (rows: Map<string, TridentRun>, now_ms: number) =>
-    (run_id: string): boolean => {
-      const run = rows.get(run_id)
-      if (run === undefined) return false
-      return runDrivingVerdict(run, now_ms).driving
-    }
-
+describe('completion legality is NOT wakeability', () => {
   const T0 = Date.parse('2026-08-14T21:35:47Z')
-  const parked = (): TridentRun =>
+  /** A run parked at `forge-init`, well past the wakeup's stand-down threshold. */
+  const stalled = (): TridentRun =>
     ({
       id: 'run-1',
       slug: 'demo',
@@ -130,36 +125,15 @@ describe('isRunLive agrees with the wakeup selector', () => {
       last_advanced_at: '2026-08-14T21:35:47Z',
     }) as unknown as TridentRun
 
-  test('an ADVANCING run still refuses the completion — the 2026-08-11 invariant holds', async () => {
-    const rows = new Map([['run-1', parked()]])
-    const store = new WorkBoardStore(db, { isRunLive: predicate(rows, T0 + 60_000) })
-    const item = await store.create(SCOPE, { title: 'P1' })
-    await store.attachRun(SCOPE, item.id, 'run-1')
-    let caught: unknown = null
-    try {
-      await store.complete(SCOPE, item.id)
-    } catch (e) {
-      caught = e
-    }
-    expect(caught).toBeInstanceOf(WorkBoardRunStillLiveError)
+  test('the wakeup WOULD take this item — the run reads as not driving', () => {
+    // Establishes the premise of the test below: this is exactly the row shape
+    // the selector releases.
+    const v = runDrivingVerdict(stalled(), T0 + WAKEUP_STAND_DOWN_MS + 1)
+    expect(v.driving).toBe(false)
   })
 
-  test('a STALLED run — exactly what the wakeup now wakes — can be completed', async () => {
-    // Without this the fix is a dead end: the wakeup makes the item reachable and
-    // the store then refuses every attempt to close it.
-    const rows = new Map([['run-1', parked()]])
-    const store = new WorkBoardStore(db, {
-      isRunLive: predicate(rows, T0 + WAKEUP_STAND_DOWN_MS + 1),
-    })
-    const item = await store.create(SCOPE, { title: 'P1' })
-    await store.attachRun(SCOPE, item.id, 'run-1')
-    expect((await store.complete(SCOPE, item.id))?.status).toBe('done')
-  })
-
-  test('MUTATION CONTROL: the phase-only predicate refuses that same item', async () => {
-    // The old guard, run against the stalled row the test above completes. It
-    // refuses — which is the defect, demonstrated rather than asserted.
-    const run = parked()
+  test('and the store STILL refuses to call it done, because the build never ended', async () => {
+    const run = stalled()
     const store = new WorkBoardStore(db, { isRunLive: () => !isTerminalPhase(run.phase) })
     const item = await store.create(SCOPE, { title: 'P1' })
     await store.attachRun(SCOPE, item.id, 'run-1')
@@ -169,6 +143,15 @@ describe('isRunLive agrees with the wakeup selector', () => {
     } catch (e) {
       caught = e
     }
+    // Loud, not silent — the refusal is recoverable by reaping the run.
     expect(caught).toBeInstanceOf(WorkBoardRunStillLiveError)
+  })
+
+  test('a terminal run completes normally — the refusal is not permanent', async () => {
+    const run = { ...stalled(), phase: 'failed' } as TridentRun
+    const store = new WorkBoardStore(db, { isRunLive: () => !isTerminalPhase(run.phase) })
+    const item = await store.create(SCOPE, { title: 'P1' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+    expect((await store.complete(SCOPE, item.id))?.status).toBe('done')
   })
 })
