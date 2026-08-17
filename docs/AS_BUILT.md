@@ -1415,99 +1415,6 @@ misjudges the first real failure after a build ends; and a past-threshold
 counterexample for a reaper-reachable `running` row, which the suite had asserted
 only at the reaper boundary.
 
-## 2026-08-17 — a repair entry is one instance's history, not the fleet's; and a guard that discloses its own write still writes
-
-Landed via PR #393. Follow-up to PR #388, which merged while its own review rounds were
-still in flight, so none of this could be pushed back into it.
-
-Five defects, found across two cross-model review rounds on #388's fix. Four of the five
-are #388's OWN defect class — a claim the code does not honour, or a migration that reads
-as applied while its statements never ran — reached through the fix for it. That is why
-the rounds kept being worth running.
-
-**A shipped repair entry spoke on databases it was never written about.** `activeRepairs`
-matched an ORPHAN `recorded_name` on the name alone, on the argument that a name is an
-orphan's whole identity. True of the row; false of the fleet. `repairs.json` ships to
-every instance, so an entry is one instance's history that all of them evaluate, and two
-databases can legitimately record one unmerged branch migration at DIFFERENT ordinals —
-each ran its own build of that branch. On the second database the entry activated anyway
-and its `file_name` marked a genuinely pending migration as applied: the `ALTER`s never
-ran, no ledger row was ever written for it, and the boot exited zero. Reproduced against
-the shipped entries and the real tree on a throwaway database, reading the three missing
-columns back out of `pragma_table_info` with a present column as the positive control. The
-match is now the (`recorded_name`, `version`) PAIR for every entry, orphan or not. What
-the pair was feared to lose — an entry going inert after the collapse moved which ordinal
-its row sits at — is carried by `_migration_repairs` instead, which is the honest place
-for it: an entry that has already activated HERE stays active here, and one that never
-activated here has no history here to speak about. A genuinely stale `version` now fails
-LOUD rather than silently: the row stays unexplained, the boot refuses, and the message
-prints a fresh entry carrying the ordinal that database actually recorded.
-
-**A repair went inert on the collapse that erased its evidence.** The ledger predicate is
-what keeps entry 125 inert on a healthy instance, and it stays. But it goes false the
-moment `collapseLedgerRowsByName` drops the drifted row of a duplicated tree-file name and
-leaves the one sitting at the tree ordinal: the ledger then looks exactly like a healthy
-instance's while the instance still needs the entry, so it deactivates and the
-hand-verified migration its `file_name` suppresses re-runs its `ALTER`s. `_migration_repairs`
-is the trace that survives — written the moment an entry activates, never rewritten — and
-it is read back as a second, durable trigger. It cannot over-activate, which is the whole
-reason the ledger predicate exists: a database that never had the incident never wrote the
-row.
-
-**One orphan hash marked TWO files in this build as applied, and neither ever ran.** Hash
-widening asks a question about the ledger and answers it about a file, and that step is
-only valid when the file is the unique tree-side claimant of those bytes. The existing
-`duplicates-an-applied-file` refusal sees a recording row whose name is a file here; it
-cannot see an ORPHAN row — the rename case the widening exists for — whose bytes two files
-here carry. Then one row marked both as applied, neither was `duplicates-an-applied-file`,
-nothing refused, and both came back under `skipped` from a boot that exited zero.
-Measured: `{ applied: [], skipped: [2, 3] }` with an empty ledger delta. The tree is now
-hashed once into a reverse index, the refusal fires on either shape, and its per-file line
-says whether the recorded name is a file the operator can go and look at. The pass is
-shared with the content-drift notice, which was already hashing the whole tree on every
-boot, so a steady-state boot now makes ONE pass where it made two.
-
-**The occupied-scratch refusal wrote before refusing.** It claimed nothing had been
-written while being thrown from inside `rekeyLedgerOnName`, which `applyMigrations` reached
-only after creating `_migration_repairs` and inserting this boot's acknowledgements — so on
-the only population that reaches it, an instance mid-incident carrying repairs, it denied a
-row sitting in the database as the operator read it. The first round softened the WORDING to
-name that row. This round removes the row: every condition the guard rests on is a pure read
-(`ledgerExists`, `ledgerIsVersionKeyed`, `tableExists`), so it moved into the read-only
-preflight with the other five and the unqualified claim is earned. `docs/INVARIANTS.md` #17
-goes back to ALL SIX deciding before any write, which is now true rather than nearly true.
-
-**A fully-migrated boot was not the pure read the README promised.** The acknowledged-repair
-write ran on every boot: `INSERT OR IGNORE` made it idempotent in EFFECT and not in WRITES,
-so the instances carrying repairs — mid-incident, the databases whose backups an operator
-most wants to open — were exactly the ones a read-only connection could not boot against.
-Measured: `attempt to write a readonly database`, with a repair-free database as the
-negative control. Rows in `_migration_repairs` are never rewritten, so "already
-acknowledged" and "nothing to write" are the same condition, and only unacknowledged
-entries are written now.
-
-Four new cases in `migrations/__tests__/ordinal-identity.test.ts`, each able to fail for
-the reason under test, plus two rewritten. **CASE 8c** builds a second database that
-recorded the same orphan at its own ordinal, boots the shipped tree at it, and asserts the
-refusal plus the printed ordinal — then resolves it with the operator's own entry and reads
-the three columns back with a control. **CASE 9** pins the two-claimant hash, with the
-single-claimant rename as its positive control. **CASE 10** boots a live-shaped instance
-twice and then a third time on a connection proven to refuse writes. **CASE 6d** now
-asserts `_migration_repairs` DOES NOT EXIST after the refusal, with the un-refused boot as
-its control, and the provenance suite's stale-ordinal case is inverted to the new contract.
-
-Mutation-proved at this head. Restoring the name-only orphan match reddens CASE 8c alone.
-Restoring the per-boot repair write reddens CASE 10 alone. Moving the occupied-scratch
-guard back inside the rekey reddens CASE 6d alone. Deleting the tree-side claimant check
-reddens CASE 9 alone. And the fail-closed guard is proven NOT to have been weakened to
-achieve any of it: deleting the unexplained-row throw still reddens CASE 4 and CASE 4b and
-nothing else.
-
-This is reconciliation, not prevention. It lets an instance whose ledger already carries
-these rows boot with a correct schema; it does not stop another such row being written. The
-recurrence is closed by env-quarantine at lane spawn plus a linked-worktree refusal in the
-runner, which is separate work.
-
 ## 2026-08-17 — the "red" T5 sweeper was never red: landing eeecad9d on main
 
 A clean-room checkout at `eeecad9d` measured 78/78 host-deploy tests passing. The
@@ -1939,6 +1846,104 @@ clean.
 | `onOpenActivity` back to an inline fallback arrow | RED — surface render count |
 | draft object identity unstable | RED — 3 surface renders, expected 2 |
 | timer never told the frame was cache-served | RED — record never completes at the paint |
+
+## 2026-08-17 — a repair entry is one instance's history, not the fleet's; and a guard that discloses its own write still writes
+
+Landed via PR #393. Follow-up to PR #388, which merged while its own review rounds were
+still in flight, so none of this could be pushed back into it.
+
+Five defects, found across two cross-model review rounds on #388's fix. Four of the five
+are #388's OWN defect class — a claim the code does not honour, or a migration that reads
+as applied while its statements never ran — reached through the fix for it. That is why
+the rounds kept being worth running.
+
+**A shipped repair entry spoke on databases it was never written about.** `activeRepairs`
+matched an ORPHAN `recorded_name` on the name alone, on the argument that a name is an
+orphan's whole identity. True of the row; false of the fleet. `repairs.json` ships to
+every instance, so an entry is one instance's history that all of them evaluate, and two
+databases can legitimately record one unmerged branch migration at DIFFERENT ordinals —
+each ran its own build of that branch. On the second database the entry activated anyway
+and its `file_name` marked a genuinely pending migration as applied: the `ALTER`s never
+ran, no ledger row was ever written for it, and the boot exited zero. Reproduced against
+the shipped entries and the real tree on a throwaway database, reading the three missing
+columns back out of `pragma_table_info` with a present column as the positive control. The
+match is now the (`recorded_name`, `version`) PAIR for every entry, orphan or not. What
+the pair was feared to lose — an entry going inert after the collapse moved which ordinal
+its row sits at — is carried by `_migration_repairs` instead, which is the honest place
+for it: an entry that has already activated HERE stays active here, and one that never
+activated here has no history here to speak about. A genuinely stale `version` now fails
+LOUD rather than silently: the row stays unexplained, the boot refuses, and the message
+prints a fresh entry carrying the ordinal that database actually recorded.
+
+**A repair went inert on the collapse that erased its evidence.** The ledger predicate is
+what keeps entry 125 inert on a healthy instance, and it stays. But it goes false the
+moment `collapseLedgerRowsByName` drops the drifted row of a duplicated tree-file name and
+leaves the one sitting at the tree ordinal: the ledger then looks exactly like a healthy
+instance's while the instance still needs the entry, so it deactivates and the
+hand-verified migration its `file_name` suppresses re-runs its `ALTER`s. `_migration_repairs`
+is the trace that survives — written the moment an entry activates, never rewritten — and
+it is read back as a second, durable trigger. It cannot over-activate, which is the whole
+reason the ledger predicate exists: a database that never had the incident never wrote the
+row.
+
+**One orphan hash marked TWO files in this build as applied, and neither ever ran.** Hash
+widening asks a question about the ledger and answers it about a file, and that step is
+only valid when the file is the unique tree-side claimant of those bytes. The existing
+`duplicates-an-applied-file` refusal sees a recording row whose name is a file here; it
+cannot see an ORPHAN row — the rename case the widening exists for — whose bytes two files
+here carry. Then one row marked both as applied, neither was `duplicates-an-applied-file`,
+nothing refused, and both came back under `skipped` from a boot that exited zero.
+Measured: `{ applied: [], skipped: [2, 3] }` with an empty ledger delta. The tree is now
+hashed once into a reverse index, the refusal fires on either shape, and its per-file line
+says whether the recorded name is a file the operator can go and look at. The pass is
+shared with the content-drift notice, which was already hashing the whole tree on every
+boot, so a steady-state boot now makes ONE pass where it made two.
+
+**The occupied-scratch refusal wrote before refusing.** It claimed nothing had been
+written while being thrown from inside `rekeyLedgerOnName`, which `applyMigrations` reached
+only after creating `_migration_repairs` and inserting this boot's acknowledgements — so on
+the only population that reaches it, an instance mid-incident carrying repairs, it denied a
+row sitting in the database as the operator read it. The first round softened the WORDING to
+name that row. This round removes the row: every condition the guard rests on is a pure read
+(`ledgerExists`, `ledgerIsVersionKeyed`, `tableExists`), so it moved into the read-only
+preflight with the other five and the unqualified claim is earned. `docs/INVARIANTS.md` #17
+goes back to ALL SIX deciding before any write, which is now true rather than nearly true.
+
+**A fully-migrated boot was not the pure read the README promised.** The acknowledged-repair
+write ran on every boot: `INSERT OR IGNORE` made it idempotent in EFFECT and not in WRITES,
+so the instances carrying repairs — mid-incident, the databases whose backups an operator
+most wants to open — were exactly the ones a read-only connection could not boot against.
+Measured: `attempt to write a readonly database`, with a repair-free database as the
+negative control. Rows in `_migration_repairs` are never rewritten, so "already
+acknowledged" and "nothing to write" are the same condition, and only unacknowledged
+entries are written now.
+
+Four new cases in `migrations/__tests__/ordinal-identity.test.ts`, each able to fail for
+the reason under test, plus two rewritten. **CASE 8c** builds a second database that
+recorded the same orphan at its own ordinal, boots the shipped tree at it, and asserts the
+refusal plus the printed ordinal — then resolves it with the operator's own entry and reads
+the three columns back with a control. **CASE 9** pins the two-claimant hash, with the
+single-claimant rename as its positive control. **CASE 10** boots a live-shaped instance
+twice and then a third time on a connection proven to refuse writes. **CASE 6d** now
+asserts `_migration_repairs` DOES NOT EXIST after the refusal, with the un-refused boot as
+its control, and the provenance suite's stale-ordinal case is inverted to the new contract.
+
+Mutation-proved at this head against the 48 cases in `ordinal-identity.test.ts` plus
+`migration-provenance.test.ts`, green before each mutant. Restoring the name-only orphan
+match reddens CASE 8c and the provenance suite's stale-ordinal case, and only those (46/2).
+Restoring the per-boot repair write reddens CASE 10 alone (47/1). Moving the
+occupied-scratch guard back inside the rekey reddens CASE 6d alone (47/1). Deleting the
+tree-side claimant check reddens CASE 9 alone (47/1). And the fail-closed guard is proven
+NOT to have been weakened to achieve any of it: deleting the unexplained-row `throw`
+reddens 11 cases (37/11), CASE 4 and CASE 4b among them — and CASE 8c, which is the
+sharpest reading of this round, because the new narrowness DEPENDS on that guard still
+refusing. An entry that stops speaking must leave the row unexplained, or the narrowing
+would have converted a wrong suppression into a silent one.
+
+This is reconciliation, not prevention. It lets an instance whose ledger already carries
+these rows boot with a correct schema; it does not stop another such row being written. The
+recurrence is closed by env-quarantine at lane spawn plus a linked-worktree refusal in the
+runner, which is separate work.
 
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
