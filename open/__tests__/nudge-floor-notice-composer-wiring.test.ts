@@ -286,9 +286,22 @@ describe('the REAL composer wires the nudge lane a floor sink that records witho
     const beforeNudge = frames.length
     nudge.onModelFloorApplied!(NOTICE)
     await sleep(1_500)
+    // Matched on the CLAMP COPY, not on `system_notice` alone. The transient pill
+    // shape is shared — the cold-start "Waking up…" ack is also a
+    // `durability: 'none'` `system_notice` — so counting every pill would let an
+    // unrelated ack racing into this window fail the test with a message that reads
+    // "the nudge lane bubbles", which is the one wrong conclusion this file must not
+    // produce. The floor body is fixed copy naming the floor model, so the narrower
+    // filter still sees a real clamp bubble: under the mutation that hands this lane
+    // the chat `deliver`, ten of these arrive.
     const bubbles = frames
       .slice(beforeNudge)
-      .filter((f) => f['system_notice'] === true && typeof f['body'] === 'string')
+      .filter(
+        (f) =>
+          f['system_notice'] === true &&
+          typeof f['body'] === 'string' &&
+          (f['body'] as string).includes(NOTICE.floor),
+      )
     expect(bubbles).toEqual([])
 
     // BOTH REACHED THE JOURNAL — best-effort, so what this proves is that the
