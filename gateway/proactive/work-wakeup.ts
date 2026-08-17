@@ -220,17 +220,26 @@ export interface WakeupSweepResult {
  *
  * The run belongs in the key even though the item alone bounds the map. An item's
  * `linked_run_id` can be superseded — `attachRun` re-binds an item to a later run
- * (`work-board/store.ts:679`) — and a re-bind is exactly the transition an operator
+ * (`WorkBoardStore.attachRun`, `work-board/store.ts`) — and a re-bind is exactly the transition an operator
  * needs to see. Keyed on the item alone, a hand-off from R1 to R2 inside the
  * half-hour window would be suppressed as a "standing" deferral and the last line
  * on record would still name R1: stale attribution, which is the specific kind of
  * wrong that is worse than silence. Including the run gives the new driver its own
  * window, and the prune still drops the old key on the same sweep.
  *
- * THE SEPARATOR IS WRITTEN AS AN ESCAPE AND MUST STAY THAT WAY. NUL is the right
- * delimiter — it is the one byte that cannot occur in a project slug, a board item
- * id or a run id, so no combination of components can collide into a single key.
- * But typing it LITERALLY puts a real NUL in the source, and a tracked file
+ * THE KEY IS LENGTH-PREFIXED, AND THAT IS WHAT MAKES IT INJECTIVE. An earlier cut
+ * joined the parts on a NUL and argued the delimiter could not occur inside any of
+ * them. Nothing enforces that: `CreateWorkBoardItemInput.id` is caller-supplied
+ * (`work-board/store.ts`) and run ids are likewise unrestricted strings, so a
+ * separator-only scheme is injective by ASSUMPTION rather than by construction.
+ * With a bare separator, ("p", "a<NUL>b", "c") and ("p", "a", "b<NUL>c") encode
+ * identically, and two different items then share one deferral window — one of
+ * them silently stops being logged, which is the going-quiet this module exists to
+ * prevent. Prefixing each part with its length removes the question entirely: the
+ * decode is unambiguous whatever the parts contain.
+ *
+ * THE SEPARATOR IS STILL WRITTEN AS AN ESCAPE WHEREVER ONE IS USED, AND MUST STAY
+ * THAT WAY. Typing a NUL LITERALLY puts a real NUL in the source, and a tracked file
  * containing one is BINARY to grep: `scripts/ci/leak-gate.sh` flags it
  * `binary-hidden` and fails the `purity` job, precisely because every PII and
  * vocabulary rule it runs would silently match nothing in such a file. This file
@@ -238,7 +247,8 @@ export interface WakeupSweepResult {
  * byte-identical at runtime and leaves the source pure ASCII.
  */
 function deferralLogKey(project_key: string, d: WakeupDeferredItem): string {
-  return `${project_key}\u0000${d.item_id}\u0000${d.run_id}`
+  const part = (s: string): string => `${s.length} ${s}`
+  return `${part(project_key)}${part(d.item_id)}${part(d.run_id)}`
 }
 
 /** Truncate for a prompt line / a log field — bounded, marked, never thrown. */

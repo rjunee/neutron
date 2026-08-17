@@ -99,6 +99,80 @@ describe('complete() refuses while the bound run is live', () => {
 })
 
 /**
+ * `complete()` WAS NEVER THE ONLY DOOR, AND THE GUARD ON IT WAS A LOCK ON THE
+ * DOOR NOBODY HAS TO USE.
+ *
+ * A review of the stalled-driver change reproduced the 2026-08-11 incident on a
+ * store that already had the guard: `update()` takes the full status enum, and
+ * `work_board_update` (`work-board/agent-tool.ts`) hands a model's `status`
+ * straight to it. Patching `{status:'done'}` walked past the check and stamped
+ * `completed_at` mid-build — the same false claim, through the other door.
+ *
+ * That matters more now, not less: the wakeup prompt this change ships steers a
+ * woken agent at the board, so the population of agents holding that tool is
+ * exactly the population the guard exists to restrain.
+ *
+ * The guard therefore lives on `update()`, the single write path, and these tests
+ * pin every door to the same answer.
+ */
+describe('update() refuses the same transition complete() refuses', () => {
+  test('REPRO: update({status:"done"}) is REFUSED while the run is live', async () => {
+    const store = storeWith(new Set(['run-1']))
+    const item = await store.create(SCOPE, { title: 'P1 — email pipeline' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+
+    let caught: unknown = null
+    try {
+      await store.update(SCOPE, item.id, { status: 'done' })
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(WorkBoardRunStillLiveError)
+    expect((caught as WorkBoardRunStillLiveError).run_id).toBe('run-1')
+    // The write must not half-apply: no status flip, no datestamp.
+    expect(store.get(SCOPE, item.id)?.status).not.toBe('done')
+    expect(store.get(SCOPE, item.id)?.completed_at).toBeNull()
+  })
+
+  test('a NON-done patch is untouched by the guard — titles still edit mid-build', async () => {
+    // The guard is about one claim ("this shipped"), not about freezing the row.
+    const store = storeWith(new Set(['run-1']))
+    const item = await store.create(SCOPE, { title: 'P1' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+    const updated = await store.update(SCOPE, item.id, { title: 'P1 — renamed' })
+    expect(updated?.title).toBe('P1 — renamed')
+  })
+
+  test('moving to in_progress mid-build is still allowed', async () => {
+    const store = storeWith(new Set(['run-1']))
+    const item = await store.create(SCOPE, { title: 'P1' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+    expect((await store.update(SCOPE, item.id, { status: 'in_progress' }))?.status).toBe(
+      'in_progress',
+    )
+  })
+
+  test('an ALREADY-done item is not re-refused — the guard keys on the TRANSITION', async () => {
+    // Re-patching done→done asserts nothing new, so it must not throw; otherwise
+    // an idempotent write becomes an error once a run is later re-attached.
+    const live = new Set<string>()
+    const store = storeWith(live)
+    const item = await store.create(SCOPE, { title: 'P1' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+    await store.update(SCOPE, item.id, { status: 'done' })
+    live.add('run-1')
+    expect((await store.update(SCOPE, item.id, { status: 'done' }))?.status).toBe('done')
+  })
+
+  test('update() still completes when the run is NOT live', async () => {
+    const store = storeWith(new Set())
+    const item = await store.create(SCOPE, { title: 'P1' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+    expect((await store.update(SCOPE, item.id, { status: 'done' }))?.status).toBe('done')
+  })
+})
+
+/**
  * THE GUARD DELIBERATELY DISAGREES WITH THE WAKEUP SELECTOR.
  *
  * A round of the stalled-driver change moved `isRunLive` onto the wakeup's
@@ -107,7 +181,8 @@ describe('complete() refuses while the bound run is live', () => {
  * opposite directions. A stale `last_advanced_at` is weak evidence that nobody is
  * driving — good enough to risk a duplicate turn — and NO evidence that the build
  * finished. `complete()` writes the board row and does not stop the build
- * (`store.ts:598`), so completing on that signal asserts something false.
+ * (`WorkBoardStore.complete`, `work-board/store.ts`), so completing on that signal
+ * asserts something false.
  *
  * These tests pin the disagreement so it cannot be "fixed" back into agreement.
  */
