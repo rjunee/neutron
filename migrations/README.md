@@ -26,6 +26,8 @@ SQLite schema migrations for Neutron's per-instance SQLite database. Forward-onl
 
 The runner enforces the regex `^\d{4}_.+\.sql$`. Files that don't match are silently ignored — keep stray notes / `.bak` files out of the directory.
 
+A file that DOES match and is **not tracked by git** is a different matter: the runner refuses to boot rather than apply it (see "When the runner refuses: an untracked file" below). Until it was committed, a stray `NNNN_*.sql` was applied at boot and recorded in `_migrations` permanently, then vanished with the next checkout — leaving a ledger row naming a migration the repository never contained.
+
 ## The `_migrations` ledger
 
 The ledger is owned by the runner, not by any `.sql` file — `runner.ts` creates it (`CREATE TABLE IF NOT EXISTS`) and brings it up to the current shape (`ensureProvenanceColumns`) on the boot that is about to write a row. Nothing in this directory should `ALTER` it: evolving the ledger from inside the ledger is circular, and on a fresh install the ALTER would land *after* the rows it needs to change.
@@ -39,13 +41,15 @@ A steady-state boot — every migration already recorded, nothing pending — do
 | `applied_at` | unix seconds, as a REAL |
 | `content_sha256` | SHA-256 of the migration file's bytes, as applied |
 | `applied_by_commit` | the deployed commit SHA, or NULL |
+| `tree_provenance` | `tracked` when the file was verified to be part of the deployed tree; `unverifiable:<reason>` when that could not be established; NULL on rows written before this existed |
 
-The last two answer *which build wrote this row*. A live instance once crash-looped on boot because an ordinal was recorded under one name while the deployed code carried another — and the investigation stalled, because at the moment the row was written the running commit contained no migration at that ordinal at all, and nothing on disk recorded what had applied it.
+The last three answer *which build wrote this row*. A live instance once crash-looped on boot because an ordinal was recorded under one name while the deployed code carried another — and the investigation stalled, because at the moment the row was written the running commit contained no migration at that ordinal at all, and nothing on disk recorded what had applied it.
 
 Both are nullable, and NULL is a real answer, not a defect:
 
 - **`content_sha256` is NULL** on rows written before provenance shipped. Nothing more can be learned about them.
 - **`applied_by_commit` is NULL** when the build had no discoverable identity. Neutron Open is self-hostable, so an install may be an unpacked tarball, a zip, or a `COPY` into a container image with no `.git` and no `git` on PATH. The runner reads git metadata as plain files and never spawns a subprocess (a subprocess on the boot path can hang); when there is nothing to read it records NULL rather than a fabricated value. It also refuses to read a `.git` this tree does not own — an install unpacked inside somebody else's checkout would otherwise record *that* repository's HEAD, which is well-formed, plausible and wrong. **Set `NEUTRON_COMMIT_SHA` when packaging a build without git metadata** (or when installing inside another repository) and provenance stays answerable for exactly the install shapes that would otherwise have none.
+- **`tree_provenance` is `unverifiable:<reason>`** when the file's membership of the deployed tree could not be established, and the reason names why: `no-git-metadata` (a tarball, zip or image install), `directory-not-tracked` (the migration directory itself is not part of any checkout — copied into `node_modules/`, staged in a build directory), `no-index` / `unreadable-index` / `unsupported-index-version` / `split-index` / `sparse-index` (an index shape the runner does not decode). **The prefix is the contract:** anything that is not exactly `tracked` is unverified, so a reader never has to enumerate the reasons. This is deliberately not the same state as `tracked` — an install that cannot check is not an install with nothing to check, and the row says which it was.
 
 **`content_sha256` is recorded and reported, not enforced.** The runner compares *names* and refuses on a mismatch; it does not compare the recorded hash against the file on disk. That is a decision, not an omission. Migrations are forward-only and already-applied files are edited in place from time to time for entirely benign reasons — a comment, a reflow, a typo in a string literal — none of which change the schema that landed. Turning the hash into a boot gate would convert every one of those into a crash loop resolvable only through `repairs.json`, and the failure it would catch (a *different* migration silently occupying an applied ordinal) already produces a name mismatch in every case where the slug differs. So the hash's job is forensic: it is printed in the refusal below, and it is what lets an operator tell "the same migration, renamed" from "a genuinely different migration that claimed this ordinal" — the question the incident that motivated these columns could not answer.
 
@@ -54,6 +58,19 @@ Both are nullable, and NULL is a real answer, not a defect:
 Deciding costs no write. The ledger is read shape-tolerantly and the columns are added only on the path that is about to insert a row, so a boot that ends in the refusal below has changed nothing — the guard whose job is to change nothing does not first mutate the schema of the database it just declared untrustworthy.
 
 One exception, and it is worth knowing before pointing a read-only connection at a live database: when `repairs.json` carries an entry that matches a mismatch in this ledger, the runner records the acknowledgement in `_migration_repairs`, and that is a write. It happens on the acknowledged-repair path only, whether or not anything is pending. A database whose ledger has no acknowledged repairs opens read-only cleanly; one that does needs a writable copy (or an unmatched `repairs.json`) to inspect.
+
+## When the runner refuses: an untracked file
+
+If a pending `NNNN_*.sql` is present in the directory but the deployed tree does not track it, `applyMigrations` **throws before it writes anything**. Nothing is applied, nothing is recorded, and the ledger is not even reshaped.
+
+Resolve it by deciding what the file is:
+
+- a **stray** — a scratch copy, an editor artifact, a leftover from another branch, something another process wrote into the directory → **delete it**. The database is unchanged, so nothing else is needed.
+- a **real migration** → **commit it**, then boot again.
+
+`repairs.json` is not the tool for this and the message says so: those entries acknowledge a name mismatch on a row that is **already recorded**, and here nothing has been recorded. Recording a row for a file the repository does not contain is the disease, not the cure.
+
+The check runs only where it can be answered: the tree's own `.git` index, read as a plain file (no subprocess — `git` may not be installed, and a subprocess on the boot path can hang). Where that is unavailable the runner applies the migration and records `tree_provenance = unverifiable:<reason>` instead, which is why the guard can be fail-closed without breaking tarball, zip or container installs. Only **pending** migrations are checked: a row that is already recorded is already permanent, and refusing forever over a file applied long ago would be an outage with no remedy.
 
 ## When the runner refuses: `repairs.json`
 

@@ -107,6 +107,14 @@ with cross-references noted inline.
     migration version numbers are never renumbered or backfilled. `migrations/runner.ts:89-126`.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
+    Two refusals in that runner are fail-closed and must stay so: a recorded name that differs from
+    the file on disk (`migrationNameMismatch`, resolvable only via a hand-verified
+    `migrations/repairs.json` entry), and a pending migration file the deployed tree does not track
+    (`formatUntrackedMigration` + `resolveDeployedTree` in `migrations/provenance.ts`). Both decide
+    BEFORE any write. Where tree membership cannot be established (no git metadata, an index shape
+    the reader does not decode, a migration directory git does not track at all) the runner applies
+    and records `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from
+    "not tracked" and collapsing them either breaks tarball installs or re-opens the class.
 18. Schema snapshot test is the refactor's data-layer safety net; regenerate only via
     `regen-snapshot.ts`, never hand-edit. `migrations/snapshot.test.ts:1` (the test),
     `migrations/regen-snapshot.ts:9-15` (writes `expected-schema.txt`).

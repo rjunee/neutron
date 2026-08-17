@@ -4,7 +4,12 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveOpenDbPath } from './db-path.ts'
-import { migrationContentHash, resolveDeployedCommit } from './provenance.ts'
+import {
+  type DeployedTree,
+  migrationContentHash,
+  resolveDeployedCommit,
+  resolveDeployedTree,
+} from './provenance.ts'
 import { installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -36,6 +41,7 @@ interface RecordedMigration {
   applied_at: number
   content_sha256: string | null
   applied_by_commit: string | null
+  tree_provenance: string | null
 }
 
 export function loadMigrations(dir: string = HERE): Migration[] {
@@ -110,6 +116,27 @@ function repairsEntryFor(
  */
 const PREDATES_PROVENANCE = '(not recorded — row predates migration provenance)'
 const NO_BUILD_IDENTITY = '(not discoverable — the build carried no git metadata)'
+/**
+ * A row from a build that recorded the commit but not yet the tree verdict — the
+ * window between the two changes. Distinguished from the two above for the same
+ * reason they are distinguished from each other: it sends the reader somewhere
+ * else, namely "this row's file was never checked against the tree, and nothing
+ * more can be learned about it now".
+ */
+const PREDATES_TREE_VERIFICATION = '(not recorded — row predates deployed-tree verification)'
+
+/** `tree_provenance` for a file the deployed tree demonstrably tracks. */
+const TRACKED_IN_DEPLOYED_TREE = 'tracked'
+
+/**
+ * `tree_provenance` for a file whose membership of the deployed tree could not
+ * be established, and the reason it could not. The prefix is the contract:
+ * anything that does not equal `tracked` is unverified, and a reader can test
+ * for it without enumerating every reason this or a future version can produce.
+ */
+function unverifiedTreeProvenance(reason: string): string {
+  return `unverifiable:${reason}`
+}
 
 /**
  * The largest millisecond offset `new Date(...)` represents; anything beyond it
@@ -174,6 +201,13 @@ function formatNameMismatch(
       recorded.applied_by_commit ??
       (recorded.content_sha256 === null ? PREDATES_PROVENANCE : NO_BUILD_IDENTITY)
     }`,
+    // Whether the row's file was ever established as part of the tree that
+    // applied it. On the incident this work is about, that is THE question — the
+    // offending row named a migration no deployed commit ever contained.
+    `    tree    ${
+      recorded.tree_provenance ??
+      (recorded.content_sha256 === null ? PREDATES_PROVENANCE : PREDATES_TREE_VERIFICATION)
+    }`,
     '',
     'Resolve ONLY with a hand-verified entry in migrations/repairs.json. Confirm by hand that the',
     'live schema already matches this code, then append this entry (replacing the note):',
@@ -181,6 +215,56 @@ function formatNameMismatch(
     indented,
     '',
     'Never rename the recorded row and never auto-apply the migration.',
+  ].join('\n')
+}
+
+/**
+ * The thrown message for a migration file the deployed tree does not track.
+ *
+ * Same self-diagnosing shape as the mismatch above, and for the same reason: the
+ * operator reading this has a boot that will not come up, and everything needed
+ * to decide should be in front of them. Two things this message must get right.
+ *
+ * It states that NOTHING WAS APPLIED. This refusal happens before any write, so
+ * deleting a stray file is a complete fix — and an operator who fears the
+ * database is half-migrated will reach for something more destructive.
+ *
+ * It names the tracked SIBLINGS. A refusal that only says "not tracked" is
+ * indistinguishable from a check that has broken and is refusing everything —
+ * the exact failure a fail-closed boot gate must let the operator rule out in
+ * one read. The count is the check's own positive control.
+ */
+function formatUntrackedMigration(
+  migration: Migration,
+  tree: { readonly dirPrefix: string; readonly tracked: ReadonlySet<string> },
+  deployedCommit: string | null,
+): string {
+  return [
+    `Migration file ${migration.fileName} is present in the migrations directory but is NOT part of ` +
+      "the deployed tree — git's index for this checkout does not track it. Refusing to apply it.",
+    '',
+    '  on disk',
+    `    file    ${tree.dirPrefix}${migration.fileName}`,
+    `    sha256  ${migrationContentHash(migration.sql)}`,
+    '  deployed tree',
+    `    build   ${deployedCommit ?? NO_BUILD_IDENTITY}`,
+    `    tracked ${tree.tracked.size} file(s) in this directory, and this is not one of them`,
+    '',
+    'NOTHING HAS BEEN APPLIED and nothing has been written — this refusal happens before the first',
+    'write, so the database is exactly as it was.',
+    '',
+    'An untracked file here is not a harmless extra. It would be applied at boot and recorded in',
+    '_migrations PERMANENTLY, and then disappear with the next checkout, leaving a ledger row that',
+    'names a migration this repository never contained. Every later boot then refuses on a mismatch',
+    'that cannot be explained from anything on disk. That is how the last outage started.',
+    '',
+    'Resolve by ONE of:',
+    '  - DELETE the file, if it is a stray — a scratch copy, an editor artifact, a leftover from',
+    '    another branch, something written into this directory by another process.',
+    '  - COMMIT it to the deployed tree, if it is a real migration, then boot again.',
+    '',
+    'Do NOT reach for migrations/repairs.json. Those entries acknowledge a name mismatch on a row',
+    'that is already recorded; nothing is recorded here, and there is nothing to repair.',
   ].join('\n')
 }
 
@@ -193,6 +277,7 @@ function formatNameMismatch(
 const PROVENANCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['content_sha256', 'TEXT'],
   ['applied_by_commit', 'TEXT'],
+  ['tree_provenance', 'TEXT'],
 ]
 
 /** The columns `_migrations` currently carries, by name. */
@@ -265,6 +350,24 @@ function ensureProvenanceColumns(db: Database): void {
       if (!ledgerColumns(db).has(column)) throw err
     }
   }
+}
+
+/**
+ * What every row written in this run records about the deployed tree.
+ *
+ * One value for the whole run, because the verdict is a property of the tree and
+ * not of the file: on the `verified` path every pending file has already been
+ * proven tracked (the alternative threw), and on the `unverifiable` path nothing
+ * about any of them could be established.
+ *
+ * NULL only when nothing is pending, which is also the only case where no row is
+ * written. It is not "unknown" — it is "no run happened".
+ */
+function treeProvenanceOf(tree: DeployedTree | null): string | null {
+  if (tree === null) return null
+  return tree.kind === 'verified'
+    ? TRACKED_IN_DEPLOYED_TREE
+    : unverifiedTreeProvenance(tree.reason)
 }
 
 function assertUniqueMigrationOrdinals(migrations: Migration[]): void {
@@ -376,12 +479,33 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   }
   const applied: number[] = []
   const skipped: number[] = []
-  // Resolved ONCE per run, and only when there is something to apply, so a
-  // steady-state boot (every migration already recorded) does no filesystem
-  // work at all. `dir` is the search origin: for the instance tree that walks
-  // up to the checkout's `.git`, and for a sidecar tree (`migrations/comments`)
-  // it finds the same one.
-  const pending = migrations.some((m) => !seen.has(m.version))
+  // Both provenance reads happen ONCE per run, and only when there is something
+  // to apply, so a steady-state boot (every migration already recorded) does no
+  // filesystem work at all. `dir` is the search origin: for the instance tree
+  // that walks up to the checkout's `.git`, and for a sidecar tree
+  // (`migrations/comments`) it finds the same one.
+  const pendingMigrations = migrations.filter((m) => !seen.has(m.version))
+  const pending = pendingMigrations.length > 0
+  const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
+  // Whether the files about to be applied are part of the deployed tree, or why
+  // that could not be established. Read BEFORE the ledger is reshaped, so the
+  // refusal below costs no write either — see the ordering note that follows.
+  const tree = pending ? resolveDeployedTree(dir) : null
+  if (tree !== null && tree.kind === 'verified') {
+    for (const m of pendingMigrations) {
+      // A file that is present but untracked is not a migration this build
+      // contains, and applying it writes a permanent ledger row for something
+      // that will not exist after the next checkout. Fail closed, name the file.
+      // Only PENDING files are checked, deliberately: a row already recorded is
+      // already permanent, and refusing forever over a stray that was applied
+      // long ago would be a boot outage with no remedy. This guard's job is to
+      // stop the silent APPLY, which is the only moment the damage is done.
+      if (!tree.tracked.has(m.fileName)) {
+        throw new Error(formatUntrackedMigration(m, tree, deployedCommit))
+      }
+    }
+  }
+  const treeProvenance = treeProvenanceOf(tree)
   // ORDERING IS LOAD-BEARING, and it is the whole reason the ledger is read
   // shape-tolerantly above. Reshaping the ledger before deciding would mean a
   // boot that ends in the refusal had already mutated the schema of the
@@ -390,7 +514,6 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // read into a write for a fully-migrated database, which breaks opening a
   // backup read-only to inspect it. Nothing pending, nothing written.
   if (pending) ensureProvenanceColumns(db)
-  const deployedCommit = pending ? resolveDeployedCommit(process.env, dir) : null
   for (const m of migrations) {
     if (seen.has(m.version)) {
       skipped.push(m.version)
@@ -416,9 +539,17 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
       // can never exist without naming the build that wrote it — the gap that
       // made the original incident unanswerable after the fact.
       db.run(
-        `INSERT INTO _migrations (version, name, applied_at, content_sha256, applied_by_commit)
-         VALUES (?, ?, ?, ?, ?)`,
-        [m.version, m.name, Date.now() / 1000, migrationContentHash(m.sql), deployedCommit],
+        `INSERT INTO _migrations
+           (version, name, applied_at, content_sha256, applied_by_commit, tree_provenance)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          m.version,
+          m.name,
+          Date.now() / 1000,
+          migrationContentHash(m.sql),
+          deployedCommit,
+          treeProvenance,
+        ],
       )
       db.exec('COMMIT')
     } catch (err) {

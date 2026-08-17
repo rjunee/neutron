@@ -50,6 +50,7 @@ test('mismatched migration name throws', () => {
       // becomes a module-resolution error that looks identical to a pass.
       cpSync(join(MIGRATIONS_DIR, 'db-path.ts'), join(dir, 'db-path.ts'))
       cpSync(join(MIGRATIONS_DIR, 'provenance.ts'), join(dir, 'provenance.ts'))
+      cpSync(join(MIGRATIONS_DIR, 'git-index.ts'), join(dir, 'git-index.ts'))
       writeFileSync(join(dir, 'collision.test.ts'), scenario)
     }
     writeFileSync(join(control, 'runner.ts'), original)
