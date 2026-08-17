@@ -319,6 +319,18 @@ export interface NeutronChatControllerOptions {
   /** Optional production diagnostics sink for completed switch records. */
   switchTimingEmit?: SwitchTimingOptions['emit']
   /**
+   * Clock for the switch stopwatch; defaults to `performance.now()`.
+   *
+   * Injectable for the same reason {@link switchConnectingGraceMs} is: the thing
+   * worth asserting about this instrument is WHICH WORK EACH MARK CONTAINS, and a
+   * test that compares real elapsed time against a threshold measures the runner
+   * instead (ISSUES #438). With a fake clock a subscriber can "render" for a known
+   * 250 ms and the decomposition becomes exact — which is what turns the whole
+   * premise of this instrument ("a mark stamped after an `await` charges the read
+   * for the main thread it waited on") from a comment into a guard.
+   */
+  switchTimingNow?: SwitchTimingOptions['now']
+  /**
    * Managed post-onboarding claim redirect target (from the page bootstrap
    * config's {@link BootstrapConfig.postOnboardingClaimUrl}). When set, the
    * controller navigates the browser here on the `onboarding_completed` frame;
@@ -541,6 +553,7 @@ export class NeutronChatController {
   private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
   private readonly switchConnectingGraceMs: number
   private readonly switchTimingEmit: SwitchTimingOptions['emit']
+  private readonly switchTimingNow: SwitchTimingOptions['now']
   /** Stopwatch for the in-flight project switch — see `switch-timing.ts`. */
   private switchTimer: SwitchTimer | null = null
   private awaitingReply = false
@@ -643,6 +656,7 @@ export class NeutronChatController {
     this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
     this.switchConnectingGraceMs = opts.switchConnectingGraceMs ?? 2_500
     this.switchTimingEmit = opts.switchTimingEmit
+    this.switchTimingNow = opts.switchTimingNow
     this.postOnboardingClaimUrl =
       typeof opts.postOnboardingClaimUrl === 'string' && opts.postOnboardingClaimUrl.length > 0
         ? opts.postOnboardingClaimUrl
@@ -747,6 +761,7 @@ export class NeutronChatController {
     this.switchTimer?.supersede()
     this.switchTimer = new SwitchTimer(this.projectId, projectId, {
       ...(this.switchTimingEmit !== undefined ? { emit: this.switchTimingEmit } : {}),
+      ...(this.switchTimingNow !== undefined ? { now: this.switchTimingNow } : {}),
     })
     // Keep the outgoing session warm; the bounded cache stops it on eviction.
     // NOT `session.stop()` — tearing the socket down here is the 1-3.1s the
