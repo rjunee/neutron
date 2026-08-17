@@ -3,8 +3,11 @@
  *
  * WHY THIS EXISTS. A live instance crash-looped on boot because `_migrations`
  * recorded an ordinal under one name while the deployed code carried another,
- * and `applyMigrations` correctly refuses to guess (see `runner.ts`,
- * `migrationNameMismatch`). The investigation then hit a wall: at the moment
+ * and `applyMigrations` refused to guess. (That particular refusal is GONE — the
+ * ordinal was never an identity and the runner now reconciles by name; see
+ * `runner.ts`, `migrationIsRecorded`. What survives is the refusal this file
+ * feeds: a recorded migration no file in the build corresponds to,
+ * `formatUnexplainedLedgerRows`.) The investigation then hit a wall: at the moment
  * the offending row was written, the commit the instance was running contained
  * no migration file at that ordinal at all — so a migration that was not part
  * of the deployed build had been applied to the live database, and NOTHING on
