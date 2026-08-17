@@ -52,7 +52,8 @@ Three changes, all in `landing/chat-react/`:
   **This removes the empty frame, not the render.** The resolved read still publishes
   behind it, `handleChange` is still called on every switch, and the total row-construction
   work is unchanged — 533 rows built once either way. It MOVES into the click-blocking
-  frame, measured at 0.19 ms → 2.37 ms of synchronous `setProject` cost. What the owner
+  frame, which an adversarial review measured at 0.19 ms → 2.37 ms of synchronous
+  `setProject` cost — their harness, cited rather than reproduced here. What the owner
   gains is that the first thing he sees is his conversation; what he does not gain, yet,
   is a shorter wait for it.
 
