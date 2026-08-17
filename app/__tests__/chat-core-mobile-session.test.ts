@@ -70,6 +70,23 @@ class FakeSocket implements SocketLike {
   sentEnvelopes(): Record<string, unknown>[] {
     return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
   }
+  /**
+   * FORWARD resume frames — `after_seq` with no `before_seq`. `resume` has a
+   * second form that asks BACKWARDS for the history below a seq, and a session
+   * whose oldest applied seq is above 1 sends one of those per catch-up; the
+   * assertions that say "resumed from N" mean the forward cursor.
+   */
+  forwardResumes(): Record<string, unknown>[] {
+    return this.sentEnvelopes().filter(
+      (e) => e['type'] === 'resume' && e['before_seq'] === undefined,
+    );
+  }
+  /** BACKWARDS resume frames — the history walk (`before_seq` present). */
+  backwardsResumes(): Record<string, unknown>[] {
+    return this.sentEnvelopes().filter(
+      (e) => e['type'] === 'resume' && e['before_seq'] !== undefined,
+    );
+  }
 }
 
 const dbs: Database[] = [];
@@ -537,7 +554,7 @@ describe('MobileChatSession — stale-store reset on server reinstall (M1)', () 
     sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1, last_seen_seq: 2 });
     await tick();
     expect(await store.lastSeenSeq(TOPIC)).toBe(0);
-    const resume = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'resume').at(-1);
+    const resume = sockets[0]!.forwardResumes().at(-1);
     expect(resume).toMatchObject({ type: 'resume', after_seq: 0 });
     // Stale acked rows gone, but the queued send survived the on-device wipe …
     expect((await session.messages()).map((m) => m.body)).toEqual(['keep me']);
@@ -560,7 +577,7 @@ describe('MobileChatSession — stale-store reset on server reinstall (M1)', () 
     await tick();
     expect(await store.lastSeenSeq(TOPIC)).toBe(40);
     expect((await session.messages()).length).toBe(2);
-    const resume = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'resume').at(-1);
+    const resume = sockets[0]!.forwardResumes().at(-1);
     expect(resume).toMatchObject({ type: 'resume', after_seq: 40 });
   });
 

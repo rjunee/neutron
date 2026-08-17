@@ -38,6 +38,24 @@ export interface ApplyResult {
   reconciled: boolean
 }
 
+/**
+ * How many BACKWARDS pages one socket open will walk before it stops asking.
+ *
+ * The walk exists because a capped forward replay skips rows the client can no
+ * longer reach; the budget exists because nothing else caps it. Together with the
+ * server's page size this is the per-topic ceiling a background warm is sized
+ * against (`app/lib/chat-core/transcript-warmer.ts` reasons explicitly about that
+ * ceiling when it fans out across scopes), so removing the budget would quietly
+ * turn "warm eight scopes" into "sync the device without limit" on cellular.
+ *
+ * Three pages plus the forward page covers 2000 messages per open — comfortably
+ * more than the longest topic the owner has reported (1130) — and a transcript
+ * longer than that is not stranded: the client's own oldest applied seq restarts
+ * the walk on the next open (`SyncEngine.backfillFrom`), so history converges
+ * across opens rather than needing one heroic open.
+ */
+export const MAX_HISTORY_BACKFILL_ROUNDS = 3
+
 export class SyncEngine {
   private readonly store: Store
 
@@ -227,10 +245,37 @@ export class SyncEngine {
     return { applied: true }
   }
 
-  /** Build the gap-fill request to send on (re)connect. */
+  /** Build the FORWARD gap-fill request to send on (re)connect: everything above
+   *  the local cursor, newest page first. */
   async resumeRequest(topic_id: string): Promise<OutboundResume> {
     const after_seq = await this.store.lastSeenSeq(topic_id)
     return { v: 1, type: 'resume', after_seq }
+  }
+
+  /**
+   * Build a BACKWARDS request for the page below `before_seq` — the other half of
+   * the resume pair, and the only way to reach history a capped forward page
+   * skipped. `after_seq: 0` because a backwards walk has no lower bound to keep:
+   * the upper bound is what shrinks each round.
+   */
+  backfillRequest(before_seq: number): OutboundResume {
+    return { v: 1, type: 'resume', after_seq: 0, before_seq: Math.max(0, Math.trunc(before_seq)) }
+  }
+
+  /**
+   * The seq to resume a BACKWARDS walk from on a fresh open, or `null` when this
+   * topic has no history below what it holds.
+   *
+   * Server seqs for a topic are assigned `MAX(seq) + 1` and nothing deletes them
+   * (`persistence/app-chat-store.ts`), so they run 1..N contiguously and the oldest
+   * seq a client holds tells it exactly whether anything is missing below: > 1 means
+   * yes. That local test is what makes the walk survive a socket close — the server
+   * only reports a gap for a page it just sent, so without it a client that ran out
+   * of rounds on one open could never pick the walk up again.
+   */
+  async backfillFrom(topic_id: string): Promise<number | null> {
+    const earliest = await this.store.earliestSeenSeq(topic_id)
+    return earliest > 1 ? earliest : null
   }
 
   /**

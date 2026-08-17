@@ -324,6 +324,18 @@ export class SqliteChatStore implements Store {
     return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
   }
 
+  async earliestSeenSeq(topic_id: string): Promise<number> {
+    // `seq > 0` and not merely NOT NULL: a row that arrived without a server seq
+    // must not become the backwards cursor, or the walk would ask for everything
+    // below 0 forever.
+    const { rows } = await this.db.execute(
+      `SELECT MIN(seq) AS min_seq FROM ${TABLE} WHERE topic_id = ? AND seq IS NOT NULL AND seq > 0`,
+      [topic_id],
+    );
+    const raw = rows[0]?.['min_seq'];
+    return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
+  }
+
   async pendingSends(topic_id: string): Promise<ChatMessage[]> {
     const { rows } = await this.db.execute(
       `SELECT * FROM ${TABLE} WHERE topic_id = ? AND status = 'queued' ORDER BY created_at ASC`,

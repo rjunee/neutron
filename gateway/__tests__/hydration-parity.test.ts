@@ -246,7 +246,7 @@ describe('G2 — hydration-parity characterization (3-transcript fidelity matrix
     const livePush = h.captured.at(-1) as AppWsOutboundAgentMessage
     expect(livePush?.type).toBe('agent_message')
 
-    const replayed = await h.adapter.replayAfter(APP_TOPIC, 0)
+    const replayed = (await h.adapter.replayAfter(APP_TOPIC, 0)).envelopes
     expect(replayed.length).toBe(1)
     const wsResume = replayed[0] as AppWsOutboundAgentMessage
     expect(wsResume?.type).toBe('agent_message')

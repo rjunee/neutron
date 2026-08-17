@@ -72,6 +72,12 @@ export interface AppChatReceiptLog {
     topic_id: string,
     after_seq: number,
     limit?: number,
+    /** EXCLUSIVE upper bound, mirroring the message replay's `before_seq`. A
+     *  BACKWARDS resume asks for a range that ENDS below the client's cursor, and
+     *  per-message state has to follow the same range or it is drained for the whole
+     *  topic on every page of the walk. Absent → unbounded above, which is what every
+     *  forward resume passes. */
+    before_seq?: number,
   ): Promise<AppChatReceiptAggregate[]>
   /**
    * Same replay as {@link aggregatesAfter}, but bounded to one PAGE and paired
@@ -92,6 +98,7 @@ export interface AppChatReceiptLog {
     after_seq: number,
     limit?: number,
     after_message_id?: string,
+    before_seq?: number,
   ): Promise<AggregatesPage<AppChatReceiptAggregate>>
 }
 
@@ -132,10 +139,12 @@ export class AppChatReceiptStore implements AppChatReceiptLog {
 
   async record(input: AppChatReceiptRecordInput): Promise<AppChatReceiptAggregate> {
     return this.core.transaction<AppChatReceiptAggregate>((tx) => {
-      // Resolve the message's true seq from the durable log — never trust a
-      // client-asserted seq. 0 when the message isn't present (defensive: such
-      // a receipt simply won't make the resume replay window).
-      const seq = this.core.resolveMessageSeq(input.message_id, tx)
+      // Resolve the message's true seq from THIS TOPIC's durable log — never
+      // trust a client-asserted seq, and never a seq from another topic (seqs are
+      // monotonic per topic, so a foreign one is an arbitrary number in this
+      // topic's ordering). 0 when this topic holds no such message (defensive:
+      // such a receipt simply won't make the resume replay window).
+      const seq = this.core.resolveMessageSeq(input.topic_id, input.message_id, tx)
 
       // `read` implies `delivered`: stamp both on a read so a device that only
       // ever reports read still counts as delivered. COALESCE in the conflict
@@ -169,8 +178,9 @@ export class AppChatReceiptStore implements AppChatReceiptLog {
     topic_id: string,
     after_seq: number,
     limit: number = DEFAULT_RECEIPT_REPLAY_LIMIT,
+    before_seq?: number,
   ): Promise<AppChatReceiptAggregate[]> {
-    return this.core.aggregatesAfter(topic_id, after_seq, limit)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit, undefined, before_seq)
   }
 
   async aggregatesAfterPage(
@@ -178,8 +188,9 @@ export class AppChatReceiptStore implements AppChatReceiptLog {
     after_seq: number,
     limit: number = DEFAULT_RECEIPT_REPLAY_LIMIT,
     after_message_id?: string,
+    before_seq?: number,
   ): Promise<AggregatesPage<AppChatReceiptAggregate>> {
-    return this.core.aggregatesAfterPage(topic_id, after_seq, limit, after_message_id)
+    return this.core.aggregatesAfterPage(topic_id, after_seq, limit, after_message_id, before_seq)
   }
 }
 

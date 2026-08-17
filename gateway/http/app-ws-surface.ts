@@ -866,25 +866,32 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           }
           return
         }
-        // Chat-sync foundation — gap-fill request. Replay a BOUNDED window after
-        // the client's cursor to THIS socket only (the requesting device), so a
-        // reconnect / cold-open fills its gap without re-broadcasting to other
+        // Chat-sync foundation — gap-fill request. Replay ONE BOUNDED PAGE of the
+        // range the client asked for, to THIS socket only (the requesting device),
+        // so a reconnect / cold-open fills its gap without re-broadcasting to other
         // live devices. Bounded means bounded: the adapter answers with at most
-        // `DEFAULT_REPLAY_LIMIT` messages — the NEWEST ones after the cursor —
-        // and nothing here pages for the rest, so a topic longer than the window
-        // arrives with its OLDEST messages missing (see
-        // `AppChatEventLogCore.rowsAfter`, and the "load earlier" gap in
-        // docs/SYSTEM-OVERVIEW.md). Do not read this as "everything after the
-        // cursor"; a previous version of this comment said that and it was the
-        // shape of the bug. No-op (replayAfter returns []) when no durable log is
+        // `DEFAULT_REPLAY_LIMIT` messages — the NEWEST ones in the range — and
+        // nothing here pages for the rest on its own initiative. Do not read the
+        // page as "everything after the cursor"; a previous version of this comment
+        // said that and it was the shape of the bug.
+        //
+        // WHAT IS NEW: a full page is now REPORTED. `older_than` comes back non-null
+        // when rows below the page were left behind, and the `history_gap` frame
+        // below hands the client the seq to ask from — so a transcript longer than
+        // one page converges instead of keeping a permanent hole (the whole reason
+        // `resume` grew a `before_seq`). No-op (an empty page) when no durable log is
         // wired. Checked BEFORE the message decoder so the user_message path keeps
         // its narrow type.
         const resume = decodeAppWsResume(parsed)
         if (resume !== null) {
           try {
-            const replay = await adapter.replayAfter(data.channel_topic_id, resume.after_seq)
+            const page = await adapter.replayAfter(
+              data.channel_topic_id,
+              resume.after_seq,
+              resume.before_seq,
+            )
             const send = data.send
-            for (const env of replay) {
+            for (const env of page.envelopes) {
               if (send !== undefined) send(env)
               else ws.send(JSON.stringify(env))
             }
@@ -896,6 +903,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             const receipts = await adapter.replayReceiptsAfter(
               data.channel_topic_id,
               resume.after_seq,
+              resume.before_seq,
             )
             for (const env of receipts) {
               if (send !== undefined) send(env)
@@ -907,6 +915,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             const reactions = await adapter.replayReactionsAfter(
               data.channel_topic_id,
               resume.after_seq,
+              resume.before_seq,
             )
             for (const env of reactions) {
               if (send !== undefined) send(env)
@@ -918,10 +927,26 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             const edits = await adapter.replayEditsAfter(
               data.channel_topic_id,
               resume.after_seq,
+              resume.before_seq,
             )
             for (const env of edits) {
               if (send !== undefined) send(env)
               else ws.send(JSON.stringify(env))
+            }
+            // The truncation signal, LAST — after every frame the page consists of,
+            // so a client that reacts to it by requesting the next page cannot
+            // interleave two pages' messages. Sent only when rows were actually left
+            // behind; an unbounded-above forward resume that fit in one page says
+            // nothing, which is why a short transcript's wire trace is unchanged.
+            if (page.older_than !== null) {
+              const gap: AppWsOutbound = {
+                v: 1,
+                type: 'history_gap',
+                older_than: page.older_than,
+                ts: Date.now(),
+              }
+              if (send !== undefined) send(gap)
+              else ws.send(JSON.stringify(gap))
             }
           } catch (err) {
             const reason = err instanceof Error ? err.message : 'resume error'
