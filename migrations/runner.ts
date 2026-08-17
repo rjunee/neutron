@@ -617,8 +617,8 @@ function rekeyLedgerOnName(db: Database): void {
     // the transaction that just rolled back. It deliberately does NOT say "the
     // database is unchanged": on this same path `applyMigrations` may already have
     // written acknowledgement rows to `_migration_repairs` before calling us, and an
-    // operator sent looking for a pristine database would be sent wrong. State the
-    // narrow claim that holds, and name the one thing that may not.
+    // operator told to expect a wholly untouched database would be sent wrong. State
+    // the narrow claim that holds, and name the one thing that may not.
     throw new Error(
       'The _migrations ledger could not be rekeyed from its ordinal onto the migration name. The ' +
         'ledger is unchanged — its shape, its columns and its rows are exactly what they were ' +
