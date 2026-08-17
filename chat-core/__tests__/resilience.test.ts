@@ -53,6 +53,18 @@ class FakeSocket implements SocketLike {
       .map((s) => JSON.parse(s) as Record<string, unknown>)
       .filter((e) => e['type'] === type)
   }
+  /**
+   * FORWARD resume frames only — the ones these GAP-5 assertions are about.
+   * `resume` has two forms now: forward (`after_seq`, no `before_seq`) and
+   * BACKWARDS (`before_seq`, asking for older history below a seq). A seeded
+   * transcript whose oldest seq is above 1 legitimately triggers one backwards
+   * request per catch-up, so counting raw `resume` frames would measure the
+   * history walk and report it as a double-resume. Every assertion below that says
+   * "resumed once" means "issued one FORWARD resume".
+   */
+  forwardResumes(): Array<Record<string, unknown>> {
+    return this.frames('resume').filter((e) => e['before_seq'] === undefined)
+  }
 }
 
 /** A virtual clock: single-shot timers fired by `advance`, re-queried each step
@@ -487,7 +499,7 @@ describe('W5 GAP-5 — every re-open resumes from MAX seq and drains the queue',
     // both on this SAME open.
     clock.advance(2_000)
     await tick()
-    expect(sockets[0]!.frames('resume').at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 5 })
+    expect(sockets[0]!.forwardResumes().at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 5 })
     expect(sockets[0]!.frames('user_message').map((e) => e['body'])).toEqual(['drain me'])
   })
 
@@ -529,14 +541,14 @@ describe('W5 GAP-5 — every re-open resumes from MAX seq and drains the queue',
     // Fallback fires first (no session_ready yet): resume #1 + resend #1.
     clock.advance(2_000)
     await tick()
-    expect(sockets[0]!.frames('resume').length).toBe(1)
+    expect(sockets[0]!.forwardResumes().length).toBe(1)
     expect(sockets[0]!.frames('user_message').length).toBe(1)
 
     // session_ready arrives LATE (no seq regression → no reset). It must NOT
     // resume or resend a second time on this same open.
     sockets[0]!.deliver(readyFrame(5))
     await tick()
-    expect(sockets[0]!.frames('resume').length).toBe(1) // still exactly one
+    expect(sockets[0]!.forwardResumes().length).toBe(1) // still exactly one
     expect(sockets[0]!.frames('user_message').length).toBe(1) // no duplicate resend
   })
 
@@ -561,7 +573,7 @@ describe('W5 GAP-5 — every re-open resumes from MAX seq and drains the queue',
     // Fallback fires: resume #1 from the stale MAX (after_seq=40).
     clock.advance(2_000)
     await tick()
-    expect(sockets[0]!.frames('resume').at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 40 })
+    expect(sockets[0]!.forwardResumes().at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 40 })
 
     // A late session_ready reports a REGRESSED high-water seq (fresh server) →
     // stale-store reset → a fresh resume-from-0 is mandatory even though the
@@ -569,7 +581,7 @@ describe('W5 GAP-5 — every re-open resumes from MAX seq and drains the queue',
     sockets[0]!.deliver(readyFrame(2))
     await tick()
     expect(await s.lastSeenSeq(TOPIC)).toBe(0) // stale transcript wiped
-    const resumes = sockets[0]!.frames('resume')
+    const resumes = sockets[0]!.forwardResumes()
     expect(resumes.length).toBe(2)
     expect(resumes.at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 0 })
   })

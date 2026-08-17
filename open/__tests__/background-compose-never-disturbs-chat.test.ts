@@ -472,8 +472,8 @@ describe('the work-board wakeup shares that background substrate', () => {
     const wraps = [...code.matchAll(/buildSubstrateReminderLlm\(([A-Za-z_$][\w$]*)\)/g)].map(
       (m) => m[1]!,
     )
-    // The fired-reminder dispatcher and the work-board wakeup.
-    expect(wraps.length).toBe(2)
+    // The fired-reminder dispatcher, work-board wakeup, and terminal-build wake.
+    expect(wraps.length).toBe(3)
     for (const name of wraps) {
       const resolved =
         name === 'reminderComposeSubstrate' ||

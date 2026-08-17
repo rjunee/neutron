@@ -100,12 +100,19 @@ export interface AppChatEditLog {
   /** Current edit state for one message (rev 0 / original empty when none). */
   aggregate(topic_id: string, message_id: string): Promise<AppChatEditAggregate>
   /**
-   * Edit aggregates for edited/deleted messages whose seq is greater than
-   * `after_seq`, ascending by seq. Used to replay edit state to a reconnecting
-   * device after the message replay. Bounded by `limit` messages (default
-   * {@link DEFAULT_EDIT_REPLAY_LIMIT}) — the NEWEST `limit` past the cursor,
+   * Edit aggregates for edited/deleted messages whose seq falls in the half-open
+   * range `(after_seq, before_seq)`, ascending by seq. Used to replay edit state to
+   * a reconnecting device after the message replay. Bounded by `limit` messages
+   * (default {@link DEFAULT_EDIT_REPLAY_LIMIT}) — the NEWEST `limit` in that range,
    * re-sorted ascending, which is the same window the message replay takes
    * (`AppChatEventLogCore.rowsAfter` owns that SQL for both).
+   *
+   * `before_seq` MUST be passed whenever the message replay passed it. The
+   * alignment argument below is about the two windows covering the same messages;
+   * a backwards message page paired with an unbounded (newest-first) edit page
+   * breaks it in the worst direction — the message page would be old and the edit
+   * page recent, so a deleted old message arrives with its original body and no
+   * tombstone. The adapter threads the same bound into both for that reason.
    *
    * MATCHING THE MESSAGE LIMIT IS A CORRECTNESS CONSTRAINT, not tidiness.
    * {@link DEFAULT_EDIT_REPLAY_LIMIT} must be at least
@@ -120,6 +127,7 @@ export interface AppChatEditLog {
     topic_id: string,
     after_seq: number,
     limit?: number,
+    before_seq?: number,
   ): Promise<AppChatEditAggregate[]>
 }
 
@@ -158,9 +166,13 @@ export class AppChatEditStore implements AppChatEditLog {
 
   async record(input: AppChatEditRecordInput): Promise<AppChatEditAggregate> {
     return this.core.transaction<AppChatEditAggregate>((tx) => {
-      // Resolve the message's true seq + role from the durable log — never trust
-      // a client-asserted seq, and the role is what authorizes the mutation.
-      const msgRow = this.core.lookupMessage(input.message_id, tx)
+      // Resolve the message's true seq + role from THIS TOPIC's durable log —
+      // never trust a client-asserted seq, and the role is what authorizes the
+      // mutation. Scoped by topic: an edit naming a message in ANOTHER topic used
+      // to resolve that topic's seq and be filed here under it, which both misfiled
+      // the owner's delete and let the alien row evict a real tombstone from the
+      // capped replay window (`AppChatEventLogCore.lookupMessage`).
+      const msgRow = this.core.lookupMessage(input.topic_id, input.message_id, tx)
       if (msgRow === null || msgRow.role === null) {
         // Unknown message → can't establish authorship → reject.
         throw new AppChatEditNotAuthorizedError('message not found')
@@ -213,8 +225,9 @@ export class AppChatEditStore implements AppChatEditLog {
     topic_id: string,
     after_seq: number,
     limit: number = DEFAULT_EDIT_REPLAY_LIMIT,
+    before_seq?: number,
   ): Promise<AppChatEditAggregate[]> {
-    return this.core.aggregatesAfter(topic_id, after_seq, limit)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit, undefined, before_seq)
   }
 }
 

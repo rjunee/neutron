@@ -1490,11 +1490,16 @@ a ninth project opens exactly as it does today), the active scope excluded, one
 warm at a time, `WARM_FIRST_DELAY_MS = 2000` after the rail lands and
 `WARM_GAP_MS = 750` between scopes so eight never arrive as a burst at a gateway
 the owner is also talking to. Bytes per scope are bounded by the server, not the
-client: a cold resume replays at most `DEFAULT_REPLAY_LIMIT = 500` messages per
-topic — the NEWEST 500 after the client's cursor, not the oldest
+client: one replay carries at most `DEFAULT_REPLAY_LIMIT = 500` messages per
+topic — the NEWEST 500 in the range asked for, not the oldest
 (`persistence/app-chat-store.ts`, `persistence/app-chat-event-core.ts`
-`rowsAfter`). That is a hard ceiling and not a page size: nothing pages past it,
-so the per-scope cost does not grow with how long the owner's chats are. There is
+`rowsAfter`). It IS a page size now, and the ceiling is a page size times a
+round budget: a client whose page came back full is told so (`history_gap`) and
+walks backwards a page at a time, up to `MAX_HISTORY_BACKFILL_ROUNDS = 3` pages
+per catch-up (`chat-core/sync-engine.ts`), so the per-scope worst case is 2000
+messages rather than 500 and still does not grow with how long the owner's chats
+are. A ceiling that could not be walked past was the previous shape, and it was
+losing the middle of long transcripts permanently — see § Chat sync. There is
 deliberately **no wifi-vs-cellular gate** — that needs a native network module,
 which would cost the OTA-shippability of everything in this section; the bound
 above is what makes cellular acceptable instead, and it is why the bound must
@@ -5781,9 +5786,16 @@ indicator. No feature flags — one live path.
     turn (no dup reply, no double LLM spend, no double Bash/Write/Edit side
     effects).
   - **#3 gap-free reconnect** — `session_ready.last_seen_seq` + a
-    `{type:'resume',after_seq}` replay of everything after the client's cursor,
-    so a reply emitted during a socket blip is recovered (no orphaned "hung"
-    reply).
+    `{type:'resume',after_seq}` replay of the NEWEST page after the client's
+    cursor, so a reply emitted during a socket blip is recovered (no orphaned
+    "hung" reply). A page that came back FULL is reported as `history_gap
+    {older_than}`, and the client asks for the page below it with
+    `{type:'resume',after_seq:0,before_seq}` — up to
+    `MAX_HISTORY_BACKFILL_ROUNDS` pages per catch-up, restarting from its own
+    oldest applied seq on the next one, so a transcript longer than one page
+    completes instead of keeping a permanent hole. Both halves are needed: the
+    server is the only party that knows a page was capped, and the client is the
+    only party that knows what it already holds.
   - **#4 receipts / reactions / edits** — persisted + fanned as `receipt_update`
     / `reaction_update` / `edit_update`, replayed on resume.
   - **#4b answered prompts (ISSUES #415 + #419)** — a `button_choice` is CLAIMED

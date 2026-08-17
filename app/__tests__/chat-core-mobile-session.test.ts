@@ -70,6 +70,23 @@ class FakeSocket implements SocketLike {
   sentEnvelopes(): Record<string, unknown>[] {
     return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
   }
+  /**
+   * FORWARD resume frames — `after_seq` with no `before_seq`. `resume` has a
+   * second form that asks BACKWARDS for the history below a seq, and a session
+   * whose oldest applied seq is above 1 sends one of those per catch-up; the
+   * assertions that say "resumed from N" mean the forward cursor.
+   */
+  forwardResumes(): Record<string, unknown>[] {
+    return this.sentEnvelopes().filter(
+      (e) => e['type'] === 'resume' && e['before_seq'] === undefined,
+    );
+  }
+  /** BACKWARDS resume frames — the history walk (`before_seq` present). */
+  backwardsResumes(): Record<string, unknown>[] {
+    return this.sentEnvelopes().filter(
+      (e) => e['type'] === 'resume' && e['before_seq'] !== undefined,
+    );
+  }
 }
 
 const dbs: Database[] = [];
@@ -537,7 +554,7 @@ describe('MobileChatSession — stale-store reset on server reinstall (M1)', () 
     sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1, last_seen_seq: 2 });
     await tick();
     expect(await store.lastSeenSeq(TOPIC)).toBe(0);
-    const resume = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'resume').at(-1);
+    const resume = sockets[0]!.forwardResumes().at(-1);
     expect(resume).toMatchObject({ type: 'resume', after_seq: 0 });
     // Stale acked rows gone, but the queued send survived the on-device wipe …
     expect((await session.messages()).map((m) => m.body)).toEqual(['keep me']);
@@ -560,7 +577,7 @@ describe('MobileChatSession — stale-store reset on server reinstall (M1)', () 
     await tick();
     expect(await store.lastSeenSeq(TOPIC)).toBe(40);
     expect((await session.messages()).length).toBe(2);
-    const resume = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'resume').at(-1);
+    const resume = sockets[0]!.forwardResumes().at(-1);
     expect(resume).toMatchObject({ type: 'resume', after_seq: 40 });
   });
 
@@ -847,3 +864,88 @@ describe('per-project topic derivation matches web (#399)', () => {
   });
 });
 
+describe('MobileChatSession — the backwards history walk', () => {
+  /** One page of a transcript of seqs 1..total, exactly as the surface answers a
+   *  `resume`: the newest `page` rows of the requested range, then a `history_gap`
+   *  when that page came back full. */
+  function answer(total: number, page: number, frame: Record<string, unknown>): object[] {
+    const after = typeof frame['after_seq'] === 'number' ? frame['after_seq'] : 0;
+    const before = typeof frame['before_seq'] === 'number' ? (frame['before_seq'] as number) : total + 1;
+    const range: number[] = [];
+    for (let seq = 1; seq <= total; seq++) if (seq > after && seq < before) range.push(seq);
+    const sent = range.slice(-page);
+    const out: object[] = sent.map((seq) => ({
+      v: 1, type: 'agent_message', message_id: `m${seq}`, seq, body: `msg-${seq}`, ts: seq,
+    }));
+    if (sent.length >= page && sent[0] !== undefined) {
+      out.push({ v: 1, type: 'history_gap', older_than: sent[0], ts: 0 });
+    }
+    return out;
+  }
+
+  /** Serve every unanswered `resume` on this socket until the client stops asking. */
+  async function pump(socket: FakeSocket, total: number, page: number): Promise<void> {
+    let served = 0;
+    for (let guard = 0; guard < 30; guard++) {
+      const pending = socket.sentEnvelopes().filter((e) => e['type'] === 'resume').slice(served);
+      if (pending.length === 0) return;
+      for (const frame of pending) {
+        served += 1;
+        for (const out of answer(total, page, frame)) socket.deliver(out);
+        await tick();
+      }
+    }
+    throw new Error('the client never stopped requesting history');
+  }
+
+  it('walks a capped replay back to seq 1 on this device', async () => {
+    // The mobile store is the real on-device SQLite one, so this also pins that
+    // `earliestSeenSeq` is answerable from it — the read the walk restarts from.
+    const store = await freshStore();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+
+    await pump(sockets[0]!, 25, 10);
+
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
+    expect(sockets[0]!.backwardsResumes().map((f) => f['before_seq'])).toEqual([16, 6]);
+  });
+
+  it('restarts the walk on a foreground catchUp over the SAME open socket', async () => {
+    // THE PLURALITY THAT BROKE THE ORIGINAL PREMISE, asserted directly. `catchUp`
+    // runs on every foreground and every foregrounded push
+    // (`app/lib/chat-core/use-mobile-chat.ts`) and re-drives `resumeAndFlush` on an
+    // already-open socket — there is no per-open guard on this session at all. So a
+    // walk that ran out of budget is resumed by the next foreground, from this
+    // device's own oldest applied seq rather than from a server signal.
+    //
+    // MUTATION-PROVED: remove the `backfillFrom` kick-off in `resumeAndFlush` and the
+    // second catch-up sends no backwards request, leaving seqs 1..5 unreachable.
+    const store = await freshStore();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+
+    // 45 rows at a 10-row page: one catch-up covers the forward page plus the round
+    // budget (3), so it stops with the oldest 5 still missing.
+    await pump(sockets[0]!, 45, 10);
+    const afterFirst = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(afterFirst.length).toBe(40);
+    expect(afterFirst[0]).toBe(6);
+
+    // A foreground catch-up on the SAME socket picks the walk up where it stopped.
+    await session.catchUp();
+    await tick();
+    await pump(sockets[0]!, 45, 10);
+
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: 45 }, (_, i) => i + 1));
+    expect(sockets[0]!.backwardsResumes().at(-1)).toMatchObject({ after_seq: 0, before_seq: 6 });
+  });
+});

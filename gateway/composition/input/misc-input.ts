@@ -96,6 +96,16 @@ export interface MiscCompositionInput {
      */
     on_run_terminal?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
     /**
+     * #335 wiring — the terminal-build WAKE observer. Runs in the tick loop's
+     * composeTerminalHook chain for EVERY terminal run, after board reconcile +
+     * on_run_terminal. The composer wires buildTerminalBuildWakeObserver here —
+     * the SAME value it registers at both terminate() chokepoints — so a
+     * loop-reaped, a cancelled, and a codegen-cancelled build all wake the agent
+     * through one chain (§F6a). Claim-first (`agent_waked_at` single writer), so
+     * a second site observing the same row composes no duplicate turn.
+     */
+    on_terminal_wake?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
+    /**
      * M1 UX REDESIGN — the LIVE-PROGRESS observer (see
      * `trident/tick.ts` `TridentTransitionHook`). Fired once per tick for every
      * run whose observable progress advanced (a checkpoint crossing

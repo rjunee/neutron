@@ -49,8 +49,15 @@ export interface Store {
    */
   getByMessageId(topic_id: string, message_id: string): Promise<ChatMessage | null>
   /** Highest `seq` applied for a topic; 0 when the topic has none. This is
-   *  the resume cursor. */
+   *  the FORWARD resume cursor. */
   lastSeenSeq(topic_id: string): Promise<number>
+  /**
+   * Lowest `seq` applied for a topic; 0 when the topic holds no sequenced row.
+   * The BACKWARDS cursor: server seqs run 1..N with no gaps, so a value above 1
+   * means this device is missing older history and can ask for it
+   * (`SyncEngine.backfillFrom`). Optimistic rows have no seq and are ignored.
+   */
+  earliestSeenSeq(topic_id: string): Promise<number>
   /** Messages still `queued` (not yet handed to the socket), oldest first. */
   pendingSends(topic_id: string): Promise<ChatMessage[]>
   /** Drop all messages for a topic (e.g. account switch). */
@@ -437,6 +444,16 @@ export class InMemoryStore implements Store {
       if (m.seq !== null && m.seq > max) max = m.seq
     }
     return max
+  }
+
+  async earliestSeenSeq(topic_id: string): Promise<number> {
+    const topic = this.byTopic.get(topic_id)
+    if (topic === undefined) return 0
+    let min = 0
+    for (const m of topic.values()) {
+      if (m.seq !== null && m.seq > 0 && (min === 0 || m.seq < min)) min = m.seq
+    }
+    return min
   }
 
   async pendingSends(topic_id: string): Promise<ChatMessage[]> {

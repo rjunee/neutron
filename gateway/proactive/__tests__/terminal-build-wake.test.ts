@@ -21,7 +21,7 @@ function harness(error?: Error) {
     claimWake: async (id) => { claims.push(id); return true }, boardItemIdForRun: async () => 'board-9',
     llm: { compose: async (spec) => { specs.push(spec); if (error) throw error; return 'Acted.' } },
     projectChatScope: () => 'acme-scope',
-    post: async (_reply, opts) => { posts.push(opts.loud); return true },
+    post: async (_run, _reply, opts) => { posts.push(opts.loud); return true },
     logger: { error: (_message, fields) => logs.push(fields) },
   }
   return { deps, specs, claims, posts, logs }

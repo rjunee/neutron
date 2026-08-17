@@ -11,7 +11,7 @@ export interface TerminalBuildWakeDeps {
   boardItemIdForRun(run: TridentRun): Promise<string | null>
   llm: WakeupLlm | null
   projectChatScope(run: TridentRun): string
-  post(reply: string, opts: { loud: boolean }): boolean | Promise<boolean>
+  post(run: TridentRun, reply: string, opts: { loud: boolean }): boolean | Promise<boolean>
   logger: { error(message: string, fields?: Record<string, unknown>): void }
 }
 
@@ -53,7 +53,7 @@ export function buildTerminalBuildWakeObserver(deps: TerminalBuildWakeDeps): (ru
         metering_context: { project_id: deps.projectChatScope(run) },
       }
       const reply = await deps.llm.compose(spec)
-      await deps.post(reply, { loud: run.phase !== 'done' })
+      await deps.post(run, reply, { loud: run.phase !== 'done' })
     } catch (error) {
       deps.logger.error('terminal_build_wake_failed_after_claim', {
         run_id: run.id, error: error instanceof Error ? error.message : String(error),

@@ -2,6 +2,116 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
+
+Landed via PR #384.
+
+Two defects, one on each side of the resume path. Both were introduced or exposed by
+PR #370 (the entry below), and both were live on `main`.
+
+**1 — "resume fires exactly once per socket open" was FALSE, and the newest-first
+window turned a self-healing gap into a permanent one.**
+
+#370 changed the row-shaped replay to the NEWEST `limit` rows after the cursor. It
+named its own trade-off honestly — "missing the newest 630" becomes "missing a middle
+630" — and accepted it on one premise, asserted in five docblocks, a test header and
+the AS_BUILT entry below: that resume fires exactly once per socket open, so nothing
+would ever be in a position to ask for the skipped range anyway.
+
+The premise was wrong in both halves. `SyncEngine` has no per-open guard at all (the
+only one, `resumedThisOpen`, lives in `chat-core/web-session.ts`), and the mobile
+session has none: `MobileChatSession.catchUp` calls `resumeAndFlush` directly on an
+already-open socket, and the RN hook calls `catchUp` on every foreground and every
+foregrounded push (`app/lib/chat-core/use-mobile-chat.ts`). Resume fires many times
+per open. That made the trade-off strictly worse than it looked — under the OLD
+ascending window, repeated resumes paged FORWARD and eventually covered the whole
+transcript, slowly but completely. Under the newest-first window the cursor jumps
+past the skipped rows and a forward cursor never goes back, so the hole is
+permanent. #370 fixed the symptom the owner reported and left an unrecoverable one
+in its place.
+
+Not fixed by reverting: newest-first is the right window for what the owner is
+looking at. Fixed by giving the window its missing SECOND side, so the omitted range
+is reachable:
+
+- `resume` grows an optional EXCLUSIVE `before_seq` (`wire-types/app-ws-envelope.ts`)
+  — "the newest page strictly below this seq". Absent is byte-identical to the
+  previous query, which is what keeps every forward resume unchanged.
+- The truncation stops being invisible. `AppWsAdapter.replayAfter` now returns a page
+  (`{ envelopes, older_than }`) and the surface follows a FULL page with a
+  `history_gap { older_than }` frame — the page's lowest seq, which is exactly the
+  bound the next request needs. A full page is a heuristic, not a proof (a topic
+  holding exactly one page says the same thing), and the cost of being wrong is one
+  empty round trip at the boundary versus an existence query on every resume.
+- Both clients answer it. `SyncEngine.backfillRequest` builds the backwards frame,
+  and each session walks: page, gap, page, gap, until a page comes back short.
+- The walk is bounded per catch-up by `MAX_HISTORY_BACKFILL_ROUNDS = 3`, which keeps
+  the per-topic ceiling `app/lib/chat-core/transcript-warmer.ts` reasons about when it
+  fans out across eight scopes on cellular. A ceiling alone would strand anything
+  longer than four pages, so the client also restarts the walk from its OWN oldest
+  applied seq on the next catch-up (`SyncEngine.backfillFrom`, over a new
+  `Store.earliestSeenSeq`). Server seqs run 1..N with no deletes, so "my oldest is
+  above 1" is an exact local test for "there is more". Bounded per open AND convergent
+  across opens; neither piece works without the other.
+- The upper bound threads into all four replays — messages, edits, receipts,
+  reactions. Bounding the messages and not the edits is the combination that leaks:
+  an old page of messages against the newest page of edit state delivers a deleted
+  message with its original body.
+
+**2 — an edit resolved its seq through an UNSCOPED lookup, so a cross-topic edit
+evicted tombstones and deleted content replayed.**
+
+`AppChatEventLogCore.lookupMessage` was `SELECT seq, role FROM app_chat_messages
+WHERE message_id = ?` with no topic. `seq` is monotonic PER TOPIC, so an edit
+recorded under topic C for a `message_id` living in topic A was written under C
+carrying A's seq — an arbitrary number in C's ordering. The edit replay is a capped
+DESCENDING window, so one alien row with a high seq sorts NEWEST and pushes a real
+tombstone out of the page; the message log is an immutable overlay (migration 0087),
+so the evicted message is then delivered with its ORIGINAL BODY and no tombstone.
+Deleted content replays to the client. The adapter docblock asserted the invariant
+this violated ("an edit row's `seq` is a seq in ITS OWN topic … not a new exposure").
+Measured, not argued: with the lookup reverted, the leak test names one resurrected
+message id.
+
+The second consequence is as bad and quieter: the owner's delete was FILED under the
+wrong topic, so it never tombstoned the message in its own topic either — a delete
+that deletes nothing.
+
+Fixed by scoping the lookup (`WHERE topic_id = ? AND message_id = ?`), which fixes it
+for all three per-message logs at once: a cross-topic edit is now rejected as
+`message not found`, and a cross-topic receipt/reaction resolves seq 0 and stays out
+of every replay window (replay is `seq > after_seq` with a floor of 0). Two receipt/
+reaction tests had built their fixtures out of this defect — deliberately colliding
+two messages on one seq via the unscoped lookup — and now assert the guarantee that
+replaced it. The composite `(seq, message_id)` page cursor stays, downgraded in the
+docs from load-bearing to defence-in-depth: with the lookup scoped, `(topic_id, seq)`
+is a PRIMARY KEY, so two replayable messages in one topic cannot share a seq.
+
+**Tests.** Every property mutation-proved, with the mutation named in the test body:
+
+| Mutation | Goes red |
+| --- | --- |
+| `before_seq` ignored in `rowsAfter` | convergence + page-floor |
+| `older_than` forced null | convergence + page-floor |
+| edit replay unbounded on a backwards page | backwards-page tombstones |
+| `lookupMessage` unscoped | tombstone eviction (one resurrected id) + both inert-row tests |
+| client ignores `history_gap` | client walk + bounded-walk + liveness |
+| no `backfillFrom` kick-off | convergence across opens |
+| round budget raised to 1000 | the per-catch-up ceiling |
+| `before_seq` dropped in the receipt store | the receipt range bound |
+
+The two below-threshold controls (a topic that fits in one window is byte-identical to
+an unbounded read; a non-zero cursor gap-fills exactly as before) stay GREEN under
+every mutation above — which is what proves the change is a genuine no-op below the
+page size rather than a rewrite that happens to pass.
+
+Also corrected the false premise everywhere it was asserted as fact: five docblocks
+(`persistence/app-chat-event-core.ts`, `persistence/app-chat-store.ts`,
+`channels/adapters/app-ws/adapter.ts`, `chat-core/web-session.ts` twice), the
+`replay-newest-window.test.ts` header, and `docs/SYSTEM-OVERVIEW.md` (§ warmer bounds
+and § chat sync). The AS_BUILT entry below is left exactly as written — this log is
+append-only, and the correction belongs here rather than in a rewrite of the record.
+
 ## 2026-08-17 — the guard against unproved claims was itself unproved, in four ways
 
 Landed via PR #351.
