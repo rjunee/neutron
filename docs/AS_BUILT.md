@@ -225,6 +225,59 @@ and installs go cold with no signal but the timings. Accepted here (the entry is
 Vendoring `gbrain` would remove the network dependency outright rather than caching around
 it, and would also close the byte-verification gap above by putting the content in the tree
 under review. It is deliberately NOT done here — recorded in #410 rather than lost.
+## 2026-08-17 — a Codex subscription is no longer one account for the whole instance
+
+PR #407. The owner may connect several ChatGPT seats; trident picks one per run at
+the existing `resolve_codex_home` seam and skips any seat that has hit its usage cap.
+This supersedes the earlier statement in this log that "a Codex subscription is one
+account for the whole instance" — that was true when written and is what changed here.
+
+New: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts` (rollout
+harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0133_codex_rotation.sql`. Edited: `trident/codex-credential.ts`,
+`trident/codex-credential-tool.ts`, `gateway/http/codex-credential-surface.ts`,
+`open/composer.ts`.
+
+Slot `default` is byte-identical to before — same service row (`codex`), same directory
+(`<owner_home>/.codex`), same bytes — so a one-seat install is unchanged, nothing
+migrates, and rotation is the single code path with no feature flag. Extra seats are
+service `codex-acct-<slot>` at `<owner_home>/.codex/accounts/<slot>/`.
+
+A seat's bundle is NEVER copied between directories. The codex CLI rewrites `auth.json`
+on refresh and that refresh rotates the refresh token, so two live copies of one account
+revoke each other. Selection is a pointer at a directory; the re-materialize guard stays
+only-if-missing. Harvest-back re-encrypts a CLI-refreshed bundle back into the store when
+the on-disk `last_refresh` is newer, which also closes a hazard that predated this change:
+the stored copy used to drift staler with every refresh, so the self-heal path would
+eventually restore a token the server had already invalidated.
+
+The exhaustion signal is harvested, not probed — there is no free usage gauge. Every
+session appends a rollout under `<CODEX_HOME>/sessions/`, whose `token_count` events carry
+`rate_limits`. That rollouts follow the run's `CODEX_HOME` was verified live rather than
+assumed: an empty `CODEX_HOME` plus one `codex exec` produced the whole state root there,
+`sessions/` included, on a run that never authenticated.
+
+The threshold is keyed on `window_minutes`, NOT on whether the CLI called a window
+`primary` or `secondary`. Measured across 12,582 real `token_count` samples from 600
+rollout files (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a week — in every
+sample and `secondary` was null in every sample. Reading `primary` as the 5-hour window,
+as the design assumed, would have applied a session threshold and a session-length
+cooldown to a weekly cap and rotated a still-capped seat back into service. Windows at or
+under 1440 minutes cool at 98%, longer ones at 99%, and the fallback cooldown is the
+window's own length. `resets_at` is epoch seconds, converted once at the parse boundary.
+
+Fail-safe rules, each pinned by a mutation proved to kill its test: a harvest that errors
+or finds nothing cools nothing; when every seat is cooling the current one is kept and
+`codex_rotation_exhausted` is logged; an `unauthorized` cooldown (a revoked refresh token)
+ignores the clock until the seat is reconnected; unrecognised failures retire nothing;
+per-project overrides resolve first and stay out of rotation. 19 mutations applied, all 19
+observed red — one of which found a real gap in a test that had asserted around the field
+it claimed to pin.
+
+Owner-facing: `codex_connect` with `account: "work"`, or `POST /api/app/codex-auth` with
+`{ auth, account }`. `GET` lists seats, cooldowns and the next seat while keeping every
+legacy top-level field; `DELETE ?account=<slot>` removes one. Omitting `account` means the
+first seat, so pre-rotation clients are unaffected.
 
 ## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
 
