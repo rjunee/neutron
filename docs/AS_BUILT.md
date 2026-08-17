@@ -2,6 +2,38 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the ordinal-125 mismatch is acknowledged and 0131 converges both schema paths — the repair that gates deploy xGkufirIQQKW1L
+
+This is the third instance of the #575 incident class: a migration from an
+in-flight build wrote the live database before the merged migration tree fixed
+that ordinal. The live `_migrations` row at version 125 therefore says
+`code_trident_runs_fix_round_contract`, while the merged file at 0125 is
+`code_trident_runs_base_sha`. Boot correctly refuses that mismatch.
+
+The new `repairs.json` entry acknowledges the exact version/name/name triple and
+leaves row 125 untouched. That acknowledgment is necessary but insufficient:
+the runner skips the mismatched 0125 instead of executing it, so its `base_sha`
+and `base_behind` ALTERs still never reach the repaired live schema. Those
+columns must come from a new ordinal.
+
+Migration 0131 rebuilds the STRICT `code_trident_runs` table into the canonical
+shape. A rebuild is required because SQLite has no conditional `ADD COLUMN`:
+the live path skipped 0125 and lacks the columns, while every fresh install
+already applied 0125 and would reject repeated ALTERs as duplicate columns. The
+rebuild converges both paths and also sheds the live incident residue
+`claimed_paths`, which no mainline code uses. The accepted trade-off is that
+cut-time diagnostic values in `base_sha`/`base_behind` are not copied from a
+fresh-path source; the owner instance has no such values because it has no such
+columns.
+
+The live-ledger replica test seeds the exact 122/124/125 recorded names, proves
+the full tree applies exactly 127/130/131, checks both missing columns and
+`agent_waked_at`, and verifies the recorded names are byte-identical afterward.
+Its negative control removes only the new 125 acknowledgment and proves the run
+refuses before writing any later migration. A fresh-install test proves 0125
+and 0131 coexist with exactly one `base_sha` column, and a pin test makes the
+acknowledgment itself part of the contract. No `_migrations` row is rewritten.
+
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
 Landed via PR #384.
