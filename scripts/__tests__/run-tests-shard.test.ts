@@ -18,6 +18,8 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -163,6 +165,46 @@ describe('run-tests.sh shard partition', () => {
     const total = laneCounts.reduce((a, b) => a + b, 0)
     expect(total).toBeGreaterThan(0)
     expect(Math.max(...laneCounts)).toBeLessThan(total)
+  })
+
+  test('a ONE-FILE general lane still plans that file — the cost packer must keep its path', () => {
+    // A cross-model review of the packing change caught this and it is worth a
+    // permanent test, because the failure was invisible: `grep -c` over exactly ONE
+    // file prints the bare count with no path at all, so the weight parser read the
+    // count AS the path, nothing matched a discovered file, and the runner planned
+    // ZERO tests and exited 0. A green run that executed nothing is the worst
+    // outcome this script has, and one file is a REACHABLE lane size — a
+    // `NEUTRON_TEST_ROOT`-scoped run at shard 1/1 gets there.
+    //
+    // Written against a scratch root rather than the repo so it costs milliseconds
+    // instead of the ~15s a real discovery pass takes.
+    const root = mkdtempSync(join(tmpdir(), 'neutron-onefile-'))
+    try {
+      const dir = join(root, 'pkg', '__tests__')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'solo.test.ts'),
+        "import { test, expect } from 'bun:test'\ntest('solo', () => { expect(1).toBe(1) })\n",
+      )
+      const r = spawnSync('bash', [RUN_TESTS], {
+        encoding: 'utf8',
+        cwd: ROOT,
+        env: {
+          ...(process.env as Record<string, string>),
+          NEUTRON_TEST_ROOT: root,
+          NEUTRON_TEST_PLAN_ONLY: '1',
+          NEUTRON_TEST_SHARD: '1/1',
+          // The scratch root has no bun project, so bun's discovery probe reports
+          // nothing; this is the documented opt-in that downgrades that to a warning.
+          NEUTRON_TEST_ALLOW_EMPTY_BUN_DISC: '1',
+        },
+      })
+      const out = `${r.stdout}${r.stderr}`
+      expect(r.status).toBe(0)
+      expect(filesOf(out)).toEqual(['./pkg/__tests__/solo.test.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   for (const bad of ['0/4', '5/4', '1/0', 'x/4', '4', '1/y', '-1/4']) {

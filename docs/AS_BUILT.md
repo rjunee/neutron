@@ -55,6 +55,28 @@ The eight-leg matrix and the `/8` denominator have to move together or shards 5-
 NOTHING while reporting green; that pairing is already guarded by
 `scripts/ci/ci-workflow.test.ts` ('the shard matrix size MATCHES the /N').
 
+A cross-model review of this change found two ways it could have produced a GREEN run
+that executed nothing, and both are fixed here — worth recording because they are the
+same failure class the surrounding script exists to prevent, reintroduced by the fix
+for a different problem:
+
+- **`grep -c` over exactly ONE file prints the bare count with no path.** The weight
+  parser then read the count AS the path, nothing matched a discovered file, and the
+  general lane planned zero tests and exited 0. A one-file lane is reachable — a
+  `NEUTRON_TEST_ROOT`-scoped run at shard 1/1 — so `-H` is now load-bearing and pinned
+  by a test. Mutation-proved: with `-H` removed the run FAILS LOUD instead of running
+  nothing.
+- **The packer replaced `GENERAL_FILES` before anything checked its status, and
+  `SHARD_TOTAL` is derived from the replaced array.** So a short list did not trip the
+  coverage audit — it LOWERED the bar the audit checks against. The packer now writes to
+  a file rather than a process substitution (a substitution's exit status is
+  unobservable), reports how many records it saw so a truncated pipeline cannot pass as a
+  small shard, and the restore loop's output count is compared against what was assigned
+  so a mangled path cannot vanish silently. Four separate refusals, all fail-closed.
+  grep's exit 1 (matched nothing) is normalised to success and only 2+ (could not read)
+  is treated as failure — a blanket `|| true` here would have thrown away the one status
+  that matters.
+
 Landed by PR #402.
 
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
