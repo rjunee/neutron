@@ -727,9 +727,66 @@ timed out` — a wiring-failure message for an environment problem. That variabl
 failed); and the harness drains `realmode_cleanups` through the production
 `drainRealmodeCleanups` instead of calling them un-awaited before `db.close()`.
 
+**THE REFUTATION ABOVE WAS ITSELF WRONG, AND THE CLAIM IT DISMISSED IS A REAL DEFECT** —
+appended rather than rewritten, per this entry's own correction rule. The paragraph
+beginning "One claim from that leg was REFUTED" reports that a `setTimeout` of one year
+"does not fire early — it was still pending after 120 seconds". Re-measured directly, with
+a control in each direction: `setTimeout(31_536_000_000)` — one year, the very value that
+paragraph names — fires after **3 ms**, and this runtime prints its own diagnosis while
+doing it, `TimeoutOverflowWarning: 31536000000 does not fit into a 32-bit signed integer.
+Timeout duration was set to 1.` The controls are what make that a measurement rather than
+another guess: a timer at `0x7fff_ffff` did NOT fire inside a 2-second window (so the
+probe can show a real wait) and a 5 ms timer fired in 6 ms (so it can see a timer fire at
+all). A one-year delay was never pending for 120 seconds; it had already elapsed before
+the observation began. This is the shape the repo already tracks — a check that returns a
+negative which reads exactly like an answer — and the cost of getting it wrong here was
+higher than a wasted round: the log stated the defect did not exist, which is the one
+thing that reliably stops the NEXT reader from fixing it.
+
+**A back-off that overflows is no back-off.** `positiveMs` rejects non-finite and
+non-positive hints and has no upper bound, which is right — a finite `retry-after:
+3000000` is a real instruction, and discarding it as garbage would buy the 60-second
+status default where the provider asked for weeks. The value is fine; the TIMER cannot
+hold it. Above `0x7fff_ffff` ms a `setTimeout` delay does not saturate, it overflows the
+32-bit signed field and fires in about a millisecond, so the adapter answered "wait weeks"
+with an instant retry against a provider that had just rate-limited it: a hot retry loop,
+and worse than having no `retry-after` handling at all.
+
+It survived three rounds on this exact field because the field has TWO consumers and only
+one was bounded. `reportFailure` clamps its park at `cooldown_started_at + MAX_PARK_MS`,
+so the pool was safe; the adapter's rotation back-off is a second consumer that reads the
+raw hint into `rotateDelay` and never consults the pool. Guarding the producer and
+bounding one consumer both looked complete while a second consumer slept on the unbounded
+value. Every consumer was then enumerated by grepping the field name rather than asserted
+to be complete: the adapter's sleep (broken, fixed here), `reportFailure` via
+`build-llm-call-substrate` and `build-import-substrate` (already bounded), `rotate`'s
+`delay_ms` copy (raw, but nothing sleeps on it — its docblock now says what a future
+sleeper must do first), and the pure propagators that never treat it as a duration
+(`events.ts`, `errors.ts`, `substrate-text.ts`, `agent-dispatch`, the history-import
+type). `TelegramRetryAfterError` shares the field NAME only and has a different source.
+
+Fixed at the CONSUMER, inside `sleep` — the adapter's only `setTimeout`, so nothing in
+that file can route around it. Bounding `positiveMs` instead would rewrite what every
+consumer sees and would put a `setTimeout` implementation limit inside a function whose
+job is deciding whether a hint is usable at all; clamping at the sleep caps what this lane
+can wait while leaving the pool the provider's untouched number to apply its own six-hour
+ceiling to, so neither consumer's policy overwrites the other's. The tests assert the
+delay the timer is ARMED with, because a correctly-clamped delay can never be awaited —
+the sibling exhaustion test takes 4.6 s precisely because its `retry-after: 4` is a
+genuine sleep, so 24.8 days would hang CI forever. Three mutations, each red on exactly
+its own pin with the rest green: unclamping the sleep reds the end-to-end test and its
+failure prints the raw `3000000000` reaching the timer; making the clamp a blanket cap
+reds the two "unchanged" controls (`30_000` and the bound itself), which is what proves it
+is a clamp and not a cap; and restoring `< 0` in place of `<= 0` reds the sub-millisecond
+guard, which is what proves an upper bound did not quietly turn a hint that must be
+refused into an accepted one.
+
 No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
 — a bounded park, a discarded bogus header value, and coverage for two branches that
 had none.
+
+Nor does the round above add one: a rotation back-off that can no longer overflow into an
+instant retry is the same subsystem behaving as it already claimed to.
 
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
