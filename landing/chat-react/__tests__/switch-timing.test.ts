@@ -36,7 +36,9 @@ describe('SwitchTimer', () => {
 
     clock.advance(12)
     t.mark('vm_published')
-    clock.advance(300)
+    clock.advance(120)
+    t.mark('frame_rendered')
+    clock.advance(180)
     t.mark('socket_open')
     clock.advance(1_000)
     t.mark('transcript_read')
@@ -47,7 +49,13 @@ describe('SwitchTimer', () => {
     const r = records[0]!
     expect(r.to).toBe('neutron-open')
     expect(r.from).toBe('general')
-    expect(r.marks).toEqual({ vm_published: 12, socket_open: 312, transcript_read: 1312, transcript: 1712 })
+    expect(r.marks).toEqual({
+      vm_published: 12,
+      frame_rendered: 132,
+      socket_open: 312,
+      transcript_read: 1312,
+      transcript: 1712,
+    })
     // The number the owner feels is the LAST mark, not the sum of the gaps.
     expect(r.total).toBe(1712)
     expect(r.incomplete).toBe(false)
@@ -58,6 +66,8 @@ describe('SwitchTimer', () => {
     const { emit, records } = collector()
     const t = new SwitchTimer(null, 'p', { now: clock.now, emit })
     t.mark('vm_published')
+    expect(records).toHaveLength(0)
+    t.mark('frame_rendered')
     expect(records).toHaveLength(0)
     t.mark('socket_open')
     expect(records).toHaveLength(0)
@@ -112,6 +122,7 @@ describe('SwitchTimer', () => {
     clock.advance(900)
     t.mark('socket_open')
     t.mark('vm_published')
+    t.mark('frame_rendered')
     t.mark('transcript_read')
     t.mark('transcript')
 
@@ -123,6 +134,7 @@ describe('SwitchTimer', () => {
     const { emit, records } = collector()
     const t = new SwitchTimer('a', 'b', { now: clock.now, emit })
     t.mark('vm_published')
+    t.mark('frame_rendered')
     t.mark('socket_open')
     t.mark('transcript_read')
     t.mark('transcript')
@@ -139,14 +151,19 @@ describe('switch timing diagnostics', () => {
     const record: SwitchRecord = {
       from: 'a',
       to: 'b',
-      marks: { vm_published: 5, transcript: 10, socket_open: 20 },
+      marks: { vm_published: 5, frame_rendered: 8, transcript: 10, socket_open: 20 },
       total: 20,
       incomplete: false,
     }
 
     const report = buildSwitchReport(record, 123)
     const context = report.events[0]!.context
-    expect(context.marks).toEqual({ vm_published: 5, transcript: 10, socket_open: 20 })
+    expect(context.marks).toEqual({
+      vm_published: 5,
+      frame_rendered: 8,
+      transcript: 10,
+      socket_open: 20,
+    })
     expect(context).not.toHaveProperty('gap_socket_to_transcript')
     expect(JSON.stringify(context)).not.toContain('-10')
 
@@ -158,7 +175,7 @@ describe('switch timing diagnostics', () => {
     } finally {
       console.info = original
     }
-    expect(line).toContain('vm=5ms socket=20ms transcript_read=- transcript=10ms')
+    expect(line).toContain('vm=5ms frame=8ms socket=20ms transcript_read=- transcript=10ms')
     expect(line).not.toContain('gap_socket_to_transcript')
   })
 
@@ -193,7 +210,9 @@ describe('switch timing diagnostics', () => {
     const t = new SwitchTimer('a', 'b', { now: clock.now, emit })
     clock.advance(1)
     t.mark('vm_published')
-    clock.advance(800)
+    clock.advance(30)
+    t.mark('frame_rendered')
+    clock.advance(770)
     t.mark('transcript_read')
     clock.advance(200)
     t.mark('transcript')
