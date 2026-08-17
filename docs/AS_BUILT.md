@@ -55,7 +55,7 @@ The eight-leg matrix and the `/8` denominator have to move together or shards 5-
 NOTHING while reporting green; that pairing is already guarded by
 `scripts/ci/ci-workflow.test.ts` ('the shard matrix size MATCHES the /N').
 
-Landed by PR #399.
+Landed by PR #402.
 
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
