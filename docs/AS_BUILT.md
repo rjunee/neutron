@@ -139,6 +139,11 @@ The last three were each survived by the first round's tests and are the reason 
 round's were written: a guard whose wiring, whose park re-check and whose definition
 of "provider-reported" are all untested is a guard that reads correct and is not.
 
+Local verification of the final state: `scripts/ci/typecheck-all.sh` — 51 tsconfigs,
+all pass; `bun test reminders/ gateway/wiring/ gateway/proactive/ runtime/__tests__`
+plus the three files above — 1968 pass, 0 fail; `scripts/ci/leak-gate.sh` on the
+pushed diff — silent.
+
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
