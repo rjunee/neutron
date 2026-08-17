@@ -36,8 +36,11 @@
  * the whole render was charged to the transcript read, and 47 real samples read
  * `transcript_read` median 3283 ms / `vm_published` median 3 ms — which says
  * "rendering is instant, the store is the cost" and means the exact opposite.
- * The store read itself measures 0.1 ms median / 1.0 ms max over a 12-topic ×
- * 533-message OPFS store.
+ * The store read cannot be the cost, and the reason is structural, not a benchmark:
+ * `chat-core/stores/opfs-store.ts:113-115` delegates `list()` to the in-memory
+ * index, so there is no OPFS I/O in the read path at all. (An uncommitted harness
+ * put it at 0.1 ms median / 1.0 ms max over a 12-topic × 533-message store —
+ * indicative corroboration, not a reproducible figure.)
  *
  * ⚠️ THE MISATTRIBUTION IS PROVEN; THE RENDER'S REAL MAGNITUDE IS NOT MEASURED.
  * The proof is a CONTROL experiment, not a measurement of the owner's client: a

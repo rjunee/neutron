@@ -399,13 +399,23 @@ against `vm_published` median 3 ms / max 39 ms, which reads as "rendering is ins
 store read is effectively 100% of the switch". Every number in that report is real and
 the conclusion it invites is wrong in both halves.
 
-**The read is not slow.** Measured against the real `OpfsChatStore` + `SyncEngine` +
-`SendQueue` over a 12-topic × 533-message store with browser-realistic OPFS latencies:
-`Promise.all([session.messages(), session.pendingCount()])` is **median 0.1 ms, p90
-0.4 ms, max 1.0 ms** — and **0.2 ms** with a 60-upsert write burst in flight. OPFS is not
-in the read path at all: `chat-core/stores/opfs-store.ts:113-115` delegates `list()`
-straight to the in-memory index (`chat-core/store.ts:413-417`), so the only OPFS reads are
-the one-shot `hydrate()` at boot (184 ms for a 3.8 MB snapshot) and the snapshot writes.
+**The read is not slow, and the reason is structural rather than a benchmark.** Read
+`chat-core/stores/opfs-store.ts:113-115`: `list()` delegates straight to the in-memory index
+(`chat-core/store.ts:413-417`). **There is no OPFS I/O in the read path at all** — the only
+OPFS reads are the one-shot `hydrate()` at boot and the snapshot writes. That is checkable
+from the tree by anyone, needs no timing, and is the actual argument; a copy-and-sort over
+533 in-memory rows cannot cost a second.
+
+⚠️ The corroborating magnitudes below are **one-off measurements against a throwaway
+harness that is NOT committed**, so they cannot be reproduced from this repo and should be
+read as indicative only. Method, for anyone who wants to redo them: drive the real
+`OpfsChatStore` + `SyncEngine` + `SendQueue` over a 12-topic × 533-message store with
+injected per-operation OPFS latencies, then time
+`Promise.all([session.messages(), session.pendingCount()])`. That gave median 0.1 ms / p90
+0.4 ms / max 1.0 ms, 0.2 ms with a 60-upsert write burst in flight, and 184 ms for a
+one-shot 3.8 MB `hydrate()`. No benchmark was added to the suite deliberately: a committed
+timing assertion measures the runner's load, which is the class `scripts/ci/lint.sh`
+CHECK 5 exists to keep out of the tree.
 
 **The mark charges the read for the main thread it waited on.** `transcript_read` is
 stamped after an `await` in `handleChange`, and `vm_published` is stamped *inside*

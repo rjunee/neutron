@@ -8,13 +8,13 @@
  * Both halves of that reading are wrong, and measuring the pieces separately is
  * what showed it:
  *
- *   • THE READ IS NOT SLOW. `session.messages()` + `session.pendingCount()` over
- *     a 12-topic × 533-message OPFS-backed store: median 0.1 ms, p90 0.4 ms, max
- *     1.0 ms — and 0.2 ms with a 60-upsert write burst in flight. OPFS is not in
- *     the read path at all: `chat-core/stores/opfs-store.ts:113-115` delegates
- *     `list()` straight to the in-memory index, and the only OPFS reads are the
- *     one-shot `hydrate()` at boot (184 ms for a 3.8 MB snapshot) and the
- *     snapshot writes.
+ *   • THE READ IS NOT SLOW, structurally. `chat-core/stores/opfs-store.ts:113-115`
+ *     delegates `list()` straight to the in-memory index, so there is NO OPFS I/O
+ *     in the read path — the only OPFS reads are the one-shot `hydrate()` at boot
+ *     and the snapshot writes. That is checkable from the tree, which is why it,
+ *     and not a timing number, is the argument. (An uncommitted harness measured
+ *     median 0.1 ms / max 1.0 ms over a 12-topic × 533-message store: indicative
+ *     corroboration, not reproducible from here.)
  *
  *   • THE MARK CHARGES THE READ FOR THE MAIN THREAD IT WAITED ON.
  *     `transcript_read` is stamped after an `await` (`controller.ts`), and React
