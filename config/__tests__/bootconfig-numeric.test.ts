@@ -122,8 +122,16 @@ describe('C1 BootConfig — numeric knobs fail loud (never NaN)', () => {
     // …`) is the natural way to bring this knob onto the blank-is-unset rule and
     // it yields port 0 — an ephemeral port nothing routes to, with
     // `boot-listener-registry`'s in-use guard (`port !== 0`) disabled, silently.
-    // A `toBeUndefined()` alone passes under that edit only because 0 !==
-    // undefined; this states the failure mode so the next reader cannot miss it.
+    //
+    // THIS ASSERTION IS REDUNDANT AS A DETECTOR AND KEPT AS DOCUMENTATION, said
+    // plainly because the first draft of this comment claimed the opposite and a
+    // cross-model reviewer caught it. `toBeUndefined()` above ALREADY fails on 0
+    // (measured: `expect(received).toBeUndefined()` / `Received: 0`), so this
+    // adds no coverage. What it adds is the NAME of the wrong value: a reader who
+    // sees `toBeUndefined()` go red learns the parse changed, and a reader who
+    // sees `Expected: not 0` learns which value it changed to and why that one is
+    // dangerous rather than merely wrong. Claiming coverage it does not provide
+    // would be the same unproved-claim defect this whole sequence is about.
     for (const blank of [' ', '   ', '\t\n ']) {
       expect(resolveBootConfig({ NEUTRON_PORT: blank }).port).not.toBe(0)
     }

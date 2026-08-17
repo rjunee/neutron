@@ -878,10 +878,30 @@ export function buildOpenGraphComposer(
     // ISSUES #421 — Neutron Connect. Resolved HERE (early) so both halves share
     // one origin: the owner-side invite link the app renders, and the
     // data-locality disclosure the invitee sees before accepting.
+    //
+    // THE PORT COMES FROM THE VALIDATED CONFIG AND NOWHERE ELSE. This was
+    // `options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787)`, which
+    // re-read the raw environment BELOW the one place that validates it and then
+    // ran `Number()` over the result. `??` falls through on `undefined` but not
+    // on `''`, so a blank `NEUTRON_PORT` reached `Number('')` — which is **0**,
+    // not `NaN` — and the invite advertised `http://127.0.0.1:0` while the
+    // listener bound 7800 (`gateway/index.ts` maps an unset config port to an
+    // absent env and takes `DEFAULT_LISTEN_PORT`). Measured on the pre-fix tree:
+    // `NEUTRON_PORT=''` -> `connectBase=http://127.0.0.1:0`. One variable, two
+    // answers, in one boot — and the answer the OWNER hands to somebody else was
+    // the wrong one, which is the half that cannot be discovered by looking at
+    // this box.
+    //
+    // The fallback default moves 8787 -> `DEFAULT_LISTEN_PORT` in the same
+    // breath, because 8787 is a port nothing in this tree ever listens on: with
+    // `NEUTRON_PORT` absent the listener binds 7800 and the invite said 8787.
+    // The sibling site in THIS FILE that answers the same question already reads
+    // `options.config?.port ?? DEFAULT_LISTEN_PORT` (the reconnect handoff), so
+    // this is two sites in one file agreeing rather than a new convention.
     const connectBaseUrlResolved = resolveConnectBaseUrlWithSource({
       env,
       bindHost,
-      port: options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787),
+      port: options.config?.port ?? DEFAULT_LISTEN_PORT,
     })
     const connectBaseUrl = connectBaseUrlResolved.base_url
     // This install's OWN Ed25519 identity: it signs the collaborator bearers it
