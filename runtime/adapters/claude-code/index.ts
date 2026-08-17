@@ -298,14 +298,30 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
  * under whatever CWD systemd chose is how two instances end up sharing a
  * registry that names neither. The REPL still runs; only recovery is absent.
  * That direction is pinned in
- * `runtime/adapters/claude-code/__tests__/repl-home-normalization.test.ts` so it
- * is a decision rather than an accident.
+ * `runtime/adapters/claude-code/__tests__/repl-home-normalization.test.ts`, at
+ * the SEAM (whether the supervision block arms) and not only as a returned
+ * value, so it is a decision rather than an accident.
  *
- * Exported for that test. Every in-repo production caller supplies a real `cwd`
- * (`open/composer.ts` resolves it through `resolveNeutronHome` before passing
- * it), so the blank arms are hardening against a future caller, not a live
- * defect — stated plainly here because an unreachable branch that reads as a
- * bug fix is its own kind of wrong docblock.
+ * Exported for that test. WHAT REACHES `cwd` IN PRODUCTION — three paths, not
+ * one, which an earlier revision of this docblock got wrong by naming only the
+ * first:
+ *
+ *   1. `open/composer.ts:1296` passes `owner_home`, resolved at `:856` through
+ *      `resolveNeutronHome`, which cannot return blank.
+ *   2. `open/wiring/substrates.ts:359` (`makeEphemeralSubstrate`) and `:408`
+ *      (`makeWarmFireSubstrate`) forward a CALLER-SUPPLIED per-run path — a
+ *      worktree or repo root, never `resolveNeutronHome` — through
+ *      `buildLlmCallSubstrate` to this factory.
+ *   3. That path's own producer, `agent-dispatch/service.ts:487`, is
+ *      `req.repo_path ?? this.deps.repo_path`, and `??` KEEPS a blank. Nothing
+ *      downstream of it re-checks.
+ *
+ * So the blank arms are not reachable today only because every in-tree producer
+ * of `repo_path` independently avoids a blank — `open/composer.ts` by resolving
+ * it, `cores/free/code-gen/src/backend.ts:278` by rejecting `.trim() === ''` at
+ * its input boundary. That is defence in depth, which is a different and weaker
+ * claim than "unreachable", and it is written this way because the earlier,
+ * stronger sentence would have told a reader not to bother pinning the seam.
  */
 export function resolveReplCwdAndHome(input: {
   cwd?: string | undefined
