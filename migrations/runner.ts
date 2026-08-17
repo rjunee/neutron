@@ -525,19 +525,35 @@ function formatUnexplainedLedgerRows(
  *
  * NOT RESOLVABLE THROUGH `repairs.json`, and it says so. Those entries acknowledge a
  * LEDGER ROW; here the ledger is fine and the duplication is in the tree.
+ *
+ * IT COVERS TWO SHAPES AND DISTINGUISHES THEM PER FILE, because the recording row is
+ * not always a file here. The original shape is "the applied migration is also a file
+ * in this build". The second is the same ambiguity with the row's name absent from the
+ * tree — the rename case — where the hash is widened on and TWO files here claim those
+ * bytes: neither is `duplicates-an-applied-file`, so nothing used to refuse and both
+ * were skipped. The remedies are identical, which is why one message serves both; the
+ * per-file line says which it is so the operator knows whether the name they are being
+ * shown is a file they can go and look at.
  */
 function formatDuplicateContentMigrations(
-  duplicates: ReadonlyArray<{ readonly migration: Migration; readonly recordedName: string }>,
+  duplicates: ReadonlyArray<{
+    readonly migration: Migration
+    readonly recordedName: string
+    readonly recordedInTree: boolean
+  }>,
 ): string {
   return [
-    `${duplicates.length} migration file(s) in this build have the same BYTES as a migration that has ` +
-      'already been applied under a different name, and the already-applied one is ALSO a file in this ' +
-      'build. Refusing, because treating these as applied would mean they never run at all.',
-    ...duplicates.flatMap(({ migration, recordedName }) => [
+    `${duplicates.length} migration file(s) in this build have the same BYTES as a migration this ledger ` +
+      'already records as applied, and are not the only file in this build carrying those bytes. ' +
+      'Refusing, because treating these as applied would mean they never run at all.',
+    ...duplicates.flatMap(({ migration, recordedName, recordedInTree }) => [
       '',
       `  ${migration.fileName}`,
       `    sha256    ${migrationContentHash(migration.sql)}`,
-      `    identical to the applied migration recorded as "${recordedName}"`,
+      `    identical to the applied migration recorded as "${recordedName}"` +
+        (recordedInTree
+          ? ' — which is ALSO a file in this build'
+          : ' — a name this build no longer contains, so the bytes are claimed here twice over'),
     ]),
     '',
     'NOTHING HAS BEEN APPLIED and nothing has been written — no migration ran, no _migrations row',
@@ -891,6 +907,36 @@ function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[
 }
 
 /**
+ * The thrown message for a rekey whose scratch name is already taken.
+ *
+ * IT IS A FILE-LEVEL FUNCTION AND NOT A STRING INSIDE THE REKEY, and that is the fix
+ * rather than a tidy-up: the guard is evaluated in `applyMigrations`'s read-only
+ * preflight, with the other five, so the sentence below is earned rather than asserted.
+ * Thrown from inside `rekeyLedgerOnName` it ran after this boot's `_migration_repairs`
+ * acknowledgements, which made "nothing has been written" false on exactly the instance
+ * the message exists for. The previous round softened the WORDING to name that row; this
+ * round removes the row instead, because a guard that has to disclose its own write is
+ * still a guard that writes.
+ */
+function formatOccupiedRekeyScratch(): string {
+  return (
+    `The _migrations ledger must be rekeyed from its ordinal onto the migration name, but the ` +
+    `table ${LEDGER_LEGACY_TABLE} already exists and the rekey needs that name free. NOTHING HAS ` +
+    'BEEN APPLIED and nothing has been written — no migration ran, no _migrations row was ' +
+    'written, the ledger was neither created nor reshaped, and no repair was acknowledged. The ' +
+    'database is exactly what it was before this boot.\n\n' +
+    'This is NOT a leftover from an interrupted rekey. The whole rekey is one transaction, so a ' +
+    'failed or killed one rolls that table away with everything else; it can never be left ' +
+    'behind. So the table holds data this runner did not put there, and it is deliberately NOT ' +
+    'dropped — an earlier version of this code dropped it unconditionally, which silently and ' +
+    'permanently destroyed whatever was in it.\n\n' +
+    `Resolve by hand, after looking at it (\`SELECT * FROM ${LEDGER_LEGACY_TABLE} LIMIT 5\`): ` +
+    "rename it to something outside this runner's namespace if the contents matter, or drop it " +
+    'yourself once you have established they do not. Then boot again.'
+  )
+}
+
+/**
  * Move the ledger's primary key from `version` to `name`, preserving every migration.
  *
  * ONE TRANSACTION, and the rename happens FIRST so the surviving `_migrations` is
@@ -919,7 +965,16 @@ function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[
  * table — and `nexus-store.ts` already classifies busy as the init race it retries,
  * where the retry finds the ledger rekeyed and does nothing.
  *
- * THE SCRATCH NAME IS REFUSED WHEN OCCUPIED, NEVER CLEARED. This used to open with
+ * THE SCRATCH NAME IS REFUSED WHEN OCCUPIED, NEVER CLEARED — and the refusal is not
+ * here. It is `formatOccupiedRekeyScratch`, thrown from `applyMigrations` alongside
+ * the other five guards, before anything at all is written. It lived here first, which
+ * put it after this boot's `_migration_repairs` acknowledgements, so on the one
+ * population it is written for — an instance mid-incident, carrying repairs — its claim
+ * that nothing had been written was false as the operator read it. A guard whose job is
+ * to change nothing cannot be reached through a write. This function is therefore only
+ * ever CALLED with the name free, and the condition it is called under
+ * (`ledgerIsVersionKeyed`) is the same pure read that decides the rekey is needed at
+ * all. This used to open with
  * `DROP TABLE IF EXISTS _migrations_version_keyed`, which is a data-destroying
  * statement guarded by nothing — and because the drop is inside the transaction that
  * goes on to COMMIT, a real table there was deleted PERMANENTLY, silently, on a boot
@@ -934,29 +989,6 @@ function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[
  * dropping costs them a table with no warning and no record.
  */
 function rekeyLedgerOnName(db: Database): void {
-  // BEFORE the transaction, so the throw carries no rollback ambiguity: the rekey has
-  // not been attempted at all. That is a statement about the REKEY and not about the
-  // database — see the message, which used to conflate the two.
-  if (tableExists(db, LEDGER_LEGACY_TABLE)) {
-    throw new Error(
-      `The _migrations ledger must be rekeyed from its ordinal onto the migration name, but the ` +
-        `table ${LEDGER_LEGACY_TABLE} already exists and the rekey needs that name free. NOTHING ` +
-        'HAS BEEN APPLIED — no migration ran, and the ledger was neither reshaped nor read into ' +
-        'it: its shape, its columns and its rows are exactly what they were before this boot.\n\n' +
-        'ONE THING ON THIS PATH MAY ALREADY HAVE BEEN WRITTEN, and it is named here rather than ' +
-        'denied: a `_migration_repairs` acknowledgement row, if this boot had one to write, was ' +
-        'written before the rekey was attempted and is still there. That table is an audit trail ' +
-        'and holds no schema; nothing else in the database was touched.\n\n' +
-        'This is NOT a leftover from an interrupted rekey. The whole rekey is one transaction, so a ' +
-        'failed or killed one rolls that table away with everything else; it can never be left ' +
-        'behind. So the table holds data this runner did not put there, and it is deliberately NOT ' +
-        'dropped — an earlier version of this code dropped it unconditionally, which silently and ' +
-        'permanently destroyed whatever was in it.\n\n' +
-        `Resolve by hand, after looking at it (\`SELECT * FROM ${LEDGER_LEGACY_TABLE} LIMIT 5\`): ` +
-        'rename it to something outside this runner\'s namespace if the contents matter, or drop it ' +
-        'yourself once you have established they do not. Then boot again.',
-    )
-  }
   db.exec('BEGIN IMMEDIATE')
   try {
     db.exec(`ALTER TABLE _migrations RENAME TO ${LEDGER_LEGACY_TABLE}`)
@@ -1490,13 +1522,23 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
    * whether the ledger's record of a name is what a normal apply of THIS build would
    * have written, and a mismatch is precisely the incident these entries describe.
    *
-   * WHETHER `version` IS PART OF THE MATCH DEPENDS ON THE NAME — see the predicate
-   * below. For an orphan `recorded_name` it is CONTEXT rather than a key: it
-   * records the ordinal the row was written under, it is printed in the refusal
-   * message that emits these entries, and it is still written into
-   * `_migration_repairs` as part of the audit trail. An entry whose `version` has gone
-   * stale — because the row it named was the one a collapse dropped — therefore keeps
-   * working instead of quietly ceasing to.
+   * `version` IS PART OF THE MATCH FOR EVERY ENTRY, ORPHAN OR NOT, and it has to be.
+   * An earlier revision dropped it for an orphan `recorded_name` on the argument that
+   * a name alone identifies an orphan — which is true of the row and false of the
+   * DATABASE. `repairs.json` is shipped to the whole fleet, so an entry is a claim
+   * about one instance's history that every instance evaluates. Two databases can
+   * legitimately record one unmerged branch migration at DIFFERENT ordinals (each ran
+   * its own build of that branch), and on the second one the same entry then suppressed
+   * a migration that was genuinely pending there: `file_name` marked it applied, its
+   * `ALTER`s never ran, and no row was ever recorded for it. Measured, not reasoned —
+   * see CASE 8c, which reproduces it against a second database and reads the columns
+   * back out. That is the silent-missing-schema failure these entries exist to end,
+   * exported to instances the incident was never about.
+   *
+   * The ordinal a stale `version` was feared to lose is carried by
+   * `_migration_repairs` instead, which is the honest place for it: an entry that has
+   * ALREADY activated on this database stays active on it whatever the ledger comes to
+   * look like, and one that never activated here has no history here to speak about.
    */
   const treeOrdinalByName = new Map(migrations.map((m) => [m.name, m.version] as const))
   const alreadyAcknowledged = acknowledgedRepairKeys(db)
@@ -1506,28 +1548,23 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     // `acknowledgedRepairKeys`. Checked first because it is a set lookup, and because
     // it is the answer that does not depend on the ledger still showing the incident.
     alreadyAcknowledged.has(repairKey(repair)) ||
-    ledger.rows.some((row) => {
-      if (row.name !== repair.recorded_name) return false
-      const treeOrdinal = treeOrdinalByName.get(repair.recorded_name)
-      // ORPHAN NAME: the name IS the identity and no ordinal can narrow it. Every entry
-      // this runner mints is orphan-named by construction — `repairsEntryFor` is called
-      // from exactly one place (the unexplained-row refusal) whose candidates require
-      // `!treeNames.has(row.name)` — so matching on name alone is what carries an entry
-      // through a collapse that moved which ordinal the row is recorded at.
-      if (treeOrdinal === undefined) return true
-      // TREE-FILE NAME: this build ships a migration of that name, so the recorded
-      // ordinal is the ONLY thing separating the incident row from legitimate renumber
-      // drift. Both conjuncts are load-bearing: the first refuses to speak about a row
-      // the entry was never written about, and the second refuses to treat a row sitting
-      // exactly where a normal apply would have written it as an incident at all.
-      //
-      // THAT NARROWNESS IS WHY THE ACKNOWLEDGEMENT ABOVE EXISTS. This conjunction goes
-      // false the moment the collapse drops the drifted row and leaves the one sitting
-      // at the tree ordinal — the ledger stops showing the incident, though the instance
-      // still has it. `_migration_repairs` remembers instead; see
-      // `acknowledgedRepairKeys`.
-      return row.version === repair.version && row.version !== treeOrdinal
-    }),
+    ledger.rows.some(
+      (row) =>
+        // THE ROW THE ENTRY WAS WRITTEN ABOUT, in the two terms that identify it: the
+        // name it recorded and the ordinal it recorded it under. Neither is optional.
+        // The name alone identifies the row on the instance the entry came from and
+        // NOT across the fleet — see the docblock, and CASE 8c.
+        row.name === repair.recorded_name &&
+        row.version === repair.version &&
+        // AND IT MUST STILL BE AN INCIDENT. A row sitting exactly where a normal apply
+        // of this build would have written it is legitimate renumber drift, not the
+        // state an entry describes: entry 125's `recorded_name` is a file here
+        // (`0124_…`), so without this a healthy instance that had recorded 0124 and not
+        // yet run 0125 would have had 0125 suppressed forever. `undefined` — no file of
+        // that name in this build — is the orphan case, which is an incident by
+        // definition and never equal to a number.
+        row.version !== treeOrdinalByName.get(repair.recorded_name),
+    ),
   )
   // WHAT AN ACTIVE SUPPRESS REPAIR ASSERTS, in two independent halves — the original
   // shipped entries need both. (1) The migration named by `file_name` is ALREADY
@@ -1580,6 +1617,30 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // run). It is also what the unexplained-row guard selects against further down, so it
   // is derived once here rather than twice.
   const treeNames = new Set(migrations.map((m) => m.name))
+  /**
+   * This tree's bytes, hashed ONCE, in both directions.
+   *
+   * NOT A NEW COST. The content-drift notice near the end of this function already
+   * hashes every recorded file on every boot — 123 files, 350 KB, 3.9 ms measured, over
+   * bytes `loadMigrations` has already read — and it now reads this map instead of
+   * hashing again, as does the duplicate-content check. So a steady-state boot makes ONE
+   * pass where it used to make two, and `classifyMigration` still short-circuits on the
+   * name and hashes nothing.
+   *
+   * The reverse index is what the duplicate check needs and could not derive: "how many
+   * files in THIS BUILD carry these bytes". Hash widening asks a question about the
+   * ledger and answers it about a file, and that step is only valid when the file is the
+   * unique tree-side claimant of those bytes.
+   */
+  const treeContent: Array<{ readonly migration: Migration; readonly hash: string }> = []
+  const treeNamesByHash = new Map<string, string[]>()
+  for (const migration of migrations) {
+    const hash = migrationContentHash(migration.sql)
+    treeContent.push({ migration, hash })
+    const sharing = treeNamesByHash.get(hash)
+    if (sharing === undefined) treeNamesByHash.set(hash, [migration.name])
+    else sharing.push(migration.name)
+  }
   const verdicts = new Map(
     migrations.map((m) => [m.name, classifyMigration(m, ledger, treeNames)] as const),
   )
@@ -1690,13 +1751,35 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // so the search below always finds one. An empty string standing in for it would be a
   // second unreachable branch reading as a real mode, which is what the narrowed row
   // type further down exists to avoid.
-  const duplicates: Array<{ migration: Migration; recordedName: string }> = []
-  for (const migration of migrations) {
+  const duplicates: Array<{ migration: Migration; recordedName: string; recordedInTree: boolean }> =
+    []
+  for (const { migration, hash } of treeContent) {
     if (repairedNames.has(migration.name)) continue
-    if (verdicts.get(migration.name) !== 'duplicates-an-applied-file') continue
-    for (const owner of ledger.hashOwners.get(migrationContentHash(migration.sql)) ?? []) {
-      if (!treeNames.has(owner)) continue
-      duplicates.push({ migration, recordedName: owner })
+    const owners = ledger.hashOwners.get(hash)
+    if (owners === undefined) continue
+    if (verdicts.get(migration.name) === 'duplicates-an-applied-file') {
+      for (const owner of owners) {
+        if (!treeNames.has(owner)) continue
+        duplicates.push({ migration, recordedName: owner, recordedInTree: true })
+        break
+      }
+      continue
+    }
+    // THE SAME AMBIGUITY WITH THE OWNER OFF-TREE, which the verdict above cannot see.
+    // `recorded-by-content` widens on a row no file here accounts for — the rename case
+    // — and that inference reads "THIS file has already run". It is sound only when
+    // this file is the ONLY one here carrying those bytes. When a second is, the same
+    // row marks BOTH as applied, and because the row's sole owner is absent from the
+    // tree neither one is `duplicates-an-applied-file`, so nothing refused: both were
+    // skipped, neither recorded, and the boot exited zero reporting them under
+    // `skipped`. That is this file's own silent-missing-schema class, reached through
+    // the widening rather than through the ordinal, and CASE 9 reproduces it.
+    if (verdicts.get(migration.name) !== 'recorded-by-content') continue
+    if ((treeNamesByHash.get(hash)?.length ?? 1) < 2) continue
+    // Any owner will do and there is at least one: the verdict required the hash to be
+    // owned, and this branch required every owner to be off-tree.
+    for (const owner of owners) {
+      duplicates.push({ migration, recordedName: owner, recordedInTree: false })
       break
     }
   }
@@ -1724,6 +1807,19 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     const unexplained = candidateRows.filter((row) => !fileHashes.has(row.content_sha256))
     if (unexplained.length > 0) throw new Error(formatUnexplainedLedgerRows(unexplained, today))
   }
+  // THE SIXTH GUARD, AND IT BELONGS HERE RATHER THAN INSIDE THE REKEY. Every condition
+  // it rests on is a pure read — is there a ledger, is it still keyed on the ordinal (so
+  // a rekey is what this boot is about to do), is the scratch name occupied — so it can
+  // be decided with the other five and leave the database untouched. Thrown from inside
+  // `rekeyLedgerOnName` it ran AFTER the acknowledgement writes below, which made its own
+  // "nothing has been written" false on an instance carrying repairs: the mid-incident
+  // database is the only one that reaches it. Gated on `pending` because that is the only
+  // path that reshapes the ledger at all; a steady-state boot never rekeys, so a table
+  // sitting at that name is not yet anybody's problem and refusing over it would be an
+  // outage with no cause.
+  if (pending && ledgerExists(db) && ledgerIsVersionKeyed(db) && tableExists(db, LEDGER_LEGACY_TABLE)) {
+    throw new Error(formatOccupiedRekeyScratch())
+  }
   // CONTENT DRIFT IS REPORTED, NEVER ENFORCED — the last thing before the writes, and
   // deliberately not a refusal. See `contentDriftFields`: gating on a hash mismatch is
   // a decision this repository has weighed and declined, and this closes the SILENCE
@@ -1731,25 +1827,49 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // actually records are compared, and only rows carrying a hash can be, so a fresh
   // install and a pre-provenance ledger both say nothing.
   //
-  // THIS IS THE ONE PASS THAT HASHES ON A STEADY-STATE BOOT, and the cost is stated
+  // IT READS THE ONE PASS THAT HASHES ON A STEADY-STATE BOOT, and the cost is stated
   // rather than hand-waved because it contradicts what the rest of this file optimises
   // for: 123 files, 350 KB, 3.9 ms measured on this tree, over bytes `loadMigrations`
   // has already read — CPU, no extra I/O. It is paid on every boot because the case it
   // catches is a migration that reads as applied while its statements never ran, and
   // that case is invisible by construction. Scoping it to renumbered files only would
   // halve nothing and would go silent on exactly the shape the README's
-  // hash-is-not-a-gate decision leaves uncovered.
-  for (const migration of migrations) {
+  // hash-is-not-a-gate decision leaves uncovered. The hashes come from `treeContent`,
+  // computed once above and shared with the duplicate-content check, so the pass is made
+  // once rather than once per consumer.
+  for (const { migration, hash } of treeContent) {
     if (verdicts.get(migration.name) !== 'recorded-by-name') continue
     const recorded = ledger.byName.get(migration.name)
     if (recorded === undefined || !isHashed(recorded)) continue
-    if (recorded.content_sha256 === migrationContentHash(migration.sql)) continue
+    if (recorded.content_sha256 === hash) continue
     log.warn('migration_content_drift', contentDriftFields(migration, recorded))
   }
 
   // ---- Past this line, and not before it, the database is written to. ----
 
-  if (activeRepairs.length > 0) {
+  // ONLY WHAT IS NOT ALREADY THERE, which is what keeps a steady-state boot a pure read.
+  // `INSERT OR IGNORE` made this idempotent in EFFECT and not in WRITES: the DDL and the
+  // insert both ran on every boot, so on the one population that carries repairs —
+  // mid-incident, the databases whose backups an operator most wants to open — a
+  // fully-migrated boot still needed a writable connection, and `applyMigrations` was not
+  // the pure read the README claims. The rows are never rewritten (that is what makes
+  // `acknowledgedRepairKeys` a durable trigger), so "already acknowledged" and "nothing
+  // to write" are the same condition, read once at the top of this function.
+  // SUPPRESS ENTRIES ONLY, and only the ones not already acknowledged. Two fixes meet
+  // on this line and BOTH are load-bearing, so neither side of the rebase was taken
+  // whole:
+  //   * `suppressRepairs`, not `activeRepairs` — main's `4526a26d` ("reapply
+  //     false-witness ledger scars") narrowed this deliberately. An acknowledgment row
+  //     is what makes an entry inert on this database; writing one for a `reapply`
+  //     entry would retire the very entry whose job is to run again.
+  //   * `!alreadyAcknowledged` and the write INSIDE the guard below — this branch's
+  //     fix. `INSERT OR IGNORE` made the write idempotent in EFFECT but not in WRITES,
+  //     so a fully-migrated boot still needed a writable connection and
+  //     `applyMigrations` was not the pure read the README promises.
+  const unacknowledgedRepairs = suppressRepairs.filter(
+    (repair) => !alreadyAcknowledged.has(repairKey(repair)),
+  )
+  if (unacknowledgedRepairs.length > 0) {
     db.exec(
       `CREATE TABLE IF NOT EXISTS _migration_repairs (
          version INTEGER NOT NULL,
@@ -1760,13 +1880,13 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
          PRIMARY KEY (version, recorded_name, file_name)
        )`,
     )
-  }
-  for (const repair of suppressRepairs) {
-    db.run(
-      `INSERT OR IGNORE INTO _migration_repairs
-       (version, recorded_name, file_name, note, acknowledged_at) VALUES (?, ?, ?, ?, ?)`,
-      [repair.version, repair.recorded_name, repair.file_name, repair.note, Date.now() / 1000],
-    )
+    for (const repair of unacknowledgedRepairs) {
+      db.run(
+        `INSERT OR IGNORE INTO _migration_repairs
+         (version, recorded_name, file_name, note, acknowledged_at) VALUES (?, ?, ?, ?, ?)`,
+        [repair.version, repair.recorded_name, repair.file_name, repair.note, Date.now() / 1000],
+      )
+    }
   }
   const applied: number[] = []
   const skipped: number[] = []

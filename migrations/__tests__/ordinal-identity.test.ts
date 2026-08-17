@@ -1049,19 +1049,24 @@ test('CASE 6c — a rekey that fails AFTER the provenance ALTERs also leaves the
   db.close()
 })
 
-test('CASE 6d — the occupied-scratch refusal names the one row it MAY have written, and it is there', () => {
-  // WHAT THIS PINS IS A SENTENCE, and the sentence used to be false. The refusal for an
-  // occupied scratch name read "nothing has been written — no migration ran, no row was
-  // written". But it is thrown from `rekeyLedgerOnName`, which `applyMigrations` reaches
-  // only AFTER it has created `_migration_repairs` and inserted this boot's
-  // acknowledgements. So on exactly the instance the message is written for — one
-  // carrying repairs, mid-incident — it denied a row that was sitting in the database as
-  // the operator read it. That is the falsity class this whole PR exists to remove,
-  // restated in one message.
+test('CASE 6d — the occupied-scratch refusal writes NOTHING, including the repair it used to acknowledge first', () => {
+  // WHAT THIS PINS IS A SENTENCE, and the sentence was false in the shipped code. The
+  // refusal for an occupied scratch name claimed nothing had been written, while being
+  // thrown from `rekeyLedgerOnName` — which `applyMigrations` reached only AFTER creating
+  // `_migration_repairs` and inserting this boot's acknowledgements. So on exactly the
+  // instance the message is written for, one carrying repairs mid-incident, it denied a
+  // row sitting in the database as the operator read it.
   //
-  // THIS TEST CAN FAIL FOR THE REASON UNDER TEST: it asserts the repairs row EXISTS
-  // after the throw, and that the message does not contain the old denial. Restore
-  // either half of the old wording and it goes red.
+  // THE FIRST FIX SOFTENED THE WORDING TO NAME THAT ROW. This one removes the row: the
+  // guard is evaluated in the read-only preflight with the other five, on nothing but
+  // pure reads (`ledgerExists`, `ledgerIsVersionKeyed`, `tableExists`), so the
+  // unqualified claim is earned. A guard that has to disclose its own write is still a
+  // guard that writes, and the whole ordering argument in `applyMigrations` rests on
+  // there being no exception to it.
+  //
+  // THIS TEST CAN FAIL FOR THE REASON UNDER TEST: it asserts `_migration_repairs` does
+  // NOT EXIST after the throw. Move the guard back inside the rekey and it goes red on
+  // that line — the table appears, holding the acknowledgement.
   const ghost = (file: string): string => {
     const dir = mkdtempSync(join(tmp, 'ghost-'))
     writeFileSync(join(dir, file), 'CREATE TABLE IF NOT EXISTS ghost (id TEXT PRIMARY KEY);\n')
@@ -1103,19 +1108,15 @@ test('CASE 6d — the occupied-scratch refusal names the one row it MAY have wri
   }
 
   expect(message).toContain('needs that name free')
-  expect(message).toContain('NOTHING HAS BEEN APPLIED')
-  // THE DISCRIMINATING PAIR. The message must name the row it may have written, and must
-  // no longer deny writing one.
-  expect(message).toContain('_migration_repairs')
-  expect(message).not.toContain('no row was written')
+  expect(message).toContain('NOTHING HAS BEEN APPLIED and nothing has been written')
+  expect(message).toContain('no repair was acknowledged')
 
-  // ...and the claim, verified against the database the operator would open. The
-  // acknowledgement row IS there, exactly as the message now says.
-  expect(
-    db.query('SELECT version, recorded_name, file_name FROM _migration_repairs').all(),
-  ).toEqual([{ version: 500, recorded_name: 'ghost', file_name: 'beta' }])
-  // Everything the message DOES deny is verified too: the ledger's shape, columns and
-  // rows are untouched, and no migration ran.
+  // THE DISCRIMINATING ASSERTION, and the only one in this file that can see the
+  // difference: the acknowledgement table was never created. This is where the repair
+  // write used to have landed already.
+  expect(db.query("SELECT 1 FROM sqlite_master WHERE name = '_migration_repairs'").get()).toBeNull()
+  // The rest of the claim, verified: the ledger's shape, columns and rows are untouched,
+  // and no migration ran.
   expect(ddlOf(db, '_migrations')).toBe(ddlBefore)
   for (const column of ['content_sha256', 'applied_by_commit', 'tree_provenance']) {
     expect(columnsOf(db, '_migrations')).not.toContain(column)
@@ -1125,9 +1126,15 @@ test('CASE 6d — the occupied-scratch refusal names the one row it MAY have wri
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't3'").get()).toBeNull()
 
   // The remedy the message gives works, and the repair is still doing its job after it.
+  // THE POSITIVE CONTROL for the assertion above: on the boot that is NOT refused, the
+  // acknowledgement really is written — so its absence after the refusal is the guard's
+  // ordering and not an entry that never activated at all.
   db.exec('ALTER TABLE _migrations_version_keyed RENAME TO operator_kept_this')
   expect(applyMigrations(db, build)).toEqual({ applied: [2], skipped: [1] })
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
+  expect(
+    db.query('SELECT version, recorded_name, file_name FROM _migration_repairs').all(),
+  ).toEqual([{ version: 500, recorded_name: 'ghost', file_name: 'beta' }])
   db.close()
 })
 
@@ -1255,13 +1262,14 @@ test('CASE 7 — a tolerated ordinal collision still boots on the NEXT boot, wit
 // -------------------- 8. a repair that must not go inert after the rekey
 
 test('CASE 8 — a repair naming the row the collapse DROPS keeps acknowledging afterwards', () => {
-  // The rekey used to silently deactivate a repair. `activeRepairs` required an exact
-  // (version, name) pair, and `collapseLedgerRowsByName` keeps the EARLIEST-applied row
-  // of a duplicated name and drops the others — which sit at a different ordinal by
+  // The rekey used to silently deactivate a repair. `activeRepairs` matched on the
+  // ledger alone, and `collapseLedgerRowsByName` keeps the EARLIEST-applied row of a
+  // duplicated name and drops the others — which sit at a different ordinal by
   // definition. So an entry naming the non-surviving row activated on the rekey boot
-  // and went inert on every boot after it. That matcher was itself an
-  // ordinal-as-identity holdover, left behind in repair matching by the change that
-  // deleted the assumption everywhere else.
+  // and went inert on every boot after it, because the row it was matched against no
+  // longer existed. The fix is `_migration_repairs` read back as a durable second
+  // trigger, NOT a looser ledger match: widening the match instead let a shipped entry
+  // speak on databases it was never written about, which is CASE 8c.
   //
   // Both halves of what an active repair asserts break, independently:
   //   - the hand-verified migration stops being suppressed, so its `ALTER`s re-run;
@@ -1332,8 +1340,8 @@ test('CASE 8 — a repair naming the row the collapse DROPS keeps acknowledging 
   expect(boot2.skipped).toContain(1)
   expect(boot2.applied).not.toContain(1)
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 't2'").get()).toBeNull()
-  // The acknowledgement was audited on this boot too, at the ordinal the entry carries
-  // — `version` is still recorded, it is simply no longer what the entry is matched on.
+  // The acknowledgement written on boot 1 is still the only row, at the ordinal the
+  // entry carries — nothing rewrites it, which is what makes it a trustworthy trigger.
   expect(
     db.query('SELECT version, recorded_name, file_name FROM _migration_repairs').all(),
   ).toEqual([{ version: 501, recorded_name: 'ghost', file_name: 'beta' }])
@@ -1436,4 +1444,203 @@ test('CASE 8b — a repair on a TREE-FILE name survives the collapse that makes 
   // And it is a fixed point.
   expect(applyMigrations(db, build).applied).toEqual([])
   db.close()
+})
+
+test('CASE 8c — a shipped entry does NOT speak on a database that recorded the same orphan elsewhere', () => {
+  // THE FLEET, WHICH IS WHAT A `repairs.json` ENTRY IS EVALUATED BY. An entry is one
+  // instance's history, shipped to every instance, so the terms it is matched on decide
+  // how far it reaches. Matching an orphan `recorded_name` on the NAME ALONE — the
+  // widening that carried an entry through a collapse before `_migration_repairs` did —
+  // reaches too far: two databases can legitimately record one unmerged branch migration
+  // at DIFFERENT ordinals, each having run its own build of that branch, and the name is
+  // the same on both.
+  //
+  // WHAT THAT COST, reproduced against the SHIPPED entries and the real tree. The second
+  // database has never run `code_trident_runs_fix_round_contract`; entry 124's `file_name`
+  // names it. With a name-only match the entry activated, the migration was marked
+  // applied, its three `ALTER`s never ran, no ledger row was written for it, and the boot
+  // exited zero. That is this file's own silent-missing-schema class, exported to an
+  // instance the incident was never about.
+  //
+  // THE DISCRIMINATING ASSERTIONS are the columns read back out of `pragma_table_info`
+  // after the boot, with a column that IS there as the positive control. Drop
+  // `row.version === repair.version` from `activeRepairs` and they go absent.
+  const withEdits = (edits: {
+    drop?: readonly string[]
+    add?: ReadonlyArray<readonly [string, string]>
+    repairs?: unknown
+  }): string => {
+    const dir = mkdtempSync(join(tmp, 'fleet-'))
+    for (const file of readdirSync(REAL_TREE)) {
+      if (!/^\d{4}_.+\.sql$/.test(file)) continue
+      cpSync(join(REAL_TREE, file), join(dir, file))
+    }
+    for (const file of edits.drop ?? []) rmSync(join(dir, file))
+    for (const [file, body] of edits.add ?? []) writeFileSync(join(dir, file), body)
+    if (edits.repairs === undefined) {
+      cpSync(join(REAL_TREE, 'repairs.json'), join(dir, 'repairs.json'))
+    } else {
+      writeFileSync(join(dir, 'repairs.json'), JSON.stringify(edits.repairs))
+    }
+    return dir
+  }
+  const FIX_ROUND_FILE = '0124_code_trident_runs_fix_round_contract.sql'
+  const FIX_ROUND_NAME = 'code_trident_runs_fix_round_contract'
+  const ORPHAN_NAME = 'dispatch_dependencies_and_claims'
+  // Held back so the fixture is a release that predates them, exactly as the other
+  // fixtures here do — `0131` rebuilds the table and would mask the missing columns.
+  const TAIL = [
+    '0125_code_trident_runs_base_sha.sql',
+    PENDING_FILE,
+    RENUMBERED_FILE,
+    REPAIR_FILE,
+  ]
+
+  // THE SECOND DATABASE. Its own build of the unmerged branch took ordinal 141 — not the
+  // 124 the incident instance recorded it at — and the merged 0124 had not been written
+  // yet, so it is genuinely pending here.
+  const db = new Database(join(tmp, 'second-instance.db'), { create: true })
+  applyMigrations(
+    db,
+    withEdits({
+      drop: [FIX_ROUND_FILE, ...TAIL],
+      add: [
+        [
+          `0${BRANCH_ORDINAL}_${ORPHAN_NAME}.sql`,
+          'CREATE TABLE IF NOT EXISTS branch_only_second (id TEXT PRIMARY KEY);\n',
+        ],
+      ],
+      repairs: [],
+    }),
+  )
+  // THE PRECONDITION, MEASURED: the orphan name is recorded, at its own ordinal, and the
+  // migration entry 124 would suppress has never run here.
+  expect(ledger(db).find((row) => row.name === ORPHAN_NAME)).toEqual({
+    version: BRANCH_ORDINAL,
+    name: ORPHAN_NAME,
+  })
+  expect(ledger(db).some((row) => row.name === FIX_ROUND_NAME)).toBe(false)
+
+  // Boot the current build, carrying the SHIPPED repairs.json. Entry 124 names this
+  // orphan at ordinal 124 and this database has it elsewhere, so the entry stays inert —
+  // which leaves the row unexplained and the boot refused. That is the right failure:
+  // loud, and it prints the ordinal THIS database recorded.
+  let message = ''
+  try {
+    applyMigrations(db, withEdits({ drop: TAIL }))
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+  expect(message).toContain('NO migration file in this build corresponds to')
+  expect(message).toContain(`"version": ${BRANCH_ORDINAL}`)
+  expect(message).toContain(`"recorded_name": "${ORPHAN_NAME}"`)
+
+  // And the remedy is the operator's own entry, at their own ordinal, acknowledging the
+  // row ALONE (`file_name` empty — nothing in this build already ran here). The migration
+  // entry 124 would have suppressed now applies, which is the whole point.
+  const resolved = withEdits({
+    drop: TAIL,
+    repairs: [
+      {
+        version: BRANCH_ORDINAL,
+        recorded_name: ORPHAN_NAME,
+        file_name: '',
+        note: 'hand-verified on THIS database: the branch table is unused and nothing here already ran',
+        date: '2026-08-17',
+      },
+    ],
+  })
+  expect(applyMigrations(db, resolved).applied).toContain(124)
+  expect(ledger(db).some((row) => row.name === FIX_ROUND_NAME)).toBe(true)
+  // THE COLUMNS, read back with a positive control. `id` is present whatever happens, so
+  // an empty result would prove the query works and the columns are absent rather than
+  // that the table name was a typo.
+  const columns = columnsOf(db, 'code_trident_runs')
+  expect(columns).toContain('id')
+  expect(columns).toContain('reviewed_head')
+  expect(columns).toContain('bound_pr')
+  expect(columns).toContain('fenced_paths')
+  db.close()
+})
+
+// ------------- 9. one recorded hash, two files in this build claiming it
+
+test('CASE 9 — an orphan hash claimed by TWO files in this build is refused, not skipped twice', () => {
+  // HASH WIDENING ASKS ABOUT THE LEDGER AND ANSWERS ABOUT A FILE, and that step is only
+  // valid when the file is the unique tree-side claimant of those bytes.
+  // `recorded-by-content` fires for a row no file here accounts for — the rename case —
+  // and reads as "THIS file has already run". When a SECOND file here carries the same
+  // bytes, the one row marks both as applied; and because the row's sole owner is absent
+  // from the tree neither file is `duplicates-an-applied-file`, so the refusal built for
+  // exactly this ambiguity never fired. Both were skipped, neither was recorded, and the
+  // boot exited zero reporting them under `skipped` — the silent-missing-schema class,
+  // reached through the widening instead of through the ordinal.
+  const body = 'CREATE TABLE IF NOT EXISTS shared_bytes (id TEXT PRIMARY KEY);\n'
+  const before = mkdtempSync(join(tmp, 'one-claimant-'))
+  writeFileSync(join(before, '0001_original.sql'), body)
+  const db = new Database(join(tmp, 'two-claimants.db'), { create: true })
+  expect(applyMigrations(db, before).applied).toEqual([1])
+  expect(ledger(db)).toEqual([{ version: 1, name: 'original' }])
+
+  // The build that renamed it AND shipped a second file with the same bytes.
+  const after = mkdtempSync(join(tmp, 'two-claimants-'))
+  writeFileSync(join(after, '0002_renamed.sql'), body)
+  writeFileSync(join(after, '0003_brand_new.sql'), body)
+
+  let message = ''
+  try {
+    applyMigrations(db, after)
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err)
+  }
+  // THE DISCRIMINATING ASSERTION: it threw at all. Before this, the call returned
+  // `{ applied: [], skipped: [2, 3] }` and the boot came up.
+  expect(message).toContain('have the same BYTES')
+  expect(message).toContain('0002_renamed.sql')
+  expect(message).toContain('0003_brand_new.sql')
+  // The message is honest about WHERE the recording row is: `original` is not a file in
+  // this build, so it must not claim to be one.
+  expect(message).toContain('recorded as "original"')
+  expect(message).toContain('a name this build no longer contains')
+  // Nothing was written, as the message says.
+  expect(ledger(db)).toEqual([{ version: 1, name: 'original' }])
+
+  // THE POSITIVE CONTROL, and it can fail for the reason under test: with only ONE
+  // claimant the widening is exactly what it was built for and the rename boots clean.
+  const single = mkdtempSync(join(tmp, 'renamed-only-'))
+  writeFileSync(join(single, '0002_renamed.sql'), body)
+  expect(applyMigrations(db, single)).toEqual({ applied: [], skipped: [2] })
+  db.close()
+})
+
+// ---------- 10. a boot that decides nothing writes nothing, repairs included
+
+test('CASE 10 — a fully-migrated boot carrying an ACKNOWLEDGED repair is a pure read', () => {
+  // WHAT A READ-ONLY CONNECTION IS FOR: opening a backup of a live database to inspect
+  // it, which is the thing an operator does most while an incident is open. The
+  // acknowledged-repair write ran on EVERY boot — `INSERT OR IGNORE` made it idempotent
+  // in EFFECT, not in WRITES — so the instances carrying repairs were exactly the ones
+  // whose backups could not be opened, and the README's claim that a fully-migrated boot
+  // is a pure read was false on them. The rows are never rewritten, so "already
+  // acknowledged" and "nothing to write" are the same condition.
+  const db = liveInstanceBefore({ provenance: true })
+  const path = db.filename
+  // Boot 1 acknowledges. Boot 2 is the steady state under test.
+  applyMigrations(db)
+  expect(applyMigrations(db).applied).toEqual([])
+  // THE PRECONDITION, MEASURED: this database really does carry acknowledgements, so the
+  // test is not passing because there was never anything to write.
+  expect(
+    db.query<{ n: number }, []>('SELECT COUNT(*) AS n FROM _migration_repairs').get()?.n ?? 0,
+  ).toBeGreaterThan(0)
+  db.close()
+
+  const readonly = new Database(path, { readonly: true })
+  // THE CONTROL FOR THE PROBE ITSELF: prove this connection genuinely refuses writes.
+  // Without it a passing `applyMigrations` below would only show that the assertion ran.
+  expect(() => readonly.exec('CREATE TABLE control_probe (id INTEGER)')).toThrow(/readonly/)
+  // THE DISCRIMINATING ASSERTION: the same boot the live instance performs, over the real
+  // tree and the shipped `repairs.json`, against a connection that cannot write.
+  expect(applyMigrations(readonly).applied).toEqual([])
+  readonly.close()
 })
