@@ -108,6 +108,22 @@ export {
 export type { RunHostCommand, MergeConflictResolver } from './merge.ts'
 
 export {
+  buildFableArbiter,
+  assertArbitrableOptions,
+  isOwnerOnlyQuestion,
+  ARBITER_TOOL_NAMES,
+  FORBIDDEN_OPTION_IDS,
+  DEFAULT_ARBITER_CAP,
+} from './arbiter.ts'
+export type {
+  TridentArbiter,
+  ArbitrationInput,
+  ArbitrationOption,
+  ArbitrationOutcome,
+  ArbitrationRecord,
+} from './arbiter.ts'
+
+export {
   buildTridentOrchestrator,
   computeDiffLineCount,
 } from './orchestrator.ts'

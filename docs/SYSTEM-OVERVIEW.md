@@ -637,10 +637,20 @@ a slash-command.
   calls `setReplToolBridge(graph.get('mcp'))` once the registry is populated;
   shutdown clears it. LLM-less boxes (no graph) leave it unset → no second
   server.
-- **Security (opt-in per substrate).** Only the owner's WARM conversational
-  substrate (`cc-agent-*`) sets `enableToolBridge: true`. The untrusted
-  history-import REPL (`cc-import-*`), the per-project onboarding-compose REPL
-  (`cc-compose-*` — see "Per-project isolated onboarding compose" below), and the
+- **Security (opt-in per substrate).** The owner's two WARM conversational
+  substrates set `enableToolBridge: true`: the live chat (`cc-agent-*`) and the
+  background proactive-compose REPL (`cc-nudge-*` — fired reminders/rituals and the
+  work-board wakeup). The second is an equal-grant, separate-session twin of the
+  first: it runs `PROFILE_WARM_CHAT` with the same bridge, GitHub credential and
+  frontier-model floor, because a RITUAL composes there and ISSUES #504 settled that
+  a fired ritual must have "access to everything general has access to" — the
+  previous locked-down `cc-ritual-*` lane could not read the owner's calendar and was
+  rejected. What is separate is the SESSION, so a background compose that aborts
+  cannot evict the child the owner is chatting on; the security boundary for that
+  lane remains the ritual APPROVAL GATE (`reminders/ritual-fire.ts`), not the
+  substrate. The untrusted history-import REPL (`cc-import-*`), the per-project
+  onboarding-compose REPL (`cc-compose-*` — see "Per-project isolated onboarding
+  compose" below), and the
   Trident build / fire REPLs (`cc-trident-*` / `cc-trident-fire-*`) leave it off,
   so a prompt-injection in untrusted content can never reach a Core tool. The bridge's MCP namespace is
   permitted via `--allowedTools mcp__neutron`. The built-in `--tools` surface is
@@ -4383,9 +4393,13 @@ ritual content in chat.
   what must be recorded about it? A `nudge` answer composes the row's stored
   message; a `skipped` answer (the fail-closed verdict) writes a durable
   `code_ritual_runs` 'skipped' row and posts NOTHING; a `fire` answer writes a
-  durable `'running'` row and composes the APPROVED PROMPT — on the owner's own
-  warm `cc-agent-*` session, through the same `llm.compose` call and the same
+  durable `'running'` row and composes the APPROVED PROMPT — on the warm BACKGROUND
+  compose session (`cc-nudge-*`), through the same `llm.compose` call and the same
   `deliver()` outbound a nudge uses — then settles the ledger `finished`/`failed`.
+  That session was `cc-agent-*`, the owner's chat REPL, until 2026-08-16: one
+  aborted compose poisoned it and he could not chat until the service restarted
+  (see the AS_BUILT entry). The lane is still ONE fire path with the live-chat
+  `--tools` surface — it simply no longer runs inside the session he is talking to.
   A `silent` ritual skips the success post; a failure posts one one-line notice and
   escalates once per 3-consecutive-failure streak. `reapOrphanRitualRuns` still
   reaps prior-boot orphaned `'running'` rows to `'crashed'` at boot and prunes runs
@@ -7318,6 +7332,24 @@ chased a non-bug. The string detector + its test were **removed**.
   `reportFailure`, and re-emits it unchanged — so a slow turn is a recoverable
   single-turn retry (the substrate poisons + respawns the warm session) instead
   of parking the credential and cascading into "all credentials in cooldown".
+- **A BACKGROUND lane cannot park the owner's credential (2026-08-16).** The three
+  fast-paths above are per-SYMPTOM: each names one substrate failure that must not
+  be mistaken for a quota condition. A dead REPL child was not on that list, so it
+  fell through to `mapStatusForPoolCooldown(null, retryable)` → 429; five reminder
+  composes reached `MAX_CONSECUTIVE_FAILURES` and parked the box's single
+  credential for an hour, after which every owner chat turn failed instantly with
+  "all Anthropic credentials are in cooldown". The structural guard is a LANE, not
+  another symptom: `BuildLlmCallSubstrateInput.credential_failure_lane`
+  (`'interactive'` by default, `'background'` on `cc-nudge-*`) makes a background
+  failure leave the pool-wide strike ledger entirely alone (`reportFailure`'s
+  `origin`, `runtime/credential-pool.ts`: neither incremented nor re-read, so it can
+  neither trip the hour-long park nor EXTEND one an interactive turn tripped) and
+  decline to report an INFERRED cooldown at all. "Inferred" is drawn strictly: the
+  retryable→429 default, a parsed status the mapper REWRITES (a retryable `HTTP 503`
+  also maps to 429), and `detectCliAuthFailure`, whose weakest rule is the substring
+  `401` anywhere in the prose. A REAL provider status (a 429/402/401 the provider
+  itself returned, or an adapter-stamped `rate_limited`) still cools on either lane —
+  the owner's next turn would meet that wall a second later regardless.
 - **Regression guard.** `dev-channel-pty-bind.e2e.test.ts` spawns claude under a
   real `Bun.spawn({terminal})` PTY and asserts `/channel-bound` fires + a turn
   round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in

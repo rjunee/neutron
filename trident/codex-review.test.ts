@@ -9,7 +9,8 @@
  *   11  not_connected  — codex CLI absent
  *   3   deferred       — configured but the review could not be performed: auth
  *                        precheck failed, or the diff was EMPTY (never silent-approve)
- *   5   deferred       — configured + authed but the review call failed
+ *   5   deferred       — configured + authed but the review call failed or
+ *                        returned no final message (including a refusal)
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -32,6 +33,8 @@ interface RunOpts {
   noCodexHome?: boolean
   /** Put a mock `codex` on PATH whose `login status` exits with this code. */
   codexLoginExit?: number | null
+  /** Mock codex emits NO final message — the refusal shape. */
+  mockCodexSilent?: boolean
   /**
    * Write this content to a diff file and point NEUTRON_CODEX_DIFF_FILE at it.
    * Omitted → a small non-empty diff (an empty diff is now DEFERRED, so a test
@@ -81,7 +84,7 @@ function run(opts: RunOpts = {}): {
     // is observable — a silently-truncated diff is invisible from the exit code.
     writeFileSync(
       mock,
-      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\nexit 0\n`,
+      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\n${opts.mockCodexSilent === true ? '' : 'echo "mock codex review body"\necho "VERDICT: APPROVE"\n'}exit 0\n`,
     )
     chmodSync(mock, 0o755)
   }
@@ -263,6 +266,103 @@ describe('trident/codex-review.sh — an EMPTY diff is DEFERRED, never an approv
     })
     expect(status).toBe(3)
     expect(stdout).not.toContain('VERDICT: APPROVE')
+  })
+})
+
+describe('exit 0 with an EMPTY final message is DEFERRED, never an approval', () => {
+  test('empty output from the exec seam is diagnosed distinctly', () => {
+    const { status, stderr, stdout } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; exit 0' },
+    })
+    expect(status).toBe(5)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_OUTPUT')
+    expect(stderr).toContain('DEFERRED')
+    expect(stderr).not.toContain('CODEX_REVIEW_CALL_FAILED')
+    expect(stderr).not.toContain('CODEX_REVIEW_REFUSED')
+    expect(stdout).not.toContain('VERDICT')
+  })
+
+  test('whitespace-only output from the exec seam is empty too', () => {
+    const { status, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; printf "  \\n\\n\\t\\n"; exit 0' },
+    })
+    expect(status).toBe(5)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_OUTPUT')
+  })
+
+  test('content-policy refusal is named and the tool stderr is replayed', () => {
+    const { status, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        NEUTRON_CODEX_EXEC_CMD:
+          'cat >/dev/null; echo "ERROR: This content was flagged for possible cybersecurity risk." >&2; echo "tokens used: 90,276" >&2; exit 0',
+      },
+    })
+    expect(status).toBe(5)
+    expect(stderr).toContain('CODEX_REVIEW_REFUSED')
+    expect(stderr).toContain('flagged for possible cybersecurity risk')
+    expect(stderr).toContain('DEFERRED')
+    expect(stderr).not.toContain('CODEX_REVIEW_CALL_FAILED')
+    expect(stderr).not.toContain('CODEX_REVIEW_EMPTY_OUTPUT')
+    expect(stderr).toContain('tokens used: 90,276')
+  })
+
+  test('refusal-shaped stderr beside a real review remains a successful review', () => {
+    const { status, stderr, stdout } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        NEUTRON_CODEX_EXEC_CMD:
+          'cat >/dev/null; echo "warn: flagged for possible cybersecurity risk" >&2; echo "real finding"; echo "VERDICT: APPROVE"; exit 0',
+      },
+    })
+    expect(status).toBe(0)
+    expect(stdout).toContain('VERDICT: APPROVE')
+    expect(stderr).not.toContain('CODEX_REVIEW_REFUSED')
+    expect(stderr).not.toContain('CODEX_REVIEW_EMPTY_OUTPUT')
+  })
+
+  test('a real request-changes review is replayed unchanged', () => {
+    const { status, stdout } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        NEUTRON_CODEX_EXEC_CMD:
+          'cat >/dev/null; echo "blocker: X"; echo "VERDICT: REQUEST_CHANGES"; exit 0',
+      },
+    })
+    expect(status).toBe(0)
+    expect(stdout).toContain('blocker: X')
+    expect(stdout).toContain('VERDICT: REQUEST_CHANGES')
+  })
+
+  test('empty output from the real codex invocation path is gated too', () => {
+    const { status, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      mockCodexSilent: true,
+    })
+    expect(status).toBe(5)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_OUTPUT')
+  })
+
+  test('a non-zero call with refusal text remains a call failure', () => {
+    const { status, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        NEUTRON_CODEX_EXEC_CMD:
+          'cat >/dev/null; echo "flagged for possible cybersecurity risk" >&2; exit 7',
+      },
+    })
+    expect(status).toBe(5)
+    expect(stderr).toContain('CODEX_REVIEW_CALL_FAILED')
+    expect(stderr).not.toContain('CODEX_REVIEW_REFUSED')
   })
 })
 

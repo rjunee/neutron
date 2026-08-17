@@ -34,7 +34,7 @@ function orchestrator(control: LaunchControl, crashRecovery = false) {
   return buildTridentOrchestrator({
     fire_workflow: async () => {
       control.fires += 1
-      return { status: 'fired' as const, launcher_session_key: `generation-${control.fires}` }
+      return { status: 'fired' as const, error: null, launcher_session_key: `generation-${control.fires}` }
     },
     db_path: join(tmp, 'project.db'),
     run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
