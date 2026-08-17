@@ -64,6 +64,13 @@ async function spawnSession(
     enabled: options.frontierModelFloor === true,
     sessionKey,
     source: resume !== undefined ? 'resume' : 'spawn',
+    // The OWNER-FACING half of "make it loud". Without this the clamp is a
+    // stderr line on a box nobody reads — the same invisibility that let the
+    // degradation run for a day. Wired only on the owner's chat substrate
+    // (`open/wiring/substrates.ts`), which is also the only substrate floored.
+    ...(options.onModelFloorApplied !== undefined
+      ? { notify: options.onModelFloorApplied }
+      : {}),
   })
   // Respawn-is-always-resume (brief § 0 / § 2): when a resume directive is
   // present (from the registry on a post-crash next-turn, or from the watchdog /

@@ -268,6 +268,11 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
                 onDeadTurnNotice: ctx.liveAgentNoticeSinks.onDeadTurnNotice,
                 onSizeAlert: ctx.liveAgentNoticeSinks.onSizeAlert,
                 onRateLimitBanner: ctx.liveAgentNoticeSinks.onRateLimitBanner,
+                // …and the model-floor clamp, wired HERE and only here: this is
+                // the one substrate carrying `frontier_model_floor`, so it is the
+                // only one that can ever emit the notice, and it is the one with
+                // an owner chat surface to deliver it to.
+                onModelFloorApplied: ctx.liveAgentNoticeSinks.onModelFloorApplied,
               }
             : {}),
           ...(ctx.liveAgentRecoveredReplySink !== undefined

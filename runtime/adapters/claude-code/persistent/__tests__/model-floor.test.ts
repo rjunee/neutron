@@ -35,16 +35,23 @@ import type { Event } from '../../../../events.ts'
 import { FAST_MODEL, SONNET_MODEL, getBestModel } from '../../../../models.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
 import { createClaudeCodeSubstrateAuto } from '../../index.ts'
-import { familyOf, resolveModelFloor, tierRankOf } from '../model-floor.ts'
+import {
+  applyModelFloor,
+  familyOf,
+  resolveModelFloor,
+  tierRankOf,
+  type ModelFloorNotice,
+} from '../model-floor.ts'
 import {
   createPersistentReplSubstrate,
   getReplSinkInfo,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
-import { poolKeyFor } from '../pool.ts'
+import { poolKeyFor, replayPendingInbound } from '../pool.ts'
 import { supervisedBySessionKey } from '../pool-state.ts'
-import { getRecord, upsertRecord } from '../repl-registry.ts'
+import { registerSupervisedSubstrate, respawnReplSession } from '../supervision.ts'
+import { getRecord, patchRecord, upsertRecord } from '../repl-registry.ts'
 
 /** The EXACT id measured in the owner's live REPL registry on the degraded row. */
 const LIVE_HAIKU_ID = 'claude-haiku-4-5-20251001'
@@ -100,9 +107,59 @@ describe('resolveModelFloor — the decision', () => {
   it('clamps an OLDER generation and a FUTURE generation of a lower tier', () => {
     // Neither is in the alias set, and neither ever will be — a set of literals
     // needs a human to remember. The family token does not.
-    for (const id of ['claude-haiku-3-5-20241022', 'claude-haiku-9', 'claude-sonnet-7']) {
+    //
+    // ⚠️ THE FIRST TWO ARE REAL PUBLISHED IDS, AND THAT IS THE WHOLE POINT. The
+    // previous revision of this test asserted on `claude-haiku-3-5-20241022` — the
+    // CURRENT naming order applied to an OLD generation, which Anthropic never
+    // shipped. A fabricated id let the older-generation claim pass while the
+    // genuinely published `claude-3-5-haiku-20241022` (generation FIRST) walked
+    // straight through the floor: it yielded family `3`, unrecognised, ranked at
+    // the frontier. A regression test whose input cannot occur proves nothing.
+    for (const id of [
+      'claude-3-5-haiku-20241022',
+      'claude-3-5-sonnet-20241022',
+      'claude-haiku-9',
+      'claude-sonnet-7',
+    ]) {
       expect(resolveModelFloor({ requested: id, enabled: true }).clamped, id).toBe(true)
     }
+  })
+
+  it('clamps a lower tier behind a GATEWAY / PROXY prefix', () => {
+    // `repl-registry.ts` never schema-checks `model`, and these are the real id
+    // shapes a Bedrock / Vertex / proxy-routed deployment writes. Anchoring the
+    // family on the first token read every one of them as a vendor word, ranked
+    // them at the frontier, and let them through.
+    for (const id of [
+      'us.anthropic.claude-haiku-4-5-v1:0',
+      'eu.anthropic.claude-3-5-haiku-20241022-v1:0',
+      'anthropic/claude-haiku-4-5',
+      'publishers/anthropic/models/claude-3-5-haiku@20241022',
+    ]) {
+      const d = resolveModelFloor({ requested: id, enabled: true })
+      expect(d.clamped, id).toBe(true)
+      expect(d.model, id).toBe(getBestModel())
+    }
+  })
+
+  it('reads the tier out of BOTH naming orders and every prefix shape', () => {
+    // The predicate under the clamps above, asserted directly so a failure says
+    // WHICH id shape broke rather than only that a clamp stopped happening.
+    for (const id of [
+      'claude-haiku-4-5-20251001',
+      'claude-3-5-haiku-20241022',
+      'us.anthropic.claude-haiku-4-5-v1:0',
+      'anthropic/claude-haiku-4-5',
+      'publishers/anthropic/models/claude-3-5-haiku@20241022',
+      'HAIKU',
+    ]) {
+      expect(familyOf(id), id).toBe('haiku')
+    }
+    // …and the frontier tiers still read as themselves in both orders, so the
+    // scan did not simply start matching everything.
+    expect(familyOf('claude-opus-5')).toBe('opus')
+    expect(familyOf('claude-3-opus-20240229')).toBe('opus')
+    expect(familyOf('us.anthropic.claude-opus-5-v1:0')).toBe('opus')
   })
 
   it('clamps a FUTURE dated snapshot of a lower tier', () => {
@@ -136,6 +193,27 @@ describe('resolveModelFloor — the decision', () => {
     const d = resolveModelFloor({ requested: FAST_MODEL, enabled: false })
     expect(d.clamped).toBe(false)
     expect(d.model).toBe(FAST_MODEL)
+  })
+
+  it('returns an UNFLOORED substrate’s value byte-for-byte, whatever it is', () => {
+    // The unfloored path is a passthrough BY CONTRACT — `spawn.ts` relies on it to
+    // claim the deliberate FAST_MODEL callers are untouched. A previous revision
+    // coerced a non-string BEFORE the enabled check, so an unfloored substrate
+    // that passed a junk value got `''` back instead of its own input. Padding is
+    // the observable case; the non-string is the one that changed the outcome.
+    const padded = '  claude-haiku-4-5  '
+    expect(resolveModelFloor({ requested: padded, enabled: false }).model).toBe(padded)
+    const junk = 42 as unknown as string
+    expect(resolveModelFloor({ requested: junk, enabled: false }).model).toBe(junk)
+  })
+
+  it('TRIMS the id it hands to --model, not just the one it compares', () => {
+    // The comparison has always been whitespace-insensitive; the RETURN was not,
+    // so a padded frontier id in an unvalidated row reached the CLI padded. Case
+    // is left alone deliberately — a model id's case is meaningful to the API.
+    const d = resolveModelFloor({ requested: `  ${getBestModel()}  `, enabled: true })
+    expect(d.clamped).toBe(false)
+    expect(d.model).toBe(getBestModel())
   })
 
   it('holds at the CONFIGURED best when an operator pinned a cheaper tier', () => {
@@ -194,6 +272,98 @@ describe('resolveModelFloor — the decision', () => {
     expect(familyOf('claude-opus-5')).toBe('opus')
     expect(familyOf('haiku')).toBe('haiku')
     expect(familyOf('  Sonnet ')).toBe('sonnet')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 1b. The clamp is LOUD — on BOTH surfaces.
+// ---------------------------------------------------------------------------
+
+describe('applyModelFloor — a clamp is never silent', () => {
+  /** Capture the process log lines `createLogger`'s default sink writes. */
+  function captureWarnings<T>(body: () => T): { result: T; lines: string[] } {
+    const lines: string[] = []
+    const original = console.warn
+    console.warn = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(' '))
+    }
+    try {
+      return { result: body(), lines }
+    } finally {
+      console.warn = original
+    }
+  }
+
+  it('writes a structured operator line naming the session, the request and the floor', () => {
+    // The OPERATOR half. Asserted on the emitted LINE rather than on a spy for the
+    // helper, because the previous revision's only loudness was this call and
+    // NOTHING failed when it was deleted — every test passed on the return value.
+    const { result, lines } = captureWarnings(() =>
+      applyModelFloor({
+        requested: LIVE_HAIKU_ID,
+        enabled: true,
+        sessionKey: 'key-loud',
+        source: 'resume',
+      }),
+    )
+    expect(result).toBe(getBestModel())
+    const line = lines.find((l) => l.includes('event=model_floor_applied'))
+    expect(line, `no model_floor_applied line in ${JSON.stringify(lines)}`).toBeDefined()
+    expect(line!).toContain('session_key=key-loud')
+    expect(line!).toContain('source=resume')
+    expect(line!).toContain(`requested_model=${LIVE_HAIKU_ID}`)
+    expect(line!).toContain(`floor_model=${getBestModel()}`)
+  })
+
+  it('fires the OWNER-facing notice with the record’s model and the floor', () => {
+    // The half a journald line cannot do. `log.warn` reaches the server's stderr;
+    // the owner reads a chat. This seam is what `open/wiring/substrates.ts` hands
+    // to the gateway's `substrate-notice-sink`, which turns it into a
+    // `system_events` row plus a bubble on the owner's chat topic.
+    const notices: ModelFloorNotice[] = []
+    const model = applyModelFloor({
+      requested: LIVE_HAIKU_ID,
+      enabled: true,
+      sessionKey: 'key-notice',
+      source: 'spawn',
+      notify: (n) => notices.push(n),
+    })
+    expect(model).toBe(getBestModel())
+    expect(notices.length).toBe(1)
+    expect(notices[0]).toEqual({
+      sessionKey: 'key-notice',
+      source: 'spawn',
+      requested: LIVE_HAIKU_ID,
+      floor: getBestModel(),
+    })
+  })
+
+  it('stays quiet when nothing was clamped — an event on correct behaviour is noise', () => {
+    const notices: ModelFloorNotice[] = []
+    const { lines } = captureWarnings(() =>
+      applyModelFloor({
+        requested: getBestModel(),
+        enabled: true,
+        sessionKey: 'key-quiet',
+        source: 'spawn',
+        notify: (n) => notices.push(n),
+      }),
+    )
+    expect(notices.length).toBe(0)
+    expect(lines.filter((l) => l.includes('model_floor_applied')).length).toBe(0)
+  })
+
+  it('a throwing notice sink never fails the spawn it is describing', () => {
+    const model = applyModelFloor({
+      requested: LIVE_HAIKU_ID,
+      enabled: true,
+      sessionKey: 'key-throw',
+      source: 'spawn',
+      notify: () => {
+        throw new Error('sink is down')
+      },
+    })
+    expect(model).toBe(getBestModel())
   })
 })
 
@@ -349,41 +519,98 @@ describe('the frontier-model floor holds at the spawn chokepoint', () => {
     expect(record!.model).toBe(getBestModel())
   }, SPAWN_TEST_TIMEOUT_MS)
 
-  it('a pre-poisoned row is corrected rather than obeyed on the next spawn', async () => {
-    // Seed the registry the way the live box was found — under the REAL pool key,
-    // so this is the row `record.model` would actually be resolved from — then
-    // spawn and assert both halves: the child comes up on the frontier model, and
-    // nothing is left holding the poisoned value.
+  it('the pool’s REPLAY reader resolves the poisoned row — and the floor still holds', async () => {
+    // THE PRODUCTION READER, not a hand-built spec. `pool.ts` resolves a replay
+    // spawn as `record?.model ?? getBestModel()` — the exact `??` that is the
+    // whole defect — so this drives `replayPendingInbound` against a seeded row
+    // instead of passing the model in itself. A previous revision of this test
+    // seeded the row AND passed the same id through `spec(...)`, which meant
+    // deleting the seed left it green: it never proved the reader was covered.
+    // Here the seed is load-bearing twice over — it is the only source of the
+    // spawn's model, and the clamp notice must name it.
     const { host, argvs } = makeCapturingHost()
     const registryPath = join(tempDir('neutron-model-floor-reg-'), 'repl-registry.json')
+    const notices: ModelFloorNotice[] = []
     const options = opts(host, {
-      user_id: 'u-seed',
+      user_id: 'u-replay',
       project_id: 'default',
       credential_identity: 'cred-1',
       replRegistryPath: registryPath,
       frontierModelFloor: true,
+      onModelFloorApplied: (n) => notices.push(n),
     })
     const sessionKey = poolKeyFor(options)
+    const sessionId = '00000000-0000-4000-8000-000000000000'
     upsertRecord(registryPath, {
       sessionKey,
-      sessionId: '00000000-0000-4000-8000-000000000000',
+      sessionId,
       cwd: options.cwd!,
       channelName: 'seeded',
-      has_session: false,
+      has_session: true,
       model: LIVE_HAIKU_ID,
     })
     expect(getRecord(registryPath, sessionKey)!.model).toBe(LIVE_HAIKU_ID)
 
-    await drain(createPersistentReplSubstrate(options).start(spec(LIVE_HAIKU_ID)))
+    const replayed = await replayPendingInbound(options, {
+      sessionKey,
+      sessionId,
+      cwd: options.cwd!,
+      droppedInbound: 'the turn that was dropped when the REPL died',
+    })
+    expect(replayed).toBe(true)
+    expect(argvs.length).toBeGreaterThan(0)
     expect(modelArg(argvs[0]!)).toBe(getBestModel())
+    // The clamp NAMED the seeded value — so this assertion cannot pass without
+    // the reader having actually read the row.
+    expect(notices.map((n) => n.requested)).toEqual([LIVE_HAIKU_ID])
+    // …and nothing is left holding the poisoned value.
     const rows = JSON.parse(readFileSync(registryPath, 'utf8')) as Record<
       string,
       { model?: string }
     >
-    expect(Object.keys(rows)).toContain(sessionKey)
     for (const [key, row] of Object.entries(rows)) {
       expect(row.model, key).not.toBe(LIVE_HAIKU_ID)
     }
+  }, SPAWN_TEST_TIMEOUT_MS)
+
+  it('the supervision RESUME reader resolves the poisoned row — the respawn comes up floored', async () => {
+    // THE SECOND PRODUCTION READER (`supervision.ts` `resumeSpecFor`), and the one
+    // that made the live bug self-perpetuating: every watchdog respawn re-read the
+    // row, re-spawned on it, and wrote it back. Spawn clean, poison the row the
+    // way the live box was found, then respawn through the REAL actuation.
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-model-floor-reg-'), 'repl-registry.json')
+    const notices: ModelFloorNotice[] = []
+    const options = opts(host, {
+      user_id: 'u-resume',
+      project_id: 'default',
+      credential_identity: 'cred-1',
+      replRegistryPath: registryPath,
+      frontierModelFloor: true,
+      jsonlExistsProbe: () => true, // pretend the transcript landed → has_session flips
+      onModelFloorApplied: (n) => notices.push(n),
+    })
+    registerSupervisedSubstrate(options)
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    const sessionKey = poolKeyFor(options)
+    for (let i = 0; i < 200; i++) {
+      if (getRecord(registryPath, sessionKey)?.has_session === true) break
+      await Bun.sleep(15)
+    }
+    expect(getRecord(registryPath, sessionKey)?.has_session).toBe(true)
+    expect(notices.length).toBe(0) // the clean spawn clamped nothing
+
+    patchRecord(registryPath, sessionKey, { model: LIVE_HAIKU_ID })
+    const outcome = respawnReplSession(options, sessionKey, 'wedge-watchdog', 'model-floor-test')
+    expect(outcome.ok).toBe(true)
+    for (let i = 0; i < 200; i++) {
+      if (argvs.length >= 2) break
+      await Bun.sleep(15)
+    }
+    expect(argvs.length).toBeGreaterThanOrEqual(2)
+    expect(modelArg(argvs[1]!)).toBe(getBestModel())
+    expect(notices.map((n) => n.requested)).toEqual([LIVE_HAIKU_ID])
+    expect(notices[0]!.source).toBe('resume')
   }, SPAWN_TEST_TIMEOUT_MS)
 
   it('a substrate WITHOUT the floor keeps its deliberate fast-tier choice', async () => {

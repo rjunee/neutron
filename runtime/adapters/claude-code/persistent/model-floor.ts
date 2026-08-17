@@ -44,18 +44,38 @@
 // schema-checks it, so a row really can hold any of those. "Whatever the record
 // says" has to mean whatever it says.
 //
-// So the comparison is by TIER RANK, derived from the FAMILY token of the id
-// (`claude-haiku-4-5-20251001` → `haiku`; the bare alias `haiku` → `haiku`), and
-// the order is read off the `runtime/models.ts` aliases rather than a hardcoded
-// table, so a generation bump cannot silently invert it. That closes the alias,
-// generation, snapshot and casing gaps in one predicate, with nothing to
-// maintain when a tier moves generation.
+// So the comparison is by TIER RANK, derived from the FAMILY token of the id,
+// and the order is read off the `runtime/models.ts` aliases rather than a
+// hardcoded table, so a generation bump cannot silently invert it. That closes
+// the alias, generation, snapshot and casing gaps in one predicate, with nothing
+// to maintain when a tier moves generation.
+//
+// THE FAMILY TOKEN IS NOT THE FIRST TOKEN — AND ASSUMING IT WAS LET REAL IDS
+// THROUGH. A previous revision anchored on the first dash-token after `claude-`,
+// which is only correct for the CURRENT naming order (`claude-haiku-4-5-…`).
+// Anthropic's earlier order puts the generation FIRST, so the genuinely
+// published `claude-3-5-haiku-20241022` yielded family `3` — unrecognised,
+// therefore ranked at the frontier, therefore NOT clamped. Its own regression
+// test hid this by asserting on `claude-haiku-3-5-20241022`, an id in the new
+// order that Anthropic never shipped: a fabricated string that made the gap look
+// closed. Gateway/proxy prefixes had the identical shape of failure —
+// `us.anthropic.claude-haiku-4-5-v1:0` (Bedrock) and `anthropic/claude-haiku-4-5`
+// (OpenRouter-style) both yielded a family that was really a provider prefix.
+//
+// So the id is SPLIT on every non-alphanumeric boundary and scanned for the
+// first token that is neither a provider/routing word nor a bare number: both
+// naming orders, both proxy prefixes, the `@`-separated Vertex form and the bare
+// CLI aliases all land on the same tier token. When no such token exists the
+// family is empty, which ranks at the frontier — see below.
 //
 // AN UNRECOGNISED ID RANKS AT THE TOP, DELIBERATELY. Clamping it would fight the
 // model-upgrade path, which legitimately writes ids THIS process has never heard
 // of into a record (`supervision.ts` rewrites `record.model` before a `--resume`
 // respawn). A NAMED lower tier is unambiguous; an unknown id is not, and guessing
-// would trade a loud wrong-model bug for a silent fights-the-upgrade one.
+// would trade a loud wrong-model bug for a silent fights-the-upgrade one. Note
+// which way the remaining error leans: a token scan that lands on a lower-tier
+// word by accident spends MORE money on a BETTER model, while the failure this
+// file exists to stop is the reverse. Over-clamping is the survivable direction.
 //
 // THE FLOOR IS THE CONFIGURED BEST, NOT "THE TOP TIER". `BEST_MODEL` is
 // overridable via `NEUTRON_BEST_MODEL`, so an operator can run an instance
@@ -73,20 +93,49 @@ import { FAST_MODEL, SONNET_MODEL, getBestModel } from '../../../models.ts'
 const log = createLogger('model-floor')
 
 /**
+ * Vendor / routing words that appear in a model id but never name a TIER. Every
+ * one of these is real: `claude-*` is the CLI form, `us.anthropic.claude-*-v1:0`
+ * is Bedrock, `anthropic/claude-*` is the OpenRouter-style proxy form, and
+ * `publishers/anthropic/models/claude-*` is Vertex. Skipping them is what lets a
+ * proxied id be RANKED rather than waved through as unrecognised.
+ */
+const NON_TIER_TOKENS = new Set([
+  'anthropic',
+  'apac',
+  'bedrock',
+  'claude',
+  'eu',
+  'global',
+  'models',
+  'publishers',
+  'us',
+  'vertex',
+])
+
+/**
  * The family token of a model id — the part naming the TIER rather than the
- * generation. `claude-haiku-4-5-20251001` → `haiku`, `claude-sonnet-5` →
- * `sonnet`, `claude-opus-5` → `opus`. The bare CLI aliases normalise to
- * themselves, which is the point: `--model haiku` is a real thing the CLI
- * accepts, and a set of four literal ids does not catch it.
+ * generation, the vendor or the snapshot. All of these yield `haiku`:
+ * `claude-haiku-4-5-20251001` (current order), `claude-3-5-haiku-20241022`
+ * (earlier order, generation first), `us.anthropic.claude-haiku-4-5-v1:0`
+ * (Bedrock), `anthropic/claude-haiku-4-5` (proxy), `claude-3-5-haiku@20241022`
+ * (Vertex) and the bare CLI alias `haiku`. That last one is the point a literal
+ * id set always misses: `--model haiku` is a real thing the CLI accepts.
  *
- * Trims and lowercases first, so a stray-whitespace or mixed-case value in an
- * unvalidated registry row cannot walk past the comparison.
+ * MECHANISM: lowercase, split on every non-alphanumeric boundary, then return
+ * the first token that is neither a {@link NON_TIER_TOKENS} vendor word nor a
+ * bare number (a bare number is a generation or a `YYYYMMDD` snapshot, never a
+ * tier). An id with no such token — `claude-2.1` — yields `''`, which
+ * {@link tierRankOf} ranks at the frontier along with everything else it does
+ * not recognise.
  */
 export function familyOf(model: string): string {
-  const normalized = model.trim().toLowerCase()
-  const base = normalized.startsWith('claude-') ? normalized.slice('claude-'.length) : normalized
-  const dash = base.indexOf('-')
-  return dash === -1 ? base : base.slice(0, dash)
+  for (const token of model.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (token === '') continue
+    if (NON_TIER_TOKENS.has(token)) continue
+    if (/^\d+$/.test(token)) continue
+    return token
+  }
+  return ''
 }
 
 /** Rank of the frontier, and of anything unrecognised — see the header for why
@@ -137,13 +186,27 @@ export interface ModelFloorInput {
  */
 export function resolveModelFloor(input: ModelFloorInput): ModelFloorDecision {
   const floor = input.best ?? getBestModel()
+  // THE UNFLOORED PATH RETURNS THE INPUT BYTE-FOR-BYTE, and it returns FIRST.
+  // An earlier revision coerced a non-string to `''` before this check, so a
+  // substrate that had opted OUT of the floor still came away with a different
+  // value than it passed in — contradicting this function's own docstring and
+  // the identity claim `spawn.ts` rests on. Nothing below this line can run for
+  // a utility caller now.
+  if (!input.enabled) {
+    return { model: input.requested, clamped: false, requested: input.requested, floor }
+  }
   // Defensive against an unvalidated registry row. `requested` is TYPED `string`,
   // but `repl-registry.ts` leaves `model` optional and never schema-checks it, so
   // a row written by another build can carry anything — and a `.trim()` on a
   // non-string would throw INSIDE a spawn, converting a wrong-model bug into a
   // dead session.
-  const requested = typeof input.requested === 'string' ? input.requested : ''
-  if (!input.enabled) return { model: requested, clamped: false, requested, floor }
+  const raw = typeof input.requested === 'string' ? input.requested : ''
+  // NORMALISE WHAT WE RETURN, not just what we compare. The rank comparison has
+  // always been whitespace/case-insensitive, but the un-clamped path used to hand
+  // the ORIGINAL bytes to `--model` — so a padded frontier id in an unvalidated
+  // row reached the CLI padded. Trimming is the whole normalisation: the case of
+  // a model id is meaningful to the API, so it is left alone.
+  const requested = raw.trim()
   // A blank floor cannot improve anything, and clamping TO it would hand the CLI
   // an empty `--model` and fail the launch outright — strictly worse than the
   // degradation being corrected. (`BEST_MODEL` resolves with `??`, so an empty
@@ -151,26 +214,62 @@ export function resolveModelFloor(input: ModelFloorInput): ModelFloorDecision {
   if (floor.trim() === '') return { model: requested, clamped: false, requested, floor }
   // A blank request on a floored session resolves TO the floor: an empty
   // `--model` is a failed spawn, and the floor is the best available answer.
-  if (requested.trim() === '') return { model: floor, clamped: true, requested, floor }
+  if (requested === '') return { model: floor, clamped: true, requested, floor }
   if (tierRankOf(requested) >= tierRankOf(floor)) {
     return { model: requested, clamped: false, requested, floor }
   }
   return { model: floor, clamped: true, requested, floor }
 }
 
+/** A clamp, shaped for the notice-family DI seam. Mirrors `DeadTurnNotice` /
+ *  `RateLimitBannerNotice`: the runtime detects, the gateway decides how the
+ *  owner is told (`gateway/http/substrate-notice-sink.ts`). */
+export interface ModelFloorNotice {
+  /** Pool key of the session that was clamped. */
+  readonly sessionKey: string
+  /** `'spawn'` (cold) or `'resume'` (re-attach) — which path resolved the model. */
+  readonly source: string
+  /** The model the record asked for, i.e. the degradation. */
+  readonly requested: string
+  /** The model the session was held at instead. */
+  readonly floor: string
+}
+
 /**
  * Apply the floor AND make a clamp LOUD. The silence is half the defect: this
  * ran for a day and the only signal was the owner noticing worse answers, while
  * the chat itself explained the degradation with a claim about environment
- * defaults that `runtime/models.ts` contradicts. A clamp now names the session,
- * the model that was requested, where it came from, and the floor applied — on
- * `warn`, which flows at every log level above `error`.
+ * defaults that `runtime/models.ts` contradicts.
+ *
+ * A CONSOLE LINE IS NOT LOUD. The first revision emitted only `log.warn`, which
+ * `logger/index.ts` routes to the server's stderr — a journald line on a box the
+ * owner does not read. That is the SAME class of invisibility the notice family
+ * was built to end for dead turns and rate-limit banners (`substrate-notice-
+ * sink.ts`), so a clamp now takes the same two-surface route: the structured
+ * warn for the operator log, AND {@link ModelFloorNotice} through the injected
+ * sink, which the gateway fans to a `system_events` row plus a system bubble on
+ * the owner's chat topic. Unwired (every utility substrate, and every test that
+ * does not care) ⇒ the warn alone, exactly as before.
+ *
+ * DELIBERATELY UNLATCHED, unlike the three notices above it. Those latch because
+ * their upstream condition PERSISTS — a rate-limit banner sits in the pane for
+ * an hour and would re-fire on every scan. A clamp cannot repeat for the same
+ * cause: it rewrites the offending row with the floored value in the same breath
+ * (see `spawn.ts`), so a SECOND clamp means something re-poisoned the row, which
+ * is a live re-poisoner and the single most important thing to say out loud.
+ * Suppressing the repeat would rebuild the silence this whole file is here for.
+ *
+ * A sink throw is swallowed: a visibility notice must never fail a spawn.
  *
  * Returns the model to spawn with. Callers use the return value for BOTH the
  * child argv and the registry write, so one clamp also un-poisons the row.
  */
 export function applyModelFloor(
-  input: ModelFloorInput & { readonly sessionKey: string; readonly source: string },
+  input: ModelFloorInput & {
+    readonly sessionKey: string
+    readonly source: string
+    readonly notify?: (notice: ModelFloorNotice) => void
+  },
 ): string {
   const decision = resolveModelFloor(input)
   if (decision.clamped) {
@@ -183,6 +282,16 @@ export function applyModelFloor(
         'an owner-facing conversational REPL resolved a model below the configured ' +
         'best tier; the request was refused and the session re-resolved to the floor',
     })
+    try {
+      input.notify?.({
+        sessionKey: input.sessionKey,
+        source: input.source,
+        requested: decision.requested,
+        floor: decision.floor,
+      })
+    } catch {
+      /* a visibility notice must never fail the spawn it is describing */
+    }
   }
   return decision.model
 }

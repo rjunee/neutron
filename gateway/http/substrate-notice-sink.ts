@@ -1,7 +1,7 @@
 /**
  * substrate-notice-sink.ts — O6: wire the persistent-REPL NOTICE-family DI seams
- * (`onDeadTurnNotice` / `onSizeAlert` / `onRateLimitBanner`) to the gateway's two
- * visibility surfaces.
+ * (`onDeadTurnNotice` / `onSizeAlert` / `onRateLimitBanner` /
+ * `onModelFloorApplied`) to the gateway's two visibility surfaces.
  *
  * THE GAP: the runtime substrate DETECTS four previously-invisible states — a
  * mid-turn API 5xx that killed a turn (row #11), a warm transcript that crossed a
@@ -22,13 +22,21 @@
  *      chat_log row), so a reload never re-hydrates a stale "rate-limited"
  *      bubble.
  *
- * LATCHING: all three notices are edge-latched UPSTREAM by the substrate (a
+ * A FOURTH STATE, added after the model-floor defect: `onModelFloorApplied` — an
+ * owner-facing spawn resolved BELOW the configured best model and was held at the
+ * floor (`runtime/.../model-floor.ts`). It shares this file for the same reason
+ * as the other three: its first implementation was a `log.warn`, so the owner's
+ * chat silently ran a lower tier for a working day and the only detector was him
+ * noticing the answers were worse.
+ *
+ * LATCHING: the first three notices are edge-latched UPSTREAM by the substrate (a
  * per-turn dead-turn latch; a per-band size latch; a per-`threadId::severity`
  * rate-limit latch), so a callback fires ONCE per rising edge and a stale banner
  * in an idle pane never re-fires (the hourly-re-fire bug the substrate already
  * closed). This sink therefore does NOT re-latch — adding a second latch here
  * would wrongly suppress a legitimate later rising edge (a size warn→critical
- * escalation, or a recovered-then-recurring rate limit).
+ * escalation, or a recovered-then-recurring rate limit). The fourth is unlatched
+ * BY DESIGN at both ends; the reason is at its callback below.
  *
  * DELIVER IS LAZY (`deliver: () => …`) because the {@link Deliver} seam is
  * constructed AFTER the per-instance conversational substrate this sink is wired
@@ -38,6 +46,7 @@
 
 import type {
   DeadTurnNotice,
+  ModelFloorNotice,
   RateLimitBannerNotice,
   SizeSeverity,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
@@ -49,12 +58,13 @@ import {
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { Deliver } from './deliver.ts'
 
-/** The three notice callbacks, shaped exactly as the substrate option bag expects
+/** The notice callbacks, shaped exactly as the substrate option bag expects
  *  (see `BuildLlmCallSubstrateInput`). */
 export interface SubstrateNoticeSinks {
   onDeadTurnNotice: (notice: DeadTurnNotice) => void
   onSizeAlert: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner: (notice: RateLimitBannerNotice) => void
+  onModelFloorApplied: (notice: ModelFloorNotice) => void
 }
 
 export interface MakeSubstrateNoticeSinksDeps {
@@ -82,6 +92,14 @@ const RATE_LIMIT_USAGE_CAP_BODY =
   "🚧 Claude usage limit reached — your subscription window is capped and won't recover until it resets."
 const RATE_LIMIT_TEMPORARY_BODY =
   '⏳ Claude is briefly rate-limited or overloaded. It will retry on its own — no action needed.'
+/** The floor-clamp bubble NAMES BOTH MODELS. The owner's only symptom last time
+ *  was that the answers got worse, and when he asked, the chat told him the lower
+ *  tier was the environment default — which `runtime/models.ts` contradicts. A
+ *  notice that says only "a model was corrected" would leave that same guessing
+ *  game in place, so the requested id and the floor both go in the bubble. */
+const modelFloorBody = (requested: string, floor: string): string =>
+  `⚠️ This chat's saved session asked for \`${requested}\`, which is below the best model. ` +
+  `It was held at \`${floor}\` instead — no action needed, but if it keeps happening something is rewriting the session's model.`
 
 /**
  * Build the notice-family sinks the gateway wires into the owner's conversational
@@ -94,7 +112,7 @@ export function makeSubstrateNoticeSinks(
   deps: MakeSubstrateNoticeSinksDeps,
 ): SubstrateNoticeSinks {
   const journal = (
-    event: 'dead_turn_notice' | 'session_size_alert' | 'rate_limit_banner',
+    event: 'dead_turn_notice' | 'session_size_alert' | 'rate_limit_banner' | 'model_floor_applied',
     level: 'info' | 'warn',
     payload: Record<string, unknown>,
   ): void => {
@@ -154,6 +172,20 @@ export function makeSubstrateNoticeSinks(
       const usageCap = notice.severity === 'usage-cap'
       journal('rate_limit_banner', 'warn', { severity: notice.severity, matched: notice.matched })
       bubble(usageCap ? RATE_LIMIT_USAGE_CAP_BODY : RATE_LIMIT_TEMPORARY_BODY)
+    },
+    // UNLATCHED, unlike the three above — see `applyModelFloor`'s docblock. Their
+    // upstream condition persists and would re-fire on every scan; a clamp cannot
+    // repeat for the same cause, because it rewrites the offending registry row
+    // with the floored value. A SECOND clamp therefore means a live re-poisoner,
+    // which is the one thing that must not be suppressed.
+    onModelFloorApplied: (notice: ModelFloorNotice): void => {
+      journal('model_floor_applied', 'warn', {
+        session_key: notice.sessionKey,
+        source: notice.source,
+        requested_model: notice.requested,
+        floor_model: notice.floor,
+      })
+      bubble(modelFloorBody(notice.requested, notice.floor))
     },
   }
 }

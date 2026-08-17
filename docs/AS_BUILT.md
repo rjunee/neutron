@@ -62,6 +62,63 @@ Mutation-proved, each with a control: reverting `familyOf` to identity (the
 pre-review exact-id matching) reddens 6 of 23; restoring the disable-when-cheap
 guard reddens 1.
 
+A second review round found four more, and the two that matter most are about
+the SAME failure mode in different clothing: a check that cannot fail for the
+reason it claims.
+
+THE FAMILY TOKEN WAS THE FIRST TOKEN, which is only correct for one of the two
+naming orders Anthropic has shipped. `claude-3-5-haiku-20241022` — real,
+published, generation first — yielded family `3`, was therefore unrecognised,
+was therefore ranked at the frontier, and sailed past the floor. Gateway and
+proxy id forms failed identically: `us.anthropic.claude-haiku-4-5-v1:0` and
+`anthropic/claude-haiku-4-5` both anchored on a vendor word. The regression test
+hid all of it by asserting on `claude-haiku-3-5-20241022`, the CURRENT order
+applied to an old generation, which nobody has ever published. A fabricated
+input made a live gap look closed. The id is now split on every non-alphanumeric
+boundary and scanned for the first token that is neither a vendor word nor a
+bare number, which lands on the tier in both orders and behind every prefix
+form. Note which way the residual error leans: a scan that lands on a lower-tier
+word by accident spends more money on a better model, while the failure this
+file exists to stop is the reverse.
+
+THE LOUDNESS HAD NO TEST AND WAS NOT LOUD. Deleting the `log.warn` left every
+test in the suite green — the assertions all ran on the return value — and even
+when it fired it was a stderr line on a server, which is not a signal to the
+person whose chat got worse. That is the identical invisibility that let the
+original defect run for a working day, twice. A clamp now takes the same
+two-surface route as the dead-turn and rate-limit notices: the structured
+operator line, AND a `ModelFloorNotice` through an injected sink wired only on
+the owner's chat substrate, which the gateway fans to a `system_events` row plus
+a chat bubble naming both the requested model and the floor. It is deliberately
+UNLATCHED, unlike its three siblings: their upstream condition persists and
+would re-fire on every scan, whereas a clamp rewrites the offending row in the
+same breath — so a second clamp means something is actively re-poisoning it,
+which is the one thing that must not be suppressed.
+
+The other two were coverage holes with the same shape. The pre-poisoned-row test
+seeded `record.model` and then passed the same id in through `spec(...)`, so the
+production readers were never exercised and deleting the seed left it green;
+there are now two tests driving the REAL readers — `pool.ts`'s replay path and
+`supervision.ts`'s resume path — with the clamp notice asserting on the seeded
+value, so the seed is load-bearing twice over. And the "only the owner's chat
+carries the floor" test built `wireSubstrates` alone, while the deliberate
+fast-tier callers it was protecting are built by `wireMemory`: flipping the
+correction judge onto the chat profile was measured to leave that test fully
+green, and now reddens two in `open-wiring-memory.test.ts`.
+
+Two nits closed alongside. The non-string coercion ran BEFORE the enabled check,
+so an unfloored substrate did not get its own value back verbatim as the
+docstring promised; the early return moved above it. And the floor normalised
+for the comparison but not for the output, so a padded id from an unvalidated
+row reached `--model` padded; the returned value is trimmed now (case is left
+alone — it is meaningful to the API).
+
+Six mutations, each with a control proving it landed: reverting the family
+extraction reddens 3; deleting the owner notice reddens 3; deleting the operator
+log line reddens 1; bypassing the floor at the spawn chokepoint reddens 4;
+removing the poisoned seed reddens the replay test; flipping a memory call site
+onto the chat profile reddens 2.
+
 ## 2026-08-16 — a stored record could pull the owner's chat below the best model
 
 Landed via PR #342.

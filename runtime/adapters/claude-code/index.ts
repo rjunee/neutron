@@ -36,6 +36,7 @@ import {
   type RecoveredReply,
 } from './persistent/persistent-repl-substrate.ts'
 import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+import type { ModelFloorNotice } from './persistent/model-floor.ts'
 import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 import type { SettingsPermissions } from './persistent/build-settings.ts'
 
@@ -46,6 +47,7 @@ export { injectPersistentReplActiveTurn } from './persistent/persistent-repl-sub
 // the `onDeadTurnNotice` / `onSizeAlert` sinks imports them from THIS adapter
 // boundary (never a deep `persistent/*` path).
 export type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+export type { ModelFloorNotice } from './persistent/model-floor.ts'
 export type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 // Task 6 (T5 write-containment) — surface the per-session `permissions` shape at
 // the adapter boundary so a gateway caller wiring a ritual write-containment
@@ -133,6 +135,15 @@ export interface ClaudeCodeSubstrateOptions {
    * and the mechanism in `persistent/model-floor.ts`.
    */
   frontier_model_floor?: boolean
+  /**
+   * FLOOR-CLAMP NOTICE → `PersistentReplSubstrateOptions.onModelFloorApplied`.
+   * Fired when the floor above actually refused a lower-tier model. Forwarded
+   * here for the same reason as the other notice seams: a caller built through
+   * `createClaudeCodeSubstrateAuto` could otherwise not deliver it, and the clamp
+   * would degrade to a stderr line the owner never sees — which is exactly how
+   * the original degradation stayed invisible.
+   */
+  onModelFloorApplied?: (notice: ModelFloorNotice) => void
   /**
    * S3 §2 — conversational warm-pool namespace. The persistent substrate folds
    * these into its pool key so distinct (user, project) sessions never collapse
@@ -351,6 +362,11 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // the spawn would still come up on Haiku, so the forward is tested end-to-end.
   if (options.frontier_model_floor !== undefined) {
     p.frontierModelFloor = options.frontier_model_floor
+  }
+  // …and the clamp NOTICE alongside it, for the same reason the floor itself is
+  // forwarded here: a dropped seam looks correct and delivers nothing.
+  if (options.onModelFloorApplied !== undefined) {
+    p.onModelFloorApplied = options.onModelFloorApplied
   }
   // S3 §2 — thread the conversational identity + selected credential into the
   // pool key (closes #104; makes the substrate instance-isolation-SAFE).
