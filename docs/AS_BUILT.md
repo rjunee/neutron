@@ -6,6 +6,8 @@ Running log of what shipped, newest first. One entry per merged change.
 
 Landed via PR #364.
 
+Round-two corrections landed via PR #365.
+
 A retroactive panel on #333 returned five findings, and #349 answered them by
 re-measuring rather than inheriting. **Every one of the five settles the same way
 here, independently re-measured — closed.** What is left is one level down
