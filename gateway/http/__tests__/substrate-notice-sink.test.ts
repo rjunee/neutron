@@ -300,8 +300,12 @@ describe('makeSubstrateNoticeSinks — journal + owner bubble per state', () => 
       floor: 'frontier-tier',
     })
 
-    // The clamp is durably recorded — NOT a stderr line, which is the silence the
-    // floor notice exists to end.
+    // The clamp REACHES THE JOURNAL — NOT a stderr line, which is the silence the
+    // floor notice exists to end. "Reaches", not "is durably recorded": this test
+    // injects the sink, and in production the same call is best-effort at both ends
+    // (an unregistered ambient sink is a no-op, `emitSystemEventSafe` swallows a
+    // write failure). What is pinned is that the callback ATTEMPTS the row with the
+    // right event name and level, which is what makes a clamp findable afterwards.
     expect(rows.length).toBe(1)
     expect(rows[0]!.event).toBe('model_floor_applied')
     expect(rows[0]!.level).toBe('warn')
