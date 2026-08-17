@@ -83,12 +83,17 @@ twice and then a third time on a connection proven to refuse writes. **CASE 6d**
 asserts `_migration_repairs` DOES NOT EXIST after the refusal, with the un-refused boot as
 its control, and the provenance suite's stale-ordinal case is inverted to the new contract.
 
-Mutation-proved at this head. Restoring the name-only orphan match reddens CASE 8c alone.
-Restoring the per-boot repair write reddens CASE 10 alone. Moving the occupied-scratch
-guard back inside the rekey reddens CASE 6d alone. Deleting the tree-side claimant check
-reddens CASE 9 alone. And the fail-closed guard is proven NOT to have been weakened to
-achieve any of it: deleting the unexplained-row throw still reddens CASE 4 and CASE 4b and
-nothing else.
+Mutation-proved at this head against the 48 cases in `ordinal-identity.test.ts` plus
+`migration-provenance.test.ts`, green before each mutant. Restoring the name-only orphan
+match reddens CASE 8c and the provenance suite's stale-ordinal case, and only those (46/2).
+Restoring the per-boot repair write reddens CASE 10 alone (47/1). Moving the
+occupied-scratch guard back inside the rekey reddens CASE 6d alone (47/1). Deleting the
+tree-side claimant check reddens CASE 9 alone (47/1). And the fail-closed guard is proven
+NOT to have been weakened to achieve any of it: deleting the unexplained-row `throw`
+reddens 11 cases (37/11), CASE 4 and CASE 4b among them — and CASE 8c, which is the
+sharpest reading of this round, because the new narrowness DEPENDS on that guard still
+refusing. An entry that stops speaking must leave the row unexplained, or the narrowing
+would have converted a wrong suppression into a silent one.
 
 This is reconciliation, not prevention. It lets an instance whose ledger already carries
 these rows boot with a correct schema; it does not stop another such row being written. The
