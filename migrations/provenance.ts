@@ -5,7 +5,7 @@
  * recorded an ordinal under one name while the deployed code carried another,
  * and `applyMigrations` refused to guess. (That particular refusal is GONE — the
  * ordinal was never an identity and the runner now reconciles by name; see
- * `runner.ts`, `migrationIsRecorded`. What survives is the refusal this file
+ * `runner.ts`, `classifyMigration`. What survives is the refusal this file
  * feeds: a recorded migration no file in the build corresponds to,
  * `formatUnexplainedLedgerRows`.) The investigation then hit a wall: at the moment
  * the offending row was written, the commit the instance was running contained

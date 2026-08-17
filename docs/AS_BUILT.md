@@ -2,37 +2,6 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
-## 2026-08-17 — the ordinal-125 mismatch is acknowledged and 0131 converges both schema paths — the repair that gates deploy xGkufirIQQKW1L
-
-This is the third instance of the #575 incident class: a migration from an
-in-flight build wrote the live database before the merged migration tree fixed
-that ordinal. The live `_migrations` row at version 125 therefore says
-`code_trident_runs_fix_round_contract`, while the merged file at 0125 is
-`code_trident_runs_base_sha`. Boot correctly refuses that mismatch.
-
-The new `repairs.json` entry acknowledges the exact version/name/name triple and
-leaves row 125 untouched. That acknowledgment is necessary but insufficient:
-the runner skips the mismatched 0125 instead of executing it, so its `base_sha`
-and `base_behind` ALTERs still never reach the repaired live schema. Those
-columns must come from a new ordinal.
-
-Migration 0131 rebuilds the STRICT `code_trident_runs` table into the canonical
-shape. A rebuild is required because SQLite has no conditional `ADD COLUMN`:
-the live path skipped 0125 and lacks the columns, while every fresh install
-already applied 0125 and would reject repeated ALTERs as duplicate columns. The
-rebuild converges both paths and also sheds the live incident residue
-`claimed_paths`, which no mainline code uses. The accepted trade-off is that
-cut-time diagnostic values in `base_sha`/`base_behind` are not copied from a
-fresh-path source; the owner instance has no such values because it has no such
-columns.
-
-The live-ledger replica test seeds the exact 122/124/125 recorded names, proves
-the full tree applies exactly 127/130/131, checks both missing columns and
-`agent_waked_at`, and verifies the recorded names are byte-identical afterward.
-Its negative control removes only the new 125 acknowledgment and proves the run
-refuses before writing any later migration. A fresh-install test proves 0125
-and 0131 coexist with exactly one `base_sha` column, and a pin test makes the
-acknowledgment itself part of the contract. No `_migrations` row is rewritten.
 ## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
 
 Landed via PR #388.
@@ -64,7 +33,7 @@ never run and the schema silently lacks them — which is exactly ordinals 122, 
 — and as PENDING when the same migration already ran under another number, which re-runs
 it and crashes on a duplicate column.
 
-So `migrations/runner.ts` reconciles by the migration NAME (`migrationIsRecorded`), with
+So `migrations/runner.ts` reconciles by the migration NAME (`classifyMigration`), with
 `content_sha256` as a second, name-independent identity used only to WIDEN the answer: a
 migration whose exact bytes are recorded has run, whatever it was called then. It never
 narrows one. The README's existing decision — the hash is recorded and reported, not
@@ -238,6 +207,127 @@ still skips an `ALTER` that `0131` would rebuild anyway — but it is an optimis
 thing standing between the owner and a booting instance. The fail-closed half is untouched
 and CASE 4 still pins it.
 
+**On the owner's instance this is ONE deploy, not several, and that was measured rather than
+hoped.** The live ledger records `dispatch_dependencies_and_claims` at 124,
+`code_trident_runs_fix_round_contract` at 125 and `code_trident_runs_infra_retries` at 126.
+Reconciled by name against this tree: 124's row names no file here and is acknowledged; 125's
+row names the file this build numbers 0124, so it reads as applied; **126's row names the file
+this build numbers 0126, so it matches and needs nothing — ordinal 126 does not collide.**
+Ordinals 127, 130 and 131 are absent from the ledger, which is the ordinary pending state, so
+they apply in order. Nothing further is queued behind this. The two orphan names were checked
+with a positive control — `code_trident_runs_infra_retries` and
+`work_board_items_archived_status` ARE files in the tree, `work_board_items_pr` and
+`dispatch_dependencies_and_claims` are not — so the absences are measurements and not a
+grep that silently matched nothing.
+
+**What this does NOT do is stop the class recurring.** The writer is the tenant's own
+in-product lanes inheriting `NEUTRON_HOME`, and closing that needs env-quarantine at lane
+spawn plus a linked-worktree refusal in the runner — a separate change, dispatch-queue item 5
+per the SPEC decision of 2026-08-17. This is the reconciliation that lets an already-damaged
+instance boot; it is not the guard that prevents the next one being damaged.
+
+### Round 2 — four defects the first round's tests could not see
+
+Each of these passed review because the test covering its area exercised the harmless half of
+its own shape. That pattern, rather than any one bug, is the thing worth remembering.
+
+**The rekey destroyed data at its scratch name.** It opened with
+`DROP TABLE IF EXISTS _migrations_version_keyed` — a data-destroying statement guarded by
+nothing, inside the transaction that goes on to commit. The existing test put a VIEW on that
+name, and SQLite refuses to `DROP TABLE` a view, so the statement threw and the test passed
+while the table case, the only one where data exists to lose, deleted it permanently and
+silently. The state that `DROP` was written to clean up cannot occur at all: the rename, the
+copy and the final drop are one transaction, so a crash rolls the scratch table away with
+everything else. It now refuses before opening the transaction and tells the operator to move
+their own table. CASE 6b asserts the surviving row and is the only assertion in the file that
+goes red if the `DROP` returns.
+
+**The collapse fabricated provenance.** It filled `content_sha256`, `applied_by_commit` and
+`tree_provenance` independently, so it could emit one row's hash beside another row's commit —
+a tuple no row ever had, asserting that those bytes were applied by a build that did not apply
+them. They are not three facts but one, written together inside a single migration's
+transaction, and a fabricated forensic row is worse than a NULL because it cannot be told from
+a true one. The triple is now adopted whole from one donor row, identified by carrying a hash.
+CASE 5c is mutation-proven: restoring per-column filling turns it red and nothing else, and it
+receives exactly the fabricated commit. CASE 5 stays green under that mutation, which is why
+it could never have caught this — its surviving row has no provenance at all, so both rules
+agree there.
+
+**Hash widening was a silent-skip bug.** "These bytes are recorded" only means "this file has
+run" when the recording row is one no file in this build already accounts for — the rename case
+the widening exists for. When the row's name IS a file here, a second differently-named file is
+merely byte-identical, and calling it applied meant it never ran, never recorded, and was
+reported under `skipped` by a boot that exited zero. That is this change's own defect class
+reached through its fix. It now refuses, naming both files. Worth recording that the review
+finding described this as a one-boot repro; it is not. In a single boot both files are pending
+and the second throws `duplicate column name` loudly. The silent form needs the first file
+recorded by an earlier boot, which is what happens when a duplicate is added later.
+
+**A hash mismatch under a matching name booted in total silence.** Refusing there is a decision
+this repository has weighed and declined — `migrations/README.md`, "recorded and reported, not
+enforced" — because already-applied files are edited in place for benign reasons and a gate
+turns each one into a crash loop. That decision stands and is untouched. What was never decided
+is saying nothing: a migration amended during review and renumbered by the merge reads as
+applied, its added statements never run, and both hashes were in hand at that moment. It is now
+a warning, never a gate, with `renumbered` as its own field because bytes AND ordinal both
+moving is the one combination an in-place edit cannot produce. A steady-state boot says nothing,
+and there is a test for that silence — a notice that fires every boot is noise an operator
+learns to ignore.
+
+**Two smaller corrections.** The name-collision refusal now names the untracked side and gives
+its remedy; its docblock had claimed the untracked guard would refuse such a stray anyway, which
+was unreachable in two independent ways — the check ran before the tree was resolved, and a
+shared name is exactly what makes both files read as applied, so nothing is pending and the
+untracked loop reaches nobody. And the claim that the new unexplained-row guard is "strictly
+stronger than the guard it replaces" is deleted as false: the old guard refused on hashless
+orphans whose ordinal a build file occupied, which is how 122, 124 and 125 were noticed at all.
+The two are not ordered. The real trade is written down instead — the old guard's loud failure
+was never the mechanism that fixed anything, and the false refusals it caused after a mere
+renumber had no remedy that was not worse.
+
+## 2026-08-17 — the ordinal-125 mismatch is acknowledged and 0131 converges both schema paths — the repair that gates deploy xGkufirIQQKW1L
+
+This is the third instance of the #575 incident class: a migration from an
+in-flight build wrote the live database before the merged migration tree fixed
+that ordinal. The live `_migrations` row at version 125 therefore says
+`code_trident_runs_fix_round_contract`, while the merged file at 0125 is
+`code_trident_runs_base_sha`. Boot correctly refuses that mismatch.
+
+The new `repairs.json` entry acknowledges the exact version/name/name triple and
+leaves row 125 untouched. That acknowledgment is necessary but insufficient:
+the runner skips the mismatched 0125 instead of executing it, so its `base_sha`
+and `base_behind` ALTERs still never reach the repaired live schema. Those
+columns must come from a new ordinal.
+
+Migration 0131 rebuilds the STRICT `code_trident_runs` table into the canonical
+shape. A rebuild is required because SQLite has no conditional `ADD COLUMN`:
+the live path skipped 0125 and lacks the columns, while every fresh install
+already applied 0125 and would reject repeated ALTERs as duplicate columns. The
+rebuild converges both paths and also sheds the live incident residue
+`claimed_paths`, which no mainline code uses. The accepted trade-off is that
+cut-time diagnostic values in `base_sha`/`base_behind` are not copied from a
+fresh-path source; the owner instance has no such values because it has no such
+columns.
+
+The live-ledger replica test seeds the exact 122/124/125 recorded names, proves
+the full tree applies exactly 127/130/131, checks both missing columns and
+`agent_waked_at`, and verifies the recorded names are byte-identical afterward.
+Its negative control removes only the new 125 acknowledgment and proves the run
+refuses before writing any later migration. A fresh-install test proves 0125
+and 0131 coexist with exactly one `base_sha` column, and a pin test makes the
+acknowledgment itself part of the contract. No `_migrations` row is rewritten.
+
+SUPERSEDED IN PART BY PR #388 (the entry above), and specifically this sentence:
+"Its negative control removes only the new 125 acknowledgment and proves the run
+refuses before writing any later migration." That was true of the runner as it
+stood here, and it is no longer the contract. Once the ledger reconciles by
+migration identity rather than by ordinal, removing the 125 acknowledgment does
+NOT cause a refusal — `code_trident_runs_base_sha` is simply absent from the
+ledger by name, so it applies, and the boot succeeds. The test now asserts that
+instead. The acknowledgment remains shipped and remains correct (it records the
+incident and skips an `ALTER` that 0131 rebuilds regardless), but it is an
+optimisation rather than the thing standing between the owner and a booting
+instance. Read the entry above for what the runner actually does now.
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
 Landed via PR #384.

@@ -133,7 +133,7 @@ test('the live 0125 incident boots, applies 127/130/131, and leaves row 125 unto
  * recorded NAME at ordinal 125 against the file that happens to sit at 125 in this
  * build, and that comparison is gone: the ordinal is a filename prefix, not an
  * identity, so the runner asks whether THIS MIGRATION has run rather than whether its
- * NUMBER has. See `runner.ts`, `migrationIsRecorded`.
+ * NUMBER has. See `runner.ts`, `classifyMigration`.
  *
  * So with no entry, `code_trident_runs_base_sha` is simply not recorded, and it
  * applies. The boot succeeds and the schema is correct by a second, independent route

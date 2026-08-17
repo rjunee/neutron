@@ -312,7 +312,7 @@ function formatAppliedAt(appliedAt: number): string {
  * WHAT REPLACED WHAT, and why the replacement is narrower rather than weaker. The
  * refusal this supersedes fired when the file at ordinal N carried a different
  * name than the row at ordinal N. That comparison is now known to be wrong in both
- * directions (see `migrationIsRecorded`) and, worse, unfixable in the direction
+ * directions (see `classifyMigration`) and, worse, unfixable in the direction
  * that matters: on the live instance the mismatching file's columns were genuinely
  * absent, so the only remedies the message could offer — acknowledge the row, or
  * renumber the file — either left the schema broken or broke every instance where
@@ -646,7 +646,7 @@ function ledgerIsVersionKeyed(db: Database): boolean {
  *
  * `name` IS THE PRIMARY KEY AND `version` IS PLAIN DATA. That inversion is the
  * whole fix. `version` used to be the key, which asserted that an ordinal
- * identifies a migration — it does not (see `migrationIsRecorded`), and the
+ * identifies a migration — it does not (see `classifyMigration`), and the
  * assertion was load-bearing in the worst way: on an instance where a branch
  * migration had consumed ordinal 125, the merged migration numbered 0125 could not
  * be recorded at all, because its own ordinal was taken by a row for something
@@ -1251,7 +1251,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
    * which is exactly what would have made the widening invisible.
    *
    * THAT COMPARISON IS FORENSICS, NOT IDENTITY. It does not ask "has this migration
-   * run?" — `migrationIsRecorded` owns that question and answers it by name. It asks
+   * run?" — `classifyMigration` owns that question and answers it by name. It asks
    * whether the ledger's record of a name is what a normal apply of THIS build would
    * have written, and a mismatch is precisely the incident these entries describe.
    *
