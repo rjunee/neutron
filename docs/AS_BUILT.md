@@ -2,6 +2,92 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — a chat replayed one page per socket open, so a long transcript stopped short of the present
+
+Landed via PR #370.
+
+Owner-reported, live, on his primary working chat: it opened on old messages and
+ended ~630 short of the present.
+
+`AppWsAdapter.replayAfter` answered a resume with exactly ONE bounded page. The
+surface calls it once per socket open (`gateway/http/app-ws-surface.ts:878`), the
+adapter made a single `chat_log.replayAfter` call with no limit, so
+`DEFAULT_REPLAY_LIMIT = 500` applied — and on a 1130-row topic the device got seq
+1..500 and nothing else. Two other topics on that instance held 280 and 251, under
+the limit, and rendered completely, which is why it read as one broken chat rather
+than a broken replay.
+
+Fixed where the defect actually lived: the caller now DRAINS
+(`channels/adapters/app-ws/adapter.ts`, `replayAfter`), paging forward from the
+last row's `seq` until a page comes back empty. The receipt and reaction replays
+beside it already did this (`replayReceiptsAfter`, `replayReactionsAfter`); the
+message replay was the one on the resume path that did not. One socket open now
+delivers the whole transcript, in order.
+
+`DEFAULT_REPLAY_LIMIT` is UNCHANGED and now means what it says: a bound on one
+page, not on one replay. Raising it was never the fix — it only moves how many
+round trips a cold resume costs.
+
+NOT fixed by returning the newest page instead, which was the first attempt and
+was wrong in a way worth recording. A resume cursor only moves FORWARD
+(`chat-core/sync-engine.ts:232` reads `MAX(applied seq)`), so handing back the
+newest 500 would jump the cursor to the topic max and make seq 1..630 unreachable
+for the life of the store — converting a visible "missing the newest" into a
+silent, permanent "missing the oldest". The page stays a PREFIX
+(`persistence/app-chat-event-core.ts`, `rowsAfter`, `ORDER BY seq ASC`) precisely
+so the remainder is always reachable from what was already sent. The SQL is
+therefore semantically identical to what it was before this change; the two
+hand-copied versions of it are now one private helper, because `aggregatesAfter`
+promises output identical to `aggregatesAfterPage` and duplicated queries drift.
+
+Two docblocks described intent as implementation and are corrected. The original
+on `DEFAULT_REPLAY_LIMIT` claimed the client "re-issues resume from the new
+high-water mark to page the rest": true ACROSS opens, false WITHIN one. The client
+does re-issue from `lastSeenSeq` on every open (`chat-core/web-session.ts:588`,
+`app/lib/chat-core/mobile-session.ts:460`), but resume fires once per socket, so
+the transcript advanced 500 messages per app restart. Paging that takes three
+reconnects is not paging, and writing it as though it were is what let the gap
+sit. The first correction over-shot to "No client ever did", a false absence
+claim; both are replaced with the measured behaviour and its citations. The
+`row`-shaped `next_cursor: null` contract now states its exception rather than
+implying a completeness it cannot promise.
+
+Three docstrings that a reviewer flagged as overclaiming unlimited replay — the
+surface's "Replay everything after the client's cursor", `sync-engine.ts`'s "the
+whole fresh transcript", and the store suite's "after_seq=0 replays the whole
+transcript" — are deliberately left untouched. The drain made them TRUE. They
+described intended behaviour that the single-page replay had quietly falsified, so
+the correction belonged in the code, not the sentences.
+
+The edits log keeps its single-call replay and its gap is now WRITTEN DOWN on
+`AppChatEditLog.aggregatesAfter` and `AppWsAdapter.replayEditsAfter` instead of
+being quietly matched to a window that no longer exists: a topic with more than
+`DEFAULT_EDIT_REPLAY_LIMIT` edited messages after the cursor still replays only
+the oldest of them. Cosmetic (a missing "edited" marker) where a dropped message
+is not, so it is recorded rather than fixed here.
+
+Mutation-proved by observed execution, not by prose. Removing the drain loop
+reddens 3 tests in the new
+`channels/adapters/app-ws/__tests__/replay-drains-long-backlog.test.ts`, including
+the 1130-message convergence case and the cursor-sequence test that pins
+`0 → 500 → 1000 → 1130` plus one empty page (so "simplify the drain into one
+huge-limit query" cannot pass). Flipping the page window back to newest-first
+reddens 12 across the persistence and adapter suites. Blanking bodies for
+`seq > 400` reddens the full-payload control — which the earlier first-row-only
+control passed, so that control was replaced with one asserting every row of the
+page. Controls green throughout: forward gap-fill from a non-zero cursor, an
+under-limit topic in a single page, tiny-limit convergence, topic isolation,
+non-advancing-cursor liveness, and a no-durable-log instance. 533 pass / 0 fail
+across `persistence/`, `channels/adapters/app-ws/` and `chat-core/`.
+
+Honest about what remains: each SQL page is bounded, but the array a resume
+returns is O(messages after the cursor), so a very long topic makes a cold resume
+proportionally large. That is the profile the receipt and reaction drains beside it
+already have, and it is the honest one — the alternative is dropping messages the
+owner cannot ask for again. Bounding it needs a client affordance to fetch older
+history on demand, which the wire has no shape for yet, and is deliberately not
+faked with a silent cap.
+
 ## 2026-08-17 — a live instance crash-looped on a migration ordinal, and the repair is now in `repairs.json`
 
 An instance refused to boot for ~3 hours (1248 uncaught exceptions) because `_migrations` recorded version 124 under one name while the deployed tree carried another at that ordinal. `migrations/runner.ts` threw rather than guess, which is the designed behaviour — the cost is a hard crash loop, so the instance served nothing and clients connected to an empty server.
