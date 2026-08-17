@@ -23,6 +23,7 @@ import { MobileChatSession } from '../lib/chat-core/mobile-session';
 import {
   SqliteChatStore,
   contiguousFloorSql,
+  contiguousPrefilterSql,
   type SqlRow,
   type SqliteExecutor,
   type SqlValue,
@@ -952,6 +953,58 @@ describe('MobileChatSession — the backwards history walk', () => {
     expect(sockets[0]!.backwardsResumes().at(-1)).toMatchObject({ after_seq: 0, before_seq: 6 });
   });
 
+  it('does NOT buy a page it already holds when the server reports a full page', async () => {
+    // The server sets `older_than` whenever its page came back FULL, which is a claim
+    // about the SERVER's page and not about this device. A device already holding the
+    // range below the page used to answer that frame by re-downloading it — 500 rows
+    // on the real limits, on every foreground, since `catchUp` re-resumes over an
+    // already-open socket.
+    //
+    // MUTATION-PROVED: drop the `if (this.historyComplete) return` guard in
+    // `requestHistoryBackfill` and the last assertion fails — one backwards resume
+    // goes out asking for seqs this device is holding.
+    const store = await freshStore();
+    for (const seq of Array.from({ length: 10 }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `h${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    // Whole down to seq 1 — the precondition, measured rather than assumed.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+    expect(sockets[0]!.forwardResumes().at(-1)).toMatchObject({ after_seq: 10 });
+
+    // The server answers with a FULL page above the cursor and, truthfully for itself,
+    // says there is history below the page floor.
+    for (const seq of Array.from({ length: 10 }, (_, i) => i + 11)) {
+      sockets[0]!.deliver({
+        v: 1, type: 'agent_message', message_id: `m${seq}`, seq, body: `msg-${seq}`, ts: seq,
+      });
+    }
+    sockets[0]!.deliver({ v: 1, type: 'history_gap', older_than: 11, ts: 0 });
+    await tick();
+
+    // It applied the page...
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+    // ...and asked for nothing below it.
+    expect(sockets[0]!.backwardsResumes()).toEqual([]);
+  });
+
   it('sees an INTERIOR hole in the on-device SQLite store, not just a missing prefix', async () => {
     // `SqliteChatStore.contiguousFloorSeq` is a SECOND implementation of the
     // contiguity read — a correlated `NOT EXISTS` walked backwards off the
@@ -1016,6 +1069,15 @@ describe('MobileChatSession — the backwards history walk', () => {
     // during this build made SQLite prefer the range constraint over the equality,
     // and only the plan showed it — every behavioural assertion above stayed green.
     // So the plan is pinned, over the very string the store prepares.
+    //
+    // WHAT THIS IS AND IS NOT A MEASUREMENT OF. The engine here is `bun:sqlite`; the
+    // device runs `@op-engineering/op-sqlite` (`app/lib/chat-core/op-sqlite-store.ts`).
+    // Both are SQLite and the planner reads the same index definition, so a plan that
+    // is index-only here will be index-only there — but this is a guard on the QUERY,
+    // not a measurement on the DEVICE, and it should not be cited as one. It is worth
+    // keeping anyway because it discriminates: the `AND p.seq > 0` variant reds it.
+    // The assertions are coupled to the planner's wording, so a bun upgrade that
+    // rephrases a plan line can break them without anything being wrong.
     const db = new Database(':memory:');
     dbs.push(db);
     await SqliteChatStore.open(bunExecutor(db));
@@ -1036,6 +1098,52 @@ describe('MobileChatSession — the backwards history walk', () => {
     // No sort (`ORDER BY seq DESC` is served by walking the index backwards) and no
     // table access on either leg.
     const joined = details.join(' | ');
+    expect(joined).not.toContain('TEMP B-TREE');
+    expect(joined).not.toContain('SCAN');
+  });
+
+  it('answers a HOLE-FREE store from one index-only aggregate pass, not the probe walk', async () => {
+    // The healthy store is the common case and it was the expensive one: with no run
+    // start above seq 1 the descending walk probes every row in the topic. The
+    // pre-filter answers it in one pass — `COUNT(*) == MAX - MIN + 1` means nothing
+    // between them is missing, and then the floor IS `MIN`.
+    //
+    // Pinned on both legs, because a pre-filter that is merely FAST is worthless: the
+    // behavioural assertions in the interior-hole test above are what prove it still
+    // returns the right answer (20 with a hole, 1 without), and the plan below is what
+    // proves it is the cheap read it claims to be.
+    const db = new Database(':memory:');
+    dbs.push(db);
+    const store = await SqliteChatStore.open(bunExecutor(db));
+
+    // The equality holds for a contiguous run that does NOT start at 1 either, so the
+    // pre-filter must return MIN rather than 1. (Returning 1 would look right on every
+    // fixture that happens to start at seq 1 and silently stop a real walk.)
+    for (const seq of [7, 8, 9]) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `p${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(7);
+    // And an empty topic is 0 without either query needing to find anything.
+    expect(await store.contiguousFloorSeq('app:nobody')).toBe(0);
+
+    const details = (
+      db.prepare(`EXPLAIN QUERY PLAN ${contiguousPrefilterSql()}`).all() as Array<
+        Record<string, unknown>
+      >
+    ).map((r) => String(r['detail']));
+    const joined = details.join(' | ');
+    expect(joined).toContain('COVERING INDEX idx_chat_messages_topic_seq');
     expect(joined).not.toContain('TEMP B-TREE');
     expect(joined).not.toContain('SCAN');
   });

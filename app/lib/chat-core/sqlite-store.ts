@@ -202,10 +202,40 @@ const CONTIGUOUS_FLOOR_SQL = `SELECT m.seq AS floor_seq FROM ${TABLE} m
    ORDER BY m.seq DESC
    LIMIT 1`;
 
+/**
+ * The CHEAP PRE-FILTER that keeps the HEALTHY store off the probe walk above.
+ *
+ * A hole-free topic is the common case and it is the expensive one for
+ * {@link CONTIGUOUS_FLOOR_SQL}: the descending walk finds no run start until it
+ * reaches seq 1, so it pays one point probe per row in the topic. This answers the
+ * same question for that case in a single index-only pass — `COUNT(*)` equals
+ * `MAX - MIN + 1` exactly when nothing between them is missing, and then the floor
+ * IS `MIN`. The probe walk runs only when the counts disagree, i.e. only on a store
+ * that actually has a hole to find, where the walk is also cheap (it stops at the
+ * first run start, which is at most one hole down from the high-water mark).
+ *
+ * So the cost, stated for both shapes on the 1,130-row topic the owner reported:
+ * contiguous → one covering index scan, no probes; holey → that scan plus a walk of
+ * the newest run. Neither is per-message — the sessions call this once per forward
+ * resume.
+ *
+ * The three aggregates come from ONE statement rather than three so the answer
+ * cannot be assembled from two different snapshots.
+ */
+const CONTIGUOUS_PREFILTER_SQL = `SELECT COUNT(*) AS held, MIN(seq) AS min_seq, MAX(seq) AS max_seq
+   FROM ${TABLE}
+  WHERE topic_id = ? AND seq IS NOT NULL AND seq > 0`;
+
 /** The SQL {@link SqliteChatStore.contiguousFloorSeq} prepares, for the query-plan
  *  assertion in `app/__tests__/chat-core-mobile-session.test.ts`. */
 export function contiguousFloorSql(): string {
   return CONTIGUOUS_FLOOR_SQL;
+}
+
+/** The pre-filter SQL {@link SqliteChatStore.contiguousFloorSeq} tries first, for the
+ *  same query-plan assertion. */
+export function contiguousPrefilterSql(): string {
+  return CONTIGUOUS_PREFILTER_SQL;
 }
 
 export class SqliteChatStore implements Store {
@@ -372,6 +402,14 @@ export class SqliteChatStore implements Store {
   }
 
   async contiguousFloorSeq(topic_id: string): Promise<number> {
+    // The healthy path first — see CONTIGUOUS_PREFILTER_SQL. `held === 0` also
+    // short-circuits an empty topic without preparing the walk at all.
+    const pre = (await this.db.execute(CONTIGUOUS_PREFILTER_SQL, [topic_id])).rows[0];
+    const held = numberOrZero(pre?.['held']);
+    if (held === 0) return 0;
+    const min = numberOrZero(pre?.['min_seq']);
+    const max = numberOrZero(pre?.['max_seq']);
+    if (min > 0 && held === max - min + 1) return min;
     const { rows } = await this.db.execute(CONTIGUOUS_FLOOR_SQL, [topic_id]);
     const raw = rows[0]?.['floor_seq'];
     return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
@@ -530,6 +568,12 @@ export class SqliteChatStore implements Store {
 }
 
 /** Map a raw SQL row back into the canonical {@link ChatMessage}. */
+/** A SQL aggregate read as a number, 0 for NULL / non-numeric (an empty topic's
+ *  `MIN`/`MAX` are NULL, and `COUNT` never is). */
+function numberOrZero(raw: SqlValue | undefined): number {
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
+}
+
 function rowToMessage(row: SqlRow): ChatMessage {
   return {
     topic_id: String(row['topic_id'] ?? ''),

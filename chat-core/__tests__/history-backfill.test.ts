@@ -321,4 +321,41 @@ describe('history backfill — a capped replay converges on the whole transcript
 
     expect(sockets[0]!.backwards()).toEqual([])
   })
+
+  it('does not buy a page it already holds when the server calls its page full', async () => {
+    // `history_gap` means the SERVER's page came back full. That is not the same claim
+    // as "rows remain below it" for THIS device: one already holding the range below
+    // the page used to answer the frame by re-downloading it, every open.
+    //
+    // MUTATION-PROVED: drop the `if (this.historyComplete) return` guard in
+    // `WebChatSession.requestHistoryBackfill` and the last assertion fails — a
+    // backwards resume goes out for seqs the store is holding.
+    const { session, sockets, store } = setup()
+    for (const seq of Array.from({ length: PAGE }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: `h${seq}`,
+        message_id: `h${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+    // The precondition, measured: whole down to seq 1.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1)
+
+    session.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+    // A FULL page above the cursor, then the truthful-for-the-server gap.
+    await pump(sockets[0]!, PAGE * 2)
+
+    expect(await seqsIn(store)).toEqual(Array.from({ length: PAGE * 2 }, (_, i) => i + 1))
+    expect(sockets[0]!.backwards()).toEqual([])
+  })
 })

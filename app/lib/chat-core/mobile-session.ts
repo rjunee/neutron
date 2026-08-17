@@ -145,6 +145,9 @@ export class MobileChatSession {
    *  a server that repeated itself could not spin this client. */
   private backfillRounds = 0;
   private backfillFloor: number | null = null;
+  /** Set per forward resume: this device's transcript is contiguous down to seq 1, so
+   *  no backwards page can tell it anything. See `requestHistoryBackfill`. */
+  private historyComplete = false;
   private readonly ackTimeoutMs: number;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
@@ -400,8 +403,17 @@ export class MobileChatSession {
       return;
     }
     // The server admitting its replay was TRUNCATED: rows below `older_than` were
-    // not sent. Ask for the page below it — this is the only path by which a
-    // transcript longer than one replay page ever completes on this device.
+    // not sent. Ask for the page below — this is the only path by which a transcript
+    // longer than one replay page ever completes on this device.
+    //
+    // THE FRAME'S SEQ IS TAKEN AT FACE VALUE, and it must be: this handler cannot ask
+    // the store where its own history stops being whole, because the frames of the
+    // page that precedes this one may not be applied yet. `chat-core/ws-client.ts`
+    // dispatches each frame without awaiting the previous one, so a store read here
+    // sees an arbitrary prefix of the page — and the failure is the dangerous
+    // direction, since a floor read too high DECLINES a walk this device needs.
+    // Whether the walk is needed at all is decided ONCE per open, before any response
+    // can arrive, in `resumeAndFlush`; see `requestHistoryBackfill`.
     const historyGap = parseHistoryGap(data);
     if (historyGap !== null) {
       this.requestHistoryBackfill(historyGap);
@@ -501,12 +513,25 @@ export class MobileChatSession {
     // undelivered sends. A fresh budget per forward resume — and on mobile that
     // means per foreground and per foregrounded push, since `catchUp` re-drives
     // this on an already-open socket — then one backwards request if this device's
-    // own oldest applied seq shows history below it. The server can only report a
-    // gap for a page it just sent, so without this local test a walk that ran out
-    // of budget could never be picked up later.
+    // transcript is NOT CONTIGUOUS down to seq 1. The server can only report a gap
+    // for a page it just sent, so without this local test a walk that ran out of
+    // budget could never be picked up later.
+    //
+    // Contiguity, not "my oldest applied seq" — which is what this said, and it
+    // described the shipped behaviour before `Store.contiguousFloorSeq` replaced
+    // `earliestSeenSeq`. The difference is a class of permanent loss rather than
+    // wording: a device that holds seq 1 AND has a hole above it has an oldest seq of
+    // 1, so an oldest-row test reports "nothing missing" and the hole is never asked
+    // for again (`chat-core/sync-engine.ts` `backfillFrom`).
     this.backfillRounds = 0;
     this.backfillFloor = null;
     const backfillFrom = await this.engine.backfillFrom(this.topic_id);
+    // Decided HERE and cached for the open, because the `history_gap` handler cannot
+    // safely re-derive it: `backfillFrom` is null both for an empty store and for a
+    // transcript that is already whole, and only the second one means "refuse every
+    // backwards page this open".
+    this.historyComplete =
+      backfillFrom === null && (await this.store.lastSeenSeq(this.topic_id)) > 0;
     if (backfillFrom !== null) this.requestHistoryBackfill(backfillFrom);
   }
 
@@ -516,8 +541,17 @@ export class MobileChatSession {
    * refuses any bound that does not strictly descend, so the walk always
    * terminates. A send that fails (socket gone) is not retried here: the next
    * resume restarts the walk from the on-device store.
+   *
+   * ALSO REFUSES OUTRIGHT WHEN THIS DEVICE'S TRANSCRIPT IS ALREADY WHOLE, which is
+   * what stops a truthful `history_gap` from buying a page the device holds. The
+   * server sets `older_than` whenever its page came back FULL, which is not the same
+   * as "rows remain below it" for THIS device: one holding 1..500 of 1000 resumes at
+   * 500, is sent 501..1000 with `older_than: 501`, and used to ask for the page below
+   * 501 — 500 rows it already had, re-downloaded on every mobile foreground, since
+   * `catchUp` re-resumes over an already-open socket.
    */
   private requestHistoryBackfill(before_seq: number): void {
+    if (this.historyComplete) return;
     if (before_seq <= 1) return;
     if (this.backfillRounds >= MAX_HISTORY_BACKFILL_ROUNDS) return;
     if (this.backfillFloor !== null && before_seq >= this.backfillFloor) return;

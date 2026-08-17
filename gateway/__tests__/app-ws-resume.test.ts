@@ -38,6 +38,7 @@ import {
   AppChatEditStore,
   AppChatStore,
   DEFAULT_EDIT_REPLAY_LIMIT,
+  DEFAULT_REPLAY_LIMIT,
   ProjectDb,
 } from '@neutronai/persistence/index.ts'
 import {
@@ -484,9 +485,14 @@ describe('app-ws resume — the truncation signal reaches the wire', () => {
     await c.close()
   })
 
-  it('says nothing about truncation when the transcript fits in one page', async () => {
+  it('says nothing about truncation when the page is NOT FULL', async () => {
     // The below-threshold control: a short topic's wire trace gains no gap frame, so
     // an ordinary reconnect never starts a pointless backwards walk.
+    //
+    // "Not full" and not "fits in one page", which is what this said and is a
+    // different claim — a transcript of EXACTLY one page DOES get a gap frame (see the
+    // boundary test below). The trigger is `rows.length >= DEFAULT_REPLAY_LIMIT`, so
+    // the honest description of the quiet case is that the page came back short.
     seedRows(12)
     const c = await openClient(h.base, 'devC', new InMemoryStore())
     c.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0 }))
@@ -496,5 +502,39 @@ describe('app-ws resume — the truncation signal reaches the wire', () => {
     expect(gapsIn(c.events)).toEqual([])
 
     await c.close()
+  })
+
+  it('DOES claim a gap on a transcript of exactly one page, and one row fewer does not', async () => {
+    // The boundary, both sides, because this is the case the comment on the emit
+    // site used to describe wrongly. At exactly `DEFAULT_REPLAY_LIMIT` rows the page
+    // is full, `older_than` is the page floor (seq 1), and the frame goes out even
+    // though there is nothing below it. That is intended: proving emptiness costs an
+    // extra query on every resume, and the client drops a bound of 1.
+    seedRows(DEFAULT_REPLAY_LIMIT)
+    const full = await openClient(h.base, 'devD', new InMemoryStore())
+    full.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0 }))
+    await waitFor(
+      () => full.events.filter((e) => e.type === 'user_message').length >= DEFAULT_REPLAY_LIMIT,
+      8000,
+    )
+    await waitFor(() => gapsIn(full.events).length > 0)
+    expect(gapsIn(full.events).map((g) => g.older_than)).toEqual([1])
+    await full.close()
+
+    // One row fewer, same everything else: silent. The pair is what makes this a
+    // measurement of the threshold rather than of the fixture.
+    db.raw().run(`DELETE FROM app_chat_messages WHERE topic_id = ? AND seq = ?`, [
+      CHANNEL_TOPIC,
+      DEFAULT_REPLAY_LIMIT,
+    ])
+    const short = await openClient(h.base, 'devE', new InMemoryStore())
+    short.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0 }))
+    await waitFor(
+      () => short.events.filter((e) => e.type === 'user_message').length >= DEFAULT_REPLAY_LIMIT - 1,
+      8000,
+    )
+    await new Promise((r) => setTimeout(r, 80))
+    expect(gapsIn(short.events)).toEqual([])
+    await short.close()
   })
 })
