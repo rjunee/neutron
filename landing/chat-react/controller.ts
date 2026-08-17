@@ -341,6 +341,14 @@ interface StreamEntry {
 }
 
 /**
+ * How many topics' transcripts the switch cache keeps. Deliberately LARGER than
+ * `MAX_WARM_SESSIONS` (3): a session whose socket has been evicted still has a
+ * transcript worth painting instantly, and the entry is a reference to rows the
+ * store already holds, not a second copy of the bodies.
+ */
+const TRANSCRIPT_CACHE_LIMIT = 12
+
+/**
  * Task 6 (chat render fan-out) — a TOTAL, flat structural comparator over two
  * {@link RenderMessage}s. Used by {@link NeutronChatController.computeVm} to
  * REUSE the prior render object (preserving object identity) when a fresh
@@ -434,6 +442,28 @@ export class NeutronChatController {
   private started = false
   private activeState = true
   private msgs: ChatMessage[] = []
+  /**
+   * LAST RESOLVED TRANSCRIPT PER TOPIC — the thing that makes a switch not wait.
+   *
+   * `setProject` used to publish `msgs: []` and then wait for `handleChange`'s
+   * `await` to bring the transcript back, so every switch rendered TWICE: an
+   * empty scoped frame, then the same frame again with content. The awaited
+   * continuation cannot run until the synchronous render the first publish
+   * triggered has finished, so the transcript's arrival is queued behind a full
+   * render of a view the owner never wanted to see.
+   *
+   * This map is what the switch reads INSTEAD, synchronously, in the same block
+   * that publishes — so the first frame of a re-entered project already carries
+   * its transcript and there is one render, not two. `handleChange` keeps it
+   * current on every resolved read.
+   *
+   * Keyed by TOPIC, never by project: `topicForProject` is what scopes a
+   * conversation, so one project's messages cannot be served into another's
+   * frame even if the same project id were reused. Bounded by
+   * {@link TRANSCRIPT_CACHE_LIMIT} in insertion order (re-set moves an entry to
+   * the end) so a long session over many projects can't grow it without limit.
+   */
+  private readonly transcriptCache = new Map<string, { msgs: ChatMessage[]; pending: number }>()
   /** message_id → accumulated streaming text (not yet persisted). */
   private readonly streaming = new Map<string, StreamEntry>()
   /**
@@ -704,8 +734,14 @@ export class NeutronChatController {
     this.notices.length = 0
     this.chosen.clear()
     this.awaitingReply = false
-    this.msgs = []
-    this.pending = 0
+    // THE SWITCH DOES NOT WAIT ON THE STORE. The last resolved transcript for
+    // the topic being entered is read here, SYNCHRONOUSLY, so the frame this
+    // block publishes already carries it. A first-ever visit has no entry and
+    // falls back to empty — that switch still awaits `handleChange`, because
+    // there is genuinely nothing yet to paint.
+    const entering = this.transcriptCache.get(this.topicForProject(projectId))
+    this.msgs = entering?.msgs ?? []
+    this.pending = entering?.pending ?? 0
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
     this.activeWorkBoardItems = null
@@ -740,12 +776,21 @@ export class NeutronChatController {
       this.session.start()
       this.session.setActive(this.activeState)
     }
-    // Publish the empty/scoped VM immediately (instant switch feel), then
-    // hydrate the new topic's durable transcript.
+    // Publish the scoped VM immediately — already carrying the entered topic's
+    // last-known transcript (see `transcriptCache`), so this is the frame the
+    // owner actually wanted rather than an empty one to be replaced.
     this.publish()
-    // The "instant" claim, measured. If this mark is already hundreds of ms the
-    // problem is the paint, not the data — the opposite fix.
+    // `vm_published` measures THIS CALL — computing the VM and notifying
+    // subscribers. It does NOT measure the render those subscribers perform:
+    // React flushes that synchronously inside the click, after this returns. So a
+    // small number here proves nothing about the paint, which is why
+    // `frame_rendered` below exists.
     this.switchTimer?.mark('vm_published')
+    // The first instant at which the published frame has actually been drawn.
+    // Scheduled per switch; a stamp arriving after the record flushed (a switch
+    // the owner abandoned) is a no-op inside `SwitchTimer.mark`.
+    const timer = this.switchTimer
+    this.afterNextFrame(() => timer?.mark('frame_rendered'))
     void this.handleChange()
   }
 
@@ -1196,6 +1241,12 @@ export class NeutronChatController {
     // transcript AND `markVisibleAgentRead` would route old-topic read receipts
     // through the new project's socket (Codex P2).
     const session = this.session
+    // The TOPIC this read belongs to, captured in the same synchronous instant as
+    // the session so the pair cannot disagree. The cache is written under THIS
+    // key even when the session changed underfoot: the rows are that topic's, and
+    // filing them under whatever topic is active by the time the read lands is
+    // exactly how one project's messages would end up in another's frame.
+    const topic = this.topicForProject(this.projectId)
     const [msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
     // SPLIT ON PURPOSE. The single `transcript` mark covered BOTH the store read
     // and everything after it, so a slow switch could not say which. Measured on
@@ -1203,7 +1254,16 @@ export class NeutronChatController {
     // copy-and-sort to cost a second — so the two halves needed separating before
     // anything was optimised. `transcript_read` is the data; `transcript` is the
     // data PLUS the publish that renders it.
+    //
+    // ⚠️ THIS MARK IS STAMPED AFTER AN `await`, SO IT CHARGES THE READ FOR THE
+    // MAIN THREAD IT WAITED ON. Measured (2026-08-17): the read itself is 0.1 ms
+    // median / 1.0 ms max over a 12-topic × 533-message OPFS store — `list()`
+    // never touches OPFS (`chat-core/stores/opfs-store.ts:113-115` delegates to
+    // the in-memory index) — while a 250 ms synchronous re-render triggered by
+    // the publish above lands INSIDE this window. Read the gap between this and
+    // `frame_rendered`, never this number on its own.
     this.switchTimer?.mark('transcript_read')
+    this.cacheTranscript(topic, msgs, pending)
     if (this.session !== session) return
     this.msgs = msgs
     this.pending = pending
@@ -1221,6 +1281,42 @@ export class NeutronChatController {
     // The transcript is on screen. This is the instant the switch is genuinely
     // over, whatever the empty frame did earlier.
     this.switchTimer?.mark('transcript')
+  }
+
+  /**
+   * Run `fn` once the frame published by the current call stack has been drawn.
+   *
+   * A single `requestAnimationFrame` callback runs BEFORE that frame's paint, so
+   * it would time the render and not the picture; the trailing task is what
+   * lands after the compositor has taken it. Falls back to a plain task where
+   * there is no rAF (the unit suite, SSR) — the ordering guarantee is weaker
+   * there but nothing depends on it except a measurement.
+   */
+  private afterNextFrame(fn: () => void): void {
+    const raf = (globalThis as { requestAnimationFrame?: (cb: () => void) => unknown })
+      .requestAnimationFrame
+    const thenATask = (): void => {
+      const handle: unknown = setTimeout(fn, 0)
+      ;(handle as { unref?: () => void }).unref?.()
+    }
+    if (typeof raf === 'function') raf(thenATask)
+    else thenATask()
+  }
+
+  /**
+   * File a resolved read under the topic it belongs to, newest-touched last, so
+   * the next `setProject` into that topic can paint it without awaiting. Bounded
+   * in insertion order: a re-set moves its entry to the end, and anything past
+   * {@link TRANSCRIPT_CACHE_LIMIT} is dropped oldest-first.
+   */
+  private cacheTranscript(topic: string, msgs: ChatMessage[], pending: number): void {
+    this.transcriptCache.delete(topic)
+    this.transcriptCache.set(topic, { msgs, pending })
+    while (this.transcriptCache.size > TRANSCRIPT_CACHE_LIMIT) {
+      const oldest = this.transcriptCache.keys().next()
+      if (oldest.done === true) break
+      this.transcriptCache.delete(oldest.value)
+    }
   }
 
   /**

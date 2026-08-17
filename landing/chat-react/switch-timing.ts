@@ -27,19 +27,45 @@
  * ones named — a partial answer beats no answer, and "socket_open never arrived"
  * is a diagnosis on its own.
  *
+ * ── WHY `frame_rendered` EXISTS (2026-08-17) ────────────────────────────────
+ * The first four marks answered "which step is slow" with a number that was real,
+ * current, and about the wrong step. `vm_published` is stamped INSIDE `publish()`,
+ * so it measures notifying subscribers — not the render they cause. React flushes
+ * that render synchronously inside the click (measured through the synthetic
+ * discrete-event path: a 250 ms render put `render_ended` at 256.6 ms while
+ * `vm_published` reported 0.2 ms), and `transcript_read` is stamped after an
+ * `await`, whose continuation cannot run until that render finishes. So the whole
+ * render was charged to the transcript read, and 47 real samples read
+ * `transcript_read` median 3283 ms / `vm_published` median 3 ms — which says
+ * "rendering is instant, the store is the cost" and means the exact opposite.
+ * The store read measures 0.1 ms median / 1.0 ms max over a 12-topic ×
+ * 533-message OPFS store.
+ *
+ * `frame_rendered` closes the hole: stamped from a `requestAnimationFrame`
+ * scheduled at the end of the switch, it is the first instant at which the
+ * published frame has actually been drawn. `frame_rendered ≈ transcript_read`
+ * ⇒ the render is the cost. `frame_rendered ≪ transcript_read` ⇒ the store is.
+ * No pair of marks in the original four could tell those apart.
+ *
  * ── ALWAYS ON ──────────────────────────────────────────────────────────────
- * No flag. It is four `performance.now()` reads and one line per switch; a knob
+ * No flag. It is five `performance.now()` reads and one line per switch; a knob
  * would only create a state where the data the owner asked for is missing.
  */
 
 import type { WebClientReport } from './diagnostics-client.ts'
 
 /** Independently observed instants in a switch; their relative order is not assumed. */
-export type SwitchMark = 'vm_published' | 'socket_open' | 'transcript_read' | 'transcript'
+export type SwitchMark =
+  | 'vm_published'
+  | 'frame_rendered'
+  | 'socket_open'
+  | 'transcript_read'
+  | 'transcript'
 
 /** Every mark a complete switch reaches. Used to decide "done" and name missing marks. */
 const ALL_MARKS: readonly SwitchMark[] = [
   'vm_published',
+  'frame_rendered',
   'socket_open',
   'transcript_read',
   'transcript',
@@ -191,6 +217,7 @@ function defaultEmit(r: SwitchRecord): void {
     `to=${r.to ?? 'general'}`,
     `from=${r.from ?? 'general'}`,
     `vm=${fmt(vm)}`,
+    `frame=${fmt(r.marks.frame_rendered)}`,
     `socket=${fmt(sock)}`,
     `transcript_read=${fmt(r.marks.transcript_read)}`,
     `transcript=${fmt(tx)}`,

@@ -391,6 +391,70 @@ for a different problem:
   that matters.
 
 Landed by PR #402.
+## 2026-08-17 — the project switch was never waiting on the store, and the mark that said so was measuring the render
+
+The owner's web UI took 3-9 s to switch projects. 47 real `project_switch` samples from
+his client diagnostics read `transcript_read` median 3283 ms / p90 6614 ms / max 9198 ms
+against `vm_published` median 3 ms / max 39 ms, which reads as "rendering is instant, the
+store read is effectively 100% of the switch". Every number in that report is real and
+the conclusion it invites is wrong in both halves.
+
+**The read is not slow.** Measured against the real `OpfsChatStore` + `SyncEngine` +
+`SendQueue` over a 12-topic × 533-message store with browser-realistic OPFS latencies:
+`Promise.all([session.messages(), session.pendingCount()])` is **median 0.1 ms, p90
+0.4 ms, max 1.0 ms** — and **0.2 ms** with a 60-upsert write burst in flight. OPFS is not
+in the read path at all: `chat-core/stores/opfs-store.ts:113-115` delegates `list()`
+straight to the in-memory index (`chat-core/store.ts:413-417`), so the only OPFS reads are
+the one-shot `hydrate()` at boot (184 ms for a 3.8 MB snapshot) and the snapshot writes.
+
+**The mark charges the read for the main thread it waited on.** `transcript_read` is
+stamped after an `await` in `handleChange`, and `vm_published` is stamped *inside*
+`publish()` — so it measures notifying subscribers, not the render those subscribers
+perform. React flushes that render synchronously inside the click, and the awaited
+continuation cannot run until it finishes. Measured through React's synthetic
+discrete-event path, a 250 ms render put `render_ended` at 256.6 ms and `transcript_read`
+at 257.6 ms while `vm_published` reported 0.2 ms. The control discriminates: the same
+probe wired to a plain (non-React) listener, where React defers the render, reports
+`transcript_read` **1.8 ms** for the same 250 ms render. So the render lands inside the
+window that gets attributed to the store, and the instrument's own docblock — "if this
+mark is already hundreds of ms the problem is the paint, not the data" — had named the
+right discriminator and then put the mark on the wrong side of it.
+
+Two changes, both in `landing/chat-react/`:
+
+- **`controller.ts` — the switch reads the transcript synchronously.** A bounded
+  per-TOPIC cache (`transcriptCache`, 12 entries, insertion-ordered) holds the last
+  resolved `{ msgs, pending }` for every visited topic, written by `handleChange` under
+  the topic captured in the same synchronous instant as the session. `setProject` reads
+  it before it publishes, so the FIRST frame of a re-entered project already carries that
+  project's transcript instead of an empty thread that a second render replaces. The
+  switch is off the store's critical path entirely — it no longer awaits the read at all.
+  A first-ever visit still publishes empty and fills from the read, because there is
+  genuinely nothing yet to paint.
+
+- **`switch-timing.ts` — a new `frame_rendered` mark, so this cannot recur.** Stamped
+  from a `requestAnimationFrame` plus a trailing task (a single rAF callback runs *before*
+  that frame's paint), it is the first instant at which the published frame has actually
+  been drawn. `frame_rendered ≈ transcript_read` ⇒ the render is the cost;
+  `frame_rendered ≪ transcript_read` ⇒ the store is. No pair of the original four marks
+  could tell those apart, which is why the report pointed at the wrong subsystem.
+
+The session-changed-underfoot guard (a real Codex P2) is untouched and now has its own
+tests: a stalled read for the topic the owner LEFT cannot clobber the topic they entered,
+and cannot route the old topic's read receipts through the new project's session. The
+cache write is deliberately on the other side of that guard — the rows belong to the topic
+captured before the await, and filing them under whatever topic happens to be active when
+a slow read lands is precisely how one project's messages would reach another's frame.
+
+`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (9 tests) pins all of it,
+and was mutation-tested both ways: reverting the synchronous cache read fails 4 of them,
+and deleting the underfoot guard fails the 2 that exist for it. Full `landing` +
+`chat-core` suites: 1147 pass / 0 fail.
+
+📌 The generalisable lesson is rule 13's shape one level down: **an instrument stamped
+after an `await` measures the queue, not the work.** Its number was current, real, and
+about a different subsystem than its name — and it was believed for exactly as long as
+nobody measured the two calls it claimed to be timing.
 
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
