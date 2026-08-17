@@ -37,6 +37,7 @@ import {
 import {
   AppChatEditStore,
   AppChatStore,
+  DEFAULT_EDIT_REPLAY_LIMIT,
   ProjectDb,
 } from '@neutronai/persistence/index.ts'
 import {
@@ -162,6 +163,42 @@ const seedRows = (count: number): void => {
   for (let i = 1; i <= count; i++) stmt.run(CHANNEL_TOPIC, i, `m${i}`, `msg-${i}`, i)
 }
 
+/** Seed edit-log rows for `m<from>`..`m<to>` straight into SQL, same reason.
+ *  `deleted` picks tombstone vs body rewrite. */
+const seedEditRows = (from: number, to: number, deleted: boolean): void => {
+  const stmt = db.raw().prepare(
+    `INSERT INTO app_chat_edits
+       (topic_id, message_id, seq, rev, body, deleted, edited_at, editor_device_id)
+     VALUES (?, ?, ?, 1, ?, ?, ?, 'devX')`,
+  )
+  for (let i = from; i <= to; i++) {
+    stmt.run(CHANNEL_TOPIC, `m${i}`, i, deleted ? '' : `edited-${i}`, deleted ? 1 : 0, 1000 + i)
+  }
+}
+
+/** A device that already holds seqs 1..`count` of the seeded transcript, so a
+ *  resume from its own cursor is the resume of a CAUGHT-UP device rather than a
+ *  cold open. Bodies match {@link seedRows} so a tombstone is observable as the
+ *  body changing to ''. */
+async function storeHolding(count: number): Promise<InMemoryStore> {
+  const store = new InMemoryStore()
+  for (let i = 1; i <= count; i++) {
+    await store.upsert({
+      topic_id: CHANNEL_TOPIC,
+      client_msg_id: `m${i}`,
+      message_id: `m${i}`,
+      seq: i,
+      role: 'user',
+      body: `msg-${i}`,
+      project_id: null,
+      attachments: null,
+      created_at: i,
+      status: 'sent',
+    })
+  }
+  return store
+}
+
 const gapsIn = (events: AppWsOutbound[]) =>
   events.filter((e): e is Extract<AppWsOutbound, { type: 'history_gap' }> => e.type === 'history_gap')
 
@@ -195,9 +232,10 @@ describe('app-ws resume — a delete below the cursor reaches an offline device'
     // deletes seq 1 from another device. devA reconnects at `after_seq: 3` — above
     // the tombstone — and must still be told.
     //
-    // MUTATION-PROVED: give `AppWsAdapter.replayEditsAfter` its `after_seq`
-    // parameter back and pass `resume.after_seq` from the surface, and the final two
-    // assertions fail: no `edit_update` arrives and devA still renders 'delete me'.
+    // MUTATION-PROVED: drop the `aggregatesAtOrBelow` sweep from
+    // `AppWsAdapter.replayEditsAfter` so the edit replay is the page above the cursor
+    // only, and the final two assertions fail: no `edit_update` arrives and devA still
+    // renders 'delete me'.
     const store = new InMemoryStore()
     const a = await openClient(h.base, 'devA', store)
 
@@ -283,6 +321,101 @@ describe('app-ws resume — a delete below the cursor reaches an offline device'
     expect(seen.map((m) => m.body)).not.toContain('one')
     expect(seen.find((m) => m.seq === 1)).toMatchObject({ body: '', deleted: true })
 
+    await c.close()
+  })
+})
+
+describe('app-ws resume — a page-shaped answer starves the oldest tombstone', () => {
+  /**
+   * THE SECOND SHAPE OF THE SAME BUG, and the reason the edit replay below the
+   * cursor is a complete sweep rather than a better-ordered page.
+   *
+   * Removing the cursor's LOWER bound fixed the three-message repro above and left the
+   * mechanism intact. An edit row carries its MESSAGE's seq, so the replay window is
+   * ordered by message position; the window keeps the NEWEST `DEFAULT_EDIT_REPLAY_LIMIT`
+   * rows; and a tombstone on an OLD message is the oldest row in that ordering by
+   * construction. Give the topic `limit` newer edits and the tombstone is evicted —
+   * on that resume, and identically on every resume after it, because nothing about
+   * the ordering ever changes. Capped becomes never, and the owner's delete stays
+   * undone on a device that is otherwise perfectly caught up.
+   *
+   * No ordering fixes this, which is the point: the row that must survive is the one
+   * that sorts last. So the range the client ALREADY HOLDS is answered completely.
+   */
+  let h: Harness
+  beforeEach(async () => {
+    h = await startGateway()
+  })
+  afterEach(async () => {
+    await h.close()
+  })
+
+  const BACKLOG = 700
+  const NEWER_EDITS_FROM = 201
+
+  it('CONTROL — a newest-limit page over the same range really does drop seq 1', async () => {
+    // The probe has to be able to fail for the reason under test, so measure the
+    // starvation directly before asserting it is gone. This is the page-shaped query
+    // the replay used to be, run against the fixture, on the real store.
+    seedRows(BACKLOG)
+    seedEditRows(1, 1, true)
+    seedEditRows(NEWER_EDITS_FROM, BACKLOG, false)
+    const edits = new AppChatEditStore({ db })
+    const rows = await edits.aggregatesAfter(CHANNEL_TOPIC, 0, DEFAULT_EDIT_REPLAY_LIMIT)
+    // The budget genuinely binds: 501 rows exist, 500 come back.
+    expect(BACKLOG - NEWER_EDITS_FROM + 2).toBeGreaterThan(DEFAULT_EDIT_REPLAY_LIMIT)
+    expect(rows.length).toBe(DEFAULT_EDIT_REPLAY_LIMIT)
+    // And the one it drops is the tombstone.
+    expect(rows.map((r) => r.seq)).not.toContain(1)
+    // The sweep the fix adds returns it, from the same store, same fixture.
+    const swept = await edits.aggregatesAtOrBelow(CHANNEL_TOPIC, BACKLOG)
+    expect(swept.map((r) => r.seq)).toContain(1)
+    expect(swept.find((r) => r.seq === 1)).toMatchObject({ deleted: true, body: '' })
+  })
+
+  it('strikes the oldest message on a caught-up device with 500 newer edits above it', async () => {
+    // MUTATION-PROVED: delete the `aggregatesAtOrBelow` call in
+    // `AppWsAdapter.replayEditsAfter` (leaving the page half, which is what shipped)
+    // and the last two assertions fail — no tombstone frame arrives for m1 and the
+    // device keeps rendering 'msg-1'.
+    seedRows(BACKLOG)
+    seedEditRows(1, 1, true)
+    seedEditRows(NEWER_EDITS_FROM, BACKLOG, false)
+
+    // A device that holds the WHOLE transcript, contiguously — so nothing about
+    // history backfill is involved and the only question is edit state.
+    const store = await storeHolding(BACKLOG)
+    const c = await openClient(h.base, 'devA', store)
+    expect(await store.lastSeenSeq(CHANNEL_TOPIC)).toBe(BACKLOG)
+    expect(await store.contiguousFloorSeq(CHANNEL_TOPIC)).toBe(1)
+
+    c.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: BACKLOG }))
+    await waitFor(() => editsIn(c.events, 'm1').some((e) => e.deleted), 8000)
+
+    expect(editsIn(c.events, 'm1').at(-1)).toMatchObject({ deleted: true, body: '' })
+    const seen = await c.transcript()
+    expect(seen.find((m) => m.seq === 1)).toMatchObject({ body: '', deleted: true })
+    expect(seen.map((m) => m.body)).not.toContain('msg-1')
+
+    await c.close()
+  })
+
+  it('is stable across repeated resumes — the delete does not come back', async () => {
+    // The property is "cannot remain readable", which is a claim about every resume,
+    // not the lucky one. A device that already applied the tombstone must still hold
+    // it after the message replay runs again over the same range.
+    seedRows(BACKLOG)
+    seedEditRows(1, 1, true)
+    seedEditRows(NEWER_EDITS_FROM, BACKLOG, false)
+
+    const store = await storeHolding(BACKLOG)
+    const c = await openClient(h.base, 'devA', store)
+    for (const _round of [1, 2, 3]) {
+      c.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: BACKLOG }))
+      await new Promise((r) => setTimeout(r, 120))
+      const seen = await c.transcript()
+      expect(seen.find((m) => m.seq === 1)).toMatchObject({ body: '', deleted: true })
+    }
     await c.close()
   })
 })

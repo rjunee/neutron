@@ -256,7 +256,7 @@ describe('AppWsAdapter — the edit window covers the message window', () => {
 
     const adapter = adapterOn(new AppChatStore({ db }), true)
     const messages = (await adapter.replayAfter(CHANNEL_TOPIC, 0)).envelopes
-    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC)
+    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
 
     const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
     const leaked = idsOf(messages).filter((id) => deleted.has(id) && !tombstoned.has(id))
@@ -293,7 +293,7 @@ describe('AppWsAdapter — the edit window covers the message window', () => {
 
     const adapter = adapterOn(new AppChatStore({ db }), true)
     const messages = (await adapter.replayAfter(CHANNEL_TOPIC, 0)).envelopes
-    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC)
+    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
 
     const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
     const leaked = idsOf(messages).filter((id) => !tombstoned.has(id))
@@ -371,7 +371,7 @@ describe('AppWsAdapter.replayAfter — the omitted OLDER range is reachable', ()
     const adapter = adapterOn(new AppChatStore({ db }), true)
     const first = await adapter.replayAfter(CHANNEL_TOPIC, 0)
     const second = await adapter.replayAfter(CHANNEL_TOPIC, 0, first.older_than ?? undefined)
-    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, first.older_than ?? undefined)
+    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0, first.older_than ?? undefined)
 
     const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
     const leaked = idsOf(second.envelopes).filter((id) => !tombstoned.has(id))
@@ -450,7 +450,7 @@ describe('AppChatEditStore — an edit is scoped to ITS OWN topic', () => {
 
     const adapter = adapterOn(new AppChatStore({ db }), true)
     const messages = await adapter.replayAfter(CHANNEL_TOPIC, 0)
-    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC)
+    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
 
     const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
     const leaked = idsOf(messages.envelopes).filter((id) => deleted.has(id) && !tombstoned.has(id))

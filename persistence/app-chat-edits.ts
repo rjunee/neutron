@@ -107,13 +107,13 @@ export interface AppChatEditLog {
    * re-sorted ascending, which is the same window the message replay takes
    * (`AppChatEventLogCore.rowsAfter` owns that SQL for both).
    *
-   * THE RESUME PATH PASSES `after_seq: 0`, ALWAYS — see
-   * `AppWsAdapter.replayEditsAfter`, which does not accept a cursor at all. An edit
-   * row carries its MESSAGE's seq, so a delete of an old message is a NEW event at a
-   * LOW seq; bounding the replay by the reconnecting device's cursor excluded
-   * exactly the tombstones for messages it had already read, and a delete that
-   * happened while a device was offline never reached it. The parameter survives for
-   * the receipts/reactions shape this method mirrors, and for tests.
+   * THIS WINDOW COVERS THE MESSAGES THE CLIENT IS ABOUT TO RECEIVE, and only those.
+   * The range it is given is the message page's range, so `after_seq` is the client's
+   * resume cursor on a forward resume and 0 on a backwards page. The edit state of
+   * messages the client ALREADY HOLDS is a different question with a different
+   * answer, because a page can starve an old row forever; that half is
+   * {@link aggregatesAtOrBelow}, and the two together are what make the pair complete.
+   * `AppWsAdapter.replayEditsAfter` calls both and is the place the split is argued.
    *
    * `before_seq` MUST still be passed whenever the message replay passed it. The
    * alignment argument below is about the two windows covering the same messages;
@@ -128,8 +128,13 @@ export interface AppChatEditLog {
    * `DEFAULT_REPLAY_LIMIT` edit rows can exist at or above the message window's
    * lowest seq, and only an edit window at least that wide is guaranteed to carry
    * all of them. Shrink this below that and a capped replay can deliver a deleted
-   * message with its original body and no tombstone. Pinned by a test that asserts
-   * the relation between the two constants.
+   * message with its original body and no tombstone. Pinned by the BEHAVIOURAL guard
+   * `channels/adapters/app-ws/__tests__/replay-newest-window.test.ts` "covers the
+   * message window even when EVERY message in the topic is edited": in a topic where
+   * every message is deleted, every message in the page must arrive tombstoned. That
+   * is the observable property. Comparing the two constants to each other is
+   * arithmetic, and it stays true in a build where the replay is broken in every way
+   * that leaves a constant alone.
    */
   aggregatesAfter(
     topic_id: string,
@@ -137,6 +142,25 @@ export interface AppChatEditLog {
     limit?: number,
     before_seq?: number,
   ): Promise<AppChatEditAggregate[]>
+  /**
+   * COMPLETE edit state for every edited/deleted message at or below `max_seq`,
+   * ascending. No `limit`, deliberately.
+   *
+   * THIS IS THE HALF THAT MAKES A DELETE PROPAGATE. {@link aggregatesAfter} answers
+   * with the NEWEST `limit` rows in its range, which is right for messages the client
+   * is about to be sent and wrong for messages it already has: an old tombstone loses
+   * that budget contest to every newer edit, and it loses it on EVERY resume, so
+   * "capped" is really "never". A device holding seqs 1..700 with seq 1 deleted and
+   * 500 newer edits above it received no tombstone for seq 1 from any page-shaped
+   * query, while its own store still held the message — so the owner's delete was
+   * visibly undone there until the store was wiped. Passing `max_seq` = the client's
+   * resume cursor makes the answer complete over exactly the range the client holds,
+   * which is the only range where completeness is required.
+   *
+   * The cost, and why there is no `limit` here to tune:
+   * `AppChatEventLogCore.rowSweepSql`.
+   */
+  aggregatesAtOrBelow(topic_id: string, max_seq: number): Promise<AppChatEditAggregate[]>
 }
 
 /** Default replay window — edited messages whose state replays in one resume.
@@ -236,6 +260,10 @@ export class AppChatEditStore implements AppChatEditLog {
     before_seq?: number,
   ): Promise<AppChatEditAggregate[]> {
     return this.core.aggregatesAfter(topic_id, after_seq, limit, undefined, before_seq)
+  }
+
+  async aggregatesAtOrBelow(topic_id: string, max_seq: number): Promise<AppChatEditAggregate[]> {
+    return this.core.aggregatesAtOrBelow(topic_id, max_seq)
   }
 }
 

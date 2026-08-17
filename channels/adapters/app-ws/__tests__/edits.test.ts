@@ -228,7 +228,7 @@ describe('AppWsAdapter — edit resume replay', () => {
     await adapter.recordEdit({ channel_topic_id: CHANNEL_TOPIC, message_id: a.message_id, editor_device_id: 'devA', action: 'edit', body: 'q1-edited' })
     await adapter.recordEdit({ channel_topic_id: CHANNEL_TOPIC, message_id: c.message_id, editor_device_id: 'devA', action: 'delete' })
 
-    const all = await adapter.replayEditsAfter(CHANNEL_TOPIC)
+    const all = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
     expect(all.map((e) => e.seq).sort((x, y) => (x ?? 0) - (y ?? 0))).toEqual([1, 3])
 
     // The unedited message in the middle contributes nothing — the replay is one
@@ -254,13 +254,13 @@ describe('AppWsAdapter — edit resume replay', () => {
     // The device has seen everything (cursor 3); NOW seq 1 is deleted.
     await adapter.recordEdit({ channel_topic_id: CHANNEL_TOPIC, message_id: a.message_id, editor_device_id: 'devA', action: 'delete' })
 
-    const replay = await adapter.replayEditsAfter(CHANNEL_TOPIC)
+    const replay = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
     expect(replay.map((e) => e.seq)).toEqual([1])
     expect(replay[0]).toMatchObject({ deleted: true, body: '' })
   })
 
   it('legacy (no edit_log) replays nothing', async () => {
     const { adapter } = setup(['devA'], { withEditLog: false })
-    expect(await adapter.replayEditsAfter(CHANNEL_TOPIC)).toEqual([])
+    expect(await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)).toEqual([])
   })
 })

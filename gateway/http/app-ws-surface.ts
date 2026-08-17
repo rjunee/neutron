@@ -933,14 +933,27 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             // (one edit_update per edited/deleted message) AFTER the messages so
             // each update's target message is already applied.
             //
-            // The resume cursor is NOT passed, and unlike the three replays above
-            // that is deliberate: an edit row carries its MESSAGE's seq, so a delete
-            // of an old message is a new event at a low seq. Bounding edits by the
-            // cursor hid exactly those — a device that was offline when the owner
-            // deleted something reconnected above the tombstone and never received
-            // it. See `AppWsAdapter.replayEditsAfter`.
+            // The cursor is passed the same way the three replays above pass it, but
+            // it means something DIFFERENT here: for them it is a lower bound (skip
+            // what the client has), for the edit replay it is the DIVIDING LINE
+            // between a complete sweep below and a page above. An edit row carries its
+            // MESSAGE's seq, so a delete of an old message is a new event at a low seq
+            // — a device that was offline when the owner deleted something reconnects
+            // ABOVE the tombstone, and no page-shaped answer to that range ever
+            // reaches it. See `AppWsAdapter.replayEditsAfter`.
+            //
+            // The same asymmetry exists unfixed for receipts and reactions above: a
+            // reaction on an old message is filed at that message's low seq too, so a
+            // device that was away when it landed never receives it. Left alone
+            // deliberately — a missing reaction or an un-advanced read tick is a
+            // stale ornament on a message, not content the owner deleted staying
+            // readable, and both of those logs are message-group shaped, so the sweep
+            // this uses is not the same query for them (see
+            // `AppChatEventLogCore.aggregatesAtOrBelow`, which refuses that shape
+            // rather than quietly returning a page).
             const edits = await adapter.replayEditsAfter(
               data.channel_topic_id,
+              resume.after_seq,
               resume.before_seq,
             )
             for (const env of edits) {
@@ -955,12 +968,24 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             // were actually left behind" and this comment used to claim that it was.
             // `AppWsAdapter.replayAfter` sets `older_than` on `rows.length >=
             // DEFAULT_REPLAY_LIMIT`, so a topic holding exactly one page's worth
-            // reports a gap it does not have and the client spends one empty round
-            // trip discovering that. The CODE is the intended behaviour, not the
-            // comment: proving emptiness needs an existence query on every resume, so
-            // the alternative pays on every reconnect to save one round trip at one
-            // boundary. A page that is not full still says nothing, so a short
-            // transcript's wire trace is genuinely unchanged.
+            // reports a gap it does not have. THE CODE IS THE INTENDED BEHAVIOUR:
+            // proving emptiness needs an extra existence query on every resume, and a
+            // gap frame the client does not need is cheap to ignore.
+            //
+            // It is cheap because the CLIENT decides, not because the frame is rare.
+            // An earlier version of this comment costed the false positive as "one
+            // empty round trip", which cannot happen — a topic of exactly one page
+            // reports `older_than: 1` and both sessions drop a bound of 1 or less
+            // (`requestHistoryBackfill`), so that case costs nothing at all. The cost
+            // that DID exist was larger and elsewhere: a device holding 1..500 of 1000
+            // resumed at 500, got the 501..1000 page with `older_than: 501`, and asked
+            // for the page below 501 — 500 rows it already held — on every mobile
+            // foreground. The sessions now answer a gap from their own store
+            // (`SyncEngine.backfillFrom` over `Store.contiguousFloorSeq`) rather than
+            // from the seq the server happened to name, so a device whose transcript is
+            // already whole below the gap asks for nothing. A page that is not full
+            // still says nothing either way, so a short transcript's wire trace is
+            // unchanged.
             if (page.older_than !== null) {
               const gap: AppWsOutbound = {
                 v: 1,
