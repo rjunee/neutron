@@ -45,7 +45,11 @@ test('mismatched migration name throws', () => {
   try {
     for (const dir of [control, mutant]) {
       mkdirSync(dir, { recursive: true })
+      // Every module `runner.ts` imports by relative path has to come along,
+      // or the scratch copy fails to resolve and the "mutant went red" signal
+      // becomes a module-resolution error that looks identical to a pass.
       cpSync(join(MIGRATIONS_DIR, 'db-path.ts'), join(dir, 'db-path.ts'))
+      cpSync(join(MIGRATIONS_DIR, 'provenance.ts'), join(dir, 'provenance.ts'))
       writeFileSync(join(dir, 'collision.test.ts'), scenario)
     }
     writeFileSync(join(control, 'runner.ts'), original)

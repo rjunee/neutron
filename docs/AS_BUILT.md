@@ -2,6 +2,237 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the normalizer was pinned, the line that uses it was not
+
+Landed via PR #364.
+
+Round-two corrections landed via PR #365.
+
+A retroactive panel on #333 returned five findings, and #349 answered them by
+re-measuring rather than inheriting. **Every one of the five settles the same way
+here, independently re-measured — closed.** What is left is one level down
+again, and it is the only live defect in this entry. Measured first at
+3fb3e0e2, then RE-MEASURED after rebasing onto c3654db6, because #344 and #354
+moved lines inside the two files this touches: every citation below was
+re-derived by CONTENT rather than carried, and the seam finding was re-run on
+plain `origin/main` at c3654db6 rather than assumed to survive the rebase.
+
+Every measurement below was re-run after rebasing onto c3654db6, so the numbers
+and the line citations describe the same tree. **Line citations resolve against
+the tree this entry MERGES INTO, not against the commit the experiment first ran
+on** — `runtime/adapters/claude-code/index.ts` moved twice underneath this work
+(#344, then the docblock in this change), and a citation that resolves only at
+the commit it was typed at is the rot #339 is about.
+
+**THE HEADLINE FINDING DOES NOT REPRODUCE, AND THE SENTENCE IT ATTACKED STAYS.**
+The panel's blocker was that `docs/AS_BUILT.md` claims "each trim was
+mutation-proved" while four of eleven changed behaviour sites were pinned by
+nothing. Re-run here on `main`, one predicate at a time, against a green control
+(162 pass / 0 fail across the twelve suites that name any of these resolvers,
+before any mutation): **fourteen predicates, fourteen REDs.** Both arms of
+`resolveNeutronHome` and `resolveOpenDbPath` (`migrations/db-path.ts:46,48,81`);
+all three tiers of `resolveRegistryDbPath` and both arms of `resolveOwnerHome`
+(`gateway/boot-listener-registry.ts:69,71,73,336,338`); `applyEnvShim`
+(`open/server.ts:76`); both predicates in `resolveSkillsDir`
+(`gateway/wiring/build-phase-spec-resolver.ts:515,520`); `resolveM2FeedbackPath`
+(`onboarding/feedback/m2-week-4-collector.ts:48`); the `--home` guard
+(`scripts/email-accounts.ts:73`); `buildPromptVars` (`prompts/template.ts:116`);
+the normalizer's own predicate (`runtime/adapters/claude-code/index.ts:331`); and
+the return-verbatim half of `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts:216`). Each mutation was proved to have LANDED
+(`git diff` printed per mutation) and each was restored and re-verified clean.
+The claim is true as written.
+
+**WHAT IS NOT TRUE IS THE SCOPE IT READS AS.** `resolveReplCwdAndHome` appears in
+that mutation-proved list, and the FUNCTION is pinned. The LINE THAT USES IT was
+not. Measured: replacing `runtime/adapters/claude-code/index.ts:367`
+
+    if (resolved.cwd !== undefined) p.cwd = resolved.cwd
+
+with the pre-#333 code verbatim — `if (options.cwd !== undefined) p.cwd =
+options.cwd` — left **162 of 162 green**. That is finding (2) of the same panel,
+the one-variable-two-answers split at the one site nobody tested, and it was
+restorable in one line without a single test noticing. `persistent/pool.ts:118`
+records `cwd: options.cwd ?? process.cwd()`, so a blank survives the `??` into
+the session record; `persistent/supervision.ts` then refuses every respawn for
+that session because `existsSync('   ')` is false. The failure is silent and
+permanent for the life of the process, which is why a green suite over it is
+worse than no suite.
+
+The irony is on the record and worth keeping: the test file that covers this
+opens with "an earlier round of this change trimmed the supervision home and left
+`options.cwd` forwarded raw, and NOTHING went red", and then pinned only the pure
+function. Its sibling
+`persistent/__tests__/append-system-prompt-wiring.test.ts` exists because
+`appendSystemPromptFile` was proven onto an intermediate option bag while the real
+factory dropped it at THIS EXACT MAPPING. The same seam, the same file, the same
+year — and the second time it was the fix for the first that went unpinned.
+
+Three tests now sit at that seam, each mutation-proved with the failing test named:
+`p.cwd = options.cwd` reddens two by name; making the supervision home fall back
+(`resolved.home ?? process.cwd()`) reddens the third. They read the mapped bag back
+out of `supervisedBySessionKey` — the map `registerSupervisedSubstrate` populates,
+which is how the watchdog reaches a session's owning options — so the assertion is
+on the POST-MAPPING value and nothing is spawned. Finding (3), a blank home with no
+cwd turning supervision OFF entirely rather than misplacing it, is pinned there too:
+it was previously asserted as a returned `undefined`, which is not the same claim as
+"the registry, the respawns, the watchdog and the heartbeat are all skipped".
+
+**AND IT WAS RUN AGAIN ON THE FIXES, WHICH IS THE PART WORTH COPYING.** The
+second pass confirmed the premise and the two seam tests, and refused three
+things the first round had introduced or left:
+
+- **The leg count was STILL wrong.** The first correction said three; the
+  reviewer found more — `open/wiring/substrates.ts:189`, `:244`, `:329` and
+  `open/wiring/memory.ts` all reach the same factory, and `open/composer.ts:1296`
+  is the history-import/synthesis REPL, not the conversational one it had been
+  labelled. **Enumerating the callers had now been wrong twice, in the same
+  direction both times**, so the docblock stopped enumerating: every route goes
+  through `buildLlmCallSubstrate`, which copies `cwd` unexamined (`:778`) and
+  calls this factory (`:868`), and the callers divide into a HOME that cannot be
+  blank and a CALLER-SUPPLIED PER-RUN PATH that can. That is a structure, and it
+  does not depend on getting a count right.
+- **The scoped `afterEach` still reached globally.** Scoping it to the seam
+  `describe` narrowed WHEN it fired without changing WHAT it touched:
+  `shutdownAllPersistentRepls()` SIGTERMs every warm REPL in the pool and clears
+  every supervision entry, and with files running concurrently in one process it
+  can kill a child a sibling suite is awaiting — `append-system-prompt-wiring.
+  test.ts:210` is exactly such an await, on the same pool. These tests never call
+  `.start()`, so they own nothing in the pool; the only durable things they
+  create are two timers and one registry entry per instance, all keyed by paths
+  derived from a temp dir this file owns. Teardown now removes exactly those, by
+  name, synchronously.
+- **This entry contained the reviewer's own findings TWICE**, and dated itself
+  2026-08-16 above three 2026-08-17 entries in a log whose first line says
+  "newest first". Both fixed. A log that documents unproved claims while itself
+  carrying a duplicated section and a misordered heading is the same defect one
+  level up, and the reviewer was right to say so.
+
+**A METHOD NOTE THAT IS PART OF THE RESULT.** The first pass of this audit
+produced **eighteen consecutive REDs and every one was false.** The harness took
+its suite list as `"$@"` from a `zsh` caller, where an unquoted `$VAR` is not
+word-split, so twelve paths arrived as ONE filter, matched no test file, and
+`bun test` exited 1. Eighteen exit-1s that meant "your filter is malformed" read
+exactly like eighteen proofs. It was caught only because the nineteenth mutation
+was expected to be green and also came back red. The harness now requires a
+POSITIVE CONTROL — the run must report at least 150 tests executed or the result
+is discarded rather than reported. **A mutation proof asserts a negative, and a
+negative from a tool that could not run is indistinguishable from one it earned;
+this is the failure the original claim was accused of, reproduced inside the audit
+of that accusation.**
+
+**THE TWO REACHABILITY ITEMS THE PANEL LEFT UNVERIFIED ARE SETTLED, AND BOTH WERE
+RIGHT.** `resolveRegistryDbPath` has NO invocation: `git grep` over tracked files
+returns the definition (`gateway/boot-listener-registry.ts:67`), two re-export
+statements (`gateway/index.ts:61`, `gateway/composer-contract.ts:41`), its tests
+and docs — no call site. Checked one hop further than before, in the private
+hosting overlay that consumes this repo as a submodule: zero hits outside
+`vendor/`, with a positive control on the same query shape (a known symbol
+returns 2 there) so the zero is an answer rather than a broken grep. Its trim is
+hardening on a published surface, not a bug fix, and `config/index.ts` already
+says exactly that. The REPL blank-`cwd` arm is likewise unreached — but for a
+weaker reason than the docblock claimed, and the docblock is corrected in this
+change. It said every production caller resolves `cwd` through
+`resolveNeutronHome`. **There are three INDEPENDENT legs into that factory and
+only the first does** — and the first correction of this docblock, written in
+this change, still got it wrong by treating the second and third as one leg. A
+cross-model reviewer caught that, and both errors pointed the same way: toward
+believing the blank arms could not be reached and so need not be pinned.
+Leg 1 is the owner's conversational substrate (`open/composer.ts:1296`, resolved
+at `:856`). Leg 2 is the ephemeral per-dispatch factory
+(`open/wiring/substrates.ts:364`), whose value reaches here unexamined
+(`gateway/wiring/build-llm-call-substrate.ts:778`) from
+`agent-dispatch/service.ts:487` — `req.repo_path ?? this.deps.repo_path`, where
+`??` keeps a blank. Leg 3 is the warm fire substrate
+(`open/wiring/substrates.ts:413`, wired at `open/composer.ts:1045`), which is NOT
+fed by leg 2 at all: its cwd is `run.worktree ?? run.repo_path`
+(`trident/inner-loop.ts:702`), and it is memoized per cwd, so a blank would be
+cached under the blank key and reused. What actually keeps the arms unreached is
+narrower than "every producer avoids a blank": leg 2's real callers —
+`agent-dispatch/tool.ts`, `command.ts` and `board-research-start.ts` — never
+mention `repo_path` at all (verified: zero occurrences in each), so the `??`
+falls through to `this.deps.repo_path`, bound to `owner_home` at
+`open/composer.ts:1122`. The code-gen core's blank rejection
+(`cores/free/code-gen/src/backend.ts:278`) guards ITS input, not this leg, and
+citing it as protection here was part of the same conflation. So the arms are
+unreached BY CONSTRUCTION AT THE CALLERS, not by any check on the path — one
+caller electing to pass a computed `repo_path` reopens them.
+
+Findings (4) and (5) were confirmed closed and needed nothing: the shim test
+covers `NEUTRON_DB_PATH` as well as `OWNER_HOME`, with an operator-pin control
+(`open/__tests__/owner-slug-agreement.test.ts:447-500`), and
+`skill-forge/registrar.ts:32` no longer calls itself a mirror — it states, and
+this audit confirms by search, that it has no in-tree caller at all.
+
+**"PREVIOUSLY UNPINNED" IS SETTLED STATICALLY AS WELL AS EMPIRICALLY**, because
+a mutation over twelve suites proves those twelve did not catch it and nothing
+more. Eight test files on `main` name `createClaudeCodeSubstrateAuto`, and every
+one that passes a `cwd` passes a REAL path — temp dirs in
+`gateway/wiring/__tests__/build-live-agent-turn-session-isolation.test.ts:128`
+and `build-llm-call-substrate.test.ts:132`, a literal in
+`persistent/__tests__/append-system-prompt-wiring.test.ts:122`, a temp dir in
+`persistent/__tests__/model-floor.test.ts:597`. None passes a blank, so none can
+distinguish `resolved.cwd` from `options.cwd`. Positive control on the same
+query: it does find `.cwd` assertions where they exist
+(`open/__tests__/open-wiring-substrates.test.ts:330`), so the absence is an
+answer rather than a broken grep.
+
+**THE CROSS-MODEL REVIEWER RAN — it was DEFERRED on #333, which is the reason
+those findings sat unactioned — and it could not refute the fix or the
+unpinned claim. It returned four corrections and every one was to what this
+change SAYS about itself**, which is the defect class the entry is about, so
+they are recorded rather than quietly folded in:
+
+- **"Nothing is started here" was FALSE.** Constructing the factory arms
+  `startReplWatchdog` and `startModelUpdateWatchdogForInstance` — real timers.
+  Only the REPL CHILD is absent, because nothing calls `.start()`. The
+  `afterEach` exists to stop those timers, and now says so.
+- **The supervision test's prose claimed more than it asserts.** It observes
+  REGISTRATION; registry path, respawns, watchdog and heartbeat merely share the
+  same `if (home !== undefined)` block. Registration is a PROXY for that block
+  being entered — sound today, and it stops being sound the moment the block is
+  split, which is now written down instead of assumed.
+- **"Nothing downstream of it re-checks" was self-contradictory** — this
+  function IS the re-check. It is now "no stage BETWEEN that producer and this
+  function", with the unexamined intermediate copy cited
+  (`gateway/wiring/build-llm-call-substrate.ts:778`).
+- **The three legs were conflated.** `agent-dispatch/service.ts:487` feeds the
+  EPHEMERAL leg; WARM FIRE is wired separately at `open/composer.ts:1045` and
+  takes its cwd from `trident/inner-loop.ts:702`
+  (`run.worktree ?? run.repo_path`), MEMOIZED per cwd rather than fresh per run.
+  And the blank arms are unreached not because a core rejects a blank
+  (`cores/free/code-gen/src/backend.ts:278` guards ITS OWN input, a different
+  leg) but because the dispatch tool and its slash command OMIT `repo_path`
+  entirely, so the `??` falls through to `deps.repo_path`, bound to `owner_home`
+  at `open/composer.ts:1122`. Unreached BY CONSTRUCTION AT THE CALLERS — one
+  caller electing to pass a computed path reopens it.
+
+It also found the one thing with teeth beyond wording. **The runner executes
+many files concurrently INSIDE ONE PROCESS, so `process.env` is shared**, and a
+file-level `afterEach` restoring a module-load `NEUTRON_HOME` snapshot could
+overwrite another suite's home while that suite sat suspended at an `await` —
+several suites set that same variable. Env mutation is now confined to
+`withEnvHome`, which sets, calls and restores with NO intervening `await`, so
+single-threaded execution makes the interleaving IMPOSSIBLE rather than
+unlikely; and the hook is scoped to the seam block so it no longer fires after
+the four pure-function tests or clears every persistent REPL more often than
+needed. A test that fixes a race by narrowing the odds is the same kind of claim
+this entry exists to refuse.
+
+## 2026-08-17 — the review wrapper resolves from the harness install
+
+`trident/inner-loop.ts` now resolves the sibling `codex-review.sh` as
+`CODEX_REVIEW_SCRIPT_PATH` and threads it into the module-less workflow as
+`codexReviewScript`. That harness path is authoritative for every target,
+including Open: there is deliberately no `repoPath` fallback, and a configured
+Codex review seat without the threaded value fails closed with an error naming
+`codexReviewScript`.
+
+This completes the review half of #355. Builds and reviews now both resolve their
+Codex wrappers from the harness install, so a target repo does not need a
+`trident/` directory and Open can no longer work merely by coincidence while
+other projects exit 127 or drift onto deployed copies.
+
 ## 2026-08-17 — a live instance crash-looped on a migration ordinal, and the repair is now in `repairs.json`
 
 An instance refused to boot for ~3 hours (1248 uncaught exceptions) because `_migrations` recorded version 124 under one name while the deployed tree carried another at that ordinal. `migrations/runner.ts` threw rather than guess, which is the designed behaviour — the cost is a hard crash loop, so the instance served nothing and clients connected to an empty server.
@@ -32,6 +263,256 @@ needed. Until this change deploys, the currently deployed harness still resolves
 from `repoPath`, so Enterprise builds can fail with the named 127/deferred outcome
 during the accepted window between workaround removal and deployment. Nothing
 under `/opt/neutron-managed` was changed or copied.
+
+## 2026-08-16 — a fired reminder gets its own REPL, and a background failure stops silencing chat
+
+Two defects, one outage. Three consecutive journal lines from a live instance at
+2026-08-17T01:56:11Z: a reminder's compose aborted
+(`route=compose_failed reason="SubstrateCallError: cc-llm-call: aborted"`), the
+warm chat session was evicted as abandon-poisoned, and the owner's next chat turn
+died with `persistent-repl: REPL process exited`. He could not send a message
+until the service was restarted.
+
+**Defect 1 — composition ran on the owner's chat REPL.** `open/composer.ts` wired
+the reminder dispatcher's `llm` onto `liveAgentSubstrate`, and the work-board
+wakeup onto the same substrate through the same wrapper. The persistent pool keys
+on `substrate_instance_id` first (`persistent/pool.ts` `poolKeyFor`), so composing
+on `cc-agent-*` meant composing on his session. The abort path cancels the handle
+(`runtime/collect-tokens.ts`, `keepAliveExempt: true`), cancelling an unsettled
+turn poisons the session (`persistent/pool.ts:678`), and the next dispatch evicts
+and respawns it (`persistent/spawn.ts:862-866`).
+
+The two prior patches at that call site — passing the live-chat `--tools` surface,
+then the live-chat model — were both attempts to make SHARING the session safe.
+They stop an eviction caused by a mismatch; nothing stops an eviction caused by a
+failure. The #340 entry directly below closed with the actual answer ("it needs its
+own substrate") and this is it: `cc-nudge-*` (`open/wiring/substrates.ts`), a warm
+background REPL. Both timer-driven callers move onto it.
+
+**The new lane is an EQUAL-GRANT, SEPARATE-SESSION twin of the chat lane, not a
+sandbox.** It runs `PROFILE_WARM_CHAT` with `enableToolBridge: true`, the GitHub
+credential and the frontier-model floor — deliberately identical to `cc-agent-*`.
+Tightening it would rebuild the `cc-ritual-*` sandbox that ISSUES #504 deleted: a
+ritual composes on this seam, that sandbox meant the morning brief could not read
+the owner's calendar, and he rejected it outright ("access to everything general has
+access to"). The security boundary for the lane is the ritual APPROVAL GATE
+(`reminders/ritual-fire.ts`), which is unchanged. What is deliberately different is
+the instance id (the whole fix), the credential-failure lane, and the owner-facing
+notice/delivery sinks, which are omitted so a failed background compose cannot push
+a banner into his chat. `docs/INVARIANTS.md` #7/#68 and the tool-bridge section of
+`docs/SYSTEM-OVERVIEW.md` are updated in this change to state the pair rather than
+`cc-agent-*` alone. The `--tools` surface stays `LIVE_AGENT_TOOL_NAMES`, now for
+capability rather than session-matching: a ritual composes on this seam and cannot
+apply its own surface, so its approval prompt's promise of web egress is only true
+if the surface carries it.
+
+**Cost, stated plainly.** The pool key folds `project_id`
+(`runtime/adapters/claude-code/persistent/pool.ts` `poolKeyFor`) and both callers
+pass a `metering_context.project_id`, so this adds ONE resident `claude` child per
+project that actually receives background composition — the same per-project shape
+`cc-agent-*` already has, and the persistent pool has no count cap or idle TTL
+today. Also NOT fixed by this change: the spawn-side respawn failure in the incident
+journal (`persistent/spawn.ts:862-866` emits "REPL process exited" AFTER an
+evict-and-respawn, i.e. the respawn itself failed). This change removes the reason
+the owner's child was being evicted at all; if that respawn failure has a resource
+component, a second warm child per project moves against it and it will resurface
+on its own terms.
+
+**Defect 2 — a background failure locked out interactive traffic.** The substrate
+maps "retryable, no HTTP status" to 429 (`mapStatusForPoolCooldown`), so a crashed
+REPL child read as a quota condition. Five of those reached
+`MAX_CONSECUTIVE_FAILURES` and parked the box's ONE credential for
+`CONSECUTIVE_COOLDOWN_MS`; every subsequent owner turn then failed instantly with
+"all Anthropic credentials are in cooldown (429/402/401)" — naming a cause that was
+not true. The decision taken: a background lane may not contribute to a pool-wide
+counter that gates the owner's chat at all. `reportFailure` gains an `origin`
+(`runtime/credential-pool.ts`); on `'background'` the strike ledger is left entirely
+alone — neither incremented NOR re-read, so such a report can neither trip the park
+nor extend one an interactive turn already tripped. Gating only the increment would
+have left a background failure re-stamping `cooldown_until` an hour out on every
+fire: the same outage with a slower fuse.
+
+The substrate additionally declines to report an INFERRED cooldown on that lane
+(`credential_failure_lane` in `gateway/wiring/build-llm-call-substrate.ts`, threaded
+through the OpenAI path too). "Inferred" is drawn strictly, because the first cut of
+this guard drew it too loosely and left the hole open: it covers the retryable→429
+default, a parsed status the mapper REWRITES (a retryable `HTTP 503` also maps to
+429), and `detectCliAuthFailure` — whose weakest rule is the substring `401`
+appearing ANYWHERE in the message, so a background REPL crash mentioning it would
+otherwise have cooled the owner's only credential straight through the new guard.
+A REAL provider status still cools on either lane: a 429/402/401 the provider itself
+returned, or an adapter-stamped `rate_limited`. Rationale: nobody is blocked on a
+background turn, it retries on its own schedule, and any condition it could discover
+is rediscovered immediately and authoritatively by the next interactive turn — while
+the cost of the old behaviour was total product silence. On the CC path that real-429
+cooldown is `COOLDOWN_429_MS` = 60s flat: `retry_after_ms` is never populated by the
+claude-code adapters (`grep -rn retry_after_ms runtime/adapters/claude-code/` returns
+nothing), so the `retry-after` branch is reachable only from the OpenAI path.
+
+Regression tests. `open/__tests__/background-compose-never-disturbs-chat.test.ts`
+models the warm pool with the real `poolKeyFor` and the real poison rule (an aborted
+compose must leave the chat child at generation 1), with `metering_context` on every
+spec so the `project_id` pool-key dimension is actually exercised; its wiring guard
+now drives the REAL `buildOpenGraphComposer` and asserts which
+`substrate_instance_id` the production `reminder_dispatcher.dispatch()` turn lands
+on, instead of grepping composer source.
+`gateway/wiring/__tests__/background-lane-never-locks-out-owner.test.ts` drives
+inferred-cooldown failures through both lanes with an interactive CONTROL on every
+assertion, and — because the first round's tests never reached `reportFailure` on
+the background path at all, which made the `origin` argument itself untested — adds
+REAL-provider-status cases on both the Claude and the OpenAI dispatch paths. Its
+lane tests deliberately do NOT use the dead-REPL message as their vehicle any more
+(see Defect 3): a message the substrate now classifies for itself proves nothing
+about the lane, so they run on a generic unstamped retryable failure instead.
+`open/__tests__/open-wiring-substrates.test.ts` now enumerates every wired substrate
+for the tool-bridge and frontier-floor claims rather than asserting only the positive
+case, so those exclusivity titles are measured.
+
+Mutation results, MEASURED (each mutation applied alone, then the three files above
+run together: baseline 52 pass / 0 fail):
+- collapse `cc-nudge-${owner_handle}` → `cc-agent-${owner_handle}`: 7 failures.
+- point the composer's dispatcher back at `buildSubstrateReminderLlm(liveAgentSubstrate)`:
+  2 failures.
+- drop the `failureLane` argument from all four `reportFailure` call sites: 2 failures.
+- delete `credential_failure_lane: 'background'` from the nudge substrate: 1 failure.
+- revert `reportFailure`'s strike-park check to unconditional: 1 failure.
+- treat `detectCliAuthFailure` as a provider status again: 1 failure.
+
+The last three were each survived by the first round's tests and are the reason this
+round's were written: a guard whose wiring, whose park re-check and whose definition
+of "provider-reported" are all untested is a guard that reads correct and is not.
+
+**Defect 3 — the owner's own retries parked his own credential, and no lane rule
+could have stopped it.** Review found the lane split and the strike gating still
+left the incident partly live, and the PR's own passing CONTROL test was asserting
+the defect: five `persistent-repl: REPL process exited` failures on the INTERACTIVE
+lane still parked the pool for an hour. Re-reading the journal shows why that
+matters rather than being a hypothetical — the third line of the incident is exactly
+that error on the owner's chat turn. The sequence is: a background compose kills the
+shared child; the pool evicts and respawns it; the owner, seeing a failure, retries;
+each retry lands mid-respawn and fails the same way; five of them reach
+`MAX_CONSECUTIVE_FAILURES`. Every one of those turns has a person waiting on it, so
+`origin: 'background'` never applies to any of them.
+
+The fix is a classification, not a lane rule. `detectReplProcessExited`
+(`gateway/wiring/build-llm-call-substrate.ts`) joins the existing substrate
+fast-paths — `detectBinaryNotFound`, `detectChannelWedged`, `detectTurnTimeout` —
+which all sit AHEAD of the cooldown map and suppress it on BOTH lanes. A dead child
+is a local substrate fact that says nothing about the credential: no status comes
+back, so `mapStatusForPoolCooldown(null, retryable=true)` can only guess 429, and
+rotating credentials cannot revive a process. The error is re-emitted UNCHANGED and
+retryable, so the caller retries onto the respawned child on the same healthy
+credential — the pool's existing self-heal, which only ever worked if the credential
+was not parked underneath it. Precedence note: this now also outranks
+`detectCliAuthFailure` for a dead-REPL message whose stderr tail happens to contain
+`401`, which is correct — a tool call inside the turn returning 401 says nothing
+about the credential the turn was dispatched on, and the process death is the
+authoritative fact.
+
+Mutation, MEASURED: forcing `detectReplProcessExited` to return `false` fails 2 of
+the new tests (the owner-retry case and the 401-in-the-tail precedence case). The
+background-lane assertion survives that mutation by design — the lane exemption
+already covers it, and the two mechanisms are deliberately independent.
+
+**Three costs this change accepts, stated rather than implied.**
+1. *Turn serialization is per-session, so the two lanes can now run concurrently in
+   the same cwd.* `acquireTurn` (`runtime/adapters/claude-code/persistent/repl-session.ts`)
+   serializes turns within ONE session; splitting the lanes necessarily removes the
+   accidental mutual exclusion the shared session gave. Both children spawn at
+   `owner_home` and both carry `Bash`/`Write`/`Edit`, so a ritual writing files can
+   now race an owner chat turn doing the same (git `index.lock` contention, lost
+   edits). This is the direct price of isolation and is accepted: the alternative is
+   the shared session whose failures caused the outage. It is bounded by rituals
+   being rare and short. If it is ever observed, the answer is a work-scoped lock,
+   not re-merging the lanes.
+2. *The new lane is not pre-warmed.* `prewarmSubstrate` runs only for
+   `llmCallSubstrate` (`open/wiring/substrates.ts`), so the first fired reminder
+   after each restart pays the ~10-30s cold spawn inside the dispatcher's 90s compose
+   budget (`DEFAULT_TIMEOUT_MS`, `reminders/dispatcher.ts`). It fits, it is
+   self-healing, and it is once per restart — not worth holding a second resident
+   child at every boot on installs that may never fire a reminder.
+3. *The lane is outside `/reset` and the periodic context-reset sweep.* Both
+   actuators address `cc-agent-*` only; the reasoning is recorded inline at the sweep
+   in `open/composer.ts`. If that transcript is ever observed growing, it needs its
+   own policy instance with its own cooldown map, not an extra id on the existing
+   one. The per-session idle auto-compact remains the backstop.
+
+Also corrected in this round: the comments claiming the owner-facing sinks are
+omitted from the new lane were incomplete. `enableToolBridge` is ONE gate that
+installs three things, so the TodoWrite→Work Board sync and the Activity Inspector
+tap ride onto `cc-nudge-*` too. The todo sync is unreachable there (`TodoWrite` is
+not in `LIVE_AGENT_TOOL_NAMES`, the surface both callers pass); the activity tap is
+reachable and kept deliberately, because a read-only record of work done for the
+owner is reporting, not interrupting. `open/wiring/substrates.ts` and
+`runtime/adapters/claude-code/persistent/spawn.ts` now say so.
+
+Local verification of the final state: `scripts/ci/typecheck-all.sh` — 51 tsconfigs,
+all pass; `bun test reminders/ gateway/wiring/ gateway/proactive/ runtime/__tests__`
+plus the three files above — 1968 pass, 0 fail; `scripts/ci/leak-gate.sh` on the
+pushed diff — silent.
+
+## 2026-08-16 — a migration row names the build that applied it
+
+Landed via PR #352.
+
+`_migrations` gained two nullable columns, `content_sha256` and `applied_by_commit`, written
+inside each migration's own transaction so a row can never exist without naming what wrote it.
+The commit resolves from `NEUTRON_COMMIT_SHA` first, then from git metadata read as plain files
+(no subprocess — `git` may be absent and a subprocess on the boot path can hang), then NULL. A
+tarball or container install with no `.git` still boots and still records the content hash. The
+git search only accepts a checkout this tree owns — one whose root `package.json` names this
+package — so an install unpacked inside an unrelated repository records NULL instead of that
+repository's HEAD, which would be well-formed, plausible and wrong.
+
+Nothing is written while deciding. The ledger is read shape-tolerantly and the columns are added
+only on the path that is about to write a row, so a boot that ends in the refusal has not touched
+the schema of the database it just declared untrustworthy, and a fully-migrated database can still
+be opened read-only for inspection.
+
+The columns are bootstrapped by the runner rather than by a `NNNN_*.sql` file. The runner is the
+ledger's sole owner, and an ALTER at some ordinal would land after the rows 0001..NNNN-1 it needs
+to change, so every fresh install would come up provenance-less — reintroducing the gap this
+closes.
+
+The name-mismatch refusal is unchanged and still fail-closed; only its message changed. It now
+prints what is on disk (file + hash) against what was recorded (name, timestamp, hash, build) and
+emits the exact `repairs.json` entry that resolves it, so recovery no longer means
+reverse-engineering `repairKey()` from source. A test parses that entry back out of the thrown
+message and proves it resolves the mismatch; others pin that the guard still refuses a genuine
+mismatch, that an entry for a different version or a different name cannot launder one, and that
+pre-existing rows stay NULL.
+
+Declined: refusing a `.sql` file that is not part of the deployed tree. Such a guard *would* have
+flagged the motivating incident — an untracked file at that ordinal is exactly the condition it
+tests — but only in an install with trusted repo metadata, and it can detect nothing in the
+tarball, zip and container installs a self-hostable engine has to support. A refusal that is
+silently inert on much of the fleet trains operators to trust a check that is not running, so
+the answer here is the recorded hash, which every install carries.
+
+The ownership test is anchored, not just applied. Checking ownership wherever a `.git` happens to
+sit still lets the walk climb past this tree's own root, so a copy of it unpacked inside ANOTHER
+Neutron checkout passes ownership against the HOST's `package.json` — both are named `neutron`,
+which is precisely what a name cannot decide — and records the host's HEAD. The walk therefore
+ends at the nearest root: a `.git` that is not ours is NULL, and our root carrying no `.git` is
+also NULL rather than a reason to look one directory higher.
+
+Both guards carry kill evidence rather than a passing assertion. `toBeNull()` is a weak witness,
+since null is equally what a broken resolver, an unreadable fixture, or a walk that never arrived
+returns. Every null assertion is paired with a positive control that starts from the same nested
+directory and differs only in the root package name, and each guard is then deleted from a scratch
+copy and proved to turn its scenario red — ownership kills the stranger's-repository case,
+anchoring kills the vendored-copy case, and neither mutant kills the other's.
+
+Two behaviours are documented rather than changed, because both are deliberate. A steady-state
+boot does not reshape the ledger, so an instance that upgraded onto this build keeps the old
+column set until its next pending migration; reads are shape-tolerant and absent columns select
+as NULL, which is the honest value anyway. And an acknowledged `repairs.json` entry does write —
+it records the acknowledgement in `_migration_repairs` — so a database with acknowledged repairs
+is not one that opens read-only, which the README now says instead of promising otherwise. The
+recorded hash is likewise reported, not enforced: applied migration files get edited in place for
+benign reasons (a comment, a reflow), and gating boot on the hash would turn each into a crash
+loop, while the failure it would catch already produces a name mismatch.
+
 
 ## 2026-08-16 — a stalled driver is not a driver, and a silent skip is going quiet
 
@@ -149,214 +630,6 @@ going permanently unlogged, which is the precise defect this logging exists to
 cure. A test now meets that collision head-on, and it is a real discriminator
 rather than a restatement: under the separator-removal mutation it is the ONLY
 test that fails, 25 others still passing, and it passes again on restore.
-
-## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
-
-The entry-aware merge driver now retains both different entries added concurrently under the same
-heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
-while keeping the log's heading-uniqueness invariant. Unit and real-git tests pin union, dedupe,
-suffix collision handling, intact history, and conflict-free merging.
-
-## 2026-08-16 — the identity-trim claim was true and unexecuted, so CI now runs it
-
-Landed via PR #349.
-
-#333's review panel was still running when the PR merged, so its findings were
-re-verified here against `main` rather than inherited. **All five were already
-closed by #333 itself before it landed, and the entry below says so with the
-mutation evidence rather than repeating them as open.** What the re-audit found
-instead is one level up, and it is the reason the same defect recurred four
-times.
-
-**The audit, measured rather than asserted.** Every behaviour-changing predicate
-#333 touched was independently mutation-tested against a GREEN BASELINE control
-(139 pass / 0 fail across the nine suites before any mutation): 12 predicates
-across 9 readers — `resolveOpenDbPath` and both arms of `resolveNeutronHome`
-(`migrations/db-path.ts`), all three tiers of `resolveRegistryDbPath`
-(`gateway/boot-listener-registry.ts`), `applyEnvShim` (`open/server.ts`), both
-predicates in `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`),
-`resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`),
-`resolveReplCwdAndHome` (`runtime/adapters/claude-code/index.ts`), the `--home`
-guard (`scripts/email-accounts.ts`), `buildPromptVars` (`prompts/template.ts`)
-and the return-verbatim half of `resolveStatePath`
-(`gbrain-memory/gbrain-doctor.ts`). Reverting each one turns its suite RED. The
-sentence "each trim was mutation-proved" is therefore TRUE as written, and it
-stays; the two reachability claims settle the same way —
-`resolveRegistryDbPath` is named only by two `export {}` statements
-(`gateway/index.ts`, `gateway/composer-contract.ts`) with no in-tree caller, and
-the REPL blank-`cwd` arm is genuinely unreachable because `open/composer.ts:855`
-derives its `cwd` from `resolveNeutronHome`, which cannot return blank, and
-passes it at `:1295`.
-
-**The defect that IS still live: the claim's proof was a command nothing ran.**
-`config/index.ts` bounds its "every TypeScript read treats blank as unset" claim
-with a re-runnable grep, which was the right instinct and fixed the WORDING of
-the failure rather than its MECHANISM. A command in a comment fires only when a
-reader chooses to type it, and by then the claim is already wrong — which is
-precisely how rounds 1-4 went: round 1 named three untrimmed siblings as
-trimming, round 2 called a seven-item list exhaustive while naming a file that
-contained no `trim()` at all, round 3's pattern could not match the constant-key
-reader, round 4 claimed a mutation proof for four sites pinned by nothing. Four
-rounds, one mechanism, each discovered months late. So the command is now
-EXECUTED: `tests/integration/identity-env-readers-registry.test.ts` walks the
-tree with those patterns and asserts the reader set exactly equals its
-registry — in both directions, so ANY new reader fails on the PR that adds it
-AND a row whose file stopped reading the variable fails too, which is the rot
-that produced rounds 1 and 2. **What it does NOT prove is written into the test
-and into `config/index.ts`:** the per-file notes are prose and nothing evaluates
-them, so a PR can still add an untrimmed reader plus a row claiming it trims and
-stay green. What the guard removes is the SILENT path — a new reader can no
-longer land unnoticed. That is a smaller claim than "every reader trims", and it
-is the one the file can keep; an earlier draft of this entry stated the larger
-one, which would have restaged the exact defect it documents. Mutation-proved
-four ways, each with a
-control proving the mutation landed: a new unregistered reader → RED naming the
-file; a deleted row → RED; a row for a non-reader → RED in the `stale`
-direction; and neutering the walker → RED on the anti-vacuity control, which is
-the failure a set-equality guard silently hides when it compares two empty
-lists.
-
-**The guard scans the BARE NAME, which makes it strictly broader than the
-command it executes — on purpose.** Mirroring the published grep's access forms
-would have inherited its blind spots and rebuilt round 3's bug inside the guard
-against round 3's bug: `env["NEUTRON_HOME"]`, a template-literal key, and
-`const { OWNER_HOME } = env` match none of those forms. Measured — the published
-pattern set returns **0** on a file containing both shapes while returning 1 on
-a form it does match (positive control, so the 0 is an answer rather than a
-broken grep); the widened guard flags both. The cost is that three files which
-NAME a variable without reading it now carry a registry line saying so
-(`gateway/boot-bind-policy.ts`'s wide-bind refusal message, `open/server.ts`'s
-boot banner, and `runtime/system-prompt.ts`'s `{{OWNER_HOME}}` placeholder
-rewrite). One annotated line beats a hole, and the asymmetry is the reason: a
-false positive costs a line, a false negative costs another silent
-identity-resolution bug found months later. A fully computed key
-(`env[someVar]`) stays invisible to any textual scan, and a `/*` inside a string
-literal still swallows a read as far as the regex stripper is concerned. Both
-limits are written down AND asserted as failing-by-design cases, each with a
-control proving the detector otherwise finds that read — so a boundary cannot
-drift silently: if either ever becomes detectable, the assertion breaks and the
-documented limit has to be updated in the same change. Neither is patched with a
-half-correct heuristic on purpose, because a checker that LOOKS solved while
-still missing cases is the confidently-specific failure this entry is about.
-
-**The cross-model reviewer RAN this time, and it found the detector's own blind
-spots — which is the whole reason to run it.** #333's panel had that reviewer
-deferred, so its verdict carried no quality signal; this one returned four
-findings and three were real and unaddressed. Two it confirmed independently
-while they were being fixed (the access-form false negatives, and `.tsx`/`.mts`
-sitting outside a walker whose prose claimed TypeScript — 191 such files exist,
-none name the variables today, so widening cost zero rows and closed the hole
-before it had anything in it). The third was a hole nobody had found: the
-comment stripper is a regex lexer, and a read inside a MULTI-LINE template
-literal was silently lost, because the `//` in a URL sits on a line whose
-opening backtick is on the previous line and a per-line quote-balance heuristic
-cannot see that. Backticks are now tracked across lines, and the reviewer's
-counterexample is a test fixture. The fourth (P2) was a missing pin: the
-space-padded verbatim test covered two of the three tiers, so a mutation to
-`return legacy.trim()` would have passed it — now covered, and mutation-proved
-RED. **A guard built to stop under-proved claims arrived under-proved in four
-ways, and the reviewer is what caught it.**
-
-**A pin that lives only in a distant file is indistinguishable from no pin.**
-`gateway/__tests__/resolve-registry-db-path.test.ts` advertises itself as
-pinning "all four resolution tiers" and covered `''` but never whitespace; the
-whitespace pin lived in `open/__tests__/owner-slug-agreement.test.ts`. Reverting
-all three trims left the registry's OWN suite green, and this audit's first pass
-read that green as "unpinned" and nearly filed it as a blocker — a false
-negative caused by scoping the check to the file the code lives in, which is
-where anyone would look. The whitespace cases plus per-tier controls and a
-space-padded real-path case now live beside the tiers they govern; all three
-arms fail there under mutation.
-
-## 2026-08-16 — the merge-driver docblocks cite line numbers that moved
-
-Landed via PR #339.
-
-A retroactive panel returned five findings against the entry below after it had
-merged. Four did not reproduce against the merged code: `--check` from a linked
-worktree exits 0 (measured, git 2.50.1, with a main-checkout control), `--check`
-is unaffected by PATH (measured with bun removed from PATH and with a decoy bun
-first, both exit 0), its remedy is safe because the driver path is resolved from
-the main worktree, and the boundary is covered by
-`scripts/git/as-built-merge-realgit.test.ts` `--check from somewhere other than
-the shell that installed`. Those fixes had landed inside the PR before it
-merged; the panel had reviewed an earlier revision.
-
-The fifth had a live residual and this is it: the cross-file citations in the
-merge-driver cluster point at line numbers in a living file.
-
-Re-measured at `caf6928e` itself, because the first version of this entry got the
-measurement wrong in the direction that flattered the change. One of the three
-citations had rotted, not three. `scripts/git/as-built-merge-realgit.test.ts`
-cited line 715 of `trident/orchestrator.ts` for the publisher's `git apply
---3way`; at that commit 715 is prose about `.gitattributes` and `merge=union`,
-and the call sits in `rebaseOntoObservedBase` roughly 360 lines further down.
-The two in `scripts/install-merge-drivers.sh` cited line 633 for the
-`.exe`-stripping guard, and at that commit line 633 **is** that guard — both
-were correct. The earlier claim that they pointed at nothing took its numbers
-from the post-merge branch tree while attributing them to `caf6928e`, which is
-the same error the entry is about.
-
-The correction is the argument, and a stronger one than the original. Read those
-two correct citations in a tree that has merged current main and they are 45
-lines short, because unrelated work grew above them. Neither file was edited. A
-line number is not a property of a file; it is a property of a file at a commit,
-and every reader is at a different commit — so this is not a class of bug that
-care at typing time can prevent. A fourth citation named a line relative to
-`origin/main`, a target that moves on its own.
-
-So the citations now name a symbol and a new test resolves each one, the durable
-form this cluster already applies one level up where the two derivations of the
-driver command are pinned by a test rather than by a comment. No line locator
-survives anywhere in the cluster, with no exemption for pinned commits: the first
-cut allowed one and resolved the pin through git, and CI showed the shards check
-out shallow so the object is absent and a correct citation was reported as a bad
-pin. An exemption nothing can verify is worth less than none, so the historical
-citation gives up its line number and names its commit and the config write
-instead.
-
-The guard needed two rounds of its own medicine. The first version was green on
-things it was not checking: it resolved a cited symbol against the whole target
-file, so the word `bun` sitting beside a misspelled symbol carried it (`bun`
-occurs seven times in the target); it matched a definition as a prefix, so any
-rename that appended — V2, Impl — passed; it keyed sites on an exact path, so
-misspelling the path skipped every check; and it asserted nothing about its own
-coverage, which matters because every check in it is a loop over sites and a loop
-over zero sites passes.
-
-A cross-model reviewer then defeated the repairs across two further rounds: an
-extension cap that missed long and digit-leading extensions, a path check that
-only saw a backtick span holding nothing else, a definition check that a
-commented-out corpse of the old declaration satisfied, an anchor that is an
-expression rather than an identifier and so was never really checked at its site,
-a permalink form that carries a query string before its line fragment, an
-identifier boundary that did not count `$`, and site discovery that had the same
-whole-span assumption the path check had already been fixed for. Each measured
-green before and red after, with a control proving the mutation landed and a clean
-baseline proving it is not a false positive. The coverage assertion earned its
-place during the work: rewording a docblock dropped a citation site and the
-assertion is what said so, before the reword was committed.
-
-One of those repairs briefly made the guard WORSE, and only measuring caught it.
-The reviewer reported that a misspelled symbol sharing a backtick span with a
-correct path would pass; run against the code, it did not — the span stopped
-counting as a citation site at all, so the coverage floor fired and reported it.
-Teaching the loop to read mixed spans removed that accident, and on its own turned
-a mutation the guard had been catching into a silent pass. The fix was safe in
-isolation and a regression in context, which is only visible if the mutation is
-re-run after the change rather than reasoned about. Companions inside a citation
-span are now checked as part of the citation, and the mutation is red again.
-
-Two of its findings were declined on measurement rather than fixed, and the limits
-are written into the test beside the checks. Requiring every backticked path to
-resolve produces thirteen false reds in this cluster — `process.env`, `origin/main`,
-`Math.min`, a fixture filename invented by a test in the same file — because no
-rule short of reading the prose separates those from a repository path, so the
-check keeps the unambiguous shape and states what it does not cover. A near-miss
-detector over cited symbols was measured too: it closes the same class and flags
-four legitimate sites, three of them docblocks that discuss a rename in order to
-explain the check. Buying a guard by making its own explanation unwritable is the
-wrong trade.
 
 ## 2026-08-16 — the model floor was a list of four ids, not a floor
 
@@ -588,6 +861,214 @@ spawn chokepoint reddens 4; removing the poisoned seed reddens the replay test;
 flipping a memory call site onto the chat profile reddens 2. A ninth — removing
 the empty-string refusals — is the one described above as unreachable from a
 suite, and was verified by probe instead of being counted as test coverage.
+
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
+
+The entry-aware merge driver now retains both different entries added concurrently under the same
+heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
+while keeping the log's heading-uniqueness invariant. Unit and real-git tests pin union, dedupe,
+suffix collision handling, intact history, and conflict-free merging.
+
+## 2026-08-16 — the identity-trim claim was true and unexecuted, so CI now runs it
+
+Landed via PR #349.
+
+#333's review panel was still running when the PR merged, so its findings were
+re-verified here against `main` rather than inherited. **All five were already
+closed by #333 itself before it landed, and the entry below says so with the
+mutation evidence rather than repeating them as open.** What the re-audit found
+instead is one level up, and it is the reason the same defect recurred four
+times.
+
+**The audit, measured rather than asserted.** Every behaviour-changing predicate
+#333 touched was independently mutation-tested against a GREEN BASELINE control
+(139 pass / 0 fail across the nine suites before any mutation): 12 predicates
+across 9 readers — `resolveOpenDbPath` and both arms of `resolveNeutronHome`
+(`migrations/db-path.ts`), all three tiers of `resolveRegistryDbPath`
+(`gateway/boot-listener-registry.ts`), `applyEnvShim` (`open/server.ts`), both
+predicates in `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`),
+`resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`),
+`resolveReplCwdAndHome` (`runtime/adapters/claude-code/index.ts`), the `--home`
+guard (`scripts/email-accounts.ts`), `buildPromptVars` (`prompts/template.ts`)
+and the return-verbatim half of `resolveStatePath`
+(`gbrain-memory/gbrain-doctor.ts`). Reverting each one turns its suite RED. The
+sentence "each trim was mutation-proved" is therefore TRUE as written, and it
+stays; the two reachability claims settle the same way —
+`resolveRegistryDbPath` is named only by two `export {}` statements
+(`gateway/index.ts`, `gateway/composer-contract.ts`) with no in-tree caller, and
+the REPL blank-`cwd` arm is genuinely unreachable because `open/composer.ts:855`
+derives its `cwd` from `resolveNeutronHome`, which cannot return blank, and
+passes it at `:1295`.
+
+**The defect that IS still live: the claim's proof was a command nothing ran.**
+`config/index.ts` bounds its "every TypeScript read treats blank as unset" claim
+with a re-runnable grep, which was the right instinct and fixed the WORDING of
+the failure rather than its MECHANISM. A command in a comment fires only when a
+reader chooses to type it, and by then the claim is already wrong — which is
+precisely how rounds 1-4 went: round 1 named three untrimmed siblings as
+trimming, round 2 called a seven-item list exhaustive while naming a file that
+contained no `trim()` at all, round 3's pattern could not match the constant-key
+reader, round 4 claimed a mutation proof for four sites pinned by nothing. Four
+rounds, one mechanism, each discovered months late. So the command is now
+EXECUTED: `tests/integration/identity-env-readers-registry.test.ts` walks the
+tree with those patterns and asserts the reader set exactly equals its
+registry — in both directions, so ANY new reader fails on the PR that adds it
+AND a row whose file stopped reading the variable fails too, which is the rot
+that produced rounds 1 and 2. **What it does NOT prove is written into the test
+and into `config/index.ts`:** the per-file notes are prose and nothing evaluates
+them, so a PR can still add an untrimmed reader plus a row claiming it trims and
+stay green. What the guard removes is the SILENT path — a new reader can no
+longer land unnoticed. That is a smaller claim than "every reader trims", and it
+is the one the file can keep; an earlier draft of this entry stated the larger
+one, which would have restaged the exact defect it documents. Mutation-proved
+four ways, each with a
+control proving the mutation landed: a new unregistered reader → RED naming the
+file; a deleted row → RED; a row for a non-reader → RED in the `stale`
+direction; and neutering the walker → RED on the anti-vacuity control, which is
+the failure a set-equality guard silently hides when it compares two empty
+lists.
+
+**The guard scans the BARE NAME, which makes it strictly broader than the
+command it executes — on purpose.** Mirroring the published grep's access forms
+would have inherited its blind spots and rebuilt round 3's bug inside the guard
+against round 3's bug: `env["NEUTRON_HOME"]`, a template-literal key, and
+`const { OWNER_HOME } = env` match none of those forms. Measured — the published
+pattern set returns **0** on a file containing both shapes while returning 1 on
+a form it does match (positive control, so the 0 is an answer rather than a
+broken grep); the widened guard flags both. The cost is that three files which
+NAME a variable without reading it now carry a registry line saying so
+(`gateway/boot-bind-policy.ts`'s wide-bind refusal message, `open/server.ts`'s
+boot banner, and `runtime/system-prompt.ts`'s `{{OWNER_HOME}}` placeholder
+rewrite). One annotated line beats a hole, and the asymmetry is the reason: a
+false positive costs a line, a false negative costs another silent
+identity-resolution bug found months later. A fully computed key
+(`env[someVar]`) stays invisible to any textual scan, and a `/*` inside a string
+literal still swallows a read as far as the regex stripper is concerned. Both
+limits are written down AND asserted as failing-by-design cases, each with a
+control proving the detector otherwise finds that read — so a boundary cannot
+drift silently: if either ever becomes detectable, the assertion breaks and the
+documented limit has to be updated in the same change. Neither is patched with a
+half-correct heuristic on purpose, because a checker that LOOKS solved while
+still missing cases is the confidently-specific failure this entry is about.
+
+**The cross-model reviewer RAN this time, and it found the detector's own blind
+spots — which is the whole reason to run it.** #333's panel had that reviewer
+deferred, so its verdict carried no quality signal; this one returned four
+findings and three were real and unaddressed. Two it confirmed independently
+while they were being fixed (the access-form false negatives, and `.tsx`/`.mts`
+sitting outside a walker whose prose claimed TypeScript — 191 such files exist,
+none name the variables today, so widening cost zero rows and closed the hole
+before it had anything in it). The third was a hole nobody had found: the
+comment stripper is a regex lexer, and a read inside a MULTI-LINE template
+literal was silently lost, because the `//` in a URL sits on a line whose
+opening backtick is on the previous line and a per-line quote-balance heuristic
+cannot see that. Backticks are now tracked across lines, and the reviewer's
+counterexample is a test fixture. The fourth (P2) was a missing pin: the
+space-padded verbatim test covered two of the three tiers, so a mutation to
+`return legacy.trim()` would have passed it — now covered, and mutation-proved
+RED. **A guard built to stop under-proved claims arrived under-proved in four
+ways, and the reviewer is what caught it.**
+
+**A pin that lives only in a distant file is indistinguishable from no pin.**
+`gateway/__tests__/resolve-registry-db-path.test.ts` advertises itself as
+pinning "all four resolution tiers" and covered `''` but never whitespace; the
+whitespace pin lived in `open/__tests__/owner-slug-agreement.test.ts`. Reverting
+all three trims left the registry's OWN suite green, and this audit's first pass
+read that green as "unpinned" and nearly filed it as a blocker — a false
+negative caused by scoping the check to the file the code lives in, which is
+where anyone would look. The whitespace cases plus per-tier controls and a
+space-padded real-path case now live beside the tiers they govern; all three
+arms fail there under mutation.
+
+## 2026-08-16 — the merge-driver docblocks cite line numbers that moved
+
+Landed via PR #339.
+
+A retroactive panel returned five findings against the entry below after it had
+merged. Four did not reproduce against the merged code: `--check` from a linked
+worktree exits 0 (measured, git 2.50.1, with a main-checkout control), `--check`
+is unaffected by PATH (measured with bun removed from PATH and with a decoy bun
+first, both exit 0), its remedy is safe because the driver path is resolved from
+the main worktree, and the boundary is covered by
+`scripts/git/as-built-merge-realgit.test.ts` `--check from somewhere other than
+the shell that installed`. Those fixes had landed inside the PR before it
+merged; the panel had reviewed an earlier revision.
+
+The fifth had a live residual and this is it: the cross-file citations in the
+merge-driver cluster point at line numbers in a living file.
+
+Re-measured at `caf6928e` itself, because the first version of this entry got the
+measurement wrong in the direction that flattered the change. One of the three
+citations had rotted, not three. `scripts/git/as-built-merge-realgit.test.ts`
+cited line 715 of `trident/orchestrator.ts` for the publisher's `git apply
+--3way`; at that commit 715 is prose about `.gitattributes` and `merge=union`,
+and the call sits in `rebaseOntoObservedBase` roughly 360 lines further down.
+The two in `scripts/install-merge-drivers.sh` cited line 633 for the
+`.exe`-stripping guard, and at that commit line 633 **is** that guard — both
+were correct. The earlier claim that they pointed at nothing took its numbers
+from the post-merge branch tree while attributing them to `caf6928e`, which is
+the same error the entry is about.
+
+The correction is the argument, and a stronger one than the original. Read those
+two correct citations in a tree that has merged current main and they are 45
+lines short, because unrelated work grew above them. Neither file was edited. A
+line number is not a property of a file; it is a property of a file at a commit,
+and every reader is at a different commit — so this is not a class of bug that
+care at typing time can prevent. A fourth citation named a line relative to
+`origin/main`, a target that moves on its own.
+
+So the citations now name a symbol and a new test resolves each one, the durable
+form this cluster already applies one level up where the two derivations of the
+driver command are pinned by a test rather than by a comment. No line locator
+survives anywhere in the cluster, with no exemption for pinned commits: the first
+cut allowed one and resolved the pin through git, and CI showed the shards check
+out shallow so the object is absent and a correct citation was reported as a bad
+pin. An exemption nothing can verify is worth less than none, so the historical
+citation gives up its line number and names its commit and the config write
+instead.
+
+The guard needed two rounds of its own medicine. The first version was green on
+things it was not checking: it resolved a cited symbol against the whole target
+file, so the word `bun` sitting beside a misspelled symbol carried it (`bun`
+occurs seven times in the target); it matched a definition as a prefix, so any
+rename that appended — V2, Impl — passed; it keyed sites on an exact path, so
+misspelling the path skipped every check; and it asserted nothing about its own
+coverage, which matters because every check in it is a loop over sites and a loop
+over zero sites passes.
+
+A cross-model reviewer then defeated the repairs across two further rounds: an
+extension cap that missed long and digit-leading extensions, a path check that
+only saw a backtick span holding nothing else, a definition check that a
+commented-out corpse of the old declaration satisfied, an anchor that is an
+expression rather than an identifier and so was never really checked at its site,
+a permalink form that carries a query string before its line fragment, an
+identifier boundary that did not count `$`, and site discovery that had the same
+whole-span assumption the path check had already been fixed for. Each measured
+green before and red after, with a control proving the mutation landed and a clean
+baseline proving it is not a false positive. The coverage assertion earned its
+place during the work: rewording a docblock dropped a citation site and the
+assertion is what said so, before the reword was committed.
+
+One of those repairs briefly made the guard WORSE, and only measuring caught it.
+The reviewer reported that a misspelled symbol sharing a backtick span with a
+correct path would pass; run against the code, it did not — the span stopped
+counting as a citation site at all, so the coverage floor fired and reported it.
+Teaching the loop to read mixed spans removed that accident, and on its own turned
+a mutation the guard had been catching into a silent pass. The fix was safe in
+isolation and a regression in context, which is only visible if the mutation is
+re-run after the change rather than reasoned about. Companions inside a citation
+span are now checked as part of the citation, and the mutation is red again.
+
+Two of its findings were declined on measurement rather than fixed, and the limits
+are written into the test beside the checks. Requiring every backticked path to
+resolve produces thirteen false reds in this cluster — `process.env`, `origin/main`,
+`Math.min`, a fixture filename invented by a test in the same file — because no
+rule short of reading the prose separates those from a repository path, so the
+check keeps the unambiguous shape and states what it does not cover. A near-miss
+detector over cited symbols was measured too: it closes the same class and flags
+four legitimate sites, three of them docblocks that discuss a rename in order to
+explain the check. Buying a guard by making its own explanation unwritable is the
+wrong trade.
 
 ## 2026-08-16 — a stored record could pull the owner's chat below the best model
 

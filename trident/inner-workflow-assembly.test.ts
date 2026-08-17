@@ -177,6 +177,7 @@ async function runWorkflow(
     runId: opts.recordCheckpoints === true ? 'run-assembly-1' : null,
     checkpointScript: opts.recordCheckpoints === true ? '/repo/trident/checkpoint.sh' : null,
     codexBuildScript: '/harness/trident/codex-build.sh',
+    codexReviewScript: '/harness/trident/codex-review.sh',
     resumeCheckpoint: null,
     codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
     kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured

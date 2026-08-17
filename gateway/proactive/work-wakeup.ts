@@ -168,8 +168,9 @@ export interface WakeupProjectWork {
 
 /**
  * The composition seam — structurally identical to `ReminderLlm`, so the
- * composer passes the SAME `buildSubstrateReminderLlm(liveAgentSubstrate)`
- * wrapper the fired-reminder path uses. One substrate entry, two callers.
+ * composer passes the SAME `buildSubstrateReminderLlm(reminderComposeSubstrate)`
+ * wrapper the fired-reminder path uses. One substrate entry, two callers — and
+ * that substrate is the BACKGROUND `cc-nudge-*` REPL, never the owner's chat one.
  */
 export interface WakeupLlm {
   compose(spec: AgentSpec, opts?: { timeout_ms?: number }): Promise<string>
@@ -191,11 +192,12 @@ export interface WorkWakeupDeps {
    */
   post(input: { project_key: string; body: string; loud: boolean }): boolean | Promise<boolean>
   /**
-   * ⚠️ MUST be the owner's live-chat surface verbatim (`LIVE_AGENT_TOOL_NAMES`).
-   * The warm-pool reuse guard evicts a child whose requested `--tools` surface
-   * differs from the one it was spawned with, so a narrower list here would tear
-   * down the owner's chat REPL on every wakeup (`reminders/dispatcher.ts`
-   * carries the same warning for the same reason).
+   * ⚠️ MUST match what the fired-reminder dispatcher passes — both compose on the
+   * ONE background `cc-nudge-*` REPL, and the warm-pool reuse guard evicts a child
+   * whose requested `--tools` surface differs from the one it was spawned with. So
+   * a differing list here would thrash that child between the two callers. Today
+   * both pass `LIVE_AGENT_TOOL_NAMES` (`reminders/dispatcher.ts` carries the same
+   * note for the same reason).
    */
   tool_names: ReadonlyArray<string>
   /** Live best-model thunk (`getBestModel`) — overnight work gets the real model. */

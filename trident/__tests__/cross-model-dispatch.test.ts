@@ -30,7 +30,11 @@ import { fileURLToPath } from 'node:url'
 
 import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 
-import { buildWorkflowArgs, CODEX_BUILD_SCRIPT_PATH } from '../inner-loop.ts'
+import {
+  buildWorkflowArgs,
+  CODEX_BUILD_SCRIPT_PATH,
+  CODEX_REVIEW_SCRIPT_PATH,
+} from '../inner-loop.ts'
 import { TRIDENT_PHASES } from '../phase-models.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -114,6 +118,14 @@ async function runWorkflow(
     model?: string
     /** Simulate a wrapper death before either trailer-writing branch. */
     missingBuildTrailer?: boolean
+    /** Answers returned by the truth-order probe after the bridge's wait expires. */
+    trailerProbe?: Array<{
+      trailer?: string
+      exitCode?: string
+      alive?: boolean
+      errBytesBefore?: number
+      errBytesAfter?: number
+    }>
     /** The preserved build worktree contains changes after that death. */
     preservedBuildWork?: boolean
   } = {},
@@ -122,6 +134,7 @@ async function runWorkflow(
   const logs: string[] = []
   let synthCount = 0
   let deferredClaudeSeat = false
+  let trailerProbeIndex = 0
 
   const agent = async (prompt: string, o?: Record<string, unknown>): Promise<unknown> => {
     const label = o?.['label'] as string | undefined
@@ -163,6 +176,18 @@ async function runWorkflow(
             preservedWork: opts.preservedBuildWork === true,
           }
         : built
+    }
+    if (String(label).startsWith('build-trailer-probe-')) {
+      const probes = opts.trailerProbe ?? []
+      const next = probes.length === 0 ? undefined : probes[Math.min(trailerProbeIndex, probes.length - 1)]
+      trailerProbeIndex += 1
+      return {
+        trailer: next?.trailer ?? '',
+        exitCode: next?.exitCode ?? '',
+        alive: next?.alive ?? false,
+        errBytesBefore: next?.errBytesBefore ?? 100,
+        errBytesAfter: next?.errBytesAfter ?? 100,
+      }
     }
     if (String(label).startsWith('head-probe-round-built-')) {
       return { head: label === 'head-probe-round-built-r1' ? 'a'.repeat(40) : 'b'.repeat(40) }
@@ -570,6 +595,92 @@ describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () =>
   })
 })
 
+describe('the build trailer truth-order helpers — boundaries, executed', () => {
+  function extractFn(name: string): string {
+    const at = SRC.indexOf(`function ${name}(`)
+    expect(at).toBeGreaterThan(-1)
+    const open = SRC.indexOf('{', at)
+    let depth = 0
+    for (let i = open; i < SRC.length; i++) {
+      if (SRC[i] === '{') depth++
+      else if (SRC[i] === '}') {
+        depth--
+        if (depth === 0) return SRC.slice(at, i + 1)
+      }
+    }
+    throw new Error(`unbalanced braces extracting ${name}`)
+  }
+
+  const source = [
+    extractFn('parseBuildTrailer'),
+    extractFn('classifyTrailerWait'),
+    'return { parseBuildTrailer, classifyTrailerWait }',
+  ].join('\n')
+  const fns = new Function(source)() as {
+    parseBuildTrailer: (text: unknown) => Record<string, string> | null
+    classifyTrailerWait: (probe: {
+      trailer: string
+      exitCode: string
+      alive: boolean
+      errBytesBefore: number
+      errBytesAfter: number
+    }) => { state: string; signalExit?: number | null; trailer?: Record<string, string> }
+  }
+  const emptyProbe = {
+    trailer: '',
+    exitCode: '',
+    alive: false,
+    errBytesBefore: 100,
+    errBytesAfter: 100,
+  }
+
+  test('POSITIVE CONTROL: the extraction contains both decisions', () => {
+    expect(source).toContain("state: 'landed'")
+    expect(source).toContain('NEUTRON_CODEX_BUILD_WORKTREE=')
+  })
+
+  test('a missing or duplicated key is not a complete trailer', () => {
+    const missing = [
+      'NEUTRON_CODEX_BUILD_BRANCH=',
+      'NEUTRON_CODEX_BUILD_HEAD=',
+      'NEUTRON_CODEX_BUILD_REMOTE_HEAD=',
+      'NEUTRON_CODEX_BUILD_PR=',
+      'NEUTRON_CODEX_BUILD_DIFF=',
+    ].join('\n')
+    expect(fns.parseBuildTrailer(missing)).toBeNull()
+    expect(fns.parseBuildTrailer(`${missing}\nNEUTRON_CODEX_BUILD_WORKTREE=\nNEUTRON_CODEX_BUILD_HEAD=again\n`)).toBeNull()
+  })
+
+  test('six empty values are still a landed trailer', () => {
+    const trailer = [
+      'NEUTRON_CODEX_BUILD_BRANCH=',
+      'NEUTRON_CODEX_BUILD_HEAD=',
+      'NEUTRON_CODEX_BUILD_REMOTE_HEAD=',
+      'NEUTRON_CODEX_BUILD_PR=',
+      'NEUTRON_CODEX_BUILD_DIFF=',
+      'NEUTRON_CODEX_BUILD_WORKTREE=',
+    ].join('\n')
+    expect(fns.parseBuildTrailer(trailer)).toEqual({
+      branch: '',
+      head: '',
+      remoteHead: '',
+      pr: '',
+      diff: '',
+      worktree: '',
+    })
+  })
+
+  test('liveness vetoes death, while exit and stderr boundaries stay strict', () => {
+    expect(fns.classifyTrailerWait({ ...emptyProbe, alive: true, exitCode: '143' })).toEqual({ state: 'alive' })
+    expect(fns.classifyTrailerWait({ ...emptyProbe, exitCode: '0' })).toEqual({ state: 'dead', signalExit: null })
+    expect(fns.classifyTrailerWait({ ...emptyProbe, exitCode: '143' })).toEqual({ state: 'dead', signalExit: 143 })
+    expect(fns.classifyTrailerWait({ ...emptyProbe, errBytesBefore: -1, errBytesAfter: 5000 })).toEqual({
+      state: 'dead',
+      signalExit: null,
+    })
+  })
+})
+
 describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the phase', () => {
   /**
    * The reason to move a build off Claude is the Anthropic quota, so "it routes to
@@ -588,6 +699,15 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
    * `the bridge is told not to build` below is what holds that line.
    */
   const CODEX_BUILD = { build: { model: 'terra' } }
+  const SIX_LINE_TRAILER = [
+    'NEUTRON_CODEX_BUILD_BRANCH=trident/a-run',
+    `NEUTRON_CODEX_BUILD_HEAD=${'a'.repeat(40)}`,
+    'NEUTRON_CODEX_BUILD_REMOTE_HEAD=',
+    'NEUTRON_CODEX_BUILD_PR=',
+    'NEUTRON_CODEX_BUILD_DIFF=/tmp/x.diff',
+    'NEUTRON_CODEX_BUILD_WORKTREE=/wt',
+    '',
+  ].join('\n')
 
   test('the wrapper resolves from the harness install, never the repo being built', async () => {
     expect(CODEX_BUILD_SCRIPT_PATH).toBe(
@@ -657,6 +777,8 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
       const prompt = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
       expect(prompt).toContain('600-second per-call ceiling')
       expect(prompt).toContain('nohup setsid ')
+      expect(prompt).toContain('status=$1; pidf=$2; shift 2')
+      expect(prompt).toContain('/tmp/trident-codex-build-run-1-r1.pid')
       expect(prompt).toContain('540 seconds')
       expect(prompt).toContain('45 minutes total')
     } finally {
@@ -664,18 +786,21 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     }
   })
 
-  test('an absent completion trailer is DEFERRED and names the killed wrapper artifacts', async () => {
+  test('an absent completion trailer is DEFERRED without inventing a kill', async () => {
     const { result, logs, captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
       missingBuildTrailer: true,
     })
     expect(result['ok']).toBe(false)
     expect(result['checkpoint']).toBe('inner-error')
     const terminal = logs.find((line) => line.includes('inner THREW')) ?? ''
-    expect(terminal).toContain('DEFERRED: the build wrapper was killed before it could report')
+    expect(terminal).toContain("DEFERRED: the codex build's completion trailer")
+    expect(terminal).toContain('had not appeared within the wait')
+    expect(terminal).not.toContain('was killed')
     expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.trailer')
     expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.err')
     expect(terminal).toContain('preserved worktree')
     expect(terminal).not.toContain('produced no')
+    expect(captured.filter((c) => String(c.label).startsWith('build-trailer-probe-'))).toHaveLength(1)
     expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
   })
 
@@ -687,6 +812,43 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(logs.find((line) => line.includes('inner THREW'))).toContain(
       'preserved worktree, which holds uncommitted work',
     )
+  })
+
+  test('an observed signal exit may say the wrapper was killed', async () => {
+    const { logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      missingBuildTrailer: true,
+      trailerProbe: [{ exitCode: '143' }],
+    })
+    const terminal = logs.find((line) => line.includes('inner THREW')) ?? ''
+    expect(terminal).toContain('was killed (signal exit 143')
+    expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.exit')
+  })
+
+  test('a growing stderr vetoes the deferral and extends the wait', async () => {
+    const { result, captured, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      missingBuildTrailer: true,
+      trailerProbe: [
+        { errBytesBefore: 100, errBytesAfter: 5000 },
+        { trailer: SIX_LINE_TRAILER },
+      ],
+    })
+    expect(captured.filter((c) => String(c.label).startsWith('build-trailer-probe-'))).toHaveLength(2)
+    expect(logs.some((line) => line.includes('trailer absent but the wrapper is alive'))).toBe(true)
+    expect(logs.some((line) => line.includes('inner THREW'))).toBe(false)
+    expect(captured.some((c) => String(c.label).startsWith('argus:'))).toBe(true)
+    expect(result['ok']).toBe(true)
+  })
+
+  test('a trailer written after the wait expires is collected, not reported as a kill', async () => {
+    const { result, captured, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      missingBuildTrailer: true,
+      trailerProbe: [{ trailer: SIX_LINE_TRAILER }],
+    })
+    expect(result['ok']).toBe(true)
+    expect(logs.some((line) => line.includes('inner THREW'))).toBe(false)
+    expect(logs.some((line) => line.includes('was killed'))).toBe(false)
+    expect(logs.some((line) => line.includes('late completion trailer landed on probe 1/6'))).toBe(true)
+    expect(captured.some((c) => String(c.label).startsWith('argus:'))).toBe(true)
   })
 
   test('completed failed and ok trailers retain their existing result paths', async () => {
@@ -1299,6 +1461,52 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // NO reviewer was paid to read an unbuilt branch, and nothing re-Forged on Claude.
     expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
     expect(captured.filter((c) => String(c.label).startsWith('forge:fix-round-'))).toEqual([])
+  })
+})
+
+describe('THE REVIEW RUNS THROUGH THE HARNESS CODEX WRAPPER', () => {
+  test('the review wrapper resolves from the harness install, never the repo being reviewed', async () => {
+    expect(CODEX_REVIEW_SCRIPT_PATH).toBe(
+      fileURLToPath(new URL('../codex-review.sh', import.meta.url)),
+    )
+    expect(existsSync(CODEX_REVIEW_SCRIPT_PATH)).toBe(true)
+    const prompt = promptFor((await runWorkflow(productionArgs(null))).captured, 'argus:codex')
+    expect(prompt).not.toContain('/repo/trident/codex-review.sh')
+  })
+
+  test('a review in a repo with NO trident/ directory resolves and runs the wrapper', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-no-trident-'))
+    try {
+      const initialized = spawnSync('git', ['init'], { cwd: dir, encoding: 'utf8' })
+      expect(initialized.status).toBe(0)
+      const { captured } = await runWorkflow(productionArgs(null, { repo_path: dir }))
+      const prompt = promptFor(captured, 'argus:codex')
+      const match = /bash '([^']*codex-review\.sh)'/.exec(prompt)
+      expect(match).not.toBeNull()
+      const wrapper = match![1]!
+      expect(existsSync(wrapper)).toBe(true)
+      expect(wrapper.startsWith(`${dir}/`)).toBe(false)
+
+      const ran = spawnSync('/bin/bash', [wrapper, 'main'], {
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? '' },
+        encoding: 'utf8',
+      })
+      expect(ran.status).toBe(10)
+      expect(ran.stderr).toContain('NOT_CONNECTED')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a configured codex review seat with no threaded codexReviewScript fails closed by name', async () => {
+    const args = productionArgs(null)
+    delete args['codexReviewScript']
+    const { result, captured, logs } = await runWorkflow(args)
+    expect(logs.some((line) => line.includes('codexReviewScript'))).toBe(true)
+    expect(captured.filter((c) => c.label === 'argus:codex')).toEqual([])
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(result['blockKind']).toBe('infra-only')
   })
 })
 
