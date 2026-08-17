@@ -932,9 +932,15 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             // Track B Phase 4 (edit/delete) — likewise replay current edit state
             // (one edit_update per edited/deleted message) AFTER the messages so
             // each update's target message is already applied.
+            //
+            // The resume cursor is NOT passed, and unlike the three replays above
+            // that is deliberate: an edit row carries its MESSAGE's seq, so a delete
+            // of an old message is a new event at a low seq. Bounding edits by the
+            // cursor hid exactly those — a device that was offline when the owner
+            // deleted something reconnected above the tombstone and never received
+            // it. See `AppWsAdapter.replayEditsAfter`.
             const edits = await adapter.replayEditsAfter(
               data.channel_topic_id,
-              resume.after_seq,
               resume.before_seq,
             )
             for (const env of edits) {
@@ -943,9 +949,18 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             }
             // The truncation signal, LAST — after every frame the page consists of,
             // so a client that reacts to it by requesting the next page cannot
-            // interleave two pages' messages. Sent only when rows were actually left
-            // behind; an unbounded-above forward resume that fit in one page says
-            // nothing, which is why a short transcript's wire trace is unchanged.
+            // interleave two pages' messages.
+            //
+            // Sent whenever the page came back FULL, which is NOT the same as "rows
+            // were actually left behind" and this comment used to claim that it was.
+            // `AppWsAdapter.replayAfter` sets `older_than` on `rows.length >=
+            // DEFAULT_REPLAY_LIMIT`, so a topic holding exactly one page's worth
+            // reports a gap it does not have and the client spends one empty round
+            // trip discovering that. The CODE is the intended behaviour, not the
+            // comment: proving emptiness needs an existence query on every resume, so
+            // the alternative pays on every reconnect to save one round trip at one
+            // boundary. A page that is not full still says nothing, so a short
+            // transcript's wire trace is genuinely unchanged.
             if (page.older_than !== null) {
               const gap: AppWsOutbound = {
                 v: 1,

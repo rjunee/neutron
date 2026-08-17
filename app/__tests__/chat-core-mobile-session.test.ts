@@ -22,6 +22,7 @@ import { parseDevTokenUserId } from '../lib/auth-helpers';
 import { MobileChatSession } from '../lib/chat-core/mobile-session';
 import {
   SqliteChatStore,
+  contiguousFloorSql,
   type SqlRow,
   type SqliteExecutor,
   type SqlValue,
@@ -900,7 +901,9 @@ describe('MobileChatSession — the backwards history walk', () => {
 
   it('walks a capped replay back to seq 1 on this device', async () => {
     // The mobile store is the real on-device SQLite one, so this also pins that
-    // `earliestSeenSeq` is answerable from it — the read the walk restarts from.
+    // `contiguousFloorSeq` is answerable from it — the read the walk restarts from,
+    // and the one place its SQL (a correlated `NOT EXISTS` over the `(topic_id, seq)`
+    // index) runs against a real op-sqlite database rather than the in-memory store.
     const store = await freshStore();
     const { session, sockets } = makeSession(store);
     session.start();
@@ -947,5 +950,93 @@ describe('MobileChatSession — the backwards history walk', () => {
     const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
     expect(seqs).toEqual(Array.from({ length: 45 }, (_, i) => i + 1));
     expect(sockets[0]!.backwardsResumes().at(-1)).toMatchObject({ after_seq: 0, before_seq: 6 });
+  });
+
+  it('sees an INTERIOR hole in the on-device SQLite store, not just a missing prefix', async () => {
+    // `SqliteChatStore.contiguousFloorSeq` is a SECOND implementation of the
+    // contiguity read — a correlated `NOT EXISTS` walked backwards off the
+    // `(topic_id, seq)` index — so it needs its own hole fixture rather than
+    // inheriting the in-memory store's coverage. Two implementations of one
+    // predicate is exactly where a divergence hides.
+    //
+    // MUTATION-PROVED: revert the SQL to `SELECT MIN(seq)` and this returns 1, so
+    // the mobile client asks for nothing and the hole is permanent on device.
+    const store = await freshStore();
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => i + 1), // an old prefix: 1..5
+      ...Array.from({ length: 10 }, (_, i) => i + 20), // and a recent run: 20..29
+    ];
+    for (const seq of rows) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+
+    // The forward cursor is above the hole, and seq 1 IS held — the exact shape that
+    // made the old `MIN(seq) > 1` test answer "nothing is missing".
+    expect(await store.lastSeenSeq(TOPIC)).toBe(29);
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(20);
+
+    // Filling the hole makes it silent again, so a healthy device stops asking.
+    for (const seq of Array.from({ length: 14 }, (_, i) => i + 6)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+  });
+
+  it('answers contiguity off the (topic_id, seq) index — no table access, no sort', async () => {
+    // THE COST CLAIM, MEASURED. `Store.contiguousFloorSeq` documents the device read
+    // as an index walk bounded by the newest run's length. The shape that makes that
+    // true is a covering-index walk on the outer row plus an EQUALITY point probe on
+    // the predecessor; the shape that quietly destroys it is a RANGE probe, which
+    // turns the subquery into a per-row walk of the topic and the whole read into
+    // O(rows^2) on exactly the long transcript it exists to repair.
+    //
+    // That is not hypothetical. Adding a defensive `AND p.seq > 0` to the subquery
+    // during this build made SQLite prefer the range constraint over the equality,
+    // and only the plan showed it — every behavioural assertion above stayed green.
+    // So the plan is pinned, over the very string the store prepares.
+    const db = new Database(':memory:');
+    dbs.push(db);
+    await SqliteChatStore.open(bunExecutor(db));
+    const details = (
+      db.prepare(`EXPLAIN QUERY PLAN ${contiguousFloorSql()}`).all() as Array<
+        Record<string, unknown>
+      >
+    ).map((r) => String(r['detail']));
+
+    const outer = details.find((d) => d.includes(' m USING'));
+    const inner = details.find((d) => d.includes(' p USING'));
+    // The outer walk: covered by the index, bounded above by the ORDER BY + LIMIT.
+    expect(outer).toContain('COVERING INDEX idx_chat_messages_topic_seq');
+    // The predecessor probe: an EQUALITY, which is the whole measurement. A range
+    // here (`seq>?`) is the regression described above.
+    expect(inner).toContain('COVERING INDEX idx_chat_messages_topic_seq');
+    expect(inner).toContain('seq=?');
+    // No sort (`ORDER BY seq DESC` is served by walking the index backwards) and no
+    // table access on either leg.
+    const joined = details.join(' | ');
+    expect(joined).not.toContain('TEMP B-TREE');
+    expect(joined).not.toContain('SCAN');
   });
 });

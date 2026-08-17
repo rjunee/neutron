@@ -439,8 +439,17 @@ export class AppChatEventLogCore<SqlRow, Agg> {
    * carries no information at all — see the exception spelled out on
    * {@link AggregatesPage.next_cursor}. Their result is the NEWEST `limit` rows
    * after the cursor ({@link rowsAfter}), so a capped one has dropped its older
-   * rows and no cursor could fetch them back; do not read a null cursor off a row
-   * log as proof of completeness.
+   * rows; do not read a null cursor off a row log as proof of completeness.
+   *
+   * THE OLDER ROWS ARE REACHABLE, by the OTHER bound. This said "no cursor could
+   * fetch them back", which was true of the shape before `before_seq` existed and
+   * false the moment it did — the whole point of that parameter is that a caller
+   * which received a capped page asks again with `before_seq` set to the page's
+   * lowest seq and receives the page below (see {@link rowsAfter}). What remains
+   * true is the narrow claim: `next_cursor` is not the thing that fetches them, so
+   * a row-log caller that watches only the cursor learns nothing. Left uncorrected
+   * this reads as documentation that the backwards walk is impossible, which is
+   * the reasoning that produced the permanent hole in the first place.
    *
    * `message-group` logs are where the cursor matters: many rows can share one
    * message, so `limit` bounds DISTINCT MESSAGES, not rows. Crucially the page

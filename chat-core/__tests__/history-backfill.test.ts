@@ -235,6 +235,78 @@ describe('history backfill — a capped replay converges on the whole transcript
     expect(sockets[0]!.backwards().map((f) => f['before_seq'])).toEqual([40])
   })
 
+  it('converges on a transcript with an INTERIOR hole, across repeated opens', async () => {
+    // THE ACCEPTANCE PROPERTY for the hole a client cannot be told about. The two
+    // mechanisms above are both server-driven: `history_gap` only ever describes a
+    // page the server just sent, so neither can mention a range the client lost
+    // BETWEEN opens. Only the client's own store can notice that, and the test it
+    // used to apply ("is my oldest seq above 1") is blind to a hole that sits ABOVE
+    // seq 1.
+    //
+    // The fixture builds exactly that store: the device holds an old prefix 1..5 from
+    // an earlier, shorter version of the topic, and the topic has since grown to
+    // `total`. The forward resume delivers the newest page, the round budget runs
+    // out partway down, and the device is left holding 1..5 plus a recent run — an
+    // interior hole, with seq 1 present and the forward cursor above the hole.
+    //
+    // MUTATION-PROVED: restore `backfillFrom` to read the store's MINIMUM seq and
+    // the loop below never completes — it exits on the "made no progress" guard with
+    // the hole still there, because from open 2 onwards the client asks for nothing
+    // at all. That is the permanent stranding, reproduced.
+    const total = 65
+    const { session, sockets, store } = setup()
+    // The old prefix, applied before the session ever opens.
+    for (let seq = 1; seq <= 5; seq++) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+
+    const complete = Array.from({ length: total }, (_, i) => i + 1)
+    let opens = 0
+    let holeSeenAboveSeqOne = false
+    for (; opens < 10; opens++) {
+      if (opens === 0) {
+        session.start()
+      } else {
+        // A reconnect: close and re-open, which is what re-drives the forward resume
+        // and therefore the walk's fresh round budget.
+        sockets.at(-1)!.fireClose()
+        session.setActive(false)
+        session.setActive(true)
+      }
+      const socket = sockets.at(-1)!
+      socket.open()
+      socket.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+      await tick()
+      const before = await seqsIn(store)
+      await pump(socket, total)
+      const after = await seqsIn(store)
+
+      // The precondition that made the shipped test answer wrongly: seq 1 is held
+      // AND the transcript is not contiguous. Recorded rather than assumed, so this
+      // test cannot silently stop exercising the interior-hole case.
+      if (after[0] === 1 && after.length < total) holeSeenAboveSeqOne = true
+      if (after.length === total) break
+      // Liveness: every open must recover at least one row, or the walk is stuck.
+      expect(after.length).toBeGreaterThan(before.length)
+    }
+
+    expect(holeSeenAboveSeqOne).toBe(true)
+    expect(await seqsIn(store)).toEqual(complete)
+    // Convergent AND bounded: a handful of opens, not one per message.
+    expect(opens).toBeLessThanOrEqual(3)
+  })
+
   it('never asks below seq 1, which is where the transcript starts', async () => {
     // Seqs are assigned from 1, so `before_seq: 1` could only ever return nothing.
     // Asking anyway would put one dead round trip on every catch-up of a COMPLETE

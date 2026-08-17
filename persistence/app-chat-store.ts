@@ -191,9 +191,11 @@ export interface AppChatMessageLog {
  * The cursor a client sends is still its MAX applied seq (`SyncEngine.resumeRequest`
  * reads `store.lastSeenSeq(topic)` — `chat-core/store.ts`), and both sessions still
  * send it on every open. What is new is that they also send a BACKWARDS request
- * when their own oldest applied seq shows history below it
- * (`SyncEngine.earliestSeenSeq`), which is what makes a long transcript converge
- * instead of keeping a permanent hole.
+ * whenever their own transcript is not contiguous down to seq 1
+ * (`SyncEngine.backfillFrom` over `Store.contiguousFloorSeq`), which is what makes a
+ * long transcript converge instead of keeping a permanent hole. Contiguity rather
+ * than the oldest row: this test was once "is my oldest seq above 1", and a device
+ * holding seq 1 with a hole ABOVE it passed that test while stranding the hole.
  */
 export const DEFAULT_REPLAY_LIMIT = 500
 

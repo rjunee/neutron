@@ -50,9 +50,12 @@ export interface ApplyResult {
  *
  * Three pages plus the forward page covers 2000 messages per open — comfortably
  * more than the longest topic the owner has reported (1130) — and a transcript
- * longer than that is not stranded: the client's own oldest applied seq restarts
- * the walk on the next open (`SyncEngine.backfillFrom`), so history converges
- * across opens rather than needing one heroic open.
+ * longer than that is not stranded: the client restarts the walk on the next open
+ * from the floor of its own newest CONTIGUOUS run (`SyncEngine.backfillFrom` over
+ * `Store.contiguousFloorSeq`), so history converges across opens rather than
+ * needing one heroic open. Contiguity and not merely the oldest row: a store can
+ * hold seq 1 and still have a hole above it, and an oldest-row test reads that as
+ * complete.
  */
 export const MAX_HISTORY_BACKFILL_ROUNDS = 3
 
@@ -228,11 +231,24 @@ export class SyncEngine {
     if (update.message_id.length === 0) return { applied: false }
     const existing = await this.store.getByMessageId(topic_id, update.message_id)
     if (existing === null) return { applied: false }
-    // Stale-update short-circuit: skip the store churn / re-render for an update
-    // we'd discard anyway (mergeMessage would keep existing, but this keeps the
-    // applied verdict honest — same posture as applyReactionUpdate).
+    // Stale-OR-SETTLED short-circuit: skip the store churn / re-render for an
+    // update that cannot change this row (mergeMessage would produce the same
+    // state, but this keeps the applied verdict honest — same posture as
+    // applyReactionUpdate).
+    //
+    // `<=`, NOT `<`, and the equal case is the one that matters now. rev is
+    // monotonic per message, so an EQUAL rev is a re-delivery of edit state this
+    // row already carries — `pickEditState` lets incoming win on `>=` and lands on
+    // a byte-identical row. Applying it anyway costs an upsert AND an
+    // `emitChange()` re-render at both call sites. That was almost free while the
+    // resume edit replay was bounded below by the client's cursor (a caught-up
+    // device received no edit frames at all); it is not free now that the replay
+    // has NO lower bound, because every resume re-delivers every settled edit in
+    // the window — and the mobile session re-resumes on every foreground and every
+    // foregrounded push, across every warmed topic. See
+    // `AppWsAdapter.replayEditsAfter` for why the lower bound had to go.
     if (existing.edit_rev !== null && existing.edit_rev !== undefined) {
-      if (update.rev < existing.edit_rev) return { applied: false }
+      if (update.rev <= existing.edit_rev) return { applied: false }
     }
     const patch: ChatMessage = {
       ...existing,
@@ -264,18 +280,28 @@ export class SyncEngine {
 
   /**
    * The seq to resume a BACKWARDS walk from on a fresh open, or `null` when this
-   * topic has no history below what it holds.
+   * device's transcript is already contiguous down to seq 1.
    *
-   * Server seqs for a topic are assigned `MAX(seq) + 1` and nothing deletes them
-   * (`persistence/app-chat-store.ts`), so they run 1..N contiguously and the oldest
-   * seq a client holds tells it exactly whether anything is missing below: > 1 means
-   * yes. That local test is what makes the walk survive a socket close — the server
-   * only reports a gap for a page it just sent, so without it a client that ran out
-   * of rounds on one open could never pick the walk up again.
+   * This local test is what makes the walk survive a socket close — the server only
+   * reports a gap for a page it just sent, so without it a client that ran out of
+   * rounds on one open could never pick the walk up again.
+   *
+   * IT ASKS ABOUT CONTIGUITY, NOT ABOUT THE OLDEST ROW, and that distinction is the
+   * whole correctness of the walk. Server seqs run 1..N with no deletes, so it is
+   * tempting to test "is my oldest seq above 1" — and that was the shipped test. But
+   * the invariant is the SERVER's, not the client's copy: a device holding 1..100
+   * that resumes onto a capped newest-window page ends up holding 1..100 and
+   * 201..700, whose oldest seq is 1. The test answered "nothing is missing", the
+   * forward cursor was already at 700, and 101..200 was unreachable for good — the
+   * same permanent stranding the `history_gap`/`before_seq` pair exists to
+   * eliminate, arrived at by a route the pair cannot see, because the CLIENT never
+   * asks. {@link Store.contiguousFloorSeq} answers the question that actually
+   * matters, so the walk restarts at the floor of the newest unbroken run and each
+   * catch-up lowers that floor until the transcript is whole.
    */
   async backfillFrom(topic_id: string): Promise<number | null> {
-    const earliest = await this.store.earliestSeenSeq(topic_id)
-    return earliest > 1 ? earliest : null
+    const floor = await this.store.contiguousFloorSeq(topic_id)
+    return floor > 1 ? floor : null
   }
 
   /**

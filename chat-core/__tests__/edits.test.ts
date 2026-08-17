@@ -198,6 +198,37 @@ describe('SyncEngine.applyEditUpdate', () => {
     expect(row?.edit_rev).toBe(5)
   })
 
+  it('drops a SETTLED (equal-rev) re-delivery, so a resume does not re-render it', async () => {
+    // The resume edit replay has no lower bound (`AppWsAdapter.replayEditsAfter`) —
+    // that is what makes a delete reach a device that was offline when it happened.
+    // The consequence is that EVERY resume re-delivers every settled edit in the
+    // window, and the mobile session re-resumes on every foreground and every
+    // foregrounded push, across every warmed topic. An equal rev carries no new
+    // state (rev is monotonic per message), so applying it would buy an upsert and
+    // an `emitChange()` re-render per settled edit per resume, and change nothing.
+    //
+    // MUTATION-PROVED: relax the guard back to `update.rev < existing.edit_rev` and
+    // `applied` comes back true here.
+    const store = new InMemoryStore()
+    const engine = new SyncEngine(store)
+    await store.upsert(baseMessage({ body: '', deleted: true, edited_at: 50, edit_rev: 3 }))
+    const res = await engine.applyEditUpdate(TOPIC, {
+      message_id: 'm1',
+      seq: 1,
+      rev: 3,
+      body: '',
+      deleted: true,
+      edited_at: 50,
+    })
+    expect(res.applied).toBe(false)
+    // And the row is untouched — skipping is only correct if the state was already
+    // right, so assert that rather than trusting the verdict.
+    const [row] = await store.list(TOPIC)
+    expect(row?.deleted).toBe(true)
+    expect(row?.body).toBe('')
+    expect(row?.edit_rev).toBe(3)
+  })
+
   it('is a no-op when the message is not in the store yet', async () => {
     const engine = new SyncEngine(new InMemoryStore())
     const res = await engine.applyEditUpdate(TOPIC, {

@@ -987,11 +987,32 @@ export class AppWsAdapter implements ChannelAdapter {
   /**
    * Track B Phase 4 (message edit/delete) — replay edit state to a reconnecting
    * device after the message replay. Returns one `edit_update` per edited/deleted
-   * message (with seq > after_seq), ascending by seq. `[]` when the edit log
-   * isn't wired.
+   * message in the topic, ascending by seq. `[]` when the edit log isn't wired.
    *
-   * ONE bounded query, the NEWEST `DEFAULT_EDIT_REPLAY_LIMIT` edit rows after the
-   * cursor — the same shape and the same limit {@link replayAfter} uses, and that
+   * THERE IS NO `after_seq` HERE, DELIBERATELY, AND THAT IS THE FIX FOR A DELETE
+   * THAT NEVER PROPAGATED. This used to take the client's resume cursor as a lower
+   * bound, which silently assumed that an edit's position in the transcript says
+   * something about WHEN it happened. It does not: an edit row carries its
+   * MESSAGE's seq, so a delete of an OLD message is a NEW event filed at a LOW seq.
+   * A device holding 1..100 that went offline, had seq 1 deleted, and reconnected at
+   * `after_seq: 100` was sent no `edit_update` at all — the tombstone sat below its
+   * cursor — so a message the owner deleted stayed readable on that device until its
+   * local store was wiped. That is the MIRROR of the leak this subsystem was last
+   * fixed for (deleted content replaying), and it is privacy-relevant in the same
+   * way: a delete that fails to propagate is a delete that did not happen.
+   *
+   * Dropping the lower bound cannot weaken the message-window alignment below,
+   * because the window still takes the NEWEST `limit` rows and the range only grew:
+   * every row the bounded range would have returned has a higher seq than every row
+   * the bound excluded, so the newest `limit` of the wider range is a SUPERSET of
+   * the newest `limit` of the narrower one. Where there is spare budget it now
+   * carries tombstones from below the cursor; where there is not, it degrades to
+   * exactly the old page. (The residual bound: a topic with `limit` or more edited
+   * messages ABOVE the cursor leaves no room for older tombstones on that resume.
+   * Strictly better than the previous budget for them, which was zero, always.)
+   *
+   * ONE bounded query, the NEWEST `DEFAULT_EDIT_REPLAY_LIMIT` edit rows in the
+   * range — the same shape and the same limit {@link replayAfter} uses, and that
    * equality is load-bearing rather than incidental. An edit row carries its
    * MESSAGE's seq, so the two windows cover the same messages: at most `limit`
    * messages sit at or above the message window's lowest seq, hence at most
@@ -999,6 +1020,12 @@ export class AppWsAdapter implements ChannelAdapter {
    * them. A message that arrives in a capped replay therefore arrives with its
    * tombstone and its current body — never with a body an edit or delete has
    * since replaced.
+   *
+   * `before_seq` IS still threaded, and for the opposite reason: a BACKWARDS
+   * message page must be paired with the edit state of THAT page. Bound the
+   * messages and not the edits and the client gets an old page of messages against
+   * the newest page of edit state, so every deleted message in it arrives with its
+   * original body.
    *
    * That alignment is why neither replay is drained. A bounded message window
    * paired with an un-drained OLDEST-first edit window is the combination that
@@ -1019,13 +1046,14 @@ export class AppWsAdapter implements ChannelAdapter {
    */
   async replayEditsAfter(
     channel_topic_id: string,
-    after_seq: number,
     before_seq?: number,
   ): Promise<AppWsOutboundEditUpdate[]> {
     if (this.edit_log === undefined) return []
     const aggregates = await this.edit_log.aggregatesAfter(
       channel_topic_id,
-      after_seq,
+      // No lower bound, ever — see above. Written as a literal rather than taken
+      // as a parameter so a future caller cannot reintroduce the cursor.
+      0,
       DEFAULT_EDIT_REPLAY_LIMIT,
       before_seq,
     )
@@ -1085,15 +1113,25 @@ export class AppWsAdapter implements ChannelAdapter {
    * server-side ceiling. The CLIENT asks for each page, so the per-response ceiling
    * survives while the transcript still converges.
    *
-   * ALIGNED WITH THE EDIT REPLAY, which is what stops a bounded window leaking
-   * stale bodies: {@link replayEditsAfter} reads the same newest-window SQL with an
-   * equal limit AND THE SAME `before_seq`, and an edit row carries its MESSAGE's
-   * seq, so every message in this window has its edit/tombstone state in that one.
-   * Proof is by counting — at most `limit` messages sit at or above this window's
-   * lowest seq, so at most `limit` edit rows do, and the newest `limit` edit rows
-   * therefore include all of them. Pass the bound to one and not the other and the
-   * argument collapses: an old message page against a recent edit page delivers a
-   * deleted message with its original body.
+   * ALIGNED WITH THE EDIT REPLAY on the UPPER bound, which is what stops a bounded
+   * window leaking stale bodies: {@link replayEditsAfter} reads the same
+   * newest-window SQL with an equal limit AND THE SAME `before_seq`, and an edit row
+   * carries its MESSAGE's seq, so every message in this window has its edit/tombstone
+   * state in that one. Proof is by counting — at most `limit` messages sit at or
+   * above this window's lowest seq, so at most `limit` edit rows do, and the newest
+   * `limit` edit rows therefore include all of them. Pass the UPPER bound to one and
+   * not the other and the argument collapses: an old message page against a recent
+   * edit page delivers a deleted message with its original body.
+   *
+   * DELIBERATELY NOT ALIGNED ON THE LOWER BOUND, and the asymmetry is the point.
+   * This replay takes `after_seq`; the edit replay takes NO lower bound at all,
+   * because an edit row's seq is its MESSAGE's seq and says nothing about when the
+   * edit happened — bounding edits by the client's cursor is what hid a delete from
+   * every device that had already read the message. See {@link replayEditsAfter}. The
+   * counting proof above survives untouched: dropping a LOWER bound only widens the
+   * edit range, every row it admits sorts below every row the narrow range held, so
+   * the newest `limit` of the wider range is a superset of the newest `limit` of the
+   * narrower one.
    */
   async replayAfter(
     channel_topic_id: string,

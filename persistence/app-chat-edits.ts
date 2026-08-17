@@ -107,7 +107,15 @@ export interface AppChatEditLog {
    * re-sorted ascending, which is the same window the message replay takes
    * (`AppChatEventLogCore.rowsAfter` owns that SQL for both).
    *
-   * `before_seq` MUST be passed whenever the message replay passed it. The
+   * THE RESUME PATH PASSES `after_seq: 0`, ALWAYS — see
+   * `AppWsAdapter.replayEditsAfter`, which does not accept a cursor at all. An edit
+   * row carries its MESSAGE's seq, so a delete of an old message is a NEW event at a
+   * LOW seq; bounding the replay by the reconnecting device's cursor excluded
+   * exactly the tombstones for messages it had already read, and a delete that
+   * happened while a device was offline never reached it. The parameter survives for
+   * the receipts/reactions shape this method mirrors, and for tests.
+   *
+   * `before_seq` MUST still be passed whenever the message replay passed it. The
    * alignment argument below is about the two windows covering the same messages;
    * a backwards message page paired with an unbounded (newest-first) edit page
    * breaks it in the worst direction — the message page would be old and the edit

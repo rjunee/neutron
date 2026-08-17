@@ -161,6 +161,53 @@ const SCHEMA_FTS = [
  *  to a fixed working set rather than loading the whole match set into JS. */
 const SEARCH_CANDIDATE_CAP = 1000;
 
+/**
+ * `Store.contiguousFloorSeq` on the device — the floor of the NEWEST UNBROKEN RUN,
+ * NOT `MIN(seq)`. See `chat-core/store.ts` for why the difference is a class of
+ * permanent data loss rather than a refinement.
+ *
+ * Read it as "the highest RUN START": a held seq whose predecessor is absent begins
+ * a run, and the highest such seq begins the run containing the high-water mark.
+ * `ORDER BY m.seq DESC LIMIT 1` walks `idx_chat_messages_topic_seq` backwards and
+ * stops at the first row that satisfies the predicate, so the walk is bounded by the
+ * NEWEST RUN's length rather than the topic's size — a holey store is cheap and a
+ * contiguous one pays a full index walk of point probes (no table access, no sort).
+ *
+ * EXPORTED so a test can EXPLAIN QUERY PLAN the very string this store prepares,
+ * rather than a hand-copied paraphrase of it that could drift into a table scan
+ * while the assertion stayed green (the pattern `AppChatEventLogCore.rowReplaySql`
+ * already sets for the server-side replay window).
+ *
+ * `m.seq > 0` and not merely NOT NULL: an un-acked row carries no server seq and must
+ * never become the backwards cursor, or the walk would ask for everything below 0
+ * forever.
+ *
+ * THE INNER PREDICATE IS AN EQUALITY AND NOTHING ELSE, and that is a measured
+ * constraint rather than a stylistic one. Adding a seemingly free defensive `AND
+ * p.seq > 0` to the subquery made SQLite choose the RANGE constraint over the
+ * equality — the probe went from `(topic_id=? AND seq=?)` to `(topic_id=? AND
+ * seq>?)`, i.e. from one point lookup per outer row to a walk of the topic's rows per
+ * outer row, which is quadratic on the transcript this read exists to repair. Verified
+ * by EXPLAIN QUERY PLAN on both forms. The guard it would have bought is not needed
+ * either: a stray `seq = 0` row can only stop seq 1 from counting as a run start, and
+ * "floor 1" and "no run start at all" both mean `backfillFrom` returns null, so the
+ * two answers are behaviourally identical.
+ */
+const CONTIGUOUS_FLOOR_SQL = `SELECT m.seq AS floor_seq FROM ${TABLE} m
+   WHERE m.topic_id = ? AND m.seq IS NOT NULL AND m.seq > 0
+     AND NOT EXISTS (
+       SELECT 1 FROM ${TABLE} p
+        WHERE p.topic_id = m.topic_id AND p.seq = m.seq - 1
+     )
+   ORDER BY m.seq DESC
+   LIMIT 1`;
+
+/** The SQL {@link SqliteChatStore.contiguousFloorSeq} prepares, for the query-plan
+ *  assertion in `app/__tests__/chat-core-mobile-session.test.ts`. */
+export function contiguousFloorSql(): string {
+  return CONTIGUOUS_FLOOR_SQL;
+}
+
 export class SqliteChatStore implements Store {
   private readonly db: SqliteExecutor;
 
@@ -324,15 +371,9 @@ export class SqliteChatStore implements Store {
     return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
   }
 
-  async earliestSeenSeq(topic_id: string): Promise<number> {
-    // `seq > 0` and not merely NOT NULL: a row that arrived without a server seq
-    // must not become the backwards cursor, or the walk would ask for everything
-    // below 0 forever.
-    const { rows } = await this.db.execute(
-      `SELECT MIN(seq) AS min_seq FROM ${TABLE} WHERE topic_id = ? AND seq IS NOT NULL AND seq > 0`,
-      [topic_id],
-    );
-    const raw = rows[0]?.['min_seq'];
+  async contiguousFloorSeq(topic_id: string): Promise<number> {
+    const { rows } = await this.db.execute(CONTIGUOUS_FLOOR_SQL, [topic_id]);
+    const raw = rows[0]?.['floor_seq'];
     return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
   }
 
