@@ -26,6 +26,15 @@
 #                                       into the brief file. When unset, the
 #                                       brief file must already exist (the chunked
 #                                       bridge-agent fallback).
+#   in  NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE optional path to a launcher-written
+#                                       MANIFEST holding that same ordered list, one
+#                                       part path per line. Read only when the inline
+#                                       PARTS above is unset or empty — inline always
+#                                       wins — so a caller can hand over a single path
+#                                       instead of a newline-embedded env value. Set
+#                                       but missing/unreadable/empty is REFUSED (exit
+#                                       3, `CODEX_BUILD_BRIEF_PARTS_FILE_MISSING`),
+#                                       never silently downgraded to "no parts".
 #   in  NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY newline-separated `<bytes>:<fnv32>`
 #                                       receipts aligned 1:1 with BRIEF_PARTS. Required
 #                                       in parts mode; every file is verified before
@@ -739,6 +748,43 @@ BRIEF_PARTS="${NEUTRON_CODEX_BUILD_BRIEF_PARTS:-}"
 fnv_receipt() {
   perl -e 'use integer; open my $f, "<:raw", $ARGV[0] or exit 1; local $/; my $d = <$f>; my $h = 0x811c9dc5; for my $b (unpack "C*", $d) { $h = ($h ^ $b) & 0xffffffff; $h = ($h * 0x01000193) & 0xffffffff; } printf "%d:%08x", length($d), $h' "$1"
 }
+# ── THE SAME ORDERED LIST, BY PATH INSTEAD OF BY ENV ──────────────────────────
+# The inline list travels as a newline-embedded value inside a run command that a
+# model retypes, and a multi-line env assignment is the single most fragile token on
+# that trip. `NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE` names a manifest the LAUNCHER
+# wrote — same payload, one path's worth of characters to retype — so a later change
+# on the emitting side can stop sending the newlines at all.
+#
+# INLINE WINS, and is read first: every caller that sets it today behaves exactly as
+# it did, byte for byte, and never touches a file that may not exist. The manifest is
+# consulted only when the inline value is unset or empty, and RESOLVES INTO
+# `$BRIEF_PARTS` — the parse, assembly and receipt below are the one code path both
+# inputs flow through, so the two can never drift into assembling different briefs.
+#
+# ARBITRATION (merge of #313 into main): both sides independently built brief-part
+# integrity. #313 verified the ASSEMBLED whole against NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY
+# in parts mode; main (#321) verifies EACH part against
+# NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY before assembly. Main's per-part receipts
+# survive, ALONE: they are what the production launcher (inner-workflow.mjs) actually
+# emits in parts mode, and they name the corrupt part instead of reporting a whole-file
+# mismatch. #313's whole-brief check in parts mode was DROPPED — two live verifiers of
+# the same property is how this drifted apart in the first place. BRIEF_INTEGRITY
+# remains the receipt for the non-parts (pre-written brief) path only. The manifest
+# below is TRANSPORT, not trust: it resolves into $BRIEF_PARTS BEFORE the receipt gate,
+# so a manifest-supplied list faces exactly the refusals an inline one does.
+BRIEF_PARTS_FILE="${NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE:-}"
+if [ -z "$BRIEF_PARTS" ] && [ -n "$BRIEF_PARTS_FILE" ]; then
+  # FAIL CLOSED, with its own marker. A missing, unreadable or empty manifest is not
+  # "no parts, fall back to the pre-written brief": the launcher said the brief lives
+  # in parts, so an unreadable list means the brief this build would run is not the
+  # one anybody composed. `cat` covers unreadable-but-present, which a size test alone
+  # would call fine, and an all-blank manifest collapses to empty here.
+  BRIEF_PARTS="$(cat "$BRIEF_PARTS_FILE" 2>/dev/null || true)"
+  if [ -z "$BRIEF_PARTS" ]; then
+    echo "CODEX_BUILD_BRIEF_PARTS_FILE_MISSING: NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE=$BRIEF_PARTS_FILE is missing, unreadable or empty — the ordered list of brief parts never arrived, so there is nothing to assemble. DEFERRED." >&2
+    exit 3
+  fi
+fi
 if [ -n "$BRIEF_PARTS" ]; then
   if [ -z "$BRIEF_FILE" ]; then
     echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_PARTS is set but NEUTRON_CODEX_BUILD_BRIEF_FILE is unset — there is nowhere to assemble the brief. DEFERRED." >&2

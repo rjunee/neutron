@@ -2,6 +2,37 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — Brief-part integrity arbitration (#313 vs main/#321)
+
+Both #313 (`trident/the-codex-build-bridge-loses-the-br` @ 01100526) and main
+(#321) independently built brief-part integrity. Their merge arbitrated the two
+implementations instead of keeping both verifiers live.
+
+The SURVIVOR is main's per-part receipt gate: `fnv_receipt()` plus
+`NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY`. This is the receipt the production
+launcher emits in parts mode: `trident/inner-workflow.mjs:1574` sends
+`BRIEF_PARTS` plus `BRIEF_PART_INTEGRITY`, while `BRIEF_INTEGRITY` is emitted only
+for the non-parts fallback, as pinned by
+`trident/inner-workflow-assembly.test.ts:239-257`. The per-part gate also names the
+corrupt part rather than reducing the failure to a whole-file mismatch.
+
+The DROPPED implementation is #313's whole-brief
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` check in parts mode. That receipt remains
+only for the non-parts, pre-written-brief path. Two live verifiers of the same
+property are how the guarantee drifted: the union resolution left the manifest
+path unverified, and the branch's own corrupted-part test observed exit 0 where
+exit 3 was required.
+
+#313's `NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE` manifest survives as TRANSPORT ONLY.
+It resolves into `$BRIEF_PARTS` before the receipt gate, so inline and manifest
+transports face identical refusals. Transport symmetry is pinned by the
+corrupted-part-through-manifest case (exit 3 with
+`CODEX_BUILD_BRIEF_PART_CORRUPT`) and a seven-case inline-vs-manifest symmetry
+suite. Merge-time validation was `bash -n` clean,
+`trident/codex-build.test.ts` 86 pass / 0 fail (previously 76/77), and
+`trident/inner-workflow-assembly.test.ts` 55/55. The in-file ARBITRATION comment
+in `trident/codex-build.sh` carries the same rationale.
+
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
 Landed via PR #384.
@@ -795,6 +826,90 @@ display path rather than in anything an outsider dials, and bringing three shell
 files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
+
+## 2026-08-16 — the codex build brief is proven to ARRIVE at the child, and the run id to correlate
+
+The card reported two live symptoms: the brief parts are written but
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS` never reaches the child, so the build starts blind;
+and the run id is mistyped on the same path, so the run cannot be correlated back.
+Both were RE-MEASURED on main before anything was changed, by executing the transport
+the workflow actually emits rather than by reading it. Neither reproduces. The emitted
+run command, run verbatim against the real `trident/codex-build.sh`, delivered
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS` into the wrapper's child environment; the wrapper
+assembled the parts in order and what landed on the codex seam's stdin measured
+byte-identical to the prompt's OWN `NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` receipt;
+`CODEX_BUILD_MODEL` arrived; `GH_TOKEN` was gone; and the `.exit` and `.trailer` files
+landed at exactly the run-id-keyed paths the test constructed from its own id string.
+The run id is a string end-to-end (`TridentRun.id` → `buildWorkflowArgs.runId` → the
+part filenames at `trident/brief-parts.ts:71`); there is no retyping on that path. No
+production code changed.
+
+What was actually missing is the measurement that says so. Every existing suite stops
+one seam short: `inner-workflow.test.ts` asserts prompt TEXT, `codex-build.test.ts`
+hands the wrapper a HAND-BUILT environment, and the `inner-workflow-assembly.test.ts`
+lockstep executes the emitted chunk blocks but assembles files and never launches
+anything. Nothing executed the workflow-EMITTED run command and then read the CHILD's
+environment — so a regression dropping `${partsEnv}` from the command, breaking
+`shSingleQuote` on the newline-joined parts list, or drifting the run id between the
+artifact paths would have shipped green, and the symptom would have been exactly what
+the card describes.
+
+`trident/codex-build-arrival.test.ts` closes it, in the `trident/gh-authed.test.ts`
+style: the real `writeBriefParts` writes the host-held parts, the real
+`inner-workflow.mjs` composes the forge:build prompt, real bash runs the prompt's own
+chunk blocks and its own run command against the real wrapper with a stub `codex`, and
+the wrapper's documented `NEUTRON_CODEX_BUILD_EXEC_CMD` seam dumps the child's
+environment and stdin. Every assertion is on a child-written artifact — the env dump,
+the stdin dump, the exit/trailer/err files — and none on an object the parent built.
+The stripped-PARTS negative control is what makes the suite able to fail: with the
+PARTS assignment cut out of the emitted command the wrapper refuses at exit 3 with
+`CODEX_BUILD_NO_BRIEF` and the seam never runs at all, so a blind build is refused
+before a token is spent rather than started and then noticed.
+
+ONE HAZARD IS WORTH NAMING because it will be re-hit otherwise: the emitted run
+command contains REAL embedded newlines — inside the supervisor's `printf "%s\n"` and
+inside the single-quoted PARTS value — so it cannot be recovered by splitting the
+prompt on lines. Slicing from `rm -f ` to the trailing `</dev/null &` is the only
+correct extraction, and a line-based parse silently yields a truncated command that
+"passes" by never launching the wrapper.
+## 2026-08-16 — the codex build wrapper accepts the brief's part list BY PATH, not only as a multi-line env
+
+Hardening follow-up to the arrival proof below. The ordered list of brief parts reaches
+`trident/codex-build.sh` today as `NEUTRON_CODEX_BUILD_BRIEF_PARTS`, a newline-separated
+value quoted into a run command that a MODEL retypes — the single most fragile token on
+the trip, and the exact shape of the failure the card reported ("the parts are written
+but the PARTS env never arrives"). Arrival is now pinned by test, but the transport is
+still one lost quote away from a blind build.
+
+So the wrapper learned a second, equivalent input: `NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE`,
+an absolute path to a manifest the LAUNCHER writes carrying the identical payload — one
+path's worth of characters to survive instead of an embedded newline. It RESOLVES INTO
+the existing `$BRIEF_PARTS` variable before the assembly runs, so parsing, ordering,
+concatenation and the whole-brief receipt stay ONE code path and the two inputs cannot
+drift into assembling different briefs. Equivalence is measured, not argued: the same
+parts and receipt driven through the file produce a brief the child receives
+byte-identical to the inline env's, and the trailer still lands at the run-id-keyed path
+the caller named.
+
+INLINE WINS AND IS READ FIRST, so this is backward compatible by construction: every
+caller on main sets the inline value, behaves exactly as before, and never touches a file
+that may not exist. The manifest is consulted only when the inline value is unset or
+empty. It FAILS CLOSED with its own marker — set but missing, unreadable or empty exits 3
+with `CODEX_BUILD_BRIEF_PARTS_FILE_MISSING` before the codex seam runs, rather than
+degrading to "no parts" and building happily against whatever pre-written brief file
+happens to be lying there (the fixture proves that brief is present and valid and still
+refused). Once the list is read, the downstream refusals are the same code reached
+through the new door and keep their own markers: `CODEX_BUILD_BRIEF_PART_MISSING` for a
+missing or empty part, `CODEX_BUILD_BRIEF_CORRUPT` for a receipt mismatch.
+
+Seven cases in `trident/codex-build.test.ts` pin it, all child-side in that file's own
+style — the real script as a subprocess with a stub `codex` that dumps its OWN stdin and
+environment: file-vs-inline byte equality (with the child's env proving only the FILE
+input was set on that run), precedence with a valid decoy manifest plus the control that
+the decoy assembles fine when it is alone, missing manifest, empty manifest, missing
+part, empty part, corrupted part. Nothing on the EMITTING side changed —
+`inner-workflow.mjs` still sends the inline env — so this is the wrapper's half of the
+contract, landed first, for a workflow change to aim at.
 
 ## 2026-08-16 — "done" is refused on the write path, not on one of its doors
 
