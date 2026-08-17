@@ -230,8 +230,12 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
  *   - `'background'` — a timer-driven lane (proactive nudge composition). The
  *     per-status cooldown still applies, because a real 429/402/401 is the
  *     provider's own back-pressure and ignoring it would be rude and useless.
- *     But the strike is NOT counted, so a background lane can never trip the
- *     hour-long park.
+ *     But the strike counter is untouched — NOT incremented, and NOT re-read —
+ *     so a background report can neither trip the hour-long park nor EXTEND one
+ *     an interactive turn already tripped. Both halves matter: gating only the
+ *     increment still lets a background failure re-stamp `cooldown_until` an
+ *     hour into the future every time it fires, which is the same outage with a
+ *     slower fuse.
  *
  * WHY THE ASYMMETRY (incident, live instance 2026-08-17). This counter is
  * PER-CREDENTIAL but the consequence is POOL-WIDE on a single-credential box —
@@ -257,7 +261,6 @@ export function reportFailure(
 ): void {
   const c = pool.credentials.find((x) => x.id === id)
   if (!c) return
-  if (origin === 'interactive') c.consecutive_failures++
   const now = Date.now()
   if (status === 429) {
     c.cooldown_until = now + (retry_after_ms ?? COOLDOWN_429_MS)
@@ -269,9 +272,16 @@ export function reportFailure(
     c.cooldown_until = now + COOLDOWN_401_MS
     c.cooldown_reason = 'auth_401'
   }
-  if (c.consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
-    c.cooldown_until = now + CONSECUTIVE_COOLDOWN_MS
-    c.cooldown_reason = 'consecutive_failures'
+  // THE STRIKE LEDGER IS INTERACTIVE-ONLY, both the write and the read. A
+  // background report must not be able to reach `CONSECUTIVE_COOLDOWN_MS` — not
+  // by counting toward the threshold, and not by re-arming a park that is
+  // already standing.
+  if (origin === 'interactive') {
+    c.consecutive_failures++
+    if (c.consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+      c.cooldown_until = now + CONSECUTIVE_COOLDOWN_MS
+      c.cooldown_reason = 'consecutive_failures'
+    }
   }
 }
 

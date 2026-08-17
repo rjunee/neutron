@@ -23,6 +23,9 @@ import { describe, expect, test } from 'bun:test'
 
 import { buildLlmCallSubstrate } from '../build-llm-call-substrate.ts'
 import {
+  COOLDOWN_401_MS,
+  COOLDOWN_429_MS,
+  CONSECUTIVE_COOLDOWN_MS,
   MAX_CONSECUTIVE_FAILURES,
   hasUsableCredential,
   newCredentialPool,
@@ -44,19 +47,23 @@ function onePool(): CredentialPool {
 }
 
 /**
- * A substrate whose every turn dies the way the incident's did: the persistent
- * REPL's child exited. Retryable, UNSTAMPED, and carrying no HTTP status — so the
- * cooldown mapper can only GUESS, and it guesses 429.
+ * A substrate whose every turn fails with `message` — UNSTAMPED, exactly like the
+ * legacy adapter errors this cooldown path was built for.
+ *
+ * The default is the incident's own failure: the persistent REPL's child exited,
+ * retryable and carrying no HTTP status, so the cooldown mapper can only GUESS,
+ * and it guesses 429.
  */
-function deadReplSubstrate(pool: CredentialPool, lane: 'interactive' | 'background'): Substrate {
+function failingSubstrate(
+  pool: CredentialPool,
+  lane: 'interactive' | 'background',
+  message = 'persistent-repl: REPL process exited',
+  retryable = true,
+): Substrate {
   const substrateFactory = (_opts: ClaudeCodeSubstrateOptions): Substrate => ({
     start(_spec: AgentSpec): SessionHandle {
       const events = (async function* (): AsyncGenerator<Event, void, void> {
-        yield {
-          kind: 'error',
-          message: 'persistent-repl: REPL process exited',
-          retryable: true,
-        }
+        yield { kind: 'error', message, retryable }
       })()
       return {
         events,
@@ -76,6 +83,10 @@ function deadReplSubstrate(pool: CredentialPool, lane: 'interactive' | 'backgrou
   expect(sub).not.toBeNull()
   return sub!
 }
+
+/** The incident's failure shape, kept under its old name for the tests below. */
+const deadReplSubstrate = (pool: CredentialPool, lane: 'interactive' | 'background'): Substrate =>
+  failingSubstrate(pool, lane)
 
 /**
  * Fire `n` failing turns, letting the WALL CLOCK move past whatever short
@@ -147,9 +158,14 @@ describe('a background lane cannot park the owner’s credential', () => {
 })
 
 describe('a REAL provider status still cools on either lane', () => {
+  // THE LINE THIS DRAWS, because it is a real trade and not an oversight: a
+  // provider status is a FACT ABOUT THE CREDENTIAL, not about the lane that
+  // happened to discover it. A genuine 401 means the owner's next chat turn is
+  // going to fail anyway — a second later, with a worse message — so honouring it
+  // costs him nothing he had. What the background lane must never do is INVENT
+  // one, and never escalate anything into the hour-long park. Both of those are
+  // asserted here.
   test('a background 401 sets its own short cooldown but never a strike', () => {
-    // Honouring real back-pressure is not the bug — inventing it, and then
-    // escalating the invention into an hour-long park, was.
     const pool = onePool()
     for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 1; i++) {
       reportFailure(pool, 'anthropic:only', 401, undefined, 'background')
@@ -158,7 +174,7 @@ describe('a REAL provider status still cools on either lane', () => {
     expect(cred.cooldown_reason).toBe('auth_401')
     expect(cred.consecutive_failures).toBe(0)
     // 5 minutes, not the hour a strike-park would impose.
-    expect(cred.cooldown_until! - Date.now()).toBeLessThanOrEqual(5 * 60_000)
+    expect(cred.cooldown_until! - Date.now()).toBeLessThanOrEqual(COOLDOWN_401_MS)
   })
 
   test('an interactive 401 escalates to the strike park as it always has', () => {
@@ -169,5 +185,150 @@ describe('a REAL provider status still cools on either lane', () => {
     const cred = pool.credentials[0]!
     expect(cred.cooldown_reason).toBe('consecutive_failures')
     expect(cred.consecutive_failures).toBe(MAX_CONSECUTIVE_FAILURES)
+  })
+
+  test('a background report cannot RE-EXTEND a park an interactive turn already set', () => {
+    // The first cut of this guard skipped only the strike INCREMENT and left the
+    // threshold re-check running unconditionally. That is not a fix: once five
+    // interactive strikes have set the counter, every later background report
+    // re-stamps `cooldown_until` a fresh hour into the future, and the credential
+    // never becomes selectable again. Strictly worse than the original bug —
+    // permanent instead of hourly, and invisible.
+    const pool = onePool()
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) reportFailure(pool, 'anthropic:only', 429)
+    const cred = pool.credentials[0]!
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+
+    // The hour passes; the credential is usable again.
+    cred.cooldown_until = Date.now() - 1
+    expect(hasUsableCredential(pool)).toBe(true)
+
+    // A background nudge fails against a real 429 while the counter still reads 5.
+    reportFailure(pool, 'anthropic:only', 429, undefined, 'background')
+    expect(cred.cooldown_reason).toBe('rate_limit_429')
+    expect(cred.cooldown_until! - Date.now()).toBeLessThanOrEqual(COOLDOWN_429_MS)
+  })
+
+  test('CONTROL — an interactive report in that same state DOES re-park', () => {
+    const pool = onePool()
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) reportFailure(pool, 'anthropic:only', 429)
+    const cred = pool.credentials[0]!
+    cred.cooldown_until = Date.now() - 1
+    reportFailure(pool, 'anthropic:only', 429)
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(CONSECUTIVE_COOLDOWN_MS / 2)
+  })
+})
+
+describe('the substrate THREADS the lane into reportFailure, not just past it', () => {
+  // WHY THIS SUITE EXISTS. Every test above this point drives the background lane
+  // with an INFERRED cooldown, which the substrate declines to report at all — so
+  // `reportFailure` is never called on that path, and the `origin` argument the
+  // production wiring passes was never executed by a single assertion. Deleting
+  // that argument from all four call sites left the whole file green while
+  // restoring the hour-long park in production. These tests take the one path
+  // where a background failure DOES reach the pool.
+
+  test('CLAUDE PATH — a real 429 on the background lane cools, and never accumulates', async () => {
+    const pool = onePool()
+    const sub = failingSubstrate(pool, 'background', 'HTTP 429: too many requests', true)
+    await failNTurns(pool, sub, MAX_CONSECUTIVE_FAILURES + 2)
+    const cred = pool.credentials[0]!
+    expect(cred.cooldown_reason).toBe('rate_limit_429')
+    expect(cred.consecutive_failures).toBe(0)
+    // The provider's own 60s window, not the hour — and it expires on its own.
+    expect(cred.cooldown_until! - Date.now()).toBeLessThanOrEqual(COOLDOWN_429_MS)
+  })
+
+  test('CLAUDE PATH CONTROL — the same real 429s on the interactive lane still park', async () => {
+    const pool = onePool()
+    const sub = failingSubstrate(pool, 'interactive', 'HTTP 429: too many requests', true)
+    await failNTurns(pool, sub, MAX_CONSECUTIVE_FAILURES)
+    const cred = pool.credentials[0]!
+    expect(cred.cooldown_reason).toBe('consecutive_failures')
+    expect(cred.cooldown_until! - Date.now()).toBeGreaterThan(COOLDOWN_429_MS)
+  })
+
+  test('CLAUDE PATH — a prose "401" is an INFERENCE and cools nothing on the background lane', async () => {
+    // `detectCliAuthFailure` returns true for the substring `401` appearing
+    // ANYWHERE in the message (`runtime`-facing prose, a tool's echoed HTTP line, a
+    // path, a pid). The first cut of this guard treated it as a provider status, so
+    // a crashed background REPL whose tail happened to contain those three digits
+    // walked straight through the exemption and cooled the owner's only credential.
+    const pool = onePool()
+    const sub = failingSubstrate(
+      pool,
+      'background',
+      'persistent-repl: REPL process exited; last stderr line: tool call failed with 401',
+      false,
+    )
+    await failNTurns(pool, sub, MAX_CONSECUTIVE_FAILURES + 2)
+    const cred = pool.credentials[0]!
+    expect(cred.cooldown_reason).toBeUndefined()
+    expect(cred.cooldown_until).toBeUndefined()
+    expect(hasUsableCredential(pool)).toBe(true)
+  })
+
+  test('CLAUDE PATH CONTROL — that same prose still cools an INTERACTIVE turn', async () => {
+    const pool = onePool()
+    const sub = failingSubstrate(
+      pool,
+      'interactive',
+      'persistent-repl: REPL process exited; last stderr line: tool call failed with 401',
+      false,
+    )
+    await failNTurns(pool, sub, 1)
+    expect(pool.credentials[0]!.cooldown_reason).toBe('auth_401')
+  })
+
+  test('OPENAI PATH — a real 429 on the background lane cools, and never accumulates', async () => {
+    // The OpenAI family has its own dispatch loop and its own `reportFailure` call
+    // sites; the lane has to be threaded there too, and a mutation that drops it is
+    // otherwise invisible.
+    const openai = newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'openai:only', kind: 'api_key', secret: 'sk-openai' }],
+    })
+    const sub = buildLlmCallSubstrate({
+      pool: onePool(),
+      substrate_instance_id: 'cc-probe-owner',
+      provider: 'openai',
+      user_id: 'owner',
+      credential_failure_lane: 'background',
+      openai: {
+        pool: openai,
+        bindMcpResolver: () => async () => ({}),
+        model_preference: ['gpt-5.6'],
+        // No `retry-after` header — the branch the CC path can never reach, since
+        // no claude-code adapter populates `retry_after_ms`.
+        fetchImpl: (async () => new Response('rate limited', { status: 429 })) as unknown as typeof fetch,
+      },
+    })!
+    await failNTurns(openai, sub, MAX_CONSECUTIVE_FAILURES + 2)
+    const cred = openai.credentials[0]!
+    expect(cred.cooldown_reason).toBe('rate_limit_429')
+    expect(cred.consecutive_failures).toBe(0)
+    expect(cred.cooldown_until! - Date.now()).toBeLessThanOrEqual(COOLDOWN_429_MS)
+  })
+
+  test('OPENAI PATH CONTROL — the same failures on the interactive lane still park', async () => {
+    const openai = newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'openai:only', kind: 'api_key', secret: 'sk-openai' }],
+    })
+    const sub = buildLlmCallSubstrate({
+      pool: onePool(),
+      substrate_instance_id: 'cc-probe-owner',
+      provider: 'openai',
+      user_id: 'owner',
+      openai: {
+        pool: openai,
+        bindMcpResolver: () => async () => ({}),
+        model_preference: ['gpt-5.6'],
+        fetchImpl: (async () => new Response('rate limited', { status: 429 })) as unknown as typeof fetch,
+      },
+    })!
+    await failNTurns(openai, sub, MAX_CONSECUTIVE_FAILURES)
+    expect(openai.credentials[0]!.cooldown_reason).toBe('consecutive_failures')
   })
 })

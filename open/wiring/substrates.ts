@@ -4,7 +4,8 @@
  * Behavior-preserving extraction of the substrate-construction slice of
  * `createOpenComposition` (old `open/composer.ts` lines 485-661): the warm
  * onboarding phase-spec substrate (`cc-llm-*`) + its pre-warm, the warm
- * live-chat substrate (`cc-agent-*`, the ONLY one with `enableToolBridge`), the
+ * live-chat substrate (`cc-agent-*`), the background proactive-compose substrate
+ * (`cc-nudge-*`) — the two that carry `enableToolBridge` — the
  * per-worktree ephemeral factory (`makeEphemeralSubstrate`), and the warm
  * per-repo-cwd trident-fire factory (`cc-trident-fire-*` + `fireSubstrateByCwd`
  * cache). The composer destructures the returned bag and consumes each value
@@ -117,10 +118,11 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     ctx.bindMcpResolver !== undefined
   // CAPABILITY-PARITY (audit round 16) — the OpenAI config must grant EXACTLY the
   // capabilities the substrate's CLAUDE-path equivalent grants, never more. The
-  // decisive one is the TOOL BRIDGE: on the Claude path ONLY `cc-agent-*` (live
-  // chat) sets `enableToolBridge: true`; `cc-llm-*` (onboarding phase-spec) does
-  // NOT. So the OpenAI `toolManifest` (which becomes the GPT tool surface) is
-  // included ONLY for the live-agent substrate — never the phase-spec one, whose
+  // decisive one is the TOOL BRIDGE: on the Claude path the owner-facing
+  // conversational pair `cc-agent-*` (live chat) and `cc-nudge-*` (background
+  // proactive compose) set `enableToolBridge: true`; `cc-llm-*` (onboarding
+  // phase-spec) does NOT. So the OpenAI `toolManifest` (which becomes the GPT tool
+  // surface) is included ONLY for that pair — never the phase-spec one, whose
   // input is user-controlled ONBOARDING text. Emitting the full MCP manifest there
   // would let onboarding prompts reach work_board / dispatch / etc. = privilege
   // escalation the Claude path never permits.
@@ -156,7 +158,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
         }
       : {}
   // Phase-spec (`cc-llm-*`): NO tool bridge (mirrors the Claude path — it never sets
-  // enableToolBridge). Live-agent (`cc-agent-*`): tool bridge ON (mirrors enableToolBridge).
+  // enableToolBridge). Live-agent (`cc-agent-*`) and background nudge (`cc-nudge-*`):
+  // tool bridge ON (mirrors enableToolBridge), so both reuse `liveAgentProvider`.
   const phaseSpecProvider = conversationalProviderFor(false)
   const liveAgentProvider = conversationalProviderFor(true)
 
@@ -294,8 +297,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
             ? { delivery_topic_id: ctx.liveAgentDeliveryTopicId }
             : {}),
           // Live-agent: openai provider WITH the tool manifest (tool bridge ON),
-          // mirroring the Claude path's enableToolBridge — this is the ONE
-          // conversational substrate that gets tools on either provider.
+          // mirroring the Claude path's enableToolBridge. The background nudge lane
+          // below is the only other substrate that gets tools on either provider,
+          // and it gets them from this same `liveAgentProvider` bag.
           ...liveAgentProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })

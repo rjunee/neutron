@@ -47,12 +47,36 @@ then the live-chat model — were both attempts to make SHARING the session safe
 They stop an eviction caused by a mismatch; nothing stops an eviction caused by a
 failure. The #340 entry directly below closed with the actual answer ("it needs its
 own substrate") and this is it: `cc-nudge-*` (`open/wiring/substrates.ts`), a warm
-background REPL on `PROFILE_ISOLATED_COMPOSE` — no tool bridge, no GitHub
-credential, none of the owner-facing notice/delivery sinks. Both timer-driven
-callers move onto it. The `--tools` surface stays `LIVE_AGENT_TOOL_NAMES`, now for
+background REPL. Both timer-driven callers move onto it.
+
+**The new lane is an EQUAL-GRANT, SEPARATE-SESSION twin of the chat lane, not a
+sandbox.** It runs `PROFILE_WARM_CHAT` with `enableToolBridge: true`, the GitHub
+credential and the frontier-model floor — deliberately identical to `cc-agent-*`.
+Tightening it would rebuild the `cc-ritual-*` sandbox that ISSUES #504 deleted: a
+ritual composes on this seam, that sandbox meant the morning brief could not read
+the owner's calendar, and he rejected it outright ("access to everything general has
+access to"). The security boundary for the lane is the ritual APPROVAL GATE
+(`reminders/ritual-fire.ts`), which is unchanged. What is deliberately different is
+the instance id (the whole fix), the credential-failure lane, and the owner-facing
+notice/delivery sinks, which are omitted so a failed background compose cannot push
+a banner into his chat. `docs/INVARIANTS.md` #7/#68 and the tool-bridge section of
+`docs/SYSTEM-OVERVIEW.md` are updated in this change to state the pair rather than
+`cc-agent-*` alone. The `--tools` surface stays `LIVE_AGENT_TOOL_NAMES`, now for
 capability rather than session-matching: a ritual composes on this seam and cannot
 apply its own surface, so its approval prompt's promise of web egress is only true
 if the surface carries it.
+
+**Cost, stated plainly.** The pool key folds `project_id`
+(`runtime/adapters/claude-code/persistent/pool.ts` `poolKeyFor`) and both callers
+pass a `metering_context.project_id`, so this adds ONE resident `claude` child per
+project that actually receives background composition — the same per-project shape
+`cc-agent-*` already has, and the persistent pool has no count cap or idle TTL
+today. Also NOT fixed by this change: the spawn-side respawn failure in the incident
+journal (`persistent/spawn.ts:862-866` emits "REPL process exited" AFTER an
+evict-and-respawn, i.e. the respawn itself failed). This change removes the reason
+the owner's child was being evicted at all; if that respawn failure has a resource
+component, a second warm child per project moves against it and it will resurface
+on its own terms.
 
 **Defect 2 — a background failure locked out interactive traffic.** The substrate
 maps "retryable, no HTTP status" to 429 (`mapStatusForPoolCooldown`), so a crashed
@@ -62,22 +86,58 @@ REPL child read as a quota condition. Five of those reached
 "all Anthropic credentials are in cooldown (429/402/401)" — naming a cause that was
 not true. The decision taken: a background lane may not contribute to a pool-wide
 counter that gates the owner's chat at all. `reportFailure` gains an `origin`
-(`runtime/credential-pool.ts`); `'background'` skips the strike counter, and the
-substrate additionally declines to report an INFERRED cooldown on that lane
-(`credential_failure_lane` in `gateway/wiring/build-llm-call-substrate.ts`,
-threaded through the OpenAI path too). A REAL provider status still cools on either
-lane. Rationale: nobody is blocked on a background turn, it retries on its own
-schedule, and any condition it could discover is rediscovered immediately and
-authoritatively by the next interactive turn — while the cost of the old behaviour
-was total product silence.
+(`runtime/credential-pool.ts`); on `'background'` the strike ledger is left entirely
+alone — neither incremented NOR re-read, so such a report can neither trip the park
+nor extend one an interactive turn already tripped. Gating only the increment would
+have left a background failure re-stamping `cooldown_until` an hour out on every
+fire: the same outage with a slower fuse.
 
-Regression tests: `open/__tests__/background-compose-never-disturbs-chat.test.ts`
-models the warm pool with the real `poolKeyFor` and the real poison rule (an
-aborted compose must leave the chat child at generation 1) and pins the composer
-wiring; `gateway/wiring/__tests__/background-lane-never-locks-out-owner.test.ts`
-drives dead-REPL failures through both lanes with interactive CONTROLS on every
-assertion. Both were mutation-tested: collapsing the nudge instance id back onto
-`cc-agent-*` fails 3 of 5, and reverting the `origin` guard fails 2 of 5.
+The substrate additionally declines to report an INFERRED cooldown on that lane
+(`credential_failure_lane` in `gateway/wiring/build-llm-call-substrate.ts`, threaded
+through the OpenAI path too). "Inferred" is drawn strictly, because the first cut of
+this guard drew it too loosely and left the hole open: it covers the retryable→429
+default, a parsed status the mapper REWRITES (a retryable `HTTP 503` also maps to
+429), and `detectCliAuthFailure` — whose weakest rule is the substring `401`
+appearing ANYWHERE in the message, so a background REPL crash mentioning it would
+otherwise have cooled the owner's only credential straight through the new guard.
+A REAL provider status still cools on either lane: a 429/402/401 the provider itself
+returned, or an adapter-stamped `rate_limited`. Rationale: nobody is blocked on a
+background turn, it retries on its own schedule, and any condition it could discover
+is rediscovered immediately and authoritatively by the next interactive turn — while
+the cost of the old behaviour was total product silence. On the CC path that real-429
+cooldown is `COOLDOWN_429_MS` = 60s flat: `retry_after_ms` is never populated by the
+claude-code adapters (`grep -rn retry_after_ms runtime/adapters/claude-code/` returns
+nothing), so the `retry-after` branch is reachable only from the OpenAI path.
+
+Regression tests. `open/__tests__/background-compose-never-disturbs-chat.test.ts`
+models the warm pool with the real `poolKeyFor` and the real poison rule (an aborted
+compose must leave the chat child at generation 1), with `metering_context` on every
+spec so the `project_id` pool-key dimension is actually exercised; its wiring guard
+now drives the REAL `buildOpenGraphComposer` and asserts which
+`substrate_instance_id` the production `reminder_dispatcher.dispatch()` turn lands
+on, instead of grepping composer source.
+`gateway/wiring/__tests__/background-lane-never-locks-out-owner.test.ts` drives
+dead-REPL failures through both lanes with an interactive CONTROL on every
+assertion, and — because the first round's tests never reached `reportFailure` on
+the background path at all, which made the `origin` argument itself untested — adds
+REAL-provider-status cases on both the Claude and the OpenAI dispatch paths.
+`open/__tests__/open-wiring-substrates.test.ts` now enumerates every wired substrate
+for the tool-bridge and frontier-floor claims rather than asserting only the positive
+case, so those exclusivity titles are measured.
+
+Mutation results, MEASURED (each mutation applied alone, then the three files above
+run together: baseline 52 pass / 0 fail):
+- collapse `cc-nudge-${owner_handle}` → `cc-agent-${owner_handle}`: 7 failures.
+- point the composer's dispatcher back at `buildSubstrateReminderLlm(liveAgentSubstrate)`:
+  2 failures.
+- drop the `failureLane` argument from all four `reportFailure` call sites: 2 failures.
+- delete `credential_failure_lane: 'background'` from the nudge substrate: 1 failure.
+- revert `reportFailure`'s strike-park check to unconditional: 1 failure.
+- treat `detectCliAuthFailure` as a provider status again: 1 failure.
+
+The last three were each survived by the first round's tests and are the reason this
+round's were written: a guard whose wiring, whose park re-check and whose definition
+of "provider-reported" are all untested is a guard that reads correct and is not.
 
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 

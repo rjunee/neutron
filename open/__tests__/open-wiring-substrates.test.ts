@@ -6,7 +6,10 @@
  * CARE invariants the carve must preserve:
  *   - substrate instance-id prefixes are byte-identical (`cc-llm-`, `cc-agent-`,
  *     ephemeral `cc-trident-*`, warm `cc-trident-fire-*`);
- *   - `enableToolBridge: true` ONLY on `cc-agent-*`; the rest omit it;
+ *   - `enableToolBridge: true` ONLY on the owner-facing conversational pair
+ *     `cc-agent-*` + `cc-nudge-*`; the rest omit it — asserted as an enumerated
+ *     set over every wired substrate, never as a positive case with an
+ *     exclusive-sounding title;
  *   - `cc-trident-fire-*` is WARM per repo cwd (Map cache: same cwd → same id +
  *     same instance; distinct cwd → distinct id) and NON-ephemeral;
  *   - `prewarmReady` never rejects and `prewarmSettledRef.settled` flips true
@@ -111,6 +114,29 @@ async function drain(sub: Substrate): Promise<void> {
   }
 }
 
+/**
+ * Drain EVERY substrate this wiring builds, so an "only X does Y" claim is a
+ * measured set difference rather than a positive assertion wearing an exclusive
+ * title. Nullable entries are LLM-less compositions; skip those, and the callers
+ * assert a non-empty result so a wholesale null cannot make the claim vacuous.
+ *
+ * Anything added to `WiredSubstrates` must be drained here — that is the point:
+ * a new substrate joins every exclusivity assertion automatically instead of
+ * being silently outside them.
+ */
+async function drainEveryWiredSubstrate(w: ReturnType<typeof wireSubstrates>): Promise<void> {
+  await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
+  await drain(w.makeWarmFireSubstrate('/repo/alpha'))
+  for (const s of [
+    w.liveAgentSubstrate,
+    w.llmCallSubstrate,
+    w.reminderComposeSubstrate,
+    w.makeComposeSubstrate('proj'),
+  ]) {
+    if (s !== null) await drain(s)
+  }
+}
+
 // `githubSpawnEnvRef` is module-level state a composer registers at boot, so a
 // composer test running earlier IN THE SAME SHARD leaves a live resolver behind
 // and every profile that opts into the credential then calls it. CI found this;
@@ -133,16 +159,33 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.skip_permissions).toBe(true)
   })
 
-  test('ONLY cc-agent-* opts into the tool bridge', async () => {
+  test('ONLY the owner-facing conversational pair opts into the tool bridge', async () => {
+    // ENUMERATED, not asserted-positive-and-titled-"only". The earlier version of
+    // this test drained `cc-agent-*` alone and asserted its bridge was on, so the
+    // exclusivity lived entirely in the title — and went quietly false the moment a
+    // second substrate was granted the bridge. Drain EVERY substrate this wiring
+    // builds and compare the whole set.
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)
-    expect(w.liveAgentSubstrate).not.toBeNull()
-    await drain(w.liveAgentSubstrate!)
-    const opts = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
-    expect(opts).toBeDefined()
-    expect(opts!.enableToolBridge).toBe(true)
-    expect(opts!.ephemeral).not.toBe(true)
-    expect(opts!.skip_permissions).toBe(true)
+    await drainEveryWiredSubstrate(w)
+
+    const bridged = new Set(
+      captured.filter((o) => o.enableToolBridge === true).map((o) => o.substrate_instance_id),
+    )
+    // `cc-nudge-*` is the background proactive-compose lane. It is an equal-grant,
+    // SEPARATE-SESSION twin of the chat lane on purpose: a ritual composes there and
+    // ISSUES #504 settled that it must reach Core tools (the locked-down `cc-ritual-*`
+    // sandbox is exactly what that issue deleted, after the morning brief could not
+    // read the owner's calendar). Its containment is the approval gate, not the
+    // substrate. If a THIRD id ever appears here, that is a real privilege change and
+    // this test is the place it must be argued.
+    expect([...bridged].sort()).toEqual(['cc-agent-owner', 'cc-nudge-owner'])
+
+    for (const id of bridged) {
+      const opts = captured.find((o) => o.substrate_instance_id === id)!
+      expect(opts.ephemeral, id).not.toBe(true)
+      expect(opts.skip_permissions, id).toBe(true)
+    }
   })
 
   test('THE PROFILE DECIDES which substrates carry the GitHub credential', async () => {
@@ -364,10 +407,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     // Several are nullable (LLM-less compositions); drain whichever exist and
     // assert below that we actually collected some, so a wholesale null does not
     // turn this into a vacuous pass.
-    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
-    for (const s of [w.makeComposeSubstrate('proj'), w.liveAgentSubstrate, w.llmCallSubstrate]) {
-      if (s !== null) await drain(s)
-    }
+    await drainEveryWiredSubstrate(w)
 
     const fire = captured.filter((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))
     expect(fire.length).toBeGreaterThan(0)
@@ -378,7 +418,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     for (const o of others) expect(o.turn_inactivity_ms).toBeUndefined()
   })
 
-  test('ONLY the owner\u2019s chat substrate carries the frontier-model floor', async () => {
+  test('ONLY the two PROFILE_WARM_CHAT substrates carry the frontier-model floor', async () => {
     // THE WIRING, not the constant \u2014 same reasoning as the fire-window test
     // directly above. The floor is worthless unless the REAL composition passes
     // `PROFILE_WARM_CHAT` down to the spawn, and the counter-assertion matters
@@ -388,21 +428,20 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     // The defect it guards: a REPL registry row OVERRIDES the best model
     // (`record.model ?? getBestModel()`), and the spawn writes the row back, so a
     // single wrong value is permanent. The owner's project chat ran a full day on
-    // Haiku on that path, twice in one day.
+    // Haiku on that path, twice in one day \u2014 which is ALSO why the background
+    // nudge lane carries the floor: a fired reminder used to compose on the chat
+    // session and rewrite its registry row to the fast tier. It now composes on
+    // its own child, and that child must not be the cheap one either.
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)
-    await drain(w.liveAgentSubstrate!)
-    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
-    await drain(w.makeWarmFireSubstrate('/repo/alpha'))
-    for (const s of [w.makeComposeSubstrate('proj'), w.llmCallSubstrate]) {
-      if (s !== null) await drain(s)
-    }
+    await drainEveryWiredSubstrate(w)
 
-    const chat = captured.filter((o) => o.substrate_instance_id === 'cc-agent-owner')
-    expect(chat.length).toBeGreaterThan(0)
-    for (const o of chat) expect(o.frontier_model_floor).toBe(true)
+    const floored = new Set(
+      captured.filter((o) => o.frontier_model_floor === true).map((o) => o.substrate_instance_id),
+    )
+    expect([...floored].sort()).toEqual(['cc-agent-owner', 'cc-nudge-owner'])
 
-    const others = captured.filter((o) => o.substrate_instance_id !== 'cc-agent-owner')
+    const others = captured.filter((o) => !floored.has(o.substrate_instance_id))
     expect(others.length).toBeGreaterThan(0)
     for (const o of others) {
       expect(o.frontier_model_floor, o.substrate_instance_id).not.toBe(true)

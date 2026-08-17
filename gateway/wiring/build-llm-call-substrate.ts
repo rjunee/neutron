@@ -258,17 +258,23 @@ export interface BuildLlmCallSubstrateInput {
    * `'background'` marks a timer-driven lane (today: the proactive nudge/ritual
    * compose substrate, `cc-nudge-*`). Two things change, and ONLY for failures:
    *
-   *   1. The strike is not counted toward the pool's `MAX_CONSECUTIVE_FAILURES`
-   *      park (`runtime/credential-pool.ts` `reportFailure`, `origin`).
-   *   2. An INFERRED cooldown is not reported at all. The mapper turns "retryable,
-   *      no HTTP status" into a 429 — a guess, and on this lane usually a wrong one
-   *      (a crashed REPL child, a wedged channel, a compose that timed out). An
-   *      interactive turn keeps that guess because a person is blocked and backing
-   *      off is the safer error. A background turn has nobody blocked, so guessing
-   *      only costs the owner his next chat turn.
+   *   1. The strike ledger is left completely alone — not incremented, and not
+   *      re-read, so a background report can neither trip the
+   *      `MAX_CONSECUTIVE_FAILURES` park nor extend one that is already standing
+   *      (`runtime/credential-pool.ts` `reportFailure`, `origin`).
+   *   2. An INFERRED cooldown is not reported at all. Three things count as an
+   *      inference here and all three are suppressed: the mapper's "retryable, no
+   *      HTTP status" → 429 default; a parsed status the mapper REWRITES (a
+   *      retryable `HTTP 503` also becomes a 429); and `detectCliAuthFailure`,
+   *      which fires on the substring `401` appearing anywhere in the prose. On
+   *      this lane those are usually a crashed REPL child, a wedged channel, or a
+   *      compose that timed out. An interactive turn keeps the guess because a
+   *      person is blocked and backing off is the safer error. A background turn
+   *      has nobody blocked, so guessing only costs the owner his next chat turn.
    *
    * A REAL provider status still cools the credential on either lane: a 429/402/401
-   * the provider actually returned is back-pressure, not an inference.
+   * the provider actually returned is back-pressure, not an inference, and the
+   * owner's next turn would meet the same wall a second later with a worse message.
    *
    * WHY THIS EXISTS: on 2026-08-17 five nudge composes failed on a live instance
    * with no quota condition at all, parked the box's ONE credential for an hour, and
@@ -990,23 +996,34 @@ export function buildLlmCallSubstrate(
               // is mapped by CODE so, e.g., a caller-cancelled `aborted` turn is
               // never mis-cooled as a 401 just because its prose says `HTTP 401`.
               let cooldownStatus: number | null
-              // Whether `cooldownStatus` came from the PROVIDER (a status it
-              // actually returned) or from `mapStatusForPoolCooldown`'s
-              // retryable→429 GUESS. A background lane discards the guess — see
-              // `credential_failure_lane`.
+              // Whether `cooldownStatus` is a status the PROVIDER ITSELF returned,
+              // or something this file INFERRED. A background lane reports only the
+              // former — see `credential_failure_lane`.
+              //
+              // The bar is deliberately strict: `true` only when the credential
+              // status we are about to cool on IS the status that came back. A
+              // parsed `HTTP 503` that `mapStatusForPoolCooldown` turns into a 429
+              // is an inference wearing a real status's clothes, and so is
+              // `detectCliAuthFailure`, whose weakest rule is the substring `401`
+              // appearing anywhere in the prose (see that function). Getting this
+              // wrong is invisible in the good case and re-opens the whole outage in
+              // the bad one, because an inferred cooldown on a single-credential box
+              // silences the owner's chat.
               let cooldownFromProvider = false
               if (stampedCode !== undefined) {
                 if (stampedCode === 'aborted') {
                   // Caller cancellation — never a credential fault; no cooldown.
                   cooldownStatus = null
                 } else if (stampedCode === 'rate_limited') {
+                  // The ADAPTER stamped this class off the provider's own rate-limit
+                  // response; it is a report, not a guess.
                   cooldownStatus = 429
                   cooldownFromProvider = true
                 } else if (stampedCode === 'http_status') {
                   // The numeric status lives in the `HTTP <n>:` message prefix.
                   const parsed = parseHttpStatusFromMessage(ev.message)
                   cooldownStatus = mapStatusForPoolCooldown(parsed, ev.retryable)
-                  cooldownFromProvider = parsed !== null
+                  cooldownFromProvider = parsed !== null && cooldownStatus === parsed
                 } else {
                   // Every OTHER stamped class is NOT a fault of the SELECTED
                   // credential: `aborted` is a caller cancel; `all_cooldown` /
@@ -1022,10 +1039,13 @@ export function buildLlmCallSubstrate(
                 const httpStatus = parseHttpStatusFromMessage(ev.message)
                 if (httpStatus !== null) {
                   cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
-                  cooldownFromProvider = true
+                  cooldownFromProvider = cooldownStatus === httpStatus
                 } else if (detectCliAuthFailure(ev.message)) {
+                  // PROSE HEURISTIC, NOT A PROVIDER STATUS — `detectCliAuthFailure`
+                  // returns true for the substring `401` anywhere in the message, so
+                  // a background REPL crash whose text merely mentions it would
+                  // otherwise cool the owner's only credential for five minutes.
                   cooldownStatus = 401
-                  cooldownFromProvider = true
                 } else {
                   cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
                 }
@@ -1143,8 +1163,10 @@ export function startOpenAiFamilySession(args: {
   projectId?: string
   /** Credential-pool failure accounting lane — see
    *  {@link BuildLlmCallSubstrateInput.credential_failure_lane}. Absent ⇒
-   *  `'interactive'`. Only the strike counter differs here: this path already
-   *  cools exclusively on real provider statuses. */
+   *  `'interactive'`. This classifier is already credential-fault-only for
+   *  STAMPED events, so the lane changes less here than on the Claude path: the
+   *  strike ledger, plus the one prose inference this path still makes
+   *  (`detectCliAuthFailure` on a legacy/unstamped event). */
   failureLane?: FailureOrigin
 }): SessionHandle {
   const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey, projectId } = args
@@ -1361,7 +1383,13 @@ export function startOpenAiFamilySession(args: {
           // conflicting-code/prose boundary is unit-tested without driving the
           // whole adapter.
           const cooldownStatus = openAiCredentialCooldownForEvent(ev)
-          if (cooldownStatus !== null) {
+          // PROSE-INFERRED, not provider-reported: an UNSTAMPED event with no
+          // `HTTP <n>:` prefix can only have been classified by
+          // `detectCliAuthFailure`, whose weakest rule is the substring `401`
+          // anywhere in the message. Suppressed on the background lane for exactly
+          // the reason the Claude path above suppresses it.
+          const proseInferred = ev.code === undefined && parseHttpStatusFromMessage(ev.message) === null
+          if (cooldownStatus !== null && !(proseInferred && failureLane === 'background')) {
             if (ev.retry_after_ms !== undefined) {
               reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms, failureLane)
             } else {

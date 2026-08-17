@@ -5297,6 +5297,16 @@ export function buildOpenGraphComposer(
             should_reset,
           }),
       })
+      // KNOWN GAP, stated rather than implied: this sweep and the `/reset` thunk
+      // above both address `cc-agent-*` ONLY, so the background `cc-nudge-*`
+      // transcript is neither periodically swept nor reachable from `/reset`. It is
+      // left that way deliberately for now — the policy stamps its cooldown per
+      // `project_scope`, so folding a second instance's report into the same tick
+      // would let one lane's reset suppress the other's, and a nudge composes short
+      // one-shot prompts between CC's own auto-compacts rather than accumulating a
+      // conversation. If that lane is ever observed growing, it needs its OWN policy
+      // instance with its own cooldown map, not an extra `substrate_instance_id`
+      // here.
       realmodeCleanups.push(() => {
         contextResetPolicy.stop()
         // Drop every rehydration listener the live-agent runner registered on the
