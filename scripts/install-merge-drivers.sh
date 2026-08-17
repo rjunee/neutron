@@ -229,7 +229,7 @@ sq() {
 # `--check`, so the two cannot disagree about what counts as bun.
 #
 # The `.exe` suffix is stripped case-insensitively, matching `asBuiltDriverCommand` in
-# `trident/orchestrator.ts:633` (`basename(process.execPath).replace(/\.exe$/i, '') !== 'bun'`).
+# `trident/orchestrator.ts` (`basename(process.execPath).replace(/\.exe$/i, '') !== 'bun'`).
 # That repository is macOS and ubuntu today, so this is not a supported platform being added —
 # it is the OTHER derivation of this same decision already handling it, and a docblock in this
 # file claiming the two agree on what counts as bun. Without this line that claim is false, and a
@@ -411,7 +411,7 @@ if [ "${1:-}" = "--check" ]; then
   # execute, and the string being judged came out of the repo config; asking `$bun_path --revision`
   # would be this script executing an arbitrary named binary to find out whether it was safe to let
   # git execute it, which answers the question by doing the thing. The same rule is already the one
-  # the other derivation applies to itself — `asBuiltDriverCommand` (`trident/orchestrator.ts:633`)
+  # the other derivation applies to itself — `asBuiltDriverCommand` (`trident/orchestrator.ts`)
   # gates on `basename(process.execPath) !== 'bun'` — and `is_bun_named` above is spelled to match
   # it down to the `.exe` strip, so the two genuinely agree rather than merely reading as if they do.
   #
