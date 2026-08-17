@@ -174,6 +174,7 @@ const {
   // thread it falls back to the repo-of-record copy (same precedent as
   // codex-review.sh below).
   checkpointScript = null,
+  codexBuildScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
   // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
   // script (dirty → preserve, clean → plain remove) rather than an LLM told to
@@ -272,6 +273,12 @@ const kimiConfigured = kimiConfiguredArg === true
 // launcher that threads those also threads checkpointScript — the repoPath
 // fallback covers only legacy callers.
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
+
+// NO repoPath fallback, deliberately — resolving the wrapper from the repo being
+// built is the defect (Open worked by coincidence, everything else 127'd or drifted);
+// a missing arg fails closed by name in forgeAgent.
+const codexBuildSh =
+  typeof codexBuildScript === 'string' && codexBuildScript.length > 0 ? codexBuildScript : null
 
 // Resolved worktree-cleanup script path (#541) — the deterministic replacement
 // for the force-removing cleanup agent. Same repoPath fallback as above.
@@ -1154,8 +1161,11 @@ const NO_PATTERN_KILL_RULE =
 // `schema: FORGE_SCHEMA` the agent ALSO returns the structured fields, but the
 // last-lines discipline is kept verbatim as the durable, parser-friendly fallback.
 // Step 1 + step 4 differ on whether the branch/PR ALREADY EXIST (`reenter`):
-//   • a FRESH round-1 run (reenter=false) CREATES the branch (`git switch -c`)
-//     and, in pr-mode, opens a PR;
+//   • a FRESH round-1 run (reenter=false) CREATES-OR-RE-ENTERS the branch (`git switch -c`),
+//     falling back to a plain `git switch` when a prior failed run of the same
+//     card left the local branch behind (measured incident d5c1e219: the
+//     collision pushed the commit onto the worktree's auto `worktree-wf_*`
+//     branch and the divergence guard refused the round);
 //   • a RE-ENTRY (reenter=true) — a crash-resume (`resuming`) OR any bounded
 //     fix round after round 1 — re-enters the EXISTING branch WITHOUT `-c`
 //     (which would collide: "branch already exists") and REUSES the PR (never a
@@ -1166,7 +1176,7 @@ const NO_PATTERN_KILL_RULE =
 function forgeStep1(reenter) {
   return reenter
     ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
-    : `Run \`git switch -c ${forgeBranch}\` as your FIRST step (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+    : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
 }
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
@@ -1317,6 +1327,7 @@ HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from
 - There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
 - Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
 - Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
+- STEP 1 IS ALREADY DONE FOR YOU, and this REPLACES it: the wrapper that launched you checked this worktree out on ${forgeBranch} before you started. Do NOT run \`git switch -c\` (the branch exists — creating it again errors); do not switch away. Verify with \`git rev-parse --abbrev-ref HEAD\` if unsure, then build.
 - Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
 }
 
@@ -1506,7 +1517,7 @@ function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   // one won. A separate file has no ambiguity to resolve.
   const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
-  const script = `${repoPath}/trident/codex-build.sh`
+  const script = codexBuildSh
   // THE HEREDOC TERMINATOR MUST NOT OCCUR IN THE BRIEF. A brief line equal to the
   // marker would close the heredoc early and leave the REST OF THE BRIEF sitting in
   // the command as shell — and part of the brief is the owner's task text, which is
@@ -1640,6 +1651,11 @@ async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
   if (route.transport !== 'cli') {
     return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
+  }
+  if (codexBuildSh === null) {
+    throw new Error(
+      `${opts.label} is routed to the codex executor but the launcher did not thread codexBuildScript (the harness build wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
+    )
   }
   const res = await agent(
     codexBuildPrompt(

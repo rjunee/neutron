@@ -22,7 +22,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url'
 
 import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 
-import { buildWorkflowArgs } from '../inner-loop.ts'
+import { buildWorkflowArgs, CODEX_BUILD_SCRIPT_PATH } from '../inner-loop.ts'
 import { TRIDENT_PHASES } from '../phase-models.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -242,7 +242,8 @@ async function runWorkflow(
     opts.buildProduces === undefined &&
     opts.remainingTasks === undefined &&
     opts.buildBranch === undefined &&
-    opts.missingBuildTrailer !== true
+    opts.missingBuildTrailer !== true &&
+    args['codexBuildScript'] !== undefined
   ) {
     expect(synthCount).toBeGreaterThan(0)
   }
@@ -588,6 +589,56 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
    */
   const CODEX_BUILD = { build: { model: 'terra' } }
 
+  test('the wrapper resolves from the harness install, never the repo being built', async () => {
+    expect(CODEX_BUILD_SCRIPT_PATH).toBe(
+      fileURLToPath(new URL('../codex-build.sh', import.meta.url)),
+    )
+    expect(existsSync(CODEX_BUILD_SCRIPT_PATH)).toBe(true)
+    const prompt = promptFor(
+      (await runWorkflow(productionArgs(CODEX_BUILD))).captured,
+      'forge:build',
+    )
+    expect(prompt).not.toContain('/repo/trident/codex-build.sh')
+  })
+
+  test('a build in a repo with NO trident/ directory resolves and runs the wrapper', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-no-trident-'))
+    try {
+      const initialized = spawnSync('git', ['init'], { cwd: dir, encoding: 'utf8' })
+      expect(initialized.status).toBe(0)
+      const { captured } = await runWorkflow(
+        productionArgs(CODEX_BUILD, { repo_path: dir }),
+      )
+      const prompt = promptFor(captured, 'forge:build')
+      const match = /bash '([^']*codex-build\.sh)'/.exec(prompt)
+      expect(match).not.toBeNull()
+      const wrapper = match![1]!
+      expect(existsSync(wrapper)).toBe(true)
+      expect(wrapper.startsWith(`${dir}/`)).toBe(false)
+
+      const ran = spawnSync('/bin/bash', [wrapper, 'trident/x', 'main', 'local'], {
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? '' },
+        encoding: 'utf8',
+      })
+      expect(ran.status).toBe(10)
+      expect(ran.stderr).toContain('CODEX_BUILD_NOT_CONNECTED')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a cli-routed build with no threaded codexBuildScript fails closed by name', async () => {
+    const args = productionArgs(CODEX_BUILD)
+    delete args['codexBuildScript']
+    const { result, captured, logs } = await runWorkflow(args)
+    expect(result['ok']).toBe(false)
+    expect(result['checkpoint']).toBe('inner-error')
+    expect(result['terminalCause']).toContain('codexBuildScript')
+    expect(logs.some((line) => line.includes('codexBuildScript'))).toBe(true)
+    expect(captured.filter((call) => call.label === 'forge:build')).toEqual([])
+  })
+
   test('the detached wrapper outlives the Bash-call bound that used to kill it', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'neutron-codex-detach-'))
     const marker = join(dir, 'completed')
@@ -657,8 +708,8 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
   test('forge:build dispatches through the codex build wrapper, with the chosen model', async () => {
     const { captured } = await runWorkflow(productionArgs(CODEX_BUILD))
     const cmd = promptFor(captured, 'forge:build')
-    // The wrapper, by path, from the repo of record.
-    expect(cmd).toContain("bash '/repo/trident/codex-build.sh'")
+    // The wrapper, by path, from the HARNESS install.
+    expect(cmd).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}'`)
     // The MODEL on the subprocess's command line — the only place a GPT id can be
     // real. `CODEX_BUILD_MODEL`, not the reviewer's `CODEX_REVIEW_MODEL`: one name
     // for both knobs would let a box that exports one silently steer the other.
@@ -859,7 +910,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(ralphArgs['ralph']).toBe(true)
     const { captured } = await runWorkflow(ralphArgs, { complexity: 'mechanical' })
     const build = captured.find((c) => c.label === 'forge:build')!
-    expect(build.prompt).toContain("bash '/repo/trident/codex-build.sh'")
+    expect(build.prompt).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}'`)
     expect(build.prompt).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
     expect(build.opts['model'] ?? null).toBeNull()
     // …and the run SAYS the owner's setting reached this phase. A mirrored override
@@ -906,7 +957,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
       { complexity: 'mechanical' },
     )
     const build = captured.find((c) => c.label === 'forge:build')!
-    expect(build.prompt).toContain("bash '/repo/trident/codex-build.sh'")
+    expect(build.prompt).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}'`)
     expect(build.prompt).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
     // No Anthropic model, and no effort from the ignored entry, on the wrapping agent.
     expect({ model: build.opts['model'] ?? null, effort: build.opts['effort'] ?? null }).toEqual({
@@ -927,7 +978,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     })
     const fix = captured.find((c) => c.label === 'forge:fix-round-2')
     expect(fix).toBeDefined()
-    expect(fix!.prompt).toContain("bash '/repo/trident/codex-build.sh'")
+    expect(fix!.prompt).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}'`)
     expect(fix!.opts['model'] ?? null).toBeNull()
     // …and it is still a FIX: the findings and the re-entry contract reached codex.
     expect(fix!.prompt).toContain('You are FIXING')
@@ -1021,11 +1072,13 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // in a clone whose origin was unreachable (offline, a stale URL, a non-GitHub
     // remote) hard-deferred at the baseline before codex launched, every round.
     const local = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
-    expect(local).toContain("bash '/repo/trident/codex-build.sh' 'trident/a-run' 'main' 'local'")
+    expect(local).toContain(
+      `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'local'`,
+    )
 
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
     const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
-    expect(pr).toContain("bash '/repo/trident/codex-build.sh' 'trident/a-run' 'main' 'pr'")
+    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
     // The two really are different commands, so neither assertion is passing on a
     // constant that happens to contain both.
     expect(local).not.toContain("'main' 'pr'")
@@ -1038,7 +1091,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(invocation).not.toContain('GITHUB_TOKEN=')
     expect(invocation).not.toContain('GIT_CONFIG_KEY_')
     // Positive control: the slice is the real invocation, not an empty string.
-    expect(invocation).toContain("bash '/repo/trident/codex-build.sh'")
+    expect(invocation).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}'`)
   })
 
   test('the trailer is read from ITS OWN FILE, never from the codex transcript', async () => {
