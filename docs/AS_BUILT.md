@@ -2,6 +2,27 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the arrival proof is repaired to the post-merge contract (PR #377)
+
+The origin/main merge (903428b4) brought two contract changes the arrival suite
+predated, and together they broke it one way: forge:build was never emitted, so the
+run command carried no PARTS at all.
+- `codexBuildScript` is now a REQUIRED launcher arg (main removed the repoPath
+  fallback — resolving the wrapper from the repo being built is the drift #355
+  fixed), and forgeAgent fails closed by name BEFORE dispatching forge:build. The
+  harness saw the workflow die at inner-error with an empty prompt. It now threads
+  the REAL `trident/codex-build.sh`, exactly as `inner-loop.ts` buildWorkflowArgs does.
+- Parts mode no longer carries the whole-file `NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY`
+  receipt (the arbitration made per-part receipts the one gate there). Assertion (d)
+  now proves the not-blind property against the surviving scheme: every part the
+  CHILD reported measures to the prompt's own `NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY`
+  entry, and the seam's stdin is byte-for-byte the in-order assembly of those parts.
+Verified: `bun test trident/codex-build-arrival.test.ts` 2 pass / 0 fail at the branch
+head. Known-red on this host and PRE-EXISTING at origin/main 477671d7 (measured — not
+this branch's): the two worktree-binding tests in `trident/codex-build.test.ts` ("DEAD
+round-0 worktree is RECLAIMED", "LIVE worktree is still refused"); the atomic-trailer
+concurrent-reader test is load-flaky (fails in a full-file run, passes filtered).
+
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
 The outer publisher refused to publish when origin's branch ref already equalled the
