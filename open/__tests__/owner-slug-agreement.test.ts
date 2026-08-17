@@ -23,6 +23,9 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolveOwnerSlug } from '../owner-identity.ts'
+// The shim's FILL predicate, extracted from `startOpenServer` so the claim
+// `config/index.ts` makes about `open/server.ts` is enforced where it is made.
+import { applyEnvShim } from '../server.ts'
 import {
   resolveOwnerSlug as gatewayResolveOwnerSlug,
   resolveOwnerSlugSourceFromConfig,
@@ -33,11 +36,14 @@ import {
   resolveBootConfig,
   OwnerSlugUnreadableError,
 } from '@neutronai/config/index.ts'
-import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
+import { resolveNeutronHome, resolveOpenDbPath } from '@neutronai/migrations/db-path.ts'
 // The two OTHER readers of `OWNER_HOME`. `config/index.ts` documents that every
 // sibling identity read trims; these are the siblings, and a review measured
 // them not trimming. Imported here so the claim is enforced where it is made.
-import { resolveOwnerHome as listenerResolveOwnerHome } from '@neutronai/gateway/boot-listener-registry.ts'
+import {
+  resolveOwnerHome as listenerResolveOwnerHome,
+  resolveRegistryDbPath,
+} from '@neutronai/gateway/boot-listener-registry.ts'
 import { resolveOwnerHomeFromEnv } from '@neutronai/onboarding/overnight/register.ts'
 
 let home: string
@@ -307,7 +313,15 @@ describe('the boot resolver and the CLI resolver agree', () => {
       expect(effectiveOwnerHome(resolveBootConfig(pinned))).toBe(home)
     })
 
-    it('EVERY reader of OWNER_HOME agrees a blank one is unset — not just the two this branch touched', () => {
+    // NAMED FOR WHAT IT CHECKS, WHICH IS FOUR RESOLVERS — not "every reader".
+    // The earlier name claimed universal coverage of every `OWNER_HOME` reader
+    // while the body exercises the four this package can import; the CLI guard
+    // (`scripts/email-accounts.ts`), `buildPromptVars` (`prompts/template.ts`)
+    // and the shim's fill predicate are pinned in their own suites. A test whose
+    // name is wider than its body is the same defect as a docblock whose claim is
+    // wider than its grep — which is the defect this entire branch is about, so
+    // it does not get to survive inside the fix for it.
+    it('the four OWNER_HOME resolvers this package imports agree a blank one is unset', () => {
       // THE DOCBLOCK CLAIMED THIS AND IT WAS NOT TRUE. `config/index.ts`
       // asserts "every sibling identity read in this repo trims", and a review
       // found two that did not: `resolveOwnerHome`
@@ -353,6 +367,68 @@ describe('the boot resolver and the CLI resolver agree', () => {
       expect(resolveOwnerHomeFromEnv({ OWNER_HOME: '   ', NEUTRON_DB_PATH: join(home, 'db', 'project.db') } as NodeJS.ProcessEnv)).toBe(home)
     })
 
+    it('the readers the last sweep missed agree too — blank is unset on NEUTRON_DB_PATH and NEUTRON_HOME', () => {
+      // THE CLAIM WAS DECLARED TRUE WHILE THREE READERS STILL BROKE IT. The
+      // test above fixed the two `OWNER_HOME` siblings and `config/index.ts`
+      // then asserted "every sibling identity read in this repo trims". A later
+      // review measured three that did not, on the OTHER two variables:
+      //
+      //   `resolveOpenDbPath`    (`migrations/db-path.ts:67`)        — NEUTRON_DB_PATH, `length > 0`
+      //   `resolveRegistryDbPath`(`gateway/boot-listener-registry.ts:56,58,60`) — `!== ''`
+      //   `resolveStatePath`     (`gbrain-memory/gbrain-doctor.ts:205`) — trimmed the RETURN
+      //
+      // The first two are pinned here. The third lives in
+      // `gbrain-memory/__tests__/gbrain-doctor.test.ts` because `open` does not
+      // depend on `@neutronai/gbrain-memory` and a test is not a reason to make
+      // it, but it is the same defect and was fixed in the same change.
+      //
+      // Measured before this fix:
+      //   NEUTRON_DB_PATH='   ' -> resolveOpenDbPath '   ' while resolveOwnerHome
+      //                            fell back to ~/.local/share/neutron
+      //   NEUTRON_HOME='   '    -> resolveRegistryDbPath '   /registry.db' while
+      //                            resolveNeutronHome fell back to ~/neutron
+      // One variable, two answers, on the reads that decide which database the
+      // process opens and which registry tells it its own handle.
+
+      // 1. NEUTRON_DB_PATH — blank falls through to the <NEUTRON_HOME> default.
+      for (const blank of ['', '   ', '\t\n']) {
+        expect(resolveOpenDbPath({ NEUTRON_DB_PATH: blank, NEUTRON_HOME: home } as NodeJS.ProcessEnv)).toBe(
+          join(home, 'project.db'),
+        )
+      }
+      // 2. NEUTRON_HOME — blank falls through to the documented dev fallback.
+      for (const blank of ['', '   ', '\t\n']) {
+        expect(resolveRegistryDbPath({ NEUTRON_HOME: blank } as NodeJS.ProcessEnv)).toBe(
+          join(homedir(), '.local', 'share', 'neutron', 'registry.db'),
+        )
+      }
+      // …and the explicit override + legacy slots on that same function, which
+      // fixing only the `NEUTRON_HOME` line would have left on the old rule.
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: '   ', NEUTRON_HOME: home } as NodeJS.ProcessEnv)).toBe(
+        join(home, 'registry.db'),
+      )
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH_RW: '   ' } as NodeJS.ProcessEnv)).toBe(
+        join(homedir(), '.local', 'share', 'neutron', 'registry.db'),
+      )
+
+      // 3. THE RETURN HALF, which is the opposite direction of the same seam.
+      // A leading/trailing space is legal in a POSIX path, so a reader that
+      // trims its RETURN silently rewrites a real directory. Pinned here for
+      // the two readers this package can see; the `gbrain-doctor` half is in
+      // that package's own suite.
+      const spaced = ' /real/dir '
+      expect(resolveNeutronHome({ NEUTRON_HOME: spaced } as NodeJS.ProcessEnv)).toBe(spaced)
+      expect(resolveOpenDbPath({ NEUTRON_DB_PATH: spaced } as NodeJS.ProcessEnv)).toBe(spaced)
+
+      // CONTROLS — a real path is honoured on every one of them, so the
+      // assertions above fail for "blank was honoured" rather than for "the
+      // variable stopped being read at all", which is a different bug wearing
+      // the same green.
+      expect(resolveOpenDbPath({ NEUTRON_DB_PATH: '/srv/pin/x.db' } as NodeJS.ProcessEnv)).toBe('/srv/pin/x.db')
+      expect(resolveRegistryDbPath({ NEUTRON_HOME: home } as NodeJS.ProcessEnv)).toBe(join(home, 'registry.db'))
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: '/srv/r.db' } as NodeJS.ProcessEnv)).toBe('/srv/r.db')
+    })
+
     it('the env shim publishes a usable OWNER_HOME rather than re-writing the empty one', () => {
       // The SECOND live site of the same `??`. `open/server.ts:130` fills a slot
       // that is `undefined` OR `''`, so the shim wrote the empty string back
@@ -366,6 +442,88 @@ describe('the boot resolver and the CLI resolver agree', () => {
       // fallback did not become an override.
       const pinned = { NEUTRON_HOME: home, OWNER_HOME: '/srv/owner' } as NodeJS.ProcessEnv
       expect(envShimFromBootConfig(resolveBootConfig(pinned))['OWNER_HOME']).toBe('/srv/owner')
+    })
+
+    it('the shim FILL predicate treats a blank slot as empty, so the config and the env cannot disagree', () => {
+      // THE SITE THE DOCBLOCK NAMED WHILE IT DID NOT HOLD. `config/index.ts`
+      // listed `open/server.ts` among the siblings that trim; the file
+      // contained no `trim()` at all, and its fill predicate was
+      // `=== undefined || === ''`. The test above pins what the shim COMPUTES;
+      // this pins what it WRITES, which is the half that reaches the readers.
+      //
+      // Measured before the fix, `OWNER_HOME='   '` + a real `NEUTRON_HOME`:
+      //   envShimFromBootConfig -> '/real/home'   (blank read as unset)
+      //   process.env.OWNER_HOME -> '   '         (slot not filled: not '' )
+      // Below-seam readers take the env, so the frozen config and the running
+      // process disagreed about where the owner's data dir is.
+      for (const blank of ['', '   ', '\t\n']) {
+        const env = { NEUTRON_HOME: home, OWNER_HOME: blank } as NodeJS.ProcessEnv
+        applyEnvShim(env, envShimFromBootConfig(resolveBootConfig(env)))
+        expect(env['OWNER_HOME']).toBe(home)
+      }
+
+      // …AND THE OTHER KEY THE SHIM WRITES. `envShimFromBootConfig` fills
+      // `NEUTRON_DB_PATH` as well as `OWNER_HOME`, so widening this predicate
+      // changed that key's behaviour too and only one of the two was asserted.
+      // A blank db path is now an empty slot and gets the derived
+      // `<home>/project.db`, which is the value the migration runner and the
+      // booting server must agree on — the same one-variable-two-answers split,
+      // on the read that decides which database exists.
+      for (const blank of ['', '   ', '\t\n']) {
+        const env = { NEUTRON_HOME: home, NEUTRON_DB_PATH: blank } as NodeJS.ProcessEnv
+        applyEnvShim(env, envShimFromBootConfig(resolveBootConfig(env)))
+        expect(env['NEUTRON_DB_PATH']).toBe(join(home, 'project.db'))
+      }
+      // CONTROL — an operator-pinned db path is still never clobbered.
+      const pinnedDb = { NEUTRON_HOME: home, NEUTRON_DB_PATH: '/srv/pin/x.db' } as NodeJS.ProcessEnv
+      applyEnvShim(pinnedDb, envShimFromBootConfig(resolveBootConfig(pinnedDb)))
+      expect(pinnedDb['NEUTRON_DB_PATH']).toBe('/srv/pin/x.db')
+      // …and an ABSENT slot is filled too, which is the case that always worked
+      // and must keep working.
+      const absent = { NEUTRON_HOME: home } as NodeJS.ProcessEnv
+      applyEnvShim(absent, envShimFromBootConfig(resolveBootConfig(absent)))
+      expect(absent['OWNER_HOME']).toBe(home)
+
+      // CONTROL — an operator pin is still never clobbered, so "fill blank
+      // slots" did not become "overwrite everything". Without this the
+      // assertions above would also pass for a shim that ignored the slot's
+      // current value entirely, which is a different and worse bug.
+      const operator = { NEUTRON_HOME: home, OWNER_HOME: '/srv/owner' } as NodeJS.ProcessEnv
+      applyEnvShim(operator, envShimFromBootConfig(resolveBootConfig(operator)))
+      expect(operator['OWNER_HOME']).toBe('/srv/owner')
+
+      // CONTROL — a path whose blankness is only leading/trailing is a REAL
+      // path and survives, because the predicate trims to DECIDE but the slot
+      // keeps its bytes.
+      const spacedReal = { NEUTRON_HOME: home, OWNER_HOME: ' /srv/owner ' } as NodeJS.ProcessEnv
+      applyEnvShim(spacedReal, envShimFromBootConfig(resolveBootConfig(spacedReal)))
+      expect(spacedReal['OWNER_HOME']).toBe(' /srv/owner ')
+    })
+
+    it('the registry resolvers return a spaced REAL path byte-for-byte', () => {
+      // THE RETURN-SIDE CLAIM THAT NOTHING PINNED. `gateway/boot-listener-registry.ts`
+      // documents "RETURNS stay verbatim — blank means unset, a real path is
+      // passed through byte-for-byte", and the blank half is pinned above. The
+      // verbatim half was not: every existing assertion used whitespace-ONLY or
+      // clean paths, so a `.trim()` added to the RETURN — the exact regression
+      // this branch fixes in `resolveStatePath` — would have passed all of them.
+      //
+      // Leading/trailing spaces are legal in a POSIX path. A resolver that
+      // trims its return silently rewrites a real directory, which is the same
+      // one-variable-two-homes split as the blank case, in the other direction.
+      const spaced = ' /real/dir '
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: spaced } as NodeJS.ProcessEnv)).toBe(spaced)
+      expect(resolveRegistryDbPath({ NEUTRON_HOME: spaced } as NodeJS.ProcessEnv)).toBe(
+        join(spaced, 'registry.db'),
+      )
+      expect(listenerResolveOwnerHome({ OWNER_HOME: spaced } as NodeJS.ProcessEnv)).toBe(spaced)
+      expect(resolveOwnerHomeFromEnv({ OWNER_HOME: spaced } as NodeJS.ProcessEnv)).toBe(spaced)
+
+      // CONTROL — the same functions still answer for a clean path, so a
+      // failure above means "the return was rewritten", not "the variable
+      // stopped being read".
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: '/srv/r.db' } as NodeJS.ProcessEnv)).toBe('/srv/r.db')
+      expect(listenerResolveOwnerHome({ OWNER_HOME: '/srv/owner' } as NodeJS.ProcessEnv)).toBe('/srv/owner')
     })
   })
 

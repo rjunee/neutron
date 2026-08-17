@@ -120,10 +120,11 @@ const WEB_TOOLS = new Set(['WebSearch', 'WebFetch'])
  *
  * ⚠️ WHAT THIS GATE ACTUALLY DOES SINCE ISSUES #504 — READ BEFORE TRUSTING IT.
  * It bounds what a ritual may DECLARE and be approved for. It is NOT containment,
- * and it never was after the ritual lane was deleted. A ritual composes on the
- * owner's WARM chat session, which is spawned with `Bash`, `Write` and `Edit` in its
- * `--tools` surface; a ritual's own `tool_surface` cannot be applied per fire,
- * because the persistent-REPL reuse guard would evict and respawn that session
+ * and it never was after the ritual lane was deleted. A ritual composes on the warm
+ * BACKGROUND compose session (`cc-nudge-*` — no longer the owner's chat REPL, but
+ * still spawned with `Bash`, `Write` and `Edit` in its `--tools` surface); a
+ * ritual's own `tool_surface` cannot be applied per fire, because the
+ * persistent-REPL reuse guard would evict and respawn that session
  * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). So a ritual whose
  * declared surface is `['Read','Glob','Grep']` still executes somewhere Bash exists.
  *

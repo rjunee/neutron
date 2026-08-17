@@ -72,8 +72,12 @@ describe('findDuplicateEntryHeadings', () => {
   })
 
   it('agrees with the merge driver on a tab-separated heading', () => {
-    // `startsWith('## ')` requires a space; the driver's `/^##[^#]/` does not.
-    // The driver would merge these as one entry twice over; the gate saw none.
+    // `startsWith('## ')` requires a space; the driver's `HEADING` accepts a tab as
+    // the delimiter too, as CommonMark does. The driver would merge these as one
+    // entry twice over; the gate saw none. This case is also why that regex is not
+    // the narrower `/^## /` — under it this fixture parses as ZERO entries and the
+    // gate reports clean, which is the silent direction. See `HEADING` in the
+    // driver's parser for the rule and the three spellings that got it wrong.
     const log = '##\ta — one\n\nx\n\n##\ta — one\n\ny\n'
     expect(findDuplicateEntryHeadings(log)).toEqual([{ heading: '##\ta — one', lines: [1, 5] }])
   })

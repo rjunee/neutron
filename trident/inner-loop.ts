@@ -327,6 +327,24 @@ export const WORKTREE_CLEANUP_SCRIPT_PATH = fileURLToPath(
   new URL('./worktree-cleanup.sh', import.meta.url),
 )
 
+/** The abs path of the sibling Codex BUILD wrapper, which ships with the
+ *  HARNESS, never with the repo being built. `${repoPath}/trident/codex-build.sh`
+ *  only ever existed in neutron-open because Open IS the harness repo; every
+ *  other project exited 127, while Enterprise's hand-made symlink to the
+ *  deployed copy let #345's `model_reasoning_effort=xhigh` pin reach Open but
+ *  left Enterprise building with reasoning off. Threaded via args (the workflow
+ *  script has no module resolution; the TARGET repo need not contain trident/),
+ *  and authoritative for ALL projects including Open. */
+export const CODEX_BUILD_SCRIPT_PATH = fileURLToPath(new URL('./codex-build.sh', import.meta.url))
+
+/** The abs path of the sibling Codex REVIEW wrapper, which ships with the
+ *  HARNESS, never with the repo being reviewed. `${repoPath}/trident/codex-review.sh`
+ *  only ever existed in neutron-open because Open IS the harness repo; every other
+ *  project exited 127 at the review seat, and a deployed copy lets the two drift
+ *  silently. Threaded via args (the workflow script has no module resolution; the
+ *  TARGET repo need not contain trident/), authoritative for ALL projects including Open. */
+export const CODEX_REVIEW_SCRIPT_PATH = fileURLToPath(new URL('./codex-review.sh', import.meta.url))
+
 /**
  * The `--tools` surface the WARM fire substrate needs. Includes `Workflow` (the
  * launcher fires it) PLUS the build/review tools — because the inner-workflow's
@@ -363,6 +381,7 @@ export const WORKFLOW_FIRE_TOOL_NAMES = [
 export function buildWorkflowArgs(
   input: InnerLoopInput,
   briefParts?: BriefParts | null,
+  reflectionGuidance?: string,
 ): Record<string, unknown> {
   const run = input.run
   return {
@@ -394,6 +413,10 @@ export function buildWorkflowArgs(
     // runs on every path — dirty worktrees are preserved, never force-removed
     // (#541).
     worktreeCleanupScript: WORKTREE_CLEANUP_SCRIPT_PATH,
+    // The harness-authoritative Codex build wrapper; never resolve it from the target repo.
+    codexBuildScript: CODEX_BUILD_SCRIPT_PATH,
+    // The harness-authoritative Codex review wrapper; never resolve it from the target repo.
+    codexReviewScript: CODEX_REVIEW_SCRIPT_PATH,
     // The checked-in credentialed-`gh` runner the three GitHub READ probes shell
     // into, plus the STORE COORDINATES it resolves the token from. Paths and a
     // handle — never the token, which these args (a launcher prompt) could not
@@ -440,7 +463,7 @@ export function buildWorkflowArgs(
     // already relies on. Empty string for a null/whitespace/non-string context → the
     // workflow appends nothing (a clean no-op). The `.mjs` cannot import this helper
     // (no module resolution), so the derivation lives here.
-    reflectionGuidance: buildReflectionGuidance(input.reflection_context),
+    reflectionGuidance: reflectionGuidance ?? buildReflectionGuidance(input.reflection_context),
     // The TEST EXECUTION block, carried EXACTLY like `reflectionGuidance` above: an
     // already-rendered string (the `.mjs` has no module resolution), spliced into the
     // FORGE contract only, never argus. Unlike the guidance it is DERIVED UPSTREAM by
@@ -543,8 +566,9 @@ export function buildFireWorkflowPrompt(
   scriptPath: string,
   input: InnerLoopInput,
   briefParts?: BriefParts | null,
+  reflectionGuidance?: string,
 ): string {
-  const argsJson = JSON.stringify(buildWorkflowArgs(input, briefParts))
+  const argsJson = JSON.stringify(buildWorkflowArgs(input, briefParts, reflectionGuidance))
   return `You are the trident-v2 inner-loop LAUNCHER. Your ENTIRE job is to FIRE one background Workflow and then immediately reply — you run UNATTENDED and must NEVER ask for input.
 
 Do EXACTLY this, nothing else:
@@ -676,16 +700,15 @@ export function buildWorkflowFirer(opts: BuildWorkflowFirerOptions): TridentWork
 
   return async function fireWorkflow(input: InnerLoopInput): Promise<FireOutcome> {
     const cwd = input.run.worktree ?? input.run.repo_path
-    // CRITICAL: these must be exactly the strings buildWorkflowArgs carries. T3
-    // verifies args text against these receipts before substituting the files;
-    // derivation drift would make every codex build refuse. The guidance helper
-    // is pure and deterministic, so its two calls produce identical strings.
+    // Compose the guidance exactly once: the same string is written as the
+    // authoritative disk part and carried in args for the Claude route.
+    const reflectionGuidance = buildReflectionGuidance(input.reflection_context)
     const briefParts = writeParts({
       runId: input.run.id,
       task: input.run.task,
-      reflectionGuidance: buildReflectionGuidance(input.reflection_context),
+      reflectionGuidance,
     })
-    const prompt = buildFireWorkflowPrompt(scriptPath, input, briefParts)
+    const prompt = buildFireWorkflowPrompt(scriptPath, input, briefParts, reflectionGuidance)
     try {
       return await opts.fire({ prompt, cwd, settle_timeout_ms: settleTimeoutMs })
     } catch (e) {

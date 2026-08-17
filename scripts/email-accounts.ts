@@ -65,7 +65,12 @@ function main(): number {
   const args = homeFlag >= 0 ? [...argv.slice(0, homeFlag), ...argv.slice(homeFlag + 2)] : argv
   const [command, account_id, address] = args
 
-  if (owner_home === undefined || owner_home.length === 0) {
+  // BLANK IS UNSET — the same rule `effectiveOwnerHome` (`config/index.ts`)
+  // applies to this same variable. `length === 0` accepts `'   '`, and this CLI
+  // would then open a project DB under a directory named three spaces, relative
+  // to the CWD, while every trimming sibling resolved the real home — the
+  // operator sees an empty mailbox list for an install that has mailboxes.
+  if (owner_home === undefined || owner_home.trim().length === 0) {
     process.stderr.write('no owner home: pass --home <path> or set OWNER_HOME\n')
     return 2
   }

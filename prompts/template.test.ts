@@ -186,6 +186,39 @@ describe('buildPromptVars', () => {
     expect(vars.TELEGRAM_CHAT_ID).toBe(SYNTHETIC_CHAT_ID)
   })
 
+  test('a BLANK OWNER_HOME is unset, and a spaced REAL path survives verbatim', () => {
+    // THE READER THE PUBLISHED GREP CANNOT SEE. `config/index.ts` bounds its
+    // "every identity read trims" claim with a grep command, and that command
+    // matches `.OWNER_HOME` / `OWNER_HOME']` — while this function reaches the
+    // variable through `env[OWNER_HOME_KEY]`. Re-running the command DOES print
+    // `prompts/template.ts`, but only its docblock line; the read itself is
+    // structurally unmatchable, so the file reads as audited and was not.
+    //
+    // Measured before this fix, template `'{{OWNER_HOME}}/entities/x.md'`:
+    //   ''    -> '/entities/x.md'     the filesystem ROOT, fails loudly
+    //   '   ' -> '   /entities/x.md'  a RELATIVE dir named three spaces
+    // The second is creatable, so an agent handed this prompt writes the
+    // owner's entity pages into a junk dir under whatever CWD it started in and
+    // nothing errors. `trident/agent-prompts.ts` defaults its vars here, so the
+    // path is live.
+    for (const blank of ['', '   ', '\t\n']) {
+      expect(buildPromptVars({ OWNER_HOME: blank }).OWNER_HOME).toBe('')
+    }
+
+    // The PREDICATE trims, the RETURN does not — leading/trailing spaces are
+    // legal in a POSIX path, so a real directory keeps its bytes. Without this
+    // the loop above would also pass for a `.trim()` on the return, which is
+    // the opposite-direction defect this same branch fixes in `resolveStatePath`.
+    expect(buildPromptVars({ OWNER_HOME: ' /real/dir ' }).OWNER_HOME).toBe(' /real/dir ')
+
+    // CONTROL — an ordinary path still resolves, so the assertions above fail
+    // for "a blank was honoured" and not for "OWNER_HOME stopped being read",
+    // which is a different bug wearing the same green.
+    expect(buildPromptVars({ OWNER_HOME: SYNTHETIC_OWNER_HOME }).OWNER_HOME).toBe(
+      SYNTHETIC_OWNER_HOME,
+    )
+  })
+
   test('falls back to the clear placeholder when TELEGRAM_CHAT_ID is unset', () => {
     const vars = buildPromptVars({ OWNER_HOME: SYNTHETIC_OWNER_HOME })
     expect(vars.TELEGRAM_CHAT_ID).toBe(TELEGRAM_CHAT_ID_PLACEHOLDER)

@@ -203,6 +203,11 @@ describe('extractAnswerText', () => {
     expect(extractAnswerText(JSON.stringify({ content: [{ type: 'thinking' }] }))).toBeNull()
   })
 
+  it('returns null for a whitespace-only text block', () => {
+    // Same failure class as the Codex empty-output refusal card: no review happened.
+    expect(extractAnswerText(JSON.stringify({ content: [{ type: 'text', text: '  \n\t ' }] }))).toBeNull()
+  })
+
   it('skips thinking blocks and joins the text ones', () => {
     const body = JSON.stringify({
       content: [

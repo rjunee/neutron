@@ -204,6 +204,32 @@ describe('doctor state', () => {
     expect(resolveStatePath({ NEUTRON_HOME: '/srv/neutron' })).toBe('/srv/neutron/gbrain-doctor.json')
   })
 
+  test('resolveStatePath trims the PREDICATE and returns the value VERBATIM', () => {
+    // A THIRD CONVENTION IN A FAMILY OF TWO. Every sibling identity read in the
+    // repo — `resolveNeutronHome` (`migrations/db-path.ts`), `effectiveOwnerHome`
+    // (`config/index.ts`) — trims only to decide whether a value COUNTS, then
+    // passes a real value through byte-for-byte. This one trimmed the value it
+    // returned as well. Leading/trailing spaces are legal in a POSIX path, so
+    // that silently rewrote a real directory: measured, `NEUTRON_HOME=' /real/dir '`
+    // resolved state to `/real/dir/gbrain-doctor.json` here while every sibling
+    // resolved `' /real/dir '` — the doctor writing its record beside a brain dir
+    // that lives somewhere else.
+    const spaced = ' /real/dir '
+    expect(resolveStatePath({ NEUTRON_HOME: spaced })).toBe(`${spaced}/gbrain-doctor.json`)
+
+    // …and blank still means UNSET on the same read, which is the half that was
+    // already correct and must stay correct.
+    for (const blank of ['', '   ', '\t\n']) {
+      expect(resolveStatePath({ NEUTRON_HOME: blank, HOME: '/home/me' })).toBe(
+        '/home/me/neutron/data/gbrain-doctor.json',
+      )
+    }
+
+    // CONTROL — an ordinary path is unchanged, so the assertions above fail for
+    // "the return was rewritten" and not for "NEUTRON_HOME stopped being read".
+    expect(resolveStatePath({ NEUTRON_HOME: '/srv/neutron' })).toBe('/srv/neutron/gbrain-doctor.json')
+  })
+
   test('resolveStatePath falls back to $HOME/neutron/data', () => {
     expect(resolveStatePath({ HOME: '/home/me' })).toBe('/home/me/neutron/data/gbrain-doctor.json')
   })

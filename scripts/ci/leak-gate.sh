@@ -106,6 +106,11 @@
 #   LEAK_GATE_HEAD_SHA          tip of the message scan window (default: HEAD).
 #                               The pre-push hook sets it to the sha it is about
 #                               to publish, which is not always HEAD.
+#   LEAK_GATE_EXCLUDE_REF       a ref whose history is ALREADY PUBLISHED and is
+#                               therefore dropped from the message window
+#                               (`--not <ref>`). Unset by default, so CI is
+#                               unaffected. The pre-push hook sets it to
+#                               origin/main; see its header for why.
 #   LEAK_GATE_PR_TITLE          PR title  (scanned; passed via env, never shell)
 #   LEAK_GATE_PR_BODY           PR body   (scanned; passed via env, never shell)
 #
@@ -660,8 +665,26 @@ build_message_view() {
   # missing the ones that are.
   local head="${LEAK_GATE_HEAD_SHA:-HEAD}"
   git -C "$SCAN_ROOT" rev-parse --verify -q "${head}^{commit}" >/dev/null 2>&1 || head=HEAD
-  git -C "$SCAN_ROOT" log --no-merges --format='%s%n%b' "${base}..${head}" 2>/dev/null \
-    | awk '{ printf "COMMIT-MESSAGE:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
+  # ALREADY-PUBLISHED HISTORY IS NOT THIS PUSH'S TO ANSWER FOR. `base..head` is a
+  # single-floor range, and a branch that MERGES the mainline pulls the mainline's
+  # commits into it — commits already on GitHub, already mirrored, and not
+  # rewritable by the person pushing. The hook's rebase branch already excludes
+  # those; a merge needs an exclusion the floor cannot express, hence `--not`.
+  # Opt-in and unset by default, so CI keeps scanning exactly what it scanned
+  # before — in CI `--remotes`-style exclusions would drop the PR's OWN commits,
+  # which is why this takes one explicit ref rather than guessing.
+  local excl=""
+  if [ -n "${LEAK_GATE_EXCLUDE_REF:-}" ] \
+     && git -C "$SCAN_ROOT" rev-parse --verify -q "${LEAK_GATE_EXCLUDE_REF}^{commit}" >/dev/null 2>&1; then
+    excl="${LEAK_GATE_EXCLUDE_REF}"
+  fi
+  if [ -n "$excl" ]; then
+    git -C "$SCAN_ROOT" log --no-merges --format='%s%n%b' "${base}..${head}" --not "$excl" 2>/dev/null \
+      | awk '{ printf "COMMIT-MESSAGE:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
+  else
+    git -C "$SCAN_ROOT" log --no-merges --format='%s%n%b' "${base}..${head}" 2>/dev/null \
+      | awk '{ printf "COMMIT-MESSAGE:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
+  fi
   # PR title/body arrive via env and are NEVER interpolated into a shell command
   # (a PR body is attacker-controlled text; `${{ github.event… }}` inside `run:`
   # is a script-injection sink, inside `env:` it is not).

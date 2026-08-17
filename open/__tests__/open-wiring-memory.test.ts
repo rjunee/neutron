@@ -390,3 +390,75 @@ describe('wireMemory — the fast-model pin reaches every memory-lane call site 
     expect(FAST_MODEL).not.toBe(getBestModel())
   })
 })
+
+/**
+ * THE OTHER HALF OF THE FRONTIER-MODEL FLOOR, and it belongs HERE.
+ *
+ * `open/__tests__/open-wiring-substrates.test.ts` asserts that only the owner's
+ * chat substrate carries `frontier_model_floor` — but it builds `wireSubstrates`
+ * ONLY, and the deliberate fast-tier callers the counter-assertion is about are
+ * built by `wireMemory`, in this file's module. So the substrates test's
+ * "…and no other substrate does" clause never actually looked at the three call
+ * sites it was protecting: flipping the scribe extractor or the correction judge
+ * onto the chat profile would not have failed it.
+ *
+ * The floor would be a real regression on these three, not a cosmetic one: they
+ * are `FAST_MODEL` on purpose (a judge classifying one turn, an extractor per
+ * chat message, a consolidation pass over the whole history), and a floor would
+ * clamp every one of them up to the flagship — the #493 cost defect, reintroduced
+ * from the opposite direction.
+ */
+describe('wireMemory — no memory substrate carries the frontier-model floor', () => {
+  test('the correction judge is built WITHOUT the floor and spawns on the fast tier', async () => {
+    // Behavioural, through the real `wireMemory` → `buildLlmCallSubstrate` path:
+    // the floor is derived from the PROFILE, so this fails if the block ever
+    // switches to `PROFILE_WARM_CHAT` — the exact mutation the substrates test
+    // cannot see.
+    const captured: ClaudeCodeSubstrateOptions[] = []
+    const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => {
+      captured.push(opts)
+      return { start: () => correctionHandle(opts.substrate_instance_id) }
+    }
+    const w = wireMemory(makeCtx({ substrateFactory }))
+    try {
+      w.reflection.onTurnComplete({
+        user_text: 'no, use tabs not spaces',
+        agent_text: 'I indented with spaces.',
+        scope: 'general',
+      })
+      let judge: ClaudeCodeSubstrateOptions | undefined
+      for (let i = 0; i < 200; i++) {
+        judge = captured.find((o) => o.substrate_instance_id.startsWith('cc-reflection-'))
+        if (judge !== undefined) break
+        await new Promise((res) => setTimeout(res, 5))
+      }
+      expect(judge).toBeDefined()
+      expect(judge!.frontier_model_floor).not.toBe(true)
+      // And no memory substrate dispatched during this test picked it up either.
+      for (const o of captured) {
+        expect(o.frontier_model_floor, o.substrate_instance_id).not.toBe(true)
+      }
+    } finally {
+      await runCleanups(w.cleanups)
+    }
+  }, 15_000)
+
+  test('all three memory call sites name the toolless-utility profile', () => {
+    // Same weaker-but-honest source pin the #493 block above uses, and for the
+    // same reason: the scribe and consolidation blocks cannot be driven to a real
+    // spawn in-test. `PROFILE_TOOLLESS_UTILITY` is where the floor decision lives
+    // (`gateway/wiring/substrate-profiles.ts` sets `frontier_model_floor: false`
+    // on it, pinned by `substrate-profiles.test.ts`), so naming the profile at the
+    // call site IS the answer to "does this substrate get floored".
+    const src = readFileSync(join(import.meta.dir, '..', 'wiring', 'memory.ts'), 'utf8')
+    const between = (from: string, to: string): string =>
+      src.slice(src.indexOf(from), src.indexOf(to))
+    const PROFILE = 'profile: PROFILE_TOOLLESS_UTILITY'
+    expect(between('const scribeSubstrate', 'const reflectionSubstrate')).toContain(PROFILE)
+    expect(between('const reflectionSubstrate', 'const reflection: Reflection')).toContain(PROFILE)
+    expect(between('const reflectSubstrate', 'const reflectDeps')).toContain(PROFILE)
+    // The counter-check that keeps the three assertions above meaningful: the
+    // floored profile is not mentioned anywhere in the memory lane at all.
+    expect(src).not.toContain('PROFILE_WARM_CHAT')
+  })
+})

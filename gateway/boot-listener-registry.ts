@@ -49,15 +49,28 @@ export const DEFAULT_LISTEN_PORT = 7_800
  *      operator re-provisions every unit we must read this. Emits a
  *      one-shot deprecation warning.)
  *   4. `~/.local/share/neutron/registry.db` (dev fallback)
+ *
+ * BLANK IS UNSET AT EVERY STEP. `resolveOwnerHome` further down THIS FILE trims,
+ * and its docblock says the "every sibling trims" claim is "now true rather than
+ * narrowed" — but this function kept `!== ''`, so the file asserted a property it
+ * did not itself have. Measured: `NEUTRON_HOME='   '` -> `'   /registry.db'` here
+ * while `resolveNeutronHome` (`migrations/db-path.ts`) answered `~/neutron` for
+ * the same variable. The registry is how a booting instance learns its own
+ * `owner_handle`; pointing it at a directory named three spaces means the lookup
+ * finds nothing and the instance boots anonymous — the identical
+ * one-variable-two-homes failure the trim rule exists to close, on the one read
+ * that decides identity.
+ * RETURNS stay verbatim — blank means unset, a real path is passed through
+ * byte-for-byte.
  */
 let warnedLegacyRegistryDbPathRw = false
 export function resolveRegistryDbPath(env: NodeJS.ProcessEnv = process.env): string {
   const fromEnv = env['NEUTRON_REGISTRY_DB_PATH']
-  if (fromEnv !== undefined && fromEnv !== '') return fromEnv
+  if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) return fromEnv
   const home = env['NEUTRON_HOME']
-  if (home !== undefined && home !== '') return join(home, 'registry.db')
+  if (typeof home === 'string' && home.trim().length > 0) return join(home, 'registry.db')
   const legacy = env['NEUTRON_REGISTRY_DB_PATH_RW']
-  if (legacy !== undefined && legacy !== '') {
+  if (typeof legacy === 'string' && legacy.trim().length > 0) {
     if (!warnedLegacyRegistryDbPathRw) {
       warnedLegacyRegistryDbPathRw = true
       moduleLog.warn('legacy_registry_db_path', {

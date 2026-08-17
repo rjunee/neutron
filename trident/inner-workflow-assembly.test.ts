@@ -14,12 +14,12 @@
  */
 import { describe, expect, test, afterAll, beforeAll } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { buildReflectionGuidance } from './reflection-guidance.ts'
+import { buildReflectionGuidance, MAX_REFLECTION_GUIDANCE_CHARS } from './reflection-guidance.ts'
 import { briefIntegrity, writeBriefParts } from './brief-parts.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -174,6 +174,8 @@ async function runWorkflow(
     dbPath: opts.recordCheckpoints === true ? '/tmp/does-not-exist.db' : null,
     runId: opts.recordCheckpoints === true ? 'run-assembly-1' : null,
     checkpointScript: opts.recordCheckpoints === true ? '/repo/trident/checkpoint.sh' : null,
+    codexBuildScript: '/harness/trident/codex-build.sh',
+    codexReviewScript: '/harness/trident/codex-review.sh',
     resumeCheckpoint: null,
     codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
     kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured
@@ -212,6 +214,17 @@ const LARGE_TASK = [
 const forgeBuildPrompt = (captured: Captured[]): string =>
   captured.find((c) => c.label === 'forge:build')?.prompt ?? ''
 
+describe('inner-workflow.mjs — artifact-time durability checkpoint', () => {
+  test('threads the semantic checkpoint names into round-one and fix-round contracts', async () => {
+    const { captured } = await runWorkflow('', { recordCheckpoints: true })
+    const roundOne = captured.find((c) => c.label === 'forge:build')?.prompt ?? ''
+    const fixRound = captured.find((c) => c.label === 'forge:fix-round-2')?.prompt ?? ''
+    const command = (name: string) => `printf '%s' '[]' > '/tmp/trident-checkpoint-findings-run-assembly-1.json' && bash '/repo/trident/checkpoint.sh' '/tmp/does-not-exist.db' 'run-assembly-1' branch 'trident/test-run' inner_checkpoint '${name}' inner_checkpoint_head "$(git rev-parse --verify HEAD)" inner_findings_file '/tmp/trident-checkpoint-findings-run-assembly-1.json' subagent_status running`
+    expect(roundOne).toContain(command('forge-done'))
+    expect(fixRound).toContain(command('fix-round-2'))
+  })
+})
+
 describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
   const taskParts = (task = LARGE_TASK) => ({
     taskFile: '/tmp/t.part',
@@ -226,7 +239,8 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     for (const call of captured) expect(call.prompt).not.toContain('TASKBYTES_MARKER_Q9')
     const prompt = forgeBuildPrompt(captured)
     expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
-    expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
+    expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=')
+    expect(prompt).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
     const a1 = prompt.indexOf('.brief.a1')
     const task = prompt.indexOf('/tmp/t.part', a1)
     const a2 = prompt.indexOf('.brief.a2', task)
@@ -235,11 +249,12 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     expect(a2).toBeGreaterThan(task)
   })
 
-  test('whole-brief receipt is unchanged and fallback still carries the task', async () => {
+  test('parts use per-part receipts while fallback keeps its whole-brief receipt', async () => {
     const byPath = forgeBuildPrompt((await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: taskParts() })).captured)
     const fallback = forgeBuildPrompt((await runWorkflow('', { codexBuild: true, task: LARGE_TASK })).captured)
-    const receipt = (prompt: string) => prompt.match(/NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY='([^']+)'/)?.[1]
-    expect(receipt(byPath)).toBe(receipt(fallback))
+    expect(byPath).toContain('NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=')
+    expect(byPath).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
+    expect(fallback).toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
     expect(fallback).toContain('TASKBYTES_MARKER_Q9')
     expect(fallback).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
   })
@@ -250,15 +265,21 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     expect(malformed).toBe(absent)
   })
 
-  test('args-transit receipt mismatch throws the named terminal error', async () => {
-    const { result, logs } = await runWorkflow('', {
+  test('args-transit mangling does not override the disk manifest', async () => {
+    const manifest = {
+      ...taskParts(),
+      reflectionFile: '/tmp/r.part',
+      reflectionIntegrity: briefIntegrity(GUIDANCE),
+    }
+    const { captured } = await runWorkflow('', {
       codexBuild: true,
       task: LARGE_TASK,
-      briefParts: { ...taskParts(), taskIntegrity: '1:00000000' },
+      briefParts: manifest,
     })
-    const failure = `${JSON.stringify(result)} ${logs.join('\n')}`
-    expect(failure).toContain('CODEX_BUILD_BRIEF_ARGS_CORRUPT')
-    expect(failure).not.toContain('inner loop exhausted')
+    const prompt = forgeBuildPrompt(captured)
+    expect(prompt).toContain('/tmp/r.part')
+    expect(prompt).not.toContain('ARGS_CORRUPT')
+    expect(SRC).not.toContain('CODEX_BUILD_BRIEF_ARGS_CORRUPT')
   })
 
   test('reflection guidance travels by path and missing reflection metadata fails closed', async () => {
@@ -276,12 +297,13 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     expect(reflection).toBeGreaterThan(task)
     expect(a2).toBeGreaterThan(reflection)
 
-    const { result, logs } = await runWorkflow(GUIDANCE, {
+    const fallback = forgeBuildPrompt((await runWorkflow(GUIDANCE, {
       codexBuild: true,
       task: LARGE_TASK,
-      briefParts: { ...manifest, reflectionFile: null },
-    })
-    expect(`${JSON.stringify(result)} ${logs.join('\n')}`).toContain('CODEX_BUILD_BRIEF_ARGS_CORRUPT')
+      briefParts: { ...manifest, reflectionIntegrity: null },
+    })).captured)
+    const absent = forgeBuildPrompt((await runWorkflow(GUIDANCE, { codexBuild: true, task: LARGE_TASK })).captured)
+    expect(fallback).toBe(absent)
   })
 })
 
@@ -320,14 +342,15 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
   const runEmittedTransport = (
     prompt: string,
     dir: string,
-  ): { assembled: string; receipt: string; partsList: string[] } => {
+  ): { assembled: string; receipts: string[]; partsList: string[] } => {
     const partsMatch = /NEUTRON_CODEX_BUILD_BRIEF_PARTS='([^']*)'/.exec(prompt)
     expect(partsMatch).not.toBeNull()
     // LITERAL embedded newlines separate the ordered absolute paths.
     const partsList = String(partsMatch?.[1]).split('\n')
-    const receiptMatch = /NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY='([^']*)'/.exec(prompt)
+    const receiptMatch = /NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY='([^']*)'/.exec(prompt)
     expect(receiptMatch).not.toBeNull()
-    const receipt = String(receiptMatch?.[1])
+    const receipts = String(receiptMatch?.[1]).split('\n')
+    expect(receipts.length).toBe(partsList.length)
 
     // The two workflow-composed segments live under /tmp in the emitted prompt; the
     // host-written task/reflection parts already live in `dir`.
@@ -383,7 +406,14 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
     // inside the brief; it does not, and this is what says so.
     expect(assembled).not.toContain('.brief.a1')
     expect(assembled).not.toContain('.brief.a2')
-    return { assembled, receipt, partsList }
+    partsList.forEach((p, i) => {
+      // A missing receipt must fail LOUDLY, not compare a real integrity value
+      // against `undefined` and report it as a mismatched receipt.
+      const receipt = receipts[i]
+      if (receipt === undefined) throw new Error(`no receipt recorded for segment ${i}`)
+      expect(briefIntegrity(readFileSync(local(p), 'utf8'))).toBe(receipt)
+    })
+    return { assembled, receipts, partsList }
   }
 
   let dir = ''
@@ -402,7 +432,7 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
 
     const { captured } = await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: parts })
     const prompt = forgeBuildPrompt(captured)
-    const { assembled, receipt, partsList } = runEmittedTransport(prompt, dir)
+    const { assembled, partsList } = runEmittedTransport(prompt, dir)
 
     expect(partsList.length).toBe(3)
     expect(partsList[0]?.endsWith('.brief.a1')).toBe(true)
@@ -410,7 +440,6 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
     expect(partsList[2]?.endsWith('.brief.a2')).toBe(true)
 
     // THE CANONICAL ASSERTION: byte count AND fnv32, the comparison the wrapper makes.
-    expect(briefIntegrity(assembled)).toBe(receipt)
     expect(assembled).toContain('TASKBYTES_MARKER_Q9')
     expect(assembled.endsWith('\n')).toBe(true)
   })
@@ -426,7 +455,7 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
 
     const { captured } = await runWorkflow(GUIDANCE, { codexBuild: true, task: LARGE_TASK, briefParts: parts })
     const prompt = forgeBuildPrompt(captured)
-    const { assembled, receipt, partsList } = runEmittedTransport(prompt, dir)
+    const { assembled, partsList } = runEmittedTransport(prompt, dir)
 
     expect(partsList.length).toBe(4)
     expect(partsList[0]?.endsWith('.brief.a1')).toBe(true)
@@ -434,10 +463,24 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
     expect(partsList[2]).toBe(String(parts?.reflectionFile))
     expect(partsList[3]?.endsWith('.brief.a2')).toBe(true)
 
-    expect(briefIntegrity(assembled)).toBe(receipt)
     expect(assembled).toContain('TASKBYTES_MARKER_Q9')
     expect(assembled).toContain(REFLECT_MARKER)
     expect(assembled.endsWith('\n')).toBe(true)
+  })
+
+  test('two launches produce identical bytes with capped multi-byte reflection guidance', async () => {
+    const guidance = buildReflectionGuidance(`—…🚀${' owner correction — … 🚀'.repeat(MAX_REFLECTION_GUIDANCE_CHARS)}`)
+    expect(guidance.length).toBeLessThanOrEqual(MAX_REFLECTION_GUIDANCE_CHARS + 1000)
+    const assemblies: string[] = []
+    for (const launch of ['one', 'two']) {
+      const launchDir = join(dir, launch)
+      mkdirSync(launchDir, { recursive: true })
+      const parts = writeBriefParts({ runId: `lockstep-${launch}`, task: LARGE_TASK, reflectionGuidance: guidance, dir: launchDir })
+      expect(parts).not.toBeNull()
+      const { captured } = await runWorkflow(guidance, { codexBuild: true, task: LARGE_TASK, briefParts: parts })
+      assemblies.push(runEmittedTransport(forgeBuildPrompt(captured), launchDir).assembled)
+    }
+    expect(assemblies[1]).toBe(assemblies[0])
   })
 })
 

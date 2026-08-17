@@ -17,12 +17,14 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   buildWorkflowFirer,
   buildWorkflowArgs,
   buildSubstrateWorkflowFire,
+  CODEX_BUILD_SCRIPT_PATH,
+  CODEX_REVIEW_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
@@ -73,6 +75,9 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     last_advanced_at: '1970-01-01T00:00:00.000Z',
     harvested_at: null,
     crash_recoveries: 0,
+    reviewed_head: null,
+    bound_pr: null,
+    fenced_paths: null,
     ...over,
   }
 }
@@ -366,7 +371,7 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       writes.push(opts)
       return parts
     }
-    const reflection_context = '<learned_corrections>use TS</learned_corrections>'
+    const reflection_context = '<learned_corrections>use TS — preserve … and 🚀</learned_corrections>'
     const run = makeRun({ id: 'run-parts', task: 'exact task' })
     const firer = buildWorkflowFirer({ fire, write_brief_parts })
     expect(await firer(input({ run, reflection_context }))).toEqual({ status: 'fired', error: null })
@@ -378,6 +383,8 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
       },
     ])
     expect(calls[0]!.prompt).toContain(`"briefParts":${JSON.stringify(parts)}`)
+    const args = JSON.parse(calls[0]!.prompt.match(/^   args = (.+)$/m)?.[1] ?? '{}')
+    expect(args.reflectionGuidance).toBe(writes[0]!.reflectionGuidance)
   })
 
   test('a failed part write never prevents the fire and omits the manifest', async () => {
@@ -479,6 +486,30 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // containing a space. fileURLToPath decodes; new URL(...).pathname does not.
     expect(threaded).not.toContain('%')
     expect(threaded.startsWith('/')).toBe(true)
+  })
+
+  test('args thread the harness codexBuildScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexBuildScript":"([^"]*\/trident\/codex-build\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_BUILD_SCRIPT_PATH)
+  })
+
+  test('args thread the harness codexReviewScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexReviewScript":"([^"]*\/trident\/codex-review\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_REVIEW_SCRIPT_PATH)
   })
 
   test('args thread the checked-in worktreeCleanupScript abs path (#541 — no LLM in the destructive path)', async () => {

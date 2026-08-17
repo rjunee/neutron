@@ -25,6 +25,7 @@ import { SeanEllisStore } from '../../telemetry/sean-ellis-trigger.ts'
 import {
   M2FeedbackCollector,
   formatMarkdownEntry,
+  resolveM2FeedbackPath,
   routeSeanEllisChoice,
 } from '../m2-week-4-collector.ts'
 import type { ButtonChoice } from '@neutronai/channels/button-primitive.ts'
@@ -316,4 +317,40 @@ test('empty / whitespace-only freeform_text does NOT trigger markdown append', a
   })
   expect(out.appended_to_markdown).toBe(false)
   expect(existsSync(feedbackPath)).toBe(false)
+})
+
+test('the default feedback path treats a blank NEUTRON_HOME as unset', () => {
+  // PINNED BECAUSE THE CONSTANT COULD NOT BE. `DEFAULT_M2_FEEDBACK_PATH` is
+  // computed from `process.env` at import time, so the trim inside it was
+  // asserted by a comment and observable by no test — a review confirmed that
+  // reverting it left this suite green. The computation is now a function; this
+  // is the guard.
+  //
+  // `??` falls through on `undefined` but NOT on `''` or `'   '`, so unfixed a
+  // blank home resolved the destination RELATIVE to the process CWD: `''` gave
+  // `feedback/m2-week-4.md` under wherever systemd started the process, and
+  // `'   '` gave a directory named three spaces. The owner's feedback landed
+  // somewhere no reader looks, and nothing errored.
+  for (const blank of ['', '   ', '\t\n']) {
+    expect(resolveM2FeedbackPath({ NEUTRON_HOME: blank } as NodeJS.ProcessEnv)).toBe(
+      join(process.cwd(), 'feedback', 'm2-week-4.md'),
+    )
+  }
+  expect(resolveM2FeedbackPath({} as NodeJS.ProcessEnv)).toBe(
+    join(process.cwd(), 'feedback', 'm2-week-4.md'),
+  )
+
+  // CONTROL — a real home is still honoured, so the assertions above fail for
+  // "a blank was honoured" and not for "NEUTRON_HOME stopped being read", which
+  // is a different bug wearing the same green.
+  expect(resolveM2FeedbackPath({ NEUTRON_HOME: '/srv/home' } as NodeJS.ProcessEnv)).toBe(
+    join('/srv/home', 'feedback', 'm2-week-4.md'),
+  )
+
+  // CONTROL — a path whose blankness is only leading/trailing is a REAL POSIX
+  // directory and keeps its bytes; the predicate trims to DECIDE, not to
+  // rewrite.
+  expect(resolveM2FeedbackPath({ NEUTRON_HOME: ' /real/dir ' } as NodeJS.ProcessEnv)).toBe(
+    join(' /real/dir ', 'feedback', 'm2-week-4.md'),
+  )
 })
