@@ -16,9 +16,9 @@
  *
  * THE SIGNAL IS `last_advanced_at`, and it demonstrably holds what its name says:
  * `TridentRunStore.update` re-stamps it on every outer transition
- * (`store.ts:750`) and `trident/checkpoint.sh:196` re-stamps it on every inner
+ * (`TridentRunStore.update`, `trident/store.ts`) and `trident/checkpoint.sh:196` re-stamps it on every inner
  * workflow phase boundary. It is the same field the hang watchdog
- * (`orchestrator.ts:2570`) and the board's stall display (`run-progress.ts:186`)
+ * (`orchestrator.ts` no-advance reap, ~:2659) and the board's stall display (`run-progress.ts:186`)
  * already key on.
  *
  * ── THE TIMER SITS ABOVE THE REAPER, AND THAT IS THE WHOLE SAFETY ARGUMENT ────
@@ -33,7 +33,7 @@
  *
  * {@link WAKEUP_STAND_DOWN_MS} buys the reaper the first word. The reaper fires
  * at `NO_ADVANCE_HANG_MS` for every run it can reach — `subagent_run_id !== null`
- * (`orchestrator.ts:2570`) — on a sweep whose nominal cadence is 90 s
+ * (`orchestrator.ts` no-advance reap, ~:2659) — on a sweep whose nominal cadence is 90 s
  * (`tick.ts:344`). Standing down a further margin past that means that in the
  * ordinary case the run has already been flipped terminal by the time this timer
  * is consulted, so the answer comes from `terminal` — a FACT about the row —
@@ -46,7 +46,7 @@
  * always answers first". 90 s is a cadence, not a bound on reap latency. The
  * sweep is single-flight (`loop/index.ts:258-262`) and steps runs sequentially
  * (`tick.ts:719-721`), so one run wedged inside `step` — an unsettled launch,
- * whose post-cancel drain is unbounded (`inner-loop.ts:774-786`) — stalls the
+ * whose post-cancel drain is unbounded (`inner-loop.ts` post-cancel drain, ~:789-794) — stalls the
  * whole sweep, and a second run's reap check is never reached however long it
  * waits. In that state this timer CAN release a run that is genuinely building.
  *
@@ -65,9 +65,9 @@
  * `DEFAULT_SETTLE_TIMEOUT_MS` as proof no workflow exists, to decide the incident's
  * runs in minutes rather than hours. IT RACED THE LAUNCH IT WAS TRYING TO OUTLIVE.
  * Those columns are written only AFTER the fire settles
- * (`orchestrator.ts:2106-2114`), and while the settle TIMER is 3 min
+ * (`orchestrator.ts` post-settle write, ~:2137), and while the settle TIMER is 3 min
  * (`liveness.ts:115`) the cancellation that timer triggers is unbounded — the fire
- * keeps draining `handle.events` after `cancel()` (`inner-loop.ts:774-786`). So a
+ * keeps draining `handle.events` after `cancel()` (`inner-loop.ts` post-cancel drain, ~:789-794). So a
  * launch still genuinely in flight presents exactly the null/null row the rule
  * read as "never launched", and the wakeup would invite a second dispatch onto a
  * run whose launch is live. No finite bound on that window exists to read off the
@@ -115,9 +115,21 @@ export const WAKEUP_REAP_MARGIN_MS = 10 * 60_000
 
 /**
  * The no-advance threshold a peer scheduler uses — deliberately and strictly
- * GREATER than the reaper's `NO_ADVANCE_HANG_MS`, so the reaper always answers
- * first for every run it can reach. See this module's header for why that
- * ordering is the safety property rather than a tuning preference.
+ * GREATER than the reaper's `NO_ADVANCE_HANG_MS`, so that the NO-ADVANCE reap
+ * gets the first word on any run it can reach. See this module's header for why
+ * that ordering is the safety property rather than a tuning preference.
+ *
+ * BE PRECISE ABOUT WHICH REAP THIS ORDERS AGAINST — it is the no-advance one and
+ * only that one. There is a second, independent ceiling: `DEFAULT_MAX_INFLIGHT_MS`
+ * (2h, `trident/liveness.ts`) bounds a run that is still advancing but has simply
+ * gone on too long. That threshold is LARGER than this stand-down (2h vs 100m), so
+ * for a run whose only applicable reap is the inflight ceiling the wakeup acts
+ * FIRST, not second. That is not a defect and the margin below is not a fix for
+ * it: the two reaps answer different questions ("has it stopped?" vs "has it run
+ * too long?"), and a run that has stopped advancing is precisely the case this
+ * stand-down defers on. Stating the invariant as an unqualified "the reaper always
+ * answers first" is what makes it wrong — the ordering holds against
+ * `NO_ADVANCE_HANG_MS`, and nothing here claims or needs more than that.
  */
 export const WAKEUP_STAND_DOWN_MS = NO_ADVANCE_HANG_MS + WAKEUP_REAP_MARGIN_MS
 
@@ -165,7 +177,7 @@ export function runDrivingVerdict(
   // future, which is the same thing wearing a valid date — cannot show that this
   // run advanced, and the earlier version of this function called it `advancing`
   // to stay consistent with the reaper's own conservatism
-  // (`orchestrator.ts:2424-2430`). That consistency was wrong, because the two
+  // (`elapsedSinceAdvance`, `orchestrator.ts` ~:2453-2459). That consistency was wrong, because the two
   // consumers fail in OPPOSITE directions: the reaper's caution protects work
   // from being killed, while the same caution here hides a work item from the
   // only autonomy mechanism, forever, and the reaper (reading the same 0) never
