@@ -257,3 +257,19 @@ tests/integration/claim-redirect-once.open.test.ts:tenant-purged
 # Open owns. Retired-vocab rules only; PII / hosted-domain / secret stay ARMED.
 docs/SYSTEM-OVERVIEW.md:tenant-word
 docs/SYSTEM-OVERVIEW.md:tenant-purged
+
+# scripts/test-timings.json is a GENERATED cost table for the shard partition:
+# 1350 repo-relative test-file paths, each mapped to a number, and nothing else.
+# It has no prose, so it cannot carry PII, a hosted domain or a secret — and the
+# retired-vocab rules stay armed on every other file, plus every non-vocab rule
+# stays armed on THIS file.
+#
+# It matches `workspace-retired` for one reason and it is not a leak: the tree
+# contains a test file NAMED `cores/free/code-gen/__tests__/workspace-resolver.test.ts`,
+# and the gate scans CONTENT, not filenames. So the word is unobjectionable where
+# it lives and becomes a finding the moment anything LISTS that path. Any
+# path-keyed generated artifact hits this, and it recurs on every regeneration of
+# the manifest — an allowlist entry is therefore the honest fix rather than a
+# one-off. The alternative, dropping the file from the manifest, would make the
+# table silently lie about the suite it prices.
+scripts/test-timings.json:workspace-retired
