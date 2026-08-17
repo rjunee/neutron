@@ -512,6 +512,30 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.get(project_slug, id)
       if (current === null) return null
+      // REFUSE any real transition into 'done' while the bound run is still live.
+      // "Done" is a claim about the world — that work shipped — and nothing may
+      // assert it on behalf of a build that is still running.
+      //
+      // The guard lives HERE, on the one write path, rather than on `complete()`:
+      // `complete()` is not the only door. The `work_board_update` agent tool
+      // exposes the full status enum and routes straight to this method
+      // (`work-board/agent-tool.ts`), so a guard on `complete()` alone was a
+      // guard on the door nobody has to use — an agent that patched
+      // `{status:'done'}` walked past it and got `completed_at` stamped mid-build.
+      // One invariant, one place, no way around it.
+      //
+      // It throws rather than returning null because null already means "no such
+      // item", and a refusal that looks like a miss would be silently swallowed by
+      // both callers. Better it refuse loudly than lie quietly.
+      if (
+        patch.status === 'done' &&
+        current.status !== 'done' &&
+        current.linked_run_id !== null &&
+        this.isRunLive !== undefined &&
+        this.isRunLive(current.linked_run_id)
+      ) {
+        throw new WorkBoardRunStillLiveError(id, current.linked_run_id)
+      }
       const sets: string[] = []
       const params: (string | number | null)[] = []
       const push = (col: string, val: string | number | null): void => {
@@ -581,20 +605,10 @@ export class WorkBoardStore {
    * refresh `completed_at` (it routes through the same transition logic).
    */
   async complete(project_slug: string, id: string): Promise<WorkBoardItem | null> {
-    // REFUSE while the bound run is still live. "Done" is a claim about the world
-    // — that work shipped — and nothing may assert it on behalf of a build that
-    // is still running. See `isRunLive` in the options for the incident.
-    //
-    // It throws rather than returning null because null already means "no such
-    // item", and a refusal that looks like a miss would be silently swallowed by
-    // both callers. The owner's own words on this class of bug: better it refuse
-    // loudly than lie quietly.
-    const existing = this.get(project_slug, id)
-    if (existing !== null && existing.linked_run_id !== null && this.isRunLive !== undefined) {
-      if (this.isRunLive(existing.linked_run_id)) {
-        throw new WorkBoardRunStillLiveError(id, existing.linked_run_id)
-      }
-    }
+    // The live-run refusal is NOT repeated here. It lives on `update()`, which
+    // this delegates to and which every other door into 'done' also goes through
+    // — one invariant in one place. Duplicating it would be a second copy to
+    // drift, and the copy on this path was never the one being walked past.
     return this.update(project_slug, id, { status: 'done' })
   }
 
