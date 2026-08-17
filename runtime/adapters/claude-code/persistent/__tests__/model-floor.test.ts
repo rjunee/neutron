@@ -40,6 +40,7 @@ import {
   familyOf,
   resolveModelFloor,
   tierRankOf,
+  FRONTIER_RANK,
   type ModelFloorNotice,
 } from '../model-floor.ts'
 import {
@@ -157,6 +158,24 @@ describe('resolveModelFloor — the decision', () => {
     // …and an unrecognised id with an unlisted prefix still ranks at the frontier,
     // so the scan did not become "clamp anything with a slash in it".
     expect(resolveModelFloor({ requested: 'my-proxy.internal/v3/claude-opus-6', enabled: true }).clamped).toBe(false)
+  })
+
+  it('an id naming no tier at all yields an empty family, and still ranks frontier', () => {
+    // The precondition behind `tierRankOf`'s two empty-string refusals: a
+    // tier-less id yields `''`, and a padded id splits to an empty token. Match
+    // either and EVERY id would rank as the fast tier — a floor that clamps its
+    // own frontier requests.
+    //
+    // ⚠️ THIS TEST COVERS THE TOKEN HALF ONLY, and says so rather than implying
+    // more. Reaching the family half needs `FAST_MODEL` pinned to a tier-less id,
+    // and the aliases are module-level consts bound at import, so no suite can do
+    // it. Measured, not assumed: with the token filter removed this file stays
+    // GREEN on the default aliases and goes red only under
+    // `NEUTRON_FAST_MODEL=claude-2`. The guard is defensive; the label is the
+    // honest part.
+    expect(familyOf('claude-2')).toBe('')
+    expect(tierRankOf('  claude-opus-5  ')).toBe(FRONTIER_RANK)
+    expect(tierRankOf('claude-opus-5')).toBe(FRONTIER_RANK)
   })
 
   it('reads the tier out of BOTH naming orders and every prefix shape', () => {

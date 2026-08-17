@@ -121,6 +121,19 @@ found anywhere wins, which means one unlisted routing segment
 blocker one level up. `familyOf` keeps its positional answer, which is what the
 alias constants and a human reader want; the divergence is documented at both.
 
+One guard in that scan is DEFENSIVE AND LABELLED AS SUCH, because the honest
+thing was measured rather than assumed. `tierRankOf` refuses the empty string on
+both sides — an empty token (a padded id) and an empty family (an alias an
+operator pinned to a tier-less id like `claude-2`) — since matching either would
+rank EVERY id as the fast tier and produce a floor that clamps its own frontier
+requests. Only the token half is reachable from a test: the aliases are
+module-level consts bound at import, so no suite can pin a tier-less one.
+Removing the token filter leaves the file green on the default aliases; an
+out-of-suite probe under `NEUTRON_FAST_MODEL=claude-2` shows `'  claude-opus-5  '`
+ranking as the fast tier without the refusals and at the frontier with them. The
+first draft of that test claimed coverage it did not have, which the mutation run
+caught — the same defect class this whole round is about.
+
 Seven mutations, each with a control proving it landed: reverting the family
 extraction reddens 3; reverting the rank to the positional lookup reddens 1;
 deleting the owner notice reddens 3; deleting the operator log line reddens 1;

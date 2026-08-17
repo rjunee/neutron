@@ -164,9 +164,20 @@ export const FRONTIER_RANK = Number.MAX_SAFE_INTEGER
  * stop is the reverse, so the asymmetry is deliberate.
  */
 export function tierRankOf(model: string): number {
-  const tokens = new Set(model.toLowerCase().split(/[^a-z0-9]+/))
-  if (tokens.has(familyOf(FAST_MODEL))) return 0
-  if (tokens.has(familyOf(SONNET_MODEL))) return 1
+  // BOTH SIDES OF THE EMPTY STRING ARE REFUSED, and neither line is tidiness.
+  // A leading or trailing separator splits to a `''` token, and an alias an
+  // operator pinned to a tier-less id (`NEUTRON_FAST_MODEL=claude-2`) makes
+  // `familyOf` return `''` as well. Match those two and EVERY id ranks as the
+  // fast tier — a floor that clamps its own frontier requests.
+  //
+  // ⚠️ Only the token half is reachable from a test: the aliases are module-level
+  // consts bound at import, so a suite cannot pin a tier-less one. The family
+  // half is defensive, and is labelled rather than dressed up as covered.
+  const tokens = new Set(model.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t !== ''))
+  const fast = familyOf(FAST_MODEL)
+  const sonnet = familyOf(SONNET_MODEL)
+  if (fast !== '' && tokens.has(fast)) return 0
+  if (sonnet !== '' && tokens.has(sonnet)) return 1
   return FRONTIER_RANK
 }
 
