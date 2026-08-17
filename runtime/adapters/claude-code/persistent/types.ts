@@ -297,6 +297,13 @@ export interface PersistentReplSubstrateOptions {
   onModelFloorApplied?: (notice: ModelFloorNotice) => void
   /** `claude` binary override. Default `process.env.CLAUDE_BIN ?? 'claude'`. */
   claude_bin?: string
+  /**
+   * Reasoning-effort pin forwarded to `--effort` (#345's twin). `undefined` →
+   * resolveReplEffort (NEUTRON_REPL_EFFORT env, else DEFAULT_REPL_EFFORT
+   * 'high'); `''` → deliberately unpinned (flag omitted). See
+   * DEFAULT_REPL_EFFORT in build-repl-argv.ts for the why.
+   */
+  effort?: string
   /** Append `--dangerously-skip-permissions` (managed headless REPLs MUST). */
   skip_permissions?: boolean
   /**
