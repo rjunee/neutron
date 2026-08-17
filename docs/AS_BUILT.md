@@ -85,6 +85,13 @@ onto the memory lane reddens 4; dropping the factory forward reddens 1. That
 last one is not hypothetical — `appendSystemPromptFile` was lost at exactly that
 seam once, proven at the factory-input layer while the real factory dropped it.
 
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
+
+The entry-aware merge driver now retains both different entries added concurrently under the same
+heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
+while keeping the log's heading-uniqueness invariant. Unit and real-git tests pin union, dedupe,
+suffix collision handling, intact history, and conflict-free merging.
+
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 
 Landed via PR #322.
