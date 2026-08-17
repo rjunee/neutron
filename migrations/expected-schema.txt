@@ -586,7 +586,7 @@ CREATE TABLE code_trident_runs (
     last_advanced_at    TEXT NOT NULL                   -- ISO-8601 UTC
 , channel_kind TEXT NOT NULL DEFAULT 'telegram'
         CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')), workflow_run_id TEXT, inner_checkpoint TEXT, inner_verdict TEXT
-        CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')), inner_result TEXT, harvested_at INTEGER, inner_checkpoint_head TEXT, inner_checkpoint_findings TEXT, crash_recoveries INTEGER, reviewed_head TEXT, bound_pr INTEGER, fenced_paths TEXT, base_sha TEXT, base_behind INTEGER) STRICT
+        CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')), inner_result TEXT, harvested_at INTEGER, inner_checkpoint_head TEXT, inner_checkpoint_findings TEXT, crash_recoveries INTEGER, reviewed_head TEXT, bound_pr INTEGER, fenced_paths TEXT, base_sha TEXT, base_behind INTEGER, infra_retries INTEGER) STRICT
 
 [table] connect_guest_invites (tbl=connect_guest_invites)
 CREATE TABLE connect_guest_invites (

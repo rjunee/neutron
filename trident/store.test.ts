@@ -48,6 +48,7 @@ describe('TridentRunStore', () => {
     expect(run.base_sha).toBeNull()
     expect(run.base_behind).toBeNull()
     expect(run.subagent_status).toBeNull()
+    expect(run.infra_retries).toBe(0)
     // #317 — channel_kind defaults to telegram (migration 0081 column default).
     expect(run.channel_kind).toBe('telegram')
 
@@ -58,6 +59,7 @@ describe('TridentRunStore', () => {
     expect(got?.repo_path).toBe('/home/x/repos/neutron')
     expect(got?.started_at).toBe(run.started_at)
     expect(got?.channel_kind).toBe('telegram')
+    expect(got?.infra_retries).toBe(0)
   })
 
   test('base pin columns round-trip through update, save, and saveIfActive', async () => {
@@ -441,6 +443,48 @@ describe('TridentRunStore', () => {
     })
   })
 
+  describe('beginInfraRetry — the single-writer executor/transport retry claim', () => {
+    test('increments durably and clears result + every dispatch slot in one claim', async () => {
+      let clock = '2026-08-14T20:10:00.000Z'
+      const store = new TridentRunStore(db, () => clock)
+      const run = await store.create({ slug: 'infra-claim', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, {
+        subagent_run_id: 'wf-1',
+        subagent_status: 'completed',
+        workflow_run_id: 'generation-1',
+        inner_result: '{"verdict":"REQUEST_CHANGES"}',
+      })
+      clock = '2026-08-14T20:11:00.000Z'
+
+      const claimed = await store.beginInfraRetry(run.id)
+
+      expect(claimed).toMatchObject({
+        infra_retries: 1,
+        inner_result: null,
+        subagent_run_id: null,
+        subagent_status: null,
+        workflow_run_id: null,
+        last_advanced_at: clock,
+      })
+      expect(claimed?.round).toBe(1)
+      expect(claimed?.ralph_round).toBe(0)
+      expect(claimed?.harvested_at).toBeNull()
+    })
+
+    test('legacy NULL reads as zero and update() cannot write the owned counter', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 'infra-owned', project_slug: 't1', repo_path: '/r', task: 't' })
+      await db.run(`UPDATE code_trident_runs SET infra_retries = NULL WHERE id = ?`, [run.id])
+      expect(store.get(run.id)?.infra_retries).toBe(0)
+
+      await store.update(run.id, {
+        // @ts-expect-error — the durable retry budget is deliberately not patchable.
+        infra_retries: 99,
+      })
+      expect(store.get(run.id)?.infra_retries).toBe(0)
+    })
+  })
+
   describe('terminalTransition — atomic conditional terminal write (§F6a race guard)', () => {
     test('wins on a non-terminal run: flips the phase + reason and reports won', async () => {
       const store = new TridentRunStore(db)
@@ -664,19 +708,19 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the live table: 36 columns, same names as PRAGMA table_info', () => {
+  test('COLS matches the live table: 37 columns, same names as PRAGMA table_info', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
     // COLS corrupts every insert silently (STRICT only catches affinity, not
-    // arity/order). The literal 36 is deliberate — adding a column must be a
+    // arity/order). The literal 37 is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift.
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(36)
+    expect(cols).toHaveLength(37)
     expect(cols).toHaveLength(pragma.length)
     // Same members, order-independent: a rename or a drop goes red.
     expect([...cols].sort()).toEqual([...pragma.map((c) => c.name)].sort())

@@ -41,11 +41,23 @@
  */
 
 import type { Topic } from '@neutronai/channels/types.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
+import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
   assessDispatchReadiness,
   type DispatchReadinessTarget,
 } from '@neutronai/work-board/dispatch-readiness.ts'
-import { detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
+import {
+  detectMergeMode,
+  detectRalphMode,
+  defaultGitModeProbe,
+  defaultRalphModeProbe,
+  makeCredentialedHostRunner,
+  makeLazyCredentialedHostRunner,
+  type EnvCapableHostRunner,
+  type PublisherCredentialSource,
+} from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
@@ -97,23 +109,14 @@ export interface BoardBoundBuildDeps {
    */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
   /**
-   * Resolve the repo's merge mode. REQUIRED — there is deliberately no default.
-   *
-   * It used to fall back to `detectMergeMode(path, defaultGitModeProbe())`, an
-   * UNCREDENTIALED probe that shelled a bare `gh auth status` in the gateway's
-   * own environment. The gateway carries no `GH_TOKEN` by design (the credential
-   * is injected per spawn — `open/composer.ts` `setGithubSpawnEnvResolver`), so
-   * that probe would truthfully answer "not authenticated" about a process that
-   * structurally cannot be. Requiring the resolver means the composition root —
-   * the only place that holds the credential — has to supply it.
-   *
-   * MEASURED, so this does not repeat round 2's overclaim: production never took
-   * this fallback, because `open/composer.ts` already passed a credentialed
-   * resolver. Removing it closes the hole for any FUTURE caller; it is not what
-   * refused the owner's builds. That was the unscoped `gh auth status` the probe
-   * ran — see `git-mode.ts` `PUBLISHER_AUTH_COMMAND`.
+   * Resolve the repo's merge mode. An injected resolver wins. Direct callers
+   * may instead provide the secrets store and owner handle below; that fallback
+   * probes with the same per-command credential environment as the publisher.
    */
-  resolveMergeMode: (repo_path: string) => Promise<MergeMode>
+  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
+  /** Credential source for direct callers that do not inject a merge-mode resolver. */
+  secretsStore?: Pick<SecretsStore, 'get'>
+  owner_handle?: string
   /**
    * Resolve whether this build is governed (Ralph mode). Defaults to
    * `detectRalphMode` over the production probe — a `SPEC.md` at the git
@@ -189,7 +192,32 @@ export async function dispatchBoardBoundBuild(
       deps.repo_path,
       deps.project_slug,
     )
-    merge_mode = await deps.resolveMergeMode(repo_path)
+    let mergeModeFn = deps.resolveMergeMode
+    if (mergeModeFn === undefined && deps.secretsStore !== undefined && deps.owner_handle !== undefined) {
+      const loadEnv = async (): Promise<Record<string, string>> => {
+        try {
+          return githubProcessEnv(await readGitHubToken(deps.secretsStore!, asOwnerHandle(deps.owner_handle!)))
+        } catch {
+          // Degrade to {} because a throwing origin probe becomes silent 'local', removing the PR gate.
+          return {}
+        }
+      }
+      const credential: PublisherCredentialSource = {
+        owner_handle: deps.owner_handle,
+        source: 'the instance secrets store',
+        load: loadEnv,
+      }
+      const lazyRunner = makeLazyCredentialedHostRunner(loadEnv)
+      const credentialedRunner: EnvCapableHostRunner = (command, cwd, extraEnv) =>
+        extraEnv === undefined
+          ? lazyRunner(command, cwd)
+          : makeCredentialedHostRunner(extraEnv)(command, cwd)
+      mergeModeFn = (path) => detectMergeMode(path, defaultGitModeProbe(credential, credentialedRunner))
+    }
+    if (mergeModeFn === undefined) {
+      throw new Error('resolveMergeMode or a credentialed secretsStore + owner_handle is required')
+    }
+    merge_mode = await mergeModeFn(repo_path)
     // K10 restored the governed default (the refactor-window `resolveRalph =
     // false` override is gone): a root `SPEC.md` on the resolved workspace's
     // git root flips the build into Ralph mode via `detectRalphMode`. Neither

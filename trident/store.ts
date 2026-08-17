@@ -175,6 +175,18 @@ export interface TridentRun {
    * agent's failure and must not consume its fix rounds.
    */
   crash_recoveries: number
+  /**
+   * INFRASTRUCTURE AUTO-RETRY BUDGET SPENT (migration 0126) — how many
+   * harvested executor/transport failures have been atomically claimed for a
+   * continuation retry. Legacy rows (NULL) read as 0.
+   *
+   * RETRY-OWNED, SINGLE WRITER: only {@link TridentRunStore.beginInfraRetry}
+   * writes it. It is deliberately absent from `TridentRunUpdate`, `update()`,
+   * `save()` and `saveIfActive()`, so a stale full-row snapshot cannot refund a
+   * budget unit. Durable across restarts, and separate from agent fix rounds and
+   * from launcher `crash_recoveries`.
+   */
+  infra_retries: number
   /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
   reviewed_head: string | null
   /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
@@ -277,6 +289,7 @@ interface TridentRunDbRow {
   last_advanced_at: string
   harvested_at: number | null
   crash_recoveries: number | null
+  infra_retries: number | null
   reviewed_head: string | null
   bound_pr: number | null
   fenced_paths: string | null
@@ -289,7 +302,7 @@ export const COLS =
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
-  'started_at, last_advanced_at, harvested_at, crash_recoveries, ' +
+  'started_at, last_advanced_at, harvested_at, crash_recoveries, infra_retries, ' +
   'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind'
 
 // The nullable launch-pin columns deliberately backfill through their database
@@ -376,6 +389,7 @@ export class TridentRunStore {
       last_advanced_at: ts,
       harvested_at: null,
       crash_recoveries: 0,
+      infra_retries: 0,
       reviewed_head: input.reviewed_head ?? null,
       bound_pr: input.bound_pr ?? null,
       fenced_paths: input.fenced_paths ?? null,
@@ -415,6 +429,7 @@ export class TridentRunStore {
         run.last_advanced_at,
         run.harvested_at,
         run.crash_recoveries,
+        run.infra_retries,
         run.reviewed_head,
         run.bound_pr,
         run.fenced_paths,
@@ -621,6 +636,32 @@ export class TridentRunStore {
                 last_advanced_at = ?
           WHERE id = ? AND subagent_status = 'crashed'
             AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        [this.now(), id],
+      )
+      return res.changes > 0
+    })
+    return won ? this.get(id) : null
+  }
+
+  /**
+   * Atomically CLAIM a measured infrastructure failure for retry: spend one
+   * durable budget unit, clear the harvested result and release every dispatch
+   * slot in ONE conditional UPDATE. A racing terminal transition, second tick,
+   * or crash latch wins cleanly and returns null. This is the only writer of
+   * `infra_retries`; agent rounds and `harvested_at` are intentionally untouched.
+   */
+  async beginInfraRetry(id: string): Promise<TridentRun | null> {
+    const won = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET infra_retries = COALESCE(infra_retries, 0) + 1,
+                inner_result = NULL,
+                subagent_run_id = NULL,
+                subagent_status = NULL,
+                workflow_run_id = NULL,
+                last_advanced_at = ?
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND subagent_status IS NOT 'crashed'`,
         [this.now(), id],
       )
       return res.changes > 0
@@ -949,6 +990,8 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     harvested_at: row.harvested_at,
     // Legacy rows predate migration 0123 and read NULL — no budget spent yet.
     crash_recoveries: row.crash_recoveries ?? 0,
+    // Legacy rows predate migration 0126 and read NULL — no retry budget spent.
+    infra_retries: row.infra_retries ?? 0,
     reviewed_head: row.reviewed_head,
     bound_pr: row.bound_pr,
     fenced_paths: row.fenced_paths,
