@@ -876,9 +876,16 @@ export class AppWsAdapter implements ChannelAdapter {
   /**
    * Track B Phase 4 (message edit/delete) — replay edit state to a reconnecting
    * device after the message replay. Returns one `edit_update` per edited/deleted
-   * message (with seq > after_seq), ascending by seq, bounded to the newest
-   * `DEFAULT_EDIT_REPLAY_LIMIT` the same way the message replay is. `[]` when the
-   * edit log isn't wired.
+   * message (with seq > after_seq), ascending by seq. `[]` when the edit log
+   * isn't wired.
+   *
+   * ONE page, NOT drained — unlike {@link replayAfter} beside it. A topic with
+   * more than `DEFAULT_EDIT_REPLAY_LIMIT` edited messages after the cursor
+   * replays edit state for the oldest of them and silently omits the rest. Known
+   * and deliberately left: a missing "edited" marker or an un-struck tombstone is
+   * cosmetic where a missing MESSAGE is not, so it is recorded on
+   * `AppChatEditLog.aggregatesAfter` rather than fixed in the change that fixed
+   * the message replay.
    */
   async replayEditsAfter(
     channel_topic_id: string,
