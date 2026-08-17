@@ -14,6 +14,7 @@ import { buildSettings } from './build-settings.ts'
 import { bunTerminalHost } from './bun-terminal-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
+import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
 import {
@@ -44,10 +45,25 @@ async function spawnSession(
 ): Promise<ReplSession> {
   sink.ensureStarted()
   const cwd = options.cwd ?? process.cwd()
-  const model = spec.model_preference[0]
-  if (model === undefined) {
+  const requestedModel = spec.model_preference[0]
+  if (requestedModel === undefined) {
     throw new Error('persistent-repl: model_preference is empty; at least one model required')
   }
+  // FRONTIER-MODEL FLOOR (`model-floor.ts`). THE reason this lives here and not
+  // at the two `record.model ?? getBestModel()` call sites: this line is the ONE
+  // place a model id becomes a spawned child, and the same `model` binding feeds
+  // BOTH the argv (`--model`, below) and the registry row written after the child
+  // is ready. Clamping once therefore (a) keeps an owner chat off a lower tier
+  // whatever wrote the record, and (b) un-poisons the row in the same breath, so
+  // the value cannot self-perpetuate into the next respawn. A substrate without
+  // the floor is returned verbatim — the deliberate FAST_MODEL utility callers
+  // are untouched. See the module header for why the writer was not chased.
+  const model = applyModelFloor({
+    requested: requestedModel,
+    enabled: options.frontierModelFloor === true,
+    sessionKey,
+    source: resume !== undefined ? 'resume' : 'spawn',
+  })
   // Respawn-is-always-resume (brief § 0 / § 2): when a resume directive is
   // present (from the registry on a post-crash next-turn, or from the watchdog /
   // admin respawn actuation), re-attach the captured session UUID via `--resume`
