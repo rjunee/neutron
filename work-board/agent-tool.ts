@@ -160,10 +160,22 @@ export function registerWorkBoardToolSurface(
      * seam. Absent → byte-identical to the pre-task-4 behaviour (no post).
      */
     chatAck?: WorkBoardChatAck
+    /**
+     * Derived inline activity — when wired, `work_board_list` returns the
+     * EVIDENCE-derived `inline_active` (inspector clocks) instead of the stored
+     * hint, mirroring the HTTP surface's dep shape
+     * (`gateway/http/work-board-surface.ts`). BATCH on purpose: ONE O(1)
+     * evidence read per list call, never one per row, never a shell-out.
+     * Display-only — it never gates, denies or delays a tool call, and it never
+     * writes to the store. Absent (legacy / LLM-less boxes) ⇒ byte-identical
+     * raw stored-flag passthrough.
+     */
+    deriveInlineActive?: (items: WorkBoardItem[], project_id: string) => WorkBoardItem[]
   },
 ): string[] {
   const specDoc = opts?.specDoc
   const chatAck = opts?.chatAck
+  const deriveInlineActive = opts?.deriveInlineActive
   registry.register({
     name: WORK_BOARD_LIST_TOOL,
     description:
@@ -175,7 +187,18 @@ export function registerWorkBoardToolSurface(
     capability_required: 'read:project_data',
     approval_policy: 'auto',
     handler: async (_args, ctx) => {
-      return { items: store.list(workBoardScopeKey(ctx.project_slug, ctx.project_id)) }
+      const items = store.list(workBoardScopeKey(ctx.project_slug, ctx.project_id))
+      // DELIBERATE SCOPE: only the READ surfaces (this list + the per-turn
+      // `<work_board>` fragment) map through the derivation. The mutation echoes
+      // below (add/update/complete/reorder) keep the raw stored hint on purpose —
+      // they are transactional acks of the write just performed, and the agent's
+      // own tool call is itself fresh evidence.
+      return {
+        items:
+          deriveInlineActive !== undefined
+            ? deriveInlineActive(items, ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID)
+            : items,
+      }
     },
   })
 
@@ -265,8 +288,11 @@ export function registerWorkBoardToolSurface(
       'Update a Work Board item by id: change its title, move its status (upcoming/in_progress/done), ' +
       'set/replace its design_doc_ref, or flag inline_active when YOU are working the item INLINE in ' +
       'this topic (shows a caret › on the board; a bound sub-agent shows a fork ⑂ instead — that is ' +
-      'set automatically when a build is dispatched). Clear inline_active when you stop. Re-opening ' +
-      'off done clears the completion datestamp.',
+      'set automatically when a build is dispatched). Clear inline_active when you stop, though the ' +
+      'board no longer depends on you remembering: what it displays is DERIVED from recent WRITES in ' +
+      'the project, so a flag you forget expires on its own and a card you are visibly editing shows ' +
+      'as worked even if you never set the flag. Read-only work (research, a long test run) is ' +
+      'carried by the status, not the flag. Re-opening off done clears the completion datestamp.',
     input_schema: {
       type: 'object',
       properties: {

@@ -328,6 +328,17 @@ export interface MiscCompositionInput {
      * silent until the turn's single reply() lands. Omitted → no post.
      */
     chat_ack?: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck
+    /**
+     * Derived-inline-activity batch dep for `work_board_list` — mirrors the HTTP
+     * surface's `derive_inline_active` dep (T3), so the agent reads the SAME
+     * evidence truth the clients do. Display-only: ONE O(1) evidence read per
+     * call, never a write, and it never gates, denies or delays a tool call.
+     * Omitted ⇒ raw stored-flag passthrough (unchanged behaviour).
+     */
+    derive_inline_active?: (
+      items: import('@neutronai/work-board/store.ts').WorkBoardItem[],
+      project_id: string,
+    ) => import('@neutronai/work-board/store.ts').WorkBoardItem[]
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the

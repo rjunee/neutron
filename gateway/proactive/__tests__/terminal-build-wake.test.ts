@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
-import type { TridentRun } from '../../../trident/store.ts'
+import type { TridentRun } from '@neutronai/trident/store.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '../../wiring/build-live-agent-turn.ts'
 import { buildTerminalBuildWakeObserver, buildTerminalBuildWakePrompt, type TerminalBuildWakeDeps } from '../terminal-build-wake.ts'
 
@@ -13,8 +13,9 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     channel_kind: 'app_socket', failure_reason: null, workflow_run_id: null, inner_checkpoint: null,
     inner_checkpoint_head: null, inner_checkpoint_findings: null, inner_verdict: null,
     inner_result: null, started_at: 'T', last_advanced_at: 'T', harvested_at: null,
-    crash_recoveries: 0,
-    reviewed_head: null, bound_pr: null, fenced_paths: null, ...over,
+    crash_recoveries: 0, infra_retries: 0,
+    reviewed_head: null, bound_pr: null, fenced_paths: null,
+    base_sha: null, base_behind: null, ...over,
   }
 }
 

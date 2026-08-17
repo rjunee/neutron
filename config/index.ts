@@ -119,16 +119,45 @@ function intKnob(name: string, fallback: number, min: number, max: number) {
 }
 
 /**
- * An OPTIONAL integer knob: unset/empty => `undefined` (the downstream resolver
+ * An OPTIONAL integer knob: unset/blank => `undefined` (the downstream resolver
  * keeps its own default — e.g. `resolveListenPort`'s 7800), bad => LOUD throw.
  * Used for `NEUTRON_PORT`, whose seam default lives in `resolveListenPort`.
+ *
+ * BLANK IS UNSET, AND WHITESPACE IS BLANK — the same rule every identity read in
+ * this repo already follows (`effectiveOwnerHome` below documents it for the home
+ * family). This predicate was `raw === ''`, so ONE variable had TWO answers:
+ * `NEUTRON_PORT=` resolved to `undefined` and the seam's 7800 default applied,
+ * while `NEUTRON_PORT=' '` was a hard boot refusal. Nothing chose that split; it
+ * is what `=== ''` does to a value one space away from empty, and it is the same
+ * shape as the empty-vs-whitespace defect that was fixed across eleven home
+ * readers and never reached this knob because this knob is on a different
+ * variable.
+ *
+ * AND THE CANONICAL-DECIMAL GUARD BELOW IS LOAD-BEARING FOR A REASON IT DOES NOT
+ * STATE, which is why the fix belongs HERE rather than there. `Number('   ')` is
+ * **0**, not `NaN` — whitespace coerces through numeric conversion silently — so
+ * `Number.isInteger` accepts a blank, the range check accepts it (this knob's
+ * floor is 0), and the ONLY thing that turned a blank into a throw was the
+ * string comparison `String(n) !== raw.trim()`, whose own comment justifies it
+ * purely in terms of hex / scientific / signed / leading-zero lexicals. Port 0
+ * is not a rejected value in this tree — it MEANS "bind a random port"
+ * (`resolveListenPort`'s `assertPort` admits 0; `gateway/boot-listener-registry.ts`
+ * treats `port !== 0` as "explicitly resolved"). So a future reader who narrows
+ * that comparison to skip blanks — the most natural way to bring this knob onto
+ * the blank-is-unset rule, and measured: `raw.trim().length > 0 && String(n) !==
+ * raw.trim()` — turns `NEUTRON_PORT=' '` into **port 0**, and the gateway comes
+ * up on an ephemeral port nothing routes to, with the in-use guard disabled and
+ * no error anywhere. Handling the blank at the TOP makes the coercion
+ * unreachable instead of guarded-by-accident, and the boundary is pinned in
+ * `config/__tests__/bootconfig-numeric.test.ts` with an assertion that names 0
+ * specifically, so the narrowing edit reddens.
  */
 function optionalIntKnob(name: string, min: number, max: number) {
   return z
     .string()
     .optional()
     .transform((raw, ctx): number | undefined => {
-      if (raw === undefined || raw === '') return undefined
+      if (raw === undefined || raw.trim() === '') return undefined
       const n = Number(raw)
       if (!Number.isInteger(n)) {
         ctx.addIssue({
@@ -499,6 +528,38 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * `resolveSkillsDir` (`gateway/wiring/build-phase-spec-resolver.ts`);
  * `resolveM2FeedbackPath` (`onboarding/feedback/m2-week-4-collector.ts`); and
  * `buildPromptVars` (`prompts/template.ts`) — the constant-key one.
+ *
+ * AND CI RUNS THAT COMMAND, because a proof that only a human can re-run is a
+ * proof nobody re-runs. Rounds 1-4 each failed the same way: the sentence above
+ * outlived the check behind it, and every round discovered that months later
+ * rather than on the PR that broke it. Bounding the claim by a command instead
+ * of a list fixed the WORDING of that failure and not its MECHANISM — a command
+ * in a comment still only fires when a reader chooses to type it, and by then
+ * the claim is already wrong. So the command is now executed as a registry:
+ * `tests/integration/identity-env-readers-registry.test.ts` walks the tree with
+ * these patterns and asserts the set of reader files EXACTLY equals its known
+ * list. It scans the BARE NAME rather than the access forms above, so it is
+ * deliberately BROADER than the command it executes: `env["NEUTRON_HOME"]`,
+ * `` env[`OWNER_HOME`] `` and `const { OWNER_HOME } = env` match none of the
+ * forms in that grep and would otherwise land silently — mirroring the command
+ * exactly would have rebuilt round 3's blind spot inside the guard against
+ * round 3's blind spot. The cost is that a file merely NAMING a variable (an
+ * error string, a schema key, a template placeholder) also registers, which is
+ * one annotated line instead of a hole. A fully computed key (`env[someVar]`)
+ * remains invisible to any textual scan; that is stated there rather than
+ * papered over. ANY new reader — trimmed or not — fails on the PR that adds it,
+ * and a registry row whose file stopped reading the variable fails too, so the
+ * list cannot rot into a description of a tree that no longer exists, the way
+ * rounds 1 and 2 went wrong.
+ *
+ * WHAT IT DOES NOT PROVE, said here so this docblock does not restage its own
+ * defect one layer up: the registry's per-file notes are PROSE and nothing
+ * evaluates them. The guard forces a new reader to be SEEN and described; it
+ * cannot force the description to be true. So it covers COMPLETENESS (which
+ * files are in scope) and never CORRECTNESS (whether a given predicate trims) —
+ * that stays pinned per-reader, mutation-proved, in the suites listed there.
+ * Behaviour was always the covered half; the set of things needing the
+ * behaviour was not.
  *
  * WHICH OF THEM A LIVE PATH REACHES, because "brought onto the rule" and "fixed
  * a reachable defect" are different claims and this docblock has already been

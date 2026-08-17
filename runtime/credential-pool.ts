@@ -42,7 +42,14 @@ export const COOLDOWN_429_MS = 60_000
 export const COOLDOWN_402_MS = 30 * 60_000
 export const COOLDOWN_401_MS = 5 * 60_000
 export const MAX_CONSECUTIVE_FAILURES = 5
-const CONSECUTIVE_COOLDOWN_MS = 60 * 60_000
+export const CONSECUTIVE_COOLDOWN_MS = 60 * 60_000
+
+/**
+ * WHOSE turn produced a failure report. `'background'` marks a timer-driven lane
+ * with nobody waiting on it (proactive nudge composition); everything else is
+ * `'interactive'`. See {@link reportFailure} for what it changes and why.
+ */
+export type FailureOrigin = 'interactive' | 'background'
 
 export interface PooledCredential {
   /** Stable identifier (e.g. `anthropic-key-1`). MUST be unique within a pool. */
@@ -206,37 +213,126 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
 }
 
 /**
+ * A cooldown is a FLOOR on when this credential may be dispatched again, so
+ * {@link reportFailure} may only ever push it LATER. `park` is what makes that
+ * true: it takes the max of the standing park and the proposed one, and leaves
+ * `cooldown_reason` describing whichever park actually governs. The plain
+ * assignment it replaces had a THIRD failure direction nobody had named — a
+ * SHORT park silently TRUNCATING a long one — and the release it handed out was
+ * of a credential something had already judged unfit.
+ *
+ * The concrete case (Codex review, PR #356). A background report cannot trip the
+ * hour-long strike park and cannot extend one, both of which were handled. But
+ * `reportFailure(pool, id, 401, undefined, 'background')` arriving while an
+ * hour-long `consecutive_failures` park stands used to overwrite `cooldown_until`
+ * with `now + COOLDOWN_401_MS` — five minutes — and relabel the reason. A
+ * timer-driven lane with nobody waiting on it thereby RELEASED the credential
+ * the owner's own strike counter had benched, 55 minutes early, and left a label
+ * naming the wrong cause. Reachable whenever a background turn is in flight while
+ * the interactive lane parks the credential underneath it.
+ *
+ * Monotonic-under-failure applies on BOTH lanes rather than only the background
+ * one, because it is the same defect wherever it appears and it is a smaller rule
+ * than a lane-conditional: a 429's one-minute window must not release a standing
+ * 30-minute `billing_402` park either, and a `retry-after` of two hours must not
+ * be undercut by a later short status. {@link reportSuccess} stays the ONE
+ * release — a confirmed working dispatch is the only evidence that ends a park.
+ *
+ * `>=` rather than `>` so an equal-length park does not RELABEL a standing one:
+ * the first reason to explain a given expiry is the one that keeps it.
+ */
+function park(c: PooledCredential, until: number, reason: CooldownReason): void {
+  if (c.cooldown_until !== undefined && c.cooldown_until >= until) return
+  c.cooldown_until = until
+  c.cooldown_reason = reason
+}
+
+/**
  * Report a non-2xx / connection failure. Sets the cooldown clock per the
  * status code and increments `consecutive_failures`. After
  * `MAX_CONSECUTIVE_FAILURES` strikes the credential is parked for an hour.
  *
+ * Every cooldown write here goes through {@link park}, so a failure can only push
+ * a standing park LATER — never shorten it, and never relabel one it does not
+ * outlast. See that docblock.
+ *
  * `retry_after_ms` (parsed from upstream `retry-after` header) overrides the
  * default 429 cooldown — adapters MUST honor it so we play nice with provider
  * back-pressure signals.
+ *
+ * `origin` says WHOSE turn failed, and it changes only the STRIKE COUNTER:
+ *
+ *   - `'interactive'` (default) — a person is waiting on this turn. Unchanged
+ *     behaviour: count the strike, and park the credential for
+ *     {@link CONSECUTIVE_COOLDOWN_MS} once it reaches
+ *     {@link MAX_CONSECUTIVE_FAILURES}.
+ *   - `'background'` — a timer-driven lane (proactive nudge composition). The
+ *     per-status cooldown still applies, because a real 429/402/401 is the
+ *     provider's own back-pressure and ignoring it would be rude and useless.
+ *     But the strike counter is untouched — NOT incremented, and NOT re-read — so
+ *     a background report can neither TRIP the hour-long park nor RE-ARM one an
+ *     interactive turn already tripped. Both halves matter: gating only the
+ *     increment still lets a background failure re-stamp `cooldown_until` an hour
+ *     into the future every time it fires, which is the same outage with a slower
+ *     fuse.
+ *
+ *     ⚠️ SAID EXACTLY, because the looser phrasing ("a background report cannot
+ *     EXTEND a park") was WRONG and this file's own test disproves it. What a
+ *     background report cannot do is reach {@link CONSECUTIVE_COOLDOWN_MS} — it
+ *     has no route to the strike ledger. It CAN still push the expiry later when
+ *     its own PROVIDER STATUS parks longer than whatever stands: a `retry-after`
+ *     of two hours outlasts the hour-long strike park, so {@link park} keeps the
+ *     two hours and relabels to `rate_limit_429`. That is correct and deliberate
+ *     — a provider telling us to wait two hours is a fact about the credential,
+ *     not an escalation this lane invented, and ignoring it would hammer someone
+ *     who asked us not to. The bound that matters is that nothing a background
+ *     lane does is SELF-COMPOUNDING.
+ *
+ *     The THIRD direction — TRUNCATING a standing park — is closed by
+ *     {@link park} for every caller, not just this lane, and that is the one that
+ *     handed the owner's lane a credential it had already benched.
+ *
+ * WHY THE ASYMMETRY (incident, live instance 2026-08-17). This counter is
+ * PER-CREDENTIAL but the consequence is POOL-WIDE on a single-credential box —
+ * which every Open install is. Five reminder-compose failures in a row, none of
+ * them a quota condition, parked the one credential for an hour, and from then
+ * on EVERY owner chat turn failed instantly with "all Anthropic credentials are
+ * in cooldown (429/402/401)". The product went silent because a nudge failed
+ * five times, and the message named a cause that was not true.
+ *
+ * The strike counter exists to stop us hammering a credential that is silently
+ * broken. A background lane is the WRONG detector for that: nobody is waiting on
+ * it, it retries on its own schedule, and any condition it could discover will be
+ * rediscovered — immediately, authoritatively, with a real status — by the next
+ * interactive turn, which cools the credential itself. So the counter keeps its
+ * job and loses the only input that could weaponise it against the owner.
  */
 export function reportFailure(
   pool: CredentialPool,
   id: string,
   status: number,
   retry_after_ms?: number,
+  origin: FailureOrigin = 'interactive',
 ): void {
   const c = pool.credentials.find((x) => x.id === id)
   if (!c) return
-  c.consecutive_failures++
   const now = Date.now()
   if (status === 429) {
-    c.cooldown_until = now + (retry_after_ms ?? COOLDOWN_429_MS)
-    c.cooldown_reason = 'rate_limit_429'
+    park(c, now + (retry_after_ms ?? COOLDOWN_429_MS), 'rate_limit_429')
   } else if (status === 402) {
-    c.cooldown_until = now + COOLDOWN_402_MS
-    c.cooldown_reason = 'billing_402'
+    park(c, now + COOLDOWN_402_MS, 'billing_402')
   } else if (status === 401) {
-    c.cooldown_until = now + COOLDOWN_401_MS
-    c.cooldown_reason = 'auth_401'
+    park(c, now + COOLDOWN_401_MS, 'auth_401')
   }
-  if (c.consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
-    c.cooldown_until = now + CONSECUTIVE_COOLDOWN_MS
-    c.cooldown_reason = 'consecutive_failures'
+  // THE STRIKE LEDGER IS INTERACTIVE-ONLY, both the write and the read. A
+  // background report must not be able to reach `CONSECUTIVE_COOLDOWN_MS` — not
+  // by counting toward the threshold, and not by re-arming a park that is
+  // already standing.
+  if (origin === 'interactive') {
+    c.consecutive_failures++
+    if (c.consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+      park(c, now + CONSECUTIVE_COOLDOWN_MS, 'consecutive_failures')
+    }
   }
 }
 

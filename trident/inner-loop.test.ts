@@ -17,12 +17,14 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   buildWorkflowFirer,
   buildWorkflowArgs,
   buildSubstrateWorkflowFire,
+  CODEX_BUILD_SCRIPT_PATH,
+  CODEX_REVIEW_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
@@ -52,6 +54,8 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     ralph_round: 0,
     max_ralph_rounds: 20,
     branch: 'trident/add-widget',
+    base_sha: null,
+    base_behind: null,
     pr: null,
     merge_mode: 'pr',
     subagent_run_id: null,
@@ -73,6 +77,7 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     last_advanced_at: '1970-01-01T00:00:00.000Z',
     harvested_at: null,
     crash_recoveries: 0,
+    infra_retries: 0,
     reviewed_head: null,
     bound_pr: null,
     fenced_paths: null,
@@ -338,6 +343,14 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
   })
 
+  test('a valid launch base sha is threaded and invalid values are omitted', () => {
+    const sha = 'a'.repeat(40)
+    expect(buildWorkflowArgs(input({ base_sha: sha })).baseSha).toBe(sha)
+    expect('baseSha' in buildWorkflowArgs(input())).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'abc' }))).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'A'.repeat(40) }))).toBe(false)
+  })
+
   /**
    * The live head the launcher READ from git (never a model's report of it). The key's
    * PRESENCE is the signal that a code-read answer exists, so it must be absent — not
@@ -484,6 +497,30 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // containing a space. fileURLToPath decodes; new URL(...).pathname does not.
     expect(threaded).not.toContain('%')
     expect(threaded.startsWith('/')).toBe(true)
+  })
+
+  test('args thread the harness codexBuildScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexBuildScript":"([^"]*\/trident\/codex-build\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_BUILD_SCRIPT_PATH)
+  })
+
+  test('args thread the harness codexReviewScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexReviewScript":"([^"]*\/trident\/codex-review\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_REVIEW_SCRIPT_PATH)
   })
 
   test('args thread the checked-in worktreeCleanupScript abs path (#541 — no LLM in the destructive path)', async () => {

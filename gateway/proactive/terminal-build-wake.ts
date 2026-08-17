@@ -1,8 +1,8 @@
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
-import { isTerminalPhase } from '../../trident/state-machine.ts'
-import type { TridentRun } from '../../trident/store.ts'
+import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
+import type { TridentRun } from '@neutronai/trident/store.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '../wiring/build-live-agent-turn.ts'
 import type { WakeupLlm } from './work-wakeup.ts'
 

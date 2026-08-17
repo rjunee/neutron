@@ -63,6 +63,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createLogger } from '@neutronai/logger'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -84,6 +85,8 @@ import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
+
+const log = createLogger('trident')
 
 export interface TridentStep {
   (run: TridentRun): Promise<AdvanceOutcome>
@@ -261,6 +264,16 @@ export interface BuildTridentOrchestratorOptions {
    */
   begin_crash_recovery?: (run_id: string) => Promise<TridentRun | null>
   /**
+   * INFRASTRUCTURE RETRY CLAIM — atomically clear a harvested executor/transport
+   * failure and spend one durable `infra_retries` unit. Omitted means legacy
+   * terminal behaviour byte-for-byte; existing callers do not opt in implicitly.
+   */
+  begin_infra_retry?: (run_id: string) => Promise<TridentRun | null>
+  /** Maximum measured infrastructure failures retried for one run. */
+  max_infra_retries?: number
+  /** Best-effort owner/visibility seam, invoked once on durable attempt 1 only. */
+  on_infra_retry?: (run: TridentRun, attempt: number, cause: string) => Promise<void>
+  /**
    * How many launcher crashes on ONE run may be recovered by relaunching before
    * the run is failed terminally. Default {@link DEFAULT_MAX_CRASH_RECOVERIES}.
    *
@@ -322,6 +335,15 @@ export interface BuildTridentOrchestratorOptions {
  * forever. Tune via `max_crash_recoveries` (exists chiefly for tests).
  */
 export const DEFAULT_MAX_CRASH_RECOVERIES = 3
+
+/**
+ * Infrastructure retry spacing: one minute, five minutes, then fifteen minutes
+ * (long enough at the tail to outlast a token refresh). The retry count is
+ * DERIVED from this schedule so count and duration can never disagree — the
+ * lesson pinned by PR #279's readiness budget.
+ */
+export const INFRA_RETRY_BACKOFF_MS = [60_000, 300_000, 900_000] as const
+export const DEFAULT_MAX_INFRA_RETRIES = INFRA_RETRY_BACKOFF_MS.length
 
 /**
  * RC2 — did the OUTER loop genuinely HARVEST a result into this committed
@@ -486,6 +508,58 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
   ].some((p) => t.includes(p))
   if (credential) return 'publish-credential'
   return 'publish-unknown'
+}
+
+/** A harvested no-APPROVE result is either safe to retry or a genuine outcome. */
+export type InnerFailureClass = 'infrastructure' | 'genuine'
+
+/** Closed executor/transport vocabulary. WORDS only: never match bare status
+ * numbers because an unrelated 40-hex commit id can contain them. */
+export const INFRA_CAUSE_WORDS: readonly string[] = [
+  'deferred',
+  'timed out',
+  'timeout',
+  'econnreset',
+  'econnrefused',
+  'fetch failed',
+  'socket hang up',
+  'bad gateway',
+  'service unavailable',
+  'internal server error',
+  'gateway timeout',
+  'overloaded',
+]
+
+/**
+ * Classify only from measured terminal fields, fail-closed to `genuine`.
+ * `infra-only` explicitly means the code was never judged. Legacy `inner-error`
+ * is retryable only when its measured cause contains the closed transport list.
+ * Real review verdicts (`code`/`review`/`round-lost`), findings-carrying
+ * REQUEST_CHANGES, compile/test failures, provenance rejects, garbled/hang reaps,
+ * and publish failures remain genuine/owned elsewhere.
+ *
+ * Launcher crashes are the third named infrastructure class in this card's
+ * acceptance, but §1a-crash already serves them through `crash_recoveries`.
+ * This classifier deliberately never sees `subagent_status='crashed'`.
+ */
+export function classifyInnerFailure(
+  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'terminal_cause' | 'checkpoint'>,
+): InnerFailureClass {
+  if (result.verdict === 'APPROVE') return 'genuine'
+  const cause = result.terminal_cause
+  if (result.block_kind === 'infra-only' && typeof cause === 'string' && cause.trim() !== '') {
+    return 'infrastructure'
+  }
+  if (
+    result.checkpoint === 'inner-error' &&
+    result.block_kind === null &&
+    typeof cause === 'string' &&
+    cause.trim() !== ''
+  ) {
+    const measured = cause.toLowerCase()
+    if (INFRA_CAUSE_WORDS.some((word) => measured.includes(word))) return 'infrastructure'
+  }
+  return 'genuine'
 }
 
 /**
@@ -1549,6 +1623,32 @@ export function innerTerminalFailureReason(
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
 }
 
+/**
+ * GIT-TRUTH FOR THE CLAIM, NOT ONLY THE BRANCH (card 2026-08-16). A model-relayed
+ * sha that names NO git object is not a disagreement with the real head — there is
+ * only one candidate commit, git's — so it resolves to ABSENT (null), never to a
+ * refusal. Measured: hallucinated claim '924b42906950' (git cat-file: not a valid
+ * object name) refused a good build and stranded 924b4290ea81….
+ * A claim is a sha, never a refname: non-hex input returns null WITHOUT asking git,
+ * so 'HEAD'/branch names cannot resolve by accident (4 = git's minimum abbreviation).
+ * `--end-of-options` keeps hostile-shaped input from being read as a flag.
+ */
+export async function resolveClaimedCommit(
+  run_host: RunHostCommand,
+  repo_path: string,
+  claim: string | null,
+): Promise<string | null> {
+  if (claim === null) return null
+  const c = claim.trim().toLowerCase()
+  if (!/^[0-9a-f]{4,40}$/.test(c)) return null
+  const res = await run_host(
+    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${c}^{commit}`],
+    repo_path,
+  )
+  const oid = res.stdout.trim()
+  return res.ok && /^[0-9a-f]{40}$/.test(oid) ? oid : null
+}
+
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
@@ -1574,6 +1674,9 @@ export function buildTridentOrchestrator(
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
+  const beginInfraRetry = opts.begin_infra_retry
+  const maxInfraRetries = opts.max_infra_retries ?? DEFAULT_MAX_INFRA_RETRIES
+  const onInfraRetry = opts.on_infra_retry
 
   // This-process liveness: run ids whose workflow THIS process fired (and whose
   // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
@@ -1583,9 +1686,19 @@ export function buildTridentOrchestrator(
   // Run ids redispatched in THIS process — the per-process bound on orphan
   // recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
+  // Deliberately in-memory: a restart replaces the failing pool/generation, while
+  // each individual process still bounds launch faults and cannot retry forever.
+  const launchFaults = new Map<string, { count: number; last: string }>()
+  const MAX_LAUNCH_FAULTS = 3
   // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
   // seconds; the build itself runs detached and is NOT tracked here.
   const inflight = new Set<Promise<void>>()
+  /**
+   * Delay only, intentionally in memory: the LOOP BOUND is durable in
+   * `infra_retries`. Losing this map on restart is harmless because the restart
+   * itself supplies delay; it can only make the next eligible retry earlier.
+   */
+  const infraRetryNotBefore = new Map<string, number>()
 
   async function resolveBase(run: TridentRun): Promise<string> {
     if (opts.base_branch !== undefined) return opts.base_branch
@@ -1612,11 +1725,39 @@ export function buildTridentOrchestrator(
     return null
   }
 
+  /** Best-effort, read-only probe for a PR that already reached MERGED while its
+   *  launcher was unavailable. No evidence is never treated as a merge. */
+  async function detectMergedPr(run: TridentRun): Promise<number | null> {
+    if (run.merge_mode !== 'pr') return null
+    try {
+      if (run.pr !== null) {
+        const res = await opts.run_host(
+          ['gh', 'pr', 'view', String(run.pr), '--json', 'state,number', '--jq', '.state'],
+          run.repo_path,
+        )
+        return res.ok && res.stdout.trim() === 'MERGED' ? run.pr : null
+      }
+      const branch = run.branch ?? `trident/${run.slug}`
+      const res = await opts.run_host(
+        ['gh', 'pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number', '--jq', '.[0].number // empty'],
+        run.repo_path,
+      )
+      if (!res.ok) return null
+      const n = parseInt(res.stdout.trim(), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    } catch {
+      return null
+    }
+  }
+
   /**
    * A COMMIT OID IS READ, NOT REPORTED. `claimedHead` is whatever the build SAID it
    * committed — possibly abbreviated, possibly absent. The head that actually gets
    * published is the one git resolves for the branch the inner loop named (a name a
-   * model cannot plausibly mangle). A claim is only ever a CHECK against that.
+   * model cannot plausibly mangle). A claim is only ever a CHECK against that. The
+   * claim is itself resolved through git first (`resolveClaimedCommit`): unresolvable
+   * = ABSENT; only two real, DIFFERENT OIDs refuse, and only after the push, so a
+   * refusal never strands the commit.
    */
   async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
@@ -1633,14 +1774,15 @@ export function buildTridentOrchestrator(
         `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
       )
     }
-    // THE CLAIM IS A CHECK, NEVER THE SOURCE. `startsWith` makes a full 40-char claim an
-    // equality test and a 7-char one a prefix test. A disagreement is a real signal (wrong
-    // branch, wrong worktree) and names BOTH values — neither is silently preferred.
-    if (claimedHead !== null && !resolvedHead.startsWith(claimedHead.toLowerCase())) {
-      throw new Error(
-        `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
-      )
-    }
+    // THE CLAIM IS A CHECK, NEVER THE SOURCE — and it is RESOLVED before it may check
+    // anything. A claim naming no git object is ABSENT, not a conflict (there is only
+    // one candidate commit: git's). Resolved OIDs are compared for EQUALITY — a prefix
+    // compare is wrong both ways: a hallucinated prefix refused a good build, and a
+    // short sha of the right commit is only honored by resolving it. The refusal
+    // itself is DEFERRED until after the push (see below) so it can never strand the
+    // commit; it remains only for two real, resolvable, DIFFERENT commits.
+    const resolvedClaim = await resolveClaimedCommit(opts.run_host, run.repo_path, claimedHead)
+    const claimConflict = resolvedClaim !== null && resolvedClaim !== resolvedHead
     // FIX-ROUND ANCESTRY GATE (mandated by the Fable arbitration on #289 vs #318).
     // A fix round carries the head the review verdict was ABOUT; the head it produced
     // must DESCEND from it. Run fec4d3aa rebuilt from main with no ancestry of the
@@ -1769,6 +1911,17 @@ export function buildTridentOrchestrator(
     const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
     if (remoteHead !== headToPublish) {
       throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
+    }
+
+    // THE REFUSAL FIRES ONLY AFTER THE PUSH IS CONFIRMED (defect 2, 2026-08-14: the
+    // throw preceded the push, so a wrong refusal left the commit unreachable —
+    // 924b4290ea81… was stranded). A refusal is about which commit to REVIEW, not
+    // about whether the work may exist: the branch is on origin for inspection; only
+    // the PR / review dispatch is refused.
+    if (claimConflict) {
+      throw new Error(
+        `outer publisher refused: the build reported commit '${claimedHead}' (resolves to '${resolvedClaim}') but branch ${branch} resolved to '${resolvedHead}' before publish — the branch was pushed to origin for inspection; no PR or review was dispatched`,
+      )
     }
 
     let pr = prBefore
@@ -1916,6 +2069,57 @@ export function buildTridentOrchestrator(
       }
     }
 
+    const freshBuild = resume_checkpoint_name === '' && launchRun.branch === null
+    let base_sha: string | null = null
+    let base_behind: number | null = null
+    if (freshBuild && launchRun.merge_mode === 'pr') {
+      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
+      let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      if (!fetched.ok) {
+        await (opts.sleep ?? realSleep)(1000)
+        fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      }
+      if (!fetched.ok) {
+        const detail = redactPushError(fetched.stderr).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: could not fetch origin/${base} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base fetch failed — no fire)`,
+        }
+      }
+      const remoteRef = `refs/remotes/origin/${base}`
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `${remoteRef}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
+        const detail = redactPushError(resolved.stderr || resolved.stdout).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: fetched origin/${base} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base resolve failed — no fire)`,
+        }
+      }
+      base_sha = oid
+      const behind = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `refs/heads/${base}..${remoteRef}`],
+        launchRun.repo_path,
+      )
+      const count = Number.parseInt(behind.stdout.trim(), 10)
+      if (behind.ok && Number.isFinite(count)) base_behind = count
+    } else if (freshBuild && launchRun.merge_mode === 'local') {
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `refs/heads/${base}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (resolved.ok && /^[0-9a-f]{40}$/.test(oid)) base_sha = oid
+    }
+    const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
+
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
       return {
@@ -1933,11 +2137,11 @@ export function buildTridentOrchestrator(
     // leaving the run stuck non-terminal with no dispatch id and retrying every tick
     // (Codex r4 [P1]). Mirror the chat path (`build-live-agent-turn.ts`), which
     // catches `loadContext()` and degrades to no context. Silent degrade to null —
-    // the orchestrator has no logger and surfaces faults via its AdvanceOutcome.
+    // this resolver's failure surfaces only through its best-effort fallback.
     let reflection_context: string | null = null
     if (opts.resolve_reflection_context) {
       try {
-        reflection_context = opts.resolve_reflection_context(launchRun)
+        reflection_context = opts.resolve_reflection_context(pinnedRun)
       } catch {
         reflection_context = null
       }
@@ -1971,7 +2175,7 @@ export function buildTridentOrchestrator(
         }
       }
       const budget = readHostBudget()
-      const detail = buildTestStrategyDetail(launchRun.repo_path, {
+      const detail = buildTestStrategyDetail(pinnedRun.repo_path, {
         cores: budget.cores,
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
@@ -1988,8 +2192,9 @@ export function buildTridentOrchestrator(
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
     const firePromise = fireWorkflow({
-      run: launchRun,
+      run: pinnedRun,
       base_branch: base,
+      ...(base_sha !== null ? { base_sha } : {}),
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
@@ -2004,7 +2209,7 @@ export function buildTridentOrchestrator(
       // shadowing cost on 2026-08-13 and why the fallback cannot resurrect a
       // revoked credential.
       codex_home:
-        (opts.resolve_codex_home ? opts.resolve_codex_home(launchRun) : null) ??
+        (opts.resolve_codex_home ? opts.resolve_codex_home(pinnedRun) : null) ??
         opts.codex_home ??
         null,
       // The credentialed-`gh` runner's store coordinates, so the inner loop's
@@ -2054,7 +2259,7 @@ export function buildTridentOrchestrator(
       // The launching turn never settled cleanly — the workflow was NOT fired.
       // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
       return {
-        run: failedRun(run, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
+        run: failedRun(pinnedRun, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
         changed: true,
         waiting: false,
         note: `${run.phase} → failed (fire did not settle)`,
@@ -2063,12 +2268,12 @@ export function buildTridentOrchestrator(
 
     fired.add(run.id)
     const next: TridentRun = {
-      ...launchRun,
+      ...pinnedRun,
       subagent_run_id: id,
       subagent_status: 'running',
       // The exact pooled launcher generation is the crash-ownership token. A
       // legacy/test fire seam without one retains the old observability id.
-      workflow_run_id: outcome.launcher_session_key ?? launchRun.workflow_run_id ?? id,
+      workflow_run_id: outcome.launcher_session_key ?? pinnedRun.workflow_run_id ?? id,
       last_advanced_at: now(),
     }
     return {
@@ -2278,6 +2483,52 @@ export function buildTridentOrchestrator(
       return refireNextRalphTask(run, result)
     }
 
+    // RUN-LEVEL INFRASTRUCTURE AUTO-RETRY. This sits before the harvest stamp:
+    // nothing was harvested into a terminal decision when the atomic claim wins.
+    // With the seam unwired, legacy callers take the exact existing path below.
+    if (beginInfraRetry !== undefined && classifyInnerFailure(result) === 'infrastructure') {
+      if (run.infra_retries >= maxInfraRetries) {
+        const terminalRun = { ...run, harvested_at: nowMs() }
+        const failed: TridentRun = {
+          ...failedRun(
+            terminalRun,
+            `infrastructure failure persisted after ${maxInfraRetries} automatic retries ` +
+              `(budget ${maxInfraRetries}) — not retrying again. Last measured cause: ${result.terminal_cause}`,
+            true,
+          ),
+          pr: result.pr_number ?? run.pr,
+          branch: result.branch ?? run.branch,
+          inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
+          inner_verdict: 'REQUEST_CHANGES',
+        }
+        return { run: failed, changed: true, waiting: false, note: 'infrastructure retry budget used → failed' }
+      }
+
+      const claimed = await beginInfraRetry(run.id)
+      if (claimed === null) {
+        return { run, changed: false, waiting: true, note: 'infra-retry claim lost — re-read next tick' }
+      }
+      const backoffMs =
+        INFRA_RETRY_BACKOFF_MS[claimed.infra_retries - 1] ?? INFRA_RETRY_BACKOFF_MS.at(-1)!
+      infraRetryNotBefore.set(run.id, Date.parse(now()) + backoffMs)
+      if (claimed.infra_retries === 1 && onInfraRetry !== undefined) {
+        try {
+          await onInfraRetry(claimed, 1, result.terminal_cause ?? '')
+        } catch (err) {
+          log.warn('infra_retry_observer_failed', {
+            run: claimed.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+      return {
+        run: claimed,
+        changed: true,
+        waiting: true,
+        note: `infra failure → auto-retry attempt ${claimed.infra_retries} of ${maxInfraRetries} scheduled`,
+      }
+    }
+
     // RC2 — STAMP the durable outer-harvest marker up front, so EVERY outcome
     // this function returns (done / provenance-reject / exhausted / merge-fail)
     // carries it (they all spread `run`). `applyResult` is reached ONLY on a
@@ -2392,6 +2643,8 @@ export function buildTridentOrchestrator(
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
+      infraRetryNotBefore.delete(run.id)
+      launchFaults.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
@@ -2445,6 +2698,39 @@ export function buildTridentOrchestrator(
       //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
       //     unchanged reap below, byte-stable for legacy callers.
       if (run.subagent_status === 'crashed' && beginCrashRecovery !== undefined) {
+        // MEASURED 2026-08-16 23:21 gateway restart: recovery blindly relaunched
+        // finished PRs #336/#337 and the owner hand-cancelled both. A merged PR is
+        // terminal and outranks the recovery budget, but the claim MUST precede the
+        // return: it clears the crash latch whose save veto would otherwise silently
+        // discard done/completed. The claim spending one recovery unit is harmless
+        // because the run ends terminal. Nothing was harvested, so do NOT stamp
+        // `harvested_at` (applyResult remains its sole writer).
+        const mergedPr = await detectMergedPr(run)
+        if (mergedPr !== null) {
+          const claimed = await beginCrashRecovery(run.id)
+          if (claimed === null) {
+            return { run, changed: false, waiting: true, note: 'crash-recovery claim lost — re-read next tick' }
+          }
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const adopted: TridentRun = {
+            ...claimed,
+            phase: 'done',
+            pr: mergedPr,
+            branch: claimed.branch ?? run.branch,
+            inner_checkpoint: 'pr-merged',
+            inner_verdict: 'APPROVE',
+            subagent_status: 'completed',
+            failure_reason: null,
+            last_advanced_at: now(),
+          }
+          return {
+            run: adopted,
+            changed: true,
+            waiting: false,
+            note: `PR #${mergedPr} already merged — adopted after launcher crash → done (no relaunch)`,
+          }
+        }
         if (run.crash_recoveries >= maxCrashRecoveries) {
           fired.delete(run.id)
           redispatched.delete(run.id)
@@ -2479,7 +2765,33 @@ export function buildTridentOrchestrator(
         redispatched.delete(run.id)
         // CONTINUATION, not a restart: `launch()` folds `inner_checkpoint`/`pr`/`branch`
         // so the workflow resumes on the pushed branch and reuses the PR.
-        return launch(claimed)
+        try {
+          const out = await launch(claimed)
+          launchFaults.delete(run.id)
+          return out
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+          launchFaults.set(run.id, { count, last: msg })
+          if (count < MAX_LAUNCH_FAULTS) {
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+            }
+          }
+          launchFaults.delete(run.id)
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+          return {
+            run: failedRun(run, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (launch kept throwing)`,
+          }
+        }
       }
       // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
       //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes
@@ -2564,7 +2876,49 @@ export function buildTridentOrchestrator(
 
     // (3) Launch-if-needed — the single fire site (null-guarded).
     if (run.subagent_run_id === null) {
-      return launch(run)
+      // The infra-retry backoff is checked BEFORE the launch-fault budget: a run
+      // that is deliberately waiting out a backoff has not attempted a launch, so
+      // it must not consume a fault from the budget that reaps a THROWING launch.
+      const notBefore = infraRetryNotBefore.get(run.id)
+      if (notBefore !== undefined) {
+        const remainingMs = notBefore - Date.parse(now())
+        if (remainingMs > 0) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `infra-retry backoff (${Math.ceil(remainingMs / 1_000)}s remaining)`,
+          }
+        }
+        infraRetryNotBefore.delete(run.id)
+      }
+      try {
+        const out = await launch(run)
+        launchFaults.delete(run.id)
+        return out
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+        launchFaults.set(run.id, { count, last: msg })
+        if (count < MAX_LAUNCH_FAULTS) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+          }
+        }
+        launchFaults.delete(run.id)
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+        return {
+          run: failedRun(run, reason, false),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (launch kept throwing)`,
+        }
+      }
     }
 
     // (4) In flight (fired by THIS process, no result yet). Reap a stalled

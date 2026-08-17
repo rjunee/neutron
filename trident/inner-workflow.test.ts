@@ -488,9 +488,24 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     // The re-enter step switches WITHOUT -c; the create step uses -c.
     expect(SRC).toContain('Re-enter it WITHOUT')
   })
+
+  test('the FRESH forge step tolerates a leftover local branch: create-or-re-enter, -c first', () => {
+    // Measured incident d5c1e219: a relaunched card whose earlier run left
+    // refs/heads/trident/<slug> behind died on `git switch -c` ("branch already
+    // exists") and committed on the worktree-wf_ auto branch instead. The fresh
+    // step must fall back to plain `git switch`; order (-c first) distinguishes
+    // it from the reenter step, which tries the plain switch first.
+    expect(SRC).toContain('git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}')
+    expect(SRC).toContain('git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}')
+  })
 })
 
 describe('inner-workflow.mjs — codex cross-model review panelist', () => {
+  test('the codex build coda pins both halves of the host-side branch binding', () => {
+    expect(SRC).toContain('STEP 1 IS ALREADY DONE FOR YOU')
+    expect(SRC).toContain('Stay on branch ${forgeBranch}')
+  })
+
   test('destructures codexHome from args (per-project CODEX_HOME) + gates on codexConfigured', () => {
     expect(SRC).toContain('codexHome = null')
     expect(SRC).toContain('const codexConfigured =')
@@ -505,7 +520,10 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
 
   test('the codex reviewer runs trident/codex-review.sh SYNCHRONOUSLY with per-project CODEX_HOME (never backgrounded)', () => {
     expect(SRC).toContain('function codexReviewerPrompt(diffFile)')
-    expect(SRC).toContain('/trident/codex-review.sh')
+    expect(SRC).toContain('const codexReviewSh =')
+    expect(SRC).toContain('codexReviewScript = null')
+    // The repoPath resolution IS the defect — its absence is the fix.
+    expect(SRC).not.toContain('${repoPath}/trident/codex-review.sh')
     expect(SRC).toContain('CODEX_HOME=')
     expect(SRC).toContain('do NOT background it')
     // Codex reviews the SAME diff FILE Forge wrote — NOT `git diff` in repoPath
@@ -580,6 +598,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'slug',
       'runId',
       'codexHome',
+      'codexReviewSh',
       'baseBranch',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
@@ -591,9 +610,18 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'CODEX_ENV_PREFIX',
       [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
-    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '', "CODEX_REVIEW_MODEL='gpt-5.6-sol' ")(
-      '/tmp/some-diff.diff',
-    )
+    return factory(
+      '/repo',
+      'the-slug',
+      runId,
+      '/codex-home',
+      '/harness/trident/codex-review.sh',
+      'main',
+      '',
+      '',
+      '',
+      "CODEX_REVIEW_MODEL='gpt-5.6-sol' ",
+    )('/tmp/some-diff.diff')
   }
 
   /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */

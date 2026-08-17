@@ -237,6 +237,12 @@ export function buildCoreModules(
           // #429 task 4 — thread the deterministic chat ack (composer-built,
           // durable+live app-ws seam). Absent → no post (unchanged behaviour).
           ...(input.work_board.chat_ack !== undefined ? { chatAck: input.work_board.chat_ack } : {}),
+          // T4 — thread the derived-inline-activity dep so `work_board_list`
+          // serves evidence truth (same closure the HTTP surface gets). Absent →
+          // raw stored-flag passthrough. Display-only; it gates nothing.
+          ...(input.work_board.derive_inline_active !== undefined
+            ? { deriveInlineActive: input.work_board.derive_inline_active }
+            : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
@@ -656,6 +662,9 @@ export function buildCoreModules(
         // crashed launcher is instead relaunched as a continuation from its pushed
         // branch/PR/checkpoint, bounded by the durable `crash_recoveries` budget.
         orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
+        // "An infrastructure failure must retry itself" — atomically spend the
+        // durable executor/transport retry budget and release the run slot.
+        orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({
           store,

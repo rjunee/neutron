@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import type { HostCommandResult } from './git-mode.ts'
+import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
 import {
   buildTridentOrchestrator,
   isTridentHarvestTerminal,
+  resolveClaimedCommit,
   resolveResumeLiveHead,
   RESUME_HEAD_RETRY_DELAYS_MS,
 } from './orchestrator.ts'
@@ -340,11 +341,19 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('the outer publisher refuses a commit that is not the local branch tip — naming BOTH values', async () => {
     const requested = 'abcdef0123456789abcdef0123456789abcdef01'
     const resolved = '1111111111111111111111111111111111111111'
+    let lsRemotes = 0
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: requested } }),
-      hostResponder: (cmd) => cmd.join(' ').includes('rev-parse --verify refs/heads/feat-x')
-        ? ok(resolved)
-        : ok(),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(resolved)
+        if (joined.includes(`--end-of-options ${requested}^{commit}`)) return ok(requested)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(`${lsRemotes === 1 ? '9'.repeat(40) : resolved}\trefs/heads/feat-x`)
+        }
+        return ok()
+      },
     })
     const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
     expect(final.phase).toBe('failed')
@@ -354,8 +363,100 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.failure_reason).toContain(resolved)
     // …and it must not blame a review that never ran.
     expect(final.failure_reason).not.toContain('Argus')
-    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(' push '))).toBe(false)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls.some((c) => c.includes(' push '))).toBe(true)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
     expect(h.inputs).toHaveLength(1)
+  })
+
+  test("a claim that resolves to no git object is ABSENT — the publisher publishes from git's head", async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const claim = '924b42906950'
+    let fires = 0
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => ++fires === 1
+        ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: claim } }
+        : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes(`--end-of-options ${claim}^{commit}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: Needed a single revision', exit_code: 128 }
+        }
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++lsRemotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.phase).toBe('done')
+    expect(final.failure_reason).toBeNull()
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(' push '))).toBe(true)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a short-sha claim resolving to the same commit is accepted by OID equality', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const claim = head.slice(0, 7)
+    let fires = 0
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => ++fires === 1
+        ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: claim } }
+        : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes(`--end-of-options ${claim}^{commit}`)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++lsRemotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.phase).toBe('done')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(`--end-of-options ${claim}^{commit}`))).toBe(true)
+  })
+
+  test("PR #271's string claim comparison cannot return", () => {
+    const source = readFileSync(join(import.meta.dir, 'orchestrator.ts'), 'utf8')
+    expect(source).not.toContain('startsWith(claimedHead')
+    expect(source).toContain('resolveClaimedCommit')
+  })
+
+  describe('resolveClaimedCommit — real git', () => {
+    test('resolves full and abbreviated commit OIDs and rejects absent or non-sha claims', async () => {
+      const repo = join(tmp, 'claim-resolution-real-git')
+      mkdirSync(repo)
+      const git = (...args: string[]) => Bun.spawnSync(['git', '-C', repo, ...args], { stdout: 'pipe', stderr: 'pipe' })
+      expect(git('init').exitCode).toBe(0)
+      expect(git('config', 'user.email', 'test@example.com').exitCode).toBe(0)
+      expect(git('config', 'user.name', 'Test').exitCode).toBe(0)
+      writeFileSync(join(repo, 'one'), 'one')
+      expect(git('add', 'one').exitCode).toBe(0)
+      expect(git('commit', '-m', 'one').exitCode).toBe(0)
+      const a = git('rev-parse', 'HEAD').stdout.toString().trim()
+      expect(await resolveClaimedCommit(spawnCapture, repo, a)).toBe(a)
+      expect(await resolveClaimedCommit(spawnCapture, repo, a.slice(0, 8))).toBe(a)
+      expect(await resolveClaimedCommit(spawnCapture, repo, '924b42906950')).toBeNull()
+      expect(git('cat-file', '-t', '924b42906950').exitCode).not.toBe(0)
+      expect(await resolveClaimedCommit(spawnCapture, repo, 'not-a-sha')).toBeNull()
+      expect(await resolveClaimedCommit(spawnCapture, repo, null)).toBeNull()
+      expect(await resolveClaimedCommit(spawnCapture, repo, 'HEAD')).toBeNull()
+      writeFileSync(join(repo, 'two'), 'two')
+      expect(git('add', 'two').exitCode).toBe(0)
+      expect(git('commit', '-m', 'two').exitCode).toBe(0)
+      const b = git('rev-parse', 'HEAD').stdout.toString().trim()
+      expect(await resolveClaimedCommit(spawnCapture, repo, b.slice(0, 8))).toBe(b)
+      expect(b).not.toBe(a)
+    })
   })
 
   describe('FIX-ROUND ANCESTRY GATE', () => {
@@ -657,6 +758,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         // The publisher's OWN read of the head (T1) is `rev-parse --verify refs/heads/<branch>` —
         // matched BEFORE the rebase step's generic `rev-parse --verify <baseSha>^{commit}` probe.
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(oldHead)
+        if (joined.includes(`--end-of-options ${oldHead}^{commit}`)) return ok(oldHead)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(oldHead)
@@ -970,6 +1072,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1266,6 +1369,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1334,6 +1438,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1457,6 +1562,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1736,9 +1842,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
   test('a claimed sha that disagrees with rev-parse FAILS, naming both values', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
-    // Full-length and abbreviated: the prefix check must catch BOTH, or an abbreviation
-    // silently becomes "accept anything".
+    // Full-length and abbreviated claims both resolve to a real, different commit.
     for (const claimed of ['f'.repeat(40), 'baddad1']) {
+      let lsRemotes = 0
       const h = buildHarness({
         plan: () => ({
           result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: claimed },
@@ -1746,6 +1852,10 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         hostResponder: (cmd) => {
           const joined = cmd.join(' ')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+          if (joined.includes(`--end-of-options ${claimed}^{commit}`)) return ok('f'.repeat(40))
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+            return ok(`${++lsRemotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+          }
           return ok()
         },
       })
@@ -1756,7 +1866,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       expect(final.failure_reason).toContain(claimed)
       expect(final.failure_reason).toContain(head)
       expect(final.failure_reason).not.toContain('Argus')
-      expect(calls.some((c) => c.includes(' push '))).toBe(false)
+      expect(calls.some((c) => c.includes(' push '))).toBe(true)
       expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
       expect(h.inputs).toHaveLength(1)
     }
@@ -3172,16 +3282,46 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
   })
 
-  test('a FRESH launch is byte-identical: no head read, no field at all', async () => {
-    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
-    await createRun({ merge_mode: 'pr' as MergeMode })
+  test('a FRESH pr launch fetches and pins origin/main before firing', async () => {
+    const HEAD = 'a'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(HEAD.toUpperCase())
+        if (joined.includes('rev-list --count')) return ok('16')
+        return ok()
+      },
+    })
+    await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
     await launchOnce(h)
 
     expect(h.inputs).toHaveLength(1)
     expect('resume_live_head' in h.inputs[0]!).toBe(false)
+    expect(h.inputs[0]!.base_sha).toBe(HEAD)
+    expect(store.listNonTerminal()[0]?.base_sha).toBe(HEAD)
+    expect(store.listNonTerminal()[0]?.base_behind).toBe(16)
     const calls = h.hostCalls.map((c) => c.join(' '))
     expect(calls.some((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))).toBe(false)
-    expect(calls.some((c) => c.includes('rev-parse'))).toBe(false)
+    expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
+    expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
+      .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
+  })
+
+  test('two failed fresh-base fetches fail loudly without firing', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => cmd.includes('fetch')
+        ? { ok: false, stdout: '', stderr: 'network down', exit_code: 1 }
+        : ok(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    expect(h.hostCalls.filter((c) => c.includes('fetch'))).toHaveLength(2)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(store.get(run.id)?.failure_reason).toContain('could not fetch origin/main')
   })
 
   test('a local-mode resume asks the LOCAL ref', async () => {

@@ -508,6 +508,69 @@ has_origin() {
   git config --get remote.origin.url >/dev/null 2>&1
 }
 
+# Print the position and path of the first OTHER worktree holding this branch.
+# Git documents the first porcelain entry as the shared main working tree; callers
+# need that position so they can refuse to detach it.
+branch_holder() {
+  local want worktree_real
+  want="refs/heads/$1"
+  worktree_real="$(pwd -P)"
+  git worktree list --porcelain | awk \
+    -v want="$want" -v worktree="$WORKTREE" -v worktree_real="$worktree_real" '
+      /^worktree / { path = substr($0, 10); n++; next }
+      /^branch / {
+        if (substr($0, 8) == want && path != worktree && path != worktree_real) {
+          print n " " path
+          exit
+        }
+      }
+    '
+}
+
+# Return 0 when a process cwd is in the holder, 1 when none is provable, and 2 when
+# liveness cannot be verified. Unverifiable REFUSES: a wrong detach puts two rounds
+# on one branch, while a wrong refusal costs only the deferral we already have today.
+holder_is_live() {
+  local holder holder_real out p cwd line
+  holder="$1"
+  holder_real="$(cd "$holder" 2>/dev/null && pwd -P || printf '%s' "$holder")"
+
+  if [ -d /proc ]; then
+    for p in /proc/[0-9]*/cwd; do
+      cwd="$(readlink "$p" 2>/dev/null)" || continue
+      case "$cwd" in
+        "$holder"|"$holder"/*|"$holder_real"|"$holder_real"/*) return 0 ;;
+      esac
+    done
+    return 1
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    out="${TMPDIR:-/tmp}/trident-codex-build-lsof.$$"
+    if ! bounded "$out" 10 lsof -Fn -d cwd; then
+      rm -f "$out"
+      return 2
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        n*)
+          cwd="${line#n}"
+          case "$cwd" in
+            "$holder"|"$holder"/*|"$holder_real"|"$holder_real"/*)
+              rm -f "$out"
+              return 0
+              ;;
+          esac
+          ;;
+      esac
+    done < "$out"
+    rm -f "$out"
+    return 1
+  fi
+
+  return 2
+}
+
 # Is this a `pr`-mode run? See THE MERGE MODE DECIDES WHAT MUST BE TRUE in the header:
 # the remote baseline, the push-credential precheck and the PR probe are all `pr`-only,
 # and keying them on `has_origin` instead is what wedged local-mode runs on any clone
@@ -784,6 +847,106 @@ if [ "$codex_auth_ok" -ne 1 ]; then
   exit 3
 fi
 
+# ── BIND THE WORKTREE TO THE RUN'S BRANCH, BEFORE ANY TOKEN IS SPENT ──────
+# A failed bind is DEFERRED here, before codex launches, so it costs a round but no
+# tokens. This is the measured d5c1e219 incident: a worktree-wf_ auto branch plus a
+# leftover local run branch made the prompt's `git switch -c` collide, and the build
+# committed on the branch the run could not merge.
+# Runs c5c5fb4a/ad6ac515 exposed the other collision: a dead prior-round holder. Detach
+# it in place, never destroy it; the accepted probe/detach race can only admit this
+# run's earlier round, whose plausible writers the immediately preceding probe checked.
+LAUNCH_HEAD_BEFORE_BIND="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
+if [ -n "$BRANCH" ]; then
+  current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [ "$current_branch" != "$BRANCH" ]; then
+    bind_err="${TMPDIR:-/tmp}/trident-codex-build-bind.$$"
+    rm -f "$bind_err"
+    if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      if ! git switch "$BRANCH" 2>"$bind_err"; then
+        bind_n=1
+        bind_ok=0
+        while [ "$bind_n" -le 3 ]; do
+          entry="$(branch_holder "$BRANCH")"
+          [ -n "$entry" ] || break
+          holder_index="${entry%% *}"
+          holder="${entry#* }"
+
+          if [ "$holder_index" -eq 1 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in the SHARED main checkout '${holder}' — refusing to detach the operator's own worktree. DEFERRED before any tokens were spent." >&2
+            exit 3
+          fi
+
+          if [ ! -d "$holder" ]; then
+            git worktree prune >/dev/null 2>&1
+            if git switch "$BRANCH" 2>"$bind_err"; then
+              bind_ok=1
+              break
+            fi
+            bind_n=$((bind_n + 1))
+            continue
+          fi
+
+          holder_is_live "$holder"
+          holder_live=$?
+          if [ "$holder_live" -eq 0 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in worktree '${holder}' and a LIVE process is standing in it — refusing to detach a live worktree; that is how two rounds end up committing to one branch. DEFERRED before any tokens were spent." >&2
+            exit 3
+          elif [ "$holder_live" -eq 2 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in worktree '${holder}' and this host offers no way to prove nothing live is standing in it (no /proc, no usable lsof) — refusing to detach on a guess. DEFERRED before any tokens were spent." >&2
+            exit 3
+          fi
+
+          if ! git -C "$holder" checkout --detach 2>"$bind_err"; then
+            break
+          fi
+          echo "CODEX_BUILD_BRANCH_RECLAIMED: worktree '${holder}' held '${BRANCH}' with no live process standing in it — detached it in place (files preserved for post-mortem) and freed the branch. Nothing was killed and nothing was deleted." >&2
+          if git switch "$BRANCH" 2>"$bind_err"; then
+            bind_ok=1
+            break
+          fi
+          bind_n=$((bind_n + 1))
+        done
+
+        if [ "$bind_ok" -ne 1 ]; then
+          bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+          rm -f "$bind_err"
+          echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+          exit 3
+        fi
+      fi
+    elif is_pr_mode && has_origin; then
+      _tip="$(remote_tip "$BRANCH" 3)"
+      if [ "$_tip" = 'unknown' ]; then
+        rm -f "$bind_err"
+        echo "CODEX_BUILD_BRANCH_UNBOUND: git ls-remote never answered, so this worktree cannot know whether the run's branch '${BRANCH}' exists remotely before creating it locally. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+        exit 3
+      elif [ -n "$_tip" ]; then
+        bounded /dev/null 30 env GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$BRANCH" || true
+        if ! git switch -c "$BRANCH" "$_tip" 2>"$bind_err"; then
+          bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+          rm -f "$bind_err"
+          echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}' at remote tip '${_tip}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+          exit 3
+        fi
+      elif ! git switch -c "$BRANCH" 2>"$bind_err"; then
+        bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+        rm -f "$bind_err"
+        echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not create the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+        exit 3
+      fi
+    elif ! git switch -c "$BRANCH" 2>"$bind_err"; then
+      bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+      rm -f "$bind_err"
+      echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not create the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+      exit 3
+    fi
+    rm -f "$bind_err"
+  fi
+fi
+
 # ── Run the build SYNCHRONOUSLY (never backgrounded) ──────────────────────────
 # The prompt goes in on STDIN (`codex exec -`), never as an argv entry: the brief
 # carries the whole task text and a long one in a single argument can exceed the OS
@@ -794,8 +957,10 @@ fi
 # the build's, and the trailer's "did it commit" question is answered by comparing
 # against this set. All three tips, because the brief tells a re-entry to
 # `git switch <branch>` and that moves HEAD onto the previous round's commit without
-# producing one (header: THE TWO SHAS).
+# producing one (header: THE TWO SHAS). After the bind, HEAD is the branch tip; retain
+# the pre-bind parked base sha too so it can never be reported as this build's commit.
 for _pre in \
+  "$LAUNCH_HEAD_BEFORE_BIND" \
   "$(git rev-parse --verify HEAD 2>/dev/null || true)" \
   "$(git rev-parse --verify "refs/heads/${BRANCH}" 2>/dev/null || true)"; do
   _pre="$(sha_or_empty "$_pre")"
@@ -895,6 +1060,25 @@ set -- --strict-config \
 BUILD_MODEL="${CODEX_BUILD_MODEL-gpt-5.6-sol}"
 if [ -n "$BUILD_MODEL" ]; then
   set -- "$@" --model "$BUILD_MODEL"
+fi
+
+# PIN THE REASONING EFFORT, for exactly the reason the model above is pinned. Unpinned,
+# the CLI default for this tier is `none`, and every launch banner read
+# `reasoning effort: none` — the forge was building with reasoning DISABLED. Pinning the
+# model without pinning the effort buys the flagship tier and then runs it at its weakest
+# setting, which is the same silent-downgrade failure the comment above describes.
+#
+# `xhigh` is the top tier, verified against the live model rather than from the docs: the
+# launch banner echoes back `reasoning effort: xhigh`. Same `${VAR-x}` idiom as the model,
+# so an explicitly EMPTY CODEX_BUILD_EFFORT is a deliberate "let codex choose".
+#
+# CAUTION: `--strict-config` validates the KEY, not the VALUE — a misspelt effort parses
+# clean here and then fails at the API on EVERY build. Probed: `xhigh` and `high` are
+# accepted; a bogus value reaches the API and errors there. Only change this literal to a
+# value the CLI actually accepts.
+BUILD_EFFORT="${CODEX_BUILD_EFFORT-xhigh}"
+if [ -n "$BUILD_EFFORT" ]; then
+  set -- "$@" -c "model_reasoning_effort=$BUILD_EFFORT"
 fi
 
 # `--sandbox danger-full-access` — see the header for what each narrower policy

@@ -52,8 +52,12 @@ with cross-references noted inline.
    Protects: **D1**/**D2** (PoolRuntime reification / Substrate banner split) — flag/promise pair
    must move together.
 7. Substrate instance-id prefixes are pool keys; the trident fire substrate must stay warm
-   per-repo-cwd; only `cc-agent-`-prefixed instances get `enableToolBridge`.
-   `open/composer.ts:590-633,535-541`.
+   per-repo-cwd; the OWNER-FACING CONVERSATIONAL PAIR — `cc-agent-` (live chat) and `cc-nudge-`
+   (background proactive compose: fired reminders/rituals + the work-board wakeup) — and ONLY that
+   pair get `enableToolBridge` and `PROFILE_WARM_CHAT`. `cc-nudge-` is a deliberate equal-grant,
+   separate-session twin of `cc-agent-`: equal grants because a ritual composes there and ISSUES
+   #504 settled that it must reach Core tools; separate session because a background compose that
+   aborts must not poison the child the owner is talking to. `open/wiring/substrates.ts`.
    Protects: **D1**/**D2**.
 8. `Bun.serve` selects the chained fetch handler per-request inside the serve arrow so the live
    server ref reaches WS upgrades; `maxRequestBodySize` = import cap + 64MB.
@@ -100,9 +104,26 @@ with cross-references noted inline.
     Protects: **P1** (ProjectDb API widening).
 17. Migration runner: PRAGMA preamble hoisted out of the per-migration transaction;
     `PRAGMA foreign_keys=ON` re-asserted in a `finally`; per-migration BEGIN/COMMIT atomicity;
-    migration version numbers are never renumbered or backfilled. `migrations/runner.ts:89-126`.
+    migration version numbers are never renumbered or backfilled. `migrations/runner.ts`
+    (`applyMigrations`' apply loop, `splitPragmaPreamble`) — cited by function rather than by line,
+    because the previous line anchor had drifted off the code it named.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
+    Three refusals in that runner are fail-closed and must stay so: a duplicate ordinal
+    (`assertUniqueMigrationOrdinals`), a recorded name that differs from the file on disk
+    (`migrationNameMismatch`, resolvable only via a hand-verified `migrations/repairs.json` entry),
+    and a pending migration file the deployed checkout does not track (`formatUntrackedMigration` in
+    `migrations/runner.ts`, on the verdict from `resolveDeployedTree` in `migrations/provenance.ts`).
+    **All three decide before ANY write** — `_migrations` is created, and repairs are acknowledged,
+    only after the last refusal has been passed, which is what makes the untracked message's claim
+    that nothing was written true. Where tracking cannot be established (no git metadata, an index
+    shape the reader does not decode, an index that fails its own checksum or carries none, a
+    migration directory git does not track at all) the runner applies and records
+    `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from "not
+    tracked" and collapsing them either breaks tarball installs or re-opens the class. The verified
+    value is `tracked-in-index` and names its evidence: the index is the STAGED tree, so a
+    staged-but-uncommitted file passes; HEAD-tree verification is deliberately out of scope (it would
+    need a packfile reader on the boot path) and the value must not be renamed to imply otherwise.
 18. Schema snapshot test is the refactor's data-layer safety net; regenerate only via
     `regen-snapshot.ts`, never hand-edit. `migrations/snapshot.test.ts:1` (the test),
     `migrations/regen-snapshot.ts:9-15` (writes `expected-schema.txt`).
@@ -340,6 +361,18 @@ with cross-references noted inline.
     Protects: **O3** (Error taxonomy + typed substrate error codes).
 39. Binary-ENOENT must stay non-retryable so it can't launder into a 429 cooldown; `all_cooldown`
     must stay `retryable:true`. `build-llm-call-substrate.ts:437-442,515-523`.
+    A SUBSTRATE-LOCAL failure must never be reported as a credential fault, on EITHER
+    credential-failure lane. `detectBinaryNotFound`, `detectChannelWedged`,
+    `detectTurnTimeout` and `detectReplProcessExited` are classified AHEAD of the cooldown
+    map in `build-llm-call-substrate.ts` and MUST skip `reportFailure`: none carries an HTTP
+    status, so the map can only guess 429, and on a single-credential box (every Open
+    install) five guesses park the pool for an hour behind "all Anthropic credentials are in
+    cooldown" — a cause that is not true. The dead-REPL member is the one a lane rule cannot
+    cover: the strikes that caused the 2026-08-17 chat lockout were the owner's own
+    INTERACTIVE retries against a respawning child.
+    Because each detector matches PROSE emitted by another module, invariant 38 applies to
+    their producer literals: a reword is a behavior change, and
+    `__tests__/g6-error-string-conformance.test.ts` pins each one to its producer source.
     Protects: **O3**.
 40. Email triage LLM stub THROWS by design so triage renders its deterministic fallback;
     agent-settings fallbacks must report `available:false`, never fake success.
@@ -471,9 +504,9 @@ with cross-references noted inline.
 67. `open/server.ts:58-73` env mutation happens BEFORE `boot()` — untouched by the composer split
     but adjacent; config reads must not move out of the entrypoint. (Cross-ref #1.)
     Protects: **C1**.
-68. Trident fire substrate must be WARM per-repo-cwd and only `cc-agent-` gets
+68. Trident fire substrate must be WARM per-repo-cwd and only the `cc-agent-`/`cc-nudge-` pair gets
     `enableToolBridge` — pool-key/instance-id prefixes are semantic.
-    `open/composer.ts:590-633,535-541`. (Cross-ref #7.)
+    `open/wiring/substrates.ts`. (Cross-ref #7, which carries the reasoning for the pair.)
     Protects: **D1**, **D2**.
 69. 30 `open/__tests__` wiring tests + gateway `*-production-composer` tests are the composer-split
     lock; a characterization test snapshotting which `CompositionInput` fields Open sets must be
@@ -629,6 +662,17 @@ with cross-references noted inline.
     `trident/store.test.ts`.
     Protects: the fix-round budget from being spent on infrastructure failures that are not the
     agent's fault.
+116. The Work Board's `inline_active` is DISPLAY-ONLY and EVIDENCE BEATS THE STORED FLAG. Every
+    read boundary maps items through the one deriver (`work-board/inline-activity.ts`
+    `makeInlineActivityDeriver`, wired in `open/composer.ts`); the stored column is never written
+    by a read and is only ever a hint. The flag gets NO exemption from the freshness check — a
+    crashed session's stuck flag reads not-active — and the derivation must never grow a branch
+    that blocks, denies, delays or gates a tool call (it is the display-only salvage of the
+    cancelled PreToolUse-gate plan). Evidence is tier 1 only: ONE O(1) `ActivityInspector` map
+    read per board, never per row, never a shell-out. `work-board/inline-activity.test.ts` +
+    `open/__tests__/inline-activity-wiring.test.ts`.
+    Protects: the board from re-becoming a promise the agent has to remember to keep, and the
+    read path from growing per-row I/O.
 116. External launcher liveness acts only on positive death evidence: `alive`, `unknown`, or a
     throwing probe does nothing; malformed pids and disagreement between registry homes are
     ambiguous. Every running launcher is probed without the advancement sweep's 50-row cap. A
@@ -742,6 +786,10 @@ with cross-references noted inline.
 
 - **111 invariants** extracted from the 11 critic reports' load-bearing-subtleties /
   fail-soft-invariant / must-not-break sections (`critic-security-config.md` has no dedicated
+  section; its "what exists and is fine" items are folded into §11 above). Four further items
+  (#112–#115) were added post-synthesis for the gateway-restart crash-recovery build, and #116 for
+  the derived-inline-activity build; they are appended at the end of their sections rather than
+  renumbered in, so numbering is not strictly sequential within §3 and §9.
   section; its "what exists and is fine" items are folded into §11 above). Five further items
   (#112–#116) were added post-synthesis — #112–#115 for the gateway-restart crash-recovery build,
   #116 for the boot scope direction guard (2026-08-16); they are appended at the end of their
