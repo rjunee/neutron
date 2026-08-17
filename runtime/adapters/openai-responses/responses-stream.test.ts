@@ -7,7 +7,7 @@ function ssePayload(frames: ReadonlyArray<{ event: string; data: unknown }>): st
   return frames.map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n`).join('\n') + '\n'
 }
 
-function mockFetch(body: string, opts?: { status?: number }): typeof fetch {
+function mockFetch(body: string, opts?: { status?: number; headers?: Record<string, string> }): typeof fetch {
   return (async () => {
     const stream = new ReadableStream({
       start(controller) {
@@ -15,7 +15,10 @@ function mockFetch(body: string, opts?: { status?: number }): typeof fetch {
         controller.close()
       },
     })
-    return new Response(stream, { status: opts?.status ?? 200 })
+    return new Response(stream, {
+      status: opts?.status ?? 200,
+      ...(opts?.headers !== undefined ? { headers: opts.headers } : {}),
+    })
   }) as unknown as typeof fetch
 }
 
@@ -173,6 +176,162 @@ describe('openai-responses responses-stream', () => {
     const err = events.find((e) => e.kind === 'error')
     expect(err!.kind === 'error' && err!.code).toBe('rate_limited')
     expect(err!.kind === 'error' && err!.retry_after_ms).toBe(2000)
+  })
+
+  // WHERE `Infinity` USED TO COME FROM. The header parser checked
+  // `Number.isFinite` on the SECONDS and then multiplied by 1000, so
+  // `retry-after: 1e308` produced `Infinity` — and the credential pool stored
+  // that as a cooldown nothing could shorten (`>=` rejects every finite
+  // replacement) and nothing could clear (a parked credential is never selected,
+  // so no success is ever reported). One upstream header, one box dark until
+  // restart. The pool now clamps too (`MAX_PARK_MS`); this pins the source.
+  test('an OVERFLOWING retry-after header yields NO retry hint rather than Infinity', async () => {
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': '1e308' } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.code).toBe('rate_limited')
+    // Absent, so the pool falls back to its own 429 window. Before the fix this
+    // read `Infinity` and every reader of `cooldown_until` believed it.
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBeUndefined()
+  })
+
+  test('CONTROL — an ordinary retry-after header is still honoured to the millisecond', async () => {
+    // The mutation-control for the test above: if the finiteness check had been
+    // written to reject the whole numeric branch, this is what would have gone
+    // red, and provider back-pressure would be silently ignored.
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': '90' } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBe(90_000)
+  })
+
+  // FLOORING A NEGATIVE AT ZERO WAS THE BUG, NOT THE FIX, and this test used to
+  // assert the bug (`toBe(0)`). A defined `0` is not a short park, it is an ABSENT
+  // one that the pool could not tell apart from a real hint: `reportFailure`
+  // accepted it (`>= 0`), parked until `now`, and every reader of `cooldown_until`
+  // counts `<= now` as AVAILABLE — so a 429 whose header said `-30` bought no
+  // cooldown at all and we retried immediately into the rate limit. Same for any
+  // past HTTP-date, which plain clock skew produces. `undefined` routes the pool to
+  // its own 429 window instead, which is the only honest reading of a header that
+  // told us nothing usable.
+  test('a NEGATIVE retry-after header yields NO hint, not a zero the pool cannot distinguish', async () => {
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': '-30' } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBeUndefined()
+  })
+
+  test('an HTTP-DATE already in the past yields no hint either — clock skew is not a park', async () => {
+    const past = new Date(Date.now() - 30_000).toUTCString()
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': past } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBeUndefined()
+  })
+
+  test('CONTROL — an HTTP-DATE in the FUTURE is still honoured as a real delta', async () => {
+    // Without this, rejecting the whole date branch would pass every assertion
+    // above while discarding a legitimate provider window.
+    const future = new Date(Date.now() + 120_000).toUTCString()
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch('slow down', { status: 429, headers: { 'retry-after': future } }),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    const hint = err!.kind === 'error' ? err!.retry_after_ms : undefined
+    expect(hint).toBeGreaterThan(100_000)
+    expect(hint).toBeLessThanOrEqual(120_000)
+  })
+
+  // THE MESSAGE PARSER HAD THE IDENTICAL POST-MULTIPLY OVERFLOW the header parser
+  // above was fixed for, and it survived that fix because the two carried separate
+  // copies of the check. A streamed 429 carries no header, so this is the only path
+  // that reads the hint out of the prose — and its `Infinity` goes somewhere worse
+  // than the pool: `openaiResponsesSubstrate` sleeps `retry_after_ms` before
+  // rotating, and `setTimeout(Infinity)` resolves in about 14 ms, so the back-off
+  // is SKIPPED entirely and we retry at once against the provider that just
+  // limited us. Both parsers now share one boundary (`positiveMs`).
+  test('an OVERFLOWING retry hint in a STREAMED error message yields no hint either', async () => {
+    const huge = `Rate limit reached. Please try again in 2${'0'.repeat(305)}s`
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch(
+          ssePayload([
+            { event: 'error', data: { error: { type: 'rate_limit_exceeded', message: huge } } },
+          ]),
+        ),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.code).toBe('rate_limited')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBeUndefined()
+  })
+
+  test('CONTROL — an ordinary streamed retry hint is still parsed to the millisecond', async () => {
+    const events = await collect(
+      startResponsesStream({
+        endpoint: 'http://test/responses',
+        authHeaders: {},
+        body: {},
+        signal: new AbortController().signal,
+        substrate_instance_id: 'gpt-1',
+        fetchImpl: mockFetch(
+          ssePayload([
+            {
+              event: 'error',
+              data: {
+                error: { type: 'rate_limit_exceeded', message: 'Please try again in 1.2s' },
+              },
+            },
+          ]),
+        ),
+      }),
+    )
+    const err = events.find((e) => e.kind === 'error')
+    expect(err!.kind === 'error' && err!.retry_after_ms).toBe(1200)
   })
 
   test('reasoning deltas → thinking', async () => {

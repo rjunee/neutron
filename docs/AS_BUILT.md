@@ -2,6 +2,614 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — a failed Trident run now asks git whether the build survived
+
+The outer orchestrator now performs git-truth salvage before committing every
+new PR-mode terminal failure: when the run's local branch exists and is ahead of
+base, the existing outer-loop publisher pushes the commit and opens or reuses its
+PR. The outcome remains honestly `failed`; the original `failure_reason` is
+preserved with an appended salvage note and PR number. A missing branch, a branch
+with no commits ahead, an already-published run, or a failed publishing attempt is
+left untouched.
+
+Gateway startup now also lists the newest failed PR-mode rows and reconciles each
+one independently after the Trident loop starts. The production module exposes
+the fire-and-forget promise as `stranded_sweep`, and a real-git composition test
+proves that removing this wiring prevents the branch publication. This startup
+sweep recovers the eleven already-stranded branches at next boot without moving
+their rows out of `failed` or introducing publishing credentials into the inner
+loop.
+
+## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
+
+Landed via PR #378.
+
+Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
+those had already merged when this round's review landed, so the remediation could
+not go back into either; every finding below was re-verified against `main` before
+anything changed.
+
+**The seam the composer alone reaches, now driven end to end.** #375 gave the
+timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
+being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
+which proves `wireSubstrates` routes what it is handed and says nothing about whether
+anything hands it that. One line in `open/composer.ts` does. Deleting it left the
+suite green while returning the lane to a stderr-only clamp — the review measured 862
+tests passing across 105 files under that deletion, which is its number and not one
+re-measured here; what WAS re-measured is that the deletion is now red (below). The
+class is the one this repo keeps shipping, one level up from "built but never wired":
+WIRED, and the wire pinned by nothing.
+
+`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
+`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
+the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
+reminder (nothing shorter reaches that lane — its options exist only once something
+composes on it), then reads what the production composition actually handed each one.
+The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
+connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
+without it, "the nudge lane produced no bubble" could equally mean the harness cannot
+see bubbles at all. Then the same notice on the nudge lane produces no frame from the
+same socket in the same test, and both reach the `system_events` journal. Three
+mutations, each red on a different assertion: deleting the composer's
+`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
+sinks (the two sinks are identical), and giving the background sink the chat
+`deliver` (ten bubbles where zero were asserted).
+
+**An unbounded park could not be shortened, and the release was unreachable.**
+Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
+had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
+every finite replacement, and `reportSuccess` is the only release but cannot run while
+the credential is parked, because `selectCredential` filters a cooled credential out
+and no dispatch means no success to report. On a single-credential box, which every
+Open install is, that is the product silent until the process restarts.
+
+The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
+legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
+`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
+then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
+pool clamps every park at the new `MAX_PARK_MS` (six hours: clear of the reset window
+the owner waits out — a Claude subscription window is five — and short of every window
+indistinguishable from a brick), and `reportFailure` discards a `retry_after_ms` that is
+not a positive finite millisecond count in favour of the status default rather than
+believing it. The `NaN`
+direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
+instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
+`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
+The parser now yields `undefined` for any value that cannot become a real millisecond
+count — including a non-positive one.
+
+**The fourth park was the one nothing tested.** #375's own log claimed the fix was
+"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
+strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
+pair left every existing test green (the review counted 124 across four suites; that is
+its measurement, and what is re-measured here is that the revert is now red), because
+reaching that branch needs a standing park LONGER than the hour — which only a
+`retry-after` produces — while the owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
+says wait two hours, in-flight turns fail their way to the threshold, and the strike
+park would then release the credential 60 minutes into a 120-minute window the
+provider asked for, relabelled. Now covered with its control (with nothing standing,
+the fifth strike still parks for the hour), and mutation-proved: that one test goes
+red, the control stays green.
+
+**Two record corrections, appended rather than rewritten**, since this log is
+append-only and a correction that edits history is how a sibling's entry gets lost:
+- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
+  had benched" says "Seven new tests cover it" and "three of them red … four
+  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
+  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
+  reports never walk the park outward`, which is a real assertion and not a control.
+  A mutation proof asserts a negative, so a miscount in it is the one number that must
+  be right.
+- That same entry says the clamp "is now durably recorded". It is not, and its own
+  closing paragraph says so three paragraphs later: the journal is best-effort at
+  every call site. The wording is corrected where it can be — the two test comments
+  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
+  dropped.
+
+**A ZERO IS NOT A SHORT PARK, IT IS AN ABSENT ONE** — and flooring negatives at zero,
+which the paragraph above originally described as part of the fix, was the remaining
+hole rather than the close of it. `parseRetryAfterMs` turned `retry-after: -30` into a
+DEFINED `0`, as it did for any HTTP-date already past, which plain clock skew produces.
+`0` cleared `reportFailure`'s `>= 0` boundary, `park` wrote `cooldown_until = now`, and
+`hasUsableCredential` / `selectCredential` / `soonestCooldownUntil` all count
+`<= now` as AVAILABLE — so a real 429 bought a zero-length cooldown and we answered the
+provider's back-pressure with an instant retry. Worst on the background lane, which by
+design never touches the strike ledger and so has no second net beneath it. The guard is
+now `> 0` and the parser returns `undefined` for the same values, so a header that told
+us nothing usable routes to the status default. The existing negative test passed
+throughout because it fed the pool a raw `-60000` — an input no producer could produce.
+
+**`parseRetryAfterFromMessage` still had the post-multiply overflow** the header parser
+was fixed for, because the two carried separate copies of the check: it tested
+`Number.isFinite` on the parsed number and then multiplied by 1000. A streamed 429
+carries no header, so that is the only path reading the hint out of the prose, and its
+`Infinity` lands somewhere worse than the pool — `openaiResponsesSubstrate` sleeps
+`retry_after_ms` before rotating and `setTimeout(Infinity)` resolves in about 14 ms, so
+the back-off is SKIPPED and the retry is immediate. Both parsers now share one boundary.
+
+**`MAX_PARK_MS` was not a bound.** The ceiling was re-derived from `Date.now()` on every
+report, and reports DO arrive during a park: a parked credential is never SELECTED, but
+turns dispatched before the park started keep reporting per error event, and each late
+report computed a ceiling further out that the monotonic rule then adopted. Measured:
+two over-ceiling reports five hours apart walked one park from 21,600,000 ms to
+39,600,000 ms — six hours to eleven — with every existing ceiling assertion still green.
+The ceiling is now anchored to `cooldown_started_at`, the moment the park began, so the
+bound covers the whole park instead of each report inside it; `reportSuccess` clears the
+anchor with the park, and `memoize-credential-pool` carries it across a re-resolve
+alongside `cooldown_until` so a rebuild cannot re-anchor it.
+
+**The anchor had the same hole one step further in**, found by the cross-model leg of
+this round's review and reproduced before it was believed. Installing an anchor only for
+a FRESH park left a STANDING park that carries none — a credential brought across a pool
+re-resolve from before the field existed, or any `cooldown_until` written by another path
+— re-deriving its ceiling from every report and never gaining an anchor to stop it.
+Measured: late reports at +5h, +10h and +15h against a standing six-hour park walked it
+to 11h, 16h, then 21h, unbounded. `park` now adopts `now` as the anchor whenever one is
+missing, standing or not. The true start is unknowable by then, so the park may run up to
+one window past six hours from its real beginning and never further — bounded and
+honest, where the alternative was unbounded. The same review noted the memoizer's carry
+was asserted by nothing: the re-resolve test checked only `cooldown_until` and stayed
+green with the carry deleted, so it now names `cooldown_started_at` and the six-hour
+bound.
+
+Two more corrections from that leg. `positiveMs` rounded AFTER testing positivity, so
+`0.1` passed `> 0` and `Math.round` returned a defined `0` — the exact value the
+function exists to reject, reachable from any sub-millisecond hint; it now rounds first.
+And two docblocks overstated: the claim that `undefined` "routes both consumers to their
+own default" is only half true — the pool falls back to the per-status window, but model
+rotation has no default and simply skips the back-off, which is correct on that path
+because rotating moves to a DIFFERENT model rather than retrying the one that refused —
+while `MAX_PARK_MS` called `reportSuccess` flatly unreachable during a park when the same
+file documents an in-flight success reaching it. It is unreachable for NEW dispatches,
+which is what makes the ceiling the guarantee and the in-flight success luck.
+
+One claim from that leg was REFUTED rather than adopted: that a large finite hint
+overflows the timer and makes rotation immediate. Measured directly in this runtime, a
+`setTimeout` of one year does not fire early — it was still pending after 120 seconds, so
+the failure is the opposite one and it is neither new nor in this diff.
+
+Seven mutations, each red on exactly the intended pin with the rest of the suite green as
+control: `>= 0` restored (both zero tests), the negative floor restored (both
+negative-hint parser tests), the finiteness check dropped (both overflow tests,
+header and streamed), the ceiling un-anchored (the walk-outward test), and anchoring on
+a merely-PRESENT `cooldown_started_at` rather than a STANDING park (the re-anchor
+control, which proves a once-parked credential can still be parked again), anchoring
+only FRESH parks (the anchor-less standing-park test), and deleting the memoizer's
+carry of the anchor (the re-resolve test, which that assertion now catches).
+
+Three docblocks corrected where they promised properties the code does not hold — the
+defect class this repo tracks separately from the code. `MAX_PARK_MS` claimed six hours
+is "past every reset window we actually honour" while `gateway/http/app-usage-surface.ts`
+meters a 7-day window, so a weekly cap IS clamped and the six-hourly probe is a priced
+cost rather than an absent one. `park`'s non-finite arm was credited with a live defence
+it does not provide: `reportFailure` filters non-finite before it, and no other call site
+can reach it, so it is now labelled a belt on an untrusted-arithmetic path. And "a
+cooldown is a FLOOR" is narrowed to a floor AGAINST FAILURE REPORTS, because
+`reportSuccess` clears a park unconditionally — including a provider-mandated one, when
+a turn dispatched before the park completes after it — which stays deliberate and is now
+argued rather than contradicted.
+
+The end-to-end nudge test is also hermetic now. It passes the real `process.env` to the
+real composer, so an ambient `NEUTRON_MODEL_PROVIDER=openai` built the OpenAI lanes, the
+injected Claude `substrateFactory` was never called, and the file failed with `waitFor
+timed out` — a wiring-failure message for an environment problem. That variable and
+`OPENAI_API_KEY` are now saved and cleared like the rest; teardown no longer removes a
+`tmpDir` it may never have created (a `TypeError` there replaces whatever setup actually
+failed); and the harness drains `realmode_cleanups` through the production
+`drainRealmodeCleanups` instead of calling them un-awaited before `db.close()`.
+
+**THE REFUTATION ABOVE WAS ITSELF WRONG, AND THE CLAIM IT DISMISSED IS A REAL DEFECT** —
+appended rather than rewritten, per this entry's own correction rule. The paragraph
+beginning "One claim from that leg was REFUTED" reports that a `setTimeout` of one year
+"does not fire early — it was still pending after 120 seconds". Re-measured directly, with
+a control in each direction: `setTimeout(31_536_000_000)` — one year, the very value that
+paragraph names — fires after **3 ms**, and this runtime prints its own diagnosis while
+doing it, `TimeoutOverflowWarning: 31536000000 does not fit into a 32-bit signed integer.
+Timeout duration was set to 1.` The controls are what make that a measurement rather than
+another guess: a timer at `0x7fff_ffff` did NOT fire inside a 2-second window (so the
+probe can show a real wait) and a 5 ms timer fired in 6 ms (so it can see a timer fire at
+all). A one-year delay was never pending for 120 seconds; it had already elapsed before
+the observation began. This is the shape the repo already tracks — a check that returns a
+negative which reads exactly like an answer — and the cost of getting it wrong here was
+higher than a wasted round: the log stated the defect did not exist, which is the one
+thing that reliably stops the NEXT reader from fixing it.
+
+**A back-off that overflows is no back-off.** `positiveMs` rejects non-finite and
+non-positive hints and has no upper bound, which is right — a finite `retry-after:
+3000000` is a real instruction, and discarding it as garbage would buy the 60-second
+status default where the provider asked for weeks. The value is fine; the TIMER cannot
+hold it. Above `0x7fff_ffff` ms a `setTimeout` delay does not saturate, it overflows the
+32-bit signed field and fires in about a millisecond, so the adapter answered "wait weeks"
+with an instant retry against a provider that had just rate-limited it: a hot retry loop,
+and worse than having no `retry-after` handling at all.
+
+It survived three rounds on this exact field because the field has TWO consumers and only
+one was bounded. `reportFailure` clamps its park at `cooldown_started_at + MAX_PARK_MS`,
+so the pool was safe; the adapter's rotation back-off is a second consumer that reads the
+raw hint into `rotateDelay` and never consults the pool. Guarding the producer and
+bounding one consumer both looked complete while a second consumer slept on the unbounded
+value. Every consumer was then enumerated by grepping the field name rather than asserted
+to be complete: the adapter's sleep (broken, fixed here), `reportFailure` via
+`build-llm-call-substrate` and `build-import-substrate` (already bounded), `rotate`'s
+`delay_ms` copy (raw, but nothing sleeps on it — its docblock now says what a future
+sleeper must do first), and the pure propagators that never treat it as a duration
+(`events.ts`, `errors.ts`, `substrate-text.ts`, `agent-dispatch`, the history-import
+type). `TelegramRetryAfterError` shares the field NAME only and has a different source.
+
+Fixed at the CONSUMER, inside `sleep` — the adapter's only `setTimeout`, so nothing in
+that file can route around it. Bounding `positiveMs` instead would rewrite what every
+consumer sees and would put a `setTimeout` implementation limit inside a function whose
+job is deciding whether a hint is usable at all; clamping at the sleep caps what this lane
+can wait while leaving the pool the provider's untouched number to apply its own six-hour
+ceiling to, so neither consumer's policy overwrites the other's. The tests assert the
+delay the timer is ARMED with, because a correctly-clamped delay can never be awaited —
+the sibling exhaustion test takes 4.6 s precisely because its `retry-after: 4` is a
+genuine sleep, so 24.8 days would hang CI forever. Three mutations, each red on exactly
+its own pin with the rest green: unclamping the sleep reds the end-to-end test and its
+failure prints the raw `3000000000` reaching the timer; making the clamp a blanket cap
+reds the two "unchanged" controls (`30_000` and the bound itself), which is what proves it
+is a clamp and not a cap; and restoring `< 0` in place of `<= 0` reds the sub-millisecond
+guard, which is what proves an upper bound did not quietly turn a hint that must be
+refused into an accepted one.
+
+No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
+— a bounded park, a discarded bogus header value, and coverage for two branches that
+had none.
+
+Nor does the round above add one: a rotation back-off that can no longer overflow into an
+instant retry is the same subsystem behaving as it already claimed to.
+
+## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
+
+Landed via PR #388.
+
+A live instance crash-looped on boot at migration ordinal 125 — the third instance of
+one class (0122, 0124, 0125), and the first that could not be patched the way the other
+two were. The ledger recorded 125 as `code_trident_runs_fix_round_contract` (a branch
+numbered it that way; it merged as 0124) while `main` numbers 0125
+`code_trident_runs_base_sha`, whose two columns were genuinely absent —
+`pragma_table_info` showed `reviewed_head` and `bound_pr` present, `base_sha` and
+`base_behind` not.
+
+**Both per-incident remedies were checked rather than assumed, and both are wrong here.**
+A `repairs.json` entry reconciles NAMES; two real columns were missing, and no amount of
+name reconciliation creates a column. Renumbering `0125` to a free ordinal repairs the
+stuck instance and BREAKS every instance where it already applied — measured against the
+pre-fix runner on a throwaway database built from the real tree, it fails with
+`duplicate column name: base_sha`. A fix that repairs one and breaks the other is not a
+fix, in either direction.
+
+**The ordinal was never an identity.** It fixes apply ORDER and nothing else, and it is
+allocated by whoever writes the file — so across a fleet two DIFFERENT migrations
+legitimately occupy one ordinal (two branches both number theirs 0125; the second to
+merge is renumbered while the instance that already ran the first keeps 125), and ONE
+migration legitimately occupies different ordinals. Keying "has this run?" on the ordinal
+asks a question the ordinal cannot answer, and gets it wrong in both directions: a
+migration reads as APPLIED when a different one consumed its number, so its `ALTER`s
+never run and the schema silently lacks them — which is exactly ordinals 122, 124 and 125
+— and as PENDING when the same migration already ran under another number, which re-runs
+it and crashes on a duplicate column.
+
+So `migrations/runner.ts` reconciles by the migration NAME (`classifyMigration`), with
+`content_sha256` as a second, name-independent identity used only to WIDEN the answer: a
+migration whose exact bytes are recorded has run, whatever it was called then. It never
+narrows one. The README's existing decision — the hash is recorded and reported, not
+enforced, because already-applied files get benign edits and a hash gate would turn each
+into a crash loop — predates this work and is untouched.
+
+**`_migrations` moved its PRIMARY KEY from `version` to `name`**, rekeyed in place
+(`rekeyLedgerOnName`, one transaction) on the first boot that has something to apply,
+preserving every row and every column value. This is the part that had no alternative:
+with `version` as the key there is no correct value to write for a migration whose
+ordinal another migration already spent. Recording at the file's ordinal is a PK
+conflict; at `max+1` it consumes a future ordinal and recreates this bug class; at a
+negative sentinel it puts a non-version in a column named `version`; rewriting the
+occupying row destroys an incident record the repairs notes say must never be rewritten;
+a second bookkeeping table is two sources of truth for one question. Keying on the name
+removes the conflict instead of choosing which field to falsify — two rows may now share
+a `version`, which is simply true of a fleet where two migrations were both written as
+0125.
+
+**The fail-closed half is kept and restated against identity.** A recorded migration that
+NO file in this build corresponds to, by name or by hash, refuses the boot, lists EVERY
+such row (one verification pass and one edit, rather than one refused boot per row), and
+prints the exact `repairs.json` entries. `repairs.json` keeps both halves of its meaning
+— it acknowledges the orphan row, and its `file_name` marks a migration as already
+applied so a hand-applied schema change is not re-run (ordinal 122's entry does exactly
+that) — and its trigger is unchanged, so an entry only speaks where its row exists and
+stays inert on a fresh install.
+
+**That guard adjudicates ONLY rows carrying a `content_sha256`, and the gate is
+load-bearing rather than lenient.** Migration files are deliberately deleted here —
+`0059_syndication_events` with the content-sync mesh rip, `0064`–`0068` in the A2
+collapse — so every long-lived database holds hashless rows naming migrations the tree no
+longer contains. Refusing on those would take down the oldest instances in the fleet over
+evidence that is a NULL, with nothing for an operator to verify. It is still strictly
+stronger than the guard it replaces, which could not see those rows at all: that one only
+ever compared a row against the one file sharing its ordinal.
+
+A false negative in the first pass of this investigation is worth recording, because it
+would have produced exactly that outage: `git log --diff-filter=D -- 'migrations/0*.sql'`
+returned nothing, which reads as "no migration file was ever deleted". The history in
+this clone is squashed to a single commit, so the query could only ever return nothing;
+`runner.test.ts:68-76` documents the deletions in as many words. The tool's silence was
+not evidence.
+
+Two controls, both against the pre-fix runner on throwaway SQLite files built by the real
+runner over the real tree, with no ledger row hand-written anywhere: the reproduced
+instance state refuses with the exact live message and boots under this change with both
+columns present; the renumber alternative fails on a healthy instance and is a no-op
+under the new runner.
+
+`migrations/__tests__/ordinal-identity.test.ts` pins the four states — the spent ordinal
+(with and without provenance recorded), a healthy instance, a fresh install, genuine
+corruption — each as a real database driven by the real runner over the real migration
+tree, plus the rekey preserving every row and hash. Two mutation proofs with green
+controls: deleting the unexplained-row throw turns the corruption case red, and breaking
+the name check re-applies a renumbered migration and crashes. (The second mutant PASSED
+on the first attempt — identical file bytes meant the hash check answered first and the
+test proved nothing — so the renumbered fixture now carries an added comment, which is
+also the realistic case.)
+
+`untracked-migration-mutation.test.ts` gained an explicit per-mutant `deaths` count in
+place of a flat "exactly one scenario dies": the two untracked throw sites collapsed into
+one, since an occupied ordinal is no longer a finding of its own, so CONTEXT is nested
+inside REFUSAL and declaring 1 and 2 keeps them distinguishable rather than silently
+loosening the assertion.
+
+`gateway/nexus/nexus-store.ts` classified its cross-process init race by matching the
+ledger's PK name inside an error string (`UNIQUE constraint failed: _migrations.version`);
+it now accepts either column, so a sidecar mid-upgrade is classified the same as one
+already converted. `migrations/expected-schema.txt` regenerated (a two-line diff).
+`migrations/README.md` gains a "The ordinal is not an identity" section;
+`docs/INVARIANTS.md` #17 now names four fail-closed refusals instead of three.
+
+**A cross-model review of this PR found two defects in its own fix, and both are fixed
+here.** The first is the fix reintroducing its own defect class, which is the reason the
+review was worth running at all.
+
+**The rekey refused a ledger that was legitimate, which would have bricked instances that
+were healthy.** `rekeyLedgerOnName` copied the old rows into a name-keyed table with a
+single `INSERT ... SELECT`, and a database written by the ORDINAL-keyed runner can
+legitimately hold one migration NAME at TWO ordinals: migrations here are idempotent by
+contract (`migrations/AGENTS.md`), so when a merge renumbered an already-applied file to
+an ordinal that instance had not spent, the old runner's version-only dedup re-applied it
+harmlessly and recorded a SECOND row under the new number. Two rows, one name, nothing
+corrupt and nothing missing from the schema. The copy then violated the new name key, the
+rekey threw, and EVERY boot with a pending migration failed — an ordinal treated as an
+identity, one level up, and strictly worse than the bug being fixed because it breaks
+instances that worked. Reproduced first and measured, not reasoned about: two sequential
+runs of the pre-change algorithm over the real tree (the second having renumbered
+`0131_work_board_items_archived_status` back to its merged `0130`) produce the duplicate,
+and the current runner died on it with `UNIQUE constraint failed: _migrations.name`.
+
+`collapseLedgerRowsByName` now resolves the group instead: the surviving row is the one
+applied EARLIEST — ties broken by ordinal then name, so it is deterministic — because that
+is when the schema change actually landed on this database, and provenance
+(`content_sha256` / `applied_by_commit` / `tree_provenance`) is filled from any row in the
+group that carries it. That second half matters more than it looks: the earliest row is
+typically the oldest release's, written before provenance shipped and therefore NULL, so a
+plain "first row wins, drop the rest" collapse would have thrown away the only forensic
+record the instance has of that migration. The copy is row-by-row rather than one
+`INSERT ... SELECT` because the collapse is a decision about a group, and because the
+legacy ledger has to be read shape-tolerantly anyway.
+
+**The distinction being preserved is EXPLAINABLE versus not, and the fail-closed guard is
+untouched.** One name at two ordinals is fully explained by the paragraph above, so it
+collapses. A recorded migration that corresponds to no file in this build, by name or by
+hash, is explained by nothing and still refuses the boot.
+
+**The rekey's failure message told the operator something false.** It said "the database
+is unchanged", but the provenance `ALTER TABLE`s ran in `ensureLedgerShape` BEFORE
+`rekeyLedgerOnName` opened its transaction — and a statement run outside an explicit
+transaction is its own implicit one, so they COMMITTED. A failed rekey therefore left a
+ledger carrying three new columns while the error said nothing had happened, and an
+operator who believed that sentence would not go looking for a half-modified ledger. Fixed
+by making the claim true rather than by softening it: the ALTERs moved inside the
+`BEGIN IMMEDIATE`, verified against the driver first (`ALTER TABLE ... ADD COLUMN` inside
+a transaction is rolled back by `ROLLBACK` — SQLite rolls DDL back with everything else).
+The message also stops naming duplicate names as the likely cause, since that cause is now
+handled, and it says "the LEDGER is unchanged" rather than "the database": on this same
+path `applyMigrations` may already have written a `_migration_repairs` acknowledgement row
+before the rekey, so the narrow claim is the one that holds, and the message names the one
+thing that may not.
+
+`ordinal-identity.test.ts` gains the two cases that did not exist — which is why the
+review found these and the suite did not. **CASE 5 — one migration name at TWO ordinals is
+collapsed, and the instance BOOTS** asserts the pending migration applies, the post-rekey
+ledger holds exactly one row for that name at the earliest-applied ordinal, its provenance
+columns survived from the row that had them, and no other row was collapsed or duplicated.
+**CASE 6 — when the rekey fails, the ledger really is unchanged as the message says** fails
+a rekey deterministically (a leftover VIEW on the scratch-table name; `DROP TABLE IF
+EXISTS` refuses a view) and then verifies the claim: same DDL, same rows, and the
+provenance columns still ABSENT.
+
+Both cases are driven by `versionKeyedRunner`, the shipped runner's own pre-change
+algorithm, added to the test file because it is the only thing that can produce these
+ledgers and the current runner cannot. Its rows are still not hand-written — every value
+comes from a real migration file and it really executes each file's SQL — and its
+`applied_at` is passed in rather than read from the clock, so the collapse's tie-break is
+not what the assertions rest on.
+
+Three mutation proofs, each red in exactly the expected place and nowhere else: deleting
+the unexplained-row throw turns CASE 4 and CASE 4b red and leaves the new cases green
+(the fail-closed guard was not weakened to make the collapse work); making the collapse a
+pass-through turns CASE 5 red with the original `UNIQUE constraint failed` error; and
+restoring the pre-fix ALTER ordering turns CASE 6 red on the still-absent-columns
+assertion alone. All three were re-run after main was integrated, against the new
+baseline, rather than carried over from the pre-integration run.
+
+**Integrating #391 (the ordinal-125 repair migration, `0131`) changed what two tests may
+assert, and both changes are semantic rather than cosmetic.** The fixtures here stand in
+for releases that predate `0131`, so they drop it and the runner under test applies it —
+which means `0131` rebuilding `code_trident_runs` is now what converges
+`base_sha`/`base_behind`, and the shipped `repairs.json` entry SKIPS `0125` rather than
+applying it. CASE 1 and CASE 1b assert that convergence instead of asserting that `0125`
+ran; a new CASE 1c pins the case with the 125 acknowledgment REMOVED, because that is the
+one that shows the acknowledgment has stopped being a precondition for booting. The
+duplicate-name fixture's branch ordinal also moved off `0131` (it now sits above every
+ordinal the real tree uses) — it collided with the real repair file the moment that
+migration landed, which turned a name-collapse test into an ordinal-collision failure that
+said nothing about the collapse.
+
+**#391's own negative test now asserts the opposite of what it did, deliberately.**
+`live-ledger-125-repair.test.ts` required that removing the ordinal-125 entry made the boot
+REFUSE — the acknowledgment was a PRECONDITION, and a missing one was an outage whose only
+remedy was an operator verifying a live schema by hand while the instance was down. That
+refusal compared the ledger's recorded name at ordinal 125 against whatever file sits at
+125 in this build, and that comparison is exactly what this change removes. With no entry
+the migration is simply not recorded, so it applies and the boot succeeds. The entry is not
+now pointless — it remains the incident record, `_migration_repairs` still audits it, and it
+still skips an `ALTER` that `0131` would rebuild anyway — but it is an optimisation, not the
+thing standing between the owner and a booting instance. The fail-closed half is untouched
+and CASE 4 still pins it.
+
+**On the owner's instance this is ONE deploy, not several, and that was measured rather than
+hoped.** The live ledger records `dispatch_dependencies_and_claims` at 124,
+`code_trident_runs_fix_round_contract` at 125 and `code_trident_runs_infra_retries` at 126.
+Reconciled by name against this tree: 124's row names no file here and is acknowledged; 125's
+row names the file this build numbers 0124, so it reads as applied; **126's row names the file
+this build numbers 0126, so it matches and needs nothing — ordinal 126 does not collide.**
+Ordinals 127, 130 and 131 are absent from the ledger, which is the ordinary pending state, so
+they apply in order. Nothing further is queued behind this. The two orphan names were checked
+with a positive control — `code_trident_runs_infra_retries` and
+`work_board_items_archived_status` ARE files in the tree, `work_board_items_pr` and
+`dispatch_dependencies_and_claims` are not — so the absences are measurements and not a
+grep that silently matched nothing.
+
+**What this does NOT do is stop the class recurring.** The writer is the tenant's own
+in-product lanes inheriting `NEUTRON_HOME`, and closing that needs env-quarantine at lane
+spawn plus a linked-worktree refusal in the runner — a separate change, dispatch-queue item 5
+per the SPEC decision of 2026-08-17. This is the reconciliation that lets an already-damaged
+instance boot; it is not the guard that prevents the next one being damaged.
+
+### Round 2 — four defects the first round's tests could not see
+
+Each of these passed review because the test covering its area exercised the harmless half of
+its own shape. That pattern, rather than any one bug, is the thing worth remembering.
+
+**The rekey destroyed data at its scratch name.** It opened with
+`DROP TABLE IF EXISTS _migrations_version_keyed` — a data-destroying statement guarded by
+nothing, inside the transaction that goes on to commit. The existing test put a VIEW on that
+name, and SQLite refuses to `DROP TABLE` a view, so the statement threw and the test passed
+while the table case, the only one where data exists to lose, deleted it permanently and
+silently. The state that `DROP` was written to clean up cannot occur at all: the rename, the
+copy and the final drop are one transaction, so a crash rolls the scratch table away with
+everything else. It now refuses before opening the transaction and tells the operator to move
+their own table. CASE 6b asserts the surviving row and is the only assertion in the file that
+goes red if the `DROP` returns.
+
+**The collapse fabricated provenance.** It filled `content_sha256`, `applied_by_commit` and
+`tree_provenance` independently, so it could emit one row's hash beside another row's commit —
+a tuple no row ever had, asserting that those bytes were applied by a build that did not apply
+them. They are not three facts but one, written together inside a single migration's
+transaction, and a fabricated forensic row is worse than a NULL because it cannot be told from
+a true one. The triple is now adopted whole from one donor row, identified by carrying a hash.
+CASE 5c is mutation-proven: restoring per-column filling turns it red and nothing else, and it
+receives exactly the fabricated commit. CASE 5 stays green under that mutation, which is why
+it could never have caught this — its surviving row has no provenance at all, so both rules
+agree there.
+
+**Hash widening was a silent-skip bug.** "These bytes are recorded" only means "this file has
+run" when the recording row is one no file in this build already accounts for — the rename case
+the widening exists for. When the row's name IS a file here, a second differently-named file is
+merely byte-identical, and calling it applied meant it never ran, never recorded, and was
+reported under `skipped` by a boot that exited zero. That is this change's own defect class
+reached through its fix. It now refuses, naming both files. Worth recording that the review
+finding described this as a one-boot repro; it is not. In a single boot both files are pending
+and the second throws `duplicate column name` loudly. The silent form needs the first file
+recorded by an earlier boot, which is what happens when a duplicate is added later.
+
+**A hash mismatch under a matching name booted in total silence.** Refusing there is a decision
+this repository has weighed and declined — `migrations/README.md`, "recorded and reported, not
+enforced" — because already-applied files are edited in place for benign reasons and a gate
+turns each one into a crash loop. That decision stands and is untouched. What was never decided
+is saying nothing: a migration amended during review and renumbered by the merge reads as
+applied, its added statements never run, and both hashes were in hand at that moment. It is now
+a warning, never a gate, with `renumbered` as its own field because bytes AND ordinal both
+moving is the one combination an in-place edit cannot produce. A steady-state boot says nothing,
+and there is a test for that silence — a notice that fires every boot is noise an operator
+learns to ignore.
+
+**Two smaller corrections.** The name-collision refusal now names the untracked side and gives
+its remedy; its docblock had claimed the untracked guard would refuse such a stray anyway, which
+was unreachable in two independent ways — the check ran before the tree was resolved, and a
+shared name is exactly what makes both files read as applied, so nothing is pending and the
+untracked loop reaches nobody. And the claim that the new unexplained-row guard is "strictly
+stronger than the guard it replaces" is deleted as false: the old guard refused on hashless
+orphans whose ordinal a build file occupied, which is how 122, 124 and 125 were noticed at all.
+The two are not ordered. The real trade is written down instead — the old guard's loud failure
+was never the mechanism that fixed anything, and the false refusals it caused after a mere
+renumber had no remedy that was not worse.
+
+**Two claims the tests still could not see, now asserted.** The rekey renames the old ledger
+out of the way BEFORE creating the new one so a rekeyed instance's `sqlite_master` text is
+byte-identical to a fresh install's — a claim only a docblock made, while the schema snapshot
+compares nothing but the fresh path. A later create-then-rename refactor would therefore drift
+every rekeyed instance in the fleet with CI green, and `toContain` on one clause could not see
+it; CASE 2b now compares `ddlOf(db, '_migrations')` `.toBe` a fresh install's DDL. And CASE 6
+kills the rekey on its FIRST statement, which proves the provenance `ALTER`s never RAN rather
+than that they roll back — while rolling back is what "its shape, its columns and its rows are
+exactly what they were" actually claims. **CASE 6c** injects a `NOT NULL` violation at the row
+copy, asserts the quoted SQLite error to prove the failure landed AFTER the ALTERs, and only
+then asserts the unchanged DDL text, the still-absent provenance columns and the identical
+rows. The mutation proof was re-run at this head rather than carried over, since a proof is
+bound to the commit it was measured against: deleting the unexplained-row throw reddens CASE 4
+and CASE 4b and leaves every other case green.
+
+**`migrations/AGENTS.md` overstated idempotency and now states the measurement.** It said
+migrations are idempotent, "`CREATE TABLE IF NOT EXISTS` everywhere". Measured on this tree:
+34 of 123 files use bare `ALTER TABLE … ADD COLUMN`, which fails on a second run, and 34 use
+`CREATE TABLE IF NOT EXISTS`. Applied-once comes from the ledger plus the per-migration
+transaction, not from every statement being re-runnable — which also sharpens the collapse's
+own reasoning: the one-name-at-two-ordinals shape reaches a HEALTHY instance precisely because
+that file's body was re-runnable, while a body that could not be re-run failed loudly at that
+boot and never produced the pair.
+
+## 2026-08-17 — the ordinal-125 mismatch is acknowledged and 0131 converges both schema paths — the repair that gates deploy xGkufirIQQKW1L
+
+This is the third instance of the #575 incident class: a migration from an
+in-flight build wrote the live database before the merged migration tree fixed
+that ordinal. The live `_migrations` row at version 125 therefore says
+`code_trident_runs_fix_round_contract`, while the merged file at 0125 is
+`code_trident_runs_base_sha`. Boot correctly refuses that mismatch.
+
+The new `repairs.json` entry acknowledges the exact version/name/name triple and
+leaves row 125 untouched. That acknowledgment is necessary but insufficient:
+the runner skips the mismatched 0125 instead of executing it, so its `base_sha`
+and `base_behind` ALTERs still never reach the repaired live schema. Those
+columns must come from a new ordinal.
+
+Migration 0131 rebuilds the STRICT `code_trident_runs` table into the canonical
+shape. A rebuild is required because SQLite has no conditional `ADD COLUMN`:
+the live path skipped 0125 and lacks the columns, while every fresh install
+already applied 0125 and would reject repeated ALTERs as duplicate columns. The
+rebuild converges both paths and also sheds the live incident residue
+`claimed_paths`, which no mainline code uses. The accepted trade-off is that
+cut-time diagnostic values in `base_sha`/`base_behind` are not copied from a
+fresh-path source; the owner instance has no such values because it has no such
+columns.
+
+The live-ledger replica test seeds the exact 122/124/125 recorded names, proves
+the full tree applies exactly 127/130/131, checks both missing columns and
+`agent_waked_at`, and verifies the recorded names are byte-identical afterward.
+Its negative control removes only the new 125 acknowledgment and proves the run
+refuses before writing any later migration. A fresh-install test proves 0125
+and 0131 coexist with exactly one `base_sha` column, and a pin test makes the
+acknowledgment itself part of the contract. No `_migrations` row is rewritten.
+
+SUPERSEDED IN PART BY PR #388 (the entry above), and specifically this sentence:
+"Its negative control removes only the new 125 acknowledgment and proves the run
+refuses before writing any later migration." That was true of the runner as it
+stood here, and it is no longer the contract. Once the ledger reconciles by
+migration identity rather than by ordinal, removing the 125 acknowledgment does
+NOT cause a refusal — `code_trident_runs_base_sha` is simply absent from the
+ledger by name, so it applies, and the boot succeeds. The test now asserts that
+instead. The acknowledgment remains shipped and remains correct (it records the
+incident and skips an `ALTER` that 0131 rebuilds regardless), but it is an
+optimisation rather than the thing standing between the owner and a booting
+instance. Read the entry above for what the runner actually does now.
+
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
 Landed via PR #384.
@@ -549,7 +1157,6 @@ read-only, so it could not re-run either mutation itself, and five of the 14 tes
 in the repl-home file failed in its sandbox purely because `mkdtemp` was denied.
 Both were run here with write access, and the numbers in this block are from those
 runs.
-
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
 Landed via PR #370.
@@ -6418,24 +7025,6 @@ Mutation checks (each production guard was removed independently and restored):
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
-
-## 2026-08-17 — a failed Trident run now asks git whether the build survived
-
-The outer orchestrator now performs git-truth salvage before committing every
-new PR-mode terminal failure: when the run's local branch exists and is ahead of
-base, the existing outer-loop publisher pushes the commit and opens or reuses its
-PR. The outcome remains honestly `failed`; the original `failure_reason` is
-preserved with an appended salvage note and PR number. A missing branch, a branch
-with no commits ahead, an already-published run, or a failed publishing attempt is
-left untouched.
-
-Gateway startup now also lists the newest failed PR-mode rows and reconciles each
-one independently after the Trident loop starts. The production module exposes
-the fire-and-forget promise as `stranded_sweep`, and a real-git composition test
-proves that removing this wiring prevents the branch publication. This startup
-sweep recovers the eleven already-stranded branches at next boot without moving
-their rows out of `failed` or introducing publishing credentials into the inner
-loop.
 
 ## 2026-08-14 — launcher-held build brief segments travel by path
 
