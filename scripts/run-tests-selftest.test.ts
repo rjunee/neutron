@@ -327,5 +327,13 @@ describe('G8 run-tests.sh — end-to-end smoke on the REAL bun', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+    // AN EXPLICIT BUDGET, because this is the one case here that spawns the REAL
+    // bun — twice, for the discovery probe and the chunk run — and bun's default
+    // per-test deadline is 5 s. Observed 2026-08-17: it took 41.7 s and "failed"
+    // on the deadline while a full suite ran on the same box, then passed on its
+    // own seconds later. Nothing about the assertion changed; the deadline was
+    // inherited, had nothing to do with what is being asserted, and turned load
+    // into a red test. Same reasoning as PLAN_BUDGET_MS in
+    // scripts/__tests__/run-tests-shard.test.ts (ISSUES #364).
+  }, 120_000)
 })

@@ -2,6 +2,143 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the shards are balanced by measured seconds, discovery stopped walking node_modules, and a build lane stopped running the whole suite on a shared machine
+
+Landed via PR #PRNUM.
+
+Three findings with one cause: the suite was being paid for in the wrong places.
+
+**DISCOVERY WAS FILTERED WHERE IT SHOULD HAVE BEEN PRUNED, and this was the largest
+single win in the change — 2 minutes 59 seconds of it, per invocation.**
+`scripts/lib/discover-test-files.sh` ended in `-not -path '*/node_modules/*' -not
+-path '*/.*/*'`. That produces the right list and does not stop `find` DESCENDING:
+a `-path` test discards matches the walk has already visited. So with dependencies
+installed, every invocation walked every file in `node_modules` and every
+`.claude/worktrees/` clone. Measured on the main checkout: **2 m 59 s filtered,
+0.69 s pruned, byte-for-byte identical output** (1273 files). The runner pays
+discovery once per invocation, so all four CI shards paid it, and
+`run-tests-shard.test.ts` paid it eight times in one file (437 s → 120 s).
+
+The control matters here because the first two I wrote could not have failed. A
+count comparison in a FRESH worktree returns 1350 either way — that tree has no
+`.claude/worktrees` clones, so the exclusions are inert in it and "identical"
+proves nothing. Run in the main checkout with the exclusions dropped entirely the
+walk returns **20258** files against 1273, which is what makes byte-identical
+output a result rather than a coincidence.
+
+The prune is `-type d` only, deliberately: the old `-not -path '*/.*/*'` needed a
+dot component with slashes on both sides, so a top-level `.hidden.test.ts` was
+INCLUDED, and pruning `-name '.?*'` without `-type d` would have silently dropped
+it — a behaviour change hiding inside a performance change. And it is `.?*` rather
+than `.*` because **`.*` matches `.`, the starting directory, so pruning it prunes
+the entire walk** — my first draft printed zero files and exited 0, which reads as
+"this repo has no tests". The runner's coverage cross-check cannot catch that: zero
+files is its own fatal path, reached before the cross-check runs. New file
+`scripts/__tests__/discover-test-files.test.ts` pins it, and all three mutations
+(`.?*`→`.*`, dropping `-type d`, dropping the `node_modules` prune) were verified
+to fail exactly the test that names them, with the restored file green again.
+
+**THE SHARDS WERE BALANCED BY FILE COUNT, WHICH IS NOT WHAT WALL-CLOCK IS MADE
+OF.** `scripts/run-tests.sh` partitioned across runners with a round-robin on the
+file INDEX (`_k % SHARD_N`). Equal counts, and measured across the four CI shards:
+**204 s / 304 s / 412 s**. Wall-clock is set by the WORST shard, so a large part of
+it was imbalance rather than work — a handful of files dominate 1351, and a
+partition that cannot see duration cannot see them. Each file is now charged an
+observed cost from a committed manifest (`scripts/test-timings.json`) and assigned
+**longest-first to whichever shard is currently lightest**. Predicted per-shard
+totals from that manifest:
+
+```
+BEFORE (round-robin by file index): 2553s / 2142s / 2496s / 2144s   worst 2553s, spread 411s
+AFTER  (greedy longest-first):      2333s / 2333s / 2335s / 2335s   worst 2335s, spread 2s
+```
+
+The file counts are now deliberately uneven — one shard owns the 393 s
+`leak-gate-selftest.test.ts` nearly by itself — and that is the change working.
+Absolute numbers were measured on a loaded laptop and are inflated; the partition
+needs the relative weights, which is the whole reason a stale manifest costs
+balance and not correctness.
+
+**THE MANIFEST IS AN OPTIMISATION AND NEVER AN AUTHORITY, and that is the part
+worth checking rather than trusting.** A cost table rots, and the failure mode of
+getting this wrong is the worst one a test runner has: a file silently stops
+running and everything stays green. So it is consulted for a COST and never for
+MEMBERSHIP — the assignment loop walks the discovered file list, not the manifest.
+A file it does not name costs `NEUTRON_TEST_DEFAULT_FILE_SECONDS` and is assigned
+like any other; an entry naming a file that no longer exists is never looked up;
+an empty, corrupt or absent manifest makes every cost equal, which is exactly the
+round-robin this replaced. `run-tests-shard.test.ts` drives all five states and
+asserts no gaps, no overlap, every file in exactly one shard for each. The live
+demonstration shipped with the change: the new discovery test file is the 1351st
+file and the manifest has 1350 entries, so it is charged the default and runs
+normally, with no manifest bump.
+
+The one existing assertion that CHANGED rather than being added was
+`max(files) - min(files) <= 1`, and it had to: that is the property which PRODUCED
+204/304/412, so keeping it would forbid the fix. What replaces it bounds SECONDS,
+and is not a tuned constant — it is the guarantee greedy longest-first gives. The
+last file placed on the heaviest shard went there because that shard was the
+LIGHTEST at the time, so `max_final <= min_final + cost of the largest single
+file`. A partition that violates that is not greedy-longest-first any more.
+Nothing else was weakened, skipped or deleted.
+
+Regeneration is a documented flag on a normal run —
+`NEUTRON_TEST_TIMINGS_OUT=scripts/test-timings.json bash scripts/run-tests.sh` —
+which adds a JUnit reporter per lane and merges the per-file testcase times. The
+stored value is `NEUTRON_TEST_DEFAULT_FILE_SECONDS + Σ(that file's testcase
+times)`: the Σ term makes the dominant files dominant, and the constant is the
+per-file floor bun pays whatever the tests do (measured 1.35 s for a file with
+0.02 s of test bodies), which is what stops a shard being handed four hundred
+nominally-free files. A SHARDED run REFUSES to write the manifest rather than
+warning: it measured a quarter of the suite, and writing that would delete three
+quarters of the costs, after which every deleted file falls back to the default
+and the partition quietly returns to balancing by count — with nothing about the
+result looking wrong.
+
+**A LANE RUNNING THE WHOLE SUITE ON A SHARED MACHINE IS A CORRECTNESS PROBLEM
+BEFORE IT IS A SLOW ONE.** Several trident lanes each re-ran ~1351 files locally on
+every fix round. Six of those "failures" in one session were manufactured by CPU
+contention — every one sitting exactly on a 5 s timeout boundary — and when one
+file was run on two worktrees interleaved, the CONTROL tree came out slower than
+the changed one. A lane then spends a round chasing a failure its diff did not
+cause. (It happened again while this change was being built: an unrelated test in
+`test-strategy.test.ts` timed out at 5 s while the measurement suite ran, and
+passed immediately once the box was quiet.)
+
+So `trident/test-strategy.ts` now DISCOVERS where the full suite runs, the same way
+it already discovers the test command and its parallel knobs: it scans
+`.github/workflows/*.yml` for the resolved runner and, finding it, renders a stage
+2 that says the suite runs in CI on every push and must be read BY NAMED JOB for
+the exact commit being reported. The lane's local run is the changed-file set,
+produced by the new `scripts/select-tests-for-changes.sh` — the three-tier
+selection that until now was prose every agent re-derived by hand.
+
+**Nothing is verified less before merge, and the gate is untouched.** CI still runs
+the whole suite on every push; `passed` is still the only `suiteOutcome` that may
+accompany `testsPassed=true`; an unearned `failed-preexisting` is still a blocker;
+and `fullSuiteFindings` in `trident/inner-workflow.mjs` reads the same field it
+always did — only the place the evidence comes from moved. The needles are
+deliberately strong (the runner SCRIPT PATH first, the declared test script next,
+the bare command last) because the two errors are not symmetric: a false negative
+costs today's behaviour exactly (the lane runs the suite locally, safe and merely
+slow), while a false positive would move the authority to a job that is not there.
+A project with no CI suite keeps the local full run, verbatim.
+
+The rendered heading moves with it. "Full suite (stage 2), run exactly this" above
+a stage 2 that says the suite runs in CI is a straight contradiction, and a build
+resolving a contradiction picks the expensive reading — which is the whole load
+this removes. The command and its jobs/concurrency budget are still rendered
+exactly, because a `failed-preexisting` proof still needs the real invocation.
+
+Files: `scripts/lib/discover-test-files.sh`, `scripts/run-tests.sh`,
+`scripts/test-timings.json` (new), `scripts/select-tests-for-changes.sh` (new),
+`scripts/__tests__/discover-test-files.test.ts` (new),
+`scripts/__tests__/run-tests-shard.test.ts`,
+`scripts/__tests__/select-tests-for-changes.test.ts` (new),
+`trident/test-strategy.ts`, `trident/test-strategy.test.ts`,
+`trident/inner-workflow.mjs`, `docs/testing-runner.md`, `docs/SYSTEM-OVERVIEW.md`,
+`CONTRIBUTING.md`.
+
 ## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
 
 Landed via PR #388.

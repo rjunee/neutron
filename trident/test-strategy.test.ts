@@ -32,15 +32,21 @@ import {
   probeParallelKnobs,
   readHostBudget,
   renderTestStrategy,
+  resolveChangedTestSelector,
+  resolveCiFullSuite,
   resolveTestCommand,
+  CHANGED_TEST_SELECTOR,
+  CI_FULL_SUITE_REQUIRED,
   DEFAULT_BUILD_FANOUT,
   FULL_SUITE_REQUIRED,
+  LOCAL_FULL_SUITE_BANNED,
   NO_KNOBS_LINE,
   NO_TIMEOUT_WRAPPER,
   PINNED_KNOBS_LINE,
   STAGE_1_FILE_CAP,
   STAGE_1_REJECT_ONLY,
   SUITE_OUTCOME_VOCABULARY,
+  SUITE_OUTCOME_VOCABULARY_CI,
   UNPAIRED_CONCURRENCY_LINE,
   UNRESOLVED_COMMAND_LINE,
 } from './test-strategy.ts'
@@ -625,6 +631,175 @@ describe('renderTestStrategy', () => {
     expect(NO_TIMEOUT_WRAPPER).toContain('590 s')
     // Running out of patience is reported as a non-pass, never as a pass.
     expect(NO_TIMEOUT_WRAPPER).toContain('never report a pass you did not observe')
+  })
+})
+
+// ── WHERE THE FULL SUITE RUNS ───────────────────────────────────────────────
+// A lane running the whole suite in a worktree on a shared machine is what
+// saturates that machine, and a saturated machine manufactures failures — six of
+// them in one session, every one on a 5 s timeout boundary. So the suite moves to
+// CI when CI can be SEEN to run it, and the lane runs only what it touched.
+//
+// The direction of every degradation here is toward MORE local work, never less
+// verification: anything this cannot see keeps today's local full-suite run.
+describe('resolveCiFullSuite', () => {
+  const KNOB_RESOLUTION = { command: 'bun run test', source: 'package-json' as const, rawScript: 'bash scripts/run-tests.sh' }
+
+  test('a workflow that names the RUNNER SCRIPT is the suite running in CI', () => {
+    const repo = fixture({
+      '.github/workflows/ci.yml': 'jobs:\n  shard:\n    steps:\n      - run: bash scripts/run-tests.sh\n',
+    })
+    expect(resolveCiFullSuite(repo, KNOB_RESOLUTION, KNOBS)).toEqual({
+      workflow: '.github/workflows/ci.yml',
+      matched_on: 'scripts/run-tests.sh',
+    })
+  })
+
+  test('a repo with NO workflows keeps the suite local — the safe direction', () => {
+    expect(resolveCiFullSuite(fixture({}), KNOB_RESOLUTION, KNOBS)).toEqual({ workflow: null, matched_on: null })
+  })
+
+  test('workflows that never mention the runner do not count as running it', () => {
+    // A repo whose CI only lints must not have its full suite declared covered:
+    // that would move the authority to a job that is not there.
+    const repo = fixture({
+      '.github/workflows/lint.yml': 'jobs:\n  lint:\n    steps:\n      - run: bun run lint\n',
+      '.github/workflows/deploy.yml': 'jobs:\n  deploy:\n    steps:\n      - run: ./deploy.sh\n',
+    })
+    expect(resolveCiFullSuite(repo, KNOB_RESOLUTION, KNOBS).workflow).toBeNull()
+  })
+
+  test('the STRONGEST needle wins across files, not the first file alphabetically', () => {
+    // `a-lint.yml` matches only the weak `bun run test` needle; `z-ci.yml` names
+    // the runner script. Sorting by filename alone would report the lint file.
+    const repo = fixture({
+      '.github/workflows/a-lint.yml': 'steps:\n  - run: bun run test --bail\n',
+      '.github/workflows/z-ci.yml': 'steps:\n  - run: bash scripts/run-tests.sh\n',
+    })
+    expect(resolveCiFullSuite(repo, KNOB_RESOLUTION, KNOBS).workflow).toBe('.github/workflows/z-ci.yml')
+  })
+
+  test('an unresolved command probes nothing and claims nothing', () => {
+    const repo = fixture({ '.github/workflows/ci.yml': 'steps:\n  - run: bash scripts/run-tests.sh\n' })
+    expect(resolveCiFullSuite(repo, { command: null, source: null }, NO_KNOBS).workflow).toBeNull()
+  })
+
+  test('a nonexistent repoRoot is null, not a throw — a build is never blocked by this', () => {
+    expect(() => resolveCiFullSuite(join(tmpdir(), 'ci-missing-8812'), KNOB_RESOLUTION, KNOBS)).not.toThrow()
+    expect(resolveCiFullSuite(join(tmpdir(), 'ci-missing-8812'), KNOB_RESOLUTION, KNOBS).workflow).toBeNull()
+  })
+
+  test('THIS repo, for real: its own workflow is found', () => {
+    // The fixtures prove the logic; this proves the derivation still matches the
+    // repo as it ships. If the workflow is ever renamed, builds silently go back
+    // to running the whole suite on the owner's laptop — the exact regression.
+    const repoRoot = fileURLToPath(new URL('..', import.meta.url))
+    const resolution = resolveTestCommand(repoRoot)
+    const knobs = probeParallelKnobs(repoRoot, resolution.rawScript ?? resolution.command)
+    expect(resolveCiFullSuite(repoRoot, resolution, knobs).workflow).toBe('.github/workflows/ci.yml')
+  })
+})
+
+describe('resolveChangedTestSelector', () => {
+  test('present when the project ships the helper, null when it does not', () => {
+    expect(resolveChangedTestSelector(fixture({ [CHANGED_TEST_SELECTOR]: '#!/usr/bin/env bash\n' }))).toBe(
+      CHANGED_TEST_SELECTOR,
+    )
+    expect(resolveChangedTestSelector(fixture({}))).toBeNull()
+    expect(resolveChangedTestSelector(join(tmpdir(), 'selector-missing-1174'))).toBeNull()
+  })
+
+  test('THIS repo ships it, so the block hands over a command instead of a recipe', () => {
+    expect(resolveChangedTestSelector(fileURLToPath(new URL('..', import.meta.url)))).toBe(CHANGED_TEST_SELECTOR)
+  })
+})
+
+describe('renderTestStrategy — the CI-authority branch', () => {
+  const ciBlock = renderTestStrategy({
+    resolution: { command: 'bash scripts/run-tests.sh', source: 'package-json' },
+    knobs: KNOBS,
+    jobs: 4,
+    concurrency: 2,
+    base_branch: 'main',
+    ci: { workflow: '.github/workflows/ci.yml', matched_on: 'scripts/run-tests.sh' },
+    selector: CHANGED_TEST_SELECTOR,
+  })
+
+  test('the lane is told NOT to run the whole suite here, and why', () => {
+    expect(ciBlock).toContain(LOCAL_FULL_SUITE_BANNED)
+    expect(ciBlock).toContain('STAGE 2 — the full suite, IN CI, REQUIRED.')
+    expect(ciBlock).toContain('.github/workflows/ci.yml')
+    expect(ciBlock).toContain('gh pr checks')
+  })
+
+  test('the heading agrees with stage 2 instead of contradicting it', () => {
+    // "Full suite (stage 2), run exactly this" above a stage 2 that says the
+    // suite runs in CI is a straight contradiction, and a build resolving a
+    // contradiction picks the expensive reading — which is the whole load this
+    // change exists to remove.
+    expect(ciBlock).not.toContain('Full suite (stage 2), run exactly this')
+    expect(ciBlock).toContain('Full suite command (STAGE 2 below says WHERE it runs)')
+    // The command and its budget are still exact: a `failed-preexisting` proof,
+    // or a project whose CI is down, still needs the real invocation.
+    expect(ciBlock).toContain('export NEUTRON_TEST_JOBS=4')
+    expect(ciBlock).toContain('bash scripts/run-tests.sh')
+  })
+
+  test('testsPassed=true is welded to CI, not weakened — the gate is unchanged', () => {
+    // Criterion 5 does not get softer because the suite moved: a local pass on
+    // the changed-file set still cannot stand in for the audited full run, and
+    // `passed` is still the only outcome that may accompany testsPassed=true.
+    expect(ciBlock).toContain(CI_FULL_SUITE_REQUIRED)
+    expect(ciBlock).toContain(SUITE_OUTCOME_VOCABULARY_CI)
+    expect(SUITE_OUTCOME_VOCABULARY_CI).toContain('The ONLY value that may accompany testsPassed=true.')
+    expect(SUITE_OUTCOME_VOCABULARY_CI).toContain('the outcome is failed-new')
+    expect(ciBlock).toContain(STAGE_1_REJECT_ONLY)
+    // The four values the FORGE_SCHEMA enum accepts, all still taught.
+    for (const value of ['passed', 'failed-new', 'failed-preexisting', 'not-run']) {
+      expect(SUITE_OUTCOME_VOCABULARY_CI).toContain(value)
+    }
+  })
+
+  test('a stale CI pass is explicitly not clearance for the commit that replaced it', () => {
+    expect(ciBlock).toContain('EXACT commit you are reporting')
+  })
+
+  test('the selector is handed over as a COMMAND, with the recipe kept as a check', () => {
+    // The cap is passed explicitly, so the number in the prose and the number the
+    // helper actually applies cannot drift while both look right.
+    expect(ciBlock).toContain(`bash ${CHANGED_TEST_SELECTOR} main ${STAGE_1_FILE_CAP}`)
+    // The prose recipe survives — it is what the helper implements, and it is
+    // the only thing a project WITHOUT the helper has.
+    expect(ciBlock).toContain(`Bound the WHOLE stage-1 set at ${STAGE_1_FILE_CAP} files`)
+  })
+
+  test('no selector: the recipe stands alone and nothing invents a script', () => {
+    const noSelector = renderTestStrategy({
+      resolution: { command: 'pytest -q', source: 'agent-docs' },
+      knobs: NO_KNOBS,
+      jobs: 1,
+      base_branch: 'main',
+      ci: { workflow: '.github/workflows/tests.yml', matched_on: 'pytest -q' },
+    })
+    expect(noSelector).not.toContain(CHANGED_TEST_SELECTOR)
+    expect(noSelector).toContain(`Bound the WHOLE stage-1 set at ${STAGE_1_FILE_CAP} files`)
+    expect(noSelector).toContain(LOCAL_FULL_SUITE_BANNED)
+  })
+
+  test('NO CI FOUND = TODAY\'S BEHAVIOUR, verbatim — the degradation costs work, not coverage', () => {
+    const local = renderTestStrategy({
+      resolution: { command: 'bash scripts/run-tests.sh', source: 'package-json' },
+      knobs: KNOBS,
+      jobs: 4,
+      concurrency: 2,
+      base_branch: 'main',
+      ci: { workflow: null, matched_on: null },
+    })
+    expect(local).toContain(FULL_SUITE_REQUIRED)
+    expect(local).toContain(SUITE_OUTCOME_VOCABULARY)
+    expect(local).toContain('Full suite (stage 2), run exactly this')
+    expect(local).not.toContain(LOCAL_FULL_SUITE_BANNED)
+    expect(local).not.toContain(CI_FULL_SUITE_REQUIRED)
   })
 })
 

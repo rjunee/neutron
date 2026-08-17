@@ -29,12 +29,23 @@
  * jobs budget divides by a CONSTANT fan-out and not by the live run count. See
  * `computeTestJobs`.
  *
+ * WHERE THE FULL SUITE RUNS IS ALSO DISCOVERED (added 2026-08-17). Running the whole
+ * suite inside every lane's worktree is what saturates the owner's machine — several
+ * lanes at once, each re-paying it on every fix round — and a saturated box does not
+ * merely run slowly, it manufactures failures (six of them in one session, every one on
+ * a 5 s timeout boundary; an A/B of a single file across two worktrees even came out
+ * with the CONTROL slower than the changed tree). So when a project demonstrably runs
+ * its suite in CI, the LANE runs only the tests covering what it changed and CI is the
+ * authority for the rest. Coverage before merge is unchanged — the same suite still runs
+ * on every push. A project with no CI suite keeps the local full run, unchanged: the
+ * failure direction is toward doing MORE work, never less verification.
+ *
  * CONTRACT OF THIS MODULE: pure-ish (reads files, writes nothing), NEVER throws into
  * a launch path, NEVER spawns a process anywhere, and has NO import-time side
  * effects. A build must never fail because the strategy could not be derived.
  */
 
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import * as os from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 
@@ -362,6 +373,95 @@ function honours(command: string, scriptText: string | null, name: string): bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 2b. Where the FULL suite actually runs, and what selects the local subset
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CiFullSuiteResolution {
+  /** Repo-relative workflow file observed to run the project's own test command. */
+  workflow: string | null
+  /** Which needle matched. Kept for reasoning, never logged — it can be the command. */
+  matched_on: string | null
+}
+
+const NO_CI: CiFullSuiteResolution = { workflow: null, matched_on: null }
+const CI_WORKFLOW_DIR = '.github/workflows'
+/** A repo with more workflows than this is not going to be understood by a text scan. */
+const MAX_WORKFLOW_FILES = 60
+
+/**
+ * DOES THIS PROJECT RUN ITS WHOLE SUITE IN CI? The answer decides where the full
+ * suite runs, and it is DISCOVERED rather than assumed, for the same reason the
+ * runner and its knobs are: trident builds projects it has never seen.
+ *
+ * A build lane running the whole suite in a worktree on the owner's laptop is
+ * what saturates that laptop — several lanes at once, each re-paying a ~14-minute
+ * suite on every fix round. Worse than slow, it is WRONG: under contention the
+ * failures it produces are manufactured. So when CI demonstrably runs the suite,
+ * the lane runs only what it touched and CI is the authority. Nothing is verified
+ * less before merge; the same suite still runs on every push, on CI's runners.
+ *
+ * THE FAILURE DIRECTION IS DELIBERATE. A false NEGATIVE (we cannot see the CI
+ * suite) costs today's behaviour exactly — the lane runs the full suite locally,
+ * which is safe and merely slow. A false POSITIVE would move the authority to a
+ * job that is not there, so the needles are strong ones: the runner SCRIPT PATH
+ * first (`scripts/run-tests.sh` — a path in a workflow is that script running),
+ * then the project's own declared test script, then the resolved command. A bare
+ * `bun test` is the weakest and therefore the last thing tried.
+ *
+ * Static text scan only, and — like `probeParallelKnobs` — it never spawns
+ * anything and never throws.
+ */
+export function resolveCiFullSuite(
+  repoRoot: string,
+  resolution: TestCommandResolution,
+  knobs: ParallelKnobs,
+): CiFullSuiteResolution {
+  try {
+    const needles = [knobs?.probed_file, resolution?.rawScript, resolution?.command]
+      .filter((needle): needle is string => typeof needle === 'string' && needle.trim().length >= 4)
+      .map((needle) => needle.trim())
+    if (needles.length === 0) return NO_CI
+
+    const dir = resolve(repoRoot, CI_WORKFLOW_DIR)
+    const names = readdirSync(dir)
+      .filter((name) => /\.ya?ml$/i.test(name))
+      .sort()
+      .slice(0, MAX_WORKFLOW_FILES)
+
+    // Needle in the OUTER loop so the strongest evidence wins across all files,
+    // not merely within the first file that happens to sort earliest.
+    for (const needle of needles) {
+      for (const name of names) {
+        const text = readTextOrNull(resolve(dir, name))
+        if (text !== null && text.includes(needle)) {
+          return { workflow: `${CI_WORKFLOW_DIR}/${name}`, matched_on: needle }
+        }
+      }
+    }
+    return NO_CI
+  } catch {
+    return NO_CI
+  }
+}
+
+/**
+ * The repo-relative helper that prints the test files covering the working tree's
+ * changes. Prose describing a three-tier selection is not reproducible — every
+ * agent re-derives it by hand, differently — so when a project ships the helper
+ * the block hands over the command instead of the recipe. Absent, the recipe
+ * below it still stands and is what the helper implements.
+ */
+export const CHANGED_TEST_SELECTOR = 'scripts/select-tests-for-changes.sh'
+
+export function resolveChangedTestSelector(repoRoot: string): string | null {
+  try {
+    return statSync(resolve(repoRoot, CHANGED_TEST_SELECTOR)).isFile() ? CHANGED_TEST_SELECTOR : null
+  } catch {
+    return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 3. The concurrency-aware jobs budget
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -594,6 +694,10 @@ export interface TestStrategyInput {
   /** The in-process interleaving budget that goes with `jobs`. Absent → not set. */
   concurrency?: number
   base_branch: string
+  /** Where the full suite runs. Absent / `workflow: null` → it runs LOCALLY, as before. */
+  ci?: CiFullSuiteResolution
+  /** Repo-relative changed-file test selector, when the project ships one. */
+  selector?: string | null
 }
 
 /**
@@ -672,6 +776,48 @@ export const SUITE_OUTCOME_VOCABULARY = [
 ].join('\n')
 
 /**
+ * THE LANE STOPS RUNNING THE WHOLE SUITE ON THE OWNER'S MACHINE.
+ *
+ * Measured 2026-08-17, and the second half is the reason this is a CORRECTNESS
+ * rule and not a speed preference: six tests "failed" in a lane purely from CPU
+ * contention, every one of them sitting exactly on a 5 s timeout boundary, and
+ * when one file was run on two worktrees interleaved the CONTROL tree came out
+ * slower than the changed one. A saturated box does not report slower results,
+ * it reports WRONG ones — and a lane then spends a fix round chasing a failure
+ * its diff did not cause.
+ *
+ * Nothing is verified less before merge. The same suite runs in CI on every
+ * push, on runners that are not shared with three other builds.
+ */
+export const LOCAL_FULL_SUITE_BANNED =
+  'Do NOT run the whole suite on this machine. Several build lanes share these cores, and a contended box does not merely run slowly — it MANUFACTURES failures: six tests failed under lane contention on 2026-08-17, every one of them sitting exactly on a 5 s timeout boundary, and an A/B of one file across two worktrees came out with the CONTROL slower than the changed tree. Nothing is verified less by this: CI runs the same suite, on its own runners, on every push.'
+
+/** The CI counterpart of `FULL_SUITE_REQUIRED`. Pinned verbatim: same defect guard. */
+export const CI_FULL_SUITE_REQUIRED =
+  "You may NOT report testsPassed=true on the local changed-file set alone — testsPassed=true requires the project's CI suite to have COMPLETED and passed for the EXACT commit you are reporting, read by named job out of the CI run itself and never inferred from a green local set."
+
+/**
+ * The CI wording of `SUITE_OUTCOME_VOCABULARY`. Same four values, same meanings,
+ * same price on `failed-preexisting` — only the place the evidence comes from
+ * moves. The gate in `trident/inner-workflow.mjs` reads the FIELD, so it is
+ * unchanged by this: `passed` is still the only value that may accompany
+ * `testsPassed=true`, and an unearned `failed-preexisting` is still a blocker.
+ */
+export const SUITE_OUTCOME_VOCABULARY_CI = [
+  'Report the outcome as `suiteOutcome`, one of:',
+  "  passed              — CI's full-suite run for the commit you are reporting COMPLETED and every",
+  '                        test passed. The ONLY value that may accompany testsPassed=true.',
+  '  failed-new          — CI completed and something your diff broke is red. Fix it and push again.',
+  '  failed-preexisting  — CI completed, the only red is red WITHOUT your diff, and you PROVED that:',
+  '                        re-run the failing files at the base branch (e.g. `git stash` or a scratch',
+  "                        worktree at the merge-base), or cite the base branch's own CI run, and name",
+  '                        the failures and that check in your final text. Unproven, this value is a',
+  '                        false report — if you did not run the comparison, the outcome is failed-new.',
+  '  not-run             — CI did not complete for your commit (never started, still running when your',
+  '                        budget ran out, cancelled, or you never read its result).',
+].join('\n')
+
+/**
  * Acceptance criterion 7's resolution: the `timeout 590` wrapper is banned.
  *
  * THE HANG BUDGET IS 25 MINUTES, AND THAT NUMBER IS RECONCILED, not picked. Round-3
@@ -698,6 +844,14 @@ export function renderTestStrategy(input: TestStrategyInput): string {
   const baseBranch = typeof base_branch === 'string' && base_branch.trim().length > 0 ? base_branch.trim() : 'main'
   const jobCount = isPositive(jobs) ? Math.floor(jobs) : 1
   const concurrency = isPositive(input.concurrency) ? Math.floor(input.concurrency) : null
+  const ciWorkflow =
+    typeof input.ci?.workflow === 'string' && input.ci.workflow.trim().length > 0 ? input.ci.workflow.trim() : null
+  const selector = typeof input.selector === 'string' && input.selector.trim().length > 0 ? input.selector.trim() : null
+  // The heading has to agree with STAGE 2. "run exactly this" under a stage 2
+  // that says the suite runs in CI would be a straight contradiction, and the
+  // build resolves contradictions by doing the expensive thing.
+  const commandHeading =
+    ciWorkflow === null ? 'Full suite (stage 2), run exactly this' : 'Full suite command (STAGE 2 below says WHERE it runs)'
 
   const commandLines: string[] = []
   if (command === null) {
@@ -714,7 +868,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     // second command sees nothing), and the knob would be silently discarded on exactly
     // the projects whose scripts.test does more than one thing.
     commandLines.push(
-      'Full suite (stage 2), run exactly this — the export lines FIRST, on their own lines, so a',
+      `${commandHeading} — the export lines FIRST, on their own lines, so a`,
       'compound test command inherits them:',
       '',
       `  export ${knobs.jobs_env}=${jobCount}`,
@@ -730,10 +884,10 @@ export function renderTestStrategy(input: TestStrategyInput): string {
       ...(concurrency !== null && typeof knobs.concurrency_env === 'string' ? [] : [UNPAIRED_CONCURRENCY_LINE]),
     )
   } else if (knobs?.pinned_by_command === true) {
-    commandLines.push('Full suite (stage 2), run exactly this:', '', `  ${command}`, '', PINNED_KNOBS_LINE)
+    commandLines.push(`${commandHeading}:`, '', `  ${command}`, '', PINNED_KNOBS_LINE)
   } else {
     commandLines.push(
-      'Full suite (stage 2), run exactly this:',
+      `${commandHeading}:`,
       '',
       `  ${command}`,
       '',
@@ -746,7 +900,23 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     '',
     ...commandLines,
     '',
-    'STAGE 1 — fail fast (minutes, not tens of minutes).',
+    ciWorkflow === null
+      ? 'STAGE 1 — fail fast (minutes, not tens of minutes).'
+      : 'STAGE 1 — the only tests that run ON THIS MACHINE: the ones covering what you changed.',
+    ...(selector === null
+      ? []
+      : [
+          'This project ships the selector, so do not re-derive the set by hand — run it and use its',
+          'output verbatim:',
+          '',
+          // The cap is passed EXPLICITLY rather than left to the helper's default,
+          // so the number in this block and the number the helper applies cannot
+          // drift apart while both look right.
+          `  bash ${selector} ${baseBranch} ${STAGE_1_FILE_CAP}`,
+          '',
+          'It implements exactly the recipe below. The recipe is written out so you can CHECK its answer,',
+          'not so you can reinvent it.',
+        ]),
     // THE DIFF RANGE IS base..WORKING TREE, NOT base..HEAD. Step 3 runs the tests and
     // step 4 commits, so at stage-1 time there is usually NOTHING committed yet and
     // `base..HEAD` prints an empty list (on a fix round it prints the PREVIOUS round's
@@ -781,10 +951,26 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     'stage-1 red your own diff cannot explain is NOT chased here — leave it to stage 2, which runs',
     'the suite the way the project intends.',
     '',
-    'STAGE 2 — the full suite, REQUIRED.',
-    `${FULL_SUITE_REQUIRED}`,
-    'A green stage 1 buys you nothing except the right to start stage 2.',
-    SUITE_OUTCOME_VOCABULARY,
+    ...(ciWorkflow === null
+      ? [
+          'STAGE 2 — the full suite, REQUIRED.',
+          `${FULL_SUITE_REQUIRED}`,
+          'A green stage 1 buys you nothing except the right to start stage 2.',
+          SUITE_OUTCOME_VOCABULARY,
+        ]
+      : [
+          'STAGE 2 — the full suite, IN CI, REQUIRED.',
+          LOCAL_FULL_SUITE_BANNED,
+          `This project runs its whole suite in CI on every push (found in ${ciWorkflow}). Push your branch,`,
+          'then read the result for the EXACT commit you are reporting — a pass on a commit you have since',
+          'replaced is not clearance for the one that replaced it:',
+          '',
+          '  gh pr checks <pr> --watch        # or: gh run watch / gh run view --log-failed',
+          '',
+          CI_FULL_SUITE_REQUIRED,
+          'A green stage 1 buys you nothing except the right to push.',
+          SUITE_OUTCOME_VOCABULARY_CI,
+        ]),
     '',
     'TIMEOUT.',
     NO_TIMEOUT_WRAPPER,
@@ -830,11 +1016,16 @@ export function buildTestStrategyDetail(
     })
     // The command is the project's own string and could be anything, so it is NOT
     // logged — only where it came from and whether a knob was found.
+    // `matched_on` is NOT logged for the same reason the command is not: it can BE
+    // the command. Only the workflow path, which is a repo-relative filename.
+    const ci = resolveCiFullSuite(repoRoot, resolution, knobs)
     summary =
       `test-strategy: source=${resolution.source ?? 'unresolved'} knob=${knobs.jobs_env ?? 'none'}` +
       `${knobs.pinned_by_command ? ' (pinned by the project)' : ''} cores=${Math.max(0, Math.floor(env?.cores ?? 0))}` +
       ` active_runs=${Math.max(0, Math.floor(env?.active_runs ?? 0))} divisor=${divisor}` +
-      ` jobs=${jobs} concurrency=${computeTestConcurrency(env?.cores, jobs)}`
+      ` jobs=${jobs} concurrency=${computeTestConcurrency(env?.cores, jobs)}` +
+      ` full_suite=${ci.workflow === null ? 'local' : `ci:${ci.workflow}`}` +
+      ` selector=${resolveChangedTestSelector(repoRoot) === null ? 'none' : 'yes'}`
   } catch {
     summary = 'test-strategy: unavailable'
   }
@@ -860,7 +1051,15 @@ export function buildTestStrategy(
       mem_available_bytes: env?.mem_available_bytes,
     })
     const concurrency = computeTestConcurrency(env?.cores, jobs)
-    return renderTestStrategy({ resolution, knobs, jobs, concurrency, base_branch: env?.base_branch })
+    return renderTestStrategy({
+      resolution,
+      knobs,
+      jobs,
+      concurrency,
+      base_branch: env?.base_branch,
+      ci: resolveCiFullSuite(repoRoot, resolution, knobs),
+      selector: resolveChangedTestSelector(repoRoot),
+    })
   } catch {
     return renderTestStrategy({
       resolution: UNRESOLVED,

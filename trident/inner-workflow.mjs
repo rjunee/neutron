@@ -1230,7 +1230,7 @@ ${NO_PATTERN_KILL_RULE}${testStrategy === '' ? '' : `\n${testStrategy}\n`}
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
-3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
+3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 (only the tests covering what you changed) first, then the FULL suite exactly where that block says it runs: in CI when the block names a workflow, on this machine when it does not. The full suite is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
 ${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
@@ -4529,8 +4529,9 @@ function fullSuiteFindings(report) {
         'FULL suite (stage 2) a precondition of testsPassed=true — a stage-1/diff-scoped pass, a skipped ' +
         'run, or a run that never reached the runner\'s final summary line does not qualify. This round ' +
         'CANNOT be approved whatever the reviewers say. Run the full suite exactly as the TEST EXECUTION ' +
-        'block specifies, fix what it reds, and report testsPassed=true with the runner\'s own ' +
-        'summary/coverage-audit line in your log tail. If the suite is red for reasons that predate this ' +
+        'block specifies — WHERE it says, which is CI when that block names a workflow — fix what it reds, ' +
+        'and report testsPassed=true with the evidence the block asks for (the runner\'s own ' +
+        'summary/coverage-audit line, or the CI run\'s named-job result). If the suite is red for reasons that predate this ' +
         "branch, PROVE it (re-run the failing files at the base branch) and report suiteOutcome=" +
         "'failed-preexisting' with those failures named — that outcome is reviewable rather than fatal.",
     },

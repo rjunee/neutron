@@ -22,14 +22,30 @@ neutron_discover_test_files() {
     printf '%s\n' ${NEUTRON_TEST_DISCOVER_OVERRIDE}
     return 0
   fi
-  find . -type f \
+  # PRUNED, NOT FILTERED — and the difference is 22.9 seconds per invocation.
+  #
+  # This used to end in `-not -path '*/node_modules/*' -not -path '*/.*/*'`,
+  # which produces exactly the same list and does not stop `find` DESCENDING into
+  # those trees: a `-path` test discards matches after the walk has already
+  # visited them. With dependencies installed that means walking every file in
+  # `node_modules` (and every `.claude/worktrees/` clone) on every call —
+  # measured at 22.9 s, against 0.3 s pruned. The runner pays it once per
+  # invocation, so all four CI shards pay it, and
+  # `scripts/__tests__/run-tests-shard.test.ts` pays it eight times in one file.
+  #
+  # The prune is restricted to DIRECTORIES on purpose. `-name '.?*'` without
+  # `-type d` would also prune a hidden test FILE at the top level, which the old
+  # `-not -path '*/.*/*'` form INCLUDED (that pattern needs a dot component with
+  # slashes on both sides). `.?*` rather than `.*` because `.*` matches `.`, the
+  # starting directory itself — pruning that yields an empty list, silently.
+  find . \
+    \( -type d \( -name node_modules -o -name '.?*' \) \) -prune -o \
+    -type f \
     \( -name '*.test.ts'  -o -name '*.test.tsx' \
     -o -name '*.test.js'  -o -name '*.test.jsx' \
     -o -name '*.test.mjs' -o -name '*.test.cjs' \
     -o -name '*.spec.ts'  -o -name '*.spec.tsx' \
     -o -name '*.spec.js'  -o -name '*.spec.jsx' \
-    -o -name '*.spec.mjs' -o -name '*.spec.cjs' \) \
-    -not -path '*/node_modules/*' \
-    -not -path '*/.*/*' \
+    -o -name '*.spec.mjs' -o -name '*.spec.cjs' \) -print \
     | sort
 }
