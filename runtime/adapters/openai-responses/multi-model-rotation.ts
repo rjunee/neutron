@@ -50,6 +50,13 @@ export function currentModel(state: RotationState): RotationDecision {
 /**
  * Advance to the next model after a retryable error. Returns the next
  * decision; mutates `state.attempt_idx`.
+ *
+ * `delay_ms` ON THE RETURNED DECISION IS THE PROVIDER'S RAW HINT, not a delay that
+ * is safe to hand a timer. No caller sleeps on it today (`index.ts` sleeps its own
+ * `rotateDelay`), but anything that starts to MUST route it through
+ * {@link clampTimerDelayMs} first: a finite hint above `0x7fff_ffff` ms overflows
+ * `setTimeout`'s 32-bit delay and fires in ~1 ms, turning a long back-off into a hot
+ * retry loop against a provider that just rate-limited us.
  */
 export function rotate(state: RotationState, retry_after_ms?: number): RotationDecision {
   state.attempt_idx++
