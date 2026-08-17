@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 
 import { mergeAsBuiltLog, parseLog, serializeLog } from './as-built-log-merge.ts'
 import { runDriver } from './as-built-merge-driver.ts'
+import { findDuplicateEntryHeadings } from './as-built-heading-uniqueness.ts'
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..', '..')
 const REAL_LOG = join(REPO_ROOT, 'docs', 'AS_BUILT.md')
@@ -551,11 +552,40 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     expect(mergeAsBuiltLog(base, ours, theirs).ok).toBe(false)
   })
 
-  test('two different entries added under the SAME heading is a conflict, not a coin flip', () => {
+  test('two different entries added under the SAME heading are unioned with a unique retitle', () => {
     const base = log(OLD_A)
     const ours = log('## 2026-08-16 — same title\n\nours body\n\n', OLD_A)
     const theirs = log('## 2026-08-16 — same title\n\ntheirs body\n\n', OLD_A)
-    expect(mergeAsBuiltLog(base, ours, theirs).ok).toBe(false)
+    const res = mergeAsBuiltLog(base, ours, theirs)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toContain('## 2026-08-16 — same title\n\nours body\n\n')
+    expect(res.text).toContain('## 2026-08-16 — same title (2)\n\ntheirs body\n\n')
+    expect(findDuplicateEntryHeadings(res.text)).toEqual([])
+  })
+
+  test('same-heading additions with identical bytes still dedupe to ours', () => {
+    const base = log(OLD_A)
+    const shared = '## 2026-08-16 — same title\n\nshared body\n\n'
+    const res = mergeAsBuiltLog(base, log(shared, OLD_A), log(shared, OLD_A))
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text.split('## 2026-08-16 — same title').length - 1).toBe(1)
+  })
+
+  test('same-heading union skips a numeric disambiguator already present on either side', () => {
+    const base = log(OLD_A)
+    const ours = log(
+      '## 2026-08-16 — same title\n\nours body\n\n',
+      '## 2026-08-16 — same title (2)\n\nalready used\n\n',
+      OLD_A,
+    )
+    const theirs = log('## 2026-08-16 — same title\n\ntheirs body\n\n', OLD_A)
+    const res = mergeAsBuiltLog(base, ours, theirs)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.text).toContain('## 2026-08-16 — same title (3)\n\ntheirs body\n\n')
+    expect(findDuplicateEntryHeadings(res.text)).toEqual([])
   })
 
   test('a diverged header is a conflict', () => {
@@ -780,12 +810,7 @@ describe('what it refuses — the floor is a conflict a human reads, never a gue
     )
     const notALog = mergeAsBuiltLog('nothing', 'no entries here', 'none here either')
     const header = mergeAsBuiltLog(log(OLD_A), `# OURS\n\n${OLD_A}`, `# THEIRS\n\n${OLD_A}`)
-    const sameHeading = mergeAsBuiltLog(
-      log(OLD_A),
-      log('## 2026-08-16 — same title\n\nours body\n\n', OLD_A),
-      log('## 2026-08-16 — same title\n\ntheirs body\n\n', OLD_A),
-    )
-    for (const res of [bothEdited, notALog, header, sameHeading]) {
+    for (const res of [bothEdited, notALog, header]) {
       expect(res.ok).toBe(false)
       if (!res.ok) expect(res.wouldLoseEntries).toBe(false)
     }

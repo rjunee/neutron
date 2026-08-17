@@ -2222,6 +2222,65 @@ function classifyBlock(synthesis, deferredPeers) {
   return codeFindings.length === 0 ? 'infra-only' : 'code'
 }
 
+/**
+ * THE DELTA CLASSIFIER (docs-only cheap path, T1). Pure, self-contained, and
+ * CONSERVATIVE BY CONSTRUCTION: any path it does not positively recognise as
+ * documentation forces the full path. A false "full" costs one wasted full run;
+ * a false "docs-only" ships unverified code, so every ambiguity resolves to full.
+ * Classification is by PATH, never by count or diff size (the card forbids both).
+ * Self-contained on purpose: the extraction tests evaluate it out of this file's
+ * source, so it must close over NOTHING at module scope.
+ */
+function classifyDeltaPaths(paths) {
+  const full = (reason) => ({ classification: 'full', reason, offenders: [] })
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return full('delta: no changed paths measured — taking the full path')
+  }
+  const DENY_PREFIXES = ['migrations/', '.github/']
+  const ALLOW_PREFIXES = ['.trident/plans/']
+  const offenders = []
+  for (const raw of paths) {
+    if (typeof raw !== 'string') return full('delta: unreadable path entry — taking the full path')
+    const p = raw.trim()
+    if (
+      p.length === 0 ||
+      p.startsWith('/') ||
+      p.startsWith('"') ||
+      p.includes('\\') ||
+      p.includes('..')
+    ) {
+      return full(`delta: suspicious path ${JSON.stringify(raw)} — taking the full path`)
+    }
+    if (DENY_PREFIXES.some((d) => p.startsWith(d))) { offenders.push(p); continue }
+    const lower = p.toLowerCase()
+    const isDoc = lower.endsWith('.md') || lower.endsWith('.markdown') || ALLOW_PREFIXES.some((a) => p.startsWith(a))
+    if (!isDoc) offenders.push(p)
+  }
+  if (offenders.length > 0) {
+    const shown = offenders.slice(0, 3).join(', ')
+    const more = offenders.length > 3 ? ` (+${offenders.length - 3} more)` : ''
+    return { classification: 'full', reason: `full: non-docs path(s): ${shown}${more}`, offenders }
+  }
+  return { classification: 'docs-only', reason: `docs-only: all ${paths.length} changed path(s) are documentation`, offenders: [] }
+}
+
+/**
+ * The probe half: input is the raw/exit_code report of ONE verbatim
+ * `git diff --name-only <base>...<head>` command (same report-don't-interpret
+ * shape as probePrMerged). Any hint the command did not succeed cleanly —
+ * missing/non-zero exit, git error text — is "unsure", and unsure takes the
+ * expensive path and says so.
+ */
+function classifyDeltaProbe(probe) {
+  const full = (reason) => ({ classification: 'full', reason, offenders: [] })
+  const exit = probe && typeof probe.exit_code === 'number' ? probe.exit_code : null
+  if (exit !== 0) return full(`delta: probe failed (exit=${exit === null ? 'unknown' : exit}) — taking the full path`)
+  const raw = probe && typeof probe.raw === 'string' ? probe.raw : ''
+  if (/^(fatal|error):/im.test(raw)) return full('delta: probe reported a git error — taking the full path')
+  const paths = raw.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+  return classifyDeltaPaths(paths)
+}
+
 // A SYNTHESIS WE NEVER GOT IS AN INFRA BLOCK — IT MUST NOT RE-FORGE, AND MUST NOT CRASH.
 //
 // `agent()` returns null when its subagent dies on a terminal API error after

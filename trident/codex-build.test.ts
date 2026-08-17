@@ -1017,6 +1017,31 @@ describe('the BRIEF is what codex is asked to build', () => {
     expect(pinned.codexArgv).not.toContain('gpt-5.6-sol')
   })
 
+  test('the reasoning effort is PINNED, and overridable through CODEX_BUILD_EFFORT', () => {
+    // Unpinned, the CLI default for this tier is `none` — the forge built with reasoning
+    // DISABLED until this was pinned. Buying the flagship model and then leaving the
+    // effort to the default is the same silent downgrade the model pin above prevents.
+    const dflt = run({ authed: true, codexLoginExit: 0 })
+    expect(dflt.codexArgv).toContain('model_reasoning_effort=xhigh')
+
+    const pinned = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { CODEX_BUILD_EFFORT: 'high' },
+    })
+    expect(pinned.codexArgv).toContain('model_reasoning_effort=high')
+    expect(pinned.codexArgv).not.toContain('model_reasoning_effort=xhigh')
+  })
+
+  test('an explicitly EMPTY CODEX_BUILD_EFFORT falls back to the CLI default', () => {
+    const { codexArgv } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { CODEX_BUILD_EFFORT: '' },
+    })
+    expect(codexArgv).not.toContain('model_reasoning_effort')
+  })
+
   test('an explicitly EMPTY CODEX_BUILD_MODEL falls back to the CLI default', () => {
     // `${VAR-x}` substitutes only when UNSET, so an empty value is a deliberate
     // "let codex choose" and not an accident to be overwritten.
