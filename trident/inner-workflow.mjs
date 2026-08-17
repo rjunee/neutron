@@ -174,6 +174,7 @@ const {
   // thread it falls back to the repo-of-record copy (same precedent as
   // codex-review.sh below).
   checkpointScript = null,
+  codexBuildScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
   // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
   // script (dirty → preserve, clean → plain remove) rather than an LLM told to
@@ -272,6 +273,12 @@ const kimiConfigured = kimiConfiguredArg === true
 // launcher that threads those also threads checkpointScript — the repoPath
 // fallback covers only legacy callers.
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
+
+// NO repoPath fallback, deliberately — resolving the wrapper from the repo being
+// built is the defect (Open worked by coincidence, everything else 127'd or drifted);
+// a missing arg fails closed by name in forgeAgent.
+const codexBuildSh =
+  typeof codexBuildScript === 'string' && codexBuildScript.length > 0 ? codexBuildScript : null
 
 // Resolved worktree-cleanup script path (#541) — the deterministic replacement
 // for the force-removing cleanup agent. Same repoPath fallback as above.
@@ -1506,7 +1513,7 @@ function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   // one won. A separate file has no ambiguity to resolve.
   const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
-  const script = `${repoPath}/trident/codex-build.sh`
+  const script = codexBuildSh
   // THE HEREDOC TERMINATOR MUST NOT OCCUR IN THE BRIEF. A brief line equal to the
   // marker would close the heredoc early and leave the REST OF THE BRIEF sitting in
   // the command as shell — and part of the brief is the owner's task text, which is
@@ -1640,6 +1647,11 @@ async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
   if (route.transport !== 'cli') {
     return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
+  }
+  if (codexBuildSh === null) {
+    throw new Error(
+      `${opts.label} is routed to the codex executor but the launcher did not thread codexBuildScript (the harness build wrapper's absolute path). Refusing to resolve it from the target repo — that resolution is how Open and Enterprise drifted; thread it from trident/inner-loop.ts buildWorkflowArgs.`,
+    )
   }
   const res = await agent(
     codexBuildPrompt(
