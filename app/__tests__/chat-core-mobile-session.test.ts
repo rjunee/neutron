@@ -1142,6 +1142,123 @@ describe('MobileChatSession — the backwards history walk', () => {
     expect(joined).not.toContain('SCAN');
   });
 
+  it('STILL walks when the page it was just sent is what opened the hole', async () => {
+    // The trap in the guard above, and the reason it is not a bare "was I whole?" test.
+    // A device that WAS contiguous can acquire an interior hole from the very page it is
+    // reacting to: holding an old prefix of a topic that has since grown by more than
+    // one page, its forward resume returns the NEWEST page, which does not join on.
+    // `historyWholeAtResume` is true — it was true, before the page — so a guard without
+    // the cursor term would refuse the walk and defer the hole to the next open.
+    //
+    // The web half of this is `chat-core/__tests__/history-backfill.test.ts`. It is
+    // asserted separately HERE because `MobileChatSession` is a second implementation of
+    // the same handler over the real on-device SQLite store, and a claim that both
+    // surfaces are proved has to be paid for on both surfaces.
+    //
+    // MUTATION-PROVED: drop the `historyGap <= this.resumeCursor + 1` term from
+    // `MobileChatSession`'s `history_gap` guard, so the guard is `historyWholeAtResume`
+    // alone, and the walk never starts — the first `backwardsResumes()` assertion goes
+    // from 3 to 0 and the store is left holding the prefix plus the newest page.
+    const store = await freshStore();
+    const total = 50;
+    for (const seq of [1, 2, 3]) {
+      await store.upsert({
+        topic_id: TOPIC,
+        // The SERVER's ids, because this device really did receive these rows from this
+        // topic — a private id would make the re-delivery a second row and the assertion
+        // would fail on duplicates rather than on the property.
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    // Contiguous down to 1 at resume time — the precondition the guard keys on.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+    // The forward resume asked from THIS device's cursor, not from zero.
+    expect(sockets[0]!.forwardResumes().at(-1)).toMatchObject({ after_seq: 3 });
+
+    await pump(sockets[0]!, total, 10);
+
+    // It DID walk, on THIS open, and spent its whole round budget doing it rather than
+    // stopping at the forward page's floor.
+    expect(sockets[0]!.backwardsResumes().length).toBe(3);
+    const afterFirst = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    // The prefix it held, plus four pages: 41..50 forward and 11..40 walked.
+    expect(afterFirst).toEqual([1, 2, 3, ...Array.from({ length: 40 }, (_, i) => i + 11)]);
+
+    // And it CONVERGES: a foreground catch-up resets the budget and the remaining hole
+    // (4..10) closes, which is only possible because the store-side contiguity read
+    // still sees it after the walk ran out of rounds.
+    await session.catchUp();
+    await tick();
+    await pump(sockets[0]!, total, 10);
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: total }, (_, i) => i + 1));
+  });
+
+  it('decides the guard on the store as the resume left it, not as the answer finds it', async () => {
+    // THE ORDERING, PINNED, on the mobile session too. `ws.send(resume)` is the instant
+    // the server may begin answering, and chat-core's `socket.onmessage` calls the frame
+    // handler WITHOUT awaiting it, so a `history_gap` handler can run inside any `await`
+    // that follows the send. An operand read after the send is read from a store the
+    // page is already landing in.
+    //
+    // This socket answers from INSIDE `send` — the earliest a server can, and the shape
+    // of a loopback one. The device is whole (1..10 of a 20-row topic), so the correct
+    // behaviour is to apply the forward page and buy nothing below it.
+    //
+    // MUTATION-PROVED: move `this.historyWholeAtResume = ...` in
+    // `MobileChatSession.resumeAndFlush` back below `this.ws.send(resume)`, which is
+    // where it was, and the final assertion fails — the handler reads the field's
+    // `false` initial value and buys a backwards page for 10 rows the store holds.
+    const store = await freshStore();
+    const total = 20;
+    for (const seq of Array.from({ length: 10 }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+
+    const { session, sockets } = makeSession(store);
+    session.start();
+    const socket = sockets[0]!;
+    socket.answerNextResumeInsideSend = (frame) => {
+      for (const out of answer(total, 10, frame)) socket.deliver(out);
+    };
+    socket.open();
+    socket.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+
+    // The answer really did arrive inside the send — otherwise this is the ordinary case
+    // wearing a costume, and the mutation above would not turn it red.
+    expect(socket.answerNextResumeInsideSend).toBeNull();
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: total }, (_, i) => i + 1));
+    expect(socket.backwardsResumes()).toEqual([]);
+  });
+
   it('answers a HOLE-FREE store from one index-only aggregate pass, not the probe walk', async () => {
     // The healthy store is the common case and it was the expensive one: with no run
     // start above seq 1 the descending walk probes every row in the topic. The
