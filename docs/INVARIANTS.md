@@ -104,9 +104,26 @@ with cross-references noted inline.
     Protects: **P1** (ProjectDb API widening).
 17. Migration runner: PRAGMA preamble hoisted out of the per-migration transaction;
     `PRAGMA foreign_keys=ON` re-asserted in a `finally`; per-migration BEGIN/COMMIT atomicity;
-    migration version numbers are never renumbered or backfilled. `migrations/runner.ts:89-126`.
+    migration version numbers are never renumbered or backfilled. `migrations/runner.ts`
+    (`applyMigrations`' apply loop, `splitPragmaPreamble`) — cited by function rather than by line,
+    because the previous line anchor had drifted off the code it named.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
+    Three refusals in that runner are fail-closed and must stay so: a duplicate ordinal
+    (`assertUniqueMigrationOrdinals`), a recorded name that differs from the file on disk
+    (`migrationNameMismatch`, resolvable only via a hand-verified `migrations/repairs.json` entry),
+    and a pending migration file the deployed checkout does not track (`formatUntrackedMigration` in
+    `migrations/runner.ts`, on the verdict from `resolveDeployedTree` in `migrations/provenance.ts`).
+    **All three decide before ANY write** — `_migrations` is created, and repairs are acknowledged,
+    only after the last refusal has been passed, which is what makes the untracked message's claim
+    that nothing was written true. Where tracking cannot be established (no git metadata, an index
+    shape the reader does not decode, an index that fails its own checksum or carries none, a
+    migration directory git does not track at all) the runner applies and records
+    `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from "not
+    tracked" and collapsing them either breaks tarball installs or re-opens the class. The verified
+    value is `tracked-in-index` and names its evidence: the index is the STAGED tree, so a
+    staged-but-uncommitted file passes; HEAD-tree verification is deliberately out of scope (it would
+    need a packfile reader on the boot path) and the value must not be renamed to imply otherwise.
 18. Schema snapshot test is the refactor's data-layer safety net; regenerate only via
     `regen-snapshot.ts`, never hand-edit. `migrations/snapshot.test.ts:1` (the test),
     `migrations/regen-snapshot.ts:9-15` (writes `expected-schema.txt`).
@@ -645,6 +662,17 @@ with cross-references noted inline.
     `trident/store.test.ts`.
     Protects: the fix-round budget from being spent on infrastructure failures that are not the
     agent's fault.
+116. The Work Board's `inline_active` is DISPLAY-ONLY and EVIDENCE BEATS THE STORED FLAG. Every
+    read boundary maps items through the one deriver (`work-board/inline-activity.ts`
+    `makeInlineActivityDeriver`, wired in `open/composer.ts`); the stored column is never written
+    by a read and is only ever a hint. The flag gets NO exemption from the freshness check — a
+    crashed session's stuck flag reads not-active — and the derivation must never grow a branch
+    that blocks, denies, delays or gates a tool call (it is the display-only salvage of the
+    cancelled PreToolUse-gate plan). Evidence is tier 1 only: ONE O(1) `ActivityInspector` map
+    read per board, never per row, never a shell-out. `work-board/inline-activity.test.ts` +
+    `open/__tests__/inline-activity-wiring.test.ts`.
+    Protects: the board from re-becoming a promise the agent has to remember to keep, and the
+    read path from growing per-row I/O.
 116. External launcher liveness acts only on positive death evidence: `alive`, `unknown`, or a
     throwing probe does nothing; malformed pids and disagreement between registry homes are
     ambiguous. Every running launcher is probed without the advancement sweep's 50-row cap. A
@@ -758,6 +786,10 @@ with cross-references noted inline.
 
 - **111 invariants** extracted from the 11 critic reports' load-bearing-subtleties /
   fail-soft-invariant / must-not-break sections (`critic-security-config.md` has no dedicated
+  section; its "what exists and is fine" items are folded into §11 above). Four further items
+  (#112–#115) were added post-synthesis for the gateway-restart crash-recovery build, and #116 for
+  the derived-inline-activity build; they are appended at the end of their sections rather than
+  renumbered in, so numbering is not strictly sequential within §3 and §9.
   section; its "what exists and is fine" items are folded into §11 above). Five further items
   (#112–#116) were added post-synthesis — #112–#115 for the gateway-restart crash-recovery build,
   #116 for the boot scope direction guard (2026-08-16); they are appended at the end of their

@@ -158,6 +158,8 @@ function doneRun(overrides: Partial<TridentRun> = {}): TridentRun {
     reviewed_head: null,
     bound_pr: null,
     fenced_paths: null,
+    base_sha: null,
+    base_behind: null,
     ...overrides,
   }
 }

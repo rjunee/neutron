@@ -101,6 +101,161 @@ complete. Closing it needs a backfill primitive the wire has no shape for yet
 (`{type:'history', before_seq}` + a client affordance), which stays the next thing to
 build and is explicitly not faked with a bigger constant.
 
+## 2026-08-17 — the blank-is-unset sweep never reached the port knob, where a blank coerces to zero and the invite advertises it
+
+Landed via PR #373.
+
+**A retroactive adversarial re-audit of the panel on #333 found nothing left to
+fix, and that result is the first half of this entry** — because a panel's
+findings arriving as a work order does not make them still true, and the honest
+answer to "re-verify each of these five" was "all five are closed". #349, #364
+and #365 landed while the brief was being written. What follows was
+independently re-measured on `main` at `ed74a55c`, by mutation, not read out of
+the entries above.
+
+Green control first: **158 pass / 0 fail** across the eleven suites that name any
+of these resolvers, with a positive control of ≥150 executed tests so an exit-1
+from a malformed filter could not read as a proof — the trap the audit above
+documents having fallen into eighteen times.
+
+**Finding (1), "each trim was mutation-proved while four of eleven sites are
+pinned by nothing", does not reproduce. NINETEEN predicates, nineteen REDs**,
+one at a time, each mutation the exact pre-#333 code (`.trim()` deleted), each
+printed by `git diff` to prove it landed and each restored:
+`migrations/db-path.ts:46,48,81`; `gateway/boot-listener-registry.ts:69,71,73`
+and `:336,338`; `open/server.ts:76`;
+`gateway/wiring/build-phase-spec-resolver.ts:515,520`;
+`onboarding/feedback/m2-week-4-collector.ts:48`; `scripts/email-accounts.ts:73`;
+`prompts/template.ts:116`; `gbrain-memory/gbrain-doctor.ts:215`;
+`runtime/adapters/claude-code/index.ts:351`; `config/index.ts:579`; and
+`onboarding/overnight/register.ts:196,198`. **The last two rows are the part
+worth keeping**: `effectiveOwnerHome` — the docblock's own home — and
+`resolveOwnerHomeFromEnv`, which `config/index.ts:551` lists as REACHABLE,
+appear in NONE of the fourteen predicates the entry above claims to have proved.
+They were mutated anyway rather than assumed, because "absent from the proof
+list" and "unpinned" are different claims and only one of them is checkable.
+Findings (2) and (3) were confirmed the same way at the seam
+(`runtime/adapters/claude-code/index.ts:387` and `:451`, two REDs and one RED);
+(4) and (5) by reading the sites (`open/__tests__/owner-slug-agreement.test.ts:466-486`,
+`skill-forge/registrar.ts:31-54` — whose "a trim here would yield `/skills`"
+reasoning was re-derived rather than accepted, and holds, because the return is
+template concatenation and not `path.join`).
+
+**THE LIVE DEFECT IS ONE VARIABLE OVER, AND THE SWEEP COULD NOT HAVE FOUND IT.**
+`optionalIntKnob` (`config/index.ts`) tested the blank class with `raw === ''`,
+so `NEUTRON_PORT=` resolved to `undefined` and the seam's 7800 default applied
+while `NEUTRON_PORT=' '` was a hard boot refusal — one variable, two answers,
+one space apart. Nothing chose that split. It is what `=== ''` does, and the
+eleven-reader sweep is bounded to `OWNER_HOME` / `NEUTRON_HOME` /
+`NEUTRON_DB_PATH` (stated at `config/index.ts:487-497`), so this knob was out of
+scope by construction rather than missed.
+
+**AND THE GUARD THAT REJECTED THE BLANK WAS DOING IT BY ACCIDENT.**
+`Number('   ')` is **0**, not `NaN` — whitespace coerces silently through
+numeric conversion. So `Number.isInteger` accepted a blank, the range check
+accepted it (this knob's floor is 0 — `config/index.ts:183`), and the ONLY thing
+that turned a blank into a throw was the canonical-decimal string compare, whose
+own comment justifies it purely in terms of hex / scientific / signed /
+leading-zero lexicals and never mentions whitespace. Port 0 is meaningful in
+this tree rather than rejected: `assertPort` admits it and the bind path treats
+`port !== 0` as "explicitly resolved". **Measured: narrowing that compare to
+skip blanks — the most natural way to bring this knob onto the repo's own
+blank-is-unset rule — makes `NEUTRON_PORT=' '` resolve to `0`**, and the gateway
+comes up on an ephemeral port nothing routes to with the in-use guard disabled
+and no error anywhere. The failing assertion prints `Expected: not 0`. Fixed by
+handling the blank at the TOP, which makes the coercion unreachable instead of
+guarded by a line whose stated purpose is something else.
+
+Six mutation proofs, each with the mutation printed and the failing test named:
+reverting the predicate reddens two; the two-part narrowing edit reddens the same
+two with `Received: 0`; reverting `resolveListenPort`'s env predicate reddens one;
+defaulting a blank `--port=` reddens one; and the two downstream proofs below.
+
+**AND THEN THE CROSS-MODEL REVIEWER REFUTED THE FIX, WHICH IS THE PART OF THIS
+ENTRY WORTH COPYING** — it was DEFERRED on #333, which is why that panel's
+findings sat unactioned, so it was made to run here. It found that the fix
+CONVERTED A BOOT REFUSAL INTO A LIVE, MISADVERTISED SERVER, one layer
+downstream, and it was right. `open/composer.ts` built the Connect origin from
+`options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787)` — a second raw
+read of the variable, BELOW the only place that validates it. `??` does not fall
+through on `''`, so the blank reached `Number('')`, **which is 0**, and the
+invite the owner hands to somebody else advertised `http://127.0.0.1:0` while
+the listener bound 7800. Reproduced end to end before the fix:
+`NEUTRON_PORT='' -> connectBase=http://127.0.0.1:0`. That is the same
+one-variable-two-answers defect this change exists to close, reintroduced one
+layer over — **exactly the shape of finding (2) on #333**, which is the finding
+about a fix going unpinned at the line that uses it. The empty-string form was
+already live on `main` for the same reason (`Number('')` is 0 too), so this half
+is a pre-existing defect the change would have WIDENED rather than one it
+created.
+
+Fixed by deleting the second read: `options.config?.port ?? DEFAULT_LISTEN_PORT`,
+which is what the sibling site in the SAME FILE (the reconnect handoff) already
+does. That also retires the `8787` fallback, a port nothing in this tree ever
+listens on — with `NEUTRON_PORT` absent the listener bound 7800 and the invite
+said 8787.
+
+Pinned END TO END rather than at the resolver, because the resolver was never
+the broken part and a unit test over it is precisely the proof that stayed green
+while this was wrong: five tests in `open/__tests__/open-connect-served.test.ts`
+compose Open **with the frozen config, as the boot shell does** (every other test
+in that file declares a public base URL and skips the fallback entirely), issue a
+real invite over the owner HTTP surface, and assert the accept URL's origin.
+Reverting the composer expression reddens three with
+`Received: "http://127.0.0.1:0"`; reverting the config predicate alone reddens
+exactly the whitespace case. One harness per test, because `beforeEach` mints one
+database and a loop that composes twice dies on `UNIQUE constraint failed:
+projects.id` — hit while writing it.
+
+**The reviewer's third finding was that a comment in the new test asserted the
+opposite of what it does, and it is corrected rather than deleted.** The comment
+claimed `toBeUndefined()` passes on 0; it does not — it fails with
+`Received: 0`. So the `.not.toBe(0)` assertion adds no COVERAGE and is kept for
+what it does add: the NAME of the dangerous value. Claiming coverage it does not
+provide would be the same unproved-claim defect this whole sequence is about, one
+comment deep.
+
+`resolveListenPort`'s env arm got the same predicate and its docblock says
+plainly that this is CONSISTENCY ON A PUBLISHED SURFACE, NOT A LIVE FIX: `boot()`
+passes `String(config.port)` from the already-validated config
+(`gateway/index.ts:811-815`), so that arm never sees an operator string, and a
+trim on a value no live path reads is a no-op dressed as a bug fix. Three of the
+nineteen predicates above are in that same category (`resolveRegistryDbPath` has
+no call site — definition plus two re-export statements and nothing else), and
+saying which is which is the point. `--port=` is deliberately NOT on the rule:
+an explicit flag with a blank value stays a loud refusal, the split
+`scripts/email-accounts.ts:73` already makes for a blank `--home`, pinned so a
+later consistency sweep has to argue with a test.
+
+**ONE LIVE DEFECT IS RECORDED HERE AND DELIBERATELY NOT FIXED HERE.**
+`tests/integration/identity-env-readers-registry.test.ts` walks with
+`readdirSync` from `process.cwd()` (`:186`, `:295`, `:314`) and its `SKIP_DIRS`
+(`:151`) does not skip nested checkouts, of which the owner's clone has two
+holding 6731 `.ts` files — so the guard audits the same repo several times over
+there. PR #351 already fixes exactly that with `git ls-files`, is green on all
+thirteen checks, and is merely CONFLICTING after #364/#365 moved underneath it.
+That wants a rebase, not a second PR on the same file, and writing it down beats
+either fixing it twice or letting it look unnoticed.
+
+**A SECOND ONE IS RECORDED AND NOT FIXED, with its scope stated.** The shell
+surfaces still treat whitespace as a set port: `bin/neutron` and `install.sh`
+default only on `-z`, and `neutron-service.sh` probes a URL built from the raw
+value, so `neutron url` can print an origin containing whitespace while the
+server is on 7800. Before this change that divergence was masked — boot refused,
+so there was no server to misprint a URL for. It is now reachable, in a CLI
+display path rather than in anything an outsider dials, and bringing three shell
+files onto the rule is a wider change than this one should carry. Flagged rather
+than swept, because the alternative to flagging it is a fourth round discovering
+it.
+
+## 2026-08-16 — "done" is refused on the write path, not on one of its doors
+
+A review of the stalled-driver wakeup change (#341) reproduced the 2026-08-11 incident on a store that already carried the guard. `WorkBoardStore.complete()` refused to mark an item done while its bound run was live, but `complete()` was never the only door: `update()` accepts the full status enum, and the `work_board_update` agent tool hands a model's `status` straight to it. Patching `{status:'done'}` walked past the check and stamped `completed_at` mid-build — the same false claim, through the other door.
+
+The refusal now lives on `update()`, inside the transaction and before any write, keyed on a REAL transition into `done`. `complete()` delegates and no longer repeats the check, so there is one invariant in one place rather than two copies to drift. Non-`done` patches, `in_progress` moves and idempotent `done`→`done` writes are deliberately unaffected; a mutation run confirmed the new tests fail with the guard removed.
+
+Also corrected on the same change: `deferralLogKey` in `gateway/proactive/work-wakeup.ts` was injective only by assumption (item and run ids are unrestricted strings, so a bare separator let two distinct items collide onto one deferral window and one of them stop being logged) and is now length-prefixed; the `WAKEUP_STAND_DOWN_MS` docblock in `trident/run-driving.ts` no longer claims the reaper "always answers first", since the ordering holds against `NO_ADVANCE_HANG_MS` but not against the larger `DEFAULT_MAX_INFLIGHT_MS` ceiling; and six line-number citations that pointed at unrelated code are re-anchored to symbol names so they stop rotting.
+
 ## 2026-08-17 — a live instance crash-looped on a migration ordinal, and the repair is now in `repairs.json`
 
 An instance refused to boot for ~3 hours (1248 uncaught exceptions) because `_migrations` recorded version 124 under one name while the deployed tree carried another at that ordinal. `migrations/runner.ts` threw rather than guess, which is the designed behaviour — the cost is a hard crash loop, so the instance served nothing and clients connected to an empty server.
@@ -960,6 +1115,42 @@ perfectly (the driver ran, exit 0 — `.name` is only the description
 is `fatal: custom merge driver as-built-log lacks command line`, exit 128. Both
 of those are now pinned by tests, the lock-contention path included.
 
+One finding is recorded and NOT fixed here, deliberately. The owner-facing bubble
+is delivered to the bare `app:<owner>` topic (`open/composer.ts:984`) while a
+project chat's socket binds `app:<owner>:<project>`
+(`gateway/http/app-ws-surface.ts:201`) and delivery is an exact-key lookup, so an
+owner sitting only in a project chat sees the bubble in General rather than where
+the degradation happened — which is precisely where it happened last time. This
+is PRE-EXISTING and shared by all four notices in the family, not introduced
+here, and the durable `system_events` row plus the operator log land either way.
+Re-routing the whole notice family is a separate change with a design question
+attached (the composer's comment claims the bare topic is the only one the live
+client binds, which the surface code appears to contradict — the aspirational-
+docblock shape), so it is written down here instead of being quietly widened.
+
+One guard in that scan is DEFENSIVE AND LABELLED AS SUCH, because the honest
+thing was measured rather than assumed. `tierRankOf` refuses the empty string on
+both sides — an empty token (a padded id) and an empty family (an alias an
+operator pinned to a tier-less id like `claude-2`) — since matching either would
+rank EVERY id as the fast tier and produce a floor that clamps its own frontier
+requests. Only the token half is reachable from a test: the aliases are
+module-level consts bound at import, so no suite can pin a tier-less one.
+Removing the token filter leaves the file green on the default aliases; an
+out-of-suite probe under `NEUTRON_FAST_MODEL=claude-2` shows `'  claude-opus-5  '`
+ranking as the fast tier without the refusals and at the frontier with them. The
+first draft of that test claimed coverage it did not have, which the mutation run
+caught — the same defect class this whole round is about.
+
+Eight mutations reddened tests, each with a control proving it landed: reverting
+the family extraction reddens 3; reverting the rank to the positional lookup
+reddens 1; removing the tier-word pass reddens 1; deleting the owner notice
+reddens 3; deleting the operator log line reddens 1; bypassing the floor at the
+spawn chokepoint reddens 4; removing the poisoned seed reddens the replay test;
+flipping a memory call site onto the chat profile reddens 2. A ninth — removing
+the empty-string refusals — is the one described above as unreachable from a
+suite, and was verified by probe instead of being counted as test coverage.
+
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 THE REFUSAL WAS NOT REACHING GIT AS A REFUSAL. The rule above returns
 `{ ok: false }` for a one-sided deletion, and the driver handed that to
 `git merge-file` — which reads a one-sided deletion as a CLEAN HUNK, resolves it,
@@ -1428,7 +1619,7 @@ failed with `repository lacks the necessary blob to perform 3-way merge`, follow
 `lib.txt: patch does not apply`; restoring the guard makes the same server-side fork-point patch
 replay cleanly.
 
-## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly (2)
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
 heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
@@ -5085,6 +5276,160 @@ phrased strictly as measurements rather than an asserted cause, per #240. And
 harvest-before-reap is preserved: a crashed row that already carries a terminal
 `inner_result` still harvests on the next tick, with zero relaunches spent.
 
+## 2026-08-14 — inline activity is derived from evidence; the stored flag is a hint
+
+A Work Board card's `inline_active` used to be a promise the agent had to both make
+and retract. It now reads the world: every read boundary maps its items through one
+deriver (`makeInlineActivityDeriver`, `work-board/inline-activity.ts`) before they
+leave the server — the project-rail extras, the WS `work_board_changed` frame, the
+HTTP list / reorder / create / update / complete responses
+(`gateway/http/work-board-surface.ts`), the per-turn `<work_board>` fragment the
+agent is grounded on, and the agent's own `work_board_list` tool. The stored column
+is untouched by any read; where the flag and the evidence disagree, the evidence
+wins.
+
+WHAT COUNTS AS EVIDENCE, precisely: the inspector's THIRD clock,
+`lastWriteActivityAt(scope)` — advanced only by a row a mapper classified
+write-class (`isWriteClassTool`: the file-mutating tools, and a shell call whose
+command mutates — `git commit`, `rm`, `sed -i`, an output redirect). It is
+deliberately NOT `last_real_activity_at`, the wedge clock, which every `turn_start`,
+every status notice and the agent's own reply advance: wired to that clock, asking
+the agent an unrelated question marked every runless in-progress card as being
+worked on for 90 s, which is the stored flag's original lie with an extra step. The
+classifier fails CLOSED — an unrecognised shell form is not write-class, so the
+board under-claims rather than over-claims (acceptance (c) beats acceptance (a) on a
+tie).
+
+Evidence is TIER 1 ONLY: one O(1) in-memory `ActivityInspector` Map read per board
+render, keyed by `inspectorScopeKey(project_id)`, fed by the PreToolUse/PostToolUse
+tap that was already running. Never per row, never a shell-out, no I/O on the read
+path — the helper is BATCH-shaped precisely so the reader cannot be called inside the
+per-item loop. Tiers 2 and 3 of the card (commits on the card's branch, a dirty
+worktree) are recorded non-goals; they would shell out per row per render. The
+freshness window is `INLINE_EVIDENCE_WINDOW_MS = 90_000`, held equal to the
+inspector's `WEDGE_AFTER_MS` by a test (the module is a dependency-free leaf and
+cannot import it).
+
+GRANULARITY, AND WHY IT IS CAPPED AT ONE ROW. The clock is per PROJECT, because a
+card carries no session binding — a write cannot say WHICH of two in-progress cards
+it belongs to. Left unbounded, one write marked every runless in-progress card of the
+project active and, because both clients suppress ▶ on `inline_active`, hid
+Start/Retry BOARD-WIDE for the window: one read-only tool call could take the play
+control off three unrelated cards. So status-only derivation is RATIONED — at most
+ONE card per board may go active on project evidence alone (rule R5), the most
+recently touched eligible in-progress card, which is the card the agent moved into
+`in_progress` before it started writing. Cards whose stored flag is set are
+unaffected: that is an explicit claim, and it is still corroborated by evidence. A
+real card↔session binding on the row would replace the heuristic and is a separate
+change.
+
+RUN-BOUND CARDS FOLLOW `isLinkedRunning`, NOT MERE BINDING. R2 defers to the fork
+lane only while the bound run is LIVE; a card bound to a TERMINAL run — the
+retry-after-failure card someone is now fixing inline — reads its inline evidence
+again. The composer passes the SAME "is this run live" predicate the store's
+`isRunLive` safety invariant uses, so "bound and running" means one thing everywhere,
+and a throwing/absent run store degrades to "live" rather than inventing activity.
+
+TWO CLASSIFIER CORRECTIONS the first cut got wrong, both in the over-claiming
+direction that acceptance (c) exists to prevent. A `>` inside QUOTES is an argument,
+not a redirect (`grep -rn "a > b" src`, `awk '{if (a > b) print}'`), so quoted spans
+are blanked before the redirect is looked for; and a redirect whose target is a
+discard or scratch path (`/dev/null`, `2>&1`, `/tmp/…`, `/var/tmp/…`) writes nothing
+the board cares about — the agent is instructed to send verbose build/test output to
+a scratch log, so counting it would have made "quiet means quiet" fail on every test
+run. Separately, the tap CLIPS its rendered arguments at 2000 chars, so a long
+multi-key Bash call (`git commit -m "<long message>"`) arrives as unparseable JSON;
+the command is now recovered textually from the clipped body instead of being
+classified as `{`, i.e. as nothing.
+
+WHAT THE WRITE CLOCK CANNOT SEE, stated rather than hidden: read-only inline work.
+A research/analysis card, or a card whose inline turn is ten minutes of `bun test`,
+records no write and reads NOT active — and after 90 s of reads a genuinely live
+inline card goes quiet again, EVEN WITH THE FLAG SET. That is deliberate: the flag
+gets no exemption from the freshness check, because "the evidence wins" only means
+something in the direction that costs something. Two obligations follow, and both are
+now honoured in the code: callers describe the signal as RECENT WRITE ACTIVITY rather
+than "an inline action is executing" (both `canPlay` headers), and the operating
+doctrine + `work_board_update` description tell the agent the truth — read-only work
+is carried by the card's STATUS, not by the flag.
+
+The crashed-session heal is by construction, not by a reconciler: the inspector's
+buffer dies with the process, so after a restart evidence reads 0 and every stale
+flag reads not-active. A late-bound `inlineEvidenceReader` holder in `open/composer.ts`
+gives the same fail-soft answer before the inspector exists (unset ⇒ evidence 0 ⇒ not
+active), which is why construction order does not matter at any of the five call sites.
+
+THE ON EDGE IS PUSHED; THE OFF EDGE IS POLLED. `fanWorkBoardChanged` is driven by
+store writes and run transitions, and inline work makes NEITHER — so on an
+already-open board nothing would announce that work started, and acceptance (a) would
+hold only at server READ boundaries (reload, mutation, reconnect). The tool tap
+therefore fans ONE board frame on the rising edge of the write clock
+(`isInlineEvidenceEdge`: the first write for the scope, or the first after the signal
+expired). It is edge-only by construction, so a burst of tool calls inside an already
+active window costs nothing.
+
+Expiry, in contrast, produces no event at all, so both clients re-poll every 15 s
+while any card reads inline-active (`landing/chat-react/WorkBoardTab.tsx`,
+`app/app/projects/[id]/workboard.tsx`); the existing live-run poll cannot cover it,
+since a derived-inline card is runless-or-terminal by construction (rule R2). A quiet
+board still polls nothing. That poll is QUIET on both clients — the mobile screen
+renders `loading` as a full-screen spinner that REPLACES the board, so a loud 15 s
+poll blanked the board for exactly as long as the feature was on.
+
+ONE DELIBERATE ASYMMETRY: the HTTP echoes of create/update/complete derive, while
+the AGENT-TOOL mutation echoes (`work-board/agent-tool.ts`) return the raw stored
+hint. Those echoes are transactional acks of the write just performed — the agent
+asked for a value and gets back what was stored — whereas the HTTP echo is what a
+client paints straight into the board. The read surfaces the agent sees (the
+`<work_board>` fragment and `work_board_list`) do derive.
+
+Nothing here blocks, denies, delays or gates a tool call — this is the display-only
+salvage of the cancelled PreToolUse-gate plan, and the agent-tool dep is threaded as
+an optional opt (absent ⇒ byte-identical raw passthrough on legacy boxes). Mutant
+pins: `work-board/inline-activity.test.ts` (unconditional-true, the latch, the exact
+window boundary, and the deriver's scope-key + per-call-clock contract),
+`open/activity-inspector.test.ts` (the write clock vs the wedge clock on a
+no-write turn, the keepalive mutant, the classifier, the window equality),
+`work-board/agent-tool.test.ts` (activation with no `work_board_update` in the path,
+the stale-flag heal, the no-latch expiry, dep-absent passthrough, the General scope
+id, and an `inline_active` write still returning `ok`),
+`gateway/http/work-board-surface.test.ts` (acceptance a–e per response shape, with
+(d) asserting the mutations actually landed and (e) also pinning that five
+in-progress cards do not all light from one write),
+`app/__tests__/workboard-inline-activity-poll.test.ts` (the mobile poll is quiet and
+a failed quiet poll leaves the board standing) and
+`open/__tests__/inline-activity-wiring.test.ts` (real tap → real inspector → real
+deriver for a–c, plus every composer call site pinned BY NAME rather than by a call
+count, the late binding, the tap's evidence edge, and the `build-core-modules.ts`
+threading).
+
+## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
+
+`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
+build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
+>30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
+the host-held part files into a temp dir, the real workflow composes the forge:build
+prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
+by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
+then concatenated in the listed order and measured against the prompt's
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
+recomputes before it spends a token. Chained with the by-path suite in
+`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
+reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
+agent retyping anywhere in the path. Test-only; no production file changed.
+
+Two findings from building it. First, the chunk blocks may NOT have their paths
+rewritten wholesale: the coda forming the `.a2` segment names
+`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
+bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
+the assembled brief is asserted to mention neither segment path. Second, dropping the
+trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
+`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
+newline; the sensitivity check therefore uses mutations that move a real byte. Under a
+one-character head-slice shift and under a one-character tail edit, both new tests go
+RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
+gap this task existed to close.
+
 ## 2026-08-15 — a pr-mode build rebases onto observed main before review
 
 `trident/orchestrator.ts` `publishBuiltCommit` now rebases the built branch onto
@@ -5188,33 +5533,6 @@ re-run rebuilds, because there is no resume-a-terminal-run path (see above). Wid
 window trades a longer stall on every genuinely-dead branch for a rarer manual re-run; the
 numbers live in one exported constant so that trade can be made with evidence rather than
 by guess.
-
-## 2026-08-14 — the by-path build brief is proven in lockstep, prompt to receipt
-
-`trident/inner-workflow-assembly.test.ts` gains an end-to-end proof that the codex
-build prompt's OWN emitted transport assembles to the prompt's OWN receipt. For a
->30 KB task, with and without reflection guidance, the real `writeBriefParts` writes
-the host-held part files into a temp dir, the real workflow composes the forge:build
-prompt from that manifest, and the prompt's `CALL n of N` chunk blocks are executed
-by real `bash`. The files named by the prompt's `NEUTRON_CODEX_BUILD_BRIEF_PARTS` are
-then concatenated in the listed order and measured against the prompt's
-`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` — the byte count and fnv32 `codex-build.sh`
-recomputes before it spends a token. Chained with the by-path suite in
-`trident/codex-build.test.ts`, which already proves any receipt-matching parts list
-reaches codex byte-identical, this closes launcher → prompt → wrapper → codex with no
-agent retyping anywhere in the path. Test-only; no production file changed.
-
-Two findings from building it. First, the chunk blocks may NOT have their paths
-rewritten wholesale: the coda forming the `.a2` segment names
-`/tmp/trident-codex-build-<run>.diff` as brief TEXT, so a blanket rewrite corrupts the
-bytes the receipt covers. Only the `shSingleQuote`d redirect targets are remapped, and
-the assembled brief is asserted to mention neither segment path. Second, dropping the
-trailing newline from `codexBriefByPath`'s `tail` is an EQUIVALENT mutant, because
-`chunkTextOnLines` re-attaches `\n` to every line and so normalizes a missing terminal
-newline; the sensitivity check therefore uses mutations that move a real byte. Under a
-one-character head-slice shift and under a one-character tail edit, both new tests go
-RED on the receipt assertion while all 141 pre-existing tests stay green — which is the
-gap this task existed to close.
 
 ## 2026-08-14 — credentials scoped to a previous owner handle migrate at boot, and a scope miss is no longer "not connected"
 
@@ -21428,6 +21746,15 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
+# 2026-08-16 — Fresh build branches pin the fetched origin base
+
+Fresh PR-mode launches now fetch `origin/<base>` before firing, record the resolved
+`base_sha` and the local branch's measured `base_behind`, and make Forge create its
+branch and review diff from that exact commit. This prevents the measured 16-commit
+staleness of the shared checkout from accumulating until publish-time repair. Two
+failed fetch attempts are a named pre-fire infrastructure terminal; the workflow is
+never fired against a silently stale fallback. P2 Codex parity, P3 surfacing, and P4
+infra-vs-verdict presentation remain follow-ups.
 
 **Dispatch-time credentialed merge-mode probe.** The direct board-dispatch
 fallback now probes git and gh with the GitHub credential resolved from the
@@ -21528,3 +21855,140 @@ option, so it never appears on the captured opts the wiring test inspects. It re
 a passing check on the right field and would have asserted `undefined` against a name
 that does not live on that object. Printed the field, deleted the assertion, and left
 a note pointing at the file where the lane IS observable.
+## 2026-08-17 — an untracked .sql in the migrations directory was applied silently
+
+Landed via PR #374.
+
+`loadMigrations` applied every file matching `NNNN_*.sql` that was PRESENT IN THE
+DIRECTORY, tracked or not (`migrations/runner.ts`, the `readdirSync` filter). So a
+stray file that appeared there for a moment was applied at boot, recorded in
+`_migrations` permanently, and then vanished with the next checkout — leaving a
+ledger row naming a migration the repository never contained, after which every
+boot refused on a mismatch nothing on disk could explain. Fourth occurrence of the
+class; it took a live instance down twice, the last time for three hours (row 124,
+resolved only by a hand-verified `repairs.json` entry; row 122 is the same shape
+two days earlier). Rows 125 and 126 on that instance were measured the same way and
+have no source in any checkout, any vendor commit, or any reachable commit.
+
+PR #352 considered this exact check and DECLINED it, on two sound objections: it
+needs ground truth about "the deployed tree" that a tarball install does not have,
+and `git status` on the boot path can hang. Both are answered rather than waved
+past. `migrations/git-index.ts` reads `.git/index` as a plain FILE and decodes it —
+no subprocess, the same constraint `provenance.ts` already obeys for `HEAD`. And
+the reach objection frames the choice as "refuse everything or silently pass",
+missing the option the ledger exists to express: **absence of git metadata means
+CANNOT VERIFY, not NOTHING TO VERIFY.** Verifiable-and-untracked refuses before
+any write; unverifiable applies and records `tree_provenance =
+unverifiable:<reason>` on the row, so the ledger says which it was instead of
+implying a clean apply. Third nullable column, added through the same additive
+`PROVENANCE_COLUMNS` path — not a parallel mechanism, and not an overload of
+`applied_by_commit`, whose name would then no longer describe its content.
+
+The guard deliberately does not fire where it cannot decide, and each of those is a
+false-refusal that would have been worse than the bug: a migration directory the
+tree does not track AT ALL (`node_modules`, a build directory) reads as
+`directory-not-tracked`; index shapes the parser does not decode (version 4, split,
+sparse) and any corrupt file read as unverifiable; parsing is strict about landing
+exactly on the trailing checksum, because a PARTIAL path list is the one wrong
+answer that produces a false refusal. Only pending migrations are checked — a
+recorded row is already permanent, and refusing forever over a stray applied long
+ago would be an outage with no remedy.
+
+Measured, not assumed: the parser's output equals `git ls-files` on this repository
+exactly (3083 = 3083), and two other real indexes parse to 3019 and 15494 paths,
+one from a linked worktree and one from an ordinary clone. Both new guards were
+mutation-tested against the REAL files, not only scratch copies — dropping the
+refusal reddens 6 tests, dropping the reach guard reddens 3 (including the
+PRE-EXISTING `ordinal-collision-mutation` test, whose fixtures live in an untracked
+scratch directory, which is live proof the reach guard is load-bearing). Neither
+mutant kills the other's scenario. `bun test migrations/` 115 pass / 0 fail; runner
+consumers 471 pass; the sidecar-migration packages 2299 pass. Typecheck 50/51, the
+one failure (`app/tsconfig.json`, missing `node` types) reproducing identically on
+the untouched tree in this checkout. Leak gate 168 findings, the same count `main`
+produces, none in a file this change touches.
+
+### Review round 2 — four defects in the above, three of which made it wrong
+
+All still PR #374. Every item below was a real defect in the first cut, and each is
+recorded with what it would have cost, because three of them turned a guard into a
+new way to fail.
+
+**The ledger value overclaimed, and staging alone satisfied it.** `.git/index` is
+the STAGED tree, not the committed one, so `git add` (or `git add -N`) of a stray
+flipped the refusal to an apply and recorded it as `tracked` — a row asserting the
+deployed tree contained a file no commit ever did, which is the orphan row this work
+exists to prevent, now wearing a clean label. Two changes: intent-to-add entries
+(`git add -N`, which stages no content and so is in no tree at all) are excluded
+from the tracked set, and the recorded value is now `tracked-in-index`, naming its
+own evidence. HEAD-tree verification stays OUT of scope, and this is the argument
+rather than a shrug: commit and tree objects live in a packfile in any clone, so it
+would mean an `.idx` search plus `OFS_DELTA`/`REF_DELTA` reconstruction — hundreds
+of lines of binary decoding, on the boot path, to close a hole narrower than the one
+being closed, in a module whose entire premise is that it must not become a new
+cause of a boot outage. The residual (a staged-but-uncommitted migration still
+applies) is documented at `migrations/git-index.ts`'s header, in `migrations/README.md`,
+and in the value itself. A forensic column that has to be discounted is worth less
+than one that is modest and exact.
+
+**The refusal claimed "nothing has been written" while the repairs write ran
+first.** `_migration_repairs` DDL and its `INSERT OR IGNORE` executed before the
+tree was resolved, so on any instance carrying acknowledged repairs — this
+repository ships two, and a live instance took both — the sentence an operator reads
+during incident recovery was false. Every refusal is now decided before the first
+write, and the claim is stronger than it was: `_migrations` itself is created only on
+the path that inserts a row (`ensureLedgerShape`, with `readLedger` tolerant of the
+table's absence), so a refused boot leaves `sqlite_master` empty on a fresh database.
+Pinned by asserting the whole of `sqlite_master`, which is the only form of that
+assertion a table nobody thought to name cannot satisfy — and by a test that stages
+an acknowledgeable repair *and* a stray together, with the stray's deletion as the
+control that proves the repair does land.
+
+**The index's own checksum was never verified.** It was used only as a
+strict-landing offset. A flipped byte INSIDE a pathname leaves every entry length
+untouched, so the walk landed exactly where it should and returned an
+authoritative-looking list holding a corrupted name — after which the real file read
+as untracked and a legitimate deploy refused to boot. That is the precise false
+refusal the strict-landing comment claimed to guard against, produced by trusting
+bytes that carried their own proof of corruption. The trailing SHA-1 is now
+recomputed before any path is decoded, with two distinct verdicts:
+`index-checksum-mismatch` (corruption, or a shape this reader misunderstands — a
+SHA-256 repository closes its index with 32 bytes) and `index-hash-skipped`
+(`index.skipHash`, which `feature.manyFiles` enables, where git deliberately writes
+no hash). Both degrade to unverifiable, which applies and records rather than
+refusing. The test flips one byte in a pathname and asserts the boot survives; its
+control re-seals the trailer over the corrupted bytes and shows that same boot
+refusing, which is what makes the degradation the fix rather than a shrug.
+
+**A stray at an already-recorded ordinal was diagnosed as a rename.** The mismatch
+loop threw before any tree verdict existed, so the operator was sent to a
+`repairs.json` entry naming a file the tree does not track — which the sibling
+message correctly calls the disease, and which is exactly how ordinals 122 and 124
+presented on the live instance, and why the remedy applied there was the harder one.
+The tree is now resolved for a mismatch as well as for a pending file, and an
+untracked file at a recorded ordinal gets the untracked diagnosis, states what the
+mismatch would have been, and points at deletion — which clears both at once. An
+*acknowledged* repair still wins over the untracked verdict, deliberately: that entry
+is an explicit hand-verified decision about one ordinal, and overriding it would
+convert a documented recovery into an outage with no remedy.
+
+Also: the mutation suite covered two mutants and now covers FOUR, rewritten as a
+table so each property carries its own kill — refusal, reach, the
+unverifiable-RECORDING path (a mutant that records `tracked-in-index` for a tree it
+could not check), and the recorded-ordinal DIAGNOSIS. Each kills exactly one of four
+scenarios, asserted on the pass/fail counts because a passing test's name is never
+printed, with the unmutated control green on all four. The two ground-truth controls
+that legitimately cannot run everywhere (no `.git`, no `git` on PATH) now print
+`CONTROL DID NOT EXECUTE` instead of returning early into a silent pass — this
+repository's own rule-7 shape. Stale prose corrected: "Both are nullable" over three
+columns, and INVARIANTS #17, which attributed `formatUntrackedMigration` to
+`migrations/provenance.ts` (it is in `migrations/runner.ts`) and carried a line
+anchor that had drifted off the code it cited; it now cites by function name, names
+all three refusals, and records the `tracked-in-index` scope decision so a later
+reader cannot "tidy" the value into an overclaim.
+
+Re-measured this round on this checkout: the parser equals `git ls-files` exactly
+again, now WITH checksum verification active (3093 = 3093, zero missing, zero extra)
+— which is the positive control that matters most here, since an encoder and a
+parser agreeing on a wrong hash would pass every hand-built fixture and reject every
+real index on earth. `bun test migrations/` 120 pass / 0 fail. The four mutants kill
+four scenarios, one each.

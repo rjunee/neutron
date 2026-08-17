@@ -121,6 +121,9 @@ const {
   // Git-mode threaded from the run (`local` | `pr`). Defaults to `pr` for any
   // legacy caller that doesn't thread it; the launcher always sets it.
   mergeMode = 'pr',
+  // The origin/<base> tip fetched and resolved in code at fire time. A valid
+  // value pins fresh branch creation and its review diff; invalid/absent is legacy.
+  baseSha = null,
   prNumber = null,
   branch = null,
   dbPath,
@@ -710,7 +713,7 @@ function routeModel(label, tag) {
         ? ROLE_MODEL['checkpoint']
         : label.startsWith('head-probe-round-')
           ? ROLE_MODEL['head-probe']
-          : label.startsWith('build-trailer-probe-')
+          : label.startsWith('probe:codex-trailer-')
             ? ROLE_MODEL['build-trailer-probe']
             : label.startsWith('ci-probe-round-')
               ? ROLE_MODEL['ci-probe']
@@ -1183,10 +1186,26 @@ const NO_PATTERN_KILL_RULE =
 //     contract, telling the fix agent to `git switch -c` an already-created
 //     branch + `gh pr create` a duplicate — conflicting instructions that broke
 //     every REQUEST_CHANGES run.
+const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.trim().toLowerCase())
+  ? baseSha.trim().toLowerCase()
+  : null
+
 function forgeStep1(reenter) {
   return reenter
     ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
-    : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
+    // BOTH halves are load-bearing and this line is where they meet:
+    //  • base-pinning (#332) — branch from the sha origin/<base> had AT LAUNCH, not the
+    //    worktree's default HEAD, which can be behind;
+    //  • create-or-re-enter (#346, measured incident d5c1e219) — a leftover local branch
+    //    from a failed run of the same card must not kill the build with "branch already
+    //    exists", which sent the commit to the worktree's auto `worktree-wf_*` branch and
+    //    made the divergence guard refuse the round.
+    // The fallback deliberately does NOT repeat the pinned base: re-entering an EXISTING
+    // branch must not try to re-point it at the launch sha, which would discard the very
+    // work we are re-entering to keep.
+    : pinnedBase !== null
+      ? `Run \`git switch -c ${forgeBranch} ${pinnedBase} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — ${pinnedBase.slice(0, 7)} is origin/${baseBranch} as observed at launch; do NOT branch from the worktree's default HEAD, which can be behind. If the branch already exists from a previous run of this card, RE-ENTER it rather than failing. (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+      : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
 }
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
@@ -1213,7 +1232,7 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
 ${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
@@ -1652,13 +1671,70 @@ For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred', trailerComplete=false, wrapperExitCode=null, and report whether the current worktree has preserved work.`
 }
 
+function codexTrailerProbePrompt(slot) {
+  const uniq = runId || slug
+  const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
+  const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
+  const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
+  return `Run EXACTLY this single Bash command and report what it prints via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+Do NOT modify anything. Do NOT interpret any value. Report every value verbatim. NEVER EXIT SILENTLY.
+\`b1=$(wc -c < ${shSingleQuote(errFile)} 2>/dev/null || echo -1); sleep 20; b2=$(wc -c < ${shSingleQuote(errFile)} 2>/dev/null || echo -1); echo "ERR_BEFORE=$b1"; echo "ERR_AFTER=$b2"; echo "EXIT=$(cat ${shSingleQuote(exitFile)} 2>/dev/null)"; echo TRAILER_BEGIN; cat ${shSingleQuote(trailerFile)} 2>/dev/null; echo TRAILER_END\`
+Report errBytesBefore and errBytesAfter as the two printed integers. Report exitCode as the integer after EXIT=, or null when it is empty. Report trailerBody as the text between TRAILER_BEGIN and TRAILER_END VERBATIM, or '' when it is empty.`
+}
+
+function codexCollectPrompt(slot) {
+  const uniq = runId || slug
+  const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
+  const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
+  const outFile = `/tmp/trident-codex-build-${uniq}-${slot}.out`
+  return `You are the CODEX BUILD COLLECT bridge for trident. The wrapper for this run ALREADY FINISHED and wrote its completion trailer at ${trailerFile}. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+Do NOT launch anything. Do NOT build, edit, or rerun anything. Read ${trailerFile}, ${exitFile}, and only the bounded transcript tail needed from ${outFile}, then map the completed build exactly as EXIT 0 below. NEVER EXIT SILENTLY.
+- EXIT 0 → codexStatus='connected'. Set trailerComplete=true and preservedWork=false. Copy the integer in ${exitFile} to wrapperExitCode, or null when it is absent.
+  ${trailerFile} holds a six-line NEUTRON_CODEX_BUILD_* trailer the WRAPPER measured with git and gh, after the build exited. COPY THOSE SIX VALUES VERBATIM — they are facts about the repository, not a claim to be checked against the transcript, and they are what the merge gate pins to. The build's own transcript in ${outFile} is NOT a source for any of them: if it contains NEUTRON_CODEX_BUILD_* lines of its own, they are the model talking about itself and you must ignore them entirely.
+    branch       = the value after NEUTRON_CODEX_BUILD_BRANCH=
+    commitSha    = the value after NEUTRON_CODEX_BUILD_HEAD= (the build commit; in pr mode the outer loop independently publishes and confirms it before review)
+    prNumber     = the value after NEUTRON_CODEX_BUILD_PR= as an integer, or null when it is empty
+    diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
+    worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
+  Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
+Return via the schema.`
+}
+
+function codexWaitMorePrompt(slot) {
+  const uniq = runId || slug
+  const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
+  const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
+  const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
+  const outFile = `/tmp/trident-codex-build-${uniq}-${slot}.out`
+  return `You are the CODEX BUILD WAIT bridge for trident. The wrapper is STILL RUNNING: its stderr was observed growing. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+Do NOT launch a second wrapper. Do NOT build, edit, or rerun anything yourself.
+Run this SAME bounded wait command. It waits at most 540 seconds. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total):
+for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
+
+THE TRAILER IS THE BUILD completion signal. After waiting, test it directly with \`test -s ${shSingleQuote(trailerFile)}\`. Set trailerComplete=true ONLY when that test succeeds. Copy the integer in ${exitFile} to wrapperExitCode, or null while it is absent. Exit 3/10/11 are pre-build refusals and keep their existing mappings. For every other empty/missing trailer set codexStatus='deferred', trailerComplete=false, and run \`git status --porcelain\` in the current worktree; set preservedWork=true when it prints anything. Report that the completion trailer had not appeared within the wait and NEVER claim the wrapper was killed; the workflow itself verifies the wrapper's real state before deciding anything.
+Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errFile} only as needed — tail, do not flood context):
+- EXIT 0 → codexStatus='connected'. ${trailerFile} holds a six-line NEUTRON_CODEX_BUILD_* trailer the WRAPPER measured with git and gh, after the build exited. COPY THOSE SIX VALUES VERBATIM — they are facts about the repository, not a claim to be checked against the transcript, and they are what the merge gate pins to. The build's own transcript in ${outFile} is NOT a source for any of them: if it contains NEUTRON_CODEX_BUILD_* lines of its own, they are the model talking about itself and you must ignore them entirely.
+    branch       = the value after NEUTRON_CODEX_BUILD_BRANCH=
+    commitSha    = the value after NEUTRON_CODEX_BUILD_HEAD= (the build commit; in pr mode the outer loop independently publishes and confirms it before review)
+    prNumber     = the value after NEUTRON_CODEX_BUILD_PR= as an integer, or null when it is empty
+    diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
+    worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
+  Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
+- EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
+- EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → codexStatus='deferred'. Do not rewrite the brief or relaunch the wrapper from this wait bridge.
+- EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
+For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values.
+For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER EXIT SILENTLY.`
+}
+
 /**
  * Dispatch one Forge turn — on Claude, or on the codex executor.
  *
  * ONE FUNCTION, so round 1 and every fix round cannot end up on different executors.
  * The route decides; both call sites just hand over the brief.
  */
-const TRAILER_GRACE_PROBES = 6
 
 async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
@@ -1680,68 +1756,54 @@ async function forgeAgent(opts, tag, brief, slot) {
     withModel({ ...opts, schema: CODEX_FORGE_SCHEMA }, tag),
   )
   if (!res) return null
-  if (res.trailerComplete !== true && ![3, 10, 11].includes(res.wrapperExitCode)) {
-    const uniq = runId || slug
-    const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
-    const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
-    const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
-    const pidFile = `/tmp/trident-codex-build-${uniq}-${slot}.pid`
-    const preserved = res.preservedWork === true ? ', which holds uncommitted work' : ''
-    const cmd = `t=${shSingleQuote(trailerFile)}; x=${shSingleQuote(exitFile)}; e=${shSingleQuote(errFile)}; p=${shSingleQuote(pidFile)}; b=$(wc -c < "$e" 2>/dev/null || echo -1); for i in $(seq 1 60); do if test -s "$t" || test -s "$x"; then break; fi; sleep 5; done; a=$(wc -c < "$e" 2>/dev/null || echo -1); alive=false; pid=$(cat "$p" 2>/dev/null); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=true; fi; printf 'ALIVE=%s\nEXIT=%s\nERR_BEFORE=%s\nERR_AFTER=%s\nTRAILER_BEGIN\n' "$alive" "$(cat "$x" 2>/dev/null)" "$b" "$a"; cat "$t" 2>/dev/null; printf 'TRAILER_END\n'`
-
-    for (let attempt = 1; attempt <= TRAILER_GRACE_PROBES; attempt++) {
-      const probe = await seatAttempt(`build-trailer-probe-${slot}-${attempt}`, () =>
-        agent(
-          `Run EXACTLY this single Bash command and copy each value it prints verbatim into the schema: trailer is the bytes between TRAILER_BEGIN and TRAILER_END (use '' when empty), and the other four fields are the corresponding printed values. Do not interpret any value, do not run anything else, and do not modify anything. \`kill -0\` sends NO signal: it is a read-only existence test on a pid this run itself recorded, so it does not violate the no-pattern-kill rule.\n${cmd}`,
-          withModel({ label: `build-trailer-probe-${slot}`, phase: 'Build', schema: BUILD_TRAILER_PROBE_SCHEMA }),
-        ),
+  const uniq = runId || slug
+  const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
+  const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
+  const preservedSuffix = () => res.preservedWork === true ? ', which holds uncommitted work' : ''
+  const exitedError = (code) => new Error(
+    code >= 128
+      ? `${opts.label} DEFERRED: the build wrapper was killed before it could report (its supervisor recorded exit ${code} — signal ${code - 128}); its completion trailer ${trailerFile} is empty or missing. Inspect ${errFile} and the preserved worktree${preservedSuffix()}.`
+      : `${opts.label} DEFERRED: the build wrapper exited with code ${code} without writing its completion trailer ${trailerFile}. Inspect ${errFile} and the preserved worktree${preservedSuffix()}.`,
+  )
+  const awaitingTrailerError = () => {
+    const err = new Error(
+      `${opts.label} deferred: the completion trailer ${trailerFile} had not appeared within the wait and no wrapper exit was recorded — a timeout, not an observed kill. The worktree is preserved; the run is resumable and collects the trailer if it lands. Inspect ${errFile}.`,
+    )
+    err.awaitingTrailer = true
+    return err
+  }
+  let probes = 0
+  let extensions = 0
+  while (res && res.trailerComplete !== true && ![3, 10, 11].includes(res.wrapperExitCode)) {
+    const probe = await agent(
+      codexTrailerProbePrompt(slot),
+      withModel({ label: `probe:codex-trailer-${slot}`, phase: 'Build', schema: CODEX_TRAILER_PROBE_SCHEMA }),
+    )
+    const cls = probe ? classifyTrailerWait(probe) : { verdict: 'no-evidence' }
+    probes++
+    if (cls.verdict === 'collect') {
+      const got = await agent(
+        codexCollectPrompt(slot),
+        withModel({ ...opts, schema: CODEX_FORGE_SCHEMA }, tag),
       )
-      if (probe === null) {
-        log(`trident-v2 ${opts.label}: trailer probe ${attempt}/${TRAILER_GRACE_PROBES} died; that is not evidence the build died`)
+      if (got) {
+        res = got
         continue
       }
-
-      const disposition = classifyTrailerWait(probe)
-      if (disposition.state === 'landed') {
-        const t = disposition.trailer
-        const rawExit = String(probe.exitCode).trim()
-        const wrapperExitCode = /^-?\d+$/.test(rawExit) ? Number.parseInt(rawExit, 10) : null
-        log(`trident-v2 ${opts.label}: late completion trailer landed on probe ${attempt}/${TRAILER_GRACE_PROBES}: ${trailerFile}`)
-        res = {
-          codexStatus: 'connected',
-          trailerComplete: true,
-          wrapperExitCode,
-          branch: t.branch,
-          commitSha: t.head,
-          prNumber: t.pr === '' ? null : Number(t.pr),
-          diffFile: t.diff,
-          worktreePath: t.worktree,
-          testsPassed: false,
-          suiteOutcome: 'not-run',
-          preservedWork: false,
-        }
-        break
-      }
-      if (disposition.state === 'alive') {
-        log(`trident-v2 ${opts.label}: trailer absent but the wrapper is alive (supervisor pid live or stderr grew) — a live build must not be declared DEFERRED; extending the wait (probe ${attempt}/${TRAILER_GRACE_PROBES})`)
+    } else if (cls.verdict === 'exited') {
+      throw exitedError(cls.exitCode)
+    } else if (cls.verdict === 'extend' && extensions < 2) {
+      extensions++
+      const got = await agent(
+        codexWaitMorePrompt(slot),
+        withModel({ ...opts, schema: CODEX_FORGE_SCHEMA }, tag),
+      )
+      if (got) {
+        res = got
         continue
       }
-      if (disposition.signalExit !== null) {
-        throw new Error(
-          `${opts.label} DEFERRED: the build wrapper was killed (signal exit ${disposition.signalExit} recorded in ${exitFile}) before it wrote its completion trailer ${trailerFile}. Inspect ${errFile} and the preserved worktree${preserved}.`,
-        )
-      }
-      throw new Error(
-        `${opts.label} DEFERRED: the codex build's completion trailer ${trailerFile} had not appeared within the wait, and the wrapper could no longer be observed alive (no kill was observed). Inspect ${errFile} and the preserved worktree${preserved}.`,
-      )
     }
-
-    if (res.trailerComplete !== true) {
-      // Task 2 will persist this live give-up as the recoverable awaiting-trailer checkpoint.
-      throw new Error(
-        `${opts.label} DEFERRED: the codex build's completion trailer ${trailerFile} had not appeared within the wait; the wrapper was still alive when this run stopped waiting — the build may still finish. No kill was observed. Inspect ${errFile} and the preserved worktree${preserved}.`,
-      )
-    }
+    if (probes >= 2) throw awaitingTrailerError()
   }
   if (res.codexStatus !== 'connected') {
     // A LANE THAT COULD NOT RUN IS NOT A BUILD, and it must not be reported as one.
@@ -2556,37 +2618,23 @@ function oidClaim(value) {
   return OID_CLAIM.test(s) ? s : null
 }
 
-function parseBuildTrailer(text) {
-  const fields = [
-    ['NEUTRON_CODEX_BUILD_BRANCH=', 'branch'],
-    ['NEUTRON_CODEX_BUILD_HEAD=', 'head'],
-    ['NEUTRON_CODEX_BUILD_REMOTE_HEAD=', 'remoteHead'],
-    ['NEUTRON_CODEX_BUILD_PR=', 'pr'],
-    ['NEUTRON_CODEX_BUILD_DIFF=', 'diff'],
-    ['NEUTRON_CODEX_BUILD_WORKTREE=', 'worktree'],
-  ]
-  const lines = String(text).split('\n')
-  const parsed = {}
-  for (const [prefix, name] of fields) {
-    const matches = lines.filter((line) => line.startsWith(prefix))
-    if (matches.length !== 1) return null
-    parsed[name] = matches[0].slice(prefix.length)
-  }
-  return parsed
-}
-
 function classifyTrailerWait(probe) {
-  const trailer = parseBuildTrailer(probe && probe.trailer)
-  if (trailer !== null) return { state: 'landed', trailer }
-
-  const exitCode = String(probe && probe.exitCode !== undefined ? probe.exitCode : '').trim()
-  const before = probe && typeof probe.errBytesBefore === 'number' ? probe.errBytesBefore : -1
-  const after = probe && typeof probe.errBytesAfter === 'number' ? probe.errBytesAfter : -1
-  if (probe && probe.alive === true) return { state: 'alive' }
-  if (exitCode === '' && before >= 0 && after > before) return { state: 'alive' }
-
-  const rc = /^-?\d+$/.test(exitCode) ? Number.parseInt(exitCode, 10) : null
-  return { state: 'dead', signalExit: rc !== null && rc >= 128 ? rc : null }
+  if (
+    probe &&
+    typeof probe.trailerBody === 'string' &&
+    probe.trailerBody.split('\n').some((line) => line.startsWith('NEUTRON_CODEX_BUILD_HEAD='))
+  ) return { verdict: 'collect' }
+  if (probe && Number.isFinite(probe.exitCode) && Number.isInteger(probe.exitCode)) {
+    return { verdict: 'exited', exitCode: probe.exitCode }
+  }
+  if (
+    probe &&
+    typeof probe.errBytesBefore === 'number' &&
+    probe.errBytesBefore >= 0 &&
+    typeof probe.errBytesAfter === 'number' &&
+    probe.errBytesAfter > probe.errBytesBefore
+  ) return { verdict: 'extend' }
+  return { verdict: 'no-evidence' }
 }
 
 /**
@@ -3976,14 +4024,13 @@ const BRANCH_HEAD_SCHEMA = {
   },
 }
 
-const BUILD_TRAILER_PROBE_SCHEMA = {
+const CODEX_TRAILER_PROBE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['trailer', 'exitCode', 'alive', 'errBytesBefore', 'errBytesAfter'],
+  required: ['trailerBody', 'exitCode', 'errBytesBefore', 'errBytesAfter'],
   properties: {
-    trailer: { type: 'string' },
-    exitCode: { type: 'string' },
-    alive: { type: 'boolean' },
+    trailerBody: { type: 'string' },
+    exitCode: { type: ['number', 'null'] },
     errBytesBefore: { type: 'number' },
     errBytesAfter: { type: 'number' },
   },
@@ -6188,8 +6235,14 @@ ${task}${reflectionGuidance}`,
   // the backstop. The `finally` cleanup still runs. We RETURN the failure object
   // (the detached workflow's result API) rather than re-throwing, so the result is
   // a clean terminal value, not an error.
+  const awaiting = err != null && err.awaitingTrailer === true
   const thrownMessage = err && err.message ? String(err.message) : String(err)
   log(`trident-v2 inner THREW: ${thrownMessage}`)
+  if (awaiting) {
+    try {
+      await checkpoint('awaiting-trailer', { pr })
+    } catch {}
+  }
   const failureResult = {
     ok: false,
     prNumber: pr,
@@ -6210,6 +6263,10 @@ ${task}${reflectionGuidance}`,
     // bounded stops use. No `blockKind` is asserted alongside it: a throw is not a review
     // verdict, and `null` keeps the outer loop from claiming the code was judged.
     terminalCause: infraCause(thrownMessage),
+  }
+  if (awaiting) {
+    failureResult.checkpoint = 'awaiting-trailer'
+    failureResult.blockKind = 'infra-only'
   }
   try {
     await writeTerminalResult(failureResult)

@@ -926,4 +926,76 @@ describe('WorkBoardTab (happy-dom)', () => {
 
     expect(escaped).toBeNull()
   })
+
+  /**
+   * The derived `inline_active` expires on a CLOCK (a 90 s server-side evidence
+   * window), and an expiry writes nothing — so no `work_board_changed` frame is
+   * ever pushed to retire it. Without a re-read a stationary board would keep
+   * pulsing with ▶ suppressed forever. A derived-inline card is runless by
+   * construction, so the live-run poll cannot cover this case.
+   *
+   * Drives the interval directly (captured `setInterval` callback) rather than
+   * waiting 15 s of wall clock.
+   */
+  describe('re-polls while a card reads inline-active', () => {
+    async function mountCapturingIntervals(rows: WorkBoardItem[]): Promise<{
+      calls: string[]
+      fire: () => Promise<void>
+      unmount: () => Promise<void>
+    }> {
+      const ticks: Array<() => void> = []
+      const realSetInterval = globalThis.setInterval
+      // Capture only the board's own 15 s poll; anything else runs as normal.
+      ;(globalThis as unknown as { setInterval: unknown }).setInterval = ((
+        cb: () => void,
+        ms?: number,
+      ): number => {
+        if (ms === 15_000) {
+          ticks.push(cb)
+          return 0 as unknown as number
+        }
+        return realSetInterval(cb, ms) as unknown as number
+      }) as unknown as typeof globalThis.setInterval
+      try {
+        const mounted = await mount(listOf(rows))
+        return {
+          calls: mounted.calls,
+          fire: async (): Promise<void> => {
+            await mounted.act(async () => {
+              for (const t of ticks) t()
+              await tick()
+              await tick()
+            })
+          },
+          unmount: async (): Promise<void> => {
+            await mounted.act(async () => mounted.root.unmount())
+          },
+        }
+      } finally {
+        globalThis.setInterval = realSetInterval
+      }
+    }
+
+    it('re-reads the board while a runless card reads inline-active', async () => {
+      const board = await mountCapturingIntervals([
+        item({ id: 'w1', status: 'in_progress', inline_active: true }),
+      ])
+      const before = board.calls.filter((c) => c.startsWith('GET')).length
+      await board.fire()
+      expect(board.calls.filter((c) => c.startsWith('GET')).length).toBeGreaterThan(before)
+      await board.unmount()
+    })
+
+    it('does NOT poll a quiet board', async () => {
+      // The negative half: a poll that always runs is a battery bug, and it would
+      // also make the test above pass for the wrong reason.
+      const board = await mountCapturingIntervals([
+        item({ id: 'w1', status: 'in_progress', inline_active: false }),
+      ])
+      const before = board.calls.filter((c) => c.startsWith('GET')).length
+      await board.fire()
+      expect(board.calls.filter((c) => c.startsWith('GET')).length).toBe(before)
+      await board.unmount()
+    })
+  })
 })

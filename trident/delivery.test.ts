@@ -30,6 +30,8 @@ function runWith(overrides: Partial<TridentRun> = {}): TridentRun {
     ralph_round: 0,
     max_ralph_rounds: 20,
     branch: 'trident/add-flag',
+    base_sha: null,
+    base_behind: null,
     pr: null,
     merge_mode: 'local' as MergeMode,
     subagent_run_id: null,

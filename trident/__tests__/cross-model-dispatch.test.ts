@@ -120,12 +120,13 @@ async function runWorkflow(
     missingBuildTrailer?: boolean
     /** Answers returned by the truth-order probe after the bridge's wait expires. */
     trailerProbe?: Array<{
-      trailer?: string
-      exitCode?: string
-      alive?: boolean
+      trailerBody?: string
+      exitCode?: number | null
       errBytesBefore?: number
       errBytesAfter?: number
     }>
+    /** Make the bounded follow-up wait return a completed trailer. */
+    waitBridgeCompletes?: boolean
     /** The preserved build worktree contains changes after that death. */
     preservedBuildWork?: boolean
   } = {},
@@ -134,11 +135,19 @@ async function runWorkflow(
   const logs: string[] = []
   let synthCount = 0
   let deferredClaudeSeat = false
-  let trailerProbeIndex = 0
 
   const agent = async (prompt: string, o?: Record<string, unknown>): Promise<unknown> => {
     const label = o?.['label'] as string | undefined
     captured.push({ label, prompt, opts: o ?? {} })
+    if (String(label).startsWith('probe:codex-trailer')) {
+      const next = opts.trailerProbe?.shift() ?? {}
+      return {
+        trailerBody: next.trailerBody ?? '',
+        exitCode: next.exitCode ?? null,
+        errBytesBefore: next.errBytesBefore ?? 50,
+        errBytesAfter: next.errBytesAfter ?? 50,
+      }
+    }
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       const empty = opts.buildProduces !== undefined && label === 'forge:build'
       const isFix = String(label).startsWith('forge:fix-round-')
@@ -163,6 +172,30 @@ async function runWorkflow(
               : 'def',
         testsPassed: true,
       }
+      const connectedBridge = {
+        prNumber: null,
+        branch: 'trident/a-run',
+        diffFile: '/tmp/x.diff',
+        worktreePath: '/wt',
+        commitSha: 'abc',
+        testsPassed: true,
+        codexStatus: 'connected',
+        trailerComplete: true,
+        wrapperExitCode: 0,
+        preservedWork: false,
+      }
+      if (prompt.includes('CODEX BUILD COLLECT bridge')) return connectedBridge
+      if (prompt.includes('CODEX BUILD WAIT bridge')) {
+        return opts.waitBridgeCompletes === true
+          ? connectedBridge
+          : {
+              ...built,
+              codexStatus: 'deferred',
+              trailerComplete: false,
+              wrapperExitCode: null,
+              preservedWork: opts.preservedBuildWork === true,
+            }
+      }
       // THE BRIDGE'S SHAPE, not a second happy path. A codex build comes back through
       // `CODEX_FORGE_SCHEMA`, which carries whether the executor ran at all — and the
       // workflow refuses to continue without it. A mock that omitted `codexStatus`
@@ -172,22 +205,10 @@ async function runWorkflow(
             ...built,
             codexStatus: opts.missingBuildTrailer === true ? 'deferred' : 'connected',
             trailerComplete: opts.missingBuildTrailer !== true,
-            wrapperExitCode: opts.missingBuildTrailer === true ? 143 : 0,
+            wrapperExitCode: opts.missingBuildTrailer === true ? null : 0,
             preservedWork: opts.preservedBuildWork === true,
           }
         : built
-    }
-    if (String(label).startsWith('build-trailer-probe-')) {
-      const probes = opts.trailerProbe ?? []
-      const next = probes.length === 0 ? undefined : probes[Math.min(trailerProbeIndex, probes.length - 1)]
-      trailerProbeIndex += 1
-      return {
-        trailer: next?.trailer ?? '',
-        exitCode: next?.exitCode ?? '',
-        alive: next?.alive ?? false,
-        errBytesBefore: next?.errBytesBefore ?? 100,
-        errBytesAfter: next?.errBytesAfter ?? 100,
-      }
     }
     if (String(label).startsWith('head-probe-round-built-')) {
       return { head: label === 'head-probe-round-built-r1' ? 'a'.repeat(40) : 'b'.repeat(40) }
@@ -596,87 +617,45 @@ describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () =>
 })
 
 describe('the build trailer truth-order helpers — boundaries, executed', () => {
-  function extractFn(name: string): string {
-    const at = SRC.indexOf(`function ${name}(`)
-    expect(at).toBeGreaterThan(-1)
-    const open = SRC.indexOf('{', at)
-    let depth = 0
-    for (let i = open; i < SRC.length; i++) {
-      if (SRC[i] === '{') depth++
-      else if (SRC[i] === '}') {
-        depth--
-        if (depth === 0) return SRC.slice(at, i + 1)
-      }
-    }
-    throw new Error(`unbalanced braces extracting ${name}`)
-  }
-
-  const source = [
-    extractFn('parseBuildTrailer'),
-    extractFn('classifyTrailerWait'),
-    'return { parseBuildTrailer, classifyTrailerWait }',
-  ].join('\n')
-  const fns = new Function(source)() as {
-    parseBuildTrailer: (text: unknown) => Record<string, string> | null
-    classifyTrailerWait: (probe: {
-      trailer: string
-      exitCode: string
-      alive: boolean
-      errBytesBefore: number
-      errBytesAfter: number
-    }) => { state: string; signalExit?: number | null; trailer?: Record<string, string> }
-  }
+  const classifyTrailerWait = sourceFunction('classifyTrailerWait')
   const emptyProbe = {
-    trailer: '',
-    exitCode: '',
-    alive: false,
-    errBytesBefore: 100,
-    errBytesAfter: 100,
+    trailerBody: '',
+    exitCode: null,
+    errBytesBefore: 50,
+    errBytesAfter: 50,
   }
 
-  test('POSITIVE CONTROL: the extraction contains both decisions', () => {
-    expect(source).toContain("state: 'landed'")
-    expect(source).toContain('NEUTRON_CODEX_BUILD_WORKTREE=')
+  test('a trailer beats an exit record', () => {
+    expect(classifyTrailerWait({
+      ...emptyProbe,
+      trailerBody: `noise\nNEUTRON_CODEX_BUILD_HEAD=${'a'.repeat(40)}\n`,
+      exitCode: 143,
+    })).toEqual({ verdict: 'collect' })
   })
 
-  test('a missing or duplicated key is not a complete trailer', () => {
-    const missing = [
-      'NEUTRON_CODEX_BUILD_BRANCH=',
-      'NEUTRON_CODEX_BUILD_HEAD=',
-      'NEUTRON_CODEX_BUILD_REMOTE_HEAD=',
-      'NEUTRON_CODEX_BUILD_PR=',
-      'NEUTRON_CODEX_BUILD_DIFF=',
-    ].join('\n')
-    expect(fns.parseBuildTrailer(missing)).toBeNull()
-    expect(fns.parseBuildTrailer(`${missing}\nNEUTRON_CODEX_BUILD_WORKTREE=\nNEUTRON_CODEX_BUILD_HEAD=again\n`)).toBeNull()
-  })
-
-  test('six empty values are still a landed trailer', () => {
-    const trailer = [
-      'NEUTRON_CODEX_BUILD_BRANCH=',
-      'NEUTRON_CODEX_BUILD_HEAD=',
-      'NEUTRON_CODEX_BUILD_REMOTE_HEAD=',
-      'NEUTRON_CODEX_BUILD_PR=',
-      'NEUTRON_CODEX_BUILD_DIFF=',
-      'NEUTRON_CODEX_BUILD_WORKTREE=',
-    ].join('\n')
-    expect(fns.parseBuildTrailer(trailer)).toEqual({
-      branch: '',
-      head: '',
-      remoteHead: '',
-      pr: '',
-      diff: '',
-      worktree: '',
+  test('a finite integer exit wins over liveness', () => {
+    expect(classifyTrailerWait({ ...emptyProbe, exitCode: 0, errBytesAfter: 200 })).toEqual({
+      verdict: 'exited',
+      exitCode: 0,
     })
   })
 
-  test('liveness vetoes death, while exit and stderr boundaries stay strict', () => {
-    expect(fns.classifyTrailerWait({ ...emptyProbe, alive: true, exitCode: '143' })).toEqual({ state: 'alive' })
-    expect(fns.classifyTrailerWait({ ...emptyProbe, exitCode: '0' })).toEqual({ state: 'dead', signalExit: null })
-    expect(fns.classifyTrailerWait({ ...emptyProbe, exitCode: '143' })).toEqual({ state: 'dead', signalExit: 143 })
-    expect(fns.classifyTrailerWait({ ...emptyProbe, errBytesBefore: -1, errBytesAfter: 5000 })).toEqual({
-      state: 'dead',
-      signalExit: null,
+  test('equal stderr sizes provide no evidence', () => {
+    expect(classifyTrailerWait(emptyProbe)).toEqual({ verdict: 'no-evidence' })
+  })
+
+  test('a missing stderr file and a newly appeared file provide no growth evidence', () => {
+    expect(classifyTrailerWait({ ...emptyProbe, errBytesBefore: -1, errBytesAfter: -1 })).toEqual({
+      verdict: 'no-evidence',
+    })
+    expect(classifyTrailerWait({ ...emptyProbe, errBytesBefore: -1, errBytesAfter: 200 })).toEqual({
+      verdict: 'no-evidence',
+    })
+  })
+
+  test('growth from an existing stderr file extends the wait', () => {
+    expect(classifyTrailerWait({ ...emptyProbe, errBytesBefore: 100, errBytesAfter: 200 })).toEqual({
+      verdict: 'extend',
     })
   })
 })
@@ -786,21 +765,21 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     }
   })
 
-  test('an absent completion trailer is DEFERRED without inventing a kill', async () => {
+  test('an absent completion trailer is DEFERRED and names the killed wrapper artifacts', async () => {
     const { result, logs, captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
       missingBuildTrailer: true,
+      trailerProbe: [{ exitCode: 143 }],
     })
     expect(result['ok']).toBe(false)
     expect(result['checkpoint']).toBe('inner-error')
     const terminal = logs.find((line) => line.includes('inner THREW')) ?? ''
-    expect(terminal).toContain("DEFERRED: the codex build's completion trailer")
-    expect(terminal).toContain('had not appeared within the wait')
-    expect(terminal).not.toContain('was killed')
+    expect(terminal).toContain('the build wrapper was killed before it could report')
+    expect(terminal).toContain('signal 15')
     expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.trailer')
     expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.err')
     expect(terminal).toContain('preserved worktree')
     expect(terminal).not.toContain('produced no')
-    expect(captured.filter((c) => String(c.label).startsWith('build-trailer-probe-'))).toHaveLength(1)
+    expect(captured.filter((c) => String(c.label).startsWith('probe:codex-trailer'))).toHaveLength(1)
     expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
   })
 
@@ -808,47 +787,65 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     const { logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
       missingBuildTrailer: true,
       preservedBuildWork: true,
+      trailerProbe: [{ exitCode: 143 }],
     })
     expect(logs.find((line) => line.includes('inner THREW'))).toContain(
       'preserved worktree, which holds uncommitted work',
     )
   })
 
-  test('an observed signal exit may say the wrapper was killed', async () => {
-    const { logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
-      missingBuildTrailer: true,
-      trailerProbe: [{ exitCode: '143' }],
-    })
-    const terminal = logs.find((line) => line.includes('inner THREW')) ?? ''
-    expect(terminal).toContain('was killed (signal exit 143')
-    expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.exit')
-  })
-
-  test('a growing stderr vetoes the deferral and extends the wait', async () => {
+  test('a trailer that lands after the wait is collected, not declared a kill', async () => {
     const { result, captured, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
       missingBuildTrailer: true,
-      trailerProbe: [
-        { errBytesBefore: 100, errBytesAfter: 5000 },
-        { trailer: SIX_LINE_TRAILER },
-      ],
+      trailerProbe: [{ trailerBody: SIX_LINE_TRAILER }],
     })
-    expect(captured.filter((c) => String(c.label).startsWith('build-trailer-probe-'))).toHaveLength(2)
-    expect(logs.some((line) => line.includes('trailer absent but the wrapper is alive'))).toBe(true)
-    expect(logs.some((line) => line.includes('inner THREW'))).toBe(false)
+    expect(result['ok']).toBe(true)
+    expect(captured.some((c) => c.prompt.includes('CODEX BUILD COLLECT bridge'))).toBe(true)
     expect(captured.some((c) => String(c.label).startsWith('argus:'))).toBe(true)
-    expect(result['ok']).toBe(true)
-  })
-
-  test('a trailer written after the wait expires is collected, not reported as a kill', async () => {
-    const { result, captured, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
-      missingBuildTrailer: true,
-      trailerProbe: [{ trailer: SIX_LINE_TRAILER }],
-    })
-    expect(result['ok']).toBe(true)
-    expect(logs.some((line) => line.includes('inner THREW'))).toBe(false)
     expect(logs.some((line) => line.includes('was killed'))).toBe(false)
-    expect(logs.some((line) => line.includes('late completion trailer landed on probe 1/6'))).toBe(true)
-    expect(captured.some((c) => String(c.label).startsWith('argus:'))).toBe(true)
+  })
+
+  test('a growing stderr vetoes the deferral', async () => {
+    const { result, captured, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      missingBuildTrailer: true,
+      trailerProbe: [{ errBytesBefore: 100, errBytesAfter: 250 }],
+      waitBridgeCompletes: true,
+    })
+    expect(captured.some((c) => c.prompt.includes('CODEX BUILD WAIT bridge'))).toBe(true)
+    expect(result['ok']).toBe(true)
+    expect(logs.some((line) => line.includes('was killed'))).toBe(false)
+  })
+
+  test('a timed-out wait names the wait, not a kill, and lands the recoverable checkpoint', async () => {
+    const args = productionArgs(CODEX_BUILD)
+    args['dbPath'] = '/tmp/trident-cross-model-dispatch.db'
+    const { result, captured, logs } = await runWorkflow(args, {
+      missingBuildTrailer: true,
+      trailerProbe: [{}, {}],
+    })
+    expect(result['ok']).toBe(false)
+    expect(result['checkpoint']).toBe('awaiting-trailer')
+    expect(result['checkpoint']).not.toBe('inner-error')
+    expect(result['blockKind']).toBe('infra-only')
+    const terminal = logs.find((line) => line.includes('inner THREW')) ?? ''
+    expect(terminal).toContain('had not appeared within the wait')
+    expect(terminal).toContain('not an observed kill')
+    expect(terminal).not.toContain('was killed')
+    expect(captured.find((c) => c.label === 'checkpoint:awaiting-trailer')?.prompt).toContain(
+      "inner_checkpoint 'awaiting-trailer'",
+    )
+  })
+
+  test('the exit-recorded-no-trailer case below 128 does not claim a kill', async () => {
+    const { result, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      missingBuildTrailer: true,
+      trailerProbe: [{ exitCode: 3 }],
+    })
+    expect(result['ok']).toBe(false)
+    expect(result['checkpoint']).toBe('inner-error')
+    const terminal = logs.find((line) => line.includes('inner THREW')) ?? ''
+    expect(terminal).toContain('exited with code 3 without writing its completion trailer')
+    expect(terminal).not.toContain('was killed')
   })
 
   test('completed failed and ok trailers retain their existing result paths', async () => {

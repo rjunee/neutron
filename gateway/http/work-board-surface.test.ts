@@ -12,6 +12,12 @@ import {
   type WorkBoardSurface,
 } from './work-board-surface.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
+import {
+  INLINE_EVIDENCE_WINDOW_MS,
+  withDerivedInlineActive,
+  type InlineEvidenceReader,
+} from '@neutronai/work-board/inline-activity.ts'
+import { inspectorScopeKey } from '@neutronai/open/activity-inspector.ts'
 
 /** A minimal fake trident run for the surface's progress + cancel deps. */
 function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
@@ -51,6 +57,8 @@ function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
     reviewed_head: null,
     bound_pr: null,
     fenced_paths: null,
+    base_sha: null,
+    base_behind: null,
     ...over,
   }
 }
@@ -702,5 +710,172 @@ describe('work-board HTTP surface — per-project scoping (Bug 3)', () => {
     const proj = await surface.handler(req('GET', '/api/app/projects/projA/work-board'))
     const projBody = (await proj!.json()) as { items: unknown[] }
     expect(projBody.items).toEqual([])
+  })
+})
+
+/**
+ * T3 — derived inline activity at the HTTP boundary. Every item-bearing response
+ * must carry the EVIDENCE-derived `inline_active`, never the stored hint. Each
+ * test below names the rule/mapping whose deletion turns it red; the dep is
+ * wired through the REAL `withDerivedInlineActive` + `inspectorScopeKey`, only
+ * the evidence clock is faked.
+ */
+describe('derived inline activity on the HTTP surface', () => {
+  const NOW = 1_000_000
+  /** ms epoch of the last WRITE-CLASS tap; 0 = none ever. */
+  let evidenceAt = 0
+  let readerCalls = 0
+  let wired: WorkBoardSurface
+
+  beforeEach(() => {
+    evidenceAt = 0
+    readerCalls = 0
+    const reader: InlineEvidenceReader = {
+      lastWriteActivityAt: () => {
+        readerCalls++
+        return evidenceAt
+      },
+    }
+    const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+    wired = createWorkBoardSurface({
+      store,
+      auth,
+      derive_inline_active: (items, pid) =>
+        withDerivedInlineActive(items, reader, inspectorScopeKey(pid), NOW),
+    })
+  })
+
+  test('(a) fresh evidence activates a runless in_progress card, and writes nothing', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    expect(a.inline_active).toBe(false) // the stored hint says "idle"
+    evidenceAt = NOW - 1_000 // a real tool call one second ago
+    const before = store.get(SCOPE, a.id)
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { items: { id: string; inline_active: boolean }[] }
+    // Deleting the GET `derive(...)` mapping turns this red.
+    expect(body.items[0]?.inline_active).toBe(true)
+
+    // Read-only: no work_board_update anywhere in the path — the stored row,
+    // including its hint and updated_at, is byte-identical to before the GET.
+    expect(store.get(SCOPE, a.id)).toEqual(before)
+    expect(store.get(SCOPE, a.id)!.inline_active).toBe(false)
+  })
+
+  test('(b) a crashed session stale flag reads false on GET and on the update echo', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    await store.update(SCOPE, a.id, { inline_active: true }) // session died flag-on
+    evidenceAt = 0 // the inspector buffer died with the process
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    expect(body.items[0]?.inline_active).toBe(false) // evidence wins over the flag
+
+    // Deleting the update-echo `deriveOne` turns this red.
+    const patch = await wired.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { title: 'A2' }),
+    )
+    expect(patch?.status).toBe(200)
+    const patched = (await patch!.json()) as { item: { title: string; inline_active: boolean } }
+    expect(patched.item.title).toBe('A2')
+    expect(patched.item.inline_active).toBe(false)
+    // The hint is still set in storage — only the WIRE value was healed.
+    expect(store.get(SCOPE, a.id)!.inline_active).toBe(true)
+  })
+
+  test('(c) evidence exactly at the window boundary is stale — the derivation cannot latch', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    await store.update(SCOPE, a.id, { inline_active: true })
+    evidenceAt = NOW - INLINE_EVIDENCE_WINDOW_MS // stale by `>=`, not fresh
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    // A `return true` mutant of the dep (or a `>` boundary) fails here.
+    expect(body.items[0]?.inline_active).toBe(false)
+  })
+
+  test('(e) one evidence read per response, not one per row', async () => {
+    for (const t of ['a', 'b', 'c', 'd', 'e']) {
+      await store.create(SCOPE, { title: t, status: 'in_progress' })
+    }
+    evidenceAt = NOW - 1_000
+    readerCalls = 0
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    expect(body.items).toHaveLength(5)
+    // …and ONE project write does not claim five cards: status-only derivation is
+    // rationed to a single candidate row, so ▶ stays available on the rest of the
+    // board. Deleting that rationing makes this five.
+    expect(body.items.filter((i) => i.inline_active)).toHaveLength(1)
+    // Deleting the BATCH shape (calling the reader per item) turns this red.
+    expect(readerCalls).toBe(1)
+  })
+
+  test('the reorder response carries derived values too', async () => {
+    const live = await store.create(SCOPE, { title: 'live', status: 'in_progress' })
+    await store.create(SCOPE, { title: 'idle' })
+    evidenceAt = NOW - 1_000
+
+    const res = await wired.handler(
+      req('POST', `/api/app/projects/proj1/work-board/${live.id}/reorder`, {}),
+    )
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { items: { title: string; inline_active: boolean }[] }
+    // Deleting the reorder `derive(...)` turns this red.
+    expect(body.items.find((i) => i.title === 'live')?.inline_active).toBe(true)
+    expect(body.items.find((i) => i.title === 'idle')?.inline_active).toBe(false)
+  })
+
+  test('a dep-less surface still passes the RAW stored flag through (degraded, not broken)', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    await store.update(SCOPE, a.id, { inline_active: true })
+    evidenceAt = 0
+
+    const res = await surface.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    expect(body.items[0]?.inline_active).toBe(true)
+    expect(readerCalls).toBe(0)
+  })
+
+  test('(d) nothing is gated: the wired surface returns the same statuses as the dep-less one', async () => {
+    evidenceAt = NOW - 1_000 // maximally "active" — still gates nothing
+
+    const run = async (s: WorkBoardSurface, project: string): Promise<number[]> => {
+      const created = await s.handler(
+        req('POST', `/api/app/projects/${project}/work-board`, { title: 'x' }),
+      )
+      const createdText = await created!.text()
+      const id = (JSON.parse(createdText) as { item: { id: string } }).item.id
+      const patched = await s.handler(
+        req('PATCH', `/api/app/projects/${project}/work-board/${id}`, { status: 'in_progress' }),
+      )
+      const reordered = await s.handler(
+        req('POST', `/api/app/projects/${project}/work-board/${id}/reorder`, {}),
+      )
+      const completed = await s.handler(
+        req('POST', `/api/app/projects/${project}/work-board/${id}/complete`, {}),
+      )
+      const completedText = await completed!.text()
+      // Every mutation ACTUALLY LANDED — the load-bearing form of "nothing is
+      // gated". A substring hunt for 'denied' over an `{item:{…}}` body proves
+      // nothing; a write that the derivation suppressed would show up here as a
+      // missing item or an unchanged status.
+      const patchedBody = JSON.parse(await patched!.text()) as { item: { status: string } }
+      expect(patchedBody.item.status).toBe('in_progress')
+      const reorderedBody = JSON.parse(await reordered!.text()) as { items: { id: string }[] }
+      expect(reorderedBody.items.map((i) => i.id)).toContain(id)
+      // `complete` flips status to 'done', so its echo derives false via R1.
+      const completedBody = JSON.parse(completedText) as { item: { inline_active: boolean } }
+      expect(completedBody.item.inline_active).toBe(false)
+      return [created!.status, patched!.status, reordered!.status, completed!.status]
+    }
+
+    const wiredStatuses = await run(wired, 'projW')
+    const plainStatuses = await run(surface, 'projP')
+    expect(wiredStatuses).toEqual([201, 200, 200, 200])
+    expect(wiredStatuses).toEqual(plainStatuses)
   })
 })

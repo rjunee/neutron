@@ -115,11 +115,16 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
  * the old `status !== 'in_progress'` clause made a failed-run in_progress card
  * unrecoverable from the UI).
  *
- * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): prevents a
- * competing Trident build while an inline agent action is executing. STALENESS
- * CAVEAT: if the agent dies mid-inline-work without clearing the flag, the card
- * enters a permanent pulse+no-▶ state. Acceptable until an inline heartbeat
- * reconciler lands (mirrors app/lib/work-board-helpers.ts canPlay).
+ * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): suppresses ▶
+ * while the card shows RECENT WRITE ACTIVITY, so the owner does not launch a
+ * Trident build on top of a repo an inline agent was just rewriting. No stronger
+ * claim than that: the wire field is DERIVED server-side from a 90 s
+ * write-evidence window, so a crashed session's stale flag reads false on the
+ * next read (it heals on a clock, not an event — which is why the poll below
+ * re-reads while any card is inline-active), and inline work that writes nothing
+ * for 90 s (a long test run, a research turn) reads NOT active and ▶ returns.
+ * That false negative is deliberate: a hint, never a lock, and nothing here
+ * blocks (mirrors app/lib/work-board-helpers.ts canPlay).
  */
 function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active
@@ -430,6 +435,14 @@ export function WorkBoardTab({
   // (via `isLinkedRunning`) so a finished/terminal run does NOT poll forever.
   const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
 
+  // …and while any card reads INLINE-ACTIVE, for the same reason in reverse. That
+  // flag is now DERIVED server-side from a 90 s evidence window, so it goes stale
+  // by the clock, with no write to fan a frame — a stationary board would keep
+  // pulsing (and keep ▶ hidden) until something else happened to touch it. Note a
+  // derived-inline card is runless BY CONSTRUCTION (rule R2 in
+  // `work-board/inline-activity.ts`), so `hasLiveRun` can never cover this case.
+  const hasInlineActive = useMemo(() => items.some((it) => it.inline_active), [items])
+
   // PR-4 — surface the live-activity roll-up to the desktop slide-out pane on
   // every board change (initial load, live snapshot, or poll). The pane keys its
   // auto-open/close + header count off this; `summarize` is pure so the effect
@@ -438,12 +451,12 @@ export function WorkBoardTab({
     onSummary?.(summarize(items))
   }, [items, onSummary])
   useEffect(() => {
-    if (!hasLiveRun) return
+    if (!hasLiveRun && !hasInlineActive) return
     const interval = setInterval(() => {
       refresh(true)
     }, 15_000)
     return () => clearInterval(interval)
-  }, [hasLiveRun, refresh])
+  }, [hasLiveRun, hasInlineActive, refresh])
 
   const addItem = useCallback((): void => {
     const title = newTitle.trim()
