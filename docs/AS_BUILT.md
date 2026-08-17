@@ -2,7 +2,7 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
-## 2026-08-16 — the normalizer was pinned, the line that uses it was not
+## 2026-08-17 — the normalizer was pinned, the line that uses it was not
 
 Landed via PR #364.
 
@@ -76,27 +76,35 @@ cwd turning supervision OFF entirely rather than misplacing it, is pinned there 
 it was previously asserted as a returned `undefined`, which is not the same claim as
 "the registry, the respawns, the watchdog and the heartbeat are all skipped".
 
-**THE CROSS-MODEL REVIEWER RAN, WHICH IS THE OTHER HALF OF WHY #333'S FINDINGS
-SAT UNACTIONED — ON THAT PANEL IT WAS DEFERRED, so its REQUEST_CHANGES carried no
-quality signal at all.** Here it ran and returned four findings. **It could not
-refute the fix, and it could not refute the "previously unpinned" claim.** All
-four are corrections to what this change SAYS ABOUT ITSELF, which is the same
-defect class the change is about: (1) "nothing is started here" was false —
-constructing the factory arms `startReplWatchdog` and
-`startModelUpdateWatchdogForInstance`, real timers; only the REPL CHILD is not
-spawned. (2) The third test's prose claimed registry, respawns, watchdog and
-heartbeat were pinned; it observes REGISTRATION only, which is a PROXY for the
-shared `if (home !== undefined)` block being entered and stops holding if that
-block is ever split. (3) "Nothing downstream re-checks" was self-contradictory —
-this function IS the re-check. (4) The three legs were conflated, corrected
-above. Each is now written as what holds. **The test isolation finding was the
-one with teeth beyond wording**: the runner executes many files concurrently
-INSIDE ONE PROCESS (`scripts/run-tests.sh:9`), so `process.env` is shared and a
-file-level `afterEach` restoring a module-load snapshot could overwrite another
-suite's `NEUTRON_HOME` while that suite sat suspended at an `await`. Env mutation
-is now confined to a helper that sets, calls and restores with NO intervening
-`await`, so single-threaded execution makes the interleaving impossible rather
-than unlikely.
+**AND IT WAS RUN AGAIN ON THE FIXES, WHICH IS THE PART WORTH COPYING.** The
+second pass confirmed the premise and the two seam tests, and refused three
+things the first round had introduced or left:
+
+- **The leg count was STILL wrong.** The first correction said three; the
+  reviewer found more — `open/wiring/substrates.ts:189`, `:244`, `:329` and
+  `open/wiring/memory.ts` all reach the same factory, and `open/composer.ts:1296`
+  is the history-import/synthesis REPL, not the conversational one it had been
+  labelled. **Enumerating the callers had now been wrong twice, in the same
+  direction both times**, so the docblock stopped enumerating: every route goes
+  through `buildLlmCallSubstrate`, which copies `cwd` unexamined (`:778`) and
+  calls this factory (`:868`), and the callers divide into a HOME that cannot be
+  blank and a CALLER-SUPPLIED PER-RUN PATH that can. That is a structure, and it
+  does not depend on getting a count right.
+- **The scoped `afterEach` still reached globally.** Scoping it to the seam
+  `describe` narrowed WHEN it fired without changing WHAT it touched:
+  `shutdownAllPersistentRepls()` SIGTERMs every warm REPL in the pool and clears
+  every supervision entry, and with files running concurrently in one process it
+  can kill a child a sibling suite is awaiting — `append-system-prompt-wiring.
+  test.ts:210` is exactly such an await, on the same pool. These tests never call
+  `.start()`, so they own nothing in the pool; the only durable things they
+  create are two timers and one registry entry per instance, all keyed by paths
+  derived from a temp dir this file owns. Teardown now removes exactly those, by
+  name, synchronously.
+- **This entry contained the reviewer's own findings TWICE**, and dated itself
+  2026-08-16 above three 2026-08-17 entries in a log whose first line says
+  "newest first". Both fixed. A log that documents unproved claims while itself
+  carrying a duplicated section and a misordered heading is the same defect one
+  level up, and the reviewer was right to say so.
 
 **A METHOD NOTE THAT IS PART OF THE RESULT.** The first pass of this audit
 produced **eighteen consecutive REDs and every one was false.** The harness took

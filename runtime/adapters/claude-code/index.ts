@@ -302,42 +302,46 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
  * the SEAM (whether the supervision block arms) and not only as a returned
  * value, so it is a decision rather than an accident.
  *
- * Exported for that test. WHAT REACHES `cwd` IN PRODUCTION — THREE INDEPENDENT
- * LEGS, not one. An earlier revision named only the first; the revision after
- * that named three but conflated two of them, and a cross-model review caught
- * it. Both errors pointed the same way — toward believing the blank arms could
- * not be reached, and therefore need not be pinned.
+ * Exported for that test. WHAT REACHES `cwd` IN PRODUCTION — stated as a
+ * STRUCTURE rather than a list, because two successive revisions of this
+ * paragraph tried to enumerate the callers and BOTH miscounted, each time in the
+ * direction of believing the blank arms could not be reached and so need not be
+ * pinned. A cross-model review falsified the first count, then the second.
  *
- *   1. THE OWNER'S CONVERSATIONAL SUBSTRATE. `open/composer.ts:1296` passes
- *      `owner_home`, resolved at `:856` through `resolveNeutronHome`, which
- *      cannot return blank.
- *   2. THE EPHEMERAL PER-DISPATCH LEG. `open/wiring/substrates.ts:364`
- *      (`makeEphemeralSubstrate`) forwards a caller-supplied path via
- *      `buildLlmCallSubstrate` (`gateway/wiring/build-llm-call-substrate.ts:778`
- *      copies it onto the options bag unexamined). Its producer is
+ * The structure does not depend on getting a count right. EVERY production route
+ * into this function goes through `buildLlmCallSubstrate`, which copies its
+ * `cwd` onto the options bag WITHOUT EXAMINING IT
+ * (`gateway/wiring/build-llm-call-substrate.ts:778`) and then calls this factory
+ * (`:868`). So the only question that matters is what those callers pass, and
+ * they divide into exactly two kinds:
+ *
+ *   A. A HOME, resolved through `resolveNeutronHome`, which cannot return blank.
+ *      This is most of them — `open/wiring/substrates.ts:189`, `:244`, `:329`
+ *      (phase-spec, the owner's warm conversational REPL, compose),
+ *      `open/wiring/memory.ts` (scribe/reflection), and `open/composer.ts:1296`
+ *      (the dedicated history-import/synthesis REPL, NOT the conversational one
+ *      — the previous revision mislabelled it). None of these can carry a blank.
+ *   B. A CALLER-SUPPLIED PER-RUN PATH, which can. Two independent producers:
+ *      `open/wiring/substrates.ts:364` (`makeEphemeralSubstrate`), fed by
  *      `agent-dispatch/service.ts:487` — `req.repo_path ?? this.deps.repo_path`,
- *      and `??` KEEPS a blank, so a caller that passed `'   '` would land one
- *      here. No stage BETWEEN that producer and this function re-checks it;
- *      THIS function is the re-check, which is the point of the normalization.
- *   3. THE WARM FIRE LEG, which is NOT fed by the one above — a distinction the
- *      previous revision got wrong. `open/wiring/substrates.ts:413`
- *      (`makeWarmFireSubstrate`) is wired at `open/composer.ts:1045` and takes
- *      its cwd from `trident/inner-loop.ts:702`, `run.worktree ?? run.repo_path`.
- *      It is also MEMOIZED per cwd rather than fresh per run, so a blank would
- *      be cached under the blank key and reused.
+ *      where `??` KEEPS a blank; and `open/wiring/substrates.ts:413`
+ *      (`makeWarmFireSubstrate`), which is NOT fed by that one, taking its cwd
+ *      from `trident/inner-loop.ts:702` (`run.worktree ?? run.repo_path`) and
+ *      MEMOIZING per cwd, so a blank would be cached under the blank key and
+ *      reused.
  *
- * WHY IT IS UNREACHED TODAY, stated as what actually holds rather than as a
- * property of the whole family. Leg 2's real callers — the dispatch tool and its
- * slash command — OMIT `repo_path` entirely, so the `??` falls through to
- * `this.deps.repo_path`, which `open/composer.ts:1122` binds to `owner_home`,
- * i.e. back to `resolveNeutronHome`. (A separate core rejects a blank
- * `repo_path` at its own boundary — `cores/free/code-gen/src/backend.ts:278` —
- * but that guards ITS input, not this leg, and citing it as though it protected
- * this one was part of the same conflation.) So the arms are unreached by
- * CONSTRUCTION AT THE CALLERS, not by any check on the path itself, and one
- * caller electing to pass a computed `repo_path` reopens it. That is a weaker
- * claim than "unreachable" on purpose: the stronger sentence is exactly what
- * tells the next reader not to bother pinning the seam.
+ * WHY KIND B IS UNREACHED TODAY, which is narrower than it sounds. Its callers
+ * simply never populate the field: `agent-dispatch/tool.ts`, `command.ts` and
+ * `board-research-start.ts` contain no occurrence of `repo_path` at all, so the
+ * `??` falls through to `this.deps.repo_path`, bound to `owner_home` at
+ * `open/composer.ts:1122`. (A separate core rejects a blank `repo_path` at its
+ * own input boundary — `cores/free/code-gen/src/backend.ts:274` — but that
+ * guards ITS leg, not this one; citing it as protection here was part of the
+ * earlier miscount.) So the arms are unreached BY CONSTRUCTION AT THE CALLERS,
+ * not by any check on the path, and one caller electing to pass a computed
+ * `repo_path` reopens them. That is a weaker claim than "unreachable" on
+ * purpose: the stronger sentence is exactly what tells the next reader not to
+ * bother pinning the seam.
  */
 export function resolveReplCwdAndHome(input: {
   cwd?: string | undefined
