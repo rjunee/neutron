@@ -179,13 +179,14 @@ ranking as the fast tier without the refusals and at the frontier with them. The
 first draft of that test claimed coverage it did not have, which the mutation run
 caught — the same defect class this whole round is about.
 
-Nine mutations, each with a control proving it landed: reverting the family
-extraction reddens 3; reverting the rank to the positional lookup reddens 1;
-removing the tier-word pass reddens 1;
-deleting the owner notice reddens 3; deleting the operator log line reddens 1;
-bypassing the floor at the spawn chokepoint reddens 4; removing the poisoned seed
-reddens the replay test; flipping a memory call site onto the chat profile
-reddens 2.
+Eight mutations reddened tests, each with a control proving it landed: reverting
+the family extraction reddens 3; reverting the rank to the positional lookup
+reddens 1; removing the tier-word pass reddens 1; deleting the owner notice
+reddens 3; deleting the operator log line reddens 1; bypassing the floor at the
+spawn chokepoint reddens 4; removing the poisoned seed reddens the replay test;
+flipping a memory call site onto the chat profile reddens 2. A ninth — removing
+the empty-string refusals — is the one described above as unreachable from a
+suite, and was verified by probe instead of being counted as test coverage.
 
 ## 2026-08-16 — a stored record could pull the owner's chat below the best model
 
