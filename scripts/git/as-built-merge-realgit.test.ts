@@ -1670,9 +1670,16 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // same-directory-segment encoding the cross-model reviewer used three rounds ago, which is
       // why that example is now described in words in the docblock instead of typed.
       // `docs/AS_BUILT.md` is in the citable set explicitly because it is the most-cited path in
-      // the cluster — 23 mentions across the three files, more than any anchor target — and it is
+      // the cluster — 9 backticked mentions against 7 for the only anchor target — and it is
       // neither a cluster file nor an anchor's home, so deriving the set from those two alone left
-      // the single most likely path to be typo'd as the one path a mangle could not be reported on.
+      // the most-cited path of all as the one path a mangle could not be reported on.
+      //
+      // That count was itself measured twice, and the first number was wrong in the way this file
+      // keeps warning about. A line-counting grep said 23, because it counts every LINE holding the
+      // string — including the attribute-line prose and the unbackticked narrative, neither of which
+      // this check can see. The instrument has to be the one the code uses: backticked words inside
+      // spans. Nine. A confidently specific number taken with the wrong instrument is the same
+      // defect as a docblock describing a mode the code never enters.
       const citable = [...cluster, ...anchors.map((a) => a.definedIn), 'docs/AS_BUILT.md']
       const flatten = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
       const byLetters = new Map(citable.map((p) => [flatten(p), p]))
