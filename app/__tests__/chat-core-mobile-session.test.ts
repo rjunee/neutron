@@ -868,13 +868,13 @@ describe('MobileChatSession — the backwards history walk', () => {
   /** One page of a transcript of seqs 1..total, exactly as the surface answers a
    *  `resume`: the newest `page` rows of the requested range, then a `history_gap`
    *  when that page came back full. */
-  function answer(total: number, page: number, frame: Record<string, unknown>): unknown[] {
+  function answer(total: number, page: number, frame: Record<string, unknown>): object[] {
     const after = typeof frame['after_seq'] === 'number' ? frame['after_seq'] : 0;
     const before = typeof frame['before_seq'] === 'number' ? (frame['before_seq'] as number) : total + 1;
     const range: number[] = [];
     for (let seq = 1; seq <= total; seq++) if (seq > after && seq < before) range.push(seq);
     const sent = range.slice(-page);
-    const out: unknown[] = sent.map((seq) => ({
+    const out: object[] = sent.map((seq) => ({
       v: 1, type: 'agent_message', message_id: `m${seq}`, seq, body: `msg-${seq}`, ts: seq,
     }));
     if (sent.length >= page && sent[0] !== undefined) {
