@@ -336,6 +336,14 @@ export interface BuildTridentOrchestratorOptions {
  */
 export const DEFAULT_MAX_CRASH_RECOVERIES = 3
 
+/** Appended (never substituted) to `failure_reason` when a terminal failure's branch was
+ *  published by the git-truth salvage. The run is NOT a success: the lane died, the work
+ *  survived, the PR is unreviewed. Wording is delivery-classifier-safe (see delivery.ts):
+ *  it must never contain 'exhausted', 'conflict', 'hang', 'stalled', 'no progress for',
+ *  'merge failed', 'git ' (with trailing space), 'rebase', 'checkout', 'missing',
+ *  'garbled', 'provenance', 'failed:', or 'not enabled'. */
+export const TRIDENT_SALVAGE_MARKER = 'build survived the failure'
+
 /**
  * Infrastructure retry spacing: one minute, five minutes, then fifteen minutes
  * (long enough at the tail to outlast a token refresh). The retry count is
@@ -1978,6 +1986,57 @@ export function buildTridentOrchestrator(
     }
   }
 
+  // Rescue failures are observable in the step note, but never persisted on the run. A WeakMap
+  // keeps that diagnostic paired with the exact input object without changing the locked return
+  // contract of `salvageStrandedFailure` or leaking entries after the outcome is released.
+  const salvageFailureNotes = new WeakMap<TridentRun, string>()
+
+  /** Git-truth reconciliation for a run about to be recorded `failed` (the card
+   *  "a failed run must be asked whether it built something"). NEVER throws.
+   *  Returns the (possibly annotated) run to persist; returns the INPUT OBJECT
+   *  UNCHANGED (===) when there is nothing to salvage or the rescue failed. */
+  async function salvageStrandedFailure(run: TridentRun): Promise<TridentRun> {
+    try {
+      if (run.merge_mode !== 'pr') return run
+      const branch = run.branch ?? `trident/${run.slug}`
+      if ((run.failure_reason ?? '').includes(TRIDENT_SALVAGE_MARKER)) return run
+
+      const local = await opts.run_host(
+        ['git', '-C', run.repo_path, 'rev-parse', '--verify', `refs/heads/${branch}`],
+        run.repo_path,
+      )
+      const localHead = local.stdout.trim()
+      if (!local.ok || !/^[0-9a-f]{40}$/.test(localHead)) return run
+
+      const base = await resolveBase(run)
+      const ahead = await opts.run_host(
+        ['git', '-C', run.repo_path, 'rev-list', '--count', `${base}..${localHead}`],
+        run.repo_path,
+      )
+      const aheadText = ahead.stdout.trim()
+      if (!ahead.ok || !/^\d+$/.test(aheadText) || Number.parseInt(aheadText, 10) <= 0) return run
+
+      const remote = await opts.run_host(
+        ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+        run.repo_path,
+      )
+      if (remote.ok && remote.stdout.trim().split(/\s+/)[0] === localHead && run.pr !== null) return run
+
+      const published = await publishBuiltCommit(run, null)
+      return {
+        ...run,
+        pr: published.pr,
+        branch,
+        failure_reason: `${run.failure_reason ?? 'run failed'} — ${TRIDENT_SALVAGE_MARKER} — branch ${branch} pushed to origin as PR #${published.pr}, unreviewed`,
+        last_advanced_at: now(),
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      salvageFailureNotes.set(run, detail.slice(0, 150))
+      return run
+    }
+  }
+
   /** Fire the inner workflow on the warm substrate; the launching turn settles
    *  immediately and the workflow runs detached. Persists the tracking id on a
    *  clean fire. Folds any existing PR + the last checkpoint into the args for
@@ -2639,7 +2698,7 @@ export function buildTridentOrchestrator(
     return Math.max(0, n - t)
   }
 
-  async function step(run: TridentRun): Promise<AdvanceOutcome> {
+  async function stepCore(run: TridentRun): Promise<AdvanceOutcome> {
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
@@ -2934,6 +2993,22 @@ export function buildTridentOrchestrator(
       return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (stalled)` }
     }
     return { run, changed: false, waiting: true, note: `waiting on inner-loop dispatch ${run.subagent_run_id}` }
+  }
+
+  async function step(run: TridentRun): Promise<AdvanceOutcome> {
+    const out = await stepCore(run)
+    if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase)) {
+      const salvaged = await salvageStrandedFailure(out.run)
+      if (salvaged !== out.run) {
+        return { ...out, run: salvaged, note: `${out.note}; stranded build salvaged → PR #${salvaged.pr}` }
+      }
+      const failureNote = salvageFailureNotes.get(out.run)
+      if (failureNote !== undefined) {
+        salvageFailureNotes.delete(out.run)
+        return { ...out, note: `${out.note}; stranded build salvage failed: ${failureNote}` }
+      }
+    }
+    return out
   }
 
   /** Resolve once every in-flight FIRE turn has settled (tests + graceful
