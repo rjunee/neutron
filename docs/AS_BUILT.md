@@ -20,6 +20,313 @@ no-op because the ref was already correct. The genuine "nothing was built" outco
 its guard where it belongs: the empty base-to-head diff refusal. A remote at the
 PRE-rebase tip while the replay produced a new head still takes the real lease push.
 
+## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
+
+Landed via PR #388.
+
+A live instance crash-looped on boot at migration ordinal 125 — the third instance of
+one class (0122, 0124, 0125), and the first that could not be patched the way the other
+two were. The ledger recorded 125 as `code_trident_runs_fix_round_contract` (a branch
+numbered it that way; it merged as 0124) while `main` numbers 0125
+`code_trident_runs_base_sha`, whose two columns were genuinely absent —
+`pragma_table_info` showed `reviewed_head` and `bound_pr` present, `base_sha` and
+`base_behind` not.
+
+**Both per-incident remedies were checked rather than assumed, and both are wrong here.**
+A `repairs.json` entry reconciles NAMES; two real columns were missing, and no amount of
+name reconciliation creates a column. Renumbering `0125` to a free ordinal repairs the
+stuck instance and BREAKS every instance where it already applied — measured against the
+pre-fix runner on a throwaway database built from the real tree, it fails with
+`duplicate column name: base_sha`. A fix that repairs one and breaks the other is not a
+fix, in either direction.
+
+**The ordinal was never an identity.** It fixes apply ORDER and nothing else, and it is
+allocated by whoever writes the file — so across a fleet two DIFFERENT migrations
+legitimately occupy one ordinal (two branches both number theirs 0125; the second to
+merge is renumbered while the instance that already ran the first keeps 125), and ONE
+migration legitimately occupies different ordinals. Keying "has this run?" on the ordinal
+asks a question the ordinal cannot answer, and gets it wrong in both directions: a
+migration reads as APPLIED when a different one consumed its number, so its `ALTER`s
+never run and the schema silently lacks them — which is exactly ordinals 122, 124 and 125
+— and as PENDING when the same migration already ran under another number, which re-runs
+it and crashes on a duplicate column.
+
+So `migrations/runner.ts` reconciles by the migration NAME (`classifyMigration`), with
+`content_sha256` as a second, name-independent identity used only to WIDEN the answer: a
+migration whose exact bytes are recorded has run, whatever it was called then. It never
+narrows one. The README's existing decision — the hash is recorded and reported, not
+enforced, because already-applied files get benign edits and a hash gate would turn each
+into a crash loop — predates this work and is untouched.
+
+**`_migrations` moved its PRIMARY KEY from `version` to `name`**, rekeyed in place
+(`rekeyLedgerOnName`, one transaction) on the first boot that has something to apply,
+preserving every row and every column value. This is the part that had no alternative:
+with `version` as the key there is no correct value to write for a migration whose
+ordinal another migration already spent. Recording at the file's ordinal is a PK
+conflict; at `max+1` it consumes a future ordinal and recreates this bug class; at a
+negative sentinel it puts a non-version in a column named `version`; rewriting the
+occupying row destroys an incident record the repairs notes say must never be rewritten;
+a second bookkeeping table is two sources of truth for one question. Keying on the name
+removes the conflict instead of choosing which field to falsify — two rows may now share
+a `version`, which is simply true of a fleet where two migrations were both written as
+0125.
+
+**The fail-closed half is kept and restated against identity.** A recorded migration that
+NO file in this build corresponds to, by name or by hash, refuses the boot, lists EVERY
+such row (one verification pass and one edit, rather than one refused boot per row), and
+prints the exact `repairs.json` entries. `repairs.json` keeps both halves of its meaning
+— it acknowledges the orphan row, and its `file_name` marks a migration as already
+applied so a hand-applied schema change is not re-run (ordinal 122's entry does exactly
+that) — and its trigger is unchanged, so an entry only speaks where its row exists and
+stays inert on a fresh install.
+
+**That guard adjudicates ONLY rows carrying a `content_sha256`, and the gate is
+load-bearing rather than lenient.** Migration files are deliberately deleted here —
+`0059_syndication_events` with the content-sync mesh rip, `0064`–`0068` in the A2
+collapse — so every long-lived database holds hashless rows naming migrations the tree no
+longer contains. Refusing on those would take down the oldest instances in the fleet over
+evidence that is a NULL, with nothing for an operator to verify. It is still strictly
+stronger than the guard it replaces, which could not see those rows at all: that one only
+ever compared a row against the one file sharing its ordinal.
+
+A false negative in the first pass of this investigation is worth recording, because it
+would have produced exactly that outage: `git log --diff-filter=D -- 'migrations/0*.sql'`
+returned nothing, which reads as "no migration file was ever deleted". The history in
+this clone is squashed to a single commit, so the query could only ever return nothing;
+`runner.test.ts:68-76` documents the deletions in as many words. The tool's silence was
+not evidence.
+
+Two controls, both against the pre-fix runner on throwaway SQLite files built by the real
+runner over the real tree, with no ledger row hand-written anywhere: the reproduced
+instance state refuses with the exact live message and boots under this change with both
+columns present; the renumber alternative fails on a healthy instance and is a no-op
+under the new runner.
+
+`migrations/__tests__/ordinal-identity.test.ts` pins the four states — the spent ordinal
+(with and without provenance recorded), a healthy instance, a fresh install, genuine
+corruption — each as a real database driven by the real runner over the real migration
+tree, plus the rekey preserving every row and hash. Two mutation proofs with green
+controls: deleting the unexplained-row throw turns the corruption case red, and breaking
+the name check re-applies a renumbered migration and crashes. (The second mutant PASSED
+on the first attempt — identical file bytes meant the hash check answered first and the
+test proved nothing — so the renumbered fixture now carries an added comment, which is
+also the realistic case.)
+
+`untracked-migration-mutation.test.ts` gained an explicit per-mutant `deaths` count in
+place of a flat "exactly one scenario dies": the two untracked throw sites collapsed into
+one, since an occupied ordinal is no longer a finding of its own, so CONTEXT is nested
+inside REFUSAL and declaring 1 and 2 keeps them distinguishable rather than silently
+loosening the assertion.
+
+`gateway/nexus/nexus-store.ts` classified its cross-process init race by matching the
+ledger's PK name inside an error string (`UNIQUE constraint failed: _migrations.version`);
+it now accepts either column, so a sidecar mid-upgrade is classified the same as one
+already converted. `migrations/expected-schema.txt` regenerated (a two-line diff).
+`migrations/README.md` gains a "The ordinal is not an identity" section;
+`docs/INVARIANTS.md` #17 now names four fail-closed refusals instead of three.
+
+**A cross-model review of this PR found two defects in its own fix, and both are fixed
+here.** The first is the fix reintroducing its own defect class, which is the reason the
+review was worth running at all.
+
+**The rekey refused a ledger that was legitimate, which would have bricked instances that
+were healthy.** `rekeyLedgerOnName` copied the old rows into a name-keyed table with a
+single `INSERT ... SELECT`, and a database written by the ORDINAL-keyed runner can
+legitimately hold one migration NAME at TWO ordinals: migrations here are idempotent by
+contract (`migrations/AGENTS.md`), so when a merge renumbered an already-applied file to
+an ordinal that instance had not spent, the old runner's version-only dedup re-applied it
+harmlessly and recorded a SECOND row under the new number. Two rows, one name, nothing
+corrupt and nothing missing from the schema. The copy then violated the new name key, the
+rekey threw, and EVERY boot with a pending migration failed — an ordinal treated as an
+identity, one level up, and strictly worse than the bug being fixed because it breaks
+instances that worked. Reproduced first and measured, not reasoned about: two sequential
+runs of the pre-change algorithm over the real tree (the second having renumbered
+`0131_work_board_items_archived_status` back to its merged `0130`) produce the duplicate,
+and the current runner died on it with `UNIQUE constraint failed: _migrations.name`.
+
+`collapseLedgerRowsByName` now resolves the group instead: the surviving row is the one
+applied EARLIEST — ties broken by ordinal then name, so it is deterministic — because that
+is when the schema change actually landed on this database, and provenance
+(`content_sha256` / `applied_by_commit` / `tree_provenance`) is filled from any row in the
+group that carries it. That second half matters more than it looks: the earliest row is
+typically the oldest release's, written before provenance shipped and therefore NULL, so a
+plain "first row wins, drop the rest" collapse would have thrown away the only forensic
+record the instance has of that migration. The copy is row-by-row rather than one
+`INSERT ... SELECT` because the collapse is a decision about a group, and because the
+legacy ledger has to be read shape-tolerantly anyway.
+
+**The distinction being preserved is EXPLAINABLE versus not, and the fail-closed guard is
+untouched.** One name at two ordinals is fully explained by the paragraph above, so it
+collapses. A recorded migration that corresponds to no file in this build, by name or by
+hash, is explained by nothing and still refuses the boot.
+
+**The rekey's failure message told the operator something false.** It said "the database
+is unchanged", but the provenance `ALTER TABLE`s ran in `ensureLedgerShape` BEFORE
+`rekeyLedgerOnName` opened its transaction — and a statement run outside an explicit
+transaction is its own implicit one, so they COMMITTED. A failed rekey therefore left a
+ledger carrying three new columns while the error said nothing had happened, and an
+operator who believed that sentence would not go looking for a half-modified ledger. Fixed
+by making the claim true rather than by softening it: the ALTERs moved inside the
+`BEGIN IMMEDIATE`, verified against the driver first (`ALTER TABLE ... ADD COLUMN` inside
+a transaction is rolled back by `ROLLBACK` — SQLite rolls DDL back with everything else).
+The message also stops naming duplicate names as the likely cause, since that cause is now
+handled, and it says "the LEDGER is unchanged" rather than "the database": on this same
+path `applyMigrations` may already have written a `_migration_repairs` acknowledgement row
+before the rekey, so the narrow claim is the one that holds, and the message names the one
+thing that may not.
+
+`ordinal-identity.test.ts` gains the two cases that did not exist — which is why the
+review found these and the suite did not. **CASE 5 — one migration name at TWO ordinals is
+collapsed, and the instance BOOTS** asserts the pending migration applies, the post-rekey
+ledger holds exactly one row for that name at the earliest-applied ordinal, its provenance
+columns survived from the row that had them, and no other row was collapsed or duplicated.
+**CASE 6 — when the rekey fails, the ledger really is unchanged as the message says** fails
+a rekey deterministically (a leftover VIEW on the scratch-table name; `DROP TABLE IF
+EXISTS` refuses a view) and then verifies the claim: same DDL, same rows, and the
+provenance columns still ABSENT.
+
+Both cases are driven by `versionKeyedRunner`, the shipped runner's own pre-change
+algorithm, added to the test file because it is the only thing that can produce these
+ledgers and the current runner cannot. Its rows are still not hand-written — every value
+comes from a real migration file and it really executes each file's SQL — and its
+`applied_at` is passed in rather than read from the clock, so the collapse's tie-break is
+not what the assertions rest on.
+
+Three mutation proofs, each red in exactly the expected place and nowhere else: deleting
+the unexplained-row throw turns CASE 4 and CASE 4b red and leaves the new cases green
+(the fail-closed guard was not weakened to make the collapse work); making the collapse a
+pass-through turns CASE 5 red with the original `UNIQUE constraint failed` error; and
+restoring the pre-fix ALTER ordering turns CASE 6 red on the still-absent-columns
+assertion alone. All three were re-run after main was integrated, against the new
+baseline, rather than carried over from the pre-integration run.
+
+**Integrating #391 (the ordinal-125 repair migration, `0131`) changed what two tests may
+assert, and both changes are semantic rather than cosmetic.** The fixtures here stand in
+for releases that predate `0131`, so they drop it and the runner under test applies it —
+which means `0131` rebuilding `code_trident_runs` is now what converges
+`base_sha`/`base_behind`, and the shipped `repairs.json` entry SKIPS `0125` rather than
+applying it. CASE 1 and CASE 1b assert that convergence instead of asserting that `0125`
+ran; a new CASE 1c pins the case with the 125 acknowledgment REMOVED, because that is the
+one that shows the acknowledgment has stopped being a precondition for booting. The
+duplicate-name fixture's branch ordinal also moved off `0131` (it now sits above every
+ordinal the real tree uses) — it collided with the real repair file the moment that
+migration landed, which turned a name-collapse test into an ordinal-collision failure that
+said nothing about the collapse.
+
+**#391's own negative test now asserts the opposite of what it did, deliberately.**
+`live-ledger-125-repair.test.ts` required that removing the ordinal-125 entry made the boot
+REFUSE — the acknowledgment was a PRECONDITION, and a missing one was an outage whose only
+remedy was an operator verifying a live schema by hand while the instance was down. That
+refusal compared the ledger's recorded name at ordinal 125 against whatever file sits at
+125 in this build, and that comparison is exactly what this change removes. With no entry
+the migration is simply not recorded, so it applies and the boot succeeds. The entry is not
+now pointless — it remains the incident record, `_migration_repairs` still audits it, and it
+still skips an `ALTER` that `0131` would rebuild anyway — but it is an optimisation, not the
+thing standing between the owner and a booting instance. The fail-closed half is untouched
+and CASE 4 still pins it.
+
+**On the owner's instance this is ONE deploy, not several, and that was measured rather than
+hoped.** The live ledger records `dispatch_dependencies_and_claims` at 124,
+`code_trident_runs_fix_round_contract` at 125 and `code_trident_runs_infra_retries` at 126.
+Reconciled by name against this tree: 124's row names no file here and is acknowledged; 125's
+row names the file this build numbers 0124, so it reads as applied; **126's row names the file
+this build numbers 0126, so it matches and needs nothing — ordinal 126 does not collide.**
+Ordinals 127, 130 and 131 are absent from the ledger, which is the ordinary pending state, so
+they apply in order. Nothing further is queued behind this. The two orphan names were checked
+with a positive control — `code_trident_runs_infra_retries` and
+`work_board_items_archived_status` ARE files in the tree, `work_board_items_pr` and
+`dispatch_dependencies_and_claims` are not — so the absences are measurements and not a
+grep that silently matched nothing.
+
+**What this does NOT do is stop the class recurring.** The writer is the tenant's own
+in-product lanes inheriting `NEUTRON_HOME`, and closing that needs env-quarantine at lane
+spawn plus a linked-worktree refusal in the runner — a separate change, dispatch-queue item 5
+per the SPEC decision of 2026-08-17. This is the reconciliation that lets an already-damaged
+instance boot; it is not the guard that prevents the next one being damaged.
+
+### Round 2 — four defects the first round's tests could not see
+
+Each of these passed review because the test covering its area exercised the harmless half of
+its own shape. That pattern, rather than any one bug, is the thing worth remembering.
+
+**The rekey destroyed data at its scratch name.** It opened with
+`DROP TABLE IF EXISTS _migrations_version_keyed` — a data-destroying statement guarded by
+nothing, inside the transaction that goes on to commit. The existing test put a VIEW on that
+name, and SQLite refuses to `DROP TABLE` a view, so the statement threw and the test passed
+while the table case, the only one where data exists to lose, deleted it permanently and
+silently. The state that `DROP` was written to clean up cannot occur at all: the rename, the
+copy and the final drop are one transaction, so a crash rolls the scratch table away with
+everything else. It now refuses before opening the transaction and tells the operator to move
+their own table. CASE 6b asserts the surviving row and is the only assertion in the file that
+goes red if the `DROP` returns.
+
+**The collapse fabricated provenance.** It filled `content_sha256`, `applied_by_commit` and
+`tree_provenance` independently, so it could emit one row's hash beside another row's commit —
+a tuple no row ever had, asserting that those bytes were applied by a build that did not apply
+them. They are not three facts but one, written together inside a single migration's
+transaction, and a fabricated forensic row is worse than a NULL because it cannot be told from
+a true one. The triple is now adopted whole from one donor row, identified by carrying a hash.
+CASE 5c is mutation-proven: restoring per-column filling turns it red and nothing else, and it
+receives exactly the fabricated commit. CASE 5 stays green under that mutation, which is why
+it could never have caught this — its surviving row has no provenance at all, so both rules
+agree there.
+
+**Hash widening was a silent-skip bug.** "These bytes are recorded" only means "this file has
+run" when the recording row is one no file in this build already accounts for — the rename case
+the widening exists for. When the row's name IS a file here, a second differently-named file is
+merely byte-identical, and calling it applied meant it never ran, never recorded, and was
+reported under `skipped` by a boot that exited zero. That is this change's own defect class
+reached through its fix. It now refuses, naming both files. Worth recording that the review
+finding described this as a one-boot repro; it is not. In a single boot both files are pending
+and the second throws `duplicate column name` loudly. The silent form needs the first file
+recorded by an earlier boot, which is what happens when a duplicate is added later.
+
+**A hash mismatch under a matching name booted in total silence.** Refusing there is a decision
+this repository has weighed and declined — `migrations/README.md`, "recorded and reported, not
+enforced" — because already-applied files are edited in place for benign reasons and a gate
+turns each one into a crash loop. That decision stands and is untouched. What was never decided
+is saying nothing: a migration amended during review and renumbered by the merge reads as
+applied, its added statements never run, and both hashes were in hand at that moment. It is now
+a warning, never a gate, with `renumbered` as its own field because bytes AND ordinal both
+moving is the one combination an in-place edit cannot produce. A steady-state boot says nothing,
+and there is a test for that silence — a notice that fires every boot is noise an operator
+learns to ignore.
+
+**Two smaller corrections.** The name-collision refusal now names the untracked side and gives
+its remedy; its docblock had claimed the untracked guard would refuse such a stray anyway, which
+was unreachable in two independent ways — the check ran before the tree was resolved, and a
+shared name is exactly what makes both files read as applied, so nothing is pending and the
+untracked loop reaches nobody. And the claim that the new unexplained-row guard is "strictly
+stronger than the guard it replaces" is deleted as false: the old guard refused on hashless
+orphans whose ordinal a build file occupied, which is how 122, 124 and 125 were noticed at all.
+The two are not ordered. The real trade is written down instead — the old guard's loud failure
+was never the mechanism that fixed anything, and the false refusals it caused after a mere
+renumber had no remedy that was not worse.
+
+**Two claims the tests still could not see, now asserted.** The rekey renames the old ledger
+out of the way BEFORE creating the new one so a rekeyed instance's `sqlite_master` text is
+byte-identical to a fresh install's — a claim only a docblock made, while the schema snapshot
+compares nothing but the fresh path. A later create-then-rename refactor would therefore drift
+every rekeyed instance in the fleet with CI green, and `toContain` on one clause could not see
+it; CASE 2b now compares `ddlOf(db, '_migrations')` `.toBe` a fresh install's DDL. And CASE 6
+kills the rekey on its FIRST statement, which proves the provenance `ALTER`s never RAN rather
+than that they roll back — while rolling back is what "its shape, its columns and its rows are
+exactly what they were" actually claims. **CASE 6c** injects a `NOT NULL` violation at the row
+copy, asserts the quoted SQLite error to prove the failure landed AFTER the ALTERs, and only
+then asserts the unchanged DDL text, the still-absent provenance columns and the identical
+rows. The mutation proof was re-run at this head rather than carried over, since a proof is
+bound to the commit it was measured against: deleting the unexplained-row throw reddens CASE 4
+and CASE 4b and leaves every other case green.
+
+**`migrations/AGENTS.md` overstated idempotency and now states the measurement.** It said
+migrations are idempotent, "`CREATE TABLE IF NOT EXISTS` everywhere". Measured on this tree:
+34 of 123 files use bare `ALTER TABLE … ADD COLUMN`, which fails on a second run, and 34 use
+`CREATE TABLE IF NOT EXISTS`. Applied-once comes from the ledger plus the per-migration
+transaction, not from every statement being re-runnable — which also sharpens the collapse's
+own reasoning: the one-name-at-two-ordinals shape reaches a HEALTHY instance precisely because
+that file's body was re-runnable, while a body that could not be re-run failed loudly at that
+boot and never produced the pair.
+
 ## 2026-08-17 — the ordinal-125 mismatch is acknowledged and 0131 converges both schema paths — the repair that gates deploy xGkufirIQQKW1L
 
 This is the third instance of the #575 incident class: a migration from an
@@ -51,6 +358,18 @@ Its negative control removes only the new 125 acknowledgment and proves the run
 refuses before writing any later migration. A fresh-install test proves 0125
 and 0131 coexist with exactly one `base_sha` column, and a pin test makes the
 acknowledgment itself part of the contract. No `_migrations` row is rewritten.
+
+SUPERSEDED IN PART BY PR #388 (the entry above), and specifically this sentence:
+"Its negative control removes only the new 125 acknowledgment and proves the run
+refuses before writing any later migration." That was true of the runner as it
+stood here, and it is no longer the contract. Once the ledger reconciles by
+migration identity rather than by ordinal, removing the 125 acknowledgment does
+NOT cause a refusal — `code_trident_runs_base_sha` is simply absent from the
+ledger by name, so it applies, and the boot succeeds. The test now asserts that
+instead. The acknowledgment remains shipped and remains correct (it records the
+incident and skips an `ALTER` that 0131 rebuilds regardless), but it is an
+optimisation rather than the thing standing between the owner and a booting
+instance. Read the entry above for what the runner actually does now.
 
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 

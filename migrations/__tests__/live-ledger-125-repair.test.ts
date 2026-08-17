@@ -123,7 +123,33 @@ test('the live 0125 incident boots, applies 127/130/131, and leaves row 125 unto
   db.close()
 })
 
-test('without the 125 entry the run refuses and writes nothing', () => {
+/**
+ * WHAT THIS TEST USED TO ASSERT, AND WHY IT NOW ASSERTS THE OPPOSITE.
+ *
+ * It used to require that removing the ordinal-125 entry from `repairs.json` made the
+ * boot REFUSE — the acknowledgment was a PRECONDITION for coming up, and a missing one
+ * was an outage whose only remedy was an operator verifying the live schema by hand at
+ * the moment the instance was down. That refusal came from comparing the ledger's
+ * recorded NAME at ordinal 125 against the file that happens to sit at 125 in this
+ * build, and that comparison is gone: the ordinal is a filename prefix, not an
+ * identity, so the runner asks whether THIS MIGRATION has run rather than whether its
+ * NUMBER has. See `runner.ts`, `classifyMigration`.
+ *
+ * So with no entry, `code_trident_runs_base_sha` is simply not recorded, and it
+ * applies. The boot succeeds and the schema is correct by a second, independent route
+ * — which is strictly better than refusing, and it is why the inversion is the point
+ * rather than a regression.
+ *
+ * THE ENTRY IS NOT NOW POINTLESS, and this test still earns its place. It remains the
+ * record of what happened to that instance, `_migration_repairs` still audits it, and
+ * it still SKIPS an `ALTER` that `0131` would rebuild anyway. What changed is its
+ * status: an optimisation and an incident record, not the thing standing between the
+ * owner and a booting instance.
+ *
+ * The fail-closed half is untouched, and `ordinal-identity.test.ts` CASE 4 pins it: a
+ * recorded migration NO file in this build corresponds to still refuses.
+ */
+test('without the 125 entry the run no longer needs one — it applies 0125 and boots', () => {
   const db = seedLiveReplica('negative')
   const fullDir = copyTree(
     'negative-full',
@@ -133,19 +159,42 @@ test('without the 125 entry the run refuses and writes nothing', () => {
   const beforeName = db
     .query<{ name: string }, []>('SELECT name FROM _migrations WHERE version = 125')
     .get()
-
-  expect(() => applyMigrations(db, fullDir)).toThrow(
-    /version 125[\s\S]*code_trident_runs_base_sha/,
-  )
-
+  // Control on the fixture: the columns really are absent before the run, so their
+  // presence afterwards is this run's doing.
   expect(columnNames(db, 'code_trident_runs')).not.toContain('base_sha')
-  expect(db.query<{ name: string }, []>('SELECT name FROM _migrations WHERE version = 125').get())
-    .toEqual(beforeName)
+
+  const result = applyMigrations(db, fullDir)
+
+  // It applied the migration itself, instead of demanding to be told about it.
+  expect(result.applied).toEqual([125, 127, 130, 131])
+  expect(columnNames(db, 'code_trident_runs')).toContain('base_sha')
+  expect(columnNames(db, 'code_trident_runs')).toContain('base_behind')
+  // The incident row is untouched — never renamed, never renumbered, never deleted.
   expect(
-    db.query<{ version: number }, []>(
-      'SELECT version FROM _migrations WHERE version IN (127, 130, 131)',
-    ).all(),
-  ).toEqual([])
+    db
+      .query<{ name: string }, []>(
+        "SELECT name FROM _migrations WHERE version = 125 AND name = 'code_trident_runs_fix_round_contract'",
+      )
+      .get(),
+  ).toEqual(beforeName)
+  // Ordinal 125 now carries both migrations that were ever written as 0125, which is
+  // only expressible because the ledger is keyed on the name.
+  expect(
+    db
+      .query<{ name: string }, []>('SELECT name FROM _migrations WHERE version = 125 ORDER BY name')
+      .all()
+      .map((r) => r.name),
+  ).toEqual(['code_trident_runs_base_sha', 'code_trident_runs_fix_round_contract'])
+  // NOTHING WAS ACKNOWLEDGED FOR 125, because nothing needed to be — while the 122 and
+  // 124 entries this fixture's ledger does still match were acknowledged as before.
+  // Asserting the table is absent would be wrong and would prove too much: those two
+  // rows are genuinely acknowledged here, and the claim worth pinning is the narrow one.
+  expect(
+    db
+      .query<{ version: number }, []>('SELECT version FROM _migration_repairs ORDER BY version')
+      .all()
+      .map((r) => r.version),
+  ).toEqual([122, 124])
   db.close()
 })
 

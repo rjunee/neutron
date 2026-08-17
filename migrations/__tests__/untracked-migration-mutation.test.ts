@@ -20,14 +20,22 @@
  *                 established. Remove it and the ledger claims a verification
  *                 that never happened — which is the same forensic dead end the
  *                 provenance columns exist to close, now wearing a clean answer.
- *   DIAGNOSIS     reports an untracked file at an ALREADY-RECORDED ordinal as the
- *                 stray it is. Remove it and the operator gets a name-mismatch
- *                 whose remedy is a `repairs.json` entry naming a file this tree
- *                 does not track — the presentation the last outage arrived in.
+ *   CONTEXT       names the ledger row that shares the ordinal, inside the same
+ *                 refusal. Remove it and an operator staring at an occupied ordinal
+ *                 and a bare "not tracked" goes hunting a second problem that is
+ *                 not there — the presentation the last outage arrived in.
  *
- * Each mutant must kill EXACTLY ONE scenario. That is what shows the four are
- * doing different work rather than one masking another, and it is asserted on the
- * pass/fail counts because a passing test's name is never printed.
+ * EACH MUTANT MUST KILL A DECLARED NUMBER OF SCENARIOS, and the number is part of
+ * the evidence rather than a uniform 1. CONTEXT is NESTED INSIDE REFUSAL: the
+ * context line is only observable through the refusal that prints it, so deleting
+ * the refusal necessarily kills the context scenario too. Declaring `deaths: 2`
+ * there and `deaths: 1` for CONTEXT is what still distinguishes them — CONTEXT
+ * killing exactly its own scenario proves that line does independent work, and
+ * REFUSAL killing both proves the nesting rather than hiding it. (This used to be a
+ * flat "exactly one" because the runner had two separate throw sites for the two
+ * cases; identity reconciliation collapsed them, since an occupied ordinal is no
+ * longer a finding of its own.) Asserted on pass/fail counts, because a passing
+ * test's name is never printed.
  */
 
 import { expect, test } from 'bun:test'
@@ -54,17 +62,20 @@ interface Mutant {
   readonly find: string
   /** What to replace it with — the pre-guard behaviour. */
   readonly replace: string
-  /** A distinctive fragment of the ONE scenario name that must go red. */
+  /** A distinctive fragment of a scenario name that must go red. */
   readonly kills: string
+  /** How many scenarios this deletion must kill. See the header on nesting. */
+  readonly deaths: number
 }
 
 const MUTANTS: readonly Mutant[] = [
   {
     property: 'REFUSAL',
     file: 'runner.ts',
-    find: 'throw new Error(formatUntrackedMigration(migration, untracked, deployedCommit, null))',
-    replace: 'continue',
+    find: 'if (untracked !== null) {',
+    replace: 'if (false) {',
     kills: 'an untracked migration in a tracked directory is not applied',
+    deaths: 2,
   },
   {
     property: 'REACH',
@@ -72,6 +83,7 @@ const MUTANTS: readonly Mutant[] = [
     find: "if (tracked.size === 0) return unverifiable('directory-not-tracked')",
     replace: '',
     kills: 'does not track at all still boots',
+    deaths: 1,
   },
   {
     property: 'RECORDING',
@@ -79,13 +91,15 @@ const MUTANTS: readonly Mutant[] = [
     find: 'unverifiedTreeProvenance(tree.reason)',
     replace: 'TRACKED_IN_DEPLOYED_TREE',
     kills: 'records that provenance was unverifiable',
+    deaths: 1,
   },
   {
-    property: 'DIAGNOSIS',
+    property: 'CONTEXT',
     file: 'runner.ts',
-    find: '? formatUntrackedMigration(migration, untracked, deployedCommit, recorded)',
-    replace: '? formatNameMismatch(migration, recorded, today)',
-    kills: 'at a recorded ordinal names the stray',
+    find: 'ledger.byVersion.get(migration.version) ?? null',
+    replace: 'null',
+    kills: 'names the row sharing its ordinal',
+    deaths: 1,
   },
 ]
 
@@ -160,8 +174,8 @@ test('recording: a tree with no git metadata records that provenance was unverif
   })
 })
 
-test('diagnosis: an untracked file at a recorded ordinal names the stray', () => {
-  inTmp('diagnosis-mutant-', (tmp) => {
+test('context: an untracked file at a recorded ordinal names the row sharing its ordinal', () => {
+  inTmp('context-mutant-', (tmp) => {
     const db = new Database(':memory:')
     applyMigrations(db, checkout(tmp, 'was', ['0001_alpha.sql'], { '0001_alpha.sql': ALPHA }))
     // Ordinal 1 is recorded as \`alpha\`; on disk it is \`beta\`, and untracked.
@@ -173,8 +187,9 @@ test('diagnosis: an untracked file at a recorded ordinal names the stray', () =>
       message = err instanceof Error ? err.message : String(err)
     }
     expect(message).toContain('NOT part of the deployed tree')
-    // The mismatch remedy would send the operator to a repairs.json entry for a
-    // file this tree does not track, which is the disease.
+    expect(message).toContain('Ordinal 1 is ALREADY recorded, under the name "alpha"')
+    // The remedy is deletion. A repairs.json entry here would acknowledge a row
+    // against a file this tree does not track, which is the disease.
     expect(message).not.toContain('"recorded_name"')
   })
 })
@@ -235,12 +250,13 @@ test('removing any one property of the untracked guard turns its own scenario re
       const red = await runScenario(dir)
       expect(red.exitCode, `${mutant.property}\n${red.output}`).not.toBe(0)
       expect(red.output, `${mutant.property}\n${red.output}`).toContain(mutant.kills)
-      // EXACTLY ONE scenario died, and it is the named one — which is what makes
-      // the properties distinguishable rather than one standing in for another.
+      // The DECLARED number of scenarios died, and one of them is the named one —
+      // which is what keeps the properties distinguishable rather than one standing
+      // in for another. See the header for why the number is not uniformly 1.
       expect(red.output, `${mutant.property}\n${red.output}`).toContain(
-        `${SCENARIO_COUNT - 1} pass`,
+        `${SCENARIO_COUNT - mutant.deaths} pass`,
       )
-      expect(red.output, `${mutant.property}\n${red.output}`).toContain('1 fail')
+      expect(red.output, `${mutant.property}\n${red.output}`).toContain(`${mutant.deaths} fail`)
     }
   } finally {
     rmSync(root, { recursive: true, force: true })
