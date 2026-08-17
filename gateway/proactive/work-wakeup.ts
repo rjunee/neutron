@@ -226,9 +226,19 @@ export interface WakeupSweepResult {
  * on record would still name R1: stale attribution, which is the specific kind of
  * wrong that is worse than silence. Including the run gives the new driver its own
  * window, and the prune still drops the old key on the same sweep.
+ *
+ * THE SEPARATOR IS WRITTEN AS AN ESCAPE AND MUST STAY THAT WAY. NUL is the right
+ * delimiter — it is the one byte that cannot occur in a project slug, a board item
+ * id or a run id, so no combination of components can collide into a single key.
+ * But typing it LITERALLY puts a real NUL in the source, and a tracked file
+ * containing one is BINARY to grep: `scripts/ci/leak-gate.sh` flags it
+ * `binary-hidden` and fails the `purity` job, precisely because every PII and
+ * vocabulary rule it runs would silently match nothing in such a file. This file
+ * shipped a literal NUL here and the gate was right to refuse it. The escape is
+ * byte-identical at runtime and leaves the source pure ASCII.
  */
 function deferralLogKey(project_key: string, d: WakeupDeferredItem): string {
-  return `${project_key} ${d.item_id} ${d.run_id}`
+  return `${project_key}\u0000${d.item_id}\u0000${d.run_id}`
 }
 
 /** Truncate for a prompt line / a log field — bounded, marked, never thrown. */
