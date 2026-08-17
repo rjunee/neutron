@@ -1,6 +1,6 @@
 # IMPLEMENTATION_PLAN.md — one factory for TridentRun test fixtures
 
-Governing card: "Every branch that adds a TridentRun field breaks up to 14 fixtures across the repo — one factory, not twenty literals". Repo of record: `/var/lib/neutron/tenants/n7eb7cca79ce58139/Projects/neutron-open/code`, base `main`.
+Governing card: "Every branch that adds a TridentRun field breaks up to 14 fixtures across the repo — one factory, not twenty literals", base `main`.
 
 Survey findings (2026-08-17):
 - No factory exists (`makeTridentRun` matches nothing). Each fixture file carries its own full ~36-field literal (`makeRun`/`run`/`fakeRun`/`runWith`/`doneRun`/`localRun`).
