@@ -1212,14 +1212,28 @@ describe('the installer under a locked config — the FATAL half-state must be i
     /**
      * THE CITATIONS IN THIS CLUSTER POINT AT SYMBOLS, NOT AT LINE NUMBERS THAT MOVE.
      *
-     * Every one of them was correct when it was typed and three of the four had rotted by the time
-     * anyone read them again, because nothing pointed at them and so nothing failed. Measured at
-     * caf6928e: `install-merge-drivers.sh` twice sent the reader to line 633 of
-     * `trident/orchestrator.ts` for `asBuiltDriverCommand`, which is at 677 — the intervening 44
-     * lines are a docblock that grew under it. This file's own header sent them to line 715 for the
-     * publisher's `git apply --3way`, which is in `rebaseOntoObservedBase` and runs at 1122; 715 is
-     * prose about `--env-file=/dev/null`. A citation that lands on unrelated prose is worse than no
-     * citation, because it reads as though it were checked.
+     * A LINE NUMBER IS NOT A PROPERTY OF A FILE. It is a property of a file AT A COMMIT, and every
+     * reader is at a different one — which is why this is not fixable by being more careful.
+     *
+     * Re-measured at caf6928e, the merge of #323, because the first version of this paragraph got
+     * it wrong in the direction that flatters the change and the correction is the actual argument:
+     *
+     *   - `install-merge-drivers.sh` cited line 633 of `trident/orchestrator.ts` twice for the
+     *     `.exe`-stripping guard that opens `asBuiltDriverCommand`. At caf6928e line 633 IS that
+     *     guard — the citations were CORRECT. Read the same two lines in a tree that has merged
+     *     current main and they are 45 lines short, because main grew above them. Neither file was
+     *     touched. Nobody was careless. The citation rotted because the READER moved, which no
+     *     amount of diligence at typing time can prevent.
+     *   - This file's own header cited line 715 of `trident/orchestrator.ts` for the publisher's
+     *     `git apply --3way`, which is in `rebaseOntoObservedBase`. That one was genuinely wrong at
+     *     caf6928e: 715 is prose about `.gitattributes` and `merge=union`, and the call sits some
+     *     360 lines further down. A citation that lands on unrelated prose is worse than no
+     *     citation, because it reads as though it were checked.
+     *
+     * So one of the three had rotted against its own commit and the other two were waiting to. The
+     * earlier claim here — that three of four had rotted, `asBuiltDriverCommand` "at 677" — took its
+     * numbers from the post-merge branch tree while attributing them to caf6928e, which is the same
+     * mistake one level up: a measurement is only meaningful with the commit it was taken at.
      *
      * RENUMBERING THEM WOULD BUY ONE COMMIT. This file already applies the durable form of the rule
      * one level up — "the two are pinned in agreement by a test rather than by this comment, because
@@ -1240,7 +1254,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
      * — a check that flagged them would flag the explanation of its own rule. The machine-readable
      * forms are the ones a reader clicks, and those are the ones covered.
      */
-    test('cross-file citations name a symbol that resolves, or pin an immutable commit', () => {
+    test('cross-file citations name a symbol that resolves, and no line locator survives', () => {
       const cluster = ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts', 'scripts/git/as-built-merge-driver.ts']
       const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
 
@@ -1261,7 +1275,15 @@ describe('the installer under a locked config — the FATAL half-state must be i
       //
       // (Spelling an offending form out literally here would trip this very check — which is the
       // check working — so the description stays in words.)
-      const LOCATOR = /([\w./-]+\.(?:ts|tsx|js|mjs|sh|md|json))(?::|#L)(\d+)/
+      //
+      // THE EXTENSION IS NOT ENUMERATED, because an enumerated one is the hand-extended hunt that
+      // `scripts/install-merge-drivers.sh` argues against one file over — it has to be edited every
+      // time a file type appears, and until someone remembers, the gap is a silent pass rather than
+      // a visible hole. The first cut listed ts|tsx|js|mjs|sh|md|json and was measured blind to
+      // `.yml`, `.mts` and `.toml` locators appended to this cluster. Any short alphanumeric
+      // extension counts now. Widening it costs nothing here: run against the cluster at this
+      // commit it matches zero lines, so the only thing it can newly catch is a new offender.
+      const LOCATOR = /([\w./-]+\.[A-Za-z][A-Za-z0-9]{0,4})(?::|#L)(\d+)/
       const offenders: string[] = []
       for (const rel of cluster) {
         read(rel).split('\n').forEach((line, i) => {
@@ -1280,16 +1302,23 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // own call sites after the DEFINITION is renamed — measured: renaming `function
       // asBuiltDriverCommand` left the name in a call and a comment, and a bare-symbol check passed
       // a function that no longer exists under that name.
+      //
+      // The definition string CARRIES ITS OPEN PAREN, and that is load-bearing rather than tidy: it
+      // is matched as a substring, so `function asBuiltDriverCommand` is satisfied by `function
+      // asBuiltDriverCommandV2`. Measured — renaming both anchored functions to a `V2` suffix left
+      // this check green, while a non-suffix rename correctly reddened it, so every rename that ADDS
+      // to the end of a name (V2, Impl, 2 — the shape a rename actually takes) walked straight
+      // through. The paren makes the match end where the name does.
       const anchors: Array<{ symbol: string; definition: string; definedIn: string; citedBy: string[] }> = [
         {
           symbol: 'asBuiltDriverCommand',
-          definition: 'function asBuiltDriverCommand',
+          definition: 'function asBuiltDriverCommand(',
           definedIn: 'trident/orchestrator.ts',
           citedBy: ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts'],
         },
         {
           symbol: 'rebaseOntoObservedBase',
-          definition: 'export async function rebaseOntoObservedBase',
+          definition: 'export async function rebaseOntoObservedBase(',
           definedIn: 'trident/orchestrator.ts',
           citedBy: ['scripts/git/as-built-merge-realgit.test.ts'],
         },
@@ -1314,25 +1343,84 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // sits — every backticked mention of a cited file must have a backticked identifier on its own
       // line or the one above, and at least one of those has to exist in the file being cited.
       //
-      // Scoped to the files the anchors above name, deliberately. A citation that names no symbol at
-      // all is legitimate prose ("the way `trident/publish-rebase-realgit.test.ts` does") and is left
-      // alone; widening this to every path mentioned anywhere would trade a real guard for noise.
+      // Scoped to the files the anchors above name, deliberately.
+      //
+      // WHAT THE SITE MUST NAME IS AN ANCHOR, NOT "ANYTHING THE TARGET CONTAINS". Resolving against
+      // the whole target file reads as strict and is not: the target is thousands of lines of
+      // ordinary code, so nearly any short backticked word is somewhere inside it. Measured —
+      // misspelling a symbol at one site and putting the word `bun` beside it left this GREEN,
+      // because `bun` appears in the target seven times; the identical typo without that word
+      // reddened. The rescue was a common English-ish token doing it by accident, which is the
+      // version that happens in real edits. The anchor table above is the curated list of what this
+      // cluster is entitled to cite, so a site has to name something ON it. A new legitimate
+      // citation therefore costs one row in that table — which is the point, since the row is what
+      // resolves the symbol against the target at all.
+      const allowedFor = new Map<string, Set<string>>()
+      for (const a of anchors) {
+        if (!allowedFor.has(a.definedIn)) allowedFor.set(a.definedIn, new Set())
+        allowedFor.get(a.definedIn)!.add(a.symbol)
+      }
+
       const unresolved: string[] = []
+      let sitesChecked = 0
       for (const rel of cluster) {
         const lines = read(rel).split('\n')
-        for (const target of [...new Set(anchors.map((a) => a.definedIn))]) {
-          const targetText = read(target)
+        for (const [target, allowed] of allowedFor) {
           lines.forEach((line, i) => {
             if (!line.includes(`\`${target}\``)) return
-            const near = `${lines[i - 1] ?? ''}\n${line}`
+            sitesChecked++
+            // The window reaches BOTH ways. It looked only backwards at first, which made coverage
+            // depend on where the prose happened to wrap: rewording a paragraph in this very file
+            // pushed two symbols onto the line AFTER their path and the sites went unresolved, with
+            // nothing wrong with the citations at all. A one-sided window turns a reflow into a
+            // verdict.
+            const near = `${lines[i - 1] ?? ''}\n${line}\n${lines[i + 1] ?? ''}`
             const named = [...near.matchAll(/`([A-Za-z_][A-Za-z0-9_]*)`/g)].map((m) => m[1]!)
-            if (named.length === 0) return // prose that cites a file and names nothing in it
-            if (named.some((id) => targetText.includes(id))) return
-            unresolved.push(`${rel} line ${i + 1} cites ${target} naming ${named.join(', ')} — none of which is in it`)
+            if (named.some((id) => allowed.has(id))) return
+            unresolved.push(
+              `${rel} line ${i + 1} cites ${target} naming ${named.join(', ') || '<nothing>'} — no anchored symbol among them`,
+            )
           })
         }
       }
-      expect(unresolved, `a citation names a symbol its target does not have:\n${unresolved.join('\n')}`).toEqual([])
+      expect(unresolved, `a citation names no anchored symbol of its target:\n${unresolved.join('\n')}`).toEqual([])
+
+      // AND THE COVERAGE IS ASSERTED, because every check above is a loop over sites and a loop over
+      // zero sites passes. That is the fail-closed-on-the-safety-net shape this repository keeps
+      // writing rules about: an unrelated reflow that stopped the sites matching would take the
+      // guard silently to nothing and still print green. Measured at this commit: exactly 7 sites.
+      // The floor is what was measured, so adding a citation is free and losing one is not — and it
+      // has already paid for itself: rewording the docblock above dropped a site and this line is
+      // what said so, in the same session, before the reword was committed.
+      expect(sitesChecked, 'the site loop reached no citations — the guard is checking nothing').toBeGreaterThanOrEqual(7)
+
+      // …and a cited PATH has to exist, which is the other half of the same hole. The site loop
+      // above keys on an exact backticked target path, so misspelling the PATH means no site
+      // matches, every check skips, and the guard reports green on a citation that resolves to
+      // nothing. The file-level check cannot catch it either — the other, correctly spelled
+      // citations in the same file satisfy the substring on their own. Measured across the cluster
+      // at this commit: 13 distinct backticked repo paths, 12 of which resolve, so this starts at
+      // effectively zero noise and only ever fires on a typo or a move.
+      //
+      // The thirteenth is the one carve-out, and it is a category rather than an exception: prose
+      // about git's own behaviour names runtime artefacts under `.git/` — the lock file git writes
+      // and renames during a config write — which are BY DEFINITION never tracked paths, so
+      // "does this file exist in the repository" is not a question about them. `.github/` is a
+      // tracked directory and deliberately still checked; the skip is the `.git/` prefix exactly.
+      const deadPaths: string[] = []
+      const PATHISH = /`([\w./-]+\/[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,4})`/g
+      for (const rel of cluster) {
+        read(rel)
+          .split('\n')
+          .forEach((line, i) => {
+            for (const m of line.matchAll(PATHISH)) {
+              if (m[1]!.startsWith('.git/')) continue // git's runtime dir, never a tracked path
+              if (existsSync(join(REPO_ROOT, m[1]!))) continue
+              deadPaths.push(`${rel} line ${i + 1} cites \`${m[1]}\`, which is not in the repository`)
+            }
+          })
+      }
+      expect(deadPaths, `a citation names a path that does not exist:\n${deadPaths.join('\n')}`).toEqual([])
     }, 30_000)
   })
 })

@@ -135,22 +135,38 @@ the main worktree, and the boundary is covered by
 the shell that installed`. Those fixes had landed inside the PR before it
 merged; the panel had reviewed an earlier revision.
 
-The fifth had a live residual and this is it. Three of the four cross-file
-citations in the merge-driver cluster pointed at the wrong line. Two in
-`scripts/install-merge-drivers.sh` sent the reader to line 633 of
-`trident/orchestrator.ts` for `asBuiltDriverCommand`, which is at 677; the test
-file's header sent them to line 715 for the publisher's `git apply --3way`,
-which is in `rebaseOntoObservedBase` and runs at 1122. Each was correct when
-typed and was renumbered by an unrelated edit to the file it pointed into.
-Nothing referenced them, so nothing failed. A fourth cited a line relative to
+The fifth had a live residual and this is it: the cross-file citations in the
+merge-driver cluster point at line numbers in a living file.
+
+Re-measured at `caf6928e` itself, because the first version of this entry got the
+measurement wrong in the direction that flattered the change. One of the three
+citations had rotted, not three. `scripts/git/as-built-merge-realgit.test.ts`
+cited line 715 of `trident/orchestrator.ts` for the publisher's `git apply
+--3way`; at that commit 715 is prose about `.gitattributes` and `merge=union`,
+and the call sits in `rebaseOntoObservedBase` roughly 360 lines further down.
+The two in `scripts/install-merge-drivers.sh` cited line 633 for the
+`.exe`-stripping guard, and at that commit line 633 **is** that guard — both
+were correct. The earlier claim that they pointed at nothing took its numbers
+from the post-merge branch tree while attributing them to `caf6928e`, which is
+the same error the entry is about.
+
+The correction is the argument, and a stronger one than the original. Read those
+two correct citations in a tree that has merged current main and they are 45
+lines short, because unrelated work grew above them. Neither file was edited. A
+line number is not a property of a file; it is a property of a file at a commit,
+and every reader is at a different commit — so this is not a class of bug that
+care at typing time can prevent. A fourth citation named a line relative to
 `origin/main`, a target that moves on its own.
 
-Renumbering them would buy one commit, so the citations now name a symbol and a
-new test resolves each one — the durable form this cluster already applies one
-level up, where the two derivations of the driver command are pinned by a test
-rather than by a comment. A line number is still allowed against an immutable
-commit, and the historical citation is kept that way, repinned to `63a342b2`.
-Mutation-tested three ways, each with a control proving the mutation landed.
+So the citations now name a symbol and a new test resolves each one, the durable
+form this cluster already applies one level up where the two derivations of the
+driver command are pinned by a test rather than by a comment. No line locator
+survives anywhere in the cluster, with no exemption for pinned commits: the first
+cut allowed one and resolved the pin through git, and CI showed the shards check
+out shallow so the object is absent and a correct citation was reported as a bad
+pin. An exemption nothing can verify is worth less than none, so the historical
+citation gives up its line number and names its commit and the config write
+instead. Mutation-tested with a control proving each mutation landed.
 
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 
