@@ -122,6 +122,19 @@ describe('resolveRegistryDbPath', () => {
     const spaced = ' /real/dir '
     expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH: spaced })).toBe(spaced)
     expect(resolveRegistryDbPath({ NEUTRON_HOME: spaced })).toBe(join(spaced, 'registry.db'))
+
+    // THE LEGACY TIER RETURNS VERBATIM TOO, and it is asserted because a
+    // cross-model reviewer measured that it was not: the first version of this
+    // test covered the two canonical tiers and stopped, so a mutation to
+    // `return legacy.trim()` would have passed it. Every tier of this resolver
+    // returns bytes; the pin now says so for every tier rather than for the two
+    // that came to mind.
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(resolveRegistryDbPath({ NEUTRON_REGISTRY_DB_PATH_RW: spaced })).toBe(spaced)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   test('NEUTRON_HOME beats legacy _RW (canonical resolution wins over backwards-compat)', () => {

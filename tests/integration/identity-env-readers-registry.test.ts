@@ -22,11 +22,19 @@
  * {@link KNOWN_READERS} with a one-line note saying how it honours the rule.
  * The assertion is exact in BOTH directions:
  *
- *   - a NEW reader that nobody trimmed fails the test the day it lands, which
- *     is the failure the four rounds above kept discovering months late;
+ *   - ANY new reader fails the test the day it lands, which is the failure the
+ *     four rounds above kept discovering months late;
  *   - a registry row whose file stopped reading the variable ALSO fails, so the
  *     list cannot rot into a description of a tree that no longer exists — the
  *     precise way rounds 1 and 2 went wrong.
+ *
+ * WHAT THIS DOES NOT PROVE, stated first because a guard that oversells itself
+ * is the defect it was built to stop. The notes in {@link KNOWN_READERS} are
+ * PROSE and nothing evaluates them, so a PR CAN add an untrimmed reader plus a
+ * row claiming it trims and stay green. What the guard removes is the SILENT
+ * path: a new reader can no longer land unnoticed, and someone has to look at
+ * it and write down what it does. That is a smaller claim than "every reader
+ * trims", and it is the one this file can actually keep.
  *
  * This guard is about COMPLETENESS — which files are in scope. It deliberately
  * does not re-assert BEHAVIOUR: each reader's blank-is-unset semantics are
@@ -39,14 +47,15 @@
  * `gbrain-memory/__tests__/gbrain-doctor.test.ts`. Behaviour was the covered
  * half; the set of things that needed the behaviour was not.
  *
- * SCOPE, stated rather than implied — the same boundary `config/index.ts`
- * publishes. This walks `.ts` only, so the shell entrypoints (`install.sh`,
- * `neutron-service.sh`, `neutron-backup.sh`) are outside it and remain
- * deliberately unfixed; and it is a TEXTUAL scan, so it answers "which files
- * are in scope", never "is this particular predicate correct".
+ * SCOPE, stated rather than implied. This walks TypeScript — `.ts`, `.tsx`,
+ * `.mts`, `.cts` — so the shell entrypoints (`install.sh`, `neutron-service.sh`,
+ * `neutron-backup.sh`) are outside it and remain deliberately unfixed, a
+ * different blast radius written down in `config/index.ts`. And it is a TEXTUAL
+ * scan, so it answers "which files are in scope", never "is this particular
+ * predicate correct" — and never "is the note beside a registry row honest".
  */
 
-import { test, expect } from 'bun:test'
+import { describe, test, expect } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
@@ -141,13 +150,30 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'co
  * `__tests__` file names them to drive the readers above.
  */
 function isTestPath(relPath: string): boolean {
-  if (relPath.endsWith('.test.ts')) return true
+  // `.test.` rather than `.test.ts`, so a `.test.tsx` the widened walker now
+  // reaches is excluded as scaffolding too — otherwise widening the extensions
+  // would silently start demanding registry rows for test files.
+  if (/\.test\.[cm]?tsx?$/.test(relPath)) return true
   if (relPath.includes('__tests__/')) return true
   if (relPath.startsWith('tests/')) return true
   return false
 }
 
-/** Recursively walk a directory, yielding repo-relative `.ts` paths. */
+/**
+ * Every TypeScript extension, not just `.ts`.
+ *
+ * The published grep is `--include='*.ts'`, so it never saw `.tsx` / `.mts` /
+ * `.cts` — and this walker inherited that while its prose claimed "TypeScript".
+ * A claim wider than its check is the defect this whole file is about, so the
+ * check is widened rather than the sentence narrowed: the repo has 191 such
+ * files (the web client and the mobile app among them), and a client that grows
+ * a read of one of these variables is exactly the kind of new reader nobody
+ * would think to look for. None name the variables today, so widening costs
+ * zero registry rows and closes the hole before it has anything in it.
+ */
+const TS_EXTENSIONS: ReadonlyArray<string> = ['.ts', '.tsx', '.mts', '.cts']
+
+/** Recursively walk a directory, yielding repo-relative TypeScript paths. */
 function* walkTsFiles(dir: string, base: string): Generator<string, void, void> {
   let entries: ReadonlyArray<string>
   try {
@@ -169,7 +195,7 @@ function* walkTsFiles(dir: string, base: string): Generator<string, void, void> 
       continue
     }
     if (!s.isFile()) continue
-    if (!name.endsWith('.ts')) continue
+    if (!TS_EXTENSIONS.some((ext) => name.endsWith(ext))) continue
     yield relative(base, abs).split(sep).join('/')
   }
 }
@@ -186,21 +212,62 @@ function* walkTsFiles(dir: string, base: string): Generator<string, void, void> 
  * `open/server.ts` — which discusses `OWNER_HOME` at length and names it
  * nowhere in code — is correctly absent from the registry.
  */
-function stripComments(src: string): string {
+export function stripComments(src: string): string {
   const withoutBlocks = src.replace(/\/\*[\s\S]*?\*\//g, '')
-  return withoutBlocks
-    .split('\n')
-    .map((line) => {
-      const idx = line.indexOf('//')
-      if (idx === -1) return line
-      const before = line.slice(0, idx)
-      const singles = (before.match(/'/g) ?? []).length
-      const doubles = (before.match(/"/g) ?? []).length
-      const ticks = (before.match(/`/g) ?? []).length
-      if (singles % 2 !== 0 || doubles % 2 !== 0 || ticks % 2 !== 0) return line
-      return line.slice(0, idx)
-    })
-    .join('\n')
+
+  // MULTI-LINE TEMPLATE LITERALS ARE TRACKED ACROSS LINES, because a per-line
+  // quote count cannot see them and the miss is silent. A cross-model reviewer
+  // demonstrated the exact failure on this function:
+  //
+  //     const rendered = `
+  //     https://host/${env.NEUTRON_HOME}
+  //     `
+  //
+  // The `//` in `https://` opens no comment — it is inside a template literal
+  // that began on a PREVIOUS line — but a heuristic that only balances quotes
+  // WITHIN a line has no way to know that, so it truncated the line and the
+  // live read vanished. A false negative here is the one error this file cannot
+  // afford: it is precisely "a reader nobody registered, landing silently".
+  //
+  // So backticks are counted cumulatively and nothing is stripped while inside
+  // an unterminated template. Escaped backticks do not toggle.
+  let inTemplate = false
+  const out: string[] = []
+  for (const line of withoutBlocks.split('\n')) {
+    const startedInTemplate = inTemplate
+    for (let i = 0; i < line.length; i += 1) {
+      if (line[i] === '\\') {
+        i += 1
+        continue
+      }
+      if (line[i] === '`') inTemplate = !inTemplate
+    }
+
+    // Inside a template on entry: keep the line verbatim. Any `//` on it is
+    // string content, not a comment.
+    if (startedInTemplate) {
+      out.push(line)
+      continue
+    }
+
+    const idx = line.indexOf('//')
+    if (idx === -1) {
+      out.push(line)
+      continue
+    }
+    const before = line.slice(0, idx)
+    const singles = (before.match(/'/g) ?? []).length
+    const doubles = (before.match(/"/g) ?? []).length
+    const ticks = (before.match(/`/g) ?? []).length
+    out.push(singles % 2 !== 0 || doubles % 2 !== 0 || ticks % 2 !== 0 ? line : before)
+  }
+  return out.join('\n')
+}
+
+/** True when the source NAMES an identity variable in code (comments removed). */
+export function namesIdentityVar(src: string): boolean {
+  const code = stripComments(src)
+  return READ_PATTERNS.some((p) => p.test(code))
 }
 
 function collectReaders(base: string): ReadonlyArray<string> {
@@ -213,8 +280,7 @@ function collectReaders(base: string): ReadonlyArray<string> {
     } catch {
       continue
     }
-    const code = stripComments(body)
-    if (READ_PATTERNS.some((p) => p.test(code))) found.push(relPath)
+    if (namesIdentityVar(body)) found.push(relPath)
   }
   return found.sort()
 }
@@ -253,4 +319,52 @@ test('the registry is not vacuous — the readers the four rounds missed are all
   ]) {
     expect(actual).toContain(reader)
   }
+})
+
+describe('the detector itself, pinned against the forms that fooled earlier versions', () => {
+  // THE DETECTOR IS THE GUARD. A registry test can only be as good as the
+  // predicate that decides what a reader is, and every earlier round of this
+  // claim failed at exactly that layer rather than at the layer above it. So
+  // the predicate gets its own assertions, driven by fixtures rather than by
+  // whatever the tree happens to contain today — the tree is evidence that a
+  // form is ABSENT, never that the checker would catch it if it appeared.
+
+  test('the access forms the published grep cannot match are all detected', () => {
+    // Each of these is legal TypeScript that resolves an identity variable and
+    // matches NONE of `.NEUTRON_HOME` / `NEUTRON_HOME']` / `OWNER_HOME_KEY`.
+    expect(namesIdentityVar('const h = env["NEUTRON_HOME"]')).toBe(true)
+    expect(namesIdentityVar('const h = env[`OWNER_HOME`]')).toBe(true)
+    expect(namesIdentityVar('const { OWNER_HOME } = env')).toBe(true)
+    expect(namesIdentityVar("const h = env[ 'NEUTRON_DB_PATH' ]")).toBe(true)
+    expect(namesIdentityVar("const h = process.env['NEUTRON_HOME']")).toBe(true)
+  })
+
+  test('a read inside a MULTI-LINE template literal survives comment stripping', () => {
+    // The cross-model reviewer's counterexample, verbatim. The `//` in the URL
+    // is string content, but it sits on a line whose opening backtick is on a
+    // PREVIOUS line — so a per-line quote-balance heuristic truncated here and
+    // lost the read entirely. Silent, and in the one direction this file cannot
+    // afford to be wrong.
+    const src = ['const rendered = `', 'https://host/${env.NEUTRON_HOME}', '`'].join('\n')
+    expect(namesIdentityVar(src)).toBe(true)
+
+    // CONTROL — the stripper is still working, i.e. the assertion above passes
+    // because the read survived and NOT because stripping stopped happening.
+    expect(namesIdentityVar('// NEUTRON_HOME is discussed here\nconst x = 1')).toBe(false)
+  })
+
+  test('prose that merely names a variable is NOT a read', () => {
+    // The round-3 defect: a docblock hit that makes a file look audited.
+    expect(namesIdentityVar('/** talks about OWNER_HOME at length */\nconst x = 1')).toBe(false)
+    expect(namesIdentityVar('// resolve NEUTRON_DB_PATH later\nconst x = 1')).toBe(false)
+  })
+
+  test('a fully computed key is NOT detected, and that limit is asserted rather than assumed', () => {
+    // Written as a FAILING-BY-DESIGN case so the boundary is visible in the
+    // suite instead of only in prose. If a future change makes this detectable,
+    // this assertion fails and the docblock's stated limit gets updated with
+    // it — the claim and the check move together, which is the entire point of
+    // this file.
+    expect(namesIdentityVar('const key = someAlias\nconst h = env[key]')).toBe(false)
+  })
 })

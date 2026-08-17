@@ -127,9 +127,16 @@ reader, round 4 claimed a mutation proof for four sites pinned by nothing. Four
 rounds, one mechanism, each discovered months late. So the command is now
 EXECUTED: `tests/integration/identity-env-readers-registry.test.ts` walks the
 tree with those patterns and asserts the reader set exactly equals its
-registry — in both directions, so a new untrimmed reader fails on the PR that
-adds it AND a row whose file stopped reading the variable fails too, which is
-the rot that produced rounds 1 and 2. Mutation-proved four ways, each with a
+registry — in both directions, so ANY new reader fails on the PR that adds it
+AND a row whose file stopped reading the variable fails too, which is the rot
+that produced rounds 1 and 2. **What it does NOT prove is written into the test
+and into `config/index.ts`:** the per-file notes are prose and nothing evaluates
+them, so a PR can still add an untrimmed reader plus a row claiming it trims and
+stay green. What the guard removes is the SILENT path — a new reader can no
+longer land unnoticed. That is a smaller claim than "every reader trims", and it
+is the one the file can keep; an earlier draft of this entry stated the larger
+one, which would have restaged the exact defect it documents. Mutation-proved
+four ways, each with a
 control proving the mutation landed: a new unregistered reader → RED naming the
 file; a deleted row → RED; a row for a non-reader → RED in the `stale`
 direction; and neutering the walker → RED on the anti-vacuity control, which is
@@ -151,7 +158,27 @@ rewrite). One annotated line beats a hole, and the asymmetry is the reason: a
 false positive costs a line, a false negative costs another silent
 identity-resolution bug found months later. A fully computed key
 (`env[someVar]`) stays invisible to any textual scan; that limit is written down
-in the test rather than papered over.
+in the test rather than papered over — and asserted there as a failing-by-design
+case, so if it ever becomes detectable the assertion breaks and the stated limit
+gets updated with it.
+
+**The cross-model reviewer RAN this time, and it found the detector's own blind
+spots — which is the whole reason to run it.** #333's panel had that reviewer
+deferred, so its verdict carried no quality signal; this one returned four
+findings and three were real and unaddressed. Two it confirmed independently
+while they were being fixed (the access-form false negatives, and `.tsx`/`.mts`
+sitting outside a walker whose prose claimed TypeScript — 191 such files exist,
+none name the variables today, so widening cost zero rows and closed the hole
+before it had anything in it). The third was a hole nobody had found: the
+comment stripper is a regex lexer, and a read inside a MULTI-LINE template
+literal was silently lost, because the `//` in a URL sits on a line whose
+opening backtick is on the previous line and a per-line quote-balance heuristic
+cannot see that. Backticks are now tracked across lines, and the reviewer's
+counterexample is a test fixture. The fourth (P2) was a missing pin: the
+space-padded verbatim test covered two of the three tiers, so a mutation to
+`return legacy.trim()` would have passed it — now covered, and mutation-proved
+RED. **A guard built to stop under-proved claims arrived under-proved in four
+ways, and the reviewer is what caught it.**
 
 **A pin that lives only in a distant file is indistinguishable from no pin.**
 `gateway/__tests__/resolve-registry-db-path.test.ts` advertises itself as

@@ -518,12 +518,18 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * error string, a schema key, a template placeholder) also registers, which is
  * one annotated line instead of a hole. A fully computed key (`env[someVar]`)
  * remains invisible to any textual scan; that is stated there rather than
- * papered over. A new untrimmed reader fails on the PR that adds it, and a registry row
- * whose file stopped reading the variable fails too, so the list cannot rot
- * into a description of a tree that no longer exists — the way rounds 1 and 2
- * went wrong. That test covers COMPLETENESS (which files are in scope); each
- * reader's blank-is-unset BEHAVIOUR stays pinned in its own suite, mutation-
- * proved. Behaviour was always the covered half; the set of things needing the
+ * papered over. ANY new reader — trimmed or not — fails on the PR that adds it,
+ * and a registry row whose file stopped reading the variable fails too, so the
+ * list cannot rot into a description of a tree that no longer exists, the way
+ * rounds 1 and 2 went wrong.
+ *
+ * WHAT IT DOES NOT PROVE, said here so this docblock does not restage its own
+ * defect one layer up: the registry's per-file notes are PROSE and nothing
+ * evaluates them. The guard forces a new reader to be SEEN and described; it
+ * cannot force the description to be true. So it covers COMPLETENESS (which
+ * files are in scope) and never CORRECTNESS (whether a given predicate trims) —
+ * that stays pinned per-reader, mutation-proved, in the suites listed there.
+ * Behaviour was always the covered half; the set of things needing the
  * behaviour was not.
  *
  * WHICH OF THEM A LIVE PATH REACHES, because "brought onto the rule" and "fixed
