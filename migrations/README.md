@@ -28,7 +28,9 @@ The runner enforces the regex `^\d{4}_.+\.sql$`. Files that don't match are sile
 
 ## The `_migrations` ledger
 
-The ledger is owned by the runner, not by any `.sql` file — `runner.ts` creates it and evolves it on every boot (`ensureProvenanceColumns`). Nothing in this directory should `ALTER` it: evolving the ledger from inside the ledger is circular, and on a fresh install the ALTER would land *after* the rows it needs to change.
+The ledger is owned by the runner, not by any `.sql` file — `runner.ts` creates it (`CREATE TABLE IF NOT EXISTS`) and brings it up to the current shape (`ensureProvenanceColumns`) on the boot that is about to write a row. Nothing in this directory should `ALTER` it: evolving the ledger from inside the ledger is circular, and on a fresh install the ALTER would land *after* the rows it needs to change.
+
+A steady-state boot — every migration already recorded, nothing pending — does **not** reshape the ledger, by design (see "Reading the ledger" below). An instance that upgraded onto a build carrying new ledger columns therefore keeps the old shape until its next pending migration, and that is not a defect: reads are shape-tolerant (absent columns are selected as `NULL`, which is also the honest value for rows written before the columns existed), and the columns are added in the same run as, and before, the first row that has anything to put in them.
 
 | column | meaning |
 | --- | --- |
@@ -45,7 +47,13 @@ Both are nullable, and NULL is a real answer, not a defect:
 - **`content_sha256` is NULL** on rows written before provenance shipped. Nothing more can be learned about them.
 - **`applied_by_commit` is NULL** when the build had no discoverable identity. Neutron Open is self-hostable, so an install may be an unpacked tarball, a zip, or a `COPY` into a container image with no `.git` and no `git` on PATH. The runner reads git metadata as plain files and never spawns a subprocess (a subprocess on the boot path can hang); when there is nothing to read it records NULL rather than a fabricated value. It also refuses to read a `.git` this tree does not own — an install unpacked inside somebody else's checkout would otherwise record *that* repository's HEAD, which is well-formed, plausible and wrong. **Set `NEUTRON_COMMIT_SHA` when packaging a build without git metadata** (or when installing inside another repository) and provenance stays answerable for exactly the install shapes that would otherwise have none.
 
-Reading the ledger never writes to it. The columns are added only on the path that is about to insert a row, so a boot that ends in the refusal below has changed nothing, and a fully-migrated database can be opened read-only for inspection.
+**`content_sha256` is recorded and reported, not enforced.** The runner compares *names* and refuses on a mismatch; it does not compare the recorded hash against the file on disk. That is a decision, not an omission. Migrations are forward-only and already-applied files are edited in place from time to time for entirely benign reasons — a comment, a reflow, a typo in a string literal — none of which change the schema that landed. Turning the hash into a boot gate would convert every one of those into a crash loop resolvable only through `repairs.json`, and the failure it would catch (a *different* migration silently occupying an applied ordinal) already produces a name mismatch in every case where the slug differs. So the hash's job is forensic: it is printed in the refusal below, and it is what lets an operator tell "the same migration, renamed" from "a genuinely different migration that claimed this ordinal" — the question the incident that motivated these columns could not answer.
+
+### Reading the ledger
+
+Deciding costs no write. The ledger is read shape-tolerantly and the columns are added only on the path that is about to insert a row, so a boot that ends in the refusal below has changed nothing — the guard whose job is to change nothing does not first mutate the schema of the database it just declared untrustworthy.
+
+One exception, and it is worth knowing before pointing a read-only connection at a live database: when `repairs.json` carries an entry that matches a mismatch in this ledger, the runner records the acknowledgement in `_migration_repairs`, and that is a write. It happens on the acknowledged-repair path only, whether or not anything is pending. A database whose ledger has no acknowledged repairs opens read-only cleanly; one that does needs a writable copy (or an unmatched `repairs.json`) to inspect.
 
 ## When the runner refuses: `repairs.json`
 

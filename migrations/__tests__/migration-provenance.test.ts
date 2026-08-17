@@ -201,23 +201,65 @@ test('an install nested inside an unrelated repository records NULL, not that re
   writeFileSync(join(outer, '.git', 'HEAD'), `${OTHER_SHA}\n`)
   writeFileSync(join(outer, 'package.json'), JSON.stringify({ name: 'someones-project' }))
 
-  // POSITIVE CONTROL. The same fixture, differing only in the root package
-  // name, must resolve — otherwise a null below would prove nothing except that
-  // the hand-built `.git` was unreadable.
-  const control = join(tmp, 'control-repo')
-  mkdirSync(join(control, '.git'), { recursive: true })
-  writeFileSync(join(control, '.git', 'HEAD'), `${OTHER_SHA}\n`)
-  writeFileSync(join(control, 'package.json'), JSON.stringify({ name: 'neutron' }))
-  expect(resolveDeployedCommit({}, control)).toBe(OTHER_SHA)
-
   const nested = join(outer, 'vendor', 'neutron', 'migrations')
   mkdirSync(nested, { recursive: true })
   writeFileSync(join(nested, '0001_alpha.sql'), ALPHA)
+
+  // POSITIVE CONTROL, and it has to be the NESTED one. A control that resolves
+  // from the outer root proves only that the hand-built `.git` is readable — it
+  // never walks, so a null below would be equally explained by a walk that
+  // never arrived. This control starts where the real assertion starts, three
+  // directories down, and differs in exactly one byte-range: the outer root's
+  // package name. It resolving is what makes the null attributable to the
+  // ownership test rather than to a stalled search.
+  const control = join(tmp, 'control-repo')
+  const controlNested = join(control, 'vendor', 'neutron', 'migrations')
+  mkdirSync(join(control, '.git'), { recursive: true })
+  mkdirSync(controlNested, { recursive: true })
+  writeFileSync(join(control, '.git', 'HEAD'), `${OTHER_SHA}\n`)
+  writeFileSync(join(control, 'package.json'), JSON.stringify({ name: 'neutron' }))
+  expect(resolveDeployedCommit({}, controlNested)).toBe(OTHER_SHA)
 
   expect(resolveDeployedCommit({}, nested)).toBeNull()
 
   const db = new Database(':memory:')
   expect(applyMigrations(db, nested)).toEqual({ applied: [1], skipped: [] })
+  expect(rows(db)[0]?.['applied_by_commit']).toBeNull()
+  expect(rows(db)[0]?.['content_sha256']).toBe(migrationContentHash(ALPHA))
+})
+
+test('a copy of this tree inside ANOTHER checkout of it records NULL, not the host\'s HEAD', () => {
+  // The case the package-name test cannot decide on its own, and the reason the
+  // walk is anchored at our root instead of at the nearest `.git`. Both trees
+  // are `neutron` — a vendored copy, a scratch clone, a monorepo that vendors
+  // us — so ownership-by-name says yes to the HOST. Only reaching the copy's
+  // own root FIRST distinguishes them, and the copy has no `.git` of its own,
+  // so the honest answer is NULL.
+  const host = join(tmp, 'host-neutron')
+  mkdirSync(join(host, '.git'), { recursive: true })
+  writeFileSync(join(host, '.git', 'HEAD'), `${OTHER_SHA}\n`)
+  writeFileSync(join(host, 'package.json'), JSON.stringify({ name: 'neutron' }))
+
+  const copyRoot = join(host, 'vendor', 'neutron-copy')
+  const copyMigrations = join(copyRoot, 'migrations')
+  mkdirSync(copyMigrations, { recursive: true })
+  // The copy's OWN root marker. This is the only thing standing between the
+  // walk and the host's HEAD.
+  writeFileSync(join(copyRoot, 'package.json'), JSON.stringify({ name: 'neutron' }))
+  writeFileSync(join(copyMigrations, '0001_alpha.sql'), ALPHA)
+
+  // POSITIVE CONTROL: the identical layout with the copy's root marker removed
+  // is the ordinary "a subdirectory belongs to its enclosing checkout" case and
+  // must still resolve — otherwise the null below would just be a broken walk.
+  const looseMigrations = join(host, 'vendor', 'loose', 'migrations')
+  mkdirSync(looseMigrations, { recursive: true })
+  expect(resolveDeployedCommit({}, looseMigrations)).toBe(OTHER_SHA)
+
+  expect(resolveDeployedCommit({}, copyMigrations)).toBeNull()
+
+  // And it boots, with the hash that still identifies the file exactly.
+  const db = new Database(':memory:')
+  expect(applyMigrations(db, copyMigrations)).toEqual({ applied: [1], skipped: [] })
   expect(rows(db)[0]?.['applied_by_commit']).toBeNull()
   expect(rows(db)[0]?.['content_sha256']).toBe(migrationContentHash(ALPHA))
 })

@@ -61,6 +61,11 @@ const GIT_SEARCH_DEPTH = 24
  * which is worse than the NULL this file promises. So a `.git` counts only when
  * it sits beside the root `package.json` of THIS tree.
  *
+ * A name alone cannot carry that on its own, because the enclosing checkout may
+ * be another copy of THIS package — two trees, both named `neutron`, one
+ * vendored inside the other. `findGitDir` closes that by anchoring the walk at
+ * the nearest root rather than at the nearest `.git`; see the note there.
+ *
  * `provenance.test.ts` asserts the repo's own root `package.json` still carries
  * this name, so renaming the package fails a test instead of silently turning
  * provenance off everywhere.
@@ -96,37 +101,59 @@ export function migrationContentHash(sql: string): string {
 }
 
 /**
+ * Resolve the `.git` at `dir`, or `null` if it is a shape we cannot read.
+ *
+ * Handles both forms `.git` takes: a directory (an ordinary clone) and a FILE
+ * containing `gitdir: <path>` (a linked worktree or a submodule checkout).
+ */
+function gitDirAt(dir: string): string | null {
+  const candidate = join(dir, '.git')
+  const stat = statSync(candidate)
+  if (stat.isDirectory()) return candidate
+  if (stat.isFile()) {
+    const pointer = readFileSync(candidate, 'utf8').match(/^gitdir:\s*(.+)$/m)?.[1]?.trim()
+    if (pointer === undefined || pointer.length === 0) return null
+    return isAbsolute(pointer) ? pointer : resolve(dir, pointer)
+  }
+  return null
+}
+
+/**
  * Locate the git metadata directory for `startDir`, or `null` if there is none
  * within `GIT_SEARCH_DEPTH` parents that this tree actually owns.
  *
- * Handles both shapes `.git` takes: a directory (an ordinary clone) and a FILE
- * containing `gitdir: <path>` (a linked worktree or a submodule checkout). Both
- * of those are real Neutron checkouts and both pass the ownership test, because
- * in each the root `package.json` sits beside the `.git`.
+ * THE WALK IS ANCHORED AT OUR OWN ROOT, and that anchoring is the guard — not
+ * a detail of it. Two conditions end it, and each returns NULL rather than
+ * looking one directory higher:
  *
- * The first `.git` encountered ends the walk either way. Finding one means we
- * have reached a repository boundary: if it is not ours, we are nested inside
- * somebody else's repo and no ancestor above it can be ours either. Reaching
- * that boundary without matching is a NULL, never a fallback to the next one up.
+ *   a `.git` that is not ours — a repository boundary belonging to somebody
+ *   else. We are nested inside their checkout, and nothing above them is ours.
  *
- * The bounded loop still matters — an unpacked tarball has no `.git` at any
- * depth, and this runs on the boot path.
+ *   OUR root, carrying no `.git` — a source export, an unpacked tarball, a
+ *   `COPY` into an image. This tree HAS no repository, and the next one up the
+ *   path is a different tree's.
+ *
+ * The second is not a symmetric restatement of the first, and dropping it is
+ * the subtle version of the bug the ownership test exists for. Checking
+ * ownership only where a `.git` happens to sit lets the walk sail straight past
+ * our own root and keep climbing — so a copy of this tree unpacked inside
+ * ANOTHER Neutron checkout (`vendor/`, a scratch clone, a monorepo that
+ * vendors us) passes the ownership test against the HOST's `package.json` and
+ * records the HOST's HEAD. Both trees are named `neutron`, so the name test
+ * cannot tell them apart; the anchor can, because the copy's own root is
+ * reached first. The recorded value would be well-formed, plausible, and about
+ * the wrong build — the failure mode this whole file exists to refuse, arriving
+ * through the door the check was standing next to.
+ *
+ * The bounded loop still matters — a tree with no root marker and no `.git` at
+ * any depth walks to the filesystem root, and this runs on the boot path.
  */
 function findGitDir(startDir: string): string | null {
   let dir = startDir
   for (let depth = 0; depth < GIT_SEARCH_DEPTH; depth++) {
-    const candidate = join(dir, '.git')
-    if (existsSync(candidate)) {
-      if (!isDeployedTreeRoot(dir)) return null
-      const stat = statSync(candidate)
-      if (stat.isDirectory()) return candidate
-      if (stat.isFile()) {
-        const pointer = readFileSync(candidate, 'utf8').match(/^gitdir:\s*(.+)$/m)?.[1]?.trim()
-        if (pointer === undefined || pointer.length === 0) return null
-        return isAbsolute(pointer) ? pointer : resolve(dir, pointer)
-      }
-      return null
-    }
+    const isRoot = isDeployedTreeRoot(dir)
+    if (existsSync(join(dir, '.git'))) return isRoot ? gitDirAt(dir) : null
+    if (isRoot) return null
     const parent = dirname(dir)
     if (parent === dir) return null
     dir = parent
