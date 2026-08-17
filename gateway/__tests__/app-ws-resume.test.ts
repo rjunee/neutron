@@ -411,9 +411,13 @@ describe('app-ws resume — a page-shaped answer starves the oldest tombstone', 
 
     const store = await storeHolding(BACKLOG)
     const c = await openClient(h.base, 'devA', store)
-    for (const _round of [1, 2, 3]) {
+    for (const round of [1, 2, 3]) {
       c.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: BACKLOG }))
-      await new Promise((r) => setTimeout(r, 120))
+      // Wait on the ROUND's own tombstone frame rather than on a clock: this fixture
+      // ships 501 edit frames per resume, and a fixed sleep makes the test a
+      // measurement of the machine's load. `editsIn` accumulates across rounds, so
+      // requiring `round` of them is what makes each iteration wait for ITS reply.
+      await waitFor(() => editsIn(c.events, 'm1').filter((e) => e.deleted).length >= round, 8000)
       const seen = await c.transcript()
       expect(seen.find((m) => m.seq === 1)).toMatchObject({ body: '', deleted: true })
     }
