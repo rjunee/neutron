@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
-import { buildReplArgv } from './build-repl-argv.ts'
+import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
 import { buildSettings } from './build-settings.ts'
 import { bunTerminalHost } from './bun-terminal-host.ts'
@@ -75,6 +75,10 @@ async function spawnSession(
       ? { notify: options.onModelFloorApplied }
       : {}),
   })
+  // Resolve ONCE, here: like `model` above, this single binding feeds the argv
+  // now and the launch record/registry stamp (T2), so the reported value cannot
+  // diverge from the spawned one.
+  const effort = resolveReplEffort(options.effort)
   // Respawn-is-always-resume (brief § 0 / § 2): when a resume directive is
   // present (from the registry on a post-crash next-turn, or from the watchdog /
   // admin respawn actuation), re-attach the captured session UUID via `--resume`
@@ -198,6 +202,7 @@ async function spawnSession(
     settingsPath,
     appendSystemPromptFile,
     model,
+    effort,
     addDir: cwd,
     tools: toolSurface,
     // Token budget upstream; omit it for older CLIs that reject the option.
