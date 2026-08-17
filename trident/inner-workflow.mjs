@@ -121,6 +121,9 @@ const {
   // Git-mode threaded from the run (`local` | `pr`). Defaults to `pr` for any
   // legacy caller that doesn't thread it; the launcher always sets it.
   mergeMode = 'pr',
+  // The origin/<base> tip fetched and resolved in code at fire time. A valid
+  // value pins fresh branch creation and its review diff; invalid/absent is legacy.
+  baseSha = null,
   prNumber = null,
   branch = null,
   dbPath,
@@ -1183,10 +1186,26 @@ const NO_PATTERN_KILL_RULE =
 //     contract, telling the fix agent to `git switch -c` an already-created
 //     branch + `gh pr create` a duplicate — conflicting instructions that broke
 //     every REQUEST_CHANGES run.
+const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.trim().toLowerCase())
+  ? baseSha.trim().toLowerCase()
+  : null
+
 function forgeStep1(reenter) {
   return reenter
     ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
-    : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
+    // BOTH halves are load-bearing and this line is where they meet:
+    //  • base-pinning (#332) — branch from the sha origin/<base> had AT LAUNCH, not the
+    //    worktree's default HEAD, which can be behind;
+    //  • create-or-re-enter (#346, measured incident d5c1e219) — a leftover local branch
+    //    from a failed run of the same card must not kill the build with "branch already
+    //    exists", which sent the commit to the worktree's auto `worktree-wf_*` branch and
+    //    made the divergence guard refuse the round.
+    // The fallback deliberately does NOT repeat the pinned base: re-entering an EXISTING
+    // branch must not try to re-point it at the launch sha, which would discard the very
+    // work we are re-entering to keep.
+    : pinnedBase !== null
+      ? `Run \`git switch -c ${forgeBranch} ${pinnedBase} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — ${pinnedBase.slice(0, 7)} is origin/${baseBranch} as observed at launch; do NOT branch from the worktree's default HEAD, which can be behind. If the branch already exists from a previous run of this card, RE-ENTER it rather than failing. (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+      : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
 }
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
@@ -1213,7 +1232,7 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
 ${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}

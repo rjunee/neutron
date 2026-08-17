@@ -55,6 +55,8 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     ralph_round: 0,
     max_ralph_rounds: 20,
     branch: 'feat-x',
+    base_sha: null,
+    base_behind: null,
     pr: 42,
     merge_mode: 'pr' as MergeMode,
     subagent_run_id: null,

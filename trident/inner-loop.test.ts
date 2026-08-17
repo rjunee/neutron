@@ -54,6 +54,8 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     ralph_round: 0,
     max_ralph_rounds: 20,
     branch: 'trident/add-widget',
+    base_sha: null,
+    base_behind: null,
     pr: null,
     merge_mode: 'pr',
     subagent_run_id: null,
@@ -339,6 +341,14 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
   test('the Ralph round counter is threaded from the run row', () => {
     expect(buildWorkflowArgs(input()).ralphRound).toBe(0)
     expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
+  })
+
+  test('a valid launch base sha is threaded and invalid values are omitted', () => {
+    const sha = 'a'.repeat(40)
+    expect(buildWorkflowArgs(input({ base_sha: sha })).baseSha).toBe(sha)
+    expect('baseSha' in buildWorkflowArgs(input())).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'abc' }))).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'A'.repeat(40) }))).toBe(false)
   })
 
   /**

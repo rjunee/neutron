@@ -25,6 +25,8 @@ function run(): TridentRun {
     ralph_round: 0,
     max_ralph_rounds: 0,
     branch: null,
+    base_sha: null,
+    base_behind: null,
     pr: null,
     merge_mode: 'pr',
     subagent_run_id: null,

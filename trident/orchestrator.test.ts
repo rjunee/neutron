@@ -3282,16 +3282,46 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
   })
 
-  test('a FRESH launch is byte-identical: no head read, no field at all', async () => {
-    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
-    await createRun({ merge_mode: 'pr' as MergeMode })
+  test('a FRESH pr launch fetches and pins origin/main before firing', async () => {
+    const HEAD = 'a'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(HEAD.toUpperCase())
+        if (joined.includes('rev-list --count')) return ok('16')
+        return ok()
+      },
+    })
+    await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
     await launchOnce(h)
 
     expect(h.inputs).toHaveLength(1)
     expect('resume_live_head' in h.inputs[0]!).toBe(false)
+    expect(h.inputs[0]!.base_sha).toBe(HEAD)
+    expect(store.listNonTerminal()[0]?.base_sha).toBe(HEAD)
+    expect(store.listNonTerminal()[0]?.base_behind).toBe(16)
     const calls = h.hostCalls.map((c) => c.join(' '))
     expect(calls.some((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))).toBe(false)
-    expect(calls.some((c) => c.includes('rev-parse'))).toBe(false)
+    expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
+    expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
+      .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
+  })
+
+  test('two failed fresh-base fetches fail loudly without firing', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => cmd.includes('fetch')
+        ? { ok: false, stdout: '', stderr: 'network down', exit_code: 1 }
+        : ok(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    expect(h.hostCalls.filter((c) => c.includes('fetch'))).toHaveLength(2)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(store.get(run.id)?.failure_reason).toContain('could not fetch origin/main')
   })
 
   test('a local-mode resume asks the LOCAL ref', async () => {

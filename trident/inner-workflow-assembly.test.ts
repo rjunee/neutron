@@ -89,6 +89,7 @@ interface RunOpts {
   /** `'pr'` stops the run at the durable publisher handoff, which is where the build's
    *  claim and the review panel end up in DIFFERENT PROCESSES. */
   mergeMode?: 'pr' | 'local'
+  baseSha?: string
 }
 
 async function runWorkflow(
@@ -162,6 +163,7 @@ async function runWorkflow(
     repoPath: '/repo',
     task: opts.task ?? 'build the feature',
     baseBranch: 'main',
+    ...(opts.baseSha !== undefined ? { baseSha: opts.baseSha } : {}),
     slug: 'test-run',
     maxRounds: 3,
     ralph: opts.ralph === true,
@@ -823,6 +825,29 @@ describe('AS-BUILT: TEST EXECUTION strategy threading (executed prompt capture)'
     const prompt = forgeBuildPrompt(captured)
     expect(prompt.indexOf(MARKER)).toBeLessThan(prompt.indexOf('\nCONTRACT\n'))
     expect(prompt.indexOf('WORKTREE=<your worktree pwd>')).toBeGreaterThan(prompt.indexOf(MARKER))
+  })
+})
+
+describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
+  test('pins branch creation and the reviewer diff when baseSha is present', async () => {
+    const sha = 'a'.repeat(40)
+    const prompt = forgeBuildPrompt((await runWorkflow('', { baseSha: sha })).captured)
+    expect(prompt).toContain(`git switch -c trident/test-run ${sha}`)
+    expect(prompt).toContain(`git diff ${sha}..HEAD`)
+  })
+
+  test('falls back to the unpinned create-or-re-enter branch and diff when baseSha is absent', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('')).captured)
+    // The fallback must NOT name a base — that is the whole distinction from the
+    // pinned case above. It asserts the ABSENCE of a pin rather than one exact
+    // sentence, because the unpinned branch line also has to stay create-or-
+    // re-enter (`|| git switch`): a leftover local branch from an earlier round
+    // must not kill the build with "branch already exists". Pinning that literal
+    // to `git switch -c <branch>` + backtick made this test fail the moment the
+    // re-enter clause landed, while the behaviour it guards was still correct.
+    expect(prompt).toContain('git switch -c trident/test-run 2>/dev/null || git switch trident/test-run')
+    expect(prompt).not.toContain('as observed at launch')
+    expect(prompt).toContain('git diff main..HEAD')
   })
 })
 

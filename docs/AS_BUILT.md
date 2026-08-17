@@ -861,6 +861,42 @@ perfectly (the driver ran, exit 0 — `.name` is only the description
 is `fatal: custom merge driver as-built-log lacks command line`, exit 128. Both
 of those are now pinned by tests, the lock-contention path included.
 
+One finding is recorded and NOT fixed here, deliberately. The owner-facing bubble
+is delivered to the bare `app:<owner>` topic (`open/composer.ts:984`) while a
+project chat's socket binds `app:<owner>:<project>`
+(`gateway/http/app-ws-surface.ts:201`) and delivery is an exact-key lookup, so an
+owner sitting only in a project chat sees the bubble in General rather than where
+the degradation happened — which is precisely where it happened last time. This
+is PRE-EXISTING and shared by all four notices in the family, not introduced
+here, and the durable `system_events` row plus the operator log land either way.
+Re-routing the whole notice family is a separate change with a design question
+attached (the composer's comment claims the bare topic is the only one the live
+client binds, which the surface code appears to contradict — the aspirational-
+docblock shape), so it is written down here instead of being quietly widened.
+
+One guard in that scan is DEFENSIVE AND LABELLED AS SUCH, because the honest
+thing was measured rather than assumed. `tierRankOf` refuses the empty string on
+both sides — an empty token (a padded id) and an empty family (an alias an
+operator pinned to a tier-less id like `claude-2`) — since matching either would
+rank EVERY id as the fast tier and produce a floor that clamps its own frontier
+requests. Only the token half is reachable from a test: the aliases are
+module-level consts bound at import, so no suite can pin a tier-less one.
+Removing the token filter leaves the file green on the default aliases; an
+out-of-suite probe under `NEUTRON_FAST_MODEL=claude-2` shows `'  claude-opus-5  '`
+ranking as the fast tier without the refusals and at the frontier with them. The
+first draft of that test claimed coverage it did not have, which the mutation run
+caught — the same defect class this whole round is about.
+
+Eight mutations reddened tests, each with a control proving it landed: reverting
+the family extraction reddens 3; reverting the rank to the positional lookup
+reddens 1; removing the tier-word pass reddens 1; deleting the owner notice
+reddens 3; deleting the operator log line reddens 1; bypassing the floor at the
+spawn chokepoint reddens 4; removing the poisoned seed reddens the replay test;
+flipping a memory call site onto the chat profile reddens 2. A ninth — removing
+the empty-string refusals — is the one described above as unreachable from a
+suite, and was verified by probe instead of being counted as test coverage.
+
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 THE REFUSAL WAS NOT REACHING GIT AS A REFUSAL. The rule above returns
 `{ ok: false }` for a one-sided deletion, and the driver handed that to
 `git merge-file` — which reads a one-sided deletion as a CLEAN HUNK, resolves it,
@@ -1329,7 +1365,7 @@ failed with `repository lacks the necessary blob to perform 3-way merge`, follow
 `lib.txt: patch does not apply`; restoring the guard makes the same server-side fork-point patch
 replay cleanly.
 
-## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
+## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly (2)
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
 heading. The incoming entry receives the first free numeric heading suffix, preserving both bodies
@@ -21329,6 +21365,15 @@ landmine — `max-oauth-multi-sub` is Managed-consumed, the wow-moment cluster i
 for a queued plan — so an aggressive sweep is contraindicated here) + the known
 engineering follow-ups (RA2/F8/P6/O5/F6/Core-scheduler) + W3 transcript unification. A
 second fresh-eyes certification audit followed this closeout.
+# 2026-08-16 — Fresh build branches pin the fetched origin base
+
+Fresh PR-mode launches now fetch `origin/<base>` before firing, record the resolved
+`base_sha` and the local branch's measured `base_behind`, and make Forge create its
+branch and review diff from that exact commit. This prevents the measured 16-commit
+staleness of the shared checkout from accumulating until publish-time repair. Two
+failed fetch attempts are a named pre-fire infrastructure terminal; the workflow is
+never fired against a silently stale fallback. P2 Codex parity, P3 surfacing, and P4
+infra-vs-verdict presentation remain follow-ups.
 
 **Dispatch-time credentialed merge-mode probe.** The direct board-dispatch
 fallback now probes git and gh with the GitHub credential resolved from the
