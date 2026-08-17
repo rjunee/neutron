@@ -24,7 +24,7 @@
  * AND THE PEER COULD NOT RESCUE THEM, which is why the fix belongs on this side.
  * Both trident reap paths — the 90-min hang watchdog and the 2-h inflight ceiling
  * — sit inside `if (run.subagent_run_id !== null || run.subagent_status ===
- * 'crashed')` (`orchestrator.ts:2429`, `:2530`, `:2573`). A run that never
+ * 'crashed')` (`orchestrator.ts:2470`, `:2570`, `:2614`). A run that never
  * obtained a dispatch id is reachable by neither, and a reaper fix would in any
  * case run on the very loop whose stall this is compensating for. A backstop must
  * not depend on the liveness of the thing it backs up. Those unreachable runs are
@@ -85,7 +85,7 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
     const linked =
       item.linked_run_id === null ? null : input.lookupRun(item.linked_run_id) ?? null
     // SCOPE THE LOOKUP, exactly as `runProgressForItem` does
-    // (`trident/run-progress.ts:217-219`): `TridentRunStore.get` is keyed on the
+    // (`trident/run-progress.ts:219`): `TridentRunStore.get` is keyed on the
     // run id ALONE, so a stale or mis-copied `linked_run_id` naming another
     // project's run would be read as this item's driver — and if that unrelated
     // run keeps advancing, the item is suppressed for as long as it lives. A

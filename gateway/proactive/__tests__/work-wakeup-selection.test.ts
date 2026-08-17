@@ -44,7 +44,7 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     pr: null,
     merge_mode: 'pr',
     // A LAUNCHED run is the realistic default: a clean fire writes both columns
-    // in one update (`orchestrator.ts:2064-2073`). Tests that want the
+    // in one update (`orchestrator.ts:2106-2114`). Tests that want the
     // never-launched shape null them explicitly.
     subagent_run_id: 'wf-1',
     subagent_status: 'running',
@@ -126,7 +126,7 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
     // The blocker in the first cut: at `NO_ADVANCE_HANG_MS` a healthy long Forge
     // step was woken while it worked, because `last_advanced_at` is stale by
     // construction mid-phase. This run carries a dispatch id, so the reaper
-    // (`orchestrator.ts:2530`) decides it — and the wakeup stands down past that.
+    // (`orchestrator.ts:2570`) decides it — and the wakeup stands down past that.
     const out = select({
       items: [item({ linked_run_id: 'run-1' })],
       runs: [run()],
@@ -193,8 +193,8 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
   test('a run whose LAUNCH IS IN FLIGHT is not woken on the strength of its empty dispatch columns', () => {
     // An earlier cut read null/null past the 3-min settle budget as proof that no
     // workflow existed, and woke the item within minutes. But those columns are
-    // written only after the fire settles (`orchestrator.ts:2064-2073`) and the
-    // settle timer's cancellation is unbounded (`inner-loop.ts:772-786`), so this
+    // written only after the fire settles (`orchestrator.ts:2106-2114`) and the
+    // settle timer's cancellation is unbounded (`inner-loop.ts:774-786`), so this
     // row shape is routinely a LIVE launch — and waking it is the double-drive
     // Property 1 exists to prevent. It stays withheld until the ordinary timer.
     const out = select({

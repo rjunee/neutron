@@ -278,7 +278,7 @@ export async function runWorkWakeupSweep(
   // THE SAME PRUNE, FOR THE SAME REASON, ON THE DEFERRAL WINDOWS. This window is
   // owned by the loop rather than taken from `log.rateLimited`, whose state is a
   // module-global map pruned only by `resetLoggerStateForTests`
-  // (`logger/index.ts:237-247`). Every other caller of that helper keys it on a
+  // (`logger/index.ts:238-247`). Every other caller of that helper keys it on a
   // bounded vocabulary; a board item id is not one — it is fresh per item, for as
   // long as the process lives. Owning the map keeps the keyspace bounded by what
   // is CURRENTLY deferred, which is the same discipline the streak map fifteen

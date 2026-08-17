@@ -9,16 +9,16 @@
  *
  * PHASE IS NOT PROGRESS. In the Phase-2a EXEC model the outer `phase` stays
  * `forge-init` for the WHOLE inner Forge→Argus→fix workflow — only a terminal
- * transition moves it (`run-progress.ts:12-16`, `orchestrator.ts:2392`). So
+ * transition moves it (`run-progress.ts:11-13`, `orchestrator.ts:2392`). So
  * "non-terminal" is true of a run that is building hard AND of a run that stopped
  * moving hours ago, and a guard keyed on it defers to both. That is a guard that
  * fails CLOSED on a peer which is not doing its job.
  *
  * THE SIGNAL IS `last_advanced_at`, and it demonstrably holds what its name says:
  * `TridentRunStore.update` re-stamps it on every outer transition
- * (`store.ts:650`) and `trident/checkpoint.sh:196` re-stamps it on every inner
+ * (`store.ts:750`) and `trident/checkpoint.sh:196` re-stamps it on every inner
  * workflow phase boundary. It is the same field the hang watchdog
- * (`orchestrator.ts:2530`) and the board's stall display (`run-progress.ts:186`)
+ * (`orchestrator.ts:2570`) and the board's stall display (`run-progress.ts:186`)
  * already key on.
  *
  * ── THE TIMER SITS ABOVE THE REAPER, AND THAT IS THE WHOLE SAFETY ARGUMENT ────
@@ -33,7 +33,7 @@
  *
  * {@link WAKEUP_STAND_DOWN_MS} makes it not decide it. The reaper fires at
  * `NO_ADVANCE_HANG_MS` for every run it can reach — `subagent_run_id !== null`
- * (`orchestrator.ts:2530`) — on a sweep that runs every 90 s (`tick.ts:344`).
+ * (`orchestrator.ts:2570`) — on a sweep that runs every 90 s (`tick.ts:344`).
  * Standing down for a further margin past that means: by the time this timer is
  * even consulted, any run the reaper can reach has ALREADY been flipped terminal,
  * and this function answers `terminal` — a FACT about the row — instead of
@@ -53,9 +53,9 @@
  * `DEFAULT_SETTLE_TIMEOUT_MS` as proof no workflow exists, to decide the incident's
  * runs in minutes rather than hours. IT RACED THE LAUNCH IT WAS TRYING TO OUTLIVE.
  * Those columns are written only AFTER the fire settles
- * (`orchestrator.ts:2064-2073`), and while the settle TIMER is 3 min
+ * (`orchestrator.ts:2106-2114`), and while the settle TIMER is 3 min
  * (`liveness.ts:115`) the cancellation that timer triggers is unbounded — the fire
- * keeps draining `handle.events` after `cancel()` (`inner-loop.ts:772-786`). So a
+ * keeps draining `handle.events` after `cancel()` (`inner-loop.ts:774-786`). So a
  * launch still genuinely in flight presents exactly the null/null row the rule
  * read as "never launched", and the wakeup would invite a second dispatch onto a
  * run whose launch is live. No finite bound on that window exists to read off the
@@ -149,7 +149,7 @@ export function runDrivingVerdict(
   // future, which is the same thing wearing a valid date — cannot show that this
   // run advanced, and the earlier version of this function called it `advancing`
   // to stay consistent with the reaper's own conservatism
-  // (`orchestrator.ts:2380-2388`). That consistency was wrong, because the two
+  // (`orchestrator.ts:2424-2430`). That consistency was wrong, because the two
   // consumers fail in OPPOSITE directions: the reaper's caution protects work
   // from being killed, while the same caution here hides a work item from the
   // only autonomy mechanism, forever, and the reaper (reading the same 0) never

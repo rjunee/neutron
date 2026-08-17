@@ -168,6 +168,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
           deferred: [
             {
               title: 'Ship the importer',
+              item_id: 'item-1',
               run_id: 'run-1',
               phase: 'forge-init',
               since_advance_ms: 120_000,
@@ -234,7 +235,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('the deferral window map is PRUNED to what is currently deferred', async () => {
     // The window is owned by the loop rather than taken from `log.rateLimited`,
     // whose module-global map is never pruned in production
-    // (`logger/index.ts:237-247`). A board item id is a fresh key per item, so
+    // (`logger/index.ts:238-247`). A board item id is a fresh key per item, so
     // without this prune the map is the first unbounded keyspace in it.
     resetLoggerStateForTests()
     const lines = captureInfo()

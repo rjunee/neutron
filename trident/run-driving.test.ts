@@ -29,7 +29,7 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     pr: null,
     merge_mode: 'pr',
     // A LAUNCHED run is the realistic default: a clean fire writes both columns
-    // in one update (`orchestrator.ts:2064-2073`). Tests that want the
+    // in one update (`orchestrator.ts:2106-2114`). Tests that want the
     // not-yet-launched shape null them explicitly.
     subagent_run_id: 'wf-1',
     subagent_status: 'running',
@@ -60,7 +60,7 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
 describe('runDrivingVerdict — the threshold ordering that makes the timer safe', () => {
   test('the stand-down threshold is STRICTLY above the reaper, by more than a sweep', () => {
     // This is the safety property, asserted on the constants themselves rather
-    // than only on behaviour: the reaper (`orchestrator.ts:2530`) must always get
+    // than only on behaviour: the reaper (`orchestrator.ts:2570`) must always get
     // to answer for a run it can reach before this timer is consulted, and it
     // notices on a 90 s sweep (`tick.ts:344`).
     expect(WAKEUP_STAND_DOWN_MS).toBeGreaterThan(NO_ADVANCE_HANG_MS)
@@ -82,10 +82,10 @@ describe('runDrivingVerdict — the threshold ordering that makes the timer safe
 
   test('PROPERTY 1 — a launch still IN FLIGHT is never read as "no workflow exists"', () => {
     // The other blocker. `subagent_run_id`/`subagent_status` are written only
-    // AFTER the fire settles (`orchestrator.ts:2064-2073`), and the settle timer
+    // AFTER the fire settles (`orchestrator.ts:2106-2114`), and the settle timer
     // (3 min, `liveness.ts:115`) triggers a cancellation that is itself unbounded
     // — the fire keeps draining `handle.events` after `cancel()`
-    // (`inner-loop.ts:772-786`). So a null/null row past the settle budget is
+    // (`inner-loop.ts:774-786`). So a null/null row past the settle budget is
     // routinely a LIVE launch, and treating it as proof of no workflow invited a
     // second dispatch onto it. Nothing may stand this run down on those columns.
     const launching = run({ subagent_run_id: null, subagent_status: null })
@@ -113,7 +113,7 @@ describe('runDrivingVerdict — the threshold ordering that makes the timer safe
 
   test('PROPERTY 2 — a run the reaper CANNOT reach is still released by the timer', () => {
     // Both reap paths require a dispatch id or a crashed launcher
-    // (`orchestrator.ts:2429`, `:2530`). A run that never obtained one is
+    // (`orchestrator.ts:2470`, `:2570`). A run that never obtained one is
     // reachable by neither, so this timer is the only thing that frees its item.
     const unreachable = run({ subagent_run_id: null, subagent_status: null })
     const v = runDrivingVerdict(unreachable, T0 + WAKEUP_STAND_DOWN_MS + 1)
@@ -165,7 +165,7 @@ describe('runDrivingVerdict', () => {
   })
 
   test('a CRASHED launcher keeps the conservative timer — its build may still be detached', () => {
-    // `orchestrator.ts:2419-2426`: a dead launcher is not a dead build.
+    // `orchestrator.ts:2250-2257`: a dead launcher is not a dead build.
     const crashed = run({ subagent_run_id: null, subagent_status: 'crashed' })
     expect(runDrivingVerdict(crashed, T0 + NO_ADVANCE_HANG_MS + 1).driving).toBe(true)
     expect(runDrivingVerdict(crashed, T0 + WAKEUP_STAND_DOWN_MS + 1).reason).toBe('no-advance')
