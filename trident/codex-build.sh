@@ -897,6 +897,25 @@ if [ -n "$BUILD_MODEL" ]; then
   set -- "$@" --model "$BUILD_MODEL"
 fi
 
+# PIN THE REASONING EFFORT, for exactly the reason the model above is pinned. Unpinned,
+# the CLI default for this tier is `none`, and every launch banner read
+# `reasoning effort: none` — the forge was building with reasoning DISABLED. Pinning the
+# model without pinning the effort buys the flagship tier and then runs it at its weakest
+# setting, which is the same silent-downgrade failure the comment above describes.
+#
+# `xhigh` is the top tier, verified against the live model rather than from the docs: the
+# launch banner echoes back `reasoning effort: xhigh`. Same `${VAR-x}` idiom as the model,
+# so an explicitly EMPTY CODEX_BUILD_EFFORT is a deliberate "let codex choose".
+#
+# CAUTION: `--strict-config` validates the KEY, not the VALUE — a misspelt effort parses
+# clean here and then fails at the API on EVERY build. Probed: `xhigh` and `high` are
+# accepted; a bogus value reaches the API and errors there. Only change this literal to a
+# value the CLI actually accepts.
+BUILD_EFFORT="${CODEX_BUILD_EFFORT-xhigh}"
+if [ -n "$BUILD_EFFORT" ]; then
+  set -- "$@" -c "model_reasoning_effort=$BUILD_EFFORT"
+fi
+
 # `--sandbox danger-full-access` — see the header for what each narrower policy
 # cannot do. `--cd "$WORKTREE"` keeps codex rooted in THIS worktree (the bridge agent's
 # isolated checkout) rather than wherever the CLI would otherwise infer a workspace
