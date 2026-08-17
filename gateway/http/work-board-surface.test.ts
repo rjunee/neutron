@@ -7,6 +7,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { WorkBoardStore, workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
+import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import {
   createWorkBoardSurface,
   type TridentRunAccess,
@@ -22,46 +23,21 @@ import { inspectorScopeKey } from '@neutronai/open/activity-inspector.ts'
 
 /** A minimal fake trident run for the surface's progress + cancel deps. */
 function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'demo',
     project_slug: SLUG,
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/demo',
-    pr: null,
     merge_mode: 'pr',
     subagent_run_id: 'wf-1',
-    subagent_status: 'running',
     repo_path: '/repo',
-    worktree: null,
     task: 'build',
-    chat_id: null,
-    thread_id: null,
     channel_kind: 'app_socket',
-    failure_reason: null,
     workflow_run_id: 'wf-1',
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-07-02T00:00:00Z',
     last_advanced_at: '2026-07-02T00:00:00Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
-    base_sha: null,
-    base_behind: null,
     ...over,
-  }
+  })
 }
 
 /** A fake `TridentRunAccess` recording every cancel (`update phase=stopped`). */

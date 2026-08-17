@@ -63,6 +63,7 @@ import { SYSTEM_SPEAKER_USER_ID } from '@neutronai/channels/button-store.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
+import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -122,15 +123,12 @@ function cleanup(composition: { realmode_cleanups?: Array<() => void> }): void {
 
 /** A skill-worthy `done` Trident run (multi-step, distinct actions, succeeded). */
 function doneRun(overrides: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-skillforge-1',
     slug: 'demo',
     project_slug: 'owner',
     phase: 'done',
-    round: 1,
     max_rounds: 5,
-    ralph: false,
-    ralph_round: 0,
     max_ralph_rounds: 0,
     branch: 'feat/demo',
     pr: 42,
@@ -138,30 +136,11 @@ function doneRun(overrides: Partial<TridentRun> = {}): TridentRun {
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/tmp/repo',
-    worktree: null,
     task: 'scrape a tweet and file the result to the brief',
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-06-26T00:00:00.000Z',
     last_advanced_at: '2026-06-26T00:01:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
-    base_sha: null,
-    base_behind: null,
     ...overrides,
-  }
+  })
 }
 
 /**

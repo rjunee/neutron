@@ -11,48 +11,25 @@ import { describe, expect, test } from 'bun:test'
 
 import { composeTerminalHook, withTerminalObserver } from './terminal-observer.ts'
 import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 import type { TridentTerminalHook } from './tick.ts'
 
 function run(): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'r1',
     slug: 'demo',
     project_slug: 'owner',
     phase: 'done',
-    round: 1,
     max_rounds: 5,
-    ralph: false,
-    ralph_round: 0,
     max_ralph_rounds: 0,
-    branch: null,
-    base_sha: null,
-    base_behind: null,
-    pr: null,
     merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/tmp/repo',
-    worktree: null,
     task: 'demo task',
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-06-26T00:00:00.000Z',
     last_advanced_at: '2026-06-26T00:01:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
-  }
+  })
 }
 
 function hook(onTerminal: (r: TridentRun) => Promise<void>): TridentTerminalHook {
