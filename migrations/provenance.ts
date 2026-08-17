@@ -3,8 +3,11 @@
  *
  * WHY THIS EXISTS. A live instance crash-looped on boot because `_migrations`
  * recorded an ordinal under one name while the deployed code carried another,
- * and `applyMigrations` correctly refuses to guess (see `runner.ts`,
- * `migrationNameMismatch`). The investigation then hit a wall: at the moment
+ * and `applyMigrations` refused to guess. (That particular refusal is GONE — the
+ * ordinal was never an identity and the runner now reconciles by name; see
+ * `runner.ts`, `classifyMigration`. What survives is the refusal this file
+ * feeds: a recorded migration no file in the build corresponds to,
+ * `formatUnexplainedLedgerRows`.) The investigation then hit a wall: at the moment
  * the offending row was written, the commit the instance was running contained
  * no migration file at that ordinal at all — so a migration that was not part
  * of the deployed build had been applied to the live database, and NOTHING on
@@ -32,11 +35,22 @@
  * git metadata as plain files instead of spawning a subprocess (a subprocess
  * on the boot path can hang on a slow mount or a held `index.lock`), and is
  * bounded in how far it will walk.
+ *
+ * `resolveDeployedTree` answers the other half of the same question — not "which
+ * build wrote this row" but "did that build know about this file at all" — from
+ * the tracked-file list in `git-index.ts`. It degrades the same way and returns a
+ * REASON rather than an empty answer, because "we cannot check" and "nothing is
+ * tracked" have opposite consequences at the call site. What it can and cannot
+ * prove is stated at the function, and argued in `git-index.ts`'s header: the
+ * evidence is git's INDEX, so it is the staged tree rather than the committed
+ * one.
  */
 
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+
+import { readGitIndex } from './git-index.ts'
 
 /**
  * A git object id as it appears in `HEAD`, a loose ref file, or `packed-refs`.
@@ -148,17 +162,30 @@ function gitDirAt(dir: string): string | null {
  * The bounded loop still matters — a tree with no root marker and no `.git` at
  * any depth walks to the filesystem root, and this runs on the boot path.
  */
-function findGitDir(startDir: string): string | null {
+function findCheckoutRoot(startDir: string): string | null {
   let dir = startDir
   for (let depth = 0; depth < GIT_SEARCH_DEPTH; depth++) {
     const isRoot = isDeployedTreeRoot(dir)
-    if (existsSync(join(dir, '.git'))) return isRoot ? gitDirAt(dir) : null
+    if (existsSync(join(dir, '.git'))) return isRoot ? dir : null
     if (isRoot) return null
     const parent = dirname(dir)
     if (parent === dir) return null
     dir = parent
   }
   return null
+}
+
+/**
+ * The git metadata directory of the checkout `startDir` belongs to.
+ *
+ * Returns the ROOT's `.git`, never an ancestor's — the walk above is what
+ * guarantees that, and both callers depend on it: one records the commit, the
+ * other reads the tracked-file list. Recording either from the wrong repository
+ * is the failure this file exists to refuse.
+ */
+function findGitDir(startDir: string): string | null {
+  const root = findCheckoutRoot(startDir)
+  return root === null ? null : gitDirAt(root)
 }
 
 /** Read a loose ref file (`<gitDir>/refs/heads/main`), if it holds an object id. */
@@ -245,5 +272,95 @@ export function resolveDeployedCommit(
     // A malformed .git, a permissions error, a symlink loop — none of these
     // are worth a boot failure. Provenance is best-effort by design.
     return null
+  }
+}
+
+/**
+ * Whether a migration directory's files are tracked by the deployed checkout.
+ *
+ * `verified` carries the names of the files in that directory the checkout's
+ * index tracks, so the caller can refuse one that is not among them.
+ * `unverifiable` carries WHY, so the caller can record that provenance was not
+ * established instead of pretending it was.
+ *
+ * THE TWO ARE NOT THE SAME STATE, and conflating them is why this check was
+ * declined once. "No git metadata" is not "nothing is tracked": treating it as
+ * an empty tracked-set would refuse every migration on every tarball install,
+ * and treating a stray file as fine because SOME installs cannot check is how a
+ * ledger ends up naming migrations that never existed. Each state gets its own
+ * behaviour, and the one that cannot decide says so in the row it writes.
+ *
+ * WHAT `verified` PROVES, precisely: the path is in git's INDEX — the staged
+ * tree. That is a superset of the committed tree, so a file `git add`ed and never
+ * committed passes, and one `git add -N`'d does not (`git-index.ts` excludes
+ * intent-to-add entries, which stage no content). The residual and the reason
+ * HEAD-tree verification is out of scope are argued in that module's header; the
+ * short version is that it would require a packfile reader on the boot path. The
+ * naming here follows from it: the caller records `tracked-in-index`, which is
+ * what was actually established, rather than a claim about a commit.
+ */
+export type DeployedTree =
+  | { readonly kind: 'verified'; readonly dirPrefix: string; readonly tracked: ReadonlySet<string> }
+  | { readonly kind: 'unverifiable'; readonly reason: string }
+
+function unverifiable(reason: string): DeployedTree {
+  return { kind: 'unverifiable', reason }
+}
+
+/**
+ * `dir` as the deployed tree names it — `migrations/`, `migrations/comments/` —
+ * or `null` when `dir` is not inside the tree at all.
+ */
+function dirPrefixIn(root: string, dir: string): string | null {
+  const rel = relative(root, dir)
+  if (rel.length === 0) return ''
+  if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) return null
+  return `${rel.split(sep).join('/')}/`
+}
+
+/**
+ * Resolve which files in `dir` the deployed tree tracks.
+ *
+ * Total by construction, like everything else here: any I/O or parse failure
+ * resolves to `unverifiable`, never a throw and never a partial list.
+ */
+export function resolveDeployedTree(dir: string): DeployedTree {
+  try {
+    const root = findCheckoutRoot(dir)
+    if (root === null) return unverifiable('no-git-metadata')
+    const gitDir = gitDirAt(root)
+    if (gitDir === null) return unverifiable('no-git-metadata')
+    const index = readGitIndex(gitDir)
+    if (!index.ok) return unverifiable(index.reason)
+    // NOT REACHABLE TODAY, and kept deliberately. `findCheckoutRoot` walks UP from
+    // `dir`, so the root it returns is always a textual ancestor and `dirPrefixIn`
+    // always answers — this is the total-function guard on that invariant, not a
+    // path any caller can currently take. It stays because the alternative if the
+    // invariant ever breaks is a prefix computed from an unrelated root, which
+    // would silently mark tracked files untracked and refuse a correct boot; that
+    // failure is much worse than an unverifiable row. `README.md` lists the reason
+    // with the same caveat so the ledger's contract stays complete.
+    const dirPrefix = dirPrefixIn(root, dir)
+    if (dirPrefix === null) return unverifiable('outside-deployed-tree')
+
+    const tracked = new Set<string>()
+    for (const path of index.paths) {
+      if (!path.startsWith(dirPrefix)) continue
+      const name = path.slice(dirPrefix.length)
+      if (name.length === 0 || name.includes('/')) continue
+      tracked.add(name)
+    }
+    // A DIRECTORY THE TREE DOES NOT TRACK AT ALL CANNOT ANSWER THE QUESTION,
+    // and this is the guard that keeps the check off installs it would wreck.
+    // A migration tree can legitimately live somewhere git ignores — copied
+    // into `node_modules/` by a package install, unpacked beside a checkout,
+    // staged in a build directory. There every file is "untracked" and refusing
+    // them all would take down an install that is perfectly correct. The
+    // question is only answerable where the directory itself is demonstrably
+    // part of the tree, and one tracked sibling is what demonstrates it.
+    if (tracked.size === 0) return unverifiable('directory-not-tracked')
+    return { kind: 'verified', dirPrefix, tracked }
+  } catch {
+    return unverifiable('unreadable-index')
   }
 }

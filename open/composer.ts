@@ -281,6 +281,7 @@ import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-swee
 import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
+import { buildTerminalBuildWakeObserver } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
 import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
@@ -505,6 +506,7 @@ import {
 } from './project-rail.ts'
 import { turnIsActive } from './wiring/typing-catchup.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
+import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
 import {
   dispatchBoardBoundBuild,
   type TridentBoardBinder,
@@ -517,6 +519,11 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
+import {
+  isInlineEvidenceEdge,
+  makeInlineActivityDeriver,
+  type InlineEvidenceReader,
+} from '@neutronai/work-board/inline-activity.ts'
 import { buildNexusReaderSeam } from './wiring/nexus-reader-seam.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
@@ -873,10 +880,30 @@ export function buildOpenGraphComposer(
     // ISSUES #421 — Neutron Connect. Resolved HERE (early) so both halves share
     // one origin: the owner-side invite link the app renders, and the
     // data-locality disclosure the invitee sees before accepting.
+    //
+    // THE PORT COMES FROM THE VALIDATED CONFIG AND NOWHERE ELSE. This was
+    // `options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787)`, which
+    // re-read the raw environment BELOW the one place that validates it and then
+    // ran `Number()` over the result. `??` falls through on `undefined` but not
+    // on `''`, so a blank `NEUTRON_PORT` reached `Number('')` — which is **0**,
+    // not `NaN` — and the invite advertised `http://127.0.0.1:0` while the
+    // listener bound 7800 (`gateway/index.ts` maps an unset config port to an
+    // absent env and takes `DEFAULT_LISTEN_PORT`). Measured on the pre-fix tree:
+    // `NEUTRON_PORT=''` -> `connectBase=http://127.0.0.1:0`. One variable, two
+    // answers, in one boot — and the answer the OWNER hands to somebody else was
+    // the wrong one, which is the half that cannot be discovered by looking at
+    // this box.
+    //
+    // The fallback default moves 8787 -> `DEFAULT_LISTEN_PORT` in the same
+    // breath, because 8787 is a port nothing in this tree ever listens on: with
+    // `NEUTRON_PORT` absent the listener binds 7800 and the invite said 8787.
+    // The sibling site in THIS FILE that answers the same question already reads
+    // `options.config?.port ?? DEFAULT_LISTEN_PORT` (the reconnect handoff), so
+    // this is two sites in one file agreeing rather than a new convention.
     const connectBaseUrlResolved = resolveConnectBaseUrlWithSource({
       env,
       bindHost,
-      port: options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787),
+      port: options.config?.port ?? DEFAULT_LISTEN_PORT,
     })
     const connectBaseUrl = connectBaseUrlResolved.base_url
     // This install's OWN Ed25519 identity: it signs the collaborator bearers it
@@ -2300,6 +2327,27 @@ export function buildOpenGraphComposer(
     const GENERAL_RAIL_KEY = '__general__'
     const railChatKey = (project_id?: string): string =>
       project_id !== undefined && project_id.length > 0 ? project_id : GENERAL_RAIL_KEY
+    // Same late-binding shape as buildClarifyPoster: these rail/WS closures are
+    // defined before ActivityInspector, but dereference the holder at fire time.
+    const inlineEvidenceReader: InlineEvidenceReader = {}
+    // ONE deriver for every read boundary (rail extras, the WS frame, the HTTP
+    // surface, the per-turn fragment, the agent's `work_board_list`). The scope
+    // key and the clock are decided HERE, once, so no call site can pass the
+    // wrong scope or a stale `now` — see makeInlineActivityDeriver's header.
+    const deriveInlineActivity = makeInlineActivityDeriver({
+      reader: inlineEvidenceReader,
+      scopeKey: inspectorScopeKey,
+      // The SAME "is the bound run still live" predicate the store's `isRunLive`
+      // safety invariant uses (~:3790), so a card bound to a run means one thing
+      // everywhere: a LIVE run owns the card's activity (fork lane), a TERMINAL
+      // one does not — and the card someone is now fixing inline reads active
+      // instead of staying dark. `boardRunStore` is declared later in this scope;
+      // the closure only derefs it at read time, long after composition.
+      isRunLive: (run_id: string): boolean => {
+        const run = boardRunStore.get(run_id)
+        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+      },
+    })
     // M1 UX REDESIGN — the rail-redesign per-project derived fields
     // (`activity` / `preview` / `preview_from` / `live_runs`). Pure derivation in
     // `open/project-rail.ts`; here we only COLLECT the signals from the project's
@@ -2321,7 +2369,7 @@ export function buildOpenGraphComposer(
       try {
         const scopeKey = workBoardScopeKey(project_slug, project_id)
         const nowMs = Date.now()
-        const items = workBoardStore.list(scopeKey)
+        const items = deriveInlineActivity(workBoardStore.list(scopeKey), project_id)
         // Item-level signals (pure, unit-tested via scanItemsForRailSignals):
         // catches runless-but-failed items (cleared link / research/dispatch)
         // AND still-bound terminal-failed runs. See open/project-rail.ts.
@@ -2351,9 +2399,12 @@ export function buildOpenGraphComposer(
         if (!hasFailedNotDone) {
           const latest = boardRunStore.latestByProjectScope(scopeKey)
           if (latest !== null && latest.phase === 'failed') {
+            // An ACTIONABLE item: neither done nor SHELVED. A shelved card
+            // (`status='archived'`, migration 0130) is parked off the active
+            // lane, so it must not keep the rail in `attention` forever.
             const hasOpenItem = workBoardStore
               .list(scopeKey)
-              .some((it) => it.status !== 'done')
+              .some((it) => it.status !== 'done' && it.status !== 'archived')
             if (hasOpenItem) hasFailedNotDone = true
           }
         }
@@ -3937,7 +3988,7 @@ export function buildOpenGraphComposer(
         const frame: AppWsOutboundWorkBoardChanged = {
           v: 1,
           type: 'work_board_changed',
-          items: workBoardStore.list(changedKey).map((it) => {
+          items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
             const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
             return {
@@ -4098,6 +4149,39 @@ export function buildOpenGraphComposer(
       projectId !== null && projectId.length > 0
         ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
         : appWsTopicId(OWNER_USER_ID)
+    // #335 WIRING — the terminal-build wake observer, constructed ONCE and
+    // registered at ALL THREE composeTerminalHook sites (both terminator binds
+    // below + the tick loop via `trident.on_terminal_wake`), so a cancelled build
+    // wakes the agent exactly like a loop-reaped one (§F6a). Claim-first:
+    // `claimAgentWake` is the single writer of `agent_waked_at`, so redelivery /
+    // boot-replay / a second site observing the same row compose ZERO duplicate
+    // turns. Registered LAST in each chain so the multi-minute wake compose never
+    // delays board reconcile or skill-forge; by then the reconcile has usually
+    // detached `linked_run_id`, so the prompt's "Board item id" is commonly
+    // "none" (a module-supported shape) — the wake turn still carries run id /
+    // branch / task and has board tools to locate the item. Accepted tradeoff.
+    const terminalBuildWake = buildTerminalBuildWakeObserver({
+      claimWake: (id) => boardRunStore.claimAgentWake(id),
+      boardItemIdForRun: async (run) => workBoardStore.getByRunId(run.project_slug, run.id)?.id ?? null,
+      // The SAME background `cc-nudge-*` seam the fired-reminder + work-wakeup
+      // paths compose through — never the owner's chat REPL. Null when LLM-less
+      // → the observer returns before claiming (module-tested).
+      llm:
+        reminderComposeSubstrate === null
+          ? null
+          : { compose: (spec, opts) => buildSubstrateReminderLlm(reminderComposeSubstrate).compose(spec, opts) },
+      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? 'general',
+      // Durable inert row + live push to the run's own chat; buzz only when loud.
+      post: async (run, reply, opts) => {
+        const result = await deliver(run.chat_id ?? tridentDeliveryChatId(null), {
+          body: reply,
+          durability: 'inert',
+          ...(opts.loud ? {} : { notify: 'suppress' as const }),
+        })
+        return result.persisted
+      },
+      logger: log,
+    })
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT
@@ -4215,9 +4299,28 @@ export function buildOpenGraphComposer(
       llmCallSubstrate !== null
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })
         : null
+    // The ONE card-removal chokepoint: cancel a live bound run (trident via the
+    // §F6a terminate chokepoint, research via the dispatch stop) → dispose the
+    // card's own `plans/` doc into a folder named for the removal REASON → hard-
+    // delete the row. Built ONCE here and handed to the HTTP surface (the UI's X)
+    // AND to the agent's `work_board_remove` tool (T2), so a human removal and
+    // an agent removal run the SAME path, run-cancellation and all. `docStore` is
+    // the same instance the spec-doc service writes the doc with, so the move
+    // lands where the Documents tab reads.
+    const workBoardRemoval = new WorkBoardRemovalService({
+      store: workBoardStore,
+      trident_runs: boardRunAccess,
+      is_terminal_phase: (phase) => isTerminalPhase(phase as TridentRun['phase']),
+      ...(dispatchService !== null
+        ? { cancel_dispatch: async (id: string) => void (await dispatchService.stop(id)) }
+        : {}),
+      docs: docStore,
+    })
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
+      // The shared removal chokepoint (above) — the X's DELETE runs through it.
+      removal: workBoardRemoval,
       // #429 task 3 — no manual Build/Research picker; an omitted task_type is
       // FAST_MODEL-classified with keyword fallback (LLM-less boots classify by
       // keyword only). Explicit task_type from any caller always wins.
@@ -4225,6 +4328,15 @@ export function buildOpenGraphComposer(
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
+      // Derived inline activity — the wire `inline_active` on every item-bearing
+      // HTTP response becomes evidence truth, the stored column stays a hint.
+      // The closure DEREFS the late-bound holder at CALL time, so the
+      // construction order (this surface is built before the ActivityInspector)
+      // is safe; an unset holder reads evidence 0 ⇒ not active (fail-soft, and
+      // the correct post-crash semantics). `inspectorScopeKey('general') ===
+      // 'general'` matches the tap's General scope, so the URL project_id feeds
+      // straight through. Display-only: it gates nothing.
+      derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
       // The board scope and the DOCS project id are separate arguments on purpose:
       // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a
@@ -4282,6 +4394,8 @@ export function buildOpenGraphComposer(
         }
       },
     })
+    inlineEvidenceReader.lastWriteActivityAt = (scope): number =>
+      activityInspector.lastWriteActivityAt(scope)
     // The tool tap: `activity-tap.ts` (a Pre/PostToolUse hook running in the CC
     // subprocess) POSTs each tool start/finish to the substrate sink's `/activity`
     // route, which dispatches this closure. THIS is where the panel's real content
@@ -4305,7 +4419,23 @@ export function buildOpenGraphComposer(
       })
       // `null` ⇒ a row the transcript is better without (the `reply` tool's bare
       // post-ack, whose words already landed as the assistant message row).
-      if (row !== null) activityInspector.record(inspectorScopeKey(project_id), row)
+      if (row === null) return
+      const scope = inspectorScopeKey(project_id)
+      // THE OFF→ON EDGE. Nothing else pushes a board frame when evidence appears:
+      // `fanWorkBoardChanged` is driven by store writes and run transitions, and
+      // inline work makes NEITHER — that is the whole point of this card. Without
+      // this line an already-open board keeps showing the card as quiet until
+      // something unrelated happens to touch it, so acceptance (a) would hold only
+      // at server READ boundaries (reload, mutation, reconnect). Comparing the
+      // write clock before/after the record fires it only on the transition from
+      // "no fresh evidence" to "fresh": at most once per project per window, and
+      // the OFF edge is the clients' expiry poll, which this frame is what arms.
+      const before = activityInspector.lastWriteActivityAt(scope)
+      activityInspector.record(scope, row)
+      const after = activityInspector.lastWriteActivityAt(scope)
+      if (isInlineEvidenceEdge(before, after)) {
+        fanWorkBoardChanged(workBoardScopeKey(project_slug, project_id))
+      }
     }
     setReplActivityTap(wiredActivityTap)
     const activitySurface = createActivitySurface({
@@ -5229,9 +5359,22 @@ export function buildOpenGraphComposer(
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
+            //
+            // The injected board carries the DERIVED inline activity (T4): the
+            // fragment's `·inline` marker reads the inspector's WRITE clock, so
+            // the agent cannot be lied to by its OWN stale flag — a crashed
+            // session's stuck `inline_active` reads not-active, and live inline
+            // work reads active with no `work_board_update` anywhere in the path.
+            // The clock being write-only is what keeps this marker meaningful
+            // here: the previous turn's `reply` is a `token` row, so a
+            // back-to-back conversation does NOT report every card as ·inline.
+            // ONE O(1) evidence read per turn; display-only, it gates nothing.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
-                workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                deriveInlineActivity(
+                  workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                  project_id,
+                ),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the
@@ -5638,7 +5781,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5659,7 +5802,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -6254,7 +6397,20 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc, chat_ack: workBoardChatAck },
+      // `derive_inline_active` (T4) gives the agent's `work_board_list` the SAME
+      // evidence-derived `inline_active` the HTTP surface serves (~:3959, same
+      // closure shape). The holder deref happens at CALL time, so this input
+      // being built before the ActivityInspector is irrelevant. Display-only:
+      // one O(1) evidence read per list, never a write, never a gate.
+      // `removal` is the SAME chokepoint the UI's X runs (built above, handed to
+      // the HTTP surface) — agent removal and human removal share one path.
+      work_board: {
+        store: workBoardStore,
+        spec_doc: workBoardSpecDoc,
+        chat_ack: workBoardChatAck,
+        derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
+        removal: workBoardRemoval,
+      },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).
@@ -6382,6 +6538,7 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: tridentOnRunTerminal,
+              on_terminal_wake: terminalBuildWake,
               // PULL launcher-death detection covers missed push events instead
               // of leaving the lane occupied until the 90-minute reaper.
               probe_launcher_alive: buildTridentLauncherLivenessProbe(),

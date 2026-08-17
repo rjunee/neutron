@@ -6,53 +6,38 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { WorkBoardStore, workBoardScopeKey } from '@neutronai/work-board/store.ts'
+import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
+import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import {
   createWorkBoardSurface,
   type TridentRunAccess,
   type WorkBoardSurface,
 } from './work-board-surface.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
+import {
+  INLINE_EVIDENCE_WINDOW_MS,
+  withDerivedInlineActive,
+  type InlineEvidenceReader,
+} from '@neutronai/work-board/inline-activity.ts'
+import { inspectorScopeKey } from '@neutronai/open/activity-inspector.ts'
 
 /** A minimal fake trident run for the surface's progress + cancel deps. */
 function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'demo',
     project_slug: SLUG,
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/demo',
-    pr: null,
     merge_mode: 'pr',
     subagent_run_id: 'wf-1',
-    subagent_status: 'running',
     repo_path: '/repo',
-    worktree: null,
     task: 'build',
-    chat_id: null,
-    thread_id: null,
     channel_kind: 'app_socket',
-    failure_reason: null,
     workflow_run_id: 'wf-1',
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-07-02T00:00:00Z',
     last_advanced_at: '2026-07-02T00:00:00Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 /** A fake `TridentRunAccess` recording every cancel (`update phase=stopped`). */
@@ -354,6 +339,127 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(res?.status).toBe(200)
     expect(updates).toEqual([])
     expect(store.get(SCOPE, item.id)).toBeNull()
+  })
+})
+
+describe('work-board HTTP surface — DELETE reason + plan-doc disposition', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  /** A `RemovalDocStore` spy + the removal chokepoint the composer wires. */
+  function withDocs(): {
+    removal: WorkBoardRemovalService
+    moves: Array<{ project_id: string; from: string; to: string }>
+    deletes: Array<{ project_id: string; path: string }>
+  } {
+    const moves: Array<{ project_id: string; from: string; to: string }> = []
+    const deletes: Array<{ project_id: string; path: string }> = []
+    const removal = new WorkBoardRemovalService({
+      store,
+      docs: {
+        moveDoc: async (project_id, from, to) => {
+          moves.push({ project_id, from, to })
+          return null
+        },
+        deleteDoc: async (project_id, path) => {
+          deletes.push({ project_id, path })
+          return null
+        },
+      },
+    })
+    return { removal, moves, deletes }
+  }
+
+  test('no ?reason → the X default (cancelled): the plan doc lands in plans/cancelled/', async () => {
+    const item = await store.create(SCOPE, {
+      title: 'Dropped',
+      design_doc_ref: 'neutron-docs:plans/dropped-abc123.md',
+    })
+    const { removal, moves, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as {
+      deleted: string
+      plan_doc?: { path: string; disposition: string; to?: string }
+    }
+    expect(body.deleted).toBe(item.id)
+    expect(body.plan_doc).toEqual({
+      path: 'plans/dropped-abc123.md',
+      disposition: 'moved',
+      to: 'plans/cancelled/dropped-abc123.md',
+    })
+    // The DOCS project id is the URL segment, not the board scope key.
+    expect(moves).toEqual([
+      { project_id: 'proj1', from: 'plans/dropped-abc123.md', to: 'plans/cancelled/dropped-abc123.md' },
+    ])
+    expect(deletes).toEqual([])
+    expect(store.get(SCOPE, item.id)).toBeNull()
+  })
+
+  test('?reason=shipped files the plan doc under plans/shipped/', async () => {
+    const item = await store.create(SCOPE, {
+      title: 'Shipped',
+      design_doc_ref: 'neutron-docs:plans/shipped-abc123.md',
+    })
+    const { removal, moves, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?reason=shipped`),
+    )
+    expect(res?.status).toBe(200)
+    expect(moves).toEqual([
+      { project_id: 'proj1', from: 'plans/shipped-abc123.md', to: 'plans/shipped/shipped-abc123.md' },
+    ])
+    expect(deletes).toEqual([])
+  })
+
+  test('?reason=bogus → 400 invalid_reason, and nothing is removed', async () => {
+    const item = await store.create(SCOPE, { title: 'Safe' })
+    const { removal } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?reason=bogus`),
+    )
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { code: string }
+    expect(body.code).toBe('invalid_reason')
+    expect(store.get(SCOPE, item.id)).not.toBeNull()
+  })
+
+  test('?plan_doc=delete is the ONLY way the doc is destroyed', async () => {
+    const item = await store.create(SCOPE, {
+      title: 'Scrap it',
+      design_doc_ref: 'neutron-docs:plans/scrap-abc123.md',
+    })
+    const { removal, moves, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?plan_doc=delete`),
+    )
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { plan_doc?: { disposition: string } }
+    expect(body.plan_doc?.disposition).toBe('deleted')
+    expect(deletes).toEqual([{ project_id: 'proj1', path: 'plans/scrap-abc123.md' }])
+    expect(moves).toEqual([])
+  })
+
+  test('?plan_doc=anything-else → 400 invalid_plan_doc (a destroy must be spelled out)', async () => {
+    const item = await store.create(SCOPE, { title: 'Safe' })
+    const { removal, deletes } = withDocs()
+    const s = createWorkBoardSurface({ store, auth, removal })
+
+    const res = await s.handler(
+      req('DELETE', `/api/app/projects/proj1/work-board/${item.id}?plan_doc=yes`),
+    )
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { code: string }
+    expect(body.code).toBe('invalid_plan_doc')
+    expect(deletes).toEqual([])
+    expect(store.get(SCOPE, item.id)).not.toBeNull()
   })
 })
 
@@ -702,5 +808,222 @@ describe('work-board HTTP surface — per-project scoping (Bug 3)', () => {
     const proj = await surface.handler(req('GET', '/api/app/projects/projA/work-board'))
     const projBody = (await proj!.json()) as { items: unknown[] }
     expect(projBody.items).toEqual([])
+  })
+})
+
+/**
+ * T3 — derived inline activity at the HTTP boundary. Every item-bearing response
+ * must carry the EVIDENCE-derived `inline_active`, never the stored hint. Each
+ * test below names the rule/mapping whose deletion turns it red; the dep is
+ * wired through the REAL `withDerivedInlineActive` + `inspectorScopeKey`, only
+ * the evidence clock is faked.
+ */
+describe('derived inline activity on the HTTP surface', () => {
+  const NOW = 1_000_000
+  /** ms epoch of the last WRITE-CLASS tap; 0 = none ever. */
+  let evidenceAt = 0
+  let readerCalls = 0
+  let wired: WorkBoardSurface
+
+  beforeEach(() => {
+    evidenceAt = 0
+    readerCalls = 0
+    const reader: InlineEvidenceReader = {
+      lastWriteActivityAt: () => {
+        readerCalls++
+        return evidenceAt
+      },
+    }
+    const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+    wired = createWorkBoardSurface({
+      store,
+      auth,
+      derive_inline_active: (items, pid) =>
+        withDerivedInlineActive(items, reader, inspectorScopeKey(pid), NOW),
+    })
+  })
+
+  test('(a) fresh evidence activates a runless in_progress card, and writes nothing', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    expect(a.inline_active).toBe(false) // the stored hint says "idle"
+    evidenceAt = NOW - 1_000 // a real tool call one second ago
+    const before = store.get(SCOPE, a.id)
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { items: { id: string; inline_active: boolean }[] }
+    // Deleting the GET `derive(...)` mapping turns this red.
+    expect(body.items[0]?.inline_active).toBe(true)
+
+    // Read-only: no work_board_update anywhere in the path — the stored row,
+    // including its hint and updated_at, is byte-identical to before the GET.
+    expect(store.get(SCOPE, a.id)).toEqual(before)
+    expect(store.get(SCOPE, a.id)!.inline_active).toBe(false)
+  })
+
+  test('(b) a crashed session stale flag reads false on GET and on the update echo', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    await store.update(SCOPE, a.id, { inline_active: true }) // session died flag-on
+    evidenceAt = 0 // the inspector buffer died with the process
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    expect(body.items[0]?.inline_active).toBe(false) // evidence wins over the flag
+
+    // Deleting the update-echo `deriveOne` turns this red.
+    const patch = await wired.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { title: 'A2' }),
+    )
+    expect(patch?.status).toBe(200)
+    const patched = (await patch!.json()) as { item: { title: string; inline_active: boolean } }
+    expect(patched.item.title).toBe('A2')
+    expect(patched.item.inline_active).toBe(false)
+    // The hint is still set in storage — only the WIRE value was healed.
+    expect(store.get(SCOPE, a.id)!.inline_active).toBe(true)
+  })
+
+  test('(c) evidence exactly at the window boundary is stale — the derivation cannot latch', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    await store.update(SCOPE, a.id, { inline_active: true })
+    evidenceAt = NOW - INLINE_EVIDENCE_WINDOW_MS // stale by `>=`, not fresh
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    // A `return true` mutant of the dep (or a `>` boundary) fails here.
+    expect(body.items[0]?.inline_active).toBe(false)
+  })
+
+  test('(e) one evidence read per response, not one per row', async () => {
+    for (const t of ['a', 'b', 'c', 'd', 'e']) {
+      await store.create(SCOPE, { title: t, status: 'in_progress' })
+    }
+    evidenceAt = NOW - 1_000
+    readerCalls = 0
+
+    const res = await wired.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    expect(body.items).toHaveLength(5)
+    // …and ONE project write does not claim five cards: status-only derivation is
+    // rationed to a single candidate row, so ▶ stays available on the rest of the
+    // board. Deleting that rationing makes this five.
+    expect(body.items.filter((i) => i.inline_active)).toHaveLength(1)
+    // Deleting the BATCH shape (calling the reader per item) turns this red.
+    expect(readerCalls).toBe(1)
+  })
+
+  test('the reorder response carries derived values too', async () => {
+    const live = await store.create(SCOPE, { title: 'live', status: 'in_progress' })
+    await store.create(SCOPE, { title: 'idle' })
+    evidenceAt = NOW - 1_000
+
+    const res = await wired.handler(
+      req('POST', `/api/app/projects/proj1/work-board/${live.id}/reorder`, {}),
+    )
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { items: { title: string; inline_active: boolean }[] }
+    // Deleting the reorder `derive(...)` turns this red.
+    expect(body.items.find((i) => i.title === 'live')?.inline_active).toBe(true)
+    expect(body.items.find((i) => i.title === 'idle')?.inline_active).toBe(false)
+  })
+
+  test('a dep-less surface still passes the RAW stored flag through (degraded, not broken)', async () => {
+    const a = await store.create(SCOPE, { title: 'A', status: 'in_progress' })
+    await store.update(SCOPE, a.id, { inline_active: true })
+    evidenceAt = 0
+
+    const res = await surface.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { items: { inline_active: boolean }[] }
+    expect(body.items[0]?.inline_active).toBe(true)
+    expect(readerCalls).toBe(0)
+  })
+
+  test('(d) nothing is gated: the wired surface returns the same statuses as the dep-less one', async () => {
+    evidenceAt = NOW - 1_000 // maximally "active" — still gates nothing
+
+    const run = async (s: WorkBoardSurface, project: string): Promise<number[]> => {
+      const created = await s.handler(
+        req('POST', `/api/app/projects/${project}/work-board`, { title: 'x' }),
+      )
+      const createdText = await created!.text()
+      const id = (JSON.parse(createdText) as { item: { id: string } }).item.id
+      const patched = await s.handler(
+        req('PATCH', `/api/app/projects/${project}/work-board/${id}`, { status: 'in_progress' }),
+      )
+      const reordered = await s.handler(
+        req('POST', `/api/app/projects/${project}/work-board/${id}/reorder`, {}),
+      )
+      const completed = await s.handler(
+        req('POST', `/api/app/projects/${project}/work-board/${id}/complete`, {}),
+      )
+      const completedText = await completed!.text()
+      // Every mutation ACTUALLY LANDED — the load-bearing form of "nothing is
+      // gated". A substring hunt for 'denied' over an `{item:{…}}` body proves
+      // nothing; a write that the derivation suppressed would show up here as a
+      // missing item or an unchanged status.
+      const patchedBody = JSON.parse(await patched!.text()) as { item: { status: string } }
+      expect(patchedBody.item.status).toBe('in_progress')
+      const reorderedBody = JSON.parse(await reordered!.text()) as { items: { id: string }[] }
+      expect(reorderedBody.items.map((i) => i.id)).toContain(id)
+      // `complete` flips status to 'done', so its echo derives false via R1.
+      const completedBody = JSON.parse(completedText) as { item: { inline_active: boolean } }
+      expect(completedBody.item.inline_active).toBe(false)
+      return [created!.status, patched!.status, reordered!.status, completed!.status]
+    }
+
+    const wiredStatuses = await run(wired, 'projW')
+    const plainStatuses = await run(surface, 'projP')
+    expect(wiredStatuses).toEqual([201, 200, 200, 200])
+    expect(wiredStatuses).toEqual(plainStatuses)
+  })
+})
+
+/**
+ * The SHELVED lane over HTTP (migration 0130). 'archived' is client-writable —
+ * it is the deprioritise lever — while 'failed' stays run-driven-only.
+ */
+describe('work-board HTTP surface — the SHELVED lane (status=archived)', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  test("PATCH status:'archived' → 200, off the active lane, completed_at null", async () => {
+    const a = await store.create(SCOPE, { title: 'deprioritised card' })
+    const res = await surface.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { status: 'archived' }),
+    )
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { ok: boolean; item: { status: string; completed_at: string | null } }
+    expect(body.item.status).toBe('archived')
+    expect(body.item.completed_at).toBeNull()
+    expect(store.listActive(SCOPE)).toHaveLength(0)
+    expect(store.listCompleted(SCOPE)).toHaveLength(0)
+    expect(store.listArchived(SCOPE).map((i) => i.id)).toEqual([a.id])
+  })
+
+  test("PATCH status:'failed' is still 400 invalid_status (run-driven only)", async () => {
+    const a = await store.create(SCOPE, { title: 'not yours to write' })
+    const res = await surface.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { status: 'failed' }),
+    )
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { ok: boolean; code: string }
+    expect(body.code).toBe('invalid_status')
+  })
+
+  test('PATCH archived on a LIVE-run card → 409 run_still_live (not a 500)', async () => {
+    const liveStore = new WorkBoardStore(db, { isRunLive: () => true })
+    const liveSurface = createWorkBoardSurface({ store: liveStore, auth })
+    const a = await liveStore.create(SCOPE, { title: 'building right now' })
+    await liveStore.attachRun(SCOPE, a.id, 'run-live')
+
+    const res = await liveSurface.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { status: 'archived' }),
+    )
+    expect(res?.status).toBe(409)
+    const body = (await res!.json()) as { ok: boolean; code: string; message: string }
+    expect(body.ok).toBe(false)
+    expect(body.code).toBe('run_still_live')
+    expect(body.message).toContain('run-live')
+    // Nothing was written.
+    expect(liveStore.get(SCOPE, a.id)?.status).toBe('in_progress')
   })
 })

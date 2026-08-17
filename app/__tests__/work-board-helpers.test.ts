@@ -71,6 +71,10 @@ describe('nextStatus', () => {
     expect(nextStatus('in_progress')).toBe('done');
     expect(nextStatus('done')).toBe('done');
   });
+
+  it('advancing a SHELVED card un-shelves it back to upcoming (never to done)', () => {
+    expect(nextStatus('archived')).toBe('upcoming');
+  });
 });
 
 describe('statusLabel', () => {
@@ -78,6 +82,10 @@ describe('statusLabel', () => {
     expect(statusLabel('upcoming')).toBe('Upcoming');
     expect(statusLabel('in_progress')).toBe('In progress');
     expect(statusLabel('done')).toBe('Done');
+  });
+
+  it("archived reads 'Shelved' — never 'Done'", () => {
+    expect(statusLabel('archived')).toBe('Shelved');
   });
 });
 
@@ -287,6 +295,30 @@ describe('splitBoard', () => {
     ]);
     expect(active.map((i) => i.id)).toEqual(['a', 'c']);
     expect(completed.map((i) => i.id)).toEqual(['b']);
+  });
+
+  // Acceptance (b), pinned: a SHELVED card is counted as completed NOWHERE, and
+  // is not resurrected into the active lane the server already excluded it from.
+  it('buckets archived THIRD — not active, not completed', () => {
+    const { active, archived, completed } = splitBoard([
+      item({ id: 'a', status: 'in_progress' }),
+      item({ id: 'b', status: 'done' }),
+      item({ id: 'c', status: 'archived' }),
+      item({ id: 'd', status: 'upcoming' }),
+      item({ id: 'e', status: 'failed' }),
+    ]);
+    expect(archived.map((i) => i.id)).toEqual(['c']);
+    expect(active.map((i) => i.id)).toEqual(['a', 'd', 'e']);
+    expect(completed.map((i) => i.id)).toEqual(['b']);
+    // The Done count is what the board reports as progress — it must not move.
+    expect(completed).toHaveLength(1);
+  });
+
+  it("a shelved card's dot is the neutral upcoming outline, and it never pulses", () => {
+    expect(dotState(item({ id: 'c', status: 'archived' }))).toEqual({
+      colorKey: 'upcoming',
+      pulse: false,
+    });
   });
 });
 

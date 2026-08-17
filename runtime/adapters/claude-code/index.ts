@@ -25,6 +25,8 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { createLogger } from '@neutronai/logger'
+
 import type { Substrate } from '../../substrate.ts'
 import {
   createPersistentReplSubstrate,
@@ -53,6 +55,8 @@ export type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 // the adapter boundary so a gateway caller wiring a ritual write-containment
 // substrate imports it from HERE, never a deep `persistent/*` path.
 export type { SettingsPermissions } from './persistent/build-settings.ts'
+
+const log = createLogger('claude-code-substrate')
 
 export interface ClaudeCodeSubstrateOptions {
   /**
@@ -383,7 +387,36 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // every respawn with `invalid-cwd` because `existsSync('   ')` is false.
   // Crash recovery would fail CLOSED and silently, on exactly the malformed
   // input class this change exists to neutralise.
-  const resolved = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
+  // THE INPUTS ARE SNAPSHOT BY VALUE, ONCE, AND BOTH THE DECISION AND THE REPORT
+  // READ ONLY THE SNAPSHOT. Argus r2 raised this as a nit — the supervision-off
+  // branch below has to say WHICH slot was blank, and it was doing its own second
+  // `process.env['NEUTRON_HOME']` lookup rather than reporting what the decision
+  // measured.
+  //
+  // AN EARLIER PASS AT THIS FIX SHARED THE CONTAINER AND CLAIMED THAT WAS ENOUGH
+  // ("`const env = process.env`, so the report is structurally unable to
+  // disagree"). A cross-model reviewer falsified it and the counterexample
+  // reproduces as a test: `process.env` is a LIVE object, so sharing the
+  // reference shares no OBSERVATION — two reads of the same proxy at two instants
+  // are still two observations. The window between them is reachable from
+  // ordinary inputs, because the option bag arrives from a caller and this
+  // function reads `options.claude_bin` a few lines below the resolve: a getter
+  // there runs between the decision and the report. Measured pre-fix — the
+  // decision saw `NEUTRON_HOME` unset and the report announced `blank`.
+  //
+  // So the fix is a snapshot of the two VALUES, which is the only form that makes
+  // the claim true: there is exactly one read of each input, and the report is
+  // arithmetic over the same two constants the decision consumed. Note this is
+  // deliberately NOT behaviour-preserving in that mid-construction case — the old
+  // code reported the later value, and reporting the later value is the defect.
+  //
+  // Pinned by 'the report describes the values the DECISION read, not a later
+  // re-read of a live object', which fails closed if that read order ever moves.
+  const rawCwd = options.cwd
+  const rawHome = process.env['NEUTRON_HOME']
+  const envSnapshot: NodeJS.ProcessEnv = {}
+  if (rawHome !== undefined) envSnapshot['NEUTRON_HOME'] = rawHome
+  const resolved = resolveReplCwdAndHome({ cwd: rawCwd, env: envSnapshot })
   if (resolved.cwd !== undefined) p.cwd = resolved.cwd
   if (options.claude_bin !== undefined) p.claude_bin = options.claude_bin
   if (options.skip_permissions !== undefined) p.skip_permissions = options.skip_permissions
@@ -475,6 +508,85 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     // upgrade. Idempotent per model-update state path; the notice routes through
     // `onModelUpdate` (else stderr).
     startModelUpdateWatchdogForInstance(p)
+    // RISING EDGE — clear the supervision-off latch for this instance id, so a
+    // LATER unsupervised construction of the same id reports again.
+    //
+    // Without this the `log.once` below is a one-way switch per instance for the
+    // life of the process, and a cross-model reviewer showed what that costs:
+    // construct `x` with no home (reports), construct `x` with a real cwd
+    // (supervised), construct `x` with no home again — SILENT, because the latch
+    // is still burnt from the first one. The env and the per-construction `cwd`
+    // are both mutable at runtime, so "the condition cannot change mid-process"
+    // was simply false, and the failure mode it produced is the exact one this
+    // report exists to end: unsupervised and quiet. `clearOnce` on an unburnt
+    // key is a no-op (`logger/index.ts` — `onceFired.get(subsystem)?.delete`),
+    // so this costs nothing on the overwhelmingly common armed path.
+    log.clearOnce(`supervision-off:${options.substrate_instance_id}`)
+  } else {
+    // SUPERVISION IS OFF, AND IT SAYS SO. Reaching here means neither a `cwd`
+    // nor `NEUTRON_HOME` carried a non-blank value, so there is nowhere to put
+    // a per-instance registry and the whole block above is skipped: no
+    // watchdog, no crash respawn, no heartbeat, no model-update probe.
+    //
+    // WHAT IS TRUE AT THIS EXACT MOMENT, since an earlier version of this
+    // comment overstated it: no REPL child exists yet. This is the FACTORY —
+    // `createPersistentReplSubstrate` spawns nothing until `.start()`. So the
+    // report is about a CONFIGURATION, and what it predicts is that any session
+    // this substrate goes on to start will run unrecovered. A cross-model
+    // reviewer refused the sentence "the REPL still runs and still answers"
+    // here, correctly: it describes the consequence, not the instant.
+    //
+    // It is still emitted HERE rather than at `.start()`, because this is where
+    // the decision is taken and the inputs that caused it are in scope — and a
+    // substrate constructed unsupervised and never started is a
+    // misconfiguration worth naming either way. The cost of that choice is one
+    // line for a substrate that never runs; the cost of the alternative is
+    // silence for the one that does.
+    //
+    // Turning supervision off silently is strictly worse than putting the
+    // registry in the wrong place, because a misplaced registry leaves a trace
+    // an operator can find and an absent one leaves nothing at all. The
+    // DECISION to skip is deliberate (see {@link resolveReplCwdAndHome}); the
+    // SILENCE was not, and this is the line that ends it.
+    //
+    // ONCE PER INSTANCE, because this is a per-CONSTRUCTION path, not a
+    // per-boot one: the warm pool builds a substrate per (instance, role), and
+    // a dispatch-heavy process would otherwise repeat an unchanging line until
+    // it drowns the signal it exists to raise. The key is the instance id, so
+    // two differently-misconfigured instances still each get their own line.
+    // `once` is per-process module state keyed by subsystem × key (see
+    // `logger/index.ts`). It is a RISING-EDGE latch, not a permanent one — the
+    // armed branch above clears the key, so an instance that becomes
+    // unsupervised again after being supervised reports again. That correction
+    // came from a reviewer who pointed out the condition IS mutable: both
+    // `process.env` and the per-construction `cwd` can change.
+    //
+    // AT `error` LEVEL, NOT `warn`, AND THAT IS THE WHOLE POINT OF THE LINE.
+    // `logger/index.ts:263` drops any emission whose rank exceeds the resolved
+    // `NEUTRON_LOG_LEVEL`, and `error` is the QUIETEST level the logger has —
+    // so a `warn` here is silenced by the single most common production setting
+    // (`NEUTRON_LOG_LEVEL=error`), for exactly the unattended deployments that
+    // most need crash recovery. A report that any ordinary log-level choice can
+    // switch off is the silence this branch exists to end, wearing a log call.
+    // `error` is the only rank nothing suppresses — checked across unset,
+    // `error`, `warn`, `info`, `debug`, mixed case, blank and unrecognised
+    // values. The classification is a judgement call and worth naming as one: a
+    // reviewer argued this is a degradation rather than an error at the instant
+    // it is emitted, which is fair. It stays at `error` because every quieter
+    // rank is switchable off by ordinary operator configuration, and a report
+    // that can be switched off is the defect, not the fix.
+    log.once(`supervision-off:${options.substrate_instance_id}`).error('repl_supervision_disabled_no_home', {
+      substrate_instance_id: options.substrate_instance_id,
+      // Which slot was blank, so the operator knows which one to set. Reported
+      // as a shape, never as the value — these resolve to owner data paths.
+      // BOTH FIELDS COME FROM THE SNAPSHOT, never from a fresh read of
+      // `options` or `process.env` — see the note above `rawCwd`. `options` is a
+      // caller-supplied bag and `process.env` is live, so a second read of
+      // either is a second observation, and a report sourced from one of those
+      // can announce a condition the decision never acted on.
+      cwd: rawCwd === undefined ? 'unset' : 'blank',
+      neutron_home: rawHome === undefined ? 'unset' : 'blank',
+    })
   }
   return createPersistentReplSubstrate(p)
 }

@@ -20,6 +20,7 @@ import {
 } from './arbiter.ts'
 import type { ArbitrationInput } from './arbiter.ts'
 import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 const completion = (): Event => ({
   kind: 'completion',
@@ -91,44 +92,19 @@ function scriptedFactory(
 }
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'r1',
     slug: 'flush-fix',
     project_slug: 'proj',
     phase: 'done',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/flush-fix',
-    pr: null,
-    merge_mode: 'local',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/tmp/fake',
-    worktree: null,
     task: 'add a ring buffer flush()',
-    chat_id: null,
-    thread_id: null,
     channel_kind: 'app_socket',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
-    started_at: '2026-01-01T00:00:00.000Z',
-    last_advanced_at: '2026-01-01T00:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 function input(over: Partial<ArbitrationInput> = {}): ArbitrationInput {

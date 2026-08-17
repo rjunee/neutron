@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { NO_ADVANCE_HANG_MS } from '@neutronai/trident/liveness.ts'
 import { WAKEUP_STAND_DOWN_MS } from '@neutronai/trident/run-driving.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
+import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import type { WorkBoardItem } from '@neutronai/work-board/store.ts'
 
 import { selectWakeupWork } from '../work-wakeup-selection.ts'
@@ -30,47 +31,24 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'demo',
     project_slug: OWNER,
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/demo',
-    pr: null,
     merge_mode: 'pr',
     // A LAUNCHED run is the realistic default: a clean fire writes both columns
     // in one update (`orchestrator.ts:2106-2114`). Tests that want the
     // never-launched shape null them explicitly.
     subagent_run_id: 'wf-1',
-    subagent_status: 'running',
     repo_path: '/repo',
-    worktree: null,
     task: 'build a thing',
-    chat_id: null,
-    thread_id: null,
     channel_kind: 'app_socket',
-    failure_reason: null,
     workflow_run_id: 'wf-1',
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-08-14T21:35:47Z',
     last_advanced_at: '2026-08-14T21:35:47Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 function select(input: {

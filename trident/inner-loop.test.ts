@@ -41,46 +41,24 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 function makeRun(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'add-widget',
     project_slug: 'proj',
-    phase: 'forge-init',
-    round: 1,
     max_rounds: 3,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/add-widget',
-    pr: null,
     merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/repo',
-    worktree: null,
     task: 'Add a widget',
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 function input(over: Partial<InnerLoopInput> = {}): InnerLoopInput {
@@ -339,6 +317,14 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
   test('the Ralph round counter is threaded from the run row', () => {
     expect(buildWorkflowArgs(input()).ralphRound).toBe(0)
     expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
+  })
+
+  test('a valid launch base sha is threaded and invalid values are omitted', () => {
+    const sha = 'a'.repeat(40)
+    expect(buildWorkflowArgs(input({ base_sha: sha })).baseSha).toBe(sha)
+    expect('baseSha' in buildWorkflowArgs(input())).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'abc' }))).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'A'.repeat(40) }))).toBe(false)
   })
 
   /**

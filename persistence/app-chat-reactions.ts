@@ -87,6 +87,12 @@ export interface AppChatReactionLog {
     topic_id: string,
     after_seq: number,
     limit?: number,
+    /** EXCLUSIVE upper bound, mirroring the message replay's `before_seq`. A
+     *  BACKWARDS resume asks for a range that ENDS below the client's cursor, and
+     *  per-message state has to follow the same range or it is drained for the whole
+     *  topic on every page of the walk. Absent → unbounded above, which is what every
+     *  forward resume passes. */
+    before_seq?: number,
   ): Promise<AppChatReactionAggregate[]>
   /**
    * Same replay as {@link aggregatesAfter}, but bounded to one PAGE and paired
@@ -107,6 +113,7 @@ export interface AppChatReactionLog {
     after_seq: number,
     limit?: number,
     after_message_id?: string,
+    before_seq?: number,
   ): Promise<AggregatesPage<AppChatReactionAggregate>>
 }
 
@@ -148,10 +155,12 @@ export class AppChatReactionStore implements AppChatReactionLog {
 
   async record(input: AppChatReactionRecordInput): Promise<AppChatReactionAggregate> {
     return this.core.transaction<AppChatReactionAggregate>((tx) => {
-      // Resolve the message's true seq from the durable log — never trust a
-      // client-asserted seq. 0 when the message isn't present (defensive: such
-      // a reaction simply won't make the resume replay window).
-      const seq = this.core.resolveMessageSeq(input.message_id, tx)
+      // Resolve the message's true seq from THIS TOPIC's durable log — never
+      // trust a client-asserted seq, and never a seq from another topic (seqs are
+      // monotonic per topic, so a foreign one is an arbitrary number in this
+      // topic's ordering). 0 when this topic holds no such message (defensive:
+      // such a reaction simply won't make the resume replay window).
+      const seq = this.core.resolveMessageSeq(input.topic_id, input.message_id, tx)
 
       // Monotonic per-message revision: one higher than any rev this message has
       // seen (active or tombstoned), so every change strictly advances rev. This
@@ -192,8 +201,9 @@ export class AppChatReactionStore implements AppChatReactionLog {
     topic_id: string,
     after_seq: number,
     limit: number = DEFAULT_REACTION_REPLAY_LIMIT,
+    before_seq?: number,
   ): Promise<AppChatReactionAggregate[]> {
-    return this.core.aggregatesAfter(topic_id, after_seq, limit)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit, undefined, before_seq)
   }
 
   async aggregatesAfterPage(
@@ -201,8 +211,9 @@ export class AppChatReactionStore implements AppChatReactionLog {
     after_seq: number,
     limit: number = DEFAULT_REACTION_REPLAY_LIMIT,
     after_message_id?: string,
+    before_seq?: number,
   ): Promise<AggregatesPage<AppChatReactionAggregate>> {
-    return this.core.aggregatesAfterPage(topic_id, after_seq, limit, after_message_id)
+    return this.core.aggregatesAfterPage(topic_id, after_seq, limit, after_message_id, before_seq)
   }
 }
 

@@ -20,6 +20,38 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+describe('claimAgentWake', () => {
+  test('returns true exactly once for a terminal run', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'wake-failed', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { phase: 'failed' })
+
+    expect(await store.claimAgentWake(run.id)).toBe(true)
+    expect(await store.claimAgentWake(run.id)).toBe(false)
+  })
+
+  test('returns false for a non-terminal run', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'wake-active', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(await store.claimAgentWake(run.id)).toBe(false)
+  })
+
+  test('returns false for an unknown id', async () => {
+    const store = new TridentRunStore(db)
+    expect(await store.claimAgentWake('missing')).toBe(false)
+  })
+
+  test('claim survives a full snapshot save', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'wake-save', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { phase: 'done' })
+    expect(await store.claimAgentWake(run.id)).toBe(true)
+
+    await store.save(store.get(run.id)!)
+    expect(await store.claimAgentWake(run.id)).toBe(false)
+  })
+})
+
 describe('TridentRunStore', () => {
   test('migration applies — code_trident_runs table exists', () => {
     const row = db
@@ -45,6 +77,8 @@ describe('TridentRunStore', () => {
     expect(run.max_ralph_rounds).toBe(20)
     expect(run.merge_mode).toBe('local')
     expect(run.pr).toBeNull()
+    expect(run.base_sha).toBeNull()
+    expect(run.base_behind).toBeNull()
     expect(run.subagent_status).toBeNull()
     expect(run.infra_retries).toBe(0)
     // #317 — channel_kind defaults to telegram (migration 0081 column default).
@@ -58,6 +92,19 @@ describe('TridentRunStore', () => {
     expect(got?.started_at).toBe(run.started_at)
     expect(got?.channel_kind).toBe('telegram')
     expect(got?.infra_retries).toBe(0)
+  })
+
+  test('base pin columns round-trip through update, save, and saveIfActive', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'base-pin', project_slug: 't1', repo_path: '/r', task: 't' })
+    const sha = 'b'.repeat(40)
+    const updated = await store.update(run.id, { base_sha: sha, base_behind: 16 })
+    expect(updated?.base_sha).toBe(sha)
+    expect(updated?.base_behind).toBe(16)
+    await store.save({ ...updated!, base_behind: 17 })
+    expect(store.get(run.id)?.base_behind).toBe(17)
+    expect(await store.saveIfActive({ ...store.get(run.id)!, base_behind: 18 })).toBe(true)
+    expect(store.get(run.id)?.base_behind).toBe(18)
   })
 
   test('the checkpoint OID + findings start NULL and round-trip through update (0122)', async () => {
@@ -693,22 +740,27 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the live table: 35 columns, same names as PRAGMA table_info', () => {
+  test('COLS matches the 37 snapshot-writable table columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
     // COLS corrupts every insert silently (STRICT only catches affinity, not
-    // arity/order). The literal 34 is deliberate — adding a column must be a
+    // arity/order). The literal 37 is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift.
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(35)
-    expect(cols).toHaveLength(pragma.length)
+    expect(cols).toHaveLength(37)
+    // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
+    // writer, so a full snapshot can never clear an already-won delivery claim.
+    // The table therefore has 38 columns and COLS has 37 — compare against the
+    // snapshot-writable set, not the raw pragma count.
+    const snapshotWritable = pragma.filter((c) => c.name !== 'agent_waked_at')
+    expect(cols).toHaveLength(snapshotWritable.length)
     // Same members, order-independent: a rename or a drop goes red.
-    expect([...cols].sort()).toEqual([...pragma.map((c) => c.name)].sort())
+    expect([...cols].sort()).toEqual([...snapshotWritable.map((c) => c.name)].sort())
   })
 
   test('FIX-ROUND CONTRACT fields round-trip and default to unconstrained nulls', async () => {

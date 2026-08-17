@@ -237,6 +237,15 @@ export function buildCoreModules(
           // #429 task 4 — thread the deterministic chat ack (composer-built,
           // durable+live app-ws seam). Absent → no post (unchanged behaviour).
           ...(input.work_board.chat_ack !== undefined ? { chatAck: input.work_board.chat_ack } : {}),
+          // T4 — thread the derived-inline-activity dep so `work_board_list`
+          // serves evidence truth (same closure the HTTP surface gets). Absent →
+          // raw stored-flag passthrough. Display-only; it gates nothing.
+          ...(input.work_board.derive_inline_active !== undefined
+            ? { deriveInlineActive: input.work_board.derive_inline_active }
+            : {}),
+          // The composer-built removal chokepoint — the SAME one the UI's X
+          // runs. Present → `work_board_remove` registers; absent → it does not.
+          ...(input.work_board.removal !== undefined ? { removal: input.work_board.removal } : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
@@ -522,7 +531,8 @@ export function buildCoreModules(
       // skip delivery nor un-terminate the run (the loop already transitioned
       // it). Composed with any skill-forge observer into one observer fn.
       const boardReconcile = buildBoardReconcileObserver(input.work_board?.store) ?? undefined
-      const observers = [boardReconcile, runTerminalObserver].filter(
+      // #335 — register the same terminal-build wake observer in the tick-loop chain.
+      const observers = [boardReconcile, runTerminalObserver, tridentWiring?.on_terminal_wake].filter(
         (o): o is (run: TridentRun) => Promise<void> => o !== undefined,
       )
       // §F6a — the SAME assembly the out-of-band `terminate()` chokepoint uses,

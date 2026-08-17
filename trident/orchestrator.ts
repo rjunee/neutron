@@ -2069,6 +2069,57 @@ export function buildTridentOrchestrator(
       }
     }
 
+    const freshBuild = resume_checkpoint_name === '' && launchRun.branch === null
+    let base_sha: string | null = null
+    let base_behind: number | null = null
+    if (freshBuild && launchRun.merge_mode === 'pr') {
+      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
+      let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      if (!fetched.ok) {
+        await (opts.sleep ?? realSleep)(1000)
+        fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      }
+      if (!fetched.ok) {
+        const detail = redactPushError(fetched.stderr).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: could not fetch origin/${base} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base fetch failed — no fire)`,
+        }
+      }
+      const remoteRef = `refs/remotes/origin/${base}`
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `${remoteRef}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
+        const detail = redactPushError(resolved.stderr || resolved.stdout).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: fetched origin/${base} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base resolve failed — no fire)`,
+        }
+      }
+      base_sha = oid
+      const behind = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `refs/heads/${base}..${remoteRef}`],
+        launchRun.repo_path,
+      )
+      const count = Number.parseInt(behind.stdout.trim(), 10)
+      if (behind.ok && Number.isFinite(count)) base_behind = count
+    } else if (freshBuild && launchRun.merge_mode === 'local') {
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `refs/heads/${base}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (resolved.ok && /^[0-9a-f]{40}$/.test(oid)) base_sha = oid
+    }
+    const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
+
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
       return {
@@ -2090,7 +2141,7 @@ export function buildTridentOrchestrator(
     let reflection_context: string | null = null
     if (opts.resolve_reflection_context) {
       try {
-        reflection_context = opts.resolve_reflection_context(launchRun)
+        reflection_context = opts.resolve_reflection_context(pinnedRun)
       } catch {
         reflection_context = null
       }
@@ -2124,7 +2175,7 @@ export function buildTridentOrchestrator(
         }
       }
       const budget = readHostBudget()
-      const detail = buildTestStrategyDetail(launchRun.repo_path, {
+      const detail = buildTestStrategyDetail(pinnedRun.repo_path, {
         cores: budget.cores,
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
@@ -2141,8 +2192,9 @@ export function buildTridentOrchestrator(
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
     const firePromise = fireWorkflow({
-      run: launchRun,
+      run: pinnedRun,
       base_branch: base,
+      ...(base_sha !== null ? { base_sha } : {}),
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
@@ -2157,7 +2209,7 @@ export function buildTridentOrchestrator(
       // shadowing cost on 2026-08-13 and why the fallback cannot resurrect a
       // revoked credential.
       codex_home:
-        (opts.resolve_codex_home ? opts.resolve_codex_home(launchRun) : null) ??
+        (opts.resolve_codex_home ? opts.resolve_codex_home(pinnedRun) : null) ??
         opts.codex_home ??
         null,
       // The credentialed-`gh` runner's store coordinates, so the inner loop's
@@ -2207,7 +2259,7 @@ export function buildTridentOrchestrator(
       // The launching turn never settled cleanly — the workflow was NOT fired.
       // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
       return {
-        run: failedRun(run, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
+        run: failedRun(pinnedRun, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
         changed: true,
         waiting: false,
         note: `${run.phase} → failed (fire did not settle)`,
@@ -2216,12 +2268,12 @@ export function buildTridentOrchestrator(
 
     fired.add(run.id)
     const next: TridentRun = {
-      ...launchRun,
+      ...pinnedRun,
       subagent_run_id: id,
       subagent_status: 'running',
       // The exact pooled launcher generation is the crash-ownership token. A
       // legacy/test fire seam without one retains the old observability id.
-      workflow_run_id: outcome.launcher_session_key ?? launchRun.workflow_run_id ?? id,
+      workflow_run_id: outcome.launcher_session_key ?? pinnedRun.workflow_run_id ?? id,
       last_advanced_at: now(),
     }
     return {

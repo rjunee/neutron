@@ -64,6 +64,8 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 export interface InnerLoopInput {
   run: TridentRun
   base_branch: string
+  /** The origin/<base> tip the launcher fetched and resolved IN CODE at fire time; the workflow pins branch creation and the forge diff to it. Absent/null → legacy behavior. */
+  base_sha?: string | null
   /** Absolute sqlite file path the workflow's checkpoint + terminal-result Bash
    *  steps write to (`code_trident_runs.inner_checkpoint`/`inner_result`). */
   db_path: string
@@ -388,6 +390,7 @@ export function buildWorkflowArgs(
     repoPath: run.repo_path,
     task: run.task,
     baseBranch: input.base_branch,
+    ...(typeof input.base_sha === 'string' && /^[0-9a-f]{40}$/.test(input.base_sha) ? { baseSha: input.base_sha } : {}),
     slug: run.slug,
     maxRounds: input.max_rounds,
     ralph: run.ralph,

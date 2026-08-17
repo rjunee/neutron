@@ -32,7 +32,8 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { computeTransition } from './state-machine.ts'
-import type { MergeMode, TridentRun } from './store.ts'
+import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 const fail = (): HostCommandResult => ({ ok: false, stdout: '', stderr: 'boom', exit_code: 1 })
@@ -44,44 +45,20 @@ const INNER_WORKFLOW_SRC = readFileSync(
 )
 
 function makeRun(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'r1',
     slug: 'add-thing',
-    project_slug: 't1',
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'feat-x',
     pr: 42,
-    merge_mode: 'pr' as MergeMode,
+    merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/repo',
-    worktree: null,
     task: 'Add a thing',
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 /**

@@ -5,8 +5,13 @@
  * respawn replays `--resume`, and that `--model` is emitted LAST.
  */
 
-import { describe, it, expect } from 'bun:test'
-import { buildReplArgv } from '../build-repl-argv.ts'
+import { afterEach, beforeEach, describe, it, expect } from 'bun:test'
+import {
+  buildReplArgv,
+  resolveReplEffort,
+  DEFAULT_REPL_EFFORT,
+  CLAUDE_EFFORT_VALUES,
+} from '../build-repl-argv.ts'
 
 const base = {
   sessionId: 'sess-uuid-1',
@@ -55,6 +60,78 @@ describe('buildReplArgv', () => {
     const argv = buildReplArgv({ ...base, resume: false })
     expect(argv[argv.length - 2]).toBe('--model')
     expect(argv[argv.length - 1]).toBe('claude-opus-4-7')
+  })
+
+  describe('--effort reasoning pin (#345 twin)', () => {
+    it('pins --effort by default, immediately before the model-LAST pin', () => {
+      const argv = buildReplArgv({ ...base, resume: false })
+      expect(argv.slice(-4)).toEqual([
+        '--effort',
+        DEFAULT_REPL_EFFORT,
+        '--model',
+        'claude-opus-4-7',
+      ])
+    })
+
+    it('the default is a value claude 2.1.198 actually accepts (value-not-key trap)', () => {
+      expect(CLAUDE_EFFORT_VALUES).toContain(DEFAULT_REPL_EFFORT)
+      expect(DEFAULT_REPL_EFFORT).toBe('high')
+    })
+
+    it('an explicit effort overrides the default', () => {
+      const argv = buildReplArgv({ ...base, resume: false, effort: 'xhigh' })
+      const effortIndex = argv.indexOf('--effort')
+      expect(effortIndex).toBeGreaterThanOrEqual(0)
+      expect(argv[effortIndex + 1]).toBe('xhigh')
+      expect(argv[effortIndex + 1]).not.toBe(DEFAULT_REPL_EFFORT)
+    })
+
+    it('an explicitly EMPTY effort omits the flag (deliberate let-the-CLI-choose)', () => {
+      const argv = buildReplArgv({ ...base, resume: false, effort: '' })
+      expect(argv).not.toContain('--effort')
+      expect(argv.slice(-2)).toEqual(['--model', 'claude-opus-4-7'])
+    })
+
+    describe('resolveReplEffort', () => {
+      let savedEnv: string | undefined
+
+      beforeEach(() => {
+        savedEnv = process.env['NEUTRON_REPL_EFFORT']
+        delete process.env['NEUTRON_REPL_EFFORT']
+      })
+
+      afterEach(() => {
+        if (savedEnv === undefined) {
+          delete process.env['NEUTRON_REPL_EFFORT']
+        } else {
+          process.env['NEUTRON_REPL_EFFORT'] = savedEnv
+        }
+      })
+
+      it('uses the default when the option and environment are unset', () => {
+        expect(resolveReplEffort()).toBe(DEFAULT_REPL_EFFORT)
+      })
+
+      it('uses NEUTRON_REPL_EFFORT when set', () => {
+        process.env['NEUTRON_REPL_EFFORT'] = 'xhigh'
+        expect(resolveReplEffort()).toBe('xhigh')
+      })
+
+      it('propagates an empty environment value as a deliberate unpin', () => {
+        process.env['NEUTRON_REPL_EFFORT'] = ''
+        expect(resolveReplEffort()).toBe('')
+      })
+
+      it('prefers an explicit option over the environment', () => {
+        process.env['NEUTRON_REPL_EFFORT'] = 'low'
+        expect(resolveReplEffort('max')).toBe('max')
+      })
+
+      it('prefers an explicit empty option over the environment', () => {
+        process.env['NEUTRON_REPL_EFFORT'] = 'low'
+        expect(resolveReplEffort('')).toBe('')
+      })
+    })
   })
 
   it('sets the REPL child autocompact budget to 300000 tokens', () => {
