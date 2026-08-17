@@ -2,6 +2,63 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-16 — the citation guard counted citations instead of covering them
+
+Landed via PR #353.
+
+A retroactive panel returned four findings against the citation guard after the
+PR carrying it had merged, so none were acted on. All four reproduce against the
+merged code and each is fixed here with a landed control.
+
+The floors were headcounts rather than coverage. Per-symbol mentions and one
+cluster-wide site total were both `>=` against a single number, so a valid
+citation added anywhere paid for a broken one lost anywhere else and the sum
+stayed conserved. Measured: mangle one of the installer's citations of its
+target path so no site matches it, which is red alone, then add one ordinary
+correct citation in a different cluster file — total restored, suite green,
+broken citation still present. The typo escaped the cited-path check too,
+because losing the separators leaves a word with no slash and that check judges
+a word as a path only when it carries one, so the blind spots lined up. The site
+floor is now keyed per file-and-target, and a second independent check reduces
+every backticked word to its letters and digits and reports one that equals a
+real citable path while not being it. Residual slack is confined to adding and
+breaking a citation of the same target in the same file in one edit, and that
+limit is written into the code rather than implied — the previous comment
+claimed a property the code did not have, which is the defect class this cluster
+exists to catch.
+
+The universality claim was false inside its own docblock. The test name promised
+that no line locator survived anywhere while the paragraph above it excluded the
+prose form deliberately, and five machine-readable forms escaped as well: the
+parenthesised, bare-L and at-sign spellings, the lowercase spelling of the
+permalink fragment, and a colon locator on an extensionless build file. Each was
+injected and left the suite green, with the plain colon form as a landed
+control; all six are red now and the name says machine-readable. Widening cost
+two measurements — the colon rule may not see a digit before the colon, or an
+ISO timestamp's seconds field parses as a locator, and the three path-shaped
+forms require a slash, or an ordinary exit-code assertion reads as a
+parenthesised locator.
+
+The comment strip could manufacture a definition. Its docblock claimed the strip
+could only remove text and so could never produce a false green; deleting a
+comment joins the line before it to the line after, which can splice a
+column-zero declaration the source never had. Measured: rename the real
+declaration and prepend a two-line block comment whose terminator is immediately
+followed by the old declaration, and the suite is green on a function that no
+longer exists under that name, while the same rename without the corpse is red.
+Comments are overwritten with spaces now, so line identity and column offsets
+survive and the claim is true.
+
+A mention needed no closing delimiter, so an unterminated span counted toward a
+floor made of counts. Spans must close on the same line now; every real citation
+already did, so no floor changed. The shadowed inner `words` helper is renamed
+to `spanWords`, which exposed a caller that had been silently binding to the
+shadow.
+
+The four installer items in the originating brief were re-verified against the
+merged code and were already fixed there, so this change does not touch the
+installer.
+
 ## 2026-08-16 — same-heading concurrent AS_BUILT entries now merge cleanly
 
 The entry-aware merge driver now retains both different entries added concurrently under the same
