@@ -249,6 +249,13 @@ export class AppChatEventLogCore<SqlRow, Agg> {
    * client is given no marker saying so. Paging that remainder needs a wire
    * change (a "more above" signal plus a backwards fetch) and is deliberately
    * not attempted here.
+   *
+   * CONSTRAINT the types cannot express: a `row`-shaped store's `columns` must
+   * include `seq`, because the OUTER `ORDER BY` reads it off the subquery rather
+   * than the base table. Both current row-shaped stores do (messages via
+   * `MESSAGE_COLUMNS`, edits via `EDIT_COLUMNS` — which omits `topic_id` but
+   * keeps `seq`). A new one that omitted it would fail loudly on first query, not
+   * silently mis-order.
    */
   private rowsAfterNewest(topic_id: string, after_seq: number, limit: number): SqlRow[] {
     const safeAfter = clampAfterSeq(after_seq)
