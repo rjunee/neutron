@@ -486,7 +486,8 @@ export class NeutronChatController {
    * the EMPTY FRAME, not the render. The resolved read still publishes a second
    * time behind the first, and the row-construction work is unchanged in total
    * (533 rows built once either way) — it MOVES into the click-blocking frame,
-   * which measured the synchronous `setProject` cost from 0.19 ms to 2.37 ms.
+   * which an adversarial review measured at 0.19 ms → 2.37 ms of synchronous
+   * `setProject` cost (their harness, not one committed here).
    * The second publish's rows keep their identities (`sameRenderMessage`), so the
    * list memo can bail on it, but "one render, not two" was the claim here before
    * anybody counted the frames and it was false. What the owner gains is that the
