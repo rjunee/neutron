@@ -900,168 +900,6 @@ for a different problem:
   that matters.
 
 Landed by PR #402.
-## 2026-08-17 — a delete never reached a device that was offline, and an interior gap in a client's history was invisible and therefore permanent
-
-Landed via PR #390.
-
-Two defects that arrived with PR #384 (the entry below), both in the resume path, both
-the same shape as the ones #384 was built to eliminate — reached by other routes.
-
-**1 — the edit replay was bounded by the reconnecting device's cursor, so a delete
-that happened while it was offline never reached it.** `AppWsAdapter.replayEditsAfter`
-took the resume cursor as a LOWER bound. That assumed an edit's position in the
-transcript says something about WHEN it happened; it does not. An edit row carries its
-MESSAGE's seq, so deleting an old message is a NEW event filed at a LOW seq — below
-the cursor of every device that had already read that message, which is precisely the
-set the delete had to reach. A device holding seqs 1–100 that went offline, had seq 1
-deleted from another device, and reconnected at `after_seq: 100` was sent no
-`edit_update` at all, and kept rendering the deleted content until its local store
-happened to be wiped. The MIRROR of the leak #384 fixed (deleted content replaying),
-and privacy-relevant in the same way: a delete that fails to propagate is a delete
-that did not happen.
-
-The first fix attempted was to drop the lower bound (`after_seq: 0`) and let the
-newest-`limit` window carry older tombstones where it had budget. That fixed the small
-repro and LEFT THE MECHANISM INTACT, which is worth recording because the residual was
-written down honestly and was still a blocker: the window is ordered by message seq,
-it keeps the newest `limit` rows, and a tombstone on an old message is the oldest row
-in that ordering BY CONSTRUCTION. Give the topic 500 newer edits and the seq-1
-tombstone is evicted — on that resume and identically on every resume after it, since
-nothing about the ordering ever changes. Capped becomes never. No ordering can rescue
-the row that sorts last.
-
-So the replay now SPLITS ON WHO HOLDS THE MESSAGE. At or below the resume cursor —
-messages the device already holds and is rendering — the answer is a COMPLETE SWEEP
-with no limit (`AppChatEditLog.aggregatesAtOrBelow` over
-`AppChatEventLogCore.rowSweepSql`). Above it — messages the device is about to
-receive — it stays the aligned page, `before_seq` and all, because a BACKWARDS message
-page must carry THAT page's edit state or an old page of messages meets the newest page
-of edit state and every deleted message in it arrives with its original body. The two
-ranges are disjoint by construction, so they concatenate into one ascending run with no
-de-duplication step to get wrong, and a backwards request (`after_seq: 0`) sweeps
-nothing, so that path is unchanged.
-
-The sweep is UNBOUNDED IN COUNT deliberately, and that is the trade: any limit is a
-starvation budget for the oldest row, and the oldest row is the one that must survive.
-The cost is stated instead — one index range scan on `(topic_id, seq)`, no sort, no
-table access beyond the covered columns, returning one row per message the owner has
-ever edited or deleted inside the range the device holds. That is proportional to real
-edits and not to the transcript: a handful of deletes on the longest topic reported
-(1,130 rows) is a handful of rows. A topic with thousands of edited messages pays
-thousands of rows per forward resume, which is the honest cost of the only answer that
-cannot lose a delete. The plan is measured, not assumed
-(`persistence/app-chat-event-core.test.ts`), and the method REFUSES a message-group log
-rather than quietly handing back a page.
-
-Left alone, deliberately: receipts and reactions carry the same asymmetry — an
-aggregate is filed at its MESSAGE's seq, so a reaction on an old message never reaches a
-device that was away when it landed. Those omissions cost a stale ornament on a message,
-never content the owner deleted staying readable, and both logs are message-group shaped,
-so the sweep is not the same query for them. Recorded here and in the surface comment
-rather than silently implied to be correct.
-
-Pinned END TO END (`gateway/__tests__/app-ws-resume.test.ts`): the real surface on
-`Bun.serve`, a real SQLite message + edit log, a real `SyncEngine` applying frames into
-a real store, and the assertion on the client's RENDERED TRANSCRIPT rather than on the
-shape of a query. That distinction is load-bearing — the faithful revert of this fix is
-caught by the end-to-end test and NOT by the adapter-level unit test. The starvation
-case has its own fixture (700 messages, seq 1 deleted, 500 newer edits) plus a CONTROL
-that measures the starvation directly on the real store before asserting it is gone, and
-a repeat-resume test, because "cannot remain readable" is a claim about every resume and
-not the lucky one. Removing the sweep reds all three.
-
-**2 — the client's local "is anything missing below me" test was a test for a missing
-PREFIX, so an interior hole was undetectable and therefore permanent.** The backwards
-walk needs a local test, because the server only ever reports a gap for a page it just
-sent. That test was `MIN(seq) > 1`. A store holding 1–100 AND 201–700 has oldest seq
-1, so it answered "nothing is missing" while the forward cursor sat at 700 and
-101–200 was unreachable for good. Server seqs do run 1..N with no deletes — but that
-is the SERVER's invariant, and the client's copy of them does not inherit it. #384
-made a truncated PAGE reachable; it could not make an interior hole reachable, because
-the client never asks.
-
-`Store.earliestSeenSeq` becomes `Store.contiguousFloorSeq` — the floor of the newest
-UNBROKEN run, the smallest `s` with every seq in `[s, lastSeenSeq]` held locally. All
-three implementations move together (`InMemoryStore`, the OPFS delegate, the on-device
-`SqliteChatStore`) and the old name is gone, so there is no second path.
-
-Convergence is PROVED rather than asserted: `chat-core/__tests__/history-backfill.test.ts`
-drives the real session over repeated opens from an interior-hole fixture and requires
-the store to reach the complete transcript, with a liveness assertion that each open
-recovers at least one row and a recorded flag that the fixture really did present the
-seq-1-held-but-holey shape.
-
-What the detection COSTS, per implementation, because they differ: `InMemoryStore` is
-O(rows in the topic) always (one pass plus a descending walk — on the longest topic
-reported, 1,130 rows, ~1k integer set inserts per catch-up, not per message); the
-on-device SQL is O(length of the NEWEST RUN), MEASURED by an `EXPLAIN QUERY PLAN`
-assertion over the exact string the store prepares (covering-index walk plus an
-EQUALITY point probe on the predecessor, no sort, no table access). That measurement
-paid for itself during the build: a seemingly free defensive `AND p.seq > 0` in the
-subquery made SQLite prefer the RANGE constraint over the equality, turning one point
-lookup per outer row into a per-row walk — quadratic on exactly the long transcript
-this read exists to repair, invisible to every behavioural assertion, visible only in
-the plan. It was also unnecessary, since a stray `seq = 0` row can only stop seq 1
-counting as a run start and "floor 1" and "no run start at all" both mean
-`backfillFrom` returns null.
-
-**Also in scope.** The new wire path from #384 was unpinned and mutation-proven so:
-the `before_seq` decoder branch, the surface's edit-replay call, and the surface's
-`history_gap` emission could each be DELETED with the suite green, and each now has a
-test that goes red (mutations, controls and observed failures are tabulated on PR
-#390). Two false docstrings are corrected: `app-chat-event-core.ts` claimed a capped
-row-log page's older rows were such that "no cursor could fetch them back", which
-`before_seq` made false and which reads as documentation that the backwards walk is
-impossible; and the surface claimed the gap frame is sent "only when rows were
-actually left behind" when it is sent on every FULL page — there the COMMENT was
-wrong, not the code, because a full page is a deliberate heuristic whose alternative
-is an existence query on every resume.
-
-The cost that comment then named was ALSO wrong, in the direction that flatters the
-code, and correcting it turned up a real waste. It costed the false positive as "one
-empty round trip", which cannot happen: a topic of exactly one page reports
-`older_than: 1` and both sessions already drop a bound of 1 or less. The cost that did
-exist was larger and elsewhere — a device holding 1..500 of 1000 resumed at 500, was
-sent 501..1000 with `older_than: 501`, and asked for the page below 501, which is 500
-rows it already held, re-driven on every mobile foreground. Both sessions now refuse
-every backwards page when their own transcript is contiguous down to seq 1, decided ONCE
-per forward resume. It has to be decided there rather than in the gap handler:
-`chat-core/ws-client.ts` dispatches frames without awaiting the previous one, so a store
-read in the handler sees an arbitrary prefix of the page it is reacting to — and that
-fails in the direction that DECLINES a walk the device needs. Mutation-proved on both
-sessions. The truncation threshold itself is now pinned on BOTH sides (exactly one page
-claims a gap, one row fewer is silent), and the test that used to be named "when the
-transcript fits in one page" says "when the page is not full", which is the actual
-trigger.
-
-The hole-free store — the common case, and the expensive one for a per-row predecessor
-probe — now short-circuits on one index-only `COUNT/MIN/MAX` pass, since `COUNT(*)`
-equals `MAX - MIN + 1` exactly when nothing between them is missing and the floor is then
-`MIN`. The probe walk runs only when the counts disagree, where it is also cheap. Both
-legs pinned: the behavioural fixtures prove it still answers 20 with a hole and 1 without
-(and `MIN` rather than 1 for a contiguous run that starts at 7), the plan proves it is
-index-only. The plan guard also now states what it is: a measurement on `bun:sqlite`,
-which is not the engine the device runs, kept because it discriminates rather than because
-it is a device number.
-
-And a guard that compared two constants
-(`DEFAULT_EDIT_REPLAY_LIMIT >= DEFAULT_REPLAY_LIMIT`) is replaced by an adversarial
-behavioural fixture that strictly dominates it: it catches the shrunken-limit
-regression the arithmetic existed for AND an alignment break that touches no constant
-at all.
-
-SUPERSEDED IN PART BY PR #388 (the entry above), and specifically this sentence:
-"Its negative control removes only the new 125 acknowledgment and proves the run
-refuses before writing any later migration." That was true of the runner as it
-stood here, and it is no longer the contract. Once the ledger reconciles by
-migration identity rather than by ordinal, removing the 125 acknowledgment does
-NOT cause a refusal — `code_trident_runs_base_sha` is simply absent from the
-ledger by name, so it applies, and the boot succeeds. The test now asserts that
-instead. The acknowledgment remains shipped and remains correct (it records the
-incident and skips an `ALTER` that 0131 rebuilds regardless), but it is an
-optimisation rather than the thing standing between the owner and a booting
-instance. Read the entry above for what the runner actually does now.
-
 ## 2026-08-17 — a failed Trident run now asks git whether the build survived
 
 The outer orchestrator now performs git-truth salvage before committing every
@@ -2319,6 +2157,176 @@ Its negative control removes only the new 125 acknowledgment and proves the run
 refuses before writing any later migration. A fresh-install test proves 0125
 and 0131 coexist with exactly one `base_sha` column, and a pin test makes the
 acknowledgment itself part of the contract. No `_migrations` row is rewritten.
+
+## 2026-08-17 — a delete never reached a device that was offline, and an interior gap in a client's history was invisible and therefore permanent
+
+Landed via PR #390.
+
+Two defects that arrived with PR #384 (the entry below), both in the resume path, both
+the same shape as the ones #384 was built to eliminate — reached by other routes.
+
+**1 — the edit replay was bounded by the reconnecting device's cursor, so a delete
+that happened while it was offline never reached it.** `AppWsAdapter.replayEditsAfter`
+took the resume cursor as a LOWER bound. That assumed an edit's position in the
+transcript says something about WHEN it happened; it does not. An edit row carries its
+MESSAGE's seq, so deleting an old message is a NEW event filed at a LOW seq — below
+the cursor of every device that had already read that message, which is precisely the
+set the delete had to reach. A device holding seqs 1–100 that went offline, had seq 1
+deleted from another device, and reconnected at `after_seq: 100` was sent no
+`edit_update` at all, and kept rendering the deleted content until its local store
+happened to be wiped. The MIRROR of the leak #384 fixed (deleted content replaying),
+and privacy-relevant in the same way: a delete that fails to propagate is a delete
+that did not happen.
+
+The first fix attempted was to drop the lower bound (`after_seq: 0`) and let the
+newest-`limit` window carry older tombstones where it had budget. That fixed the small
+repro and LEFT THE MECHANISM INTACT, which is worth recording because the residual was
+written down honestly and was still a blocker: the window is ordered by message seq,
+it keeps the newest `limit` rows, and a tombstone on an old message is the oldest row
+in that ordering BY CONSTRUCTION. Give the topic 500 newer edits and the seq-1
+tombstone is evicted — on that resume and identically on every resume after it, since
+nothing about the ordering ever changes. Capped becomes never. No ordering can rescue
+the row that sorts last.
+
+So the replay now SPLITS ON WHO HOLDS THE MESSAGE. At or below the resume cursor —
+messages the device already holds and is rendering — the answer is a COMPLETE SWEEP
+with no limit (`AppChatEditLog.aggregatesAtOrBelow` over
+`AppChatEventLogCore.rowSweepSql`). Above it — messages the device is about to
+receive — it stays the aligned page, `before_seq` and all, because a BACKWARDS message
+page must carry THAT page's edit state or an old page of messages meets the newest page
+of edit state and every deleted message in it arrives with its original body. The two
+ranges are disjoint by construction, so they concatenate into one ascending run with no
+de-duplication step to get wrong, and a backwards request (`after_seq: 0`) sweeps
+nothing, so that path is unchanged.
+
+The sweep is UNBOUNDED IN COUNT deliberately, and that is the trade: any limit is a
+starvation budget for the oldest row, and the oldest row is the one that must survive.
+The cost is stated instead — one index range scan on `(topic_id, seq)`, no sort, no
+table access beyond the covered columns, returning one row per message the owner has
+ever edited or deleted inside the range the device holds. That is proportional to real
+edits and not to the transcript: a handful of deletes on the longest topic reported
+(1,130 rows) is a handful of rows. A topic with thousands of edited messages pays
+thousands of rows per forward resume, which is the honest cost of the only answer that
+cannot lose a delete. The plan is measured, not assumed
+(`persistence/app-chat-event-core.test.ts`), and the method REFUSES a message-group log
+rather than quietly handing back a page.
+
+Left alone, deliberately: receipts and reactions carry the same asymmetry — an
+aggregate is filed at its MESSAGE's seq, so a reaction on an old message never reaches a
+device that was away when it landed. Those omissions cost a stale ornament on a message,
+never content the owner deleted staying readable, and both logs are message-group shaped,
+so the sweep is not the same query for them. Recorded here and in the surface comment
+rather than silently implied to be correct.
+
+Pinned END TO END (`gateway/__tests__/app-ws-resume.test.ts`): the real surface on
+`Bun.serve`, a real SQLite message + edit log, a real `SyncEngine` applying frames into
+a real store, and the assertion on the client's RENDERED TRANSCRIPT rather than on the
+shape of a query. That distinction is load-bearing — the faithful revert of this fix is
+caught by the end-to-end test and NOT by the adapter-level unit test. The starvation
+case has its own fixture (700 messages, seq 1 deleted, 500 newer edits) plus a CONTROL
+that measures the starvation directly on the real store before asserting it is gone, and
+a repeat-resume test, because "cannot remain readable" is a claim about every resume and
+not the lucky one. Removing the sweep reds all three.
+
+**2 — the client's local "is anything missing below me" test was a test for a missing
+PREFIX, so an interior hole was undetectable and therefore permanent.** The backwards
+walk needs a local test, because the server only ever reports a gap for a page it just
+sent. That test was `MIN(seq) > 1`. A store holding 1–100 AND 201–700 has oldest seq
+1, so it answered "nothing is missing" while the forward cursor sat at 700 and
+101–200 was unreachable for good. Server seqs do run 1..N with no deletes — but that
+is the SERVER's invariant, and the client's copy of them does not inherit it. #384
+made a truncated PAGE reachable; it could not make an interior hole reachable, because
+the client never asks.
+
+`Store.earliestSeenSeq` becomes `Store.contiguousFloorSeq` — the floor of the newest
+UNBROKEN run, the smallest `s` with every seq in `[s, lastSeenSeq]` held locally. All
+three implementations move together (`InMemoryStore`, the OPFS delegate, the on-device
+`SqliteChatStore`) and the old name is gone, so there is no second path.
+
+Convergence is PROVED rather than asserted: `chat-core/__tests__/history-backfill.test.ts`
+drives the real session over repeated opens from an interior-hole fixture and requires
+the store to reach the complete transcript, with a liveness assertion that each open
+recovers at least one row and a recorded flag that the fixture really did present the
+seq-1-held-but-holey shape.
+
+What the detection COSTS, per implementation, because they differ: `InMemoryStore` is
+O(rows in the topic) always (one pass plus a descending walk — on the longest topic
+reported, 1,130 rows, ~1k integer set inserts per catch-up, not per message); the
+on-device SQL is O(length of the NEWEST RUN), MEASURED by an `EXPLAIN QUERY PLAN`
+assertion over the exact string the store prepares (covering-index walk plus an
+EQUALITY point probe on the predecessor, no sort, no table access). That measurement
+paid for itself during the build: a seemingly free defensive `AND p.seq > 0` in the
+subquery made SQLite prefer the RANGE constraint over the equality, turning one point
+lookup per outer row into a per-row walk — quadratic on exactly the long transcript
+this read exists to repair, invisible to every behavioural assertion, visible only in
+the plan. It was also unnecessary, since a stray `seq = 0` row can only stop seq 1
+counting as a run start and "floor 1" and "no run start at all" both mean
+`backfillFrom` returns null.
+
+**Also in scope.** The new wire path from #384 was unpinned and mutation-proven so:
+the `before_seq` decoder branch, the surface's edit-replay call, and the surface's
+`history_gap` emission could each be DELETED with the suite green, and each now has a
+test that goes red (mutations, controls and observed failures are tabulated on PR
+#390). Two false docstrings are corrected: `app-chat-event-core.ts` claimed a capped
+row-log page's older rows were such that "no cursor could fetch them back", which
+`before_seq` made false and which reads as documentation that the backwards walk is
+impossible; and the surface claimed the gap frame is sent "only when rows were
+actually left behind" when it is sent on every FULL page — there the COMMENT was
+wrong, not the code, because a full page is a deliberate heuristic whose alternative
+is an existence query on every resume.
+
+The cost that comment then named was ALSO wrong, in the direction that flatters the
+code, and correcting it turned up a real waste. It costed the false positive as "one
+empty round trip", which cannot happen: a topic of exactly one page reports
+`older_than: 1` and both sessions already drop a bound of 1 or less. The cost that did
+exist was larger and elsewhere — a device holding 1..500 of 1000 resumed at 500, was
+sent 501..1000 with `older_than: 501`, and asked for the page below 501, which is 500
+rows it already held, re-driven on every mobile foreground. Both sessions now answer a
+gap frame with ARITHMETIC on two values captured before any response could arrive — the
+transcript was contiguous at resume time, AND the page starts where the held run ended
+(`older_than <= resumeCursor + 1`). It cannot be a store read in the handler:
+`chat-core/ws-client.ts` dispatches frames without awaiting the previous one, so a read
+there sees an arbitrary prefix of the page it is reacting to, and it fails in the
+direction that DECLINES a walk the device needs.
+
+The cursor term is not decoration, and the first draft of this fix did not have it. A
+device that WAS whole can be holed by the very page it is reacting to: holding an old
+prefix of a topic that has since grown by more than one page, its forward resume returns
+the NEWEST page, which does not join on. "Was I whole?" alone answers yes — it was, before
+the page — and would have deferred the walk to the next open. Both terms are
+mutation-proved separately, on both sessions. The truncation threshold itself is now
+pinned on BOTH sides (exactly one page
+claims a gap, one row fewer is silent), and the test that used to be named "when the
+transcript fits in one page" says "when the page is not full", which is the actual
+trigger.
+
+The hole-free store — the common case, and the expensive one for a per-row predecessor
+probe — now short-circuits on one index-only `COUNT/MIN/MAX` pass, since `COUNT(*)`
+equals `MAX - MIN + 1` exactly when nothing between them is missing and the floor is then
+`MIN`. The probe walk runs only when the counts disagree, where it is also cheap. Both
+legs pinned: the behavioural fixtures prove it still answers 20 with a hole and 1 without
+(and `MIN` rather than 1 for a contiguous run that starts at 7), the plan proves it is
+index-only. The plan guard also now states what it is: a measurement on `bun:sqlite`,
+which is not the engine the device runs, kept because it discriminates rather than because
+it is a device number.
+
+And a guard that compared two constants
+(`DEFAULT_EDIT_REPLAY_LIMIT >= DEFAULT_REPLAY_LIMIT`) is replaced by an adversarial
+behavioural fixture that strictly dominates it: it catches the shrunken-limit
+regression the arithmetic existed for AND an alignment break that touches no constant
+at all.
+
+SUPERSEDED IN PART BY PR #388 (the entry above), and specifically this sentence:
+"Its negative control removes only the new 125 acknowledgment and proves the run
+refuses before writing any later migration." That was true of the runner as it
+stood here, and it is no longer the contract. Once the ledger reconciles by
+migration identity rather than by ordinal, removing the 125 acknowledgment does
+NOT cause a refusal — `code_trident_runs_base_sha` is simply absent from the
+ledger by name, so it applies, and the boot succeeds. The test now asserts that
+instead. The acknowledgment remains shipped and remains correct (it records the
+incident and skips an `ALTER` that 0131 rebuilds regardless), but it is an
+optimisation rather than the thing standing between the owner and a booting
+instance. Read the entry above for what the runner actually does now.
 
 ## 2026-08-17 — a newest-first replay could not be walked backwards, so a long chat lost its MIDDLE; and an edit resolved its seq from the wrong topic, so deleted content replayed
 
