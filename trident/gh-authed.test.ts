@@ -252,15 +252,16 @@ describe('gh-authed: the env it builds (unit seam)', () => {
     expect(envs[0]!['GIT_CONFIG_KEY_0']).toBe('credential.https://github.com.helper')
   })
 
-  test('with no stored token: no GH_TOKEN, no git config injection at all', async () => {
+  test('with no stored token: the child env IS the inherited environment — nothing injected', async () => {
     const { spawn, envs } = recorder()
     const code = await runGhAuthed(
       ['--db', dbPath, '--data-dir', dataDir, '--owner', OWNER, '--', 'pr', 'view', '1'],
       spawn,
     )
     expect(code).toBe(0)
-    expect(envs[0]!['GH_TOKEN']).toBeUndefined()
-    expect(envs[0]!['GIT_CONFIG_KEY_0']).toBeUndefined()
+    // The child inherits process.env by design (invariant 4), so absolute absence
+    // would assert a fact about the host shell. Equality proves nothing was injected.
+    expect(envs[0]).toEqual({ ...process.env })
   })
 
   test('the gh tail is passed VERBATIM, and the flags never leak into it', async () => {
