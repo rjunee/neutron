@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -12,6 +12,15 @@ export interface Migration {
   version: number
   name: string
   sql: string
+  fileName: string
+}
+
+interface MigrationRepair {
+  version: number
+  recorded_name: string
+  file_name: string
+  note: string
+  date: string
 }
 
 export interface ApplyResult {
@@ -32,8 +41,38 @@ export function loadMigrations(dir: string = HERE): Migration[] {
         version,
         name,
         sql: readFileSync(join(dir, f), 'utf8'),
+        fileName: f,
       }
     })
+}
+
+export function migrationNameMismatch(recorded: string, file: string): boolean {
+  return recorded !== file
+}
+
+function loadMigrationRepairs(dir: string): MigrationRepair[] {
+  const path = join(dir, 'repairs.json')
+  if (!existsSync(path)) return []
+  const repairs: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (!Array.isArray(repairs)) throw new Error(`${path} must contain a JSON array`)
+  return repairs as MigrationRepair[]
+}
+
+function repairKey(version: number, recordedName: string, fileName: string): string {
+  return `${version}\0${recordedName}\0${fileName}`
+}
+
+function assertUniqueMigrationOrdinals(migrations: Migration[]): void {
+  const byVersion = new Map<number, Migration>()
+  for (const migration of migrations) {
+    const previous = byVersion.get(migration.version)
+    if (previous) {
+      throw new Error(
+        `Migration ordinal collision at version ${migration.version}: ${previous.fileName} and ${migration.fileName}`,
+      )
+    }
+    byVersion.set(migration.version, migration)
+  }
 }
 
 /**
@@ -88,15 +127,56 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
        applied_at REAL NOT NULL
      )`,
   )
-  const seen = new Set(
+  const seen = new Map(
     db
-      .query<{ version: number }, []>('SELECT version FROM _migrations')
+      .query<{ version: number; name: string }, []>('SELECT version, name FROM _migrations')
       .all()
-      .map((r) => r.version),
+      .map((r) => [r.version, r.name] as const),
   )
+  const migrations = loadMigrations(dir)
+  assertUniqueMigrationOrdinals(migrations)
+  const repairs = new Map(
+    loadMigrationRepairs(dir).map((repair) => [
+      repairKey(repair.version, repair.recorded_name, repair.file_name),
+      repair,
+    ]),
+  )
+  const acknowledged = new Map<number, MigrationRepair>()
+  for (const migration of migrations) {
+    const recordedName = seen.get(migration.version)
+    if (recordedName === undefined || !migrationNameMismatch(recordedName, migration.name)) continue
+    const repair = repairs.get(repairKey(migration.version, recordedName, migration.name))
+    if (!repair) {
+      throw new Error(
+        `Migration version ${migration.version} was recorded as "${recordedName}" but this code contains "${migration.name}". ` +
+          'The schema may not match this code. Resolve only with a hand-verified entry in migrations/repairs.json; never rename or auto-apply the migration.',
+      )
+    }
+    acknowledged.set(migration.version, repair)
+  }
+
+  if (acknowledged.size > 0) {
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS _migration_repairs (
+         version INTEGER NOT NULL,
+         recorded_name TEXT NOT NULL,
+         file_name TEXT NOT NULL,
+         note TEXT NOT NULL,
+         acknowledged_at REAL NOT NULL,
+         PRIMARY KEY (version, recorded_name, file_name)
+       )`,
+    )
+  }
+  for (const repair of acknowledged.values()) {
+    db.run(
+      `INSERT OR IGNORE INTO _migration_repairs
+       (version, recorded_name, file_name, note, acknowledged_at) VALUES (?, ?, ?, ?, ?)`,
+      [repair.version, repair.recorded_name, repair.file_name, repair.note, Date.now() / 1000],
+    )
+  }
   const applied: number[] = []
   const skipped: number[] = []
-  for (const m of loadMigrations(dir)) {
+  for (const m of migrations) {
     if (seen.has(m.version)) {
       skipped.push(m.version)
       continue

@@ -60,6 +60,41 @@ dropping the cross-project scope check (1 red), and collapsing the log rate-limi
 key (2 red). The 14 failures in a whole-`trident/` local run are byte-identical on
 an untouched `origin/main` checkout (`worktree-cleanup-sh` and `merge-realgit`,
 both real-`git` suites this diff does not touch).
+## 2026-08-16 — a fired reminder was rewriting the owner's chat down to the fast tier
+
+Landed via PR #340.
+
+The owner's project chat answered on Haiku twice in one day. He reported it both
+times; a hand-repointed registry record held for hours and then reverted, which is
+what made it look like an environment default rather than a write.
+
+It was a write. `open/composer.ts` wires the reminder dispatcher onto
+`liveAgentSubstrate` — the owner's WARM chat REPL, by design, so "a reminder fires
+into the normal session" is literally true. The call site already passes
+`tool_names: LIVE_AGENT_TOOL_NAMES` verbatim for exactly this reason, with a
+comment explaining that a differing `--tools` surface EVICTS AND RESPAWNS the warm
+child. **The model is the same class of shared session property and was missed.**
+`reminders/dispatcher.ts` resolves `const model = input.model ?? FAST_MODEL`, the
+composer passed no `model`, and the persistent pool writes the spawned model back
+into the session's registry record — where `record?.model ?? getBestModel()` lets
+it OVERRIDE the best model rather than fall back to it. So every fired reminder
+left the owner's next chat turn on Haiku, durably across restarts.
+
+Measured on the live instance: of 26 session records exactly one held
+`claude-haiku-4-5-…` — the `cc-agent-*` session of the project whose reminders had
+fired — while every other session, including that same project's `cc-compose-*`
+lane, held an Opus id.
+
+The fix is one key, `model: getBestModel()`. Note the ritual lane two fields down
+already passed `resolve_ritual_model: getBestModel` "so it tracks the chat agent's
+model instead of pinning a stale id" — the same lesson, learned once and not
+carried across. A cheaper tier for reminder composition is still available, but it
+needs its own substrate: it cannot be taken out of the session the owner is
+talking to.
+
+Typecheck differenced against untouched main rather than counted: all 51 tsconfigs
+fail identically on both trees in this checkout (missing type libs in a partial
+install), zero introduced.
 
 ## 2026-08-16 — a stalled driver is not a driver, and a silent skip is going quiet
 
@@ -133,6 +168,89 @@ turns the observability test red. `bash scripts/ci/lint.sh` exit 0;
 `typecheck-all.sh` 50/51 with the one `app/tsconfig.json` failure reproduced
 identically on an untouched `origin/main` checkout in the same environment
 (absent `@types/node`, and nothing under `app/` is touched here).
+
+## 2026-08-16 — a stored record could pull the owner's chat below the best model
+
+Landed via PR #342.
+
+The owner's project chat came up on the fast tier instead of the frontier model,
+twice in one day, and he had to report it both times. The mechanism is one `??`.
+A spawn resolves its model as `record?.model ?? getBestModel()`
+(`runtime/adapters/claude-code/persistent/pool.ts:176`, `.../supervision.ts:81`),
+so the persisted REPL registry row OVERRIDES the best model rather than falling
+back to it — and the value that reaches the child is written straight back into
+the row (`spawn.ts:184` → the `--model` argv, `spawn.ts:646` → `record.model`).
+One wrong value therefore survives every respawn, restart and resume. Setting
+the row to the frontier model by hand held for a few hours and it came back.
+It was never an environment default: `runtime/models.ts:52-53` binds
+`BEST_MODEL` to the frontier model.
+
+THE WRITER WAS FOUND SEPARATELY, AND THAT IS WHY THIS STILL LANDED. PR #340
+closed it: the reminder dispatcher composed on `liveAgentSubstrate` — the
+owner's warm chat REPL — passing no model, so the dispatcher's own
+`input.model ?? FAST_MODEL` default rewrote the chat session's record on every
+fire (`open/composer.ts:2739`). This change was built without depending on that
+discovery, and two things keep it load-bearing now that the discovery exists.
+
+FIRST, #340 CLOSES ONE CALL SITE. Any future caller that dispatches on
+`liveAgentSubstrate` without naming a model re-opens the identical hole, and the
+only detector this class of failure has is the owner noticing the answers got
+worse. The floor makes the class unreachable rather than the instance fixed.
+
+SECOND, #340 DOES NOT REPAIR A RECORD THAT IS ALREADY POISONED. Nothing else
+rewrites `record.model`: the sole writer is the model-update watchdog's graceful
+upgrade (`supervision.ts:832`), which fires only when a 6h-gated probe finds a
+genuinely NEW top-tier id. So a row already holding the fast tier keeps
+re-spawning itself on the fast tier — read at `pool.ts:176`, written back at
+`spawn.ts:646` — until a model upgrade happens or someone edits it by hand. The
+clamp repairs it on the very next spawn, because it sits upstream of both.
+
+The property is enforced structurally: an owner-facing conversational
+session cannot spawn below the frontier tier, whatever wrote the record. The
+clamp lives at `spawn.ts:61` — the single place a model id becomes a spawned
+child, which every path funnels through (cold spawn, watchdog respawn, admin
+force-resume, pending-inbound replay). Clamping THERE rather than at the two
+`record.model ??` call sites does two jobs with one line: it holds for callers
+that do not exist yet, and the same `model` binding feeds both the argv and the
+registry write, so the row is un-poisoned in the same breath and the value
+cannot self-perpetuate.
+
+The predicate is a KNOWN lower tier (`getKnownFallbackModels()`,
+`runtime/models.ts:168`), not "anything ≠ best". That set already existed one
+layer up for the `--fallback-model` outage trap, where the model-update watchdog
+refuses to ADOPT a lower tier; it had never been mirrored on the record-READ
+path, and this closes the other end of the same pipe. Clamping anything ≠ best
+would have fought the upgrade path instead: a warm session legitimately holds
+the model it spawned with, and a newer top-tier id adopted elsewhere is not a
+degradation. `model-floor.ts:51-68` additionally normalises a trailing
+`-YYYYMMDD` snapshot, so a future dated release of a lower tier is caught
+without anyone remembering to extend the alias set.
+
+Which substrates are owner-facing is a REQUIRED, no-default field on the
+security profile (`frontier_model_floor`,
+`gateway/wiring/substrate-profiles.ts:133`) — the same shape as
+`github_credential` beside it, and for the same reason: a new profile cannot be
+authored without stating its answer, rather than the answer being guessed from
+an instance-id prefix at a spawn site. Only `PROFILE_WARM_CHAT` sets it. Scribe
+extraction, the reflection and correction judges, and the phase-spec rephrasers
+run on the fast tier ON PURPOSE and are byte-for-byte unchanged; the option is
+emitted only when a profile opts in, so every other option bag is identical to
+before.
+
+Silence was half the defect — this ran for a day and the only signal was the
+owner's own judgement of the answers, while the chat itself explained the
+degradation with a claim about environment defaults that the code contradicts.
+A clamp now emits a structured `model_floor_applied` warn naming the session,
+the requested model, its source and the floor applied. (The false explanation
+itself is confabulation, not code: `repl-agent-base.md` — the chat persona
+appended to every conversational spawn — mentions no model at all, and no
+shipped text asserts a fast-tier default.)
+
+Four mutation tests, each with a control: restoring the unconditional precedence
+reddens 3 of 14; unsetting the chat profile's floor reddens 3; leaking the floor
+onto the memory lane reddens 4; dropping the factory forward reddens 1. That
+last one is not hypothetical — `appendSystemPromptFile` was lost at exactly that
+seam once, proven at the factory-input layer while the real factory dropped it.
 
 ## 2026-08-16 — the refusal warning was invisible to the instance it protects
 

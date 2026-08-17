@@ -2737,6 +2737,37 @@ export function buildOpenGraphComposer(
         : {}),
       context: buildStatusMdContextSource({ owner_home }),
       resolveTopicId: ({ explicit_topic }): string => resolveAppWsReminderTopic(explicit_topic),
+      // ⚠️ THE LIVE-CHAT MODEL, for exactly the reason the tool surface below is
+      // passed verbatim: a fired reminder composes on `liveAgentSubstrate`, the
+      // owner's WARM chat REPL, and the persistent pool PERSISTS the model it
+      // spawned with back into that session's registry record
+      // (`runtime/adapters/claude-code/persistent/supervision.ts` saveRecord, read
+      // back at `pool.ts` `record?.model ?? getBestModel()` — the record OVERRIDES
+      // the best model rather than falling back to it). The dispatcher's own
+      // default is the Haiku-class `FAST_MODEL` (`reminders/dispatcher.ts:258`,
+      // `const model = input.model ?? FAST_MODEL`), so leaving this unset meant
+      // every fired reminder rewrote the owner's chat session to the fast tier and
+      // his NEXT chat turn resumed there — silently, and durably across restarts,
+      // because the record carries it.
+      //
+      // Measured on the live instance 2026-08-16: of 26 session records exactly
+      // one held `claude-haiku-4-5-…` — the `cc-agent-*` session of the project
+      // whose reminders had fired — while every other session, including that same
+      // project's `cc-compose-*` lane, held an Opus id. Repointing the record by
+      // hand held only until the next fire; it recurred twice in one day and the
+      // owner had to report it both times.
+      //
+      // The sibling below already learned this lesson for `--tools`: a differing
+      // surface EVICTS AND RESPAWNS the warm child. The model is the same class of
+      // shared session property and was simply missed — note `resolve_ritual_model`
+      // further down already passes `getBestModel` for the ritual lane, "so it
+      // tracks the chat agent's model instead of pinning a stale id". This is that
+      // same fix for the nudge path.
+      //
+      // A reminder composing on the owner's session must use the OWNER'S model. If
+      // a cheaper tier is ever wanted for composition, it needs its own substrate —
+      // it cannot be taken out of the session he is talking to.
+      model: getBestModel(),
       // ⚠️ THE LIVE-CHAT TOOL SURFACE, VERBATIM — and this is load-bearing, not
       // tidiness. A fired reminder composes on `liveAgentSubstrate`, the owner's
       // WARM chat REPL, and the persistent pool's reuse guard EVICTS AND RESPAWNS a

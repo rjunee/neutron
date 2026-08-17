@@ -162,8 +162,9 @@
 # stdout also carries the codex transcript, which is model-controlled text. A build
 # that quotes this header, or narrates "I printed NEUTRON_CODEX_BUILD_HEAD=<sha>",
 # puts a second trailer-shaped block in front of the reader with no way to tell which
-# one was measured. The bridge reads THIS FILE and nothing else, and the file is
-# written (truncating) after codex exits, so anything the model wrote there is gone.
+# one was measured. The bridge reads THIS FILE and nothing else. After codex exits,
+# the trailer is written to a temporary path and atomically renamed into place, so a
+# partial read is impossible and model-written content at either path is replaced.
 #
 # ── THE SANDBOX GRANT, AND WHY IT IS THIS WIDE ───────────────────────────────
 # `--sandbox danger-full-access`. Deliberate, and the narrower policies were checked
@@ -615,9 +616,13 @@ emit_trailer() {
       inner_checkpoint_head "$(git rev-parse --verify HEAD)" \
       || echo "CODEX_BUILD_CHECKPOINT_FAILED: artifact checkpoint could not be written; continuing." >&2
   fi
-  # `>` TRUNCATES, deliberately: the build had full write access and may have created
-  # this path itself. What the reader gets is what this function measured, nothing
-  # appended to it.
+  # Write to a temp path in the SAME directory and rename it into place. rename(2) is
+  # atomic on one filesystem, so a reader either finds no trailer or a complete one,
+  # never a partial one. Measured failure 2026-08-16, run 8620a7d1: a partially-written
+  # trailer was read as "empty or missing" and a finished exit-0 build was discarded.
+  # Truncation still matters on the temp path: the build had full write access and may
+  # have created either path itself. The reader gets exactly what this function
+  # measured, renamed over anything else.
   printf '%s\n' \
     "NEUTRON_CODEX_BUILD_BRANCH=${branch_name}" \
     "NEUTRON_CODEX_BUILD_HEAD=${head}" \
@@ -625,7 +630,7 @@ emit_trailer() {
     "NEUTRON_CODEX_BUILD_PR=${pr_number}" \
     "NEUTRON_CODEX_BUILD_DIFF=${diff_path}" \
     "NEUTRON_CODEX_BUILD_WORKTREE=${WORKTREE}" \
-    > "$TRAILER_FILE"
+    > "$TRAILER_TMP" && mv -f "$TRAILER_TMP" "$TRAILER_FILE"
 }
 
 # ── NOT CONNECTED: no per-project credential configured ───────────────────────
@@ -749,17 +754,18 @@ if [ -z "$TRAILER_FILE" ]; then
   echo "CODEX_BUILD_NO_TRAILER_FILE: NEUTRON_CODEX_BUILD_TRAILER_FILE is unset — there is nowhere to write the measured trailer, so a completed build could not be reported. DEFERRED." >&2
   exit 3
 fi
-# SET IS NOT WRITABLE, and it is the second of those this check is for. A path
-# under a directory that does not exist passes the emptiness test above and then fails
-# at the single `> "$TRAILER_FILE"` in `emit_trailer` — which, with no `set -e`, is a
-# line of stderr and nothing else: the script exits 0, the bridge finds no trailer,
-# and the workflow reports "produced no commitSha — nothing was built" about a build
-# that spent every token and built the whole thing. So the write is PROVED here, by
-# doing it, while the only cost of being wrong is a round.
-if ! : > "$TRAILER_FILE" 2>/dev/null; then
+# SET IS NOT WRITABLE, and it is the second of those this check is for. Prove the temp
+# path is writable here, before spending any build tokens. Then remove both the proof
+# and any stale final trailer: from this point until emit_trailer's rename, the final
+# path does not exist and cannot be mistaken for this run's completion. emit_trailer
+# is defined before this assignment but called only after codex runs, so shell expands
+# TRAILER_TMP at call time; do not reorder those calls ahead of this block.
+TRAILER_TMP="${TRAILER_FILE}.tmp.$$"
+if ! : > "$TRAILER_TMP" 2>/dev/null; then
   echo "CODEX_BUILD_TRAILER_UNWRITABLE: cannot write NEUTRON_CODEX_BUILD_TRAILER_FILE=$TRAILER_FILE (missing directory, or no permission) — a completed build would report nothing and the tokens would be spent. DEFERRED." >&2
   exit 3
 fi
+rm -f "$TRAILER_TMP" "$TRAILER_FILE"
 
 # ── DEFERRED precheck: auth must be live. 3× retry, 6s per-attempt wall cap ────
 # Ported from the review wrapper: a genuine expiry fails every attempt; a transient
