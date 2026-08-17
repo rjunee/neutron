@@ -2,6 +2,64 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — the untracked-migration guard had no test that could fail on an untracked migration
+
+Landed via PR #380.
+
+#374's guard is correct and this changed nothing about what it refuses. What it
+fixed is that the guard's own coverage of THIS repository could not fail on the
+defect: the test named "this repository's own migration files are all tracked"
+asserted `kind`, `dirPrefix` and two files chosen by hand, and never enumerated
+the migration files. One untracked `NNNN_*.sql` among the ~124 in that directory
+would have passed CI and surfaced first as a production boot refusal — the guard
+catching us in the field rather than at review time.
+
+Proved by mutation rather than argued. With an untracked `0124_mutation_probe.sql`
+planted in `migrations/`, every assertion the old test made still PASSED —
+`verified`, `dirPrefix`, `runner.ts` and `0001_initial_schema.sql` tracked — and
+only the new enumeration failed, naming the file. The set comes from
+`loadMigrations`, the production loader, not a second copy of its
+`^\d{4}_.+\.sql$` filter: the question is whether every file the runner would
+APPLY is tracked, so asking the runner is the only phrasing that cannot drift
+from it. Two controls keep the filter from passing vacuously, since an empty
+enumeration and a `tracked` set containing everything would both read as green.
+
+A CONTROL THAT CANNOT RUN NOW FAILS IN CI. `controlDidNotRun` warned and
+returned, so two real-git controls read as green while executing nothing. Half
+the original argument holds — a source export has no `.git`, a machine may have
+no `git` — and the half that does not is that a warning is a signal: nothing
+reads a green run's stdout, so a control that quietly stopped executing was
+indistinguishable from one that passed. CI has a real checkout and a real git, so
+a skip there is now a hard failure; elsewhere it still warns and passes. Verified
+both directions by mutating `REPO_ROOT` to a nonexistent path: `CI` unset → 23
+pass / 0 fail with two warnings; `CI=true` → 21 pass / 2 fail, each naming its
+control. Against the real tree with `CI=true`, 124 pass and zero skips.
+
+A STRAY COLLIDING WITH A TRACKED ORDINAL IS DIAGNOSED AS THE STRAY.
+`assertUniqueMigrationOrdinals` ran before the tree verdict existed, so a stray
+landing on an ordinal a real migration already owned — which is how 122 and 124
+actually presented — reported "two files claim version N" and sent the operator
+hunting a duplicate they never committed. Same failure #374 fixed for the
+name-mismatch path, one guard to the left. It now takes the tree verdict and
+stands aside when one side is untracked; two TRACKED files at one ordinal, and
+any collision where the tree cannot be verified, still report the collision.
+Fail-closed throughout, and there is no path to two rows at one version.
+
+Three comments that described intent rather than code, the rule-3a shape: a dead
+checksum-length compare credited with the SHA-256 rejection the byte-wise compare
+one line later actually makes; `outside-deployed-tree` reading as a live path
+when `findCheckoutRoot`'s ancestry guarantee makes it unreachable (kept as the
+total-function guard, now labelled as one, and added to README's reason-string
+contract, which had omitted it); and a `TextDecoder` allocated per index entry on
+the boot path, now hoisted. README also names the residual outright: a build lane
+running `git add -A` stages a stray with everything else, and staging alone
+satisfies this check — which is why the row says `tracked-in-index` and claims
+nothing about a commit. `docs/INVARIANTS.md` moved with the precedence change.
+
+Round 2's codex cross-model review was deferred and no kimi reviewer was
+attached, so this landed without that pass; recorded here rather than left in a
+review thread.
+
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
 Landed via PR #370.
