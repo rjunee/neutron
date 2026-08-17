@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
-import { NO_ADVANCE_HANG_MS } from './liveness.ts'
-import { runDrivingVerdict } from './run-driving.ts'
+import { DEFAULT_SETTLE_TIMEOUT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
+import { FUTURE_STAMP_TOLERANCE_MS, runDrivingVerdict } from './run-driving.ts'
 import type { TridentRun } from './store.ts'
 
 const T0 = Date.parse('2026-08-14T21:35:47Z')
@@ -20,8 +20,11 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     branch: 'trident/demo',
     pr: null,
     merge_mode: 'pr',
-    subagent_run_id: null,
-    subagent_status: null,
+    // A LAUNCHED run is the realistic default: a clean fire writes both columns
+    // in one update (`orchestrator.ts:2064-2073`). Tests that want the
+    // never-launched shape null them explicitly.
+    subagent_run_id: 'wf-1',
+    subagent_status: 'running',
     repo_path: '/repo',
     worktree: null,
     task: 'build a thing',
@@ -29,7 +32,7 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     thread_id: null,
     channel_kind: 'app_socket',
     failure_reason: null,
-    workflow_run_id: null,
+    workflow_run_id: 'wf-1',
     inner_checkpoint: null,
     inner_checkpoint_head: null,
     inner_checkpoint_findings: null,
@@ -77,12 +80,41 @@ describe('runDrivingVerdict', () => {
     }
   })
 
-  test('an unparseable last_advanced_at reads as just-advanced, like the reaper', () => {
-    // `orchestrator.ts:2380-2388` and `run-progress.ts:140-141` both fold a
-    // corrupt stamp to 0 elapsed; disagreeing here would have the reaper and this
-    // backstop draw opposite conclusions from one broken row.
-    const v = runDrivingVerdict(run({ last_advanced_at: 'not-a-date' }), T0 + 10 * NO_ADVANCE_HANG_MS)
+  test('an unparseable last_advanced_at is NOT a reading, so the run stands down', () => {
+    // Failing the other way (treating it as just-advanced, for symmetry with the
+    // reaper) hides the item forever: the reaper reads the same 0 and never
+    // recovers it either. No reading is not a good reading.
+    const v = runDrivingVerdict(run({ last_advanced_at: 'not-a-date' }), T0 + 60_000)
+    expect(v).toEqual({ driving: false, reason: 'unknown-advance', since_advance_ms: 0 })
+  })
+
+  test('a stamp from the FUTURE beyond tolerance is not a reading either', () => {
+    const v = runDrivingVerdict(run(), T0 - FUTURE_STAMP_TOLERANCE_MS - 1)
+    expect(v.driving).toBe(false)
+    expect(v.reason).toBe('unknown-advance')
+  })
+
+  test('jitter inside the future tolerance is still a healthy advancing run', () => {
+    const v = runDrivingVerdict(run(), T0 - FUTURE_STAMP_TOLERANCE_MS)
     expect(v).toEqual({ driving: true, reason: 'advancing', since_advance_ms: 0 })
+  })
+
+  test('a run with NO recorded dispatch stands down after the launch settle budget', () => {
+    // A clean fire writes both columns together (`orchestrator.ts:2064-2073`), so
+    // neither being set past the settle budget means no workflow exists to
+    // collide with. This is a FACT about the row, not a liveness guess.
+    const never = run({ subagent_run_id: null, subagent_status: null })
+    expect(runDrivingVerdict(never, T0 + DEFAULT_SETTLE_TIMEOUT_MS).driving).toBe(true)
+    const v = runDrivingVerdict(never, T0 + DEFAULT_SETTLE_TIMEOUT_MS + 1)
+    expect(v.driving).toBe(false)
+    expect(v.reason).toBe('never-launched')
+  })
+
+  test('a CRASHED launcher keeps the conservative timer — its build may still be detached', () => {
+    // `orchestrator.ts:2419-2426`: a dead launcher is not a dead build.
+    const crashed = run({ subagent_run_id: null, subagent_status: 'crashed' })
+    expect(runDrivingVerdict(crashed, T0 + DEFAULT_SETTLE_TIMEOUT_MS + 1).driving).toBe(true)
+    expect(runDrivingVerdict(crashed, T0 + NO_ADVANCE_HANG_MS + 1).reason).toBe('no-advance')
   })
 
   test('a clock behind the stamp never yields a negative elapsed', () => {

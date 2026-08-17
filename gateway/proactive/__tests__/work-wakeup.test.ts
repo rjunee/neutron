@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { resetLoggerStateForTests } from '@neutronai/logger'
 import {
   buildWakeupPrompt,
   buildWorkWakeupLoop,
@@ -11,6 +12,7 @@ import {
   WAKEUP_FAILURE_POST_CADENCE,
   WORK_WAKEUP_INTERVAL_MS,
   WORK_WAKEUP_OWNER_GRACE_MS,
+  type WakeupDeferredItem,
   type WakeupProjectWork,
   type WorkWakeupDeps,
 } from '../work-wakeup.ts'
@@ -26,6 +28,40 @@ function project(over: Partial<WakeupProjectWork> = {}): WakeupProjectWork {
     items: [{ title: 'Ship the importer' }],
     deferred: [],
     ...over,
+  }
+}
+
+function deferral(over: Partial<WakeupDeferredItem> = {}): WakeupDeferredItem {
+  return {
+    title: 'Ship the importer',
+    run_id: 'run-1',
+    phase: 'forge-init',
+    since_advance_ms: 120_000,
+    ...over,
+  }
+}
+
+/**
+ * Capture the logger's INFO lines. It routes info → `console.log`
+ * (`gateway/wiring/__tests__/resolve-llm-credentials.test.ts` uses the same
+ * seam); the level is pinned so the assertion does not depend on the ambient
+ * `NEUTRON_LOG_LEVEL`.
+ */
+function captureInfo(): { matching(event: string): string[]; restore(): void } {
+  const lines: string[] = []
+  const originalLog = console.log
+  const originalLevel = process.env['NEUTRON_LOG_LEVEL']
+  process.env['NEUTRON_LOG_LEVEL'] = 'info'
+  console.log = (...args: unknown[]): void => {
+    lines.push(args.map(String).join(' '))
+  }
+  return {
+    matching: (event: string): string[] => lines.filter((l) => l.includes(event)),
+    restore: (): void => {
+      console.log = originalLog
+      if (originalLevel === undefined) delete process.env['NEUTRON_LOG_LEVEL']
+      else process.env['NEUTRON_LOG_LEVEL'] = originalLevel
+    },
   }
 }
 
@@ -140,46 +176,65 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(h.specs).toHaveLength(0)
   })
 
+  test('a STANDING deferral is rate-limited, but the COUNT is never suppressed', async () => {
+    // 288 lines a day per item is not a signal. The window is per (project, run),
+    // so the first sweep speaks and the repeats inside the window stay quiet —
+    // while `deferred_to_run` still counts every one, so nothing is lost.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    try {
+      const h = harness({ projects: [project({ items: [], deferred: [deferral()] })] })
+      const first = await runWorkWakeupSweep(h.deps, new Map())
+      const second = await runWorkWakeupSweep(h.deps, new Map())
+      expect(first.deferred_to_run).toBe(1)
+      expect(second.deferred_to_run).toBe(1)
+    } finally {
+      lines.restore()
+    }
+    expect(lines.matching('wakeup_deferred_to_live_run')).toHaveLength(1)
+  })
+
+  test('a DIFFERENT run defers under its own window, so a new stall is never delayed', async () => {
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    try {
+      const h = harness({
+        projects: [
+          project({
+            items: [],
+            deferred: [deferral(), deferral({ run_id: 'run-2', phase: 'argus' })],
+          }),
+        ],
+      })
+      await runWorkWakeupSweep(h.deps, new Map())
+    } finally {
+      lines.restore()
+    }
+    expect(lines.matching('wakeup_deferred_to_live_run')).toHaveLength(2)
+  })
+
   test('OBSERVABILITY — every deferral writes a line naming the run and its phase', async () => {
     // The owner's complaint was "I can't tell if it's actually autonomously
-    // progressing work". The logger routes info → console.log
-    // (`gateway/wiring/__tests__/resolve-llm-credentials.test.ts` uses the same seam).
-    const lines: string[] = []
-    const originalLog = console.log
-    const originalLevel = process.env['NEUTRON_LOG_LEVEL']
-    process.env['NEUTRON_LOG_LEVEL'] = 'info'
-    console.log = (...args: unknown[]): void => {
-      lines.push(args.map(String).join(' '))
-    }
+    // progressing work". This is the line that answers it.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
     try {
       const h = harness({
         projects: [
           project({
             items: [],
             deferred: [
-              {
-                title: 'Ship the importer',
-                run_id: 'run-1',
-                phase: 'forge-init',
-                since_advance_ms: 120_000,
-              },
-              {
-                title: 'Wire the reaper',
-                run_id: 'run-2',
-                phase: 'argus',
-                since_advance_ms: 30_000,
-              },
+              deferral(),
+              deferral({ title: 'Wire the reaper', run_id: 'run-2', phase: 'argus', since_advance_ms: 30_000 }),
             ],
           }),
         ],
       })
       await runWorkWakeupSweep(h.deps, new Map())
     } finally {
-      console.log = originalLog
-      if (originalLevel === undefined) delete process.env['NEUTRON_LOG_LEVEL']
-      else process.env['NEUTRON_LOG_LEVEL'] = originalLevel
+      lines.restore()
     }
-    const deferrals = lines.filter((l) => l.includes('wakeup_deferred_to_live_run'))
+    const deferrals = lines.matching('wakeup_deferred_to_live_run')
     expect(deferrals).toHaveLength(2)
     expect(deferrals[0]).toContain('run-1')
     expect(deferrals[0]).toContain('forge-init')

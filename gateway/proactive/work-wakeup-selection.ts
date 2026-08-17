@@ -9,8 +9,10 @@
  * a trident run that is genuinely driving it — the trident tick is already that
  * item's wakeup driver, and waking it here too would double-drive one piece of
  * work from two schedulers. `runDrivingVerdict` (`trident/run-driving.ts`) answers
- * "genuinely driving"; see that module for why the answer is `last_advanced_at`
- * against the reaper's own `NO_ADVANCE_HANG_MS` and not `phase` alone.
+ * "genuinely driving" — and answers it from the ROW where it can (terminal phase,
+ * no dispatch ever recorded, no usable `last_advanced_at`), falling back to the
+ * reaper's own `NO_ADVANCE_HANG_MS` timer only for the cases those leave open.
+ * `phase` alone is never the answer; that was the bug.
  *
  * WHY THE OLD `!isTerminalPhase(run.phase)` TEST WAS THE BUG, measured on the
  * owner's instance the night the wakeup shipped: three `in_progress` items were
@@ -78,8 +80,16 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
 
   for (const item of input.items) {
     if (item.status !== 'in_progress') continue
-    const run =
+    const linked =
       item.linked_run_id === null ? null : input.lookupRun(item.linked_run_id) ?? null
+    // SCOPE THE LOOKUP, exactly as `runProgressForItem` does
+    // (`trident/run-progress.ts:217-219`): `TridentRunStore.get` is keyed on the
+    // run id ALONE, so a stale or mis-copied `linked_run_id` naming another
+    // project's run would be read as this item's driver — and if that unrelated
+    // run keeps advancing, the item is suppressed for as long as it lives. A
+    // foreign run drives nothing here, so it is ignored and the item stays
+    // wakeable.
+    const run = linked !== null && linked.project_slug === item.project_slug ? linked : null
     if (run !== null) {
       const verdict = runDrivingVerdict(run, input.now_ms, input.no_advance_hang_ms)
       if (verdict.driving) {

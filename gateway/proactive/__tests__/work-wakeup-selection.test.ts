@@ -42,8 +42,11 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     branch: 'trident/demo',
     pr: null,
     merge_mode: 'pr',
-    subagent_run_id: null,
-    subagent_status: null,
+    // A LAUNCHED run is the realistic default: a clean fire writes both columns
+    // in one update (`orchestrator.ts:2064-2073`). Tests that want the
+    // never-launched shape null them explicitly.
+    subagent_run_id: 'wf-1',
+    subagent_status: 'running',
     repo_path: '/repo',
     worktree: null,
     task: 'build a thing',
@@ -51,7 +54,7 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     thread_id: null,
     channel_kind: 'app_socket',
     failure_reason: null,
-    workflow_run_id: null,
+    workflow_run_id: 'wf-1',
     inner_checkpoint: null,
     inner_checkpoint_head: null,
     inner_checkpoint_findings: null,
@@ -167,6 +170,39 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
   test('a linked run whose row has VANISHED leaves the item wakeable (never stranded)', () => {
     const out = select({ items: [item({ linked_run_id: 'ghost' })], runs: [] })
     expect(out[0]?.items).toHaveLength(1)
+  })
+
+  test('a link to ANOTHER project’s run cannot hide the item, however healthy that run is', () => {
+    // `TridentRunStore.get` is keyed on the id alone, so without the scope check a
+    // stale cross-project `linked_run_id` pointing at a continuously-advancing run
+    // suppresses this item for as long as that run lives.
+    const out = select({
+      items: [item({ project_slug: OWNER, linked_run_id: 'run-1' })],
+      runs: [run({ id: 'run-1', project_slug: 'someone-else' })],
+    })
+    expect(out[0]?.items).toHaveLength(1)
+    expect(out[0]?.deferred).toEqual([])
+  })
+
+  test('a run parked at forge-init that NEVER launched is wakeable within minutes, not hours', () => {
+    // The reported shape. It needs no timer to resolve: the row itself says no
+    // dispatch was ever recorded.
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ subagent_run_id: null, subagent_status: null })],
+      now_ms: T0 + 10 * 60_000,
+    })
+    expect(out[0]?.items).toHaveLength(1)
+    expect(out[0]?.deferred).toEqual([])
+  })
+
+  test('a corrupt last_advanced_at makes the item wakeable rather than invisible', () => {
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ last_advanced_at: 'not-a-date' })],
+    })
+    expect(out[0]?.items).toHaveLength(1)
+    expect(out[0]?.deferred).toEqual([])
   })
 
   // ── grouping / scope ─────────────────────────────────────────────────────────

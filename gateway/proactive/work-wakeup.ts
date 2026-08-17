@@ -99,6 +99,19 @@ export const WAKEUP_FAILURE_POST_CADENCE = 6
 /** A reply starting with this is a blocked declaration and posts LOUD. */
 export const WAKEUP_BLOCKED_PREFIX = 'BLOCKED:'
 
+/**
+ * Re-log a STANDING deferral at most this often, per (project, run). A deferral
+ * is a per-tick decision, so logging every one of them would write 288 lines a
+ * day per item for as long as the build runs — a volume that stops being a
+ * signal. The window is edge-friendly rather than edge-triggered: a NEW run id
+ * has no window and logs on the first sweep that defers to it, so the interesting
+ * transition is never delayed, while the same run repeats every half hour instead
+ * of every five minutes. Half an hour is chosen against the reader, not the
+ * writer: it is short enough that "is anything progressing?" is answerable from a
+ * glance at the tail, and long enough that the answer is not buried in itself.
+ */
+export const WAKEUP_DEFERRAL_LOG_WINDOW_MS = 30 * 60_000
+
 /** One in-progress, un-driven Work Board item. */
 export interface WakeupWorkItem {
   title: string
@@ -259,17 +272,21 @@ export async function runWorkWakeupSweep(
     // that knows. Logged at INFO (not debug, unlike the owner-active gate) because
     // this is the line that answers "is anything actually progressing?" — it names
     // the run and how long since it last moved, so a parked driver is legible as a
-    // parked driver rather than as an empty board. Bounded by the board's
-    // in-progress count, which is the owner's own plan.
+    // parked driver rather than as an empty board. Rate-limited per (project, run)
+    // so a long build says so periodically instead of 288 times a day; the COUNT
+    // in `WakeupSweepResult` is unconditional, so the rate limit costs volume and
+    // never costs the fact.
     for (const d of project.deferred) {
       result.deferred_to_run += 1
-      log.info('wakeup_deferred_to_live_run', {
-        project: project.project_key,
-        item: bound(d.title, 140),
-        run_id: d.run_id,
-        phase: d.phase,
-        since_advance_ms: d.since_advance_ms,
-      })
+      log
+        .rateLimited(`deferred:${project.project_key}:${d.run_id}`, WAKEUP_DEFERRAL_LOG_WINDOW_MS)
+        .info('wakeup_deferred_to_live_run', {
+          project: project.project_key,
+          item: bound(d.title, 140),
+          run_id: d.run_id,
+          phase: d.phase,
+          since_advance_ms: d.since_advance_ms,
+        })
     }
     if (project.items.length === 0) continue
 
