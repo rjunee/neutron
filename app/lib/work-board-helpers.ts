@@ -92,31 +92,46 @@ export function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress';
   if (status === 'done') return 'Done';
   if (status === 'failed') return 'Failed';
+  if (status === 'archived') return 'Shelved';
   return 'Upcoming';
 }
 
 /** Cycle a status forward: upcoming → in_progress → done (done stays done). A
  *  failed item re-queues to upcoming on manual advance (the primary action is
- *  the ▶/↻ retry). */
+ *  the ▶/↻ retry), and so does a SHELVED item — advancing a shelved card
+ *  un-shelves it back onto the active lane. */
 export function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'upcoming') return 'in_progress';
   if (status === 'in_progress') return 'done';
   if (status === 'failed') return 'upcoming';
+  if (status === 'archived') return 'upcoming';
   return 'done';
 }
 
-/** Split a board snapshot into the active lane + the completed history. */
+/**
+ * Split a board snapshot into the active lane + the SHELVED cards + the
+ * completed history.
+ *
+ * Archived is bucketed FIRST-CLASS, never folded into either neighbour. Folding
+ * it into `completed` would report parked work as shipped progress — the exact
+ * misreport the shelved lane exists to kill — and the old two-way
+ * `status === 'done' ? completed : active` bucketing would resurrect a shelved
+ * card in the active lane the server already excluded.
+ */
 export function splitBoard(items: readonly WorkBoardItem[]): {
   active: WorkBoardItem[];
+  archived: WorkBoardItem[];
   completed: WorkBoardItem[];
 } {
   const active: WorkBoardItem[] = [];
+  const archived: WorkBoardItem[] = [];
   const completed: WorkBoardItem[] = [];
   for (const it of items) {
     if (it.status === 'done') completed.push(it);
+    else if (it.status === 'archived') archived.push(it);
     else active.push(it);
   }
-  return { active, completed };
+  return { active, archived, completed };
 }
 
 /**
