@@ -8,8 +8,8 @@
  *   → order events by a per-topic monotonic `seq` (assigned as MAX(seq)+1 on
  *     message append; resolved from the durable message log for per-message
  *     state like receipts/reactions/edits — never client-trusted)
- *   → replay events after a client's resume cursor (`WHERE seq > after
- *     ORDER BY seq ASC`, bounded by a per-store limit)
+ *   → replay events after a client's resume cursor (`WHERE seq > after`, bounded
+ *     by a per-store limit, delivered seq-ascending)
  *   → fold rows into the per-message aggregate that fans to clients.
  *
  * This module owns that mechanism once. Each store stays a thin wrapper that
@@ -19,7 +19,12 @@
  *
  * Replay comes in two shapes, preserved exactly from the original stores:
  *  - `row`: one aggregate per row; `limit` bounds ROWS and applies in SQL
- *    (messages, edits — their upsert key holds one row per message).
+ *    (messages, edits — their upsert key holds one row per message). A capped
+ *    result is the NEWEST `limit` rows after the cursor, re-sorted ascending;
+ *    the older remainder is omitted, because the single caller of this shape is
+ *    a once-per-open resume that cannot page
+ *    ({@link AppChatEventLogCore.rowsAfter} carries the full argument and the
+ *    cost of the alternative).
  *  - `message-group`: many rows per message (per-device receipts, per-device-
  *    emoji reactions); `limit` bounds DISTINCT MESSAGES. The SQL scan itself
  *    is bounded to the page (a subquery finds the first `limit` distinct
@@ -42,6 +47,30 @@ export function clampAfterSeq(after_seq: number): number {
  *  default page size when the caller passed a non-finite value. */
 export function clampReplayLimit(limit: number, fallback: number): number {
   return Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : fallback
+}
+
+/**
+ * The `row`-shaped replay statement, as a string, so a test can put EXPLAIN QUERY
+ * PLAN in front of the SQL THIS CODE ACTUALLY RUNS rather than in front of a copy
+ * of it in the test. {@link AppChatEventLogCore.rowsAfter} is its only caller and
+ * carries the reasoning; exported purely so the plan assertion cannot go stale
+ * against a re-worded query.
+ *
+ * DESCENDING, and the caller reverses the (at most `limit`) rows in memory. The
+ * obvious alternative — wrapping this in `SELECT * FROM (...) ORDER BY seq ASC` —
+ * was written first and measured second: SQLite plans the outer clause as
+ * `USE TEMP B-TREE FOR ORDER BY`, re-sorting the page it just read in index order.
+ * Bounded, but pointless, and it made the plan assertion read as though the query
+ * still sorted. One `Array.prototype.reverse` costs nothing and leaves a plan with
+ * no sort in it at all.
+ *
+ * Parameters, in order: `topic_id`, `after_seq`, `limit`.
+ */
+export function rowReplaySql(table: string, columns: string): string {
+  return `SELECT ${columns} FROM ${table}
+            WHERE topic_id = ? AND seq > ?
+            ORDER BY seq DESC
+            LIMIT ?`
 }
 
 /**
@@ -68,9 +97,21 @@ export interface ReplayCursor {
  *  {@link AppChatEventLogCore.aggregatesAfterPage}. */
 export interface AggregatesPage<Agg> {
   aggregates: Agg[]
-  /** Pass as the next call's `(after_seq, after_message_id)` to fetch the
-   *  remainder. `null` when everything after the cursor fit within `limit` —
-   *  there is genuinely nothing more to fetch. */
+  /**
+   * Pass as the next call's `(after_seq, after_message_id)` to fetch the
+   * remainder. `null` when everything after the cursor fit within `limit`.
+   *
+   * EXCEPTION the type cannot express: a `row`-shaped log always reports
+   * `null`, capped or not — and there `null` does NOT mean the backlog is
+   * drained. A row log returns the NEWEST `limit` rows after the cursor
+   * ({@link AppChatEventLogCore.rowsAfter}), so a capped result has already
+   * skipped its older rows and a forward-only resume cursor cannot go back for
+   * them. There is no continuation cursor because there is no continuation:
+   * reading `null` off a row log as proof of completeness is wrong, and the
+   * omission is documented on `rowsAfter` rather than signalled here.
+   * Only `message-group` logs use this cursor, and there it does mean the
+   * backlog is drained.
+   */
   next_cursor: ReplayCursor | null
 }
 
@@ -78,7 +119,9 @@ export interface AggregatesPage<Agg> {
  *  into aggregates. */
 export type ReplayShape<SqlRow, Agg> =
   | {
-      /** One aggregate per row; `limit` bounds rows and is applied in SQL. */
+      /** One aggregate per row; `limit` bounds rows and is applied in SQL, to
+       *  the NEWEST `limit` rows after the cursor, returned ascending
+       *  ({@link AppChatEventLogCore.rowsAfter} explains why newest). */
       kind: 'row'
       toAggregate: (row: SqlRow) => Agg
     }
@@ -222,10 +265,75 @@ export class AppChatEventLogCore<SqlRow, Agg> {
     return row?.next ?? 1
   }
 
+  /**
+   * The `row`-shaped replay window: the NEWEST `limit` rows after the cursor,
+   * returned seq-ASCENDING. Sole owner of that SQL — {@link aggregatesAfter} and
+   * {@link aggregatesAfterPage} both call it, so their row-shape output cannot
+   * drift apart. (They previously held two hand-copied versions of it, which is
+   * how a page could end up ordered one way in one method and the other way in
+   * the other.)
+   *
+   * WHY NEWEST AND NOT OLDEST. The plain `WHERE seq > ? ORDER BY seq ASC LIMIT ?`
+   * this replaced returned the OLDEST `limit` rows, which is correct only for a
+   * caller that pages the remainder — and the resume path has no such caller.
+   * `resume` fires exactly once per socket open, and the cursor it sends is the
+   * client's MAX applied seq, which this very page advances. So a 1130-row topic
+   * answered a cold resume with seq 1..500 and the owner's chat rendered the
+   * OLDEST 500, stopping ~630 messages short of the present, once per app
+   * restart, with nothing on the wire saying anything was missing.
+   *
+   * Selecting DESC off the index and reversing the (at most `limit`) rows in memory
+   * keeps the wire contract — envelopes ascending, applied in order — while moving
+   * the omitted range from the newest rows to the oldest. Both are lossy above one
+   * window; only one of them omits the messages the owner is looking at.
+   *
+   * BYTE-IDENTICAL AT OR BELOW THE LIMIT: when at most `limit` rows follow the
+   * cursor the subquery selects all of them and the outer ORDER BY restores
+   * exactly the ascending page the old SQL produced. Every gap-fill assertion
+   * that resumes from a non-zero cursor therefore holds unchanged — this is a
+   * no-op until the backlog exceeds one page.
+   *
+   * NO SCAN REGRESSION: `seq` is the trailing column of the `(topic_id, seq)`
+   * PRIMARY KEY on the messages table (`migrations/0079_app_chat_messages.sql`)
+   * and of `idx_app_chat_edits_topic_seq` on the edits table
+   * (`migrations/0087_app_chat_edits.sql`), so SQLite walks the same index
+   * backwards and early-terminates at LIMIT rather than sorting. MEASURED, not
+   * assumed: `app-chat-event-core.test.ts` runs EXPLAIN QUERY PLAN over
+   * {@link rowReplaySql} — the very string prepared here — and asserts the plan
+   * contains no sort and no table scan, for both row-shaped tables. That test is
+   * why the reversal happens in memory: the first draft wrapped the query in an
+   * outer `ORDER BY seq ASC` and the plan came back with a temp B-tree.
+   *
+   * STILL LOSSY, named rather than hidden: a capped page advances the client's
+   * cursor past the rows it skipped, and a resume cursor only moves FORWARD, so
+   * those older rows are not reachable by any later resume. This converts
+   * "missing the newest N" into "missing a middle N" and there is no marker in
+   * the UI for the seam. Closing it needs a client affordance to ask for older
+   * history — a "load earlier" request the wire has no shape for yet — NOT an
+   * unbounded drain here: draining every row after the cursor makes one cold
+   * resume O(transcript) in rows, JSON bytes and adapter memory, per topic, which
+   * the mobile warmer then multiplies by every scope it warms at app open.
+   */
+  private rowsAfter(topic_id: string, after_seq: number, limit: number): SqlRow[] {
+    const safeAfter = clampAfterSeq(after_seq)
+    const safeLimit = clampReplayLimit(limit, this.defaultReplayLimit)
+    // Read newest-first off the index, hand back oldest-first: `.all()` returns a
+    // fresh array of at most `safeLimit` rows, so reversing it in place is O(limit)
+    // and cheaper than asking SQLite to re-sort the page it just read in order.
+    return this.db
+      .prepare<SqlRow, [string, number, number]>(rowReplaySql(this.table, this.columns))
+      .all(topic_id, safeAfter, safeLimit)
+      .reverse()
+  }
+
   /** Replay: aggregates for events after the cursor, seq-ascending, bounded by
-   *  `limit` (rows or distinct messages per the replay shape). Identical output
-   *  to {@link aggregatesAfterPage}'s `aggregates` — this is a thin convenience
-   *  for callers that don't need the continuation cursor. */
+   *  `limit` (rows or distinct messages per the replay shape). A `row`-shaped log
+   *  returns the NEWEST `limit` rows after the cursor, ascending
+   *  ({@link rowsAfter}) — one bounded query, not a page of a sequence, and it
+   *  omits the OLDEST rows when the backlog is longer. A `message-group` log
+   *  returns a true first page plus a continuation cursor. Identical output to
+   *  {@link aggregatesAfterPage}'s `aggregates` — this is a thin convenience for
+   *  callers that don't need the continuation cursor. */
   aggregatesAfter(
     topic_id: string,
     after_seq: number,
@@ -233,18 +341,8 @@ export class AppChatEventLogCore<SqlRow, Agg> {
     after_message_id?: string,
   ): Agg[] {
     if (this.replay.kind === 'row') {
-      const safeAfter = clampAfterSeq(after_seq)
-      const safeLimit = clampReplayLimit(limit, this.defaultReplayLimit)
-      const rows = this.db
-        .prepare<SqlRow, [string, number, number]>(
-          `SELECT ${this.columns} FROM ${this.table}
-            WHERE topic_id = ? AND seq > ?
-            ORDER BY seq ASC
-            LIMIT ?`,
-        )
-        .all(topic_id, safeAfter, safeLimit)
       const { toAggregate } = this.replay
-      return rows.map((r) => toAggregate(r))
+      return this.rowsAfter(topic_id, after_seq, limit).map((r) => toAggregate(r))
     }
     return this.aggregatesAfterPage(topic_id, after_seq, limit, after_message_id).aggregates
   }
@@ -255,10 +353,12 @@ export class AppChatEventLogCore<SqlRow, Agg> {
    * messages exist past the page (call again with its `seq`/`message_id` to
    * fetch the remainder, rather than the tail being silently dropped).
    *
-   * Row-shaped logs (`limit` bounds rows directly in SQL) never have a "tail"
-   * beyond what `LIMIT` already fetched in one pass — a capped result there just
-   * means "call again with the last row's seq", which `aggregatesAfter` already
-   * supports — so this always reports `next_cursor: null` for them.
+   * Row-shaped logs report `next_cursor: null` unconditionally, and for THEM it
+   * carries no information at all — see the exception spelled out on
+   * {@link AggregatesPage.next_cursor}. Their result is the NEWEST `limit` rows
+   * after the cursor ({@link rowsAfter}), so a capped one has dropped its older
+   * rows and no cursor could fetch them back; do not read a null cursor off a row
+   * log as proof of completeness.
    *
    * `message-group` logs are where the cursor matters: many rows can share one
    * message, so `limit` bounds DISTINCT MESSAGES, not rows. Crucially the page
@@ -288,15 +388,8 @@ export class AppChatEventLogCore<SqlRow, Agg> {
     const safeLimit = clampReplayLimit(limit, this.defaultReplayLimit)
     const replay = this.replay
     if (replay.kind === 'row') {
-      const rows = this.db
-        .prepare<SqlRow, [string, number, number]>(
-          `SELECT ${this.columns} FROM ${this.table}
-            WHERE topic_id = ? AND seq > ?
-            ORDER BY seq ASC
-            LIMIT ?`,
-        )
-        .all(topic_id, safeAfter, safeLimit)
       const { toAggregate } = replay
+      const rows = this.rowsAfter(topic_id, after_seq, limit)
       return { aggregates: rows.map((r) => toAggregate(r)), next_cursor: null }
     }
 
