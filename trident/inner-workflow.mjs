@@ -1154,8 +1154,11 @@ const NO_PATTERN_KILL_RULE =
 // `schema: FORGE_SCHEMA` the agent ALSO returns the structured fields, but the
 // last-lines discipline is kept verbatim as the durable, parser-friendly fallback.
 // Step 1 + step 4 differ on whether the branch/PR ALREADY EXIST (`reenter`):
-//   • a FRESH round-1 run (reenter=false) CREATES the branch (`git switch -c`)
-//     and, in pr-mode, opens a PR;
+//   • a FRESH round-1 run (reenter=false) CREATES-OR-RE-ENTERS the branch (`git switch -c`),
+//     falling back to a plain `git switch` when a prior failed run of the same
+//     card left the local branch behind (measured incident d5c1e219: the
+//     collision pushed the commit onto the worktree's auto `worktree-wf_*`
+//     branch and the divergence guard refused the round);
 //   • a RE-ENTRY (reenter=true) — a crash-resume (`resuming`) OR any bounded
 //     fix round after round 1 — re-enters the EXISTING branch WITHOUT `-c`
 //     (which would collide: "branch already exists") and REUSES the PR (never a
@@ -1166,7 +1169,7 @@ const NO_PATTERN_KILL_RULE =
 function forgeStep1(reenter) {
   return reenter
     ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
-    : `Run \`git switch -c ${forgeBranch}\` as your FIRST step (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+    : `Run \`git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}\` as your FIRST step — create the branch, or RE-ENTER it when a previous run of this card left it behind (a leftover local branch must not kill the build with "branch already exists"). The cleanup step relies on this EXACT branch name to find your worktree even if you fail later.`
 }
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
