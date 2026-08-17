@@ -16,29 +16,6 @@ Codex wrappers from the harness install, so a target repo does not need a
 `trident/` directory and Open can no longer work merely by coincidence while
 other projects exit 127 or drift onto deployed copies.
 
-## 2026-08-17 — the build wrapper resolves from the harness install
-
-`trident/inner-loop.ts` now resolves the sibling `codex-build.sh` as
-`CODEX_BUILD_SCRIPT_PATH` and threads it into the module-less workflow as
-`codexBuildScript`. That harness path is authoritative for every target, including
-Open: there is deliberately no `repoPath` fallback, and a CLI-routed build without
-the threaded value fails closed with an error naming `codexBuildScript`.
-
-Previously, Open worked only because it is also the harness repo. Every other
-project exited 127 unless patched by hand. Enterprise had such a patch: an
-untracked symlink to the DEPLOYED harness plus a local `.git/info/exclude` entry.
-That also hid drift: #345's `model_reasoning_effort=xhigh` pin reached Open's
-checkout while Enterprise continued through a deployed copy with reasoning off.
-
-Operationally, the Enterprise symlink and its `trident/` exclude entry were
-removed. From the Enterprise repo, running this checkout's harness wrapper with
-`CODEX_HOME` unset reached its own credential gate and exited 10 with
-`CODEX_BUILD_NOT_CONNECTED` (not shell exit 127), proving no target-repo copy is
-needed. Until this change deploys, the currently deployed harness still resolves
-from `repoPath`, so Enterprise builds can fail with the named 127/deferred outcome
-during the accepted window between workaround removal and deployment. Nothing
-under `/opt/neutron-managed` was changed or copied.
-
 ## 2026-08-16 — the model floor was a list of four ids, not a floor
 
 Landed via PR #344.
@@ -272,6 +249,8 @@ suite, and was verified by probe instead of being counted as test coverage.
 
 ## 2026-08-16 — the normalizer was pinned, the line that uses it was not
 
+Landed via PR #364.
+
 A retroactive panel on #333 returned five findings, and #349 answered them by
 re-measuring rather than inheriting. **Every one of the five settles the same way
 here, independently re-measured against `main` at 3fb3e0e2 — closed.** What is
@@ -372,6 +351,29 @@ covers `NEUTRON_DB_PATH` as well as `OWNER_HOME`, with an operator-pin control
 (`open/__tests__/owner-slug-agreement.test.ts:447-500`), and
 `skill-forge/registrar.ts:32` no longer calls itself a mirror — it states, and
 this audit confirms by search, that it has no in-tree caller at all.
+
+## 2026-08-17 — the build wrapper resolves from the harness install
+
+`trident/inner-loop.ts` now resolves the sibling `codex-build.sh` as
+`CODEX_BUILD_SCRIPT_PATH` and threads it into the module-less workflow as
+`codexBuildScript`. That harness path is authoritative for every target, including
+Open: there is deliberately no `repoPath` fallback, and a CLI-routed build without
+the threaded value fails closed with an error naming `codexBuildScript`.
+
+Previously, Open worked only because it is also the harness repo. Every other
+project exited 127 unless patched by hand. Enterprise had such a patch: an
+untracked symlink to the DEPLOYED harness plus a local `.git/info/exclude` entry.
+That also hid drift: #345's `model_reasoning_effort=xhigh` pin reached Open's
+checkout while Enterprise continued through a deployed copy with reasoning off.
+
+Operationally, the Enterprise symlink and its `trident/` exclude entry were
+removed. From the Enterprise repo, running this checkout's harness wrapper with
+`CODEX_HOME` unset reached its own credential gate and exited 10 with
+`CODEX_BUILD_NOT_CONNECTED` (not shell exit 127), proving no target-repo copy is
+needed. Until this change deploys, the currently deployed harness still resolves
+from `repoPath`, so Enterprise builds can fail with the named 127/deferred outcome
+during the accepted window between workaround removal and deployment. Nothing
+under `/opt/neutron-managed` was changed or copied.
 
 ## 2026-08-16 — a stalled driver is not a driver, and a silent skip is going quiet
 
