@@ -302,26 +302,42 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
  * the SEAM (whether the supervision block arms) and not only as a returned
  * value, so it is a decision rather than an accident.
  *
- * Exported for that test. WHAT REACHES `cwd` IN PRODUCTION — three paths, not
- * one, which an earlier revision of this docblock got wrong by naming only the
- * first:
+ * Exported for that test. WHAT REACHES `cwd` IN PRODUCTION — THREE INDEPENDENT
+ * LEGS, not one. An earlier revision named only the first; the revision after
+ * that named three but conflated two of them, and a cross-model review caught
+ * it. Both errors pointed the same way — toward believing the blank arms could
+ * not be reached, and therefore need not be pinned.
  *
- *   1. `open/composer.ts:1296` passes `owner_home`, resolved at `:856` through
- *      `resolveNeutronHome`, which cannot return blank.
- *   2. `open/wiring/substrates.ts:364` (`makeEphemeralSubstrate`) and `:413`
- *      (`makeWarmFireSubstrate`) forward a CALLER-SUPPLIED per-run path — a
- *      worktree or repo root, never `resolveNeutronHome` — through
- *      `buildLlmCallSubstrate` to this factory.
- *   3. That path's own producer, `agent-dispatch/service.ts:487`, is
- *      `req.repo_path ?? this.deps.repo_path`, and `??` KEEPS a blank. Nothing
- *      downstream of it re-checks.
+ *   1. THE OWNER'S CONVERSATIONAL SUBSTRATE. `open/composer.ts:1296` passes
+ *      `owner_home`, resolved at `:856` through `resolveNeutronHome`, which
+ *      cannot return blank.
+ *   2. THE EPHEMERAL PER-DISPATCH LEG. `open/wiring/substrates.ts:364`
+ *      (`makeEphemeralSubstrate`) forwards a caller-supplied path via
+ *      `buildLlmCallSubstrate` (`gateway/wiring/build-llm-call-substrate.ts:778`
+ *      copies it onto the options bag unexamined). Its producer is
+ *      `agent-dispatch/service.ts:487` — `req.repo_path ?? this.deps.repo_path`,
+ *      and `??` KEEPS a blank, so a caller that passed `'   '` would land one
+ *      here. No stage BETWEEN that producer and this function re-checks it;
+ *      THIS function is the re-check, which is the point of the normalization.
+ *   3. THE WARM FIRE LEG, which is NOT fed by the one above — a distinction the
+ *      previous revision got wrong. `open/wiring/substrates.ts:413`
+ *      (`makeWarmFireSubstrate`) is wired at `open/composer.ts:1045` and takes
+ *      its cwd from `trident/inner-loop.ts:702`, `run.worktree ?? run.repo_path`.
+ *      It is also MEMOIZED per cwd rather than fresh per run, so a blank would
+ *      be cached under the blank key and reused.
  *
- * So the blank arms are not reachable today only because every in-tree producer
- * of `repo_path` independently avoids a blank — `open/composer.ts` by resolving
- * it, `cores/free/code-gen/src/backend.ts:278` by rejecting `.trim() === ''` at
- * its input boundary. That is defence in depth, which is a different and weaker
- * claim than "unreachable", and it is written this way because the earlier,
- * stronger sentence would have told a reader not to bother pinning the seam.
+ * WHY IT IS UNREACHED TODAY, stated as what actually holds rather than as a
+ * property of the whole family. Leg 2's real callers — the dispatch tool and its
+ * slash command — OMIT `repo_path` entirely, so the `??` falls through to
+ * `this.deps.repo_path`, which `open/composer.ts:1122` binds to `owner_home`,
+ * i.e. back to `resolveNeutronHome`. (A separate core rejects a blank
+ * `repo_path` at its own boundary — `cores/free/code-gen/src/backend.ts:278` —
+ * but that guards ITS input, not this leg, and citing it as though it protected
+ * this one was part of the same conflation.) So the arms are unreached by
+ * CONSTRUCTION AT THE CALLERS, not by any check on the path itself, and one
+ * caller electing to pass a computed `repo_path` reopens it. That is a weaker
+ * claim than "unreachable" on purpose: the stronger sentence is exactly what
+ * tells the next reader not to bother pinning the seam.
  */
 export function resolveReplCwdAndHome(input: {
   cwd?: string | undefined

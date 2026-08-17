@@ -119,19 +119,31 @@ describe('resolveReplCwdAndHome', () => {
 // hands that same object to `registerSupervisedSubstrate`, which is how the
 // watchdog and the admin-respawn endpoint reach a session's owning options
 // (`persistent/supervision.ts` -> `supervisedBySessionKey`). Reading the bag
-// back out of that map observes the POST-MAPPING value without spawning a REPL.
-// Nothing is started here, so no PTY, no child, no network.
+// back out of that map observes the POST-MAPPING value.
+//
+// NO REPL CHILD IS SPAWNED — nothing here calls `.start()`, so there is no PTY,
+// no subprocess and no network. That is NOT the same as "nothing is started",
+// which an earlier draft of this comment claimed and a cross-model review
+// falsified: constructing the factory ALSO arms `startReplWatchdog` and
+// `startModelUpdateWatchdogForInstance` (`../index.ts`), which are real timers.
+// Hence the scoped `afterEach` below — it exists to stop them, not for tidiness.
+//
+// ENV IS MUTATED ONLY INSIDE A SYNCHRONOUS WINDOW, which is the whole isolation
+// argument. `createClaudeCodeSubstrateAuto` reads `process.env` directly, so
+// exercising a blank `cwd` against a real home REQUIRES setting `NEUTRON_HOME`.
+// The runner executes many files concurrently INSIDE ONE PROCESS (see
+// `scripts/run-tests.sh` — intra-process `--max-concurrency`, not separate
+// processes), so `process.env` is shared with every other suite, and several of
+// them set this same variable. A snapshot-restore in a file-level `afterEach`
+// would therefore be able to overwrite another suite's home while that suite sat
+// suspended at an `await` — a cross-file clobber that would surface as a flake in
+// a file nobody had touched. `withEnvHome` sets, calls and restores WITHOUT an
+// intervening `await`, so no other test can be scheduled inside the window at
+// all: single-threaded execution turns the race into an impossibility rather
+// than an unlikelihood.
 // ---------------------------------------------------------------------------
 
 const tempDirs: string[] = []
-const PRIOR_HOME = process.env['NEUTRON_HOME']
-
-afterEach(async () => {
-  if (PRIOR_HOME === undefined) delete process.env['NEUTRON_HOME']
-  else process.env['NEUTRON_HOME'] = PRIOR_HOME
-  await shutdownAllPersistentRepls()
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
 
 function tempHome(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix))
@@ -146,7 +158,34 @@ function registeredFor(instanceId: string): PersistentReplSubstrateOptions | und
   return undefined
 }
 
+/**
+ * Run `fn` with `NEUTRON_HOME` set to `home` (or deleted when `undefined`) and
+ * restore the previous value before returning. SYNCHRONOUS BY CONTRACT — `fn`
+ * must not be async and must not await, or the isolation argument above is void.
+ */
+function withEnvHome<T>(home: string | undefined, fn: () => T): T {
+  const prior = process.env['NEUTRON_HOME']
+  if (home === undefined) delete process.env['NEUTRON_HOME']
+  else process.env['NEUTRON_HOME'] = home
+  try {
+    return fn()
+  } finally {
+    if (prior === undefined) delete process.env['NEUTRON_HOME']
+    else process.env['NEUTRON_HOME'] = prior
+  }
+}
+
 describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw one', () => {
+  // SCOPED TO THIS BLOCK on purpose. Registered at file level it would also fire
+  // after the four pure-function tests above, which start nothing and touch no
+  // env — and `shutdownAllPersistentRepls` is a GLOBAL clear of every persistent
+  // REPL, so firing it more often than necessary is reach into other suites for
+  // no benefit.
+  afterEach(async () => {
+    await shutdownAllPersistentRepls()
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
   test('a blank cwd never reaches the child, so crash recovery cannot fail closed', () => {
     // THE CHAIN, restated where it is now actually asserted. `persistent/pool.ts:118`
     // records the session as `cwd: options.cwd ?? process.cwd()`; `??` falls through
@@ -158,10 +197,11 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     // A real `NEUTRON_HOME` is set so the supervision block arms and the mapped bag
     // is registered — the blank under test is the CWD slot only.
     const home = tempHome('neutron-cwd-seam-home-')
-    process.env['NEUTRON_HOME'] = home
     BLANKS.forEach((blank, i) => {
       const id = `cc-blank-cwd-${i}-${Date.now()}`
-      createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: blank })
+      withEnvHome(home, () =>
+        createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: blank }),
+      )
       const reg = registeredFor(id)
       expect(reg).toBeDefined()
       expect(reg!.cwd).toBeUndefined()
@@ -172,7 +212,9 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     // at all, which is a different bug wearing the same green.
     const realId = `cc-real-cwd-${Date.now()}`
     const realCwd = tempHome('neutron-cwd-seam-real-')
-    createClaudeCodeSubstrateAuto({ substrate_instance_id: realId, cwd: realCwd })
+    withEnvHome(home, () =>
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: realId, cwd: realCwd }),
+    )
     expect(registeredFor(realId)?.cwd).toBe(realCwd)
   })
 
@@ -182,9 +224,10 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     // it, the other did not. Both now read it as unset, so the supervision state
     // dir lands under the instance home while the child gets the pool's default.
     const home = tempHome('neutron-cwd-seam-both-')
-    process.env['NEUTRON_HOME'] = home
     const id = `cc-blank-cwd-home-${Date.now()}`
-    createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: '   ' })
+    withEnvHome(home, () =>
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: '   ' }),
+    )
     const reg = registeredFor(id)
     expect(reg).toBeDefined()
     expect(reg!.cwd).toBeUndefined()
@@ -193,34 +236,43 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
 
   test('both slots blank: supervision does not arm — the documented direction, at the seam', () => {
     // `resolveReplCwdAndHome` returning `home: undefined` is asserted above as a
-    // VALUE. What it MEANS is that the whole supervision block is skipped —
-    // registry, respawns, watchdog, heartbeat — so the REPL runs unrecovered and
-    // nothing anywhere reports it. That is deliberate (there is nowhere to put a
+    // VALUE. What it MEANS is that the whole supervision block is skipped. THIS
+    // TEST OBSERVES REGISTRATION ONLY, and says so rather than implying more: the
+    // registry path, respawns, watchdog and heartbeat are not independently
+    // asserted here — they are wired inside the SAME `if (home !== undefined)`
+    // block in `../index.ts`, so registration is a proxy for the block having
+    // been entered, and it is a proxy that stops holding the moment that block is
+    // split. The consequence, unasserted but real, is that the REPL then runs
+    // unrecovered and nothing anywhere reports it. That is deliberate (there is
+    // nowhere to put a
     // per-instance registry, and inventing one under whatever CWD systemd chose is
     // how two instances come to share a registry naming neither), and it is a
     // SILENT direction, which is exactly why it should be pinned where it happens
     // rather than one function upstream.
     for (const blank of BLANKS) {
-      process.env['NEUTRON_HOME'] = blank
       const id = `cc-both-blank-${blank.length}-${Date.now()}`
-      createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: blank })
+      withEnvHome(blank, () =>
+        createClaudeCodeSubstrateAuto({ substrate_instance_id: id, cwd: blank }),
+      )
       expect(registeredFor(id)).toBeUndefined()
     }
 
     // CONTROL — supervision DOES arm whenever either slot carries a real path, so
     // the assertions above pin "both blank" rather than "registration never
-    // happens", which would make this test vacuous.
-    process.env['NEUTRON_HOME'] = tempHome('neutron-cwd-seam-arm-')
+    // happens", which would make this test vacuous. Both arms are exercised: the
+    // env slot alone, and the cwd slot alone with the env slot ABSENT.
+    const armedHome = tempHome('neutron-cwd-seam-arm-')
     const armedByEnv = `cc-armed-env-${Date.now()}`
-    createClaudeCodeSubstrateAuto({ substrate_instance_id: armedByEnv, cwd: '   ' })
+    withEnvHome(armedHome, () =>
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: armedByEnv, cwd: '   ' }),
+    )
     expect(registeredFor(armedByEnv)).toBeDefined()
 
-    delete process.env['NEUTRON_HOME']
     const armedByCwd = `cc-armed-cwd-${Date.now()}`
-    createClaudeCodeSubstrateAuto({
-      substrate_instance_id: armedByCwd,
-      cwd: tempHome('neutron-cwd-seam-armcwd-'),
-    })
+    const armedCwd = tempHome('neutron-cwd-seam-armcwd-')
+    withEnvHome(undefined, () =>
+      createClaudeCodeSubstrateAuto({ substrate_instance_id: armedByCwd, cwd: armedCwd }),
+    )
     expect(registeredFor(armedByCwd)).toBeDefined()
   })
 })
