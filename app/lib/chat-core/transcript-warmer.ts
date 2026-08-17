@@ -46,10 +46,12 @@
  * This is the expensive prefetch, and deliberately a much smaller window than
  * the tab-set prefetch beside it (`projects/[id]/_layout.tsx`
  * `TAB_PREFETCH_LIMIT = 12`): a tab set is one small JSON GET, whereas warming a
- * scope opens a WebSocket and pulls a cold resume — the topic's WHOLE transcript,
- * drained in `DEFAULT_REPLAY_LIMIT = 500`-message pages rather than capped at one
- * page (`persistence/app-chat-store.ts` `DEFAULT_REPLAY_LIMIT`, cited by name
- * rather than line because the line has already rotted twice). The rail is
+ * scope opens a WebSocket and pulls a cold resume — up to
+ * `DEFAULT_REPLAY_LIMIT = 500` messages per topic (`persistence/app-chat-store.ts`
+ * `DEFAULT_REPLAY_LIMIT`, cited by name rather than line because the line has
+ * already rotted twice). That is a hard per-topic ceiling, which is what makes
+ * this fan-out safe to size without a network-class check: eight scopes is
+ * bounded work, not a function of how long the owner's chats are. The rail is
  * activity-sorted, so eight
  * covers the working set the owner actually switches within on a phone; a ninth
  * project still opens exactly as it does today. "Download all the other tabs" is

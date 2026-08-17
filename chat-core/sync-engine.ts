@@ -241,8 +241,12 @@ export class SyncEngine {
    * cursor, the per-topic seq counter regressed — the server was wiped or
    * reinstalled under us (a fresh install restarts seq at 1) — so the locally
    * cached transcript belongs to a dead server and must be dropped. Clearing the
-   * topic resets the cursor to 0, so the `resume` that follows re-syncs the
-   * whole fresh transcript (`after_seq: 0`) from the new server.
+   * topic resets the cursor to 0, so the `resume` that follows re-syncs from the
+   * new server at `after_seq: 0` — its whole transcript when that fits inside the
+   * server's replay window, and the newest window's worth when it does not (the
+   * server bounds the answer; see `persistence/app-chat-store.ts`
+   * `DEFAULT_REPLAY_LIMIT`). A fresh install restarts seq at 1, so in the case this
+   * guard actually fires there is nothing near the window to lose.
    *
    * Deliberately conservative — it NEVER clears when:
    *   - the server didn't report a seq (`serverMaxSeq === null`): a fresh topic

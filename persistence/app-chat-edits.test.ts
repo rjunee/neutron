@@ -161,7 +161,7 @@ describe('AppChatEditStore — aggregatesAfter (resume replay)', () => {
     expect(await edits.aggregatesAfter(TOPIC, 0)).toEqual([])
   })
 
-  it('the limit caps replayed messages to the oldest page past the cursor', async () => {
+  it('the limit caps replayed messages to the NEWEST past the cursor', async () => {
     await appendMessage('m1') // seq 1
     await appendMessage('m2') // seq 2
     await appendMessage('m3') // seq 3
@@ -169,11 +169,11 @@ describe('AppChatEditStore — aggregatesAfter (resume replay)', () => {
     await edits.record({ topic_id: TOPIC, message_id: 'm2', editor_device_id: 'devA', action: 'edit', body: 'e2', at: 2 })
     await edits.record({ topic_id: TOPIC, message_id: 'm3', editor_device_id: 'devA', action: 'edit', body: 'e3', at: 3 })
 
-    // A prefix, like the message replay's page — so a caller can page the rest
-    // from the last aggregate's seq. (The app-ws edit replay does NOT yet page;
-    // that gap is recorded on `AppChatEditLog.aggregatesAfter`.)
+    // The NEWEST past the cursor, ascending — the same window the message replay
+    // takes, which is what keeps a capped replay's tombstones aligned with the
+    // messages it delivers (`AppChatEditLog.aggregatesAfter` carries the argument).
     const capped = await edits.aggregatesAfter(TOPIC, 0, 2)
-    expect(capped.map((a) => a.message_id)).toEqual(['m1', 'm2'])
+    expect(capped.map((a) => a.message_id)).toEqual(['m2', 'm3'])
   })
 
   it('aggregate() returns rev 0 / empty for an unedited message', async () => {

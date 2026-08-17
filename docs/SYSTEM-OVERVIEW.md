@@ -1491,10 +1491,14 @@ warm at a time, `WARM_FIRST_DELAY_MS = 2000` after the rail lands and
 `WARM_GAP_MS = 750` between scopes so eight never arrive as a burst at a gateway
 the owner is also talking to. Bytes per scope are bounded by the server, not the
 client: a cold resume replays at most `DEFAULT_REPLAY_LIMIT = 500` messages per
-topic (`persistence/app-chat-store.ts`). There is deliberately **no wifi-vs-
-cellular gate** — that needs a native network module, which would cost the
-OTA-shippability of everything in this section; the bound above is what makes
-cellular acceptable instead.
+topic — the NEWEST 500 after the client's cursor, not the oldest
+(`persistence/app-chat-store.ts`, `persistence/app-chat-event-core.ts`
+`rowsAfter`). That is a hard ceiling and not a page size: nothing pages past it,
+so the per-scope cost does not grow with how long the owner's chats are. There is
+deliberately **no wifi-vs-cellular gate** — that needs a native network module,
+which would cost the OTA-shippability of everything in this section; the bound
+above is what makes cellular acceptable instead, and it is why the bound must
+stay a bound.
 
 **The yield is the load-bearing part.** A prefetch that delays the transcript the
 owner is waiting on has made the app slower at the one interaction it was built
@@ -8150,8 +8154,15 @@ notes (audio upload + Whisper transcription → prompt + scribe).
 **Not yet at parity (documented gaps):** "load earlier" history paging beyond the
 resume replay window — this is the one remaining named-scope gap, and it is NOT
 client-only: chat-core + the app-ws surface are forward-only (a single
-`{type:'resume', after_seq}` replay, `replayAfter` ASC capped at 500), so there
-is no backfill primitive to page OLDER messages. Closing it is an additive
+`{type:'resume', after_seq}` replay, `replayAfter` capped at 500 rows), so there
+is no backfill primitive to page OLDER messages. That gap has TEETH on a topic
+longer than the window: the replay returns the NEWEST 500 after the cursor, and
+because a resume cursor only moves forward, the older messages it skipped are not
+reachable by any later resume — so a very long chat shows its recent history with
+an unmarked hole before it. The window direction was chosen that way on purpose
+(the alternative put the hole where the owner actually reads), but the hole is
+real, it is why the item below is the next thing to build, and it is the reason a
+bigger `DEFAULT_REPLAY_LIMIT` is not the fix. Closing it is an additive
 cross-layer change (a `replayBefore`/`{type:'history', before_seq}` request on
 the app-ws surface + persistence + a `WebChatSession.loadEarlier()` correlation
 + a controller cursor + a "Load earlier" button) that must not destabilize the

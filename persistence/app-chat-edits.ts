@@ -103,15 +103,18 @@ export interface AppChatEditLog {
    * Edit aggregates for edited/deleted messages whose seq is greater than
    * `after_seq`, ascending by seq. Used to replay edit state to a reconnecting
    * device after the message replay. Bounded by `limit` messages (default
-   * {@link DEFAULT_EDIT_REPLAY_LIMIT}) — the OLDEST `limit` past the cursor.
+   * {@link DEFAULT_EDIT_REPLAY_LIMIT}) — the NEWEST `limit` past the cursor,
+   * re-sorted ascending, which is the same window the message replay takes
+   * (`AppChatEventLogCore.rowsAfter` owns that SQL for both).
    *
-   * KNOWN GAP, pre-existing and deliberately not changed here: unlike the message
-   * replay, this one is NOT drained page-by-page by its caller
-   * (`AppWsAdapter.replayEditsAfter` makes a single call), so a topic with more
-   * than `limit` edited messages after the cursor replays edit state for the
-   * oldest of them and silently omits the rest. The consequence is cosmetic where
-   * a dropped message is not (an un-struck deleted bubble, a missing "edited"
-   * marker), which is why it is recorded rather than fixed in the same change.
+   * MATCHING THE MESSAGE LIMIT IS A CORRECTNESS CONSTRAINT, not tidiness.
+   * {@link DEFAULT_EDIT_REPLAY_LIMIT} must be at least
+   * `DEFAULT_REPLAY_LIMIT`: an edit row carries its message's seq, so at most
+   * `DEFAULT_REPLAY_LIMIT` edit rows can exist at or above the message window's
+   * lowest seq, and only an edit window at least that wide is guaranteed to carry
+   * all of them. Shrink this below that and a capped replay can deliver a deleted
+   * message with its original body and no tombstone. Pinned by a test that asserts
+   * the relation between the two constants.
    */
   aggregatesAfter(
     topic_id: string,
@@ -120,7 +123,9 @@ export interface AppChatEditLog {
   ): Promise<AppChatEditAggregate[]>
 }
 
-/** Default replay page size — edited messages whose state replays in one resume. */
+/** Default replay window — edited messages whose state replays in one resume.
+ *  Must stay >= `DEFAULT_REPLAY_LIMIT` so a capped message replay cannot outrun
+ *  its edit state; see {@link AppChatEditLog.aggregatesAfter}. */
 export const DEFAULT_EDIT_REPLAY_LIMIT = 500
 
 interface EditRow {

@@ -879,13 +879,26 @@ export class AppWsAdapter implements ChannelAdapter {
    * message (with seq > after_seq), ascending by seq. `[]` when the edit log
    * isn't wired.
    *
-   * ONE page, NOT drained — unlike {@link replayAfter} beside it. A topic with
-   * more than `DEFAULT_EDIT_REPLAY_LIMIT` edited messages after the cursor
-   * replays edit state for the oldest of them and silently omits the rest. Known
-   * and deliberately left: a missing "edited" marker or an un-struck tombstone is
-   * cosmetic where a missing MESSAGE is not, so it is recorded on
-   * `AppChatEditLog.aggregatesAfter` rather than fixed in the change that fixed
-   * the message replay.
+   * ONE bounded query, the NEWEST `DEFAULT_EDIT_REPLAY_LIMIT` edit rows after the
+   * cursor — the same shape and the same limit {@link replayAfter} uses, and that
+   * equality is load-bearing rather than incidental. An edit row carries its
+   * MESSAGE's seq, so the two windows cover the same messages: at most `limit`
+   * messages sit at or above the message window's lowest seq, hence at most
+   * `limit` edit rows do, hence the newest `limit` edit rows contain every one of
+   * them. A message that arrives in a capped replay therefore arrives with its
+   * tombstone and its current body — never with a body an edit or delete has
+   * since replaced.
+   *
+   * That alignment is why neither replay is drained. A bounded message window
+   * paired with an un-drained OLDEST-first edit window is the combination that
+   * genuinely loses data: it would deliver a recent deleted message with its
+   * original body and no tombstone, while spending the edit budget on
+   * long-since-settled messages the client already has.
+   *
+   * The invariant it rests on: an edit row's `seq` is a seq in ITS OWN topic. That
+   * holds for every edit this surface records; the cross-topic hazard sketched on
+   * `ReplayCursor` would break the counting argument, and would already break
+   * ordering here, so it is not a new exposure.
    */
   async replayEditsAfter(
     channel_topic_id: string,
@@ -917,52 +930,40 @@ export class AppWsAdapter implements ChannelAdapter {
    * gap without re-broadcasting to other devices. Returns `[]` when no durable
    * log is wired.
    *
-   * EVERY message after the cursor, drained page-by-page. `replayAfter` on the
-   * store bounds ONE page to `DEFAULT_REPLAY_LIMIT` rows (so no single query
-   * materializes an unbounded transcript), and that page is the OLDEST rows after
-   * the cursor — a prefix — so advancing to the last row's `seq` and asking again
-   * walks the whole backlog in order. Same drain the receipt and reaction replays
-   * already do ({@link replayReceiptsAfter}, {@link replayReactionsAfter}); this
-   * is the one replay on the resume path that did not, and a long chat paid for
-   * it: a 1130-message topic sent 500 envelopes and stopped, so the device
-   * rendered the OLDEST 500 and ended ~630 short of the present with no signal
-   * that anything was missing.
+   * ONE bounded query, and it returns the NEWEST `DEFAULT_REPLAY_LIMIT` messages
+   * after the cursor rather than the oldest. Which end it takes is the whole
+   * defect this fixed: the store used to answer with the OLDEST page, so a
+   * 1130-message topic replayed seq 1..500 and the owner's chat rendered old
+   * messages and stopped ~630 short of the present — once per app restart, since
+   * `resume` fires exactly once per socket open and nothing re-issues it within
+   * an open. See `AppChatEventLogCore.rowsAfter` for the SQL and the argument.
    *
-   * `resume` fires once per socket open, so a single page per open only converged
-   * across repeated reconnects — a transcript that catches up one screenful per
-   * app restart is indistinguishable from a broken one. Draining here converges
-   * in ONE open.
+   * NOT DRAINED, deliberately. Paging forward until a page comes back empty (the
+   * shape {@link replayReceiptsAfter} and {@link replayReactionsAfter} use) makes
+   * one cold resume O(messages after the cursor) in rows, JSON bytes and memory
+   * here, per topic — and the mobile transcript warmer opens several topics at
+   * app foreground, so the amplification is multiplied, on cellular, with no
+   * server-side ceiling. A bounded window is the cheaper wrong answer and this is
+   * the one we ship.
    *
-   * The loop stops on an empty page, and defensively on a page whose last `seq`
-   * failed to advance past the cursor we asked from (a malformed store would
-   * otherwise spin forever and hang reconnect).
+   * WHAT IT COSTS, named rather than implied: above one page this delivers the
+   * newest window and the client's cursor then advances past the rows it skipped,
+   * so a middle range stays missing and no later resume can ask for it. There is
+   * no seam marker in the UI. Closing that needs a "load earlier" request the
+   * wire has no shape for yet — a client affordance, not a bigger number here.
    *
-   * COST, stated rather than hidden: each SQL page stays bounded, but the
-   * returned array is O(messages after the cursor), so a very long topic makes a
-   * cold resume proportionally large. That is the same profile the receipt and
-   * reaction drains beside it already have, and it is the honest one — the
-   * alternative is dropping messages the owner has no way to ask for again.
-   * Trading it back for a bounded window needs a client affordance to fetch older
-   * history on demand (a "load earlier" request the wire has no shape for yet),
-   * not a silent cap here.
+   * ALIGNED WITH THE EDIT REPLAY, which is what stops a bounded window leaking
+   * stale bodies: {@link replayEditsAfter} reads the same newest-window SQL with
+   * an equal limit, and an edit row carries its MESSAGE's seq, so every message in
+   * this window has its edit/tombstone state in that one. Proof is by counting —
+   * at most `limit` messages sit at or above this window's lowest seq, so at most
+   * `limit` edit rows do, and the newest `limit` edit rows therefore include all
+   * of them.
    */
   async replayAfter(channel_topic_id: string, after_seq: number): Promise<AppWsOutbound[]> {
-    const log = this.chat_log
-    if (log === undefined) return []
-    const out: AppWsOutbound[] = []
-    let seq = after_seq
-    for (;;) {
-      const rows = await log.replayAfter(channel_topic_id, seq)
-      if (rows.length === 0) break
-      for (const row of rows) out.push(appChatRowToEnvelope(row))
-      const last = rows[rows.length - 1]
-      if (last === undefined || last.seq <= seq) {
-        wsLog.warn('message_replay_cursor_stalled', { topic: channel_topic_id, seq })
-        break
-      }
-      seq = last.seq
-    }
-    return out
+    if (this.chat_log === undefined) return []
+    const rows = await this.chat_log.replayAfter(channel_topic_id, after_seq)
+    return rows.map((r) => appChatRowToEnvelope(r))
   }
 
   /** Chat-sync foundation — highest persisted seq for a topic (0 when none /
