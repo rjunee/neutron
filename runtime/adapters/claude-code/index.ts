@@ -387,7 +387,19 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // every respawn with `invalid-cwd` because `existsSync('   ')` is false.
   // Crash recovery would fail CLOSED and silently, on exactly the malformed
   // input class this change exists to neutralise.
-  const resolved = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
+  // READ ONCE, into a bag both the DECISION and the REPORT share. Argus r2
+  // raised this as a nit and it is worth taking literally: the supervision-off
+  // branch below has to say WHICH slot was blank, and an independent second
+  // `process.env['NEUTRON_HOME']` read there is a different observation of a
+  // mutable object than the one `resolveReplCwdAndHome` actually decided on.
+  // Today the two agree because this line hardcodes `process.env`, so the nit is
+  // latent rather than a live bug — but the divergence it describes is the shape
+  // this whole PR is about: a report that names a condition it did not measure.
+  // Sharing the reference costs one local and makes the report structurally
+  // unable to disagree with the decision, including for a future caller that
+  // threads a different env bag through the injectable signature.
+  const env = process.env
+  const resolved = resolveReplCwdAndHome({ cwd: options.cwd, env })
   if (resolved.cwd !== undefined) p.cwd = resolved.cwd
   if (options.claude_bin !== undefined) p.claude_bin = options.claude_bin
   if (options.skip_permissions !== undefined) p.skip_permissions = options.skip_permissions
@@ -551,7 +563,9 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
       // Which slot was blank, so the operator knows which one to set. Reported
       // as a shape, never as the value — these resolve to owner data paths.
       cwd: options.cwd === undefined ? 'unset' : 'blank',
-      neutron_home: process.env['NEUTRON_HOME'] === undefined ? 'unset' : 'blank',
+      // From the SAME bag the decision above read — not a second, independent
+      // `process.env` lookup. See the note on the `const env` line.
+      neutron_home: env['NEUTRON_HOME'] === undefined ? 'unset' : 'blank',
     })
   }
   return createPersistentReplSubstrate(p)

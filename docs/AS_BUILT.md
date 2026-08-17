@@ -289,6 +289,55 @@ wider than its check — and all four are fixed rather than answered:
   it, which pins the deliberate re-arm after an armed construction. The property
   is once per continuously-disabled run.
 
+**ROUND 5 — THE BLOCKER WAS IN THE CLONE, NOT IN THE DIFF, AND IT WAS ARMED TO
+EAT THIS FILE.** The round-4 panel raised the as-built merge driver as a blocker
+and it reproduced exactly. `scripts/install-merge-drivers.sh` writes half its
+install into `$GIT_COMMON_DIR/info/attributes` and half into the clone's config,
+and the config here named a driver script inside a **worktree that had since been
+deleted** — so `docs/AS_BUILT.md` carried `merge=as-built-log` bound to a command
+that no longer existed. That is not the fatal half the installer's own docblock
+enumerates and defends against; it is a third state the docblock does not cover,
+because the path was valid when it was written. The measured behaviour is the
+worst available one: the merge takes one side, drops the other entry, and reports
+**no conflict**. Two as-built entries had already been lost this way. The
+installer's `--uninstall` path is the repair — both config keys and the attribute
+line, never `--unset` on the driver alone, which leaves the genuinely fatal
+`merge.<name>.name`-without-`.driver` state the docblock measures at exit 128.
+With the override gone the tracked `.gitattributes` applies again and
+`git check-attr merge docs/AS_BUILT.md` prints `union`, which is the committed
+decision for this path. Repaired BEFORE the rebase, because the rebase is
+precisely the operation that would have tripped it.
+
+The rebase onto `349ac501` then replayed one commit over one commit, touching ten
+files disjoint from this PR's seven, and the counting proof was taken after a
+fresh fetch on both sides: **zero** `^-` lines in `docs/AS_BUILT.md` against
+`origin/main`, and **342** `^## ` headings to `main`'s **341** — this entry and
+nothing else. The two-file conflict the resume brief described was already
+resolved in round 4; the test file's resolution was re-verified by SET rather
+than by eye, which is the check that would have caught a loss: all **7** test
+titles on `main` are present here, **14** total, so the seven this PR adds are
+additive and PR #364's `withEnvHome` seam, its describe-scoped `afterEach` and
+its cwd-forward case all survive. `bun test` on that file reports 14 pass, which
+is the same number arrived at independently.
+
+One nit closed, in the direction this entry is about. The supervision-off report
+in `runtime/adapters/claude-code/index.ts` derived `neutron_home` from its own
+second `process.env` lookup while the DECISION came from
+`resolveReplCwdAndHome({ cwd, env })` — a report naming a condition it did not
+itself measure. Not reachable as a bug today, because that call hardcodes
+`process.env`, and fixed anyway: one shared `env` local feeds both, so the report
+is structurally unable to disagree with the decision, including for a future
+caller that threads a different bag through the injectable signature. The
+existing per-field test (`cwd=unset` with `neutron_home=blank`, which forces the
+two classifications to differ) covers it unchanged.
+
+The TSX arm of the prefilter was re-proved by mutation this round rather than
+carried on the previous round's word: dropping `JSX_ENTITY_SHAPE.test(src)` from
+`couldNameIdentityVar` reds exactly one test — `a JSX CHARACTER REFERENCE spells
+the name, and is detected in TSX` — while the other **18** in the file stay
+green, which is the control proving the mutation was targeted and the fixture is
+not vacuous. Restored and re-run green.
+
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
 Landed via PR #370.
