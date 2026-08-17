@@ -1,22 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
+import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '../../wiring/build-live-agent-turn.ts'
 import { buildTerminalBuildWakeObserver, buildTerminalBuildWakePrompt, type TerminalBuildWakeDeps } from '../terminal-build-wake.ts'
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
-  return {
-    id: 'run-123', slug: 'wake', project_slug: 'acme', phase: 'done', round: 1, max_rounds: 3,
-    ralph: false, ralph_round: 0, max_ralph_rounds: 0, branch: 'trident/wake', pr: 42,
-    merge_mode: 'pr', subagent_run_id: null, subagent_status: null, repo_path: '/repo',
-    worktree: '/worktree', task: 'Repair terminal delivery', chat_id: 'chat-1', thread_id: null,
-    channel_kind: 'app_socket', failure_reason: null, workflow_run_id: null, inner_checkpoint: null,
-    inner_checkpoint_head: null, inner_checkpoint_findings: null, inner_verdict: null,
-    inner_result: null, started_at: 'T', last_advanced_at: 'T', harvested_at: null,
-    crash_recoveries: 0, infra_retries: 0,
-    reviewed_head: null, bound_pr: null, fenced_paths: null,
-    base_sha: null, base_behind: null, ...over,
-  }
+  return makeTridentRun({
+    id: 'run-123', slug: 'wake', project_slug: 'acme', phase: 'done', max_rounds: 3,
+    max_ralph_rounds: 0, branch: 'trident/wake', pr: 42, merge_mode: 'pr',
+    subagent_run_id: null, subagent_status: null, repo_path: '/repo', worktree: '/worktree',
+    task: 'Repair terminal delivery', chat_id: 'chat-1', channel_kind: 'app_socket',
+    started_at: 'T', last_advanced_at: 'T', ...over,
+  })
 }
 
 function harness(error?: Error) {

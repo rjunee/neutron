@@ -12,48 +12,21 @@ import {
   type RunHostCommand,
 } from './merge.ts'
 import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 function makeRun(overrides: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'id',
     slug: 's',
-    project_slug: 't1',
     phase: 'done',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'feat-x',
-    base_sha: null,
-    base_behind: null,
     pr: 42,
     merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/repo',
-    worktree: null,
-    task: 't',
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
-    started_at: '2026-01-01T00:00:00.000Z',
-    last_advanced_at: '2026-01-01T00:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    infra_retries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...overrides,
-  }
+  })
 }
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
