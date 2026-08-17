@@ -20,6 +20,245 @@ no-op because the ref was already correct. The genuine "nothing was built" outco
 its guard where it belongs: the empty base-to-head diff refusal. A remote at the
 PRE-rebase tip while the replay produced a new head still takes the real lease push.
 
+## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
+
+Landed via PR #378.
+
+Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
+those had already merged when this round's review landed, so the remediation could
+not go back into either; every finding below was re-verified against `main` before
+anything changed.
+
+**The seam the composer alone reaches, now driven end to end.** #375 gave the
+timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
+being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
+which proves `wireSubstrates` routes what it is handed and says nothing about whether
+anything hands it that. One line in `open/composer.ts` does. Deleting it left the
+suite green while returning the lane to a stderr-only clamp — the review measured 862
+tests passing across 105 files under that deletion, which is its number and not one
+re-measured here; what WAS re-measured is that the deletion is now red (below). The
+class is the one this repo keeps shipping, one level up from "built but never wired":
+WIRED, and the wire pinned by nothing.
+
+`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
+`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
+the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
+reminder (nothing shorter reaches that lane — its options exist only once something
+composes on it), then reads what the production composition actually handed each one.
+The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
+connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
+without it, "the nudge lane produced no bubble" could equally mean the harness cannot
+see bubbles at all. Then the same notice on the nudge lane produces no frame from the
+same socket in the same test, and both reach the `system_events` journal. Three
+mutations, each red on a different assertion: deleting the composer's
+`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
+sinks (the two sinks are identical), and giving the background sink the chat
+`deliver` (ten bubbles where zero were asserted).
+
+**An unbounded park could not be shortened, and the release was unreachable.**
+Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
+had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
+every finite replacement, and `reportSuccess` is the only release but cannot run while
+the credential is parked, because `selectCredential` filters a cooled credential out
+and no dispatch means no success to report. On a single-credential box, which every
+Open install is, that is the product silent until the process restarts.
+
+The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
+legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
+`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
+then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
+pool clamps every park at the new `MAX_PARK_MS` (six hours: clear of the reset window
+the owner waits out — a Claude subscription window is five — and short of every window
+indistinguishable from a brick), and `reportFailure` discards a `retry_after_ms` that is
+not a positive finite millisecond count in favour of the status default rather than
+believing it. The `NaN`
+direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
+instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
+`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
+The parser now yields `undefined` for any value that cannot become a real millisecond
+count — including a non-positive one.
+
+**The fourth park was the one nothing tested.** #375's own log claimed the fix was
+"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
+strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
+pair left every existing test green (the review counted 124 across four suites; that is
+its measurement, and what is re-measured here is that the revert is now red), because
+reaching that branch needs a standing park LONGER than the hour — which only a
+`retry-after` produces — while the owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
+says wait two hours, in-flight turns fail their way to the threshold, and the strike
+park would then release the credential 60 minutes into a 120-minute window the
+provider asked for, relabelled. Now covered with its control (with nothing standing,
+the fifth strike still parks for the hour), and mutation-proved: that one test goes
+red, the control stays green.
+
+**Two record corrections, appended rather than rewritten**, since this log is
+append-only and a correction that edits history is how a sibling's entry gets lost:
+- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
+  had benched" says "Seven new tests cover it" and "three of them red … four
+  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
+  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
+  reports never walk the park outward`, which is a real assertion and not a control.
+  A mutation proof asserts a negative, so a miscount in it is the one number that must
+  be right.
+- That same entry says the clamp "is now durably recorded". It is not, and its own
+  closing paragraph says so three paragraphs later: the journal is best-effort at
+  every call site. The wording is corrected where it can be — the two test comments
+  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
+  dropped.
+
+**A ZERO IS NOT A SHORT PARK, IT IS AN ABSENT ONE** — and flooring negatives at zero,
+which the paragraph above originally described as part of the fix, was the remaining
+hole rather than the close of it. `parseRetryAfterMs` turned `retry-after: -30` into a
+DEFINED `0`, as it did for any HTTP-date already past, which plain clock skew produces.
+`0` cleared `reportFailure`'s `>= 0` boundary, `park` wrote `cooldown_until = now`, and
+`hasUsableCredential` / `selectCredential` / `soonestCooldownUntil` all count
+`<= now` as AVAILABLE — so a real 429 bought a zero-length cooldown and we answered the
+provider's back-pressure with an instant retry. Worst on the background lane, which by
+design never touches the strike ledger and so has no second net beneath it. The guard is
+now `> 0` and the parser returns `undefined` for the same values, so a header that told
+us nothing usable routes to the status default. The existing negative test passed
+throughout because it fed the pool a raw `-60000` — an input no producer could produce.
+
+**`parseRetryAfterFromMessage` still had the post-multiply overflow** the header parser
+was fixed for, because the two carried separate copies of the check: it tested
+`Number.isFinite` on the parsed number and then multiplied by 1000. A streamed 429
+carries no header, so that is the only path reading the hint out of the prose, and its
+`Infinity` lands somewhere worse than the pool — `openaiResponsesSubstrate` sleeps
+`retry_after_ms` before rotating and `setTimeout(Infinity)` resolves in about 14 ms, so
+the back-off is SKIPPED and the retry is immediate. Both parsers now share one boundary.
+
+**`MAX_PARK_MS` was not a bound.** The ceiling was re-derived from `Date.now()` on every
+report, and reports DO arrive during a park: a parked credential is never SELECTED, but
+turns dispatched before the park started keep reporting per error event, and each late
+report computed a ceiling further out that the monotonic rule then adopted. Measured:
+two over-ceiling reports five hours apart walked one park from 21,600,000 ms to
+39,600,000 ms — six hours to eleven — with every existing ceiling assertion still green.
+The ceiling is now anchored to `cooldown_started_at`, the moment the park began, so the
+bound covers the whole park instead of each report inside it; `reportSuccess` clears the
+anchor with the park, and `memoize-credential-pool` carries it across a re-resolve
+alongside `cooldown_until` so a rebuild cannot re-anchor it.
+
+**The anchor had the same hole one step further in**, found by the cross-model leg of
+this round's review and reproduced before it was believed. Installing an anchor only for
+a FRESH park left a STANDING park that carries none — a credential brought across a pool
+re-resolve from before the field existed, or any `cooldown_until` written by another path
+— re-deriving its ceiling from every report and never gaining an anchor to stop it.
+Measured: late reports at +5h, +10h and +15h against a standing six-hour park walked it
+to 11h, 16h, then 21h, unbounded. `park` now adopts `now` as the anchor whenever one is
+missing, standing or not. The true start is unknowable by then, so the park may run up to
+one window past six hours from its real beginning and never further — bounded and
+honest, where the alternative was unbounded. The same review noted the memoizer's carry
+was asserted by nothing: the re-resolve test checked only `cooldown_until` and stayed
+green with the carry deleted, so it now names `cooldown_started_at` and the six-hour
+bound.
+
+Two more corrections from that leg. `positiveMs` rounded AFTER testing positivity, so
+`0.1` passed `> 0` and `Math.round` returned a defined `0` — the exact value the
+function exists to reject, reachable from any sub-millisecond hint; it now rounds first.
+And two docblocks overstated: the claim that `undefined` "routes both consumers to their
+own default" is only half true — the pool falls back to the per-status window, but model
+rotation has no default and simply skips the back-off, which is correct on that path
+because rotating moves to a DIFFERENT model rather than retrying the one that refused —
+while `MAX_PARK_MS` called `reportSuccess` flatly unreachable during a park when the same
+file documents an in-flight success reaching it. It is unreachable for NEW dispatches,
+which is what makes the ceiling the guarantee and the in-flight success luck.
+
+One claim from that leg was REFUTED rather than adopted: that a large finite hint
+overflows the timer and makes rotation immediate. Measured directly in this runtime, a
+`setTimeout` of one year does not fire early — it was still pending after 120 seconds, so
+the failure is the opposite one and it is neither new nor in this diff.
+
+Seven mutations, each red on exactly the intended pin with the rest of the suite green as
+control: `>= 0` restored (both zero tests), the negative floor restored (both
+negative-hint parser tests), the finiteness check dropped (both overflow tests,
+header and streamed), the ceiling un-anchored (the walk-outward test), and anchoring on
+a merely-PRESENT `cooldown_started_at` rather than a STANDING park (the re-anchor
+control, which proves a once-parked credential can still be parked again), anchoring
+only FRESH parks (the anchor-less standing-park test), and deleting the memoizer's
+carry of the anchor (the re-resolve test, which that assertion now catches).
+
+Three docblocks corrected where they promised properties the code does not hold — the
+defect class this repo tracks separately from the code. `MAX_PARK_MS` claimed six hours
+is "past every reset window we actually honour" while `gateway/http/app-usage-surface.ts`
+meters a 7-day window, so a weekly cap IS clamped and the six-hourly probe is a priced
+cost rather than an absent one. `park`'s non-finite arm was credited with a live defence
+it does not provide: `reportFailure` filters non-finite before it, and no other call site
+can reach it, so it is now labelled a belt on an untrusted-arithmetic path. And "a
+cooldown is a FLOOR" is narrowed to a floor AGAINST FAILURE REPORTS, because
+`reportSuccess` clears a park unconditionally — including a provider-mandated one, when
+a turn dispatched before the park completes after it — which stays deliberate and is now
+argued rather than contradicted.
+
+The end-to-end nudge test is also hermetic now. It passes the real `process.env` to the
+real composer, so an ambient `NEUTRON_MODEL_PROVIDER=openai` built the OpenAI lanes, the
+injected Claude `substrateFactory` was never called, and the file failed with `waitFor
+timed out` — a wiring-failure message for an environment problem. That variable and
+`OPENAI_API_KEY` are now saved and cleared like the rest; teardown no longer removes a
+`tmpDir` it may never have created (a `TypeError` there replaces whatever setup actually
+failed); and the harness drains `realmode_cleanups` through the production
+`drainRealmodeCleanups` instead of calling them un-awaited before `db.close()`.
+
+**THE REFUTATION ABOVE WAS ITSELF WRONG, AND THE CLAIM IT DISMISSED IS A REAL DEFECT** —
+appended rather than rewritten, per this entry's own correction rule. The paragraph
+beginning "One claim from that leg was REFUTED" reports that a `setTimeout` of one year
+"does not fire early — it was still pending after 120 seconds". Re-measured directly, with
+a control in each direction: `setTimeout(31_536_000_000)` — one year, the very value that
+paragraph names — fires after **3 ms**, and this runtime prints its own diagnosis while
+doing it, `TimeoutOverflowWarning: 31536000000 does not fit into a 32-bit signed integer.
+Timeout duration was set to 1.` The controls are what make that a measurement rather than
+another guess: a timer at `0x7fff_ffff` did NOT fire inside a 2-second window (so the
+probe can show a real wait) and a 5 ms timer fired in 6 ms (so it can see a timer fire at
+all). A one-year delay was never pending for 120 seconds; it had already elapsed before
+the observation began. This is the shape the repo already tracks — a check that returns a
+negative which reads exactly like an answer — and the cost of getting it wrong here was
+higher than a wasted round: the log stated the defect did not exist, which is the one
+thing that reliably stops the NEXT reader from fixing it.
+
+**A back-off that overflows is no back-off.** `positiveMs` rejects non-finite and
+non-positive hints and has no upper bound, which is right — a finite `retry-after:
+3000000` is a real instruction, and discarding it as garbage would buy the 60-second
+status default where the provider asked for weeks. The value is fine; the TIMER cannot
+hold it. Above `0x7fff_ffff` ms a `setTimeout` delay does not saturate, it overflows the
+32-bit signed field and fires in about a millisecond, so the adapter answered "wait weeks"
+with an instant retry against a provider that had just rate-limited it: a hot retry loop,
+and worse than having no `retry-after` handling at all.
+
+It survived three rounds on this exact field because the field has TWO consumers and only
+one was bounded. `reportFailure` clamps its park at `cooldown_started_at + MAX_PARK_MS`,
+so the pool was safe; the adapter's rotation back-off is a second consumer that reads the
+raw hint into `rotateDelay` and never consults the pool. Guarding the producer and
+bounding one consumer both looked complete while a second consumer slept on the unbounded
+value. Every consumer was then enumerated by grepping the field name rather than asserted
+to be complete: the adapter's sleep (broken, fixed here), `reportFailure` via
+`build-llm-call-substrate` and `build-import-substrate` (already bounded), `rotate`'s
+`delay_ms` copy (raw, but nothing sleeps on it — its docblock now says what a future
+sleeper must do first), and the pure propagators that never treat it as a duration
+(`events.ts`, `errors.ts`, `substrate-text.ts`, `agent-dispatch`, the history-import
+type). `TelegramRetryAfterError` shares the field NAME only and has a different source.
+
+Fixed at the CONSUMER, inside `sleep` — the adapter's only `setTimeout`, so nothing in
+that file can route around it. Bounding `positiveMs` instead would rewrite what every
+consumer sees and would put a `setTimeout` implementation limit inside a function whose
+job is deciding whether a hint is usable at all; clamping at the sleep caps what this lane
+can wait while leaving the pool the provider's untouched number to apply its own six-hour
+ceiling to, so neither consumer's policy overwrites the other's. The tests assert the
+delay the timer is ARMED with, because a correctly-clamped delay can never be awaited —
+the sibling exhaustion test takes 4.6 s precisely because its `retry-after: 4` is a
+genuine sleep, so 24.8 days would hang CI forever. Three mutations, each red on exactly
+its own pin with the rest green: unclamping the sleep reds the end-to-end test and its
+failure prints the raw `3000000000` reaching the timer; making the clamp a blanket cap
+reds the two "unchanged" controls (`30_000` and the bound itself), which is what proves it
+is a clamp and not a cap; and restoring `< 0` in place of `<= 0` reds the sub-millisecond
+guard, which is what proves an upper bound did not quietly turn a hint that must be
+refused into an accepted one.
+
+No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
+— a bounded park, a discarded bogus header value, and coverage for two branches that
+had none.
+
+Nor does the round above add one: a rotation back-off that can no longer overflow into an
+instant retry is the same subsystem behaving as it already claimed to.
+
 ## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
 
 Landed via PR #388.
@@ -918,245 +1157,6 @@ read-only, so it could not re-run either mutation itself, and five of the 14 tes
 in the repl-home file failed in its sandbox purely because `mkdtemp` was denied.
 Both were run here with write access, and the numbers in this block are from those
 runs.
-## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
-
-Landed via PR #378.
-
-Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
-those had already merged when this round's review landed, so the remediation could
-not go back into either; every finding below was re-verified against `main` before
-anything changed.
-
-**The seam the composer alone reaches, now driven end to end.** #375 gave the
-timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
-being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
-which proves `wireSubstrates` routes what it is handed and says nothing about whether
-anything hands it that. One line in `open/composer.ts` does. Deleting it left the
-suite green while returning the lane to a stderr-only clamp — the review measured 862
-tests passing across 105 files under that deletion, which is its number and not one
-re-measured here; what WAS re-measured is that the deletion is now red (below). The
-class is the one this repo keeps shipping, one level up from "built but never wired":
-WIRED, and the wire pinned by nothing.
-
-`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
-`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
-the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
-reminder (nothing shorter reaches that lane — its options exist only once something
-composes on it), then reads what the production composition actually handed each one.
-The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
-connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
-without it, "the nudge lane produced no bubble" could equally mean the harness cannot
-see bubbles at all. Then the same notice on the nudge lane produces no frame from the
-same socket in the same test, and both reach the `system_events` journal. Three
-mutations, each red on a different assertion: deleting the composer's
-`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
-sinks (the two sinks are identical), and giving the background sink the chat
-`deliver` (ten bubbles where zero were asserted).
-
-**An unbounded park could not be shortened, and the release was unreachable.**
-Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
-had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
-every finite replacement, and `reportSuccess` is the only release but cannot run while
-the credential is parked, because `selectCredential` filters a cooled credential out
-and no dispatch means no success to report. On a single-credential box, which every
-Open install is, that is the product silent until the process restarts.
-
-The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
-legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
-`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
-then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
-pool clamps every park at the new `MAX_PARK_MS` (six hours: clear of the reset window
-the owner waits out — a Claude subscription window is five — and short of every window
-indistinguishable from a brick), and `reportFailure` discards a `retry_after_ms` that is
-not a positive finite millisecond count in favour of the status default rather than
-believing it. The `NaN`
-direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
-instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
-`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
-The parser now yields `undefined` for any value that cannot become a real millisecond
-count — including a non-positive one.
-
-**The fourth park was the one nothing tested.** #375's own log claimed the fix was
-"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
-strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
-pair left every existing test green (the review counted 124 across four suites; that is
-its measurement, and what is re-measured here is that the revert is now red), because
-reaching that branch needs a standing park LONGER than the hour — which only a
-`retry-after` produces — while the owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
-says wait two hours, in-flight turns fail their way to the threshold, and the strike
-park would then release the credential 60 minutes into a 120-minute window the
-provider asked for, relabelled. Now covered with its control (with nothing standing,
-the fifth strike still parks for the hour), and mutation-proved: that one test goes
-red, the control stays green.
-
-**Two record corrections, appended rather than rewritten**, since this log is
-append-only and a correction that edits history is how a sibling's entry gets lost:
-- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
-  had benched" says "Seven new tests cover it" and "three of them red … four
-  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
-  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
-  reports never walk the park outward`, which is a real assertion and not a control.
-  A mutation proof asserts a negative, so a miscount in it is the one number that must
-  be right.
-- That same entry says the clamp "is now durably recorded". It is not, and its own
-  closing paragraph says so three paragraphs later: the journal is best-effort at
-  every call site. The wording is corrected where it can be — the two test comments
-  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
-  dropped.
-
-**A ZERO IS NOT A SHORT PARK, IT IS AN ABSENT ONE** — and flooring negatives at zero,
-which the paragraph above originally described as part of the fix, was the remaining
-hole rather than the close of it. `parseRetryAfterMs` turned `retry-after: -30` into a
-DEFINED `0`, as it did for any HTTP-date already past, which plain clock skew produces.
-`0` cleared `reportFailure`'s `>= 0` boundary, `park` wrote `cooldown_until = now`, and
-`hasUsableCredential` / `selectCredential` / `soonestCooldownUntil` all count
-`<= now` as AVAILABLE — so a real 429 bought a zero-length cooldown and we answered the
-provider's back-pressure with an instant retry. Worst on the background lane, which by
-design never touches the strike ledger and so has no second net beneath it. The guard is
-now `> 0` and the parser returns `undefined` for the same values, so a header that told
-us nothing usable routes to the status default. The existing negative test passed
-throughout because it fed the pool a raw `-60000` — an input no producer could produce.
-
-**`parseRetryAfterFromMessage` still had the post-multiply overflow** the header parser
-was fixed for, because the two carried separate copies of the check: it tested
-`Number.isFinite` on the parsed number and then multiplied by 1000. A streamed 429
-carries no header, so that is the only path reading the hint out of the prose, and its
-`Infinity` lands somewhere worse than the pool — `openaiResponsesSubstrate` sleeps
-`retry_after_ms` before rotating and `setTimeout(Infinity)` resolves in about 14 ms, so
-the back-off is SKIPPED and the retry is immediate. Both parsers now share one boundary.
-
-**`MAX_PARK_MS` was not a bound.** The ceiling was re-derived from `Date.now()` on every
-report, and reports DO arrive during a park: a parked credential is never SELECTED, but
-turns dispatched before the park started keep reporting per error event, and each late
-report computed a ceiling further out that the monotonic rule then adopted. Measured:
-two over-ceiling reports five hours apart walked one park from 21,600,000 ms to
-39,600,000 ms — six hours to eleven — with every existing ceiling assertion still green.
-The ceiling is now anchored to `cooldown_started_at`, the moment the park began, so the
-bound covers the whole park instead of each report inside it; `reportSuccess` clears the
-anchor with the park, and `memoize-credential-pool` carries it across a re-resolve
-alongside `cooldown_until` so a rebuild cannot re-anchor it.
-
-**The anchor had the same hole one step further in**, found by the cross-model leg of
-this round's review and reproduced before it was believed. Installing an anchor only for
-a FRESH park left a STANDING park that carries none — a credential brought across a pool
-re-resolve from before the field existed, or any `cooldown_until` written by another path
-— re-deriving its ceiling from every report and never gaining an anchor to stop it.
-Measured: late reports at +5h, +10h and +15h against a standing six-hour park walked it
-to 11h, 16h, then 21h, unbounded. `park` now adopts `now` as the anchor whenever one is
-missing, standing or not. The true start is unknowable by then, so the park may run up to
-one window past six hours from its real beginning and never further — bounded and
-honest, where the alternative was unbounded. The same review noted the memoizer's carry
-was asserted by nothing: the re-resolve test checked only `cooldown_until` and stayed
-green with the carry deleted, so it now names `cooldown_started_at` and the six-hour
-bound.
-
-Two more corrections from that leg. `positiveMs` rounded AFTER testing positivity, so
-`0.1` passed `> 0` and `Math.round` returned a defined `0` — the exact value the
-function exists to reject, reachable from any sub-millisecond hint; it now rounds first.
-And two docblocks overstated: the claim that `undefined` "routes both consumers to their
-own default" is only half true — the pool falls back to the per-status window, but model
-rotation has no default and simply skips the back-off, which is correct on that path
-because rotating moves to a DIFFERENT model rather than retrying the one that refused —
-while `MAX_PARK_MS` called `reportSuccess` flatly unreachable during a park when the same
-file documents an in-flight success reaching it. It is unreachable for NEW dispatches,
-which is what makes the ceiling the guarantee and the in-flight success luck.
-
-One claim from that leg was REFUTED rather than adopted: that a large finite hint
-overflows the timer and makes rotation immediate. Measured directly in this runtime, a
-`setTimeout` of one year does not fire early — it was still pending after 120 seconds, so
-the failure is the opposite one and it is neither new nor in this diff.
-
-Seven mutations, each red on exactly the intended pin with the rest of the suite green as
-control: `>= 0` restored (both zero tests), the negative floor restored (both
-negative-hint parser tests), the finiteness check dropped (both overflow tests,
-header and streamed), the ceiling un-anchored (the walk-outward test), and anchoring on
-a merely-PRESENT `cooldown_started_at` rather than a STANDING park (the re-anchor
-control, which proves a once-parked credential can still be parked again), anchoring
-only FRESH parks (the anchor-less standing-park test), and deleting the memoizer's
-carry of the anchor (the re-resolve test, which that assertion now catches).
-
-Three docblocks corrected where they promised properties the code does not hold — the
-defect class this repo tracks separately from the code. `MAX_PARK_MS` claimed six hours
-is "past every reset window we actually honour" while `gateway/http/app-usage-surface.ts`
-meters a 7-day window, so a weekly cap IS clamped and the six-hourly probe is a priced
-cost rather than an absent one. `park`'s non-finite arm was credited with a live defence
-it does not provide: `reportFailure` filters non-finite before it, and no other call site
-can reach it, so it is now labelled a belt on an untrusted-arithmetic path. And "a
-cooldown is a FLOOR" is narrowed to a floor AGAINST FAILURE REPORTS, because
-`reportSuccess` clears a park unconditionally — including a provider-mandated one, when
-a turn dispatched before the park completes after it — which stays deliberate and is now
-argued rather than contradicted.
-
-The end-to-end nudge test is also hermetic now. It passes the real `process.env` to the
-real composer, so an ambient `NEUTRON_MODEL_PROVIDER=openai` built the OpenAI lanes, the
-injected Claude `substrateFactory` was never called, and the file failed with `waitFor
-timed out` — a wiring-failure message for an environment problem. That variable and
-`OPENAI_API_KEY` are now saved and cleared like the rest; teardown no longer removes a
-`tmpDir` it may never have created (a `TypeError` there replaces whatever setup actually
-failed); and the harness drains `realmode_cleanups` through the production
-`drainRealmodeCleanups` instead of calling them un-awaited before `db.close()`.
-
-**THE REFUTATION ABOVE WAS ITSELF WRONG, AND THE CLAIM IT DISMISSED IS A REAL DEFECT** —
-appended rather than rewritten, per this entry's own correction rule. The paragraph
-beginning "One claim from that leg was REFUTED" reports that a `setTimeout` of one year
-"does not fire early — it was still pending after 120 seconds". Re-measured directly, with
-a control in each direction: `setTimeout(31_536_000_000)` — one year, the very value that
-paragraph names — fires after **3 ms**, and this runtime prints its own diagnosis while
-doing it, `TimeoutOverflowWarning: 31536000000 does not fit into a 32-bit signed integer.
-Timeout duration was set to 1.` The controls are what make that a measurement rather than
-another guess: a timer at `0x7fff_ffff` did NOT fire inside a 2-second window (so the
-probe can show a real wait) and a 5 ms timer fired in 6 ms (so it can see a timer fire at
-all). A one-year delay was never pending for 120 seconds; it had already elapsed before
-the observation began. This is the shape the repo already tracks — a check that returns a
-negative which reads exactly like an answer — and the cost of getting it wrong here was
-higher than a wasted round: the log stated the defect did not exist, which is the one
-thing that reliably stops the NEXT reader from fixing it.
-
-**A back-off that overflows is no back-off.** `positiveMs` rejects non-finite and
-non-positive hints and has no upper bound, which is right — a finite `retry-after:
-3000000` is a real instruction, and discarding it as garbage would buy the 60-second
-status default where the provider asked for weeks. The value is fine; the TIMER cannot
-hold it. Above `0x7fff_ffff` ms a `setTimeout` delay does not saturate, it overflows the
-32-bit signed field and fires in about a millisecond, so the adapter answered "wait weeks"
-with an instant retry against a provider that had just rate-limited it: a hot retry loop,
-and worse than having no `retry-after` handling at all.
-
-It survived three rounds on this exact field because the field has TWO consumers and only
-one was bounded. `reportFailure` clamps its park at `cooldown_started_at + MAX_PARK_MS`,
-so the pool was safe; the adapter's rotation back-off is a second consumer that reads the
-raw hint into `rotateDelay` and never consults the pool. Guarding the producer and
-bounding one consumer both looked complete while a second consumer slept on the unbounded
-value. Every consumer was then enumerated by grepping the field name rather than asserted
-to be complete: the adapter's sleep (broken, fixed here), `reportFailure` via
-`build-llm-call-substrate` and `build-import-substrate` (already bounded), `rotate`'s
-`delay_ms` copy (raw, but nothing sleeps on it — its docblock now says what a future
-sleeper must do first), and the pure propagators that never treat it as a duration
-(`events.ts`, `errors.ts`, `substrate-text.ts`, `agent-dispatch`, the history-import
-type). `TelegramRetryAfterError` shares the field NAME only and has a different source.
-
-Fixed at the CONSUMER, inside `sleep` — the adapter's only `setTimeout`, so nothing in
-that file can route around it. Bounding `positiveMs` instead would rewrite what every
-consumer sees and would put a `setTimeout` implementation limit inside a function whose
-job is deciding whether a hint is usable at all; clamping at the sleep caps what this lane
-can wait while leaving the pool the provider's untouched number to apply its own six-hour
-ceiling to, so neither consumer's policy overwrites the other's. The tests assert the
-delay the timer is ARMED with, because a correctly-clamped delay can never be awaited —
-the sibling exhaustion test takes 4.6 s precisely because its `retry-after: 4` is a
-genuine sleep, so 24.8 days would hang CI forever. Three mutations, each red on exactly
-its own pin with the rest green: unclamping the sleep reds the end-to-end test and its
-failure prints the raw `3000000000` reaching the timer; making the clamp a blanket cap
-reds the two "unchanged" controls (`30_000` and the bound itself), which is what proves it
-is a clamp and not a cap; and restoring `< 0` in place of `<= 0` reds the sub-millisecond
-guard, which is what proves an upper bound did not quietly turn a hint that must be
-refused into an accepted one.
-
-No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
-— a bounded park, a discarded bogus header value, and coverage for two branches that
-had none.
-
-Nor does the round above add one: a rotation back-off that can no longer overflow into an
-instant retry is the same subsystem behaving as it already claimed to.
-
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
 Landed via PR #370.
@@ -1403,6 +1403,44 @@ files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
 
+## 2026-08-16 — a deferral and a rejection no longer share a label
+
+A run blocked for an INFRASTRUCTURE reason — a required check that never ran, a PR
+conflicting with base, a credential that blinked — terminated wearing the same clothes as
+a genuine code rejection: `REQUEST_CHANGES`, ❌, "the reviewer still had blocking
+findings". No reviewer had read the diff. The board filled with `[failed]` cards whose
+builds were fine and whose infrastructure was not, and reading it you could not tell "the
+machine was broken" from "the code was wrong" without opening a findings file.
+
+The signal already existed and was already durable: the inner workflow writes
+`blockKind: 'infra-only'` plus the measured `terminalCause` into
+`code_trident_runs.inner_result`, and `parseInnerResult` decodes both fail-closed. Nothing
+downstream read it. `trident/infra-block.ts` `deriveInfraBlock` is now the ONE place that
+does — delivery reads it today and the board payload reads the same function next, because
+two copies of the gate would let the two surfaces disagree.
+
+The gate is `phase === 'failed' && harvested_at !== null && block_kind === 'infra-only'`.
+`harvested_at` is load-bearing, not belt-and-braces: a force-terminated or cancelled row
+keeps a stale but perfectly parseable `inner_result` from an earlier iteration
+(`saveIfActive` never overwrites it), so the column alone cannot say how the run actually
+ended — and `harvested_at` is written EXCLUSIVELY by `orchestrator.applyResult`, i.e. by
+the outer loop deciding on that exact result.
+
+`interpretFailure` gains the class `'infra-blocked'` and checks it FIRST, ahead of every
+string branch. That order is the fix, not a preference: the measured cause is model/CI
+prose, and a cause reading "PR is conflicting with base" hit `isAuthoredConflictQuestion`'s
+bare `conflict` token and produced the confident false sentence "two changes edited the
+same code in ways I could not reconcile automatically" about a build nobody reviewed. Such
+a run now composes with 🚧 "build deferred (infrastructure), not rejected", quotes the
+measured cause, and says what would clear it (rebase the base branch; re-run the required
+check; retry when the infrastructure is healthy) — with "Nothing about the code was
+rejected — it was never reviewed" said out loud. No migration: the signal was already in
+`inner_result`.
+
+Genuine rejections are byte-identical to before — the test asserts equality against the
+composition of a row carrying no structured result at all — and a run with no findings and
+no infra signal keeps its existing generic ❌ handling rather than being relabelled in
+either direction.
 ## 2026-08-16 — "done" is refused on the write path, not on one of its doors
 
 A review of the stalled-driver wakeup change (#341) reproduced the 2026-08-11 incident on a store that already carried the guard. `WorkBoardStore.complete()` refused to mark an item done while its bound run was live, but `complete()` was never the only door: `update()` accepts the full status enum, and the `work_board_update` agent tool hands a model's `status` straight to it. Patching `{status:'done'}` walked past the check and stamped `completed_at` mid-build — the same false claim, through the other door.
