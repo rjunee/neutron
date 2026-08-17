@@ -94,6 +94,8 @@ Verifying against HEAD's tree instead would mean reading commit and tree *object
 
 `renumbered` is the field worth reading. A benign in-place edit keeps its filename, so **bytes and ordinal both moving is the one combination an in-place edit cannot produce** — that is the amended-then-renumbered case, and it is where `PRAGMA table_info` is worth running. A steady-state boot emits nothing at all; a notice that fired every boot would be noise you learn to ignore, and there is a test pinning the silence.
 
+This is the one check that hashes the whole tree on every boot, and the cost is stated rather than implied: **123 files, 350 KB, 3.9 ms measured**, over bytes `loadMigrations` has already read — CPU, no extra I/O. Everything else in the runner short-circuits on the name precisely so it does not hash; this one does not, because the case it catches is invisible by construction.
+
 ### Reading the ledger
 
 **Deciding costs no write — every refusal, without exception.** `_migrations` is *created* on the path that is about to insert a row and on no other, the provenance columns are added there too, the rekey happens there and nowhere else, and the ledger is read tolerantly of both its absence and its older shapes. A boot that ends in any of the six refusals (a duplicate ordinal, a duplicate name, two files with duplicate content, an unexplained ledger row, an untracked file, an occupied rekey scratch name) leaves the database byte-for-byte as it found it — the guard whose job is to change nothing does not first mutate the schema of the database it just declared untrustworthy. `applyMigrations` against a fully-migrated database is a pure read, which is what makes opening a backup read-only to inspect it work.

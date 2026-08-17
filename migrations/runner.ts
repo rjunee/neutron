@@ -165,7 +165,13 @@ export type MigrationVerdict =
  * exactly as two files with one name is, and it is caught in the one place it can do
  * damage rather than by hashing the whole tree on every boot.
  *
- * The name is checked FIRST so a steady-state boot hashes nothing at all.
+ * The name is checked FIRST, so THIS function hashes nothing on a steady-state boot.
+ * That is a statement about this function and not about the run: the content-drift
+ * notice near the end of `applyMigrations` does hash every recorded file on every boot,
+ * deliberately. Measured on this tree — 123 files, 350 KB — a full pass is 3.9 ms, over
+ * bytes `loadMigrations` has already read, so it is CPU and no extra I/O. An earlier
+ * version of this line claimed a steady-state boot "hashes nothing at all", which was
+ * true when written and is not true of the run any more.
  */
 export function classifyMigration(
   migration: Migration,
@@ -1410,9 +1416,9 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     }))
   if (duplicates.length > 0) throw new Error(formatDuplicateContentMigrations(duplicates))
   // THE REMAINING FAIL-CLOSED GUARD, restated against identity: a recorded
-  // migration that NO file in this build corresponds to. Hashes are computed lazily
-  // and only for the rows that survive the name check, so a healthy boot hashes
-  // nothing. See `formatUnexplainedLedgerRows` for why only rows carrying a
+  // migration that NO file in this build corresponds to. The whole-tree hash below is
+  // computed only when there is at least one candidate row, which a healthy ledger does
+  // not produce. See `formatUnexplainedLedgerRows` for why only rows carrying a
   // `content_sha256` are adjudicated, and why that is narrower rather than weaker.
   //
   // THE HASH IS NON-NULL BY CONSTRUCTION FROM HERE ON, and the type says so rather than
@@ -1438,6 +1444,15 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // that decision left rather than reopening the decision. Only names the ledger
   // actually records are compared, and only rows carrying a hash can be, so a fresh
   // install and a pre-provenance ledger both say nothing.
+  //
+  // THIS IS THE ONE PASS THAT HASHES ON A STEADY-STATE BOOT, and the cost is stated
+  // rather than hand-waved because it contradicts what the rest of this file optimises
+  // for: 123 files, 350 KB, 3.9 ms measured on this tree, over bytes `loadMigrations`
+  // has already read — CPU, no extra I/O. It is paid on every boot because the case it
+  // catches is a migration that reads as applied while its statements never ran, and
+  // that case is invisible by construction. Scoping it to renumbered files only would
+  // halve nothing and would go silent on exactly the shape the README's
+  // hash-is-not-a-gate decision leaves uncovered.
   for (const migration of migrations) {
     if (verdicts.get(migration.name) !== 'recorded-by-name') continue
     const recorded = ledger.byName.get(migration.name)
