@@ -130,9 +130,23 @@ with cross-references noted inline.
     one transaction, so a table there is somebody's data and is refused rather than dropped; an
     earlier version's unconditional `DROP TABLE IF EXISTS` destroyed exactly that, silently and
     permanently, and the test that should have caught it used a VIEW, which SQLite refuses to drop).
-    **All six decide before ANY write** — `_migrations` is created, rekeyed, and repairs are
-    acknowledged, only after the last refusal has been passed, which is what makes the untracked
-    message's claim that nothing was written true.
+    **FIVE of the six decide before ANY write** — the five guards above the rekey do, because
+    `_migrations` is created, rekeyed, and repairs are acknowledged only after the last of them has
+    been passed, which is what makes the untracked message's claim that nothing was written true.
+    THE SIXTH IS THE EXCEPTION AND ITS MESSAGE MUST SAY SO: the occupied-scratch refusal is thrown
+    from inside the rekey, which runs AFTER this boot's `_migration_repairs` acknowledgements are
+    written, so on an instance carrying repairs a row exists by the time the operator reads it. The
+    message names that row instead of denying it (`ordinal-identity.test.ts` CASE 6d pins the
+    sentence against the database it describes). Wording it the other way is the falsity class this
+    guard exists to remove, restated one level down.
+    A repair entry that has ALREADY ACTIVATED on a database stays active on it —
+    `_migration_repairs` is consulted as a second, durable trigger. The ledger predicate reads state
+    the rekey erases: `collapseLedgerRowsByName` drops the drifted row of a duplicated name, so a
+    `recorded_name` this build ships comes out of the rekey sitting exactly where a healthy apply
+    would have put it, and an entry keyed only on that mismatch goes inert while the instance still
+    needs it — silently un-suppressing a hand-verified migration whose `ALTER`s then re-run. The
+    durable trigger cannot over-activate: a database that never had the incident never wrote the
+    row. CASE 8 pins the orphan shape, CASE 8b the tree-file shape.
     Hash widening MUST stay conditioned on the recording row being one no file in this build
     accounts for. Widening on a bare hash set is a silent-skip bug: a new, distinctly-named,
     tracked migration whose bytes duplicate an applied one reads as applied, so it never runs,

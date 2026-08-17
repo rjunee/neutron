@@ -235,6 +235,49 @@ function loadMigrationRepairs(dir: string): MigrationRepair[] {
   return repairs as MigrationRepair[]
 }
 
+/** The identity `_migration_repairs` is keyed on — its PRIMARY KEY, in one string. */
+function repairKey(repair: {
+  version: number
+  recorded_name: string
+  file_name: string
+}): string {
+  return JSON.stringify([repair.version, repair.recorded_name, repair.file_name])
+}
+
+/**
+ * The entries this database has ALREADY acknowledged, from `_migration_repairs`.
+ *
+ * WHY AN ENTRY NEEDS A SECOND WAY TO ACTIVATE, and why this is the honest one. The
+ * ledger-row predicate below asks whether the ledger STILL LOOKS LIKE the incident
+ * the entry describes. That question stops being answerable once the runner repairs
+ * the ledger: `collapseLedgerRowsByName` keeps the earliest-applied row of a
+ * duplicated name and drops the rest, so a name recorded at both its tree ordinal and
+ * a drifted one comes out of the rekey sitting exactly where a healthy apply would
+ * have put it. The incident is real, the database still needs the entry, and every
+ * trace the predicate reads is gone — so the entry deactivates and the migration its
+ * `file_name` suppresses re-runs its `ALTER`s against a schema that already has them.
+ * That is the same silent un-suppression CASE 8 pins for the orphan shape, reached by
+ * a different route.
+ *
+ * `_migration_repairs` is the trace that SURVIVES, because it is written at the moment
+ * an entry activates and nothing ever rewrites it. It also cannot over-activate, which
+ * is the failure the predicate's ordinal conjunct exists to prevent: a database that
+ * never had the incident never wrote the row, so it never reads one back. Widening on
+ * durable evidence of a past activation is therefore strictly narrower than the
+ * name-only trigger that was refused.
+ *
+ * Read BEFORE the first write, like everything else this boot decides on.
+ */
+function acknowledgedRepairKeys(db: Database): ReadonlySet<string> {
+  if (!tableExists(db, '_migration_repairs')) return new Set()
+  const rows = db
+    .query<{ version: number; recorded_name: string; file_name: string }, []>(
+      'SELECT version, recorded_name, file_name FROM _migration_repairs',
+    )
+    .all()
+  return new Set(rows.map(repairKey))
+}
+
 /**
  * The `repairs.json` entry that would acknowledge this exact ledger row.
  *
@@ -891,14 +934,19 @@ function collapseLedgerRowsByName(rows: RecordedMigration[]): RecordedMigration[
  * dropping costs them a table with no warning and no record.
  */
 function rekeyLedgerOnName(db: Database): void {
-  // BEFORE the transaction, so the throw carries no rollback ambiguity: nothing has
-  // been attempted yet, and the message below can state that without qualification.
+  // BEFORE the transaction, so the throw carries no rollback ambiguity: the rekey has
+  // not been attempted at all. That is a statement about the REKEY and not about the
+  // database — see the message, which used to conflate the two.
   if (tableExists(db, LEDGER_LEGACY_TABLE)) {
     throw new Error(
       `The _migrations ledger must be rekeyed from its ordinal onto the migration name, but the ` +
         `table ${LEDGER_LEGACY_TABLE} already exists and the rekey needs that name free. NOTHING ` +
-        'HAS BEEN APPLIED and nothing has been written — no migration ran, no row was written, the ' +
-        'ledger was neither reshaped nor read into it.\n\n' +
+        'HAS BEEN APPLIED — no migration ran, and the ledger was neither reshaped nor read into ' +
+        'it: its shape, its columns and its rows are exactly what they were before this boot.\n\n' +
+        'ONE THING ON THIS PATH MAY ALREADY HAVE BEEN WRITTEN, and it is named here rather than ' +
+        'denied: a `_migration_repairs` acknowledgement row, if this boot had one to write, was ' +
+        'written before the rekey was attempted and is still there. That table is an audit trail ' +
+        'and holds no schema; nothing else in the database was touched.\n\n' +
         'This is NOT a leftover from an interrupted rekey. The whole rekey is one transaction, so a ' +
         'failed or killed one rolls that table away with everything else; it can never be left ' +
         'behind. So the table holds data this runner did not put there, and it is deliberately NOT ' +
@@ -1451,7 +1499,13 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
    * working instead of quietly ceasing to.
    */
   const treeOrdinalByName = new Map(migrations.map((m) => [m.name, m.version] as const))
+  const alreadyAcknowledged = acknowledgedRepairKeys(db)
   const activeRepairs = loadMigrationRepairs(dir).filter((repair) =>
+    // ONCE ACTIVATED, ALWAYS ACTIVATED ON THIS DATABASE. The ledger predicate below
+    // reads state the rekey itself erases, so it cannot be the only trigger — see
+    // `acknowledgedRepairKeys`. Checked first because it is a set lookup, and because
+    // it is the answer that does not depend on the ledger still showing the incident.
+    alreadyAcknowledged.has(repairKey(repair)) ||
     ledger.rows.some((row) => {
       if (row.name !== repair.recorded_name) return false
       const treeOrdinal = treeOrdinalByName.get(repair.recorded_name)
@@ -1459,14 +1513,19 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
       // this runner mints is orphan-named by construction — `repairsEntryFor` is called
       // from exactly one place (the unexplained-row refusal) whose candidates require
       // `!treeNames.has(row.name)` — so matching on name alone is what carries an entry
-      // through a collapse that moved which ordinal the row is recorded at. That is why
-      // no absorbed-ordinal state has to be persisted anywhere.
+      // through a collapse that moved which ordinal the row is recorded at.
       if (treeOrdinal === undefined) return true
       // TREE-FILE NAME: this build ships a migration of that name, so the recorded
       // ordinal is the ONLY thing separating the incident row from legitimate renumber
       // drift. Both conjuncts are load-bearing: the first refuses to speak about a row
       // the entry was never written about, and the second refuses to treat a row sitting
       // exactly where a normal apply would have written it as an incident at all.
+      //
+      // THAT NARROWNESS IS WHY THE ACKNOWLEDGEMENT ABOVE EXISTS. This conjunction goes
+      // false the moment the collapse drops the drifted row and leaves the one sitting
+      // at the tree ordinal — the ledger stops showing the incident, though the instance
+      // still has it. `_migration_repairs` remembers instead; see
+      // `acknowledgedRepairKeys`.
       return row.version === repair.version && row.version !== treeOrdinal
     }),
   )
