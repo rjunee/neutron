@@ -99,6 +99,30 @@ describe('runDrivingVerdict — the threshold ordering that makes the timer safe
     expect(v.driving).toBe(false)
     expect(v.reason).toBe('no-advance')
   })
+
+  test('PROPERTY 2 — a reaper-REACHABLE `running` row is released too, past the threshold', () => {
+    // THE ACCEPTED RESIDUE, ASSERTED RATHER THAN ONLY DESCRIBED. The module header
+    // is explicit that the margin does NOT establish mutual exclusion: 90 s is the
+    // reap sweep's cadence, not a bound on its latency, and a sweep wedged inside
+    // `step` (`tick.ts:719-721`) can miss this run indefinitely. So a row that
+    // still says `running` — the shape PROPERTY 1 protects at the reaper threshold
+    // — does eventually flip to released, and a review reading only the
+    // `NO_ADVANCE_HANG_MS + 1` case above could reasonably have believed otherwise.
+    //
+    // It is the same behaviour as the parked and unreachable cases and that is the
+    // point: past the stand-down threshold the timer stops caring WHY the run went
+    // quiet. What bounds the damage is that a live inner workflow re-stamps
+    // `last_advanced_at` itself, out of process (`checkpoint.sh:196`), so a build
+    // that reaches checkpoints at all never arrives here. What remains is a build
+    // quieter than the threshold — the known heartbeat gap, ISSUES #534 — and the
+    // prompt now names the parked run so the released turn reaps rather than races
+    // it (`gateway/proactive/work-wakeup.ts` `buildWakeupPrompt`).
+    const live = run({ subagent_run_id: 'wf-1', subagent_status: 'running' })
+    expect(runDrivingVerdict(live, T0 + WAKEUP_STAND_DOWN_MS).driving).toBe(true)
+    const v = runDrivingVerdict(live, T0 + WAKEUP_STAND_DOWN_MS + 1)
+    expect(v.driving).toBe(false)
+    expect(v.reason).toBe('no-advance')
+  })
 })
 
 describe('runDrivingVerdict', () => {

@@ -500,6 +500,7 @@ import {
   type WorkBoardItem,
 } from '@neutronai/work-board/store.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
+import { isRunLiveForCompletion } from '@neutronai/trident/run-driving.ts'
 import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import {
   deriveProjectActivity,
@@ -4182,10 +4183,12 @@ export function buildOpenGraphComposer(
       // by this path until its run reaches a terminal phase. That is a LOUD refusal
       // (`WorkBoardRunStillLiveError`), not a silent one, and the right fix is to
       // reap the stalled run — not to loosen the assertion that work shipped.
-      isRunLive: (run_id: string): boolean => {
-        const run = boardRunStore.get(run_id)
-        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
-      },
+      //
+      // The predicate itself is `isRunLiveForCompletion` (`trident/run-driving.ts`)
+      // — shared BY SYMBOL with the tests that pin this disagreement, so a revert
+      // onto the wakeup's verdict turns them red instead of leaving them asserting
+      // their own private copy of the rule.
+      isRunLive: isRunLiveForCompletion((run_id: string) => boardRunStore.get(run_id)),
     })
     // M2 task 3 — bind the `/status` snapshot reader now that every source store
     // exists (projects reader / reminder store / work-board / Trident run store).

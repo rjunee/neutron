@@ -58,6 +58,7 @@
  * outcome.
  */
 
+import type { RunDrivingReason } from '@neutronai/trident/run-driving.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
@@ -122,6 +123,34 @@ export const WAKEUP_DEFERRAL_LOG_WINDOW_MS = 30 * 60_000
 /** One in-progress, un-driven Work Board item. */
 export interface WakeupWorkItem {
   title: string
+  /**
+   * Set when this item was RELEASED to the wakeup even though it still carries a
+   * `linked_run_id`: the bound run exists, is NOT terminal, and simply stopped
+   * reading as its driver (`no-advance`, or `unknown-advance` for an unusable
+   * stamp).
+   *
+   * IT IS CARRIED BECAUSE THE PROMPT WOULD OTHERWISE LIE. The wakeup turn used to
+   * state flatly that these items had "no live background run", which is true of an
+   * unbound item and false of this one — the row is still there, the binding is
+   * still there, and only the JUDGEMENT that it is driving has lapsed. An agent
+   * told the run does not exist will reasonably dispatch a new build, which is the
+   * double-drive this module's whole selection policy exists to prevent, and which
+   * `migrations/0120_trident_slug_unique_only_live.sql:42-44` would in any case
+   * refuse: that unique index is scoped to `phase NOT IN (done, failed, stopped)`,
+   * so a second run of the same slug collides with the parked one that is still
+   * non-terminal. Naming the parked run in the prompt is what lets the agent reap
+   * it instead of racing it.
+   */
+  stalled_run?: {
+    /** The `code_trident_runs.id` still bound to the item. */
+    run_id: string
+    /** That run's phase, verbatim (`forge-init`, `argus`, …). */
+    phase: string
+    /** Which release rule fired — the verdict's own greppable token. */
+    reason: RunDrivingReason
+    /** ms since the run's `last_advanced_at`; 0 when there was no usable reading. */
+    since_advance_ms: number
+  }
 }
 
 /**
@@ -215,6 +244,12 @@ export interface WakeupSweepResult {
   failed: number
   /** Items left to a live run this tick (one `wakeup_deferred_to_live_run` each). */
   deferred_to_run: number
+  /**
+   * Items TAKEN this tick despite still being bound to a non-terminal run that
+   * stopped advancing (one `wakeup_released_stalled_run` each). Unconditional, so
+   * the per-run log's rate limit costs volume and never the fact.
+   */
+  released_stalled_run: number
 }
 
 /**
@@ -253,6 +288,23 @@ function deferralLogKey(project_key: string, d: WakeupDeferredItem): string {
   return `${part(project_key)}${part(d.item_id)}${part(d.run_id)}`
 }
 
+/**
+ * The RELEASE log's rate-limit key, sharing the deferral window's map.
+ *
+ * The leading empty field is what keeps the two key spaces disjoint, and it is
+ * airtight rather than merely unlikely: a deferral key always begins with a
+ * `project_key`, a project key can never contain a NUL, and so no deferral key can
+ * ever begin with one. (A bare `'release'` prefix would have relied on no project
+ * ever being CALLED release, which is a smaller guarantee than this costs.)
+ *
+ * Keyed on the run rather than the item because the run is what an operator would
+ * act on — a release names a parked run to go and reap — and because the binding is
+ * one-run-per-item at any instant, so it is no coarser than the item in practice.
+ */
+function releaseLogKey(project_key: string, run_id: string): string {
+  return `\u0000release\u0000${project_key}\u0000${run_id}`
+}
+
 /** Truncate for a prompt line / a log field — bounded, marked, never thrown. */
 function bound(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`
@@ -262,6 +314,16 @@ function bound(text: string, max: number): string {
  * The wakeup turn prompt. Exported for tests (and so the composer's prompt and
  * the tests can never drift apart). Deliberately imperative about ACTING: the
  * failure mode being cured is a session that plans instead of moving.
+ *
+ * IT MUST NOT CLAIM MORE THAN THE SELECTOR PROVED. The line here used to read "with
+ * no live background run", which was accurate while the selector released an item
+ * only when it had no binding at all. It stopped being accurate the moment the
+ * selector began releasing items whose bound run is non-terminal but no longer
+ * advancing: for those, a run row still exists and the binding still exists — only
+ * the verdict lapsed. Telling the agent no run exists is the wording that turns a
+ * released item into a SECOND dispatch, i.e. the double-drive the release was
+ * carefully bounded to avoid. So an item released with a parked run says so, names
+ * it, and the instructions send the agent at the parked run rather than around it.
  */
 export function buildWakeupPrompt(input: {
   label: string
@@ -270,14 +332,37 @@ export function buildWakeupPrompt(input: {
 }): string {
   const listed = input.items.slice(0, MAX_WAKEUP_PROMPT_ITEMS)
   const extra = input.items.length - listed.length
-  const lines = listed.map((it) => `- ${bound(it.title, 140)}`)
+  const lines = listed.map((it) => {
+    const base = `- ${bound(it.title, 140)}`
+    if (it.stalled_run === undefined) return base
+    // `unknown-advance` has no usable clock reading by construction
+    // (`run-driving.ts:176` returns `since_advance_ms: 0`), so it must not be
+    // rendered as "0m since progress" — that reads as a run which JUST moved,
+    // the exact opposite of what the token means.
+    const quiet =
+      it.stalled_run.reason === 'unknown-advance'
+        ? 'its last-progress time is unreadable'
+        : `no progress for ${Math.floor(it.stalled_run.since_advance_ms / 60_000)}m`
+    return `${base}\n  ↳ still bound to background run ${it.stalled_run.run_id}, parked at phase "${it.stalled_run.phase}" (${quiet}).`
+  })
   if (extra > 0) lines.push(`- (+${extra} more in-progress item${extra === 1 ? '' : 's'})`)
+  const anyStalled = listed.some((it) => it.stalled_run !== undefined)
   return [
     `[SCHEDULED WAKEUP — ${input.now_iso}]`,
     `You are waking on your recurring work cadence for ${input.label}. The owner is away;`,
     'you are expected to make real progress, not wait for instructions.',
-    'The Work Board shows these in-progress items with no live background run:',
+    'The Work Board shows these in-progress items that no background run is advancing:',
     ...lines,
+    ...(anyStalled
+      ? [
+          '',
+          'An item marked ↳ is STILL BOUND to a background run that stopped advancing. That',
+          'run row still exists, so do NOT dispatch a second build for it — a new run of the',
+          'same task collides with the parked one, and you would be racing it rather than',
+          'replacing it. Either do the work directly in this turn, or stop/reap the parked',
+          'run first and dispatch afterwards.',
+        ]
+      : []),
     '',
     'In THIS turn:',
     '1. Take the single most valuable CONCRETE action toward one of these items using your',
@@ -304,12 +389,31 @@ export async function runWorkWakeupSweep(
   const now = deps.now ?? ((): number => Date.now())
   const grace = deps.owner_grace_ms ?? WORK_WAKEUP_OWNER_GRACE_MS
   const turn_timeout = deps.turn_timeout_ms ?? WORK_WAKEUP_TURN_TIMEOUT_MS
-  const result: WakeupSweepResult = { woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0 }
+  const result: WakeupSweepResult = {
+    woke: 0,
+    skipped_active: 0,
+    failed: 0,
+    deferred_to_run: 0,
+    released_stalled_run: 0,
+  }
 
   const projects = await deps.listOutstanding()
-  // Drop streak entries for projects that no longer have outstanding work, so
-  // the map cannot grow without bound across long uptimes.
-  const liveKeys = new Set(projects.map((p) => p.project_key))
+  // Drop streak entries for projects that no longer have outstanding WAKEABLE
+  // work, so the map cannot grow without bound across long uptimes.
+  //
+  // `p.items.length > 0`, NOT merely `p.project_key`. A project whose items are
+  // all deferred to live runs still yields an entry — deliberately, so the sweep
+  // can report the deferral rather than look like it found nothing — and keying
+  // the prune on the entry's mere existence would keep that project's streak
+  // alive for as long as its builds run. A streak counts CONSECUTIVE FAILED
+  // WAKEUP TURNS, and this sweep runs no turn for such a project, so the count is
+  // not being continued by evidence; it is just being preserved. The visible cost
+  // is a misfired cadence: `WAKEUP_FAILURE_POST_CADENCE` posts on the streak's
+  // value, so a stale 2 means the first genuine failure after the builds finish
+  // is judged as a third strike and posted (or swallowed) on the wrong footing.
+  // Pruning on wakeable work restarts the count at 1, which is what the next
+  // failure actually is.
+  const liveKeys = new Set(projects.filter((p) => p.items.length > 0).map((p) => p.project_key))
   for (const key of [...failureStreaks.keys()]) {
     if (!liveKeys.has(key)) failureStreaks.delete(key)
   }
@@ -321,9 +425,14 @@ export async function runWorkWakeupSweep(
   // long as the process lives. Owning the map keeps the keyspace bounded by what
   // is CURRENTLY deferred, which is the same discipline the streak map fifteen
   // lines up already follows.
-  const deferredKeys = new Set(
-    projects.flatMap((p) => p.deferred.map((d) => deferralLogKey(p.project_key, d))),
-  )
+  const deferredKeys = new Set([
+    ...projects.flatMap((p) => p.deferred.map((d) => deferralLogKey(p.project_key, d))),
+    ...projects.flatMap((p) =>
+      p.items.flatMap((it) =>
+        it.stalled_run === undefined ? [] : [releaseLogKey(p.project_key, it.stalled_run.run_id)],
+      ),
+    ),
+  ])
   for (const key of [...deferralLog.keys()]) {
     if (!deferredKeys.has(key)) deferralLog.delete(key)
   }
@@ -355,6 +464,34 @@ export async function runWorkWakeupSweep(
         run_id: d.run_id,
         phase: d.phase,
         since_advance_ms: d.since_advance_ms,
+      })
+    }
+    // AND SAY WHAT WAS TAKEN OVER A LIVE BINDING, which is the other half of the
+    // same legibility. A deferral and a release are the two outcomes of one
+    // decision, and only the deferral was ever written down — so the whole point
+    // of this change, an item being taken BACK from a parked run, was the one
+    // transition invisible in the log. Worse for `unknown-advance`: a run released
+    // because its `last_advanced_at` is corrupt or in the future
+    // (`run-driving.ts:175-177`) looked in the log exactly like an item that never
+    // had a run at all, so a broken clock and an ordinary unbound item were
+    // indistinguishable. The verdict's reason token is emitted verbatim to tell
+    // them apart.
+    for (const it of project.items) {
+      if (it.stalled_run === undefined) continue
+      result.released_stalled_run += 1
+      const logKey = releaseLogKey(project.project_key, it.stalled_run.run_id)
+      const lastLoggedAt = deferralLog.get(logKey)
+      if (lastLoggedAt !== undefined && now() - lastLoggedAt < WAKEUP_DEFERRAL_LOG_WINDOW_MS) {
+        continue
+      }
+      deferralLog.set(logKey, now())
+      log.info('wakeup_released_stalled_run', {
+        project: project.project_key,
+        item: bound(it.title, 140),
+        run_id: it.stalled_run.run_id,
+        phase: it.stalled_run.phase,
+        reason: it.stalled_run.reason,
+        since_advance_ms: it.stalled_run.since_advance_ms,
       })
     }
     if (project.items.length === 0) continue
@@ -476,11 +613,18 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
       // A fully idle tick stays SILENT: on a box with no outstanding work this
       // loop runs 288 times a day and a summary of zeros would drown the ticks
       // that mean something.
-      if (result.woke > 0 || result.failed > 0 || result.deferred_to_run > 0 || result.skipped_active > 0) {
+      if (
+        result.woke > 0 ||
+        result.failed > 0 ||
+        result.deferred_to_run > 0 ||
+        result.released_stalled_run > 0 ||
+        result.skipped_active > 0
+      ) {
         log.info('wakeup_sweep', {
           woke: result.woke,
           failed: result.failed,
           deferred_to_run: result.deferred_to_run,
+          released_stalled_run: result.released_stalled_run,
           skipped_owner_active: result.skipped_active,
         })
       }

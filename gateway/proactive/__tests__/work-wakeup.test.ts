@@ -111,7 +111,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness()
     const result = await runWorkWakeupSweep(h.deps, new Map())
 
-    expect(result).toEqual({ woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0 })
+    expect(result).toEqual({ woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0 })
     expect(h.specs).toHaveLength(1)
     const spec = h.specs[0]!
     // The warm-pool key — what lands the turn ON the owner's session.
@@ -134,7 +134,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('owner active inside the grace window → skipped, and the session is NEVER entered', async () => {
     const h = harness({ activity: NOW - (WORK_WAKEUP_OWNER_GRACE_MS - 1) })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0, released_stalled_run: 0 })
     expect(h.specs).toHaveLength(0)
     expect(h.posts).toHaveLength(0)
   })
@@ -156,7 +156,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('a project with zero items is not woken', async () => {
     const h = harness({ projects: [project({ items: [] })] })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -178,7 +178,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1 })
+    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1, released_stalled_run: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -317,7 +317,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     }
   })
 
-  test('OBSERVABILITY — every deferral writes a line naming the run and its phase', async () => {
+  test('OBSERVABILITY — a FIRST-SEEN deferral writes a line naming the run and its phase', async () => {
     // The owner's complaint was "I can't tell if it's actually autonomously
     // progressing work". This is the line that answers it.
     resetLoggerStateForTests()
@@ -354,6 +354,132 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(deferrals[1]).toContain('argus')
   })
 
+  test('OBSERVABILITY — a RELEASE writes its own line, carrying the verdict reason', async () => {
+    // The other half of the same decision. Only the deferral was ever logged, so
+    // an item being taken BACK from a parked run — the entire point of this change
+    // — was the one transition invisible in the log.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    try {
+      const h = harness({
+        projects: [
+          project({
+            items: [
+              {
+                title: 'Ship the importer',
+                stalled_run: {
+                  run_id: 'run-1',
+                  phase: 'forge-init',
+                  reason: 'no-advance',
+                  since_advance_ms: 7_200_000,
+                },
+              },
+            ],
+          }),
+        ],
+      })
+      const r = await runWorkWakeupSweep(h.deps, new Map(), new Map())
+      expect(r.released_stalled_run).toBe(1)
+    } finally {
+      lines.restore()
+    }
+    const released = lines.matching('wakeup_released_stalled_run')
+    expect(released).toHaveLength(1)
+    expect(released[0]).toContain('run-1')
+    expect(released[0]).toContain('forge-init')
+    expect(released[0]).toContain('no-advance')
+  })
+
+  test('a CORRUPT-CLOCK release is distinguishable from an ordinary unbound item', async () => {
+    // Before this, `unknown-advance` looked in the log exactly like an item that
+    // never had a run: nothing was written either way. The reason token is what
+    // tells a broken stamp from an unbound item.
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    try {
+      const h = harness({
+        projects: [
+          project({
+            items: [
+              { title: 'Unbound work' },
+              {
+                title: 'Ship the importer',
+                stalled_run: {
+                  run_id: 'run-9',
+                  phase: 'argus',
+                  reason: 'unknown-advance',
+                  since_advance_ms: 0,
+                },
+              },
+            ],
+          }),
+        ],
+      })
+      await runWorkWakeupSweep(h.deps, new Map(), new Map())
+    } finally {
+      lines.restore()
+    }
+    const released = lines.matching('wakeup_released_stalled_run')
+    // One line, for the bound item only — the unbound one is not a release.
+    expect(released).toHaveLength(1)
+    expect(released[0]).toContain('unknown-advance')
+    expect(released[0]).toContain('run-9')
+    expect(released[0]).not.toContain('Unbound work')
+  })
+
+  test('a STANDING release is rate-limited, but the COUNT is never suppressed', async () => {
+    const releasedItem = {
+      title: 'Ship the importer',
+      stalled_run: {
+        run_id: 'run-1',
+        phase: 'forge-init',
+        reason: 'no-advance' as const,
+        since_advance_ms: 7_200_000,
+      },
+    }
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    const window = new Map<string, number>()
+    try {
+      const h = harness({ projects: [project({ items: [releasedItem] })] })
+      const first = await runWorkWakeupSweep(h.deps, new Map(), window)
+      lines.clear()
+      const second = await runWorkWakeupSweep(h.deps, new Map(), window)
+      expect(first.released_stalled_run).toBe(1)
+      // The fact survives the rate limit; only the volume is spent.
+      expect(second.released_stalled_run).toBe(1)
+    } finally {
+      lines.restore()
+    }
+    expect(lines.matching('wakeup_released_stalled_run')).toHaveLength(0)
+  })
+
+  test('the release window is PRUNED once the item stops being released', async () => {
+    const window = new Map<string, number>()
+    const releasedItem = {
+      title: 'Ship the importer',
+      stalled_run: {
+        run_id: 'run-1',
+        phase: 'forge-init',
+        reason: 'no-advance' as const,
+        since_advance_ms: 7_200_000,
+      },
+    }
+    await runWorkWakeupSweep(
+      harness({ projects: [project({ items: [releasedItem] })] }).deps,
+      new Map(),
+      window,
+    )
+    expect(window.size).toBe(1)
+    // The run reached a terminal phase, so the item is now plainly unbound.
+    await runWorkWakeupSweep(
+      harness({ projects: [project({ items: [{ title: 'Ship the importer' }] })] }).deps,
+      new Map(),
+      window,
+    )
+    expect(window.size).toBe(0)
+  })
+
   test('deferrals are reported even for a project whose owner is actively driving', async () => {
     const h = harness({
       activity: NOW - 1_000,
@@ -372,7 +498,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1 })
+    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1, released_stalled_run: 0 })
   })
 
   test('an over-long report is truncated to the bound, never dropped', async () => {
@@ -427,6 +553,23 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
     expect(bad.posts).toHaveLength(1) // streak restarted at 1 → loud
   })
 
+  test('a project whose items are ALL DEFERRED is pruned too — no turn ran to continue a streak', async () => {
+    // The entry still exists on such a project, deliberately, so the deferral can
+    // be reported. Keying the prune on the entry's mere presence therefore kept a
+    // stale streak alive for as long as the builds ran, and the first genuine
+    // failure afterwards was judged as its Nth rather than its first.
+    const streaks = new Map<string, number>()
+    streaks.set('acme', 2)
+    const h = harness({ projects: [project({ items: [], deferred: [deferral()] })] })
+    await runWorkWakeupSweep(h.deps, streaks)
+    expect(streaks.has('acme')).toBe(false)
+
+    // CONTROL: the next real failure is therefore loud at streak 1.
+    const bad = harness({ composeError: 'boom' })
+    await runWorkWakeupSweep(bad.deps, streaks)
+    expect(bad.posts).toHaveLength(1)
+  })
+
   test('a project that leaves the outstanding set is pruned from the streak map', async () => {
     const streaks = new Map<string, number>()
     streaks.set('gone-project', 4)
@@ -447,6 +590,7 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       skipped_active: 0,
       failed: 1,
       deferred_to_run: 0,
+      released_stalled_run: 0,
     })
   })
 })
@@ -465,6 +609,66 @@ describe('buildWakeupPrompt', () => {
   test('names the BLOCKED protocol so the loud channel is reachable from the prompt', () => {
     const prompt = buildWakeupPrompt({ label: 'x', items: [{ title: 't' }], now_iso: 'T' })
     expect(prompt).toContain(WAKEUP_BLOCKED_PREFIX)
+  })
+
+  test('an UNBOUND item carries no run talk at all — the plain case stays plain', () => {
+    const prompt = buildWakeupPrompt({ label: 'x', items: [{ title: 't' }], now_iso: 'T' })
+    expect(prompt).toContain('that no background run is advancing')
+    expect(prompt).not.toContain('still bound to background run')
+    expect(prompt).not.toContain('do NOT dispatch a second build')
+  })
+
+  test('THE PROMPT NO LONGER CLAIMS A PARKED RUN DOES NOT EXIST', () => {
+    // The finding: an item released because its run stopped advancing was
+    // described to the agent as having "no live background run". The run row is
+    // still there and still bound, so that sentence invited the second dispatch
+    // the whole selection policy exists to prevent.
+    const prompt = buildWakeupPrompt({
+      label: 'x',
+      items: [
+        {
+          title: 'Ship the importer',
+          stalled_run: {
+            run_id: 'run-1',
+            phase: 'forge-init',
+            reason: 'no-advance',
+            since_advance_ms: 3 * 60 * 60_000,
+          },
+        },
+      ],
+      now_iso: 'T',
+    })
+    expect(prompt).not.toContain('with no live background run')
+    // It names the run, its phase, and how long it has been quiet...
+    expect(prompt).toContain('still bound to background run run-1')
+    expect(prompt).toContain('parked at phase "forge-init"')
+    expect(prompt).toContain('no progress for 180m')
+    // ...and sends the turn at the parked run rather than around it.
+    expect(prompt).toContain('do NOT dispatch a second build')
+    expect(prompt).toContain('stop/reap the parked')
+  })
+
+  test('an UNREADABLE stamp is not rendered as "0m" — that would read as just-moved', () => {
+    // `unknown-advance` carries `since_advance_ms: 0` by construction
+    // (`trident/run-driving.ts:176`), which is the absence of a reading and not a
+    // measurement of zero.
+    const prompt = buildWakeupPrompt({
+      label: 'x',
+      items: [
+        {
+          title: 'Ship the importer',
+          stalled_run: {
+            run_id: 'run-1',
+            phase: 'forge-init',
+            reason: 'unknown-advance',
+            since_advance_ms: 0,
+          },
+        },
+      ],
+      now_iso: 'T',
+    })
+    expect(prompt).toContain('its last-progress time is unreadable')
+    expect(prompt).not.toContain('no progress for 0m')
   })
 })
 
