@@ -510,6 +510,19 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
   return 'publish-unknown'
 }
 
+/**
+ * The outer publisher's push-necessity predicate (deploy-blocker card, 3 occurrences
+ * 2026-08-17: runs 26ed32c1 / 88efe1ca / 95fcfb91). The remote ref ALREADY holding exactly
+ * the head to publish is a publish the publisher does not have to perform — a no-op
+ * SUCCESS, never a failure and never "the build left no new commits": the commit exists,
+ * it is on origin, it was simply already published. An empty observation ('' — the remote
+ * ref does not exist yet) is a FIRST PUSH, not a no-op. Production call site:
+ * `publishBuiltCommit`; deleting that call turns the no-op regression tests red.
+ */
+export function remoteAlreadyAtPublishHead(observedRemoteSha: string, headToPublish: string): boolean {
+  return observedRemoteSha !== '' && observedRemoteSha === headToPublish
+}
+
 /** A harvested no-APPROVE result is either safe to retry or a genuine outcome. */
 export type InnerFailureClass = 'infrastructure' | 'genuine'
 
@@ -1759,7 +1772,10 @@ export function buildTridentOrchestrator(
    * = ABSENT; only two real, DIFFERENT OIDs refuse, and only after the push, so a
    * refusal never strands the commit.
    */
-  async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
+  async function publishBuiltCommit(
+    run: TridentRun,
+    claimedHead: string | null,
+  ): Promise<{ pr: number; head: string; push: 'pushed' | 'noop-already-at-head' }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
     const branch = run.branch ?? `trident/${run.slug}`
     // `--verify` so a missing/ambiguous ref is an ERROR rather than an echoed argument.
@@ -1881,37 +1897,41 @@ export function buildTridentOrchestrator(
     // not exist, so a first push of a new card stays correct — and is still refused if the branch
     // appeared underneath us between this read and the push.
     const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
-    // NOTHING BUILT IS A REAL OUTCOME. With the head read from git rather than relayed by a
-    // model, a run that committed nothing would otherwise publish its own remote back to
-    // itself and read as a success. `resolvedHead` is the PRE-rebase local tip, read before
-    // the replay above could move the branch ref, so this compares exactly "commits ahead of
-    // the remote". Zero ahead fails; an EMPTY `expected` means the remote branch does not
-    // exist yet (first push) and stays publishable.
-    if (expected === resolvedHead) {
-      throw new Error(
-        `outer publisher refused: branch ${branch} is already at ${resolvedHead} on origin — the build left no new commits to publish`,
-      )
-    }
-    const pushed = await runWithRetries([
-      'git',
-      '-C',
-      run.repo_path,
-      'push',
-      `--force-with-lease=refs/heads/${branch}:${expected}`,
-      'origin',
-      `refs/heads/${branch}:refs/heads/${branch}`,
-    ])
-    // NOTE the lease is deliberately NOT re-observed between retries. Re-reading it would adopt
-    // whatever moved and turn the retry into the force this code exists to avoid.
-    if (!pushed.ok) throw new Error(publishFailureReason('push', branch, pushed.stderr))
+    // ALREADY PUBLISHED IS A SUCCESS THE PUBLISHER DID NOT HAVE TO PERFORM (3 occurrences
+    // 2026-08-17, runs 26ed32c1 / 88efe1ca / 95fcfb91). A resumed or relaunched run whose
+    // branch is already fully on origin used to be REFUSED here as "the build left no new
+    // commits to publish" — a finished, reviewed, PUSHED build recorded `failed`, and the
+    // natural relaunch rebuilt work that was already on origin. The remote holding EXACTLY
+    // `headToPublish` means the push is a NO-OP: resolve to that commit and continue.
+    // Compared against the POST-rebase head, not `resolvedHead` — a remote at the
+    // pre-rebase tip while the replay produced a new head still needs the real lease push.
+    // The genuine "nothing was built" outcome keeps its guard where it belongs: the empty
+    // base..head diff refusal below, which measures CONTENT against the base.
+    const alreadyPublished = remoteAlreadyAtPublishHead(expected, headToPublish)
+    if (!alreadyPublished) {
+      const pushed = await runWithRetries([
+        'git',
+        '-C',
+        run.repo_path,
+        'push',
+        `--force-with-lease=refs/heads/${branch}:${expected}`,
+        'origin',
+        `refs/heads/${branch}:refs/heads/${branch}`,
+      ])
+      // NOTE the lease is deliberately NOT re-observed between retries. Re-reading it would adopt
+      // whatever moved and turn the retry into the force this code exists to avoid.
+      if (!pushed.ok) throw new Error(publishFailureReason('push', branch, pushed.stderr))
 
-    const witnessed = await runWithRetries(
-      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
-    )
-    const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
-    if (remoteHead !== headToPublish) {
-      throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
+      const witnessed = await runWithRetries(
+        ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+      )
+      const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
+      if (remoteHead !== headToPublish) {
+        throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
+      }
     }
+    // On the no-op path the `observed` read above IS the witness: origin was measured at
+    // exactly `headToPublish` moments ago and this publisher performed no write since.
 
     // THE REFUSAL FIRES ONLY AFTER THE PUSH IS CONFIRMED (defect 2, 2026-08-14: the
     // throw preceded the push, so a wrong refusal left the commit unreachable —
@@ -1964,7 +1984,7 @@ export function buildTridentOrchestrator(
       run.repo_path,
     )
     if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
-    return { pr, head: headToPublish }
+    return { pr, head: headToPublish, push: alreadyPublished ? 'noop-already-at-head' : 'pushed' }
   }
 
   function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {
@@ -2427,7 +2447,10 @@ export function buildTridentOrchestrator(
           run: { ...run, ...resetPatch, last_advanced_at: now() },
           changed: true,
           waiting: false,
-          note: `outer publisher confirmed ${published.head} and PR #${published.pr} → re-fire review`,
+          note:
+            published.push === 'noop-already-at-head'
+              ? `outer publisher confirmed ${published.head} already on origin (push no-op — the ref was already correct) and PR #${published.pr} → re-fire review`
+              : `outer publisher confirmed ${published.head} and PR #${published.pr} → re-fire review`,
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)

@@ -25,6 +25,7 @@ import {
   type SystemEventSink,
 } from '@neutronai/persistence/index.ts'
 import {
+  MAX_PARK_MS,
   newCredentialPool,
   reportFailure,
   selectCredential,
@@ -300,7 +301,15 @@ test('all-cooldown invalidation: a DB-added credential is picked up WITHOUT an .
   // skips the still-wedged k1 and selects the newly-added k2 — NOT k1 with a
   // reset cooldown (which would reintroduce the Codex r1 P1 inert-cooldown bug).
   expect(c2!.id).toBe('anthropic:k2')
-  expect(pool2!.credentials.find((c) => c.id === 'anthropic:k1')!.cooldown_until).toBeDefined()
+  const carried = pool2!.credentials.find((c) => c.id === 'anthropic:k1')!
+  expect(carried.cooldown_until).toBeDefined()
+  // THE PARK'S START IS CARRIED TOO, not just its expiry. `MAX_PARK_MS` is measured
+  // from `cooldown_started_at`, so a re-resolve that dropped it would hand `park` a
+  // standing park with no anchor — the state that walked one six-hour park to 11h,
+  // 16h, then 21h under late reports. Asserting only `cooldown_until` (as this test
+  // did) stays green with the carry deleted, which is why the field is named here.
+  expect(carried.cooldown_started_at).toBeDefined()
+  expect(carried.cooldown_until! - carried.cooldown_started_at!).toBeLessThanOrEqual(MAX_PARK_MS)
 })
 
 test('all-cooldown WITHOUT a credential-set change: cooldown is preserved, wedged credential is NOT re-served (ISSUES #75 regression guard)', async () => {
