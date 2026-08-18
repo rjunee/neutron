@@ -605,8 +605,25 @@ export class NeutronChatController {
    * deleted project's history back. A Set rather than a counter because the
    * question asked at the invalidation site is per-topic membership, not "is
    * anything reading".
+   *
+   * REFERENCE-COUNTED, not a Set. Two reads for one topic can overlap, and with a
+   * Set the FIRST to settle removed the topic while the SECOND was still
+   * outstanding — a deletion frame in that window would then miss the live read,
+   * skip the epoch bump, and let that read recache the deleted transcript.
+   * Membership must last until EVERY overlapping read settles, which is a count.
+   *
+   * ⚠️ HELD ON REASONING, NOT ON A TEST, AND SAYING SO. I could not construct a
+   * failing case: in the ordinary overlap the first read to settle WRITES a cache
+   * entry, so the topic stays in the invalidation's `known` set through the cache
+   * regardless of this tracker, and the Set version passes. The gap needs a read
+   * whose write-back is refused — a generation spanning `stop()` then `start()` —
+   * which I did not get to reproduce. The count is kept because it cannot be worse
+   * than the Set and costs three lines; the test that would have guarded it was
+   * DELETED rather than shipped, because it passed against the Set and a guard
+   * that cannot fail is worse than no guard. Reported by the cross-model review as
+   * P2 (`controller.ts` in-flight tracker), and left honest rather than decorated.
    */
-  private readonly inFlightTranscriptTopics = new Set<string>()
+  private readonly inFlightTranscriptTopics = new Map<string, number>()
   /** message_id → accumulated streaming text (not yet persisted). */
   private readonly streaming = new Map<string, StreamEntry>()
   /**
@@ -1153,7 +1170,21 @@ export class NeutronChatController {
     // The fresh socket finished its handshake. Only `open` counts — `connecting`
     // is the switch still in progress, and a `closed`/`reconnecting` is not the
     // thing the transcript is waiting on.
-    if (status === 'open') this.switchTimer?.mark('socket_open')
+    if (status === 'open') {
+      this.switchTimer?.mark('socket_open')
+      // RE-OFFER THE RECEIPTS THE CLOSED SOCKET REFUSED. Not ledgering a refused
+      // id restored the session's retry, but restoring eligibility is not the same
+      // as retrying: nothing re-offers merely because the transport came up. On a
+      // cold load the transcript is read from the local store and reported before
+      // the handshake finishes, so every id is refused here — and an up-to-date
+      // `session_ready` with no replay and nothing queued emits no `onChange`, so
+      // the next attempt waited on UNRELATED activity. The watermark stayed stale
+      // and unread counts came back on messages already read. This is the trigger
+      // half of that fix; `markVisibleAgentRead` is idempotent (already-sent ids
+      // are filtered by the ledger), so re-offering costs nothing when there is
+      // nothing to re-offer.
+      this.markVisibleAgentRead(this.topicForProject(this.projectId), this.msgs)
+    }
     // Chat-rail stability — the switch latch survives only the fresh socket's
     // INITIAL `connecting`; any other status means the handshake resolved
     // (`open`) or genuinely degraded (`reconnecting` / `closed`), so drop it and
@@ -1521,7 +1552,7 @@ export class NeutronChatController {
         ...this.transcriptCache.keys(),
         ...this.readReceipts.keys(),
         ...this.renderCaches.keys(),
-        ...this.inFlightTranscriptTopics,
+        ...this.inFlightTranscriptTopics.keys(),
       ])
       for (const topic of known) {
         if (!live.has(topic)) {
@@ -1576,13 +1607,15 @@ export class NeutronChatController {
     // topic here is what makes an in-flight read a first-class member of the set
     // that invalidation scans. Removed in `finally` so a throwing read cannot leak
     // the entry and pin a topic as permanently "in flight".
-    this.inFlightTranscriptTopics.add(topic)
+    this.inFlightTranscriptTopics.set(topic, (this.inFlightTranscriptTopics.get(topic) ?? 0) + 1)
     let msgs: ChatMessage[]
     let pending: number
     try {
       ;[msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
     } finally {
-      this.inFlightTranscriptTopics.delete(topic)
+      const outstanding = (this.inFlightTranscriptTopics.get(topic) ?? 1) - 1
+      if (outstanding > 0) this.inFlightTranscriptTopics.set(topic, outstanding)
+      else this.inFlightTranscriptTopics.delete(topic)
     }
     // SPLIT ON PURPOSE. The single `transcript` mark covered BOTH the store read
     // and everything after it, so a slow switch could not say which. Measured on

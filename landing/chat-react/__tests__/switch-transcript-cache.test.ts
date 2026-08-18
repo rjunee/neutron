@@ -117,6 +117,20 @@ class StallableSession implements ControllerSession {
     this.waiters = []
     for (const w of waiters) w()
   }
+
+  /**
+   * Settle exactly ONE outstanding read, leaving any others pending.
+   *
+   * `release()` drains every waiter in one go, so two overlapping reads finish in
+   * the same tick and there is no window in which one has settled while the other
+   * has not. That window is the entire subject of the overlapping-read test — with
+   * `release()` alone that test passed against the very bug it was written for.
+   * `stalled` deliberately stays true so the NEXT read still blocks.
+   */
+  releaseOne(): void {
+    const w = this.waiters.shift()
+    if (w !== undefined) w()
+  }
 }
 
 function setup(opts: { now?: () => number } = {}): {
@@ -126,9 +140,13 @@ function setup(opts: { now?: () => number } = {}): {
   records: SwitchRecord[]
   /** Deliver a server frame through the session the controller is holding. */
   deliver: (topicId: string, frame: unknown) => void
+  /** Bring a topic's transport UP, the way a finished handshake does. */
+  openSocket: (topicId: string) => void
 } {
   const sessions = new Map<string, StallableSession>()
   const sinks = new Map<string, (frame: unknown) => void>()
+  /** Per-topic transport-status sink, so a test can bring the socket UP. */
+  const statusSinks = new Map<string, (status: 'open' | 'connecting' | 'closed' | 'reconnecting') => void>()
   const frames: ChatViewModel[] = []
   const records: SwitchRecord[] = []
   const controller = new NeutronChatController({
@@ -145,6 +163,7 @@ function setup(opts: { now?: () => number } = {}): {
     ...(opts.now !== undefined ? { switchTimingNow: opts.now } : {}),
     createSession: (sessionSinks, scope) => {
       sinks.set(scope.topicId, sessionSinks.onFrame)
+      statusSinks.set(scope.topicId, sessionSinks.onStatus)
       const existing = sessions.get(scope.topicId)
       if (existing !== undefined) return existing
       const s = new StallableSession(scope.topicId)
@@ -158,7 +177,12 @@ function setup(opts: { now?: () => number } = {}): {
     if (onFrame === undefined) throw new Error(`no frame sink for ${topicId}`)
     onFrame(frame)
   }
-  return { controller, sessions, frames, records, deliver }
+  const openSocket = (topicId: string): void => {
+    const onStatus = statusSinks.get(topicId)
+    if (onStatus === undefined) throw new Error(`no status sink for ${topicId}`)
+    onStatus('open')
+  }
+  return { controller, sessions, frames, records, deliver, openSocket }
 }
 
 /** Visit a project once so its transcript is known, then leave. */
@@ -474,6 +498,35 @@ describe('rows that are painted are rows that are read', () => {
     alpha.rows = [...alpha.rows, msg('app:owner:alpha', 3)]
     await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
     expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-3'])
+  })
+
+  it('RE-OFFERS refused receipts the moment the socket opens, without waiting for a change', async () => {
+    // Not ledgering a refused id RESTORES the retry; it does not PERFORM one.
+    // Nothing re-offers merely because the transport came up, and on a cold load
+    // every id is refused — the transcript is read from the local store and
+    // reported before the handshake finishes. An up-to-date `session_ready` with
+    // no replay and nothing queued emits no `onChange`, so the next attempt waited
+    // on unrelated activity and the watermark stayed stale.
+    const { controller, sessions, openSocket } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
+      msg('app:owner:alpha', 1, 'agent'),
+    ])
+    const alpha = sessions.get('app:owner:alpha')!
+
+    // The socket was down for the hydrating read: offered, refused, NOT ledgered.
+    alpha.socketOpen = false
+    alpha.readsRead.length = 0
+    alpha.rows = [...alpha.rows, msg('app:owner:alpha', 2, 'agent')]
+    await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
+    expect(alpha.readsRead.flat()).toContain('mid-app:owner:alpha-2')
+
+    // Now the handshake finishes and NOTHING else happens — no new message, no
+    // frame, no switch. The receipt must go out on that alone.
+    alpha.socketOpen = true
+    alpha.readsRead.length = 0
+    openSocket('app:owner:alpha')
+    await tick()
+    expect(alpha.readsRead.flat()).toContain('mid-app:owner:alpha-2')
   })
 
   it('a receipt the socket REFUSED is offered again, not ledgered as sent', async () => {

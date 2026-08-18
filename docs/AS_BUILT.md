@@ -24808,3 +24808,36 @@ pinned the defect as the desired behaviour. The stub now models a closed socket.
 **SYSTEM-OVERVIEW.md changes:** none (bug fix inside existing modules; no new module,
 HTTP surface, lifecycle behaviour, deploy step or env flag — `markRead`'s return type
 is a widened contract on an existing method, not a new surface).
+
+### Follow-up — the cross-model review found the receipt fix was only half of one
+
+Codex reviewed the change above and returned two findings.
+
+**A refused receipt was made ELIGIBLE for retry, and nothing retried.** Not
+ledgering a refused id restores the session's retry contract; it does not perform
+one. `handleStatus('open')` only published, and an up-to-date `session_ready` with
+no replay and nothing queued emits no `onChange` — so on a cold load, where the
+transcript is read from the local store and reported before the handshake finishes
+and therefore refused wholesale, the next attempt waited on UNRELATED activity. The
+watermark stayed stale exactly as before, just for a different reason. The socket's
+transition to `open` now re-offers; `markVisibleAgentRead` is idempotent (the ledger
+filters ids already confirmed sent), so it costs nothing when there is nothing owed.
+
+**The in-flight tracker is now reference-counted rather than a Set** — two reads for
+one topic can overlap, and the first to settle removed membership while the second
+was still outstanding.
+
+📌 **That second one is kept on REASONING and the guard for it was DELETED rather
+than shipped.** The test I wrote passed against the Set, because in the ordinary
+overlap the first read to settle writes a cache entry, which keeps the topic in the
+invalidation's `known` set through the cache no matter what the tracker says. The
+real gap needs a read whose write-back is refused — a generation spanning `stop()`
+then `start()` — which was not reproduced. A guard that cannot fail for the reason
+under test is worse than no guard: it reads as coverage. The count is retained
+because it cannot be worse than the Set and costs three lines, and
+`controller.ts` says so at the declaration.
+
+**Mutation:** removing the socket-open re-offer reds "RE-OFFERS refused receipts the
+moment the socket opens" (28 pass / 1 fail). Restored: 29 pass / 0 fail on that
+suite, 208 pass / 0 fail across it plus `switch-render-cost` and `chat-core`,
+`bunx tsc --noEmit` 0 errors.
