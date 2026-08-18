@@ -431,6 +431,7 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {
         hostCalls.push(cmd)
+        if (cmd.includes('refs/remotes/origin/main^{commit}')) return ok('a'.repeat(40))
         return ok()
       },
       base_branch: 'main',

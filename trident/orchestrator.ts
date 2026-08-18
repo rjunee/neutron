@@ -1348,6 +1348,29 @@ export async function rebaseOntoObservedBase(
       // exactly as an unconflicted apply would — and still faces the full review gate.
       autoResolved = [...everConflicted]
     }
+    // THE REPLAY NOTE IS METADATA, NEVER A SUBJECT. This was measured on main in e6d4610d
+    // (#354), 47144a2a (#348), bce629e2 (#327), and d2680a09 (#328): every PR title on
+    // 2026-08-17/18 was this replay string instead of the builder's subject. Carrying `%B` makes
+    // the note body-only metadata. A replay of a replay reads that carried message again, so the
+    // original subject survives arbitrarily many replays and every replay appends exactly one
+    // provenance line. The read fails CLOSED: committing the note alone when git cannot read the
+    // original would silently reproduce the measured defect precisely when git is broken.
+    const replayNote =
+      `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`
+    const originalMessage = await run_host(
+      ['git', '-C', scratchDir, 'log', '-1', '--format=%B', oldHead],
+      scratchDir,
+    )
+    if (!originalMessage.ok)
+      throw new Error(
+        publishFailureReason(
+          'read the commit message of',
+          branch,
+          originalMessage.stderr || 'git log -1 failed with no output',
+        ),
+      )
+    const carried = originalMessage.stdout.trim()
+    const commitMessage = carried === '' ? replayNote : `${carried}\n\n${replayNote}`
     const committed = await run_host(
       [
         'git',
@@ -1359,7 +1382,7 @@ export async function rebaseOntoObservedBase(
         'user.email=trident@neutron.local',
         'commit',
         '-m',
-        `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`,
+        commitMessage,
       ],
       scratchDir,
     )
@@ -2120,8 +2143,8 @@ export function buildTridentOrchestrator(
       }
     }
 
-    const freshBuild = resume_checkpoint_name === '' && launchRun.branch === null
-    let base_sha: string | null = null
+    const freshBuild = launchRun.inner_checkpoint === null && launchRun.base_sha === null
+    let base_sha: string | null = launchRun.base_sha
     let base_behind: number | null = null
     if (freshBuild && launchRun.merge_mode === 'pr') {
       const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
