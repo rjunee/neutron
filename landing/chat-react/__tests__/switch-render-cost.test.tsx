@@ -9,7 +9,7 @@
  * separately, was that a switch re-rendered transcripts that were NOT on screen and
  * had NOT changed. On a two-project harness, one warm switch before and after:
  *
- *      surface renders   4 -> 2      (the background conversations stop re-rendering)
+ *      surface renders   4 -> 2      (only the surface left and the one entered)
  *      message conversions   N -> 0  (N = every message in the entered project)
  *      controller publishes  2 -> 1  (the refresh that changes nothing stops notifying)
  *
@@ -255,12 +255,19 @@ describe('re-entering a project whose transcript did not change', () => {
 })
 
 describe('a switch re-renders the surfaces whose visibility changed, and no others', () => {
-  it('leaves every background conversation untouched and converts no message', async () => {
+  it('re-renders ONLY the surface left and the surface entered, by name', async () => {
     // `ChatApp` renders EVERY mounted conversation on every publish. Without the memo,
     // each of those re-rendered its whole thread machinery at a cost proportional to ITS
     // message count — so switching to an empty conversation still paid for two 533-row
-    // transcripts nobody was looking at. The counter below is per-surface: one
-    // `useChatRuntime` call is one surface render.
+    // transcripts nobody was looking at.
+    //
+    // ⚠️ THE COUNTER RECORDS WHICH SURFACE RENDERED, NOT HOW MANY DID. A total of `2`
+    // is satisfied by the two right surfaces AND by two entirely wrong ones — so a
+    // total alone cannot support the claim this case exists to make ("the conversation
+    // nobody touched renders zero times"), and the earlier version of it asserted a
+    // total while its own name claimed the stronger thing. `useChatRuntime` is handed
+    // the surface's own view-model, so `vm.projectId` names the surface that rendered
+    // and the assertion can be about identity instead of arithmetic.
     const realChat = await import('../useNeutronChat.ts')
     const realAdapter = await import('../message-adapter.ts')
     // SNAPSHOT the originals before mocking, for two separate reasons — both of which
@@ -274,12 +281,12 @@ describe('a switch re-renders the surfaces whose visibility changed, and no othe
     const adapterPath = new URL('../message-adapter.ts', import.meta.url).pathname
     const chatExports = { ...realChat }
     const adapterExports = { ...realAdapter }
-    let surfaceRenders = 0
+    let renderedSurfaces: Array<string | null> = []
     let conversions = 0
     mock.module(chatPath, () => ({
       ...chatExports,
       useChatRuntime: ((...args: Parameters<typeof chatExports.useChatRuntime>) => {
-        surfaceRenders += 1
+        renderedSurfaces.push(args[1].projectId)
         return chatExports.useChatRuntime(...args)
       }) as typeof chatExports.useChatRuntime,
     }))
@@ -347,7 +354,7 @@ describe('a switch re-renders the surfaces whose visibility changed, and no othe
       })
       expect(container.querySelectorAll('.car-conv').length).toBe(3)
 
-      surfaceRenders = 0
+      renderedSurfaces = []
       conversions = 0
       await act(async () => {
         controller.setProject('beta')
@@ -355,11 +362,12 @@ describe('a switch re-renders the surfaces whose visibility changed, and no othe
         await tick()
       })
 
-      // Exactly the two surfaces whose `active` flipped — alpha out, beta in. General
-      // stays mounted and must not render at all. This is `2`, not `<= 2`: an off-by-one
-      // here means a surface is re-rendering for a reason nobody intended, which is the
-      // whole defect.
-      expect(surfaceRenders).toBe(2)
+      // Exactly the two surfaces whose `active` flipped — alpha out, beta in — each
+      // exactly once. General is mounted (it is the third `.car-conv` asserted above)
+      // and was neither entered nor left, so its ABSENCE from this list is the claim:
+      // a total of 2 would hold just as well if General had re-rendered and beta had
+      // not, which is a different system with the same arithmetic.
+      expect([...renderedSurfaces].sort()).toEqual(['alpha', 'beta'])
       // And no message is re-converted: beta's rows kept their identities, so
       // assistant-ui's per-identity converter cache holds across the switch.
       expect(conversions).toBe(0)
@@ -406,9 +414,14 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     expect(r.marks.transcript).toBeUndefined()
   })
 
-  it('a switch that had nothing cached still WAITS for the transcript', async () => {
-    // The discriminating case. Same five marks, same order — only the frame the owner
-    // was looking at differs, which is why the timer is TOLD rather than left to infer.
+  it('a switch that had nothing cached is over at the paint OF THE TRANSCRIPT', async () => {
+    // The discriminating case, and the one whose MARK ORDER is the whole point. A cold
+    // switch publishes an empty frame first; if `frame_rendered` were stamped against
+    // THAT paint it would land at 9 ms, the record would settle on a blank pane, and the
+    // instrument would once again be reporting a step the owner did not sit through —
+    // the original bug, one mark along. So the paint mark comes AFTER `transcript`, and
+    // the controller is what guarantees it (see the case below, which drives the real
+    // `setProject`).
     const { SwitchTimer } = await import('../switch-timing.ts')
     const records: import('../switch-timing.ts').SwitchRecord[] = []
     let t = 0
@@ -419,16 +432,72 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     })
     t = 4
     timer.mark('vm_published')
-    t = 9
-    timer.mark('frame_rendered')
-    expect(records).toHaveLength(0)
-
     t = 800
     timer.mark('transcript_read')
     t = 820
     timer.mark('transcript')
+    // Every REQUIRED mark is in and the paint is not — the record waits for it rather
+    // than settling on the number it already has.
+    expect(records).toHaveLength(0)
+
+    t = 838
+    timer.mark('frame_rendered')
     expect(records).toHaveLength(1)
-    expect(records[0]!.total).toBe(820)
+    expect(records[0]!.total).toBe(838)
     expect(records[0]!.servedFromCache).toBe(false)
+    expect(records[0]!.incomplete).toBe(false)
+  })
+
+  it('an ABANDONED switch is never reported complete, however few marks it needs', async () => {
+    // `supersede()` used to flush without saying why, and `incomplete` was derived from
+    // the marks alone. A cache-served switch's only required mark is `vm_published`,
+    // stamped in the first millisecond — so a switch the owner gave up on at 40 ms
+    // entered the sample as a COMPLETE 0.3 ms switch. Rapid clicking, which is what
+    // someone does when switching is slow, would then pull p50/p90 down: the metric
+    // improves precisely because the product is bad enough to be abandoned.
+    const { SwitchTimer } = await import('../switch-timing.ts')
+    const records: import('../switch-timing.ts').SwitchRecord[] = []
+    let t = 0
+    const timer = new SwitchTimer('alpha', 'beta', {
+      now: () => t,
+      emit: (r) => records.push(r),
+      paintSettleMs: 5_000,
+    })
+    timer.servedFromCache()
+    t = 0.3
+    timer.mark('vm_published')
+    expect(records).toHaveLength(0)
+
+    t = 40
+    timer.supersede()
+    expect(records).toHaveLength(1)
+    expect(records[0]!.superseded).toBe(true)
+    expect(records[0]!.incomplete).toBe(true)
+  })
+
+  it('a switch that FINISHED is not retroactively abandoned by the next click', async () => {
+    // The control for the case above: `supersede` must only be able to condemn a record
+    // that had not flushed. A guard that marked every timer superseded on the next
+    // switch would make every switch incomplete, which passes "no flattering samples"
+    // by destroying the sample.
+    const { SwitchTimer } = await import('../switch-timing.ts')
+    const records: import('../switch-timing.ts').SwitchRecord[] = []
+    let t = 0
+    const timer = new SwitchTimer('alpha', 'beta', {
+      now: () => t,
+      emit: (r) => records.push(r),
+      paintSettleMs: 5,
+    })
+    timer.servedFromCache()
+    t = 4
+    timer.mark('vm_published')
+    t = 9
+    timer.mark('frame_rendered')
+    expect(records).toHaveLength(1)
+
+    timer.supersede()
+    expect(records).toHaveLength(1)
+    expect(records[0]!.superseded).toBe(false)
+    expect(records[0]!.incomplete).toBe(false)
   })
 })

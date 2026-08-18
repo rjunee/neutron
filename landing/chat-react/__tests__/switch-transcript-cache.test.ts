@@ -108,7 +108,7 @@ class StallableSession implements ControllerSession {
   }
 }
 
-function setup(): {
+function setup(opts: { now?: () => number } = {}): {
   controller: NeutronChatController
   sessions: Map<string, StallableSession>
   frames: ChatViewModel[]
@@ -128,6 +128,10 @@ function setup(): {
     ],
     topicForProject: (p) => (p === null ? 'app:owner' : `app:owner:${p}`),
     switchTimingEmit: (r) => records.push(r),
+    // An injected clock where a case asserts on the ORDER of two marks: real
+    // `performance.now()` puts both within a millisecond of each other, so the
+    // assertion would hold whichever frame the mark was stamped against.
+    ...(opts.now !== undefined ? { switchTimingNow: opts.now } : {}),
     createSession: (sessionSinks, scope) => {
       sinks.set(scope.topicId, sessionSinks.onFrame)
       const existing = sessions.get(scope.topicId)
@@ -163,6 +167,36 @@ async function visit(
   s.pending = pending
   // A live change (an inbound frame) is what refreshes the controller's read.
   await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
+}
+
+/**
+ * Fill a topic's transcript cache with rows the controller has NOT acknowledged —
+ * the only state in which the cached frame's read receipts are the ones that matter.
+ *
+ * It is produced the way production produces it: a read that lands after the owner has
+ * already switched away. That read FILES its rows (they belong to that topic) and then
+ * bails at the session-changed-underfoot guard, which sits before the receipts. So the
+ * next entry into the topic is the first thing that can acknowledge them.
+ *
+ * `away` must differ from the topic being seeded — a `setProject` back to the current
+ * project returns early, the session never changes, and the guard never trips.
+ */
+async function seedUnacknowledged(
+  controller: NeutronChatController,
+  sessions: Map<string, StallableSession>,
+  projectId: string,
+  topicId: string,
+  rows: ChatMessage[],
+  away: string | null,
+): Promise<void> {
+  const s = sessions.get(topicId)
+  if (s === undefined) throw new Error(`no session for ${topicId}`)
+  s.rows = rows
+  s.stalled = true
+  controller.setProject(projectId)
+  controller.setProject(away)
+  s.release()
+  await tick()
 }
 
 describe('a project switch does not block on the store read', () => {
@@ -331,11 +365,16 @@ describe('rows that are painted are rows that are read', () => {
     // owner is looking at unacknowledged, the server watermark never advances, and
     // its next `projects_changed` restores the unread badge this switch cleared.
     const { controller, sessions } = setup()
-    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
-      msg('app:owner:alpha', 1),
-      msg('app:owner:alpha', 2),
-    ])
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [])
     await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+    await seedUnacknowledged(
+      controller,
+      sessions,
+      'alpha',
+      'app:owner:alpha',
+      [msg('app:owner:alpha', 1), msg('app:owner:alpha', 2)],
+      'beta',
+    )
 
     const alpha = sessions.get('app:owner:alpha')!
     // Hold the store open for the whole switch: any receipt that arrives is one
@@ -351,8 +390,16 @@ describe('rows that are painted are rows that are read', () => {
   it('routes those receipts through the ENTERED project’s session, never the one left', async () => {
     // The invariant the underfoot guard exists for, on the new synchronous path.
     const { controller, sessions } = setup()
-    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [])
     await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 5)])
+    await seedUnacknowledged(
+      controller,
+      sessions,
+      'alpha',
+      'app:owner:alpha',
+      [msg('app:owner:alpha', 1)],
+      'beta',
+    )
 
     const alpha = sessions.get('app:owner:alpha')!
     const beta = sessions.get('app:owner:beta')!
@@ -370,19 +417,52 @@ describe('rows that are painted are rows that are read', () => {
 
   it('reports only agent rows, so a receipt cannot light the owner’s own read tick', async () => {
     const { controller, sessions } = setup()
-    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
-      msg('app:owner:alpha', 1, 'user'),
-      msg('app:owner:alpha', 2, 'agent'),
-    ])
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [])
     await visit(controller, sessions, 'beta', 'app:owner:beta', [])
+    await seedUnacknowledged(
+      controller,
+      sessions,
+      'alpha',
+      'app:owner:alpha',
+      [msg('app:owner:alpha', 1, 'user'), msg('app:owner:alpha', 2, 'agent')],
+      'beta',
+    )
 
     const alpha = sessions.get('app:owner:alpha')!
-    alpha.stalled = true
     alpha.readsRead.length = 0
+    alpha.stalled = true
     controller.setProject('alpha')
 
     expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-2'])
     alpha.release()
+  })
+
+  it('acknowledges each agent message ONCE, not on every switch and every frame', async () => {
+    // `markVisibleAgentRead` runs from the cached frame AND from the resolved read, and
+    // again on every inbound frame — and it used to rebuild the FULL id list each time.
+    // On the owner's biggest topic that is 533 ids re-sent per call, for the life of the
+    // conversation, on the exact path being optimised. Nothing was incorrect (the wire
+    // de-dups); it was pure O(transcript) work to tell the server what it already knew.
+    const { controller, sessions } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
+      msg('app:owner:alpha', 1),
+      msg('app:owner:alpha', 2),
+    ])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [])
+    const alpha = sessions.get('app:owner:alpha')!
+    expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-1', 'mid-app:owner:alpha-2'])
+
+    alpha.readsRead.length = 0
+    controller.setProject('alpha')
+    await tick()
+    // Both the cached frame and the read that follows it find nothing unacknowledged,
+    // so neither sends anything at all — not "one call instead of two".
+    expect(alpha.readsRead).toHaveLength(0)
+
+    // Suppression is not silence: a NEW agent message is acknowledged, and alone.
+    alpha.rows = [...alpha.rows, msg('app:owner:alpha', 3)]
+    await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
+    expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-3'])
   })
 })
 
@@ -441,7 +521,11 @@ describe('the cache has a lifecycle, not just a size', () => {
     expect(frames[0]!.messages.map((m) => m.text)).toEqual(['app:owner:alpha message 1'])
   })
 
-  it('stop() drops every cached transcript — a stopped controller holds no chat', async () => {
+  it('stop() drops every cached transcript, so no later switch can paint from one', async () => {
+    // The claim is about the CACHE, not about the controller's current frame: a stopped
+    // controller still exposes the conversation it was last showing (blanking it would
+    // clear the surface between the unmount and the remount of a development
+    // double-invoke). What it must not do is paint a topic it is no longer connected to.
     const { controller, sessions, frames } = setup()
     await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
     await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
@@ -452,6 +536,71 @@ describe('the cache has a lifecycle, not just a size', () => {
     controller.setProject('alpha')
     expect(frames[0]!.messages).toHaveLength(0)
     sessions.get('app:owner:alpha')!.release()
+  })
+
+  it('A READ IN FLIGHT CANNOT REFILL THE CACHE stop() JUST EMPTIED', async () => {
+    // `stop()` clearing the map is not the same as the cache being empty afterwards.
+    // The write-back in `handleChange` runs BEFORE the session guard — deliberately, so
+    // a read that lands after a switch still files its rows under their own topic — and
+    // it therefore also runs after a `stop()`, re-creating the entry milliseconds after
+    // the clear. The invariant the case above asserts was true only for as long as no
+    // read happened to be outstanding, which is exactly when a stop is most likely.
+    const { controller, sessions, frames } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    const alpha = sessions.get('app:owner:alpha')!
+    alpha.stalled = true
+    controller.setProject('alpha')
+    controller.stop()
+    alpha.release()
+    await tick()
+
+    controller.setProject('beta')
+    alpha.stalled = true
+    frames.length = 0
+    controller.setProject('alpha')
+    expect(frames[0]!.messages).toHaveLength(0)
+    alpha.release()
+  })
+
+  it('A READ IN FLIGHT CANNOT RESURRECT A DELETED PROJECT’S TRANSCRIPT', async () => {
+    // Same mechanism as the stop() case, aimed at the worse consequence. The deletion
+    // sweep drops the entry, and an outstanding read for that topic puts it straight
+    // back — so a project recreated under the same id paints the DEAD project's history
+    // into its first frame, after the code written to prevent exactly that had run and
+    // reported success.
+    const { controller, sessions, frames, deliver } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    const alpha = sessions.get('app:owner:alpha')!
+    alpha.stalled = true
+    controller.setProject('alpha')
+    // Leave, so alpha is no longer the active topic the sweep protects.
+    controller.setProject('beta')
+
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'beta', label: 'Beta' }],
+      ts: 1,
+    })
+    // The read alpha still owes resolves NOW, carrying the deleted project's rows.
+    alpha.release()
+    await tick()
+
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'beta', label: 'Beta' }, { id: 'alpha', label: 'Alpha (new)' }],
+      ts: 2,
+    })
+    alpha.rows = []
+
+    frames.length = 0
+    controller.setProject('alpha')
+    expect(frames[0]!.messages).toHaveLength(0)
   })
 
   it('orders by last USE, so the project the owner keeps returning to survives', async () => {
@@ -694,5 +843,120 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
       if (original === undefined) delete g.requestAnimationFrame
       else g.requestAnimationFrame = original
     }
+  })
+})
+
+describe('the paint mark times the frame the owner came to see', () => {
+  it('A COLD SWITCH SCHEDULES NO PAINT MARK AGAINST ITS EMPTY FRAME', async () => {
+    // The instrument's whole claim is that `frame_rendered` is when the owner's picture
+    // appeared. A cold switch publishes an EMPTY frame first and the transcript one
+    // later; scheduling the mark against the first stamps it on a blank pane, the record
+    // settles on that number, and the switch reports as over while he is still looking
+    // at nothing. That is the original misattribution — an instrument reporting a step
+    // that is not the step being waited through — reappearing inside the fix for it.
+    //
+    // Asserted as ORDER, not as elapsed time (a wall-clock bound measures the runner).
+    // rAF is ours here, so "was a frame scheduled yet" is a direct question.
+    const g = globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }
+    const original = g.requestAnimationFrame
+    let frameCb: (() => void) | null = null
+    g.requestAnimationFrame = (cb: () => void): number => {
+      frameCb = cb
+      return 1
+    }
+    const takeScheduledFrame = (): (() => void) => {
+      if (frameCb === null) throw new Error('no frame was scheduled')
+      const cb = frameCb
+      frameCb = null
+      return cb
+    }
+    try {
+      let clock = 0
+      const { controller, sessions, records } = setup({ now: () => clock })
+      await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+
+      records.length = 0
+      frameCb = null
+      // `gamma` has never been visited, so nothing is cached and the first frame is empty.
+      controller.setProject('gamma')
+      expect(frameCb).toBeNull()
+
+      clock = 500
+      await tick()
+      // The transcript has now been published, and THAT is the frame worth timing.
+      expect(frameCb).not.toBeNull()
+
+      clock = 900
+      takeScheduledFrame()()
+      await tick()
+      await tick()
+
+      const record = records.find((r) => r.to === 'gamma')
+      expect(record).toBeDefined()
+      expect(record!.servedFromCache).toBe(false)
+      expect(record!.marks.transcript).toBe(500)
+      expect(record!.marks.frame_rendered).toBe(900)
+      expect(record!.incomplete).toBe(false)
+      // The control that stops the assertions above passing for the wrong reason:
+      // scheduled against the empty frame the mark lands at 0 — EARLIER than the
+      // transcript it is supposed to follow, not later.
+      expect(record!.marks.frame_rendered!).toBeGreaterThan(record!.marks.transcript!)
+    } finally {
+      if (original === undefined) delete g.requestAnimationFrame
+      else g.requestAnimationFrame = original
+    }
+  })
+
+  it('a cache hit on an UNREAD project is not a switch that ended at the paint', async () => {
+    // A topic's session sinks are discarded while it is inactive, so nothing refreshed
+    // its cache while the owner was away — and an unread count is the server saying a
+    // message arrived that the cache therefore cannot hold. Painting instantly is still
+    // right; calling the switch OVER at that paint is not, because the message he
+    // clicked in to read is still behind the store read.
+    const { controller, sessions, records, deliver } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [
+        { id: 'alpha', label: 'Alpha', unread: 2 },
+        { id: 'beta', label: 'Beta' },
+      ],
+      ts: 1,
+    })
+
+    records.length = 0
+    const alpha = sessions.get('app:owner:alpha')!
+    alpha.rows = [msg('app:owner:alpha', 1), msg('app:owner:alpha', 2)]
+    controller.setProject('alpha')
+    // The frame is still instant — his history is on screen before the store is asked.
+    expect(controller.getViewModel().messages).toHaveLength(1)
+    await new Promise((r) => setTimeout(r, 400))
+
+    const record = records.find((r) => r.to === 'alpha')
+    expect(record).toBeDefined()
+    expect(record!.servedFromCache).toBe(false)
+    // …and the record waited for the message the badge promised.
+    expect(record!.marks.transcript).toBeDefined()
+    expect(controller.getViewModel().messages).toHaveLength(2)
+  })
+
+  it('a READ project’s cache hit still ends at the paint — the control', async () => {
+    // Without this, "treat every cache hit as stale" would pass the case above while
+    // throwing away the entire measurement the branch exists to make.
+    const { controller, sessions, records } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    records.length = 0
+    controller.setProject('alpha')
+    await new Promise((r) => setTimeout(r, 400))
+
+    const record = records.find((r) => r.to === 'alpha')
+    expect(record).toBeDefined()
+    expect(record!.servedFromCache).toBe(true)
+    expect(record!.incomplete).toBe(false)
   })
 })

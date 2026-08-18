@@ -181,8 +181,25 @@ export interface SwitchRecord {
    * it; see {@link ABSENCE_IS_NORMAL_WHEN_CACHED}.
    */
   readonly total: number
-  /** True when the record was flushed by the deadline rather than by completing. */
+  /**
+   * True when this switch did not finish: a mark whose absence is a failure is
+   * missing, OR the owner abandoned it by clicking somewhere else (see
+   * {@link superseded}).
+   */
   readonly incomplete: boolean
+  /**
+   * True when the owner clicked a THIRD project before this switch settled, so the
+   * record is a partial observation of a switch he walked away from.
+   *
+   * It is a field rather than an inference because a cache-served switch's only
+   * required mark is `vm_published`, which is stamped in the first millisecond — so
+   * an abandoned switch reaches "every required mark is in" and, judged on the marks
+   * alone, is indistinguishable from a genuinely instant one. Rapid consecutive
+   * switches would then enter the sample as complete sub-millisecond switches and
+   * pull p50/p90 DOWN — flattering, by construction, the exact metric that is
+   * supposed to judge whether switching got faster.
+   */
+  readonly superseded: boolean
   /**
    * True when the first frame carried the entered topic's transcript from cache, so
    * the owner never waited on the store. It changes which marks are REQUIRED and
@@ -254,6 +271,8 @@ export class SwitchTimer {
    *  `total`, and rides out on the record so the reader can derive the rest; never
    *  changes what is measured, only what it is called. */
   private cached = false
+  /** See {@link SwitchRecord.superseded}. Set by {@link supersede} before it flushes. */
+  private superseded = false
 
   constructor(
     private readonly from: string | null,
@@ -305,19 +324,31 @@ export class SwitchTimer {
     }
   }
 
-  /** Abandon this switch — the user clicked somewhere else. Reports what it had. */
+  /**
+   * Abandon this switch — the user clicked somewhere else. Reports what it had,
+   * CARRYING THE CAUSE: an abandoned switch is never `complete`, however many marks
+   * it happened to collect before the owner gave up on it. See {@link SwitchRecord.superseded}.
+   */
   supersede(): void {
+    this.superseded = true
     this.flush()
   }
 
   /**
    * Emit exactly once, whatever brought us here.
    *
-   * `incomplete` is DERIVED from the marks rather than passed in by the caller:
-   * every flush path (final mark, paint settle, deadline, supersede) then agrees
-   * on one definition — "a mark whose absence is a failure is missing" — and a
-   * hidden tab that reached every required mark reports complete instead of the
-   * deadline path stamping it a failure because of the clock that woke it.
+   * `incomplete` is DERIVED rather than passed in by the caller, from exactly two
+   * facts the timer owns: a mark whose absence is a failure is missing, or the switch
+   * was abandoned. Every flush path (final mark, paint settle, deadline, supersede)
+   * then agrees on one definition, and a hidden tab that reached every required mark
+   * reports complete instead of the deadline path stamping it a failure because of
+   * the clock that woke it.
+   *
+   * The abandonment half is not decoration. Deriving `incomplete` from the MARKS
+   * ALONE silently reclassified every abandoned cache-served switch as complete,
+   * because such a switch requires only `vm_published` — so a burst of rapid clicks
+   * entered the sample as a run of sub-millisecond successes. A metric that gets
+   * better the more the owner gives up on it is worse than no metric.
    */
   private flush(): void {
     if (this.flushed) return
@@ -331,7 +362,9 @@ export class SwitchTimer {
       to: this.to,
       marks: { ...this.marks },
       total: seen.length > 0 ? Math.max(...seen) : 0,
-      incomplete: this.requiredMarks.some((m) => this.marks[m] === undefined),
+      incomplete:
+        this.superseded || this.requiredMarks.some((m) => this.marks[m] === undefined),
+      superseded: this.superseded,
       servedFromCache: this.cached,
     })
   }
@@ -398,18 +431,28 @@ function defaultEmit(r: SwitchRecord): void {
     if (r.marks[mark] === undefined) parts.push(`${reason}=${mark}`)
   }
   if (missing.length > 0) parts.push(`never_arrived=${missing.join(',')}`)
+  // Named, because `incomplete` alone would read as "this switch broke" for a
+  // switch the owner simply walked away from — two very different diagnoses.
+  if (r.superseded) parts.push('abandoned=superseded')
   console.info(`[project-switch] ${parts.join(' ')}`)
 }
 
 /**
  * Build the persisted perf report without ever accepting or embedding a bearer.
  *
- * `schema: 3` because `total` SILENTLY CHANGED MEANING — twice, for the same reason
- * both times, which is why the id is bumped rather than reasoned about. v3 stops a
- * CACHE-SERVED switch's `total` at the paint instead of at the background refresh that
- * followed it, so a v2 sample and a v3 sample of the identical switch differ by
- * seconds. A gap in the numbering is free; a collision is a wrong comparison nobody
- * can detect afterwards, so the id moves whenever the definition does.
+ * `schema: 4` because a REPORTED FIELD CHANGED MEANING — the id moves whenever a
+ * definition does, without exception, because a gap in the numbering is free and a
+ * collision is a wrong comparison nobody can detect afterwards.
+ *
+ * v4: `incomplete` now also covers ABANDONED switches. Under v3 an abandoned
+ * cache-served switch reported complete (its only required mark is stamped in the
+ * first millisecond), so filtering a v3 sample on `incomplete === false` and a v4
+ * sample the same way selects different populations — v3's includes clicks the owner
+ * gave up on, at sub-millisecond `total`s that drag the percentiles down.
+ *
+ * v3: `total` stops a CACHE-SERVED switch at the paint instead of at the background
+ * refresh that followed it, so a v2 sample and a v3 sample of the identical switch
+ * differ by seconds.
  *
  * The v2 rationale, which still holds: It is the largest mark
  * seen, and `frame_rendered` is normally the last one, so a v2 `total` includes
@@ -421,7 +464,7 @@ function defaultEmit(r: SwitchRecord): void {
  */
 export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebClientReport {
   return {
-    schema: 3,
+    schema: 4,
     report_id: `web-switch-${createdAt}-${randomId()}`,
     created_at: createdAt,
     origin: globalThis.location?.origin ?? '',
@@ -432,13 +475,18 @@ export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebC
       at: createdAt,
       level: 'info',
       kind: 'project_switch',
-      message: r.incomplete ? 'Project switch incomplete' : 'Project switch complete',
+      message: r.superseded
+        ? 'Project switch abandoned'
+        : r.incomplete
+          ? 'Project switch incomplete'
+          : 'Project switch complete',
       context: {
         from: r.from,
         to: r.to,
         marks: { ...r.marks },
         total: r.total,
         incomplete: r.incomplete,
+        superseded: r.superseded,
         served_from_cache: r.servedFromCache,
       },
     }],

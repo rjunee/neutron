@@ -556,6 +556,29 @@ export class NeutronChatController {
    * once. Cleared by `stop()`: a stopped controller holds no transcript.
    */
   private readonly transcriptCache = new Map<string, { msgs: ChatMessage[]; pending: number }>()
+  /**
+   * Bumped every time cached transcripts are INVALIDATED — by `stop()`, or by a
+   * `projects_changed` frame that reports a project gone. `handleChange` captures it
+   * synchronously and refuses to file a read that resolved across a bump.
+   *
+   * ── WHY A COUNTER AND NOT THE SESSION GUARD ──────────────────────────────────
+   * The write-back deliberately runs BEFORE the session-changed-underfoot check, so
+   * a read that lands after the owner has already switched away still files its rows
+   * under the topic they belong to — that is what makes the NEXT entry into that
+   * topic paint instantly. Correct for a switch, and exactly wrong for an
+   * invalidation: an in-flight read is a live reference to a transcript the
+   * controller has just been told to forget, and it re-created the entry moments
+   * after the clear. A deleted project's history could then paint into the project
+   * recreated under its id, and a stopped controller could paint a transcript on
+   * restart — both of them AFTER the code that exists to prevent exactly that had
+   * run and succeeded.
+   *
+   * A single counter over-invalidates: one deletion also drops the unrelated reads
+   * in flight beside it. That costs those topics one re-read on next entry, which is
+   * the same asymmetry the deletion branch is already decided on — over-invalidating
+   * is free, under-invalidating paints the wrong history.
+   */
+  private transcriptCacheEpoch = 0
   /** message_id → accumulated streaming text (not yet persisted). */
   private readonly streaming = new Map<string, StreamEntry>()
   /**
@@ -590,8 +613,14 @@ export class NeutronChatController {
    * change bypasses `React.memo`, and assistant-ui's converter cache is keyed on
    * message identity — so a switch BACK into a project whose transcript had not
    * changed by one byte re-converted and re-rendered every row in it. Keyed by
-   * topic, the same switch reuses both the row objects and the array, the memos
-   * hold, and the incoming surface re-renders nothing.
+   * topic, the same switch reuses both the row objects and the array, so the memos
+   * hold and no message is re-converted.
+   *
+   * What a switch still costs, stated exactly because the loose version of it ("no
+   * background conversation re-renders") is the kind of universal nobody can check:
+   * the two surfaces whose `active` flag flipped re-render, and only those two. A
+   * conversation that was neither entered nor left renders zero times, which
+   * `switch-render-cost.test.tsx` asserts by NAME rather than by a total.
    *
    * Bounded by {@link TRANSCRIPT_CACHE_LIMIT} in last-use order, alongside (and for
    * the same reason as) {@link transcriptCache}.
@@ -624,6 +653,34 @@ export class NeutronChatController {
   private readonly switchTimingNow: SwitchTimingOptions['now']
   /** Stopwatch for the in-flight project switch — see `switch-timing.ts`. */
   private switchTimer: SwitchTimer | null = null
+  /**
+   * True while the in-flight switch's `frame_rendered` mark is still owed to a frame
+   * that has not been published yet — i.e. the frame `setProject` published was a
+   * placeholder, and the one worth timing is the one `handleChange` publishes with
+   * the transcript.
+   *
+   * It exists because the mark must be scheduled from exactly ONE of the two publishes
+   * and the choice is not a property of either of them in isolation. Scheduling from
+   * both looks harmless — the first stamp wins — and is the bug: on a cold switch the
+   * first stamp is the paint of an EMPTY thread, so the record settles on a picture
+   * with nothing in it and reports the switch as over while the owner is still looking
+   * at a blank pane.
+   */
+  private switchAwaitsPaint = false
+  /**
+   * topic → agent message ids already reported read on that topic's session.
+   *
+   * `markVisibleAgentRead` is called from two places per warm switch (the cached frame
+   * and the resolved read) and again on every inbound frame, and it rebuilt the FULL id
+   * list each time — 533 ids per call on the owner's biggest topic, re-sent for the
+   * lifetime of the conversation. The session de-dups on the wire, so nothing was
+   * wrong; it was just paying O(transcript) to tell the server things it had already
+   * been told, on the exact path being optimised.
+   *
+   * Dropped by `stop()` and by the deletion sweep alongside the transcript it mirrors:
+   * a topic whose cache is gone must not carry a memory of what was acknowledged in it.
+   */
+  private readonly readReceipts = new Map<string, Set<string>>()
   private awaitingReply = false
   /** Newest activity row for the ACTIVE scope while a turn is in flight. */
   private liveActivity: { label: string; detail?: string } | null = null
@@ -772,12 +829,21 @@ export class NeutronChatController {
       this.switchConnectingTimer = null
     }
     this.sessionCache.clear()
-    // A stopped controller holds no transcript. `sessionCache.clear()` was already
-    // here and the transcript cache was not, which left a stopped controller
-    // holding every visited topic's rows and able to paint them on restart —
-    // a lifecycle invariant asserted nowhere and held by nothing.
+    // A stopped controller holds no CACHED transcript for any topic — so no switch
+    // after a restart can paint from one. (It still exposes the messages and the
+    // view-model of the conversation it was last showing; those are the current
+    // frame, not the cache, and clearing them would blank the surface between the
+    // unmount and the remount of a development double-invoke.) `sessionCache.clear()`
+    // was already here and the transcript cache was not, which left a stopped
+    // controller holding every visited topic's rows and able to paint them on
+    // restart — a lifecycle invariant asserted nowhere and held by nothing.
     this.transcriptCache.clear()
     this.renderCaches.clear()
+    this.readReceipts.clear()
+    // A read already in flight is a live reference to what was just cleared, and it
+    // writes back before it checks anything. Without this bump it refills the cache
+    // milliseconds after the clear, and the invariant above is false again.
+    this.transcriptCacheEpoch += 1
   }
 
   setActive(active: boolean): void {
@@ -844,6 +910,19 @@ export class NeutronChatController {
     // AWAY from a project they'd already read. The read receipts that
     // `markVisibleAgentRead` sends once the transcript hydrates advance the
     // server-side watermark too, so the next server frame agrees (unread = 0).
+    //
+    // The count is READ BEFORE IT IS CLEARED, because it is also the one thing that
+    // says the cached transcript is KNOWN STALE. An inactive topic's session sinks
+    // are discarded (`sessionForProject` gates `onChange` on `this.session ===
+    // candidate`), so nothing refreshed the cache while the owner was away — and an
+    // unread count is the server telling us a message arrived that the cache
+    // therefore cannot contain. Painting from it is still right (his history appears
+    // instantly), but calling that switch OVER is not: he is waiting for the message
+    // the badge promised him, and it is still behind the store read.
+    const enteringHadUnread =
+      projectId !== null &&
+      projectId.length > 0 &&
+      this.projects.some((p) => p.id === projectId && (p.unread ?? 0) > 0)
     if (projectId !== null && projectId.length > 0) {
       this.projects = this.projects.map((p) =>
         p.id === projectId && (p.unread ?? 0) > 0 ? { ...p, unread: 0 } : p,
@@ -866,14 +945,22 @@ export class NeutronChatController {
     // Reading an entry is USING it. Without this the ordering is by last write,
     // so the project the owner switches into constantly — and never writes to —
     // ages out behind one that took a single inbound message.
-    if (entering !== undefined) {
-      this.touchTranscript(enteringTopic, entering)
+    if (entering !== undefined) this.touchTranscript(enteringTopic, entering)
+    // Does the frame published below carry EVERYTHING the owner is waiting for? Only
+    // then is the switch over when that frame is drawn. A cache hit on a topic with
+    // an unread message is a hit on a transcript that provably lacks the message he
+    // clicked in to read, so it paints instantly and finishes late, like a cold one.
+    const firstFramePaintsWhatHeWants = entering !== undefined && !enteringHadUnread
+    if (firstFramePaintsWhatHeWants) {
       // The frame below will carry this topic's transcript, so the owner is looking at
       // his messages before the store is asked anything. Tell the stopwatch, or it
       // holds the record open for a background refresh nobody waited on and files an
       // instant switch as a slow one blamed on the store.
       this.switchTimer?.servedFromCache()
     }
+    // Which publish's paint is the one to time — this one, or the one `handleChange`
+    // does when the transcript lands. Exactly one of the two schedules the mark.
+    this.switchAwaitsPaint = !firstFramePaintsWhatHeWants
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
     this.activeWorkBoardItems = null
@@ -920,7 +1007,7 @@ export class NeutronChatController {
     // `entering` was looked up under `enteringTopic`, so the rows and the socket
     // are the same scope. That is the invariant the underfoot guard protects, held
     // here by construction rather than by a check.
-    if (entering !== undefined) this.markVisibleAgentRead(entering.msgs)
+    if (entering !== undefined) this.markVisibleAgentRead(enteringTopic, entering.msgs)
     // Publish the scoped VM immediately — already carrying the entered topic's
     // last-known transcript (see `transcriptCache`), so this is the frame the
     // owner actually wanted rather than an empty one to be replaced.
@@ -931,11 +1018,16 @@ export class NeutronChatController {
     // small number here proves nothing about the paint, which is why
     // `frame_rendered` below exists.
     this.switchTimer?.mark('vm_published')
-    // The first instant at which the published frame has actually been drawn.
-    // Scheduled per switch; a stamp arriving after the record flushed (a switch
+    // The first instant at which the published frame has actually been drawn —
+    // scheduled HERE only when that frame carries what the owner came to see. When it
+    // does not (nothing cached, or a cached transcript the unread badge says is out of
+    // date) this frame is a placeholder, and `handleChange` schedules the mark against
+    // the frame that replaces it. A stamp arriving after the record flushed (a switch
     // the owner abandoned) is a no-op inside `SwitchTimer.mark`.
-    const timer = this.switchTimer
-    this.afterNextFrame(() => timer?.mark('frame_rendered'))
+    if (!this.switchAwaitsPaint) {
+      const timer = this.switchTimer
+      this.afterNextFrame(() => timer?.mark('frame_rendered'))
+    }
     void this.handleChange()
   }
 
@@ -1383,9 +1475,19 @@ export class NeutronChatController {
       const live = new Set(projects.map((p) => this.topicForProject(p.id)))
       live.add(this.topicForProject(null))
       live.add(this.topicForProject(this.projectId))
+      let dropped = false
       for (const topic of [...this.transcriptCache.keys()]) {
-        if (!live.has(topic)) this.transcriptCache.delete(topic)
+        if (!live.has(topic)) {
+          this.transcriptCache.delete(topic)
+          this.readReceipts.delete(topic)
+          dropped = true
+        }
       }
+      // Deleting the ENTRY is not enough on its own: a store read for that topic may
+      // already be in flight, and it writes back before it checks whether anything
+      // still wants it. Bumping the epoch is what makes the deletion stick against
+      // the read that was started before it. See {@link transcriptCacheEpoch}.
+      if (dropped) this.transcriptCacheEpoch += 1
       // The render cache is the SAME rows one derivation later, keyed the same way,
       // so it inherits the same hazard verbatim — a recreated project reusing a
       // deleted one's topic would otherwise re-enter on the dead project's row
@@ -1415,6 +1517,11 @@ export class NeutronChatController {
     // filing them under whatever topic is active by the time the read lands is
     // exactly how one project's messages would end up in another's frame.
     const topic = this.topicForProject(this.projectId)
+    // The invalidation generation this read was STARTED under, captured in the same
+    // instant as the pair above. The write-back below runs before the session guard
+    // on purpose — see {@link transcriptCacheEpoch} — so this is the only thing that
+    // can stop it re-creating an entry that `stop()` or a deletion just removed.
+    const epoch = this.transcriptCacheEpoch
     const [msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
     // SPLIT ON PURPOSE. The single `transcript` mark covered BOTH the store read
     // and everything after it, so a slow switch could not say which. Measured on
@@ -1433,7 +1540,7 @@ export class NeutronChatController {
     // the window demonstrably contains the render. Read the gap between this and
     // `frame_rendered`, never this number on its own.
     this.switchTimer?.mark('transcript_read')
-    this.cacheTranscript(topic, msgs, pending)
+    if (this.transcriptCacheEpoch === epoch) this.cacheTranscript(topic, msgs, pending)
     if (this.session !== session) return
     this.msgs = msgs
     this.pending = pending
@@ -1446,11 +1553,23 @@ export class NeutronChatController {
         if (persistedIds.has(id)) this.streaming.delete(id)
       }
     }
-    this.markVisibleAgentRead(msgs)
+    this.markVisibleAgentRead(topic, msgs)
     this.publish()
     // The transcript is on screen. This is the instant the switch is genuinely
     // over, whatever the empty frame did earlier.
     this.switchTimer?.mark('transcript')
+    // THE PAINT THE OWNER WAITED FOR IS THIS ONE, when the first frame had nothing
+    // to show. `setProject` schedules the paint mark itself only when that frame
+    // already carried the transcript; on a cold switch it published an EMPTY frame,
+    // and timing that paint would settle the record on a picture with nothing in it
+    // — reintroducing, one mark along, the original bug where the instrument reported
+    // a step that was not the step the owner sat through. Whichever branch runs, the
+    // mark stamps the frame he was actually waiting to see.
+    if (this.switchAwaitsPaint) {
+      this.switchAwaitsPaint = false
+      const timer = this.switchTimer
+      this.afterNextFrame(() => timer?.mark('frame_rendered'))
+    }
   }
 
   /**
@@ -1526,14 +1645,28 @@ export class NeutronChatController {
    * "read"; the session de-dups so this only sends one receipt per message.
    * Reporting ONLY agent messages (never the user's own sends) means a receipt
    * can't light the sender's own read tick.
+   *
+   * Sends only ids not yet reported for `topic` ({@link readReceipts}); a call with
+   * nothing new sends nothing at all. `topic` is passed rather than read from
+   * `this.projectId` so the ledger is keyed by the same scope the caller resolved the
+   * rows under — the invariant that keeps one topic's receipts off another's socket.
    */
-  private markVisibleAgentRead(msgs: ChatMessage[]): void {
+  private markVisibleAgentRead(topic: string, msgs: ChatMessage[]): void {
     if (this.session.markRead === undefined) return
+    let sent = this.readReceipts.get(topic)
+    if (sent === undefined) {
+      sent = new Set<string>()
+      this.readReceipts.set(topic, sent)
+    }
     const ids: string[] = []
     for (const m of msgs) {
-      if (m.role === 'agent' && m.message_id !== null) ids.push(m.message_id)
+      if (m.role === 'agent' && m.message_id !== null && !sent.has(m.message_id)) {
+        ids.push(m.message_id)
+      }
     }
-    if (ids.length > 0) this.session.markRead(ids)
+    if (ids.length === 0) return
+    for (const id of ids) sent.add(id)
+    this.session.markRead(ids)
   }
 
   /** Report messages the user has viewed (Track B Phase 4). Exposed for a UI
