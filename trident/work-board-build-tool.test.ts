@@ -44,6 +44,14 @@ function localProbe(): GitModeProbe {
   }
 }
 
+function prProbe(): GitModeProbe {
+  const probe = localProbe()
+  return {
+    ...probe,
+    hasGithubOrigin: async () => true,
+  }
+}
+
 let tmp: string
 let db: ProjectDb
 let store: TridentRunStore
@@ -263,6 +271,34 @@ describe('work_board_dispatch_build tool', () => {
     const out = (await toolFor().handler({ board_item_id: 'ready', task: '   ' }, ctx)) as Record<string, unknown>
     expect(out.ok).toBe(false)
     expect(String(out.error)).toContain('task')
+  })
+
+  test('an already-landed rejection preserves the chokepoint message', async () => {
+    const reg = new ToolRegistry()
+    registerTridentBuildToolSurface(reg, {
+      store,
+      work_board: board(),
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      merge_mode_probe: prProbe(),
+      resolveRalph: async () => false,
+      landed_probe: async () => ({
+        pr: 336,
+        merged_at: null,
+        head_on_base: null,
+        base: 'main',
+      }),
+    })
+    const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+      { board_item_id: 'ready', task: 'build the export' },
+      ctx,
+    )) as Record<string, unknown>
+
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('already merged as #336')
+    expect(String(out.error)).toContain('verify the card instead of rebuilding')
+    expect(store.listNonTerminal()).toEqual([])
+    expect(attached).toEqual([])
   })
 })
 

@@ -28,6 +28,7 @@ import type { Topic } from '@neutronai/channels/types.ts'
 import {
   dispatchBoardBoundBuild,
   type BoardBoundBuildDeps,
+  type DispatchLandedProbe,
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -111,6 +112,8 @@ export interface TridentBuildToolDeps {
    * live secrets store rather than the `unwiredPublisherCredential` placeholder.
    */
   merge_mode_probe: GitModeProbe
+  /** Shared outer-loop merged-PR probe from the composition root. */
+  landed_probe?: DispatchLandedProbe
   resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
@@ -221,6 +224,7 @@ export function registerTridentBuildToolSurface(
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
+        ...(deps.landed_probe !== undefined ? { landedProbe: deps.landed_probe } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
@@ -335,6 +339,7 @@ export function registerTridentBuildToolSurface(
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
+        ...(deps.landed_probe !== undefined ? { landedProbe: deps.landed_probe } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),

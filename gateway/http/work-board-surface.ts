@@ -97,6 +97,7 @@ export type WorkBoardStartResult =
         | 'invalid_bound_pr'
         | 'review_needs_bound_pr'
         | 'underspecified'
+        | 'already_landed'
         | 'backend_error'
       message: string
     }

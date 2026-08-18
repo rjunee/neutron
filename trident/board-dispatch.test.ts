@@ -8,9 +8,11 @@ import { TridentRunStore } from './store.ts'
 import {
   detectReviewIntent,
   dispatchBoardBoundBuild,
+  makeDispatchLandedProbe,
   type BoardBoundBuildDeps,
   type TridentBoardBinder,
 } from './board-dispatch.ts'
+import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -37,6 +39,8 @@ const board: TridentBoardBinder = {
   attachRun: async () => {},
 }
 
+const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+
 function makeRepo(withOrigin: boolean): string {
   const dir = join(tmp, withOrigin ? 'repo-with-origin' : 'repo-local')
   mkdirSync(dir)
@@ -53,7 +57,10 @@ function installGhShim(): string {
   const shimDir = join(tmp, 'shim')
   mkdirSync(shimDir)
   const ghPath = join(shimDir, 'gh')
-  writeFileSync(ghPath, `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-ABSENT}" > "${join(tmp, 'gh-observed')}"\nexit 0\n`)
+  writeFileSync(
+    ghPath,
+    `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-ABSENT}" > "${join(tmp, 'gh-observed')}"\nprintf '%s\\n' "$*" >> "${join(tmp, 'gh-argv')}"\nexit 0\n`,
+  )
   chmodSync(ghPath, 0o755)
   return shimDir
 }
@@ -232,7 +239,7 @@ describe('dispatchBoardBoundBuild credentialed merge-mode probe', () => {
     }
   })
 
-  test('resolves the credential once per host command', async () => {
+  test('resolves credentials for merge-mode auth and the landed probe', async () => {
     const repo = makeRepo(true)
     const shimDir = installGhShim()
     let getCalls = 0
@@ -241,7 +248,7 @@ describe('dispatchBoardBoundBuild credentialed merge-mode probe', () => {
     try {
       const result = await dispatch(repo, { get: async () => (getCalls++, 'test-sentinel-token-abc') })
       expect(result.ok).toBe(true)
-      expect(getCalls).toBe(2)
+      expect(getCalls).toBe(3)
     } finally {
       process.env['PATH'] = oldPath
     }
@@ -271,5 +278,149 @@ describe('dispatchBoardBoundBuild credentialed merge-mode probe', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.merge_mode).toBe('local')
+  })
+})
+
+describe('dispatch refuses a card whose work already landed', () => {
+  const mergedJson = JSON.stringify({
+    number: 336,
+    headRefOid: 'a'.repeat(40),
+    mergedAt: '2026-08-16T23:27:00Z',
+  })
+
+  function fakeRunner(
+    ghResult: HostCommandResult,
+    ancestorResult: HostCommandResult = ok(),
+  ): { calls: string[][]; run: EnvCapableHostRunner } {
+    const calls: string[][] = []
+    const run: EnvCapableHostRunner = async (command) => {
+      calls.push(command)
+      if (command[0] === 'gh') return ghResult
+      if (command.includes('symbolic-ref')) return ok('origin/main\n')
+      if (command.includes('fetch')) return ok()
+      if (command.includes('--is-ancestor')) return ancestorResult
+      return { ok: false, stdout: '', stderr: 'unexpected command', exit_code: 2 }
+    }
+    return { calls, run }
+  }
+
+  function dispatchWith(
+    run: EnvCapableHostRunner,
+    mergeMode: 'pr' | 'local' = 'pr',
+  ): { attached: string[]; result: ReturnType<typeof dispatchBoardBoundBuild> } {
+    const attached: string[] = []
+    const recordingBoard: TridentBoardBinder = {
+      get: board.get,
+      attachRun: async (_slug, _id, run_id) => {
+        attached.push(run_id)
+      },
+    }
+    return {
+      attached,
+      result: dispatchBoardBoundBuild(
+        { task: 'build the thing', board_item_id: 'ready' },
+        {
+          store,
+          board: recordingBoard,
+          project_slug: 'proj-1',
+          repo_path: tmp,
+          resolveBuildRepo: async () => tmp,
+          resolveMergeMode: async () => mergeMode,
+          resolveRalph: async () => false,
+          landedProbe: makeDispatchLandedProbe(run),
+        },
+      ),
+    }
+  }
+
+  test('a merged PR refuses before creating or attaching any state', async () => {
+    const fake = fakeRunner(ok(mergedJson))
+    const dispatched = dispatchWith(fake.run)
+    const result = await dispatched.result
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('already_landed')
+    expect(result.message).toContain('already merged as #336')
+    expect(result.message).toContain('verify the card instead of rebuilding')
+    const row = db.raw().query('SELECT COUNT(*) AS count FROM code_trident_runs').get() as {
+      count: number
+    }
+    expect(row.count).toBe(0)
+    expect(dispatched.attached).toEqual([])
+  })
+
+  test('no merged PR proceeds and creates the expected card branch', async () => {
+    const fake = fakeRunner(ok(''))
+    const result = await dispatchWith(fake.run).result
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.branch).toBe('trident/build-the-thing')
+  })
+
+  test('a probe that cannot answer degrades open', async () => {
+    const fake = fakeRunner({
+      ok: false,
+      stdout: '',
+      stderr: 'connect timeout',
+      exit_code: 1,
+    })
+    const result = await dispatchWith(fake.run).result
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('local mode never invokes the GitHub probe', async () => {
+    const fake = fakeRunner(ok(mergedJson))
+    const result = await dispatchWith(fake.run, 'local').result
+
+    expect(result.ok).toBe(true)
+    expect(fake.calls.filter((command) => command[0] === 'gh')).toEqual([])
+  })
+
+  test('a squash-merged PR still refuses when its head is not on the base', async () => {
+    const fake = fakeRunner(
+      ok(mergedJson),
+      { ok: false, stdout: '', stderr: '', exit_code: 1 },
+    )
+    const result = await dispatchWith(fake.run).result
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('already_landed')
+    expect(result.message).toContain('already merged as #336')
+    expect(result.message).not.toContain('contained in origin/')
+  })
+
+  test('the credentialed fallback probe runs when no probe is injected', async () => {
+    const repo = makeRepo(false)
+    const shimDir = installGhShim()
+    const oldPath = process.env['PATH']
+    process.env['PATH'] = `${shimDir}:${oldPath ?? ''}`
+    try {
+      const result = await dispatchBoardBoundBuild(
+        { task: 'build the thing', board_item_id: 'ready' },
+        {
+          store,
+          board,
+          project_slug: 'proj-1',
+          repo_path: tmp,
+          resolveBuildRepo: async () => repo,
+          resolveMergeMode: async () => 'pr',
+          resolveRalph: async () => false,
+          owner_handle: 'owner',
+          secretsStore: { get: async () => 'test-sentinel-token-abc' },
+        },
+      )
+
+      expect(result.ok).toBe(true)
+      const argv = readFileSync(join(tmp, 'gh-argv'), 'utf8')
+      expect(argv).toContain(
+        'pr list --head trident/build-the-thing --state merged --json number,headRefOid,mergedAt',
+      )
+    } finally {
+      process.env['PATH'] = oldPath
+    }
   })
 })
