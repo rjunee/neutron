@@ -480,6 +480,7 @@ clean.
 | `onOpenActivity` back to an inline fallback arrow | RED — surface render count |
 | draft object identity unstable | RED — 3 surface renders, expected 2 |
 | timer never told the frame was cache-served | RED — record never completes at the paint |
+
 ## 2026-08-17 — a readiness poll must wait for the thing it claims to prove (#411)
 
 `gateway/index.ts` `boot()` now binds `process.once('SIGTERM'|'SIGINT')`
