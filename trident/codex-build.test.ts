@@ -45,10 +45,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
-// Resolve against this worktree, not the repo-of-record workspace symlink. Build
-// lanes intentionally run branches whose newest migrations are not in that other
-// checkout yet; using its runner made this changed file fail on missing tables.
-import { applyMigrations } from '../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')

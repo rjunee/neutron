@@ -173,12 +173,12 @@ function durationBetween(
 }
 
 /**
- * A fire can contain more than one Codex attempt when the first process dies
- * before stamping its end. Pair the first observed end with the most recent
- * start before it; firstStages() would instead pair that end with the abandoned
- * attempt and silently inflate the build duration by the retry gap.
+ * A fire can contain more than one Codex attempt. Each wrapper invocation stamps
+ * both success and failure, so the useful measurement is the latest attempt: its
+ * last start and last end. This also pairs a retry after a killed, unstamped first
+ * attempt, while preserving non-monotonic reporting for malformed ordering.
  */
-function durationBetweenLatestStartBeforeFirstEnd(
+function durationBetweenLastStages(
   events: readonly StageEvent[],
   from: string,
   to: string,
@@ -186,10 +186,7 @@ function durationBetweenLatestStartBeforeFirstEnd(
   const pair = new Map<string, StageEvent>()
   for (const event of events) {
     if (event.stage === from) pair.set(from, event)
-    if (event.stage === to) {
-      pair.set(to, event)
-      break
-    }
+    if (event.stage === to) pair.set(to, event)
   }
   return durationBetween(pair, from, to)
 }
@@ -220,7 +217,7 @@ export function computeSegments(fireWindow: FireWindow): WindowAttribution {
         : (segment.durationMs / attributedSumMs) * 100,
   }))
   const briefToBuild = durationBetween(first, 'fire-dispatched', 'wrapper-start')
-  const codexBuild = durationBetweenLatestStartBeforeFirstEnd(
+  const codexBuild = durationBetweenLastStages(
     fireWindow.events,
     'codex-exec-start',
     'codex-exec-end',

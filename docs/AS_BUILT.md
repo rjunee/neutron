@@ -5,7 +5,7 @@ Running log of what shipped, newest first. One entry per merged change.
 ## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
 
 The `plan:probe` seat now also relays a byte-bounded branch log from
-`git log --name-only <base>..<ref> | head -c 12288 | iconv -c …`. Its Forge-branch
+`git log --name-only <base>..<ref> | head -c 12288 | iconv -c … || true`. Its Forge-branch
 and base-branch fetches are independent, so a local-only Forge branch cannot
 prevent `origin/<base>` from refreshing. The log has no checksum because it is
 synthesis material, not a persisted relay. The workflow independently clamps the
@@ -20,11 +20,12 @@ Forge prompt only when `usePlanNext` selected its authoritative producer; a
 `plan:fable` answer cannot activate the shared schema's optional field. A missing
 or empty branch log also blocks brief transport in code even if the planner emits
 a schema-valid brief anyway. It emits nothing when the brief is absent or empty.
-The brief is
-absent from the persisted plan and every checkpoint prompt, leaving no
-accumulation channel. A missing or empty branch log or brief fails open: the cheap
-path remains selected and no header is emitted. The iteration-1 and genuine
-crash-resume `plan:fable` paths remain byte-untouched, guarded by canary assertions.
+The brief is independently fenced as untrusted reference data before Forge sees
+it, and both fence delimiters are neutralised before the byte cap. It is absent
+from the persisted plan and every checkpoint prompt, leaving no accumulation
+channel. A missing or empty branch log or brief fails open: the cheap path remains
+selected and no header is emitted. The iteration-1 and genuine crash-resume
+`plan:fable` paths remain byte-untouched, guarded by canary assertions.
 
 The historical BEFORE on the 2026-08-18 continuation round of card
 `trident-cannot-review-an-existing-p` was planner 2m54 (versus 9m50 for round-1
@@ -37,10 +38,10 @@ AFTER measured with the new exact pair.
 AFTER: not yet measurable — this branch has not merged, so no real continuation
 round can have consumed the new brief. The wrapper now durably stamps both
 `codex-exec-start` and `codex-exec-end` on success and failure, and
-`trident/stage-attribution.ts` reports that exact pair. If a killed first attempt
-has no end and a retry starts in the same fire window, the first end is paired
-with the latest start before it rather than the abandoned start. Checkpoint time
-and the next fire are no longer timing proxies.
+`trident/stage-attribution.ts` reports the latest start/end pair in the fire
+window. This selects the retry when an earlier invocation failed after stamping
+its end, and also handles a killed first attempt with no end. Checkpoint time and
+the next fire are no longer timing proxies.
 
 `BRANCH-BRIEF-MEASUREMENT: PENDING`. Removal gate: by 2026-08-25 the Trident owner
 must replace that marker with the result from a real multi-task continuation,
@@ -50,8 +51,8 @@ no-brief control is required before claiming the delta came from this feature.
 If no qualifying measurement is recorded by the deadline, the exact duration
 does not drop, or no matched control substantiates attribution, the owner reverts
 the branch-state brief rather than retaining an unproven optimisation.
-`trident/inner-workflow-plan-next.test.ts` makes a still-PENDING marker fail the
-suite after that date, so the gate is executable rather than prose-only.
+The deadline remains an operational removal gate; historical test runs do not
+change outcome based on the wall clock.
 
 ## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
 

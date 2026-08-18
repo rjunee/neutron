@@ -202,7 +202,7 @@ describe('stage attribution pure reader', () => {
     expect(windows[1]?.label).toBe('run-orphan#1 round=2 ralph_round=3')
   })
 
-  test('a killed Codex attempt pairs the first end with the retry start immediately before it', () => {
+  test('a killed Codex attempt pairs the remaining end with the retry start', () => {
     const [fireWindow] = groupIntoFireWindows([
       event('run-retry', 'launch-start', 0),
       event('run-retry', 'codex-exec-start', 700),
@@ -215,6 +215,35 @@ describe('stage attribution pure reader', () => {
     expect(result.codexBuildMs).toBe(2_000)
     expect(result.codexBuildStatus).toBeNull()
     expect(result.notes).toContain('duplicate:codex-exec-start')
+  })
+
+  test('a completed failed attempt cannot hide the later successful retry duration', () => {
+    const [fireWindow] = groupIntoFireWindows([
+      event('run-retry', 'launch-start', 0),
+      event('run-retry', 'codex-exec-start', 1_000),
+      event('run-retry', 'codex-exec-end', 31_000),
+      event('run-retry', 'codex-exec-start', 60_000),
+      event('run-retry', 'codex-exec-end', 1_860_000),
+    ])
+    const result = computeSegments(fireWindow!)
+
+    expect(result.codexBuildMs).toBe(1_800_000)
+    expect(result.codexBuildStatus).toBeNull()
+    expect(result.notes).toContain('duplicate:codex-exec-start')
+    expect(result.notes).toContain('duplicate:codex-exec-end')
+  })
+
+  test('an end timestamp before its start is non-monotonic, not a missing stamp', () => {
+    const [fireWindow] = groupIntoFireWindows([
+      event('run-regression', 'launch-start', 0),
+      event('run-regression', 'codex-exec-end', 500),
+      event('run-regression', 'codex-exec-start', 1_000),
+    ])
+
+    expect(computeSegments(fireWindow!)).toMatchObject({
+      codexBuildMs: null,
+      codexBuildStatus: 'unattributed(non-monotonic)',
+    })
   })
 
   test('logical stage regression becomes unattributed(non-monotonic), never a negative duration', () => {
