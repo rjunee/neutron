@@ -43,6 +43,7 @@ import {
 
 import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import {
+  briefAlertText,
   canPlay,
   dotState,
   failureReasonText,
@@ -132,6 +133,8 @@ function WorkBoardRowImpl({
   const tag = stepTag(item.run_progress);
   const round = roundText(item.run_progress);
   const failReason = failureReasonText(item.run_progress);
+  const briefAlert = briefAlertText(item.run_progress);
+  const runNotice = briefAlert ?? failReason;
   const docLabel = docLinkLabel(item.design_doc_ref);
   const showPlay = canPlay(item) && onPlay !== undefined;
   const retry = isRetry(item);
@@ -327,9 +330,9 @@ function WorkBoardRowImpl({
             </View>
           ) : null}
           {round !== null ? <Text style={styles.round}>{round}</Text> : null}
-          {failReason !== null ? (
+          {runNotice !== null ? (
             <Text style={styles.failReason} numberOfLines={1}>
-              {failReason}
+              {runNotice}
             </Text>
           ) : null}
         </View>

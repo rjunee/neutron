@@ -2,6 +2,21 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
+
+Migration 0136 adds the nullable `code_trident_runs.brief_alert` field. The Codex
+wrapper writes the exact `_PART_MISSING`, `_PART_CORRUPT`, or whole-brief
+`_CORRUPT` refusal through the host checkpoint before retaining the same exit-3
+fail-closed behavior. Checkpoint diagnostics are suppressed so a SQLite error
+cannot leak the tenant DB path or displace the refusal tag from the bounded
+wrapper-error tail; a short stable failure tag remains when recording itself fails.
+
+`deriveRunProgress` now carries the alert through the Work-board HTTP and live
+snapshot shape. Both web and mobile rows prefer it over a terminal failure reason,
+so a bridge retry that recovered and let the run continue still leaves the exact
+integrity reason readable on its card. Tests cover all three persisted refusal
+paths, the store and progress mapping, client parsing, and live web rendering.
+
 ## 2026-08-18 — Pre-build latency gets a durable append-only stage ledger
 
 Migration 0133 adds `code_trident_stage_events`, an append-only SQLite ledger read

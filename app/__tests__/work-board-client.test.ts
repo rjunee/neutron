@@ -158,11 +158,13 @@ describe('parseWorkBoardItems', () => {
           pr: null,
           verdict: null,
           failure_reason: null,
+          brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.',
         },
       },
     ]);
     expect(out[0]!.run_progress?.step_label).toBe('fixing');
     expect(out[0]!.run_progress?.round).toBe(3);
+    expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT');
   });
 
   it('falls back to stepLabelFromPhase when step_label is absent (legacy server)', () => {

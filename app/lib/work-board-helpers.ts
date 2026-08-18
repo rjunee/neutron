@@ -216,6 +216,14 @@ export function failureReasonText(rp: RunProgress | undefined): string | null {
   return reason !== null && reason.length > 0 ? reason : null;
 }
 
+/** A brief-integrity refusal is shown even when the bridge recovered and the run
+ *  continued, which is exactly the case where `failure_reason` stays null. */
+export function briefAlertText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null;
+  const alert = rp.brief_alert;
+  return typeof alert === 'string' && alert.length > 0 ? alert : null;
+}
+
 /** The leading dot's color bucket, or 'upcoming' (faint gray outline, no fill). */
 export type DotColorKey = 'upcoming' | PhaseColorKey;
 

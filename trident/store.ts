@@ -93,7 +93,12 @@ export interface TridentRun {
    */
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
-  /** Host-recorded brief-integrity refusal; null until the build wrapper detects one. */
+  /**
+   * Host-recorded brief-integrity refusal; null until the build wrapper detects
+   * one. Intentionally sticky for this run: a bridge retry can recover and let
+   * the run continue, but the card must still reveal that refusal. A manual
+   * retry creates a new run row with a fresh null.
+   */
   brief_alert: string | null
   /**
    * Trident v2 (migration 0089) — the CC workflow run id of the last

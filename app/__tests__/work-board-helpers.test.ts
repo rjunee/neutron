@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  briefAlertText,
   canPlay,
   dragReorderTarget,
   dotState,
@@ -143,6 +144,14 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
   it('is null/idle for an unbound item (no run_progress)', () => {
     expect(stepTag(undefined)).toBeNull();
     expect(roundText(undefined)).toBeNull();
+  });
+});
+
+describe('briefAlertText', () => {
+  it('surfaces a recovered brief refusal on a still-live run', () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.';
+    expect(briefAlertText(progress({ step_label: 'building', brief_alert: alert }))).toBe(alert);
+    expect(briefAlertText(progress({ brief_alert: null }))).toBeNull();
   });
 });
 

@@ -256,6 +256,37 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('shows a brief corruption alert while the recovered run continues', async () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.'
+    const rows = [
+      item({
+        id: 'alerted',
+        title: 'Recovered build',
+        status: 'in_progress',
+        linked_run_id: 'run_alerted',
+        run_progress: {
+          run_id: 'run_alerted',
+          phase_label: 'building',
+          step_label: 'building',
+          round: 1,
+          started_at: '2026-08-18T00:00:00Z',
+          last_advanced_at: '2026-08-18T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+          brief_alert: alert,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-tag')?.textContent).toBe('Building')
+    expect(container.querySelector('.cwb-fail-reason')?.textContent).toBe(alert)
+    await act(async () => root.unmount())
+  })
+
   it('renders a derived tag for a LEGACY run_progress missing step_label (no crash)', async () => {
     // A rolling-deploy / legacy gateway HTTP GET can return run_progress with only
     // phase_label (no step_label). The row must derive the tag from phase_label

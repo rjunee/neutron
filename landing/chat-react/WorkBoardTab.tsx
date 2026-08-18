@@ -185,6 +185,14 @@ function failureReasonText(rp: RunProgress | undefined): string | null {
   return reason !== null && reason.length > 0 ? reason : null
 }
 
+/** Brief-integrity refusals remain visible after a successful bridge retry, when
+ *  the run is live and therefore has no terminal failure reason. */
+function briefAlertText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null
+  const alert = rp.brief_alert
+  return typeof alert === 'string' && alert.length > 0 ? alert : null
+}
+
 interface DotState {
   cls: string
   pulse: boolean
@@ -936,6 +944,8 @@ function WorkBoardRow({
   const tag = stepTag(item.run_progress)
   const round = roundText(item.run_progress)
   const failReason = failureReasonText(item.run_progress)
+  const briefAlert = briefAlertText(item.run_progress)
+  const runNotice = briefAlert ?? failReason
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
@@ -1076,9 +1086,9 @@ function WorkBoardRow({
         <div className="cwb-row-meta">
           {tag !== null ? <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span> : null}
           {round !== null ? <span className="cwb-round">{round}</span> : null}
-          {failReason !== null ? (
-            <span className="cwb-fail-reason" title={failReason}>
-              {failReason}
+          {runNotice !== null ? (
+            <span className="cwb-fail-reason" title={runNotice}>
+              {runNotice}
             </span>
           ) : null}
         </div>
