@@ -565,6 +565,81 @@ describe('TridentRunStore', () => {
   })
 })
 
+describe('round persistence (canary)', () => {
+  test('update() derives round from a fix checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-update', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, { inner_checkpoint: 'fix-round-3' })
+
+    expect(store.get(run.id)?.round).toBe(3)
+    expect(store.get(run.id)?.inner_checkpoint).toBe('fix-round-3')
+  })
+
+  test('update() keeps round monotonic while storing an older checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-monotonic', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'fix-round-3' })
+
+    await store.update(run.id, { inner_checkpoint: 'fix-round-2' })
+
+    expect(store.get(run.id)?.round).toBe(3)
+    expect(store.get(run.id)?.inner_checkpoint).toBe('fix-round-2')
+  })
+
+  test('update() does not guess a round from an unrelated checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-no-guess', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, { inner_checkpoint: 'argus-approved' })
+
+    expect(store.get(run.id)?.round).toBe(1)
+  })
+
+  test('update() lets an explicit round win without a duplicate SET', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-explicit', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, { round: 9, inner_checkpoint: 'fix-round-4' })
+
+    expect(store.get(run.id)?.round).toBe(9)
+  })
+
+  test('update() persists outer-published group 3 as the round', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-published', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, {
+      inner_checkpoint: `outer-published:${'b'.repeat(40)}:2:6`,
+    })
+
+    expect(store.get(run.id)?.round).toBe(6)
+  })
+
+  test('saveIfActive() derives round from a fix checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-save-active', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    expect(await store.saveIfActive({ ...store.get(run.id)!, inner_checkpoint: 'fix-round-5' })).toBe(true)
+
+    expect(store.get(run.id)?.round).toBe(5)
+  })
+
+  test('save() derives round and never lowers the stored value from a stale snapshot', async () => {
+    const store = new TridentRunStore(db)
+    const staleRun = await store.create({ slug: 'round-save-stale', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(staleRun.id, { inner_checkpoint: 'fix-round-5' })
+
+    await store.save({ ...staleRun, round: 1, inner_checkpoint: 'argus-approved' })
+
+    expect(store.get(staleRun.id)?.round).toBe(5)
+
+    const derivedRun = await store.create({ slug: 'round-save-derived', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.save({ ...store.get(derivedRun.id)!, inner_checkpoint: 'fix-round-4' })
+    expect(store.get(derivedRun.id)?.round).toBe(4)
+  })
+})
+
 describe('terminalTransition retracts a stale in-flight claim', () => {
   // Observed live 2026-08-10: the owner cancelled a running build and the row sat at
   // `phase='stopped'` with `subagent_status='running'` — a finished run still
