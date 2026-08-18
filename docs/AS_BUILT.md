@@ -489,16 +489,18 @@ last statement before the returned handle.
 `tests/integration/orphan-survival.test.ts` waits for that log line instead of
 for a migration row count plus a fixed sleep.
 
-The old poll broke as soon as `_migrations` held at least one row, then slept
-100 ms, under a comment claiming the poll proved the signal handler was
-registered. Each migration commits in its own transaction, so a non-zero count
-means migration k of 124 (measured breaking at k=2..60), and the handler binds
-much later regardless: `applyMigrationsToProjectDb` at `gateway/index.ts:295`,
-the binds at `:1078`, with the whole composition and the listener bind at `:831`
-in between. The same comment's numbered boot path also had the handler
-installing before `Bun.serve`; the code is the reverse. Signalling inside that
-gap kills the child at SIGTERM's default disposition (exit 143, DB never
-closed), which is how this test reddened two unrelated PRs in one night.
+The revision that reddened #406 and #407 broke its poll as soon as `_migrations`
+held at least one row, then slept 100 ms, under a comment claiming the poll
+proved the signal handler was registered. Each migration commits in its own
+transaction, so a non-zero count means migration k of N (measured breaking at
+k=2..60; N is derived from disk and moved 124 → 126 while this branch was in
+review, which is why no count is written down here), and the handler binds much
+later regardless: `applyMigrationsToProjectDb` at `gateway/index.ts:295`, the
+binds at `:1078`, with the whole composition and the listener bind at `:831` in
+between. The same comment's numbered boot path also had the handler installing
+before `Bun.serve`; the code is the reverse. Signalling inside that gap kills
+the child at SIGTERM's default disposition (exit 143, DB never closed), which is
+how this test reddened two unrelated PRs in one night.
 
 `READY=1` used to be sent at the listener bind, ~170 synchronous lines before
 those binds. `Type=notify` lets systemd queue a stop job the instant it lands,
@@ -516,28 +518,79 @@ level dependency. The test pins `NEUTRON_LOG_LEVEL=info` on the spawned gateway
 for the same reason — inheriting a runner that exports `warn` or `error` would
 suppress the marker and time the poll out deterministically.
 
-Measured on one loaded box, same load for both arms, 30 consecutive runs each:
-**0/30 pass before, 30/30 after.** Falsifiability re-verified by three observed
-mutation runs against the fixed code:
+**Pass rate, three arms, each named.** 30 consecutive runs of the file per arm,
+back to back on one box at load average 224-240 across 8 cores (five other lanes
+were live, which is the load this flake needs and an idle box cannot supply):
 
-- remove the `SIGTERM` bind → red, `expected 0, received 143`;
-- skip `db.close()` in `shutdown()` → red, `-wal still holds 86552
+| arm | what it is | result |
+|---|---|---|
+| pre-#407 | the revision that reddened #406/#407 (`count > 0` + 100 ms) | **0/30 pass** — 30/30 failed with exactly `Received: 143` |
+| base branch | `main`, i.e. #407's revision (all migrations + `[loop-registry]` + 50 ms) | **30/30 pass** |
+| this branch | wait for the signal-handler marker, no sleep | **30/30 pass** |
+
+Naming the baseline matters because it changes the claim. #407 already stopped
+the bleeding: at this load its revision does not reproduce the failure, so this
+branch is **not** measurable as a flake fix against `main`. What it contributes
+over `main` is (a) the residual 50 ms sleep is gone, so the remaining race is
+closed rather than narrowed, (b) `READY=1` no longer promises a graceful stop
+before the handlers exist, and (c) the guards below are falsifiable.
+
+**Falsifiability, four mutation runs against this branch, each observed:**
+
+- control (unmutated) → green, `1 pass 1 skip 8 expect()`;
+- remove both `process.once` binds → **red**, `Expected: 0 / Received: 143`;
+- skip `db.close()` in `shutdown()` → **red**, `-wal still holds 152472
   uncheckpointed bytes`. This is the hole the flake was hiding: the process
   exits 0 and SQLite replays the WAL on re-open, so every other assertion stays
-  green. The test asserts the sidecar is checkpointed to zero bytes — a clean
-  close truncates rather than unlinks it, so the assertion is on the byte count,
-  not on existence;
-- force the Linux-without-systemd shape → the sibling test reports `1 skip`.
-  Against the pre-fix code the same simulation reports `1 pass` for a test that
-  executed none of its body, because it probed inside the body and `return`ed.
-  Those probes are now hoisted to module scope and feed `test.skipIf`.
+  green. The discriminator is the sidecar byte count — a clean close truncates
+  rather than unlinks it, so an existence check would pass for the wrong reason;
+- take the DB out of WAL mode → **red** at the new pre-signal assertion, `no
+  -wal sidecar while the gateway is live`. That assertion exists so the
+  post-exit "0 bytes" cannot hold vacuously.
+
+Two things the prover itself taught, both of which had produced a false result
+first time:
+
+- `db.close()` appears six times in `gateway/index.ts` and five are error paths
+  a healthy boot never reaches. A text-matched mutation landed on the
+  scope-reconcile failure path at `:363` instead of the shutdown drain at
+  `:1061`, the test stayed green, and that green read as "the guard is
+  vacuous" when it actually meant "the mutation was a no-op". The arm is now
+  anchored on its surrounding lines and greps for its own marker.
+- `journal_mode` is set in two places and persisted in the DB header, so
+  migration 0001's preamble overrides the connection pragma in
+  `persistence/db.ts`. Mutating only the pragma leaves a real `-wal` on disk and
+  proves nothing; the arm mutates both.
+
+Round 2's entry claimed a `86552`-byte figure for the skip-close mutation. That
+number is not reproducible from the mutation it was attributed to — it is what
+the live sidecar measures under a different mutation entirely. Replaced above
+with the measured 152472.
+
+The Linux-without-systemd shape is not re-listed as a mutation arm: the probes
+now sit at module scope feeding `test.skipIf`, which is visible in every run's
+`1 skip` rather than something a mutation has to demonstrate.
 
 The systemd sibling test had the readiness defect in its own dialect (fixed
 2 s/7 s/1 s sleeps for conditions systemd answers directly) and now polls
-`is-active` and a genuinely changed `MainPID`. Its stop-wait comment claimed
-`is-active != active` guarantees the drain finished; it does not — that
-predicate is also true during `deactivating`. The blocking `systemctl stop` is
-the actual guarantee, and the comment now says so.
+`is-active` and a genuinely changed `MainPID`. Four further corrections to it:
+
+- it read `is-active`, which collapses `activating`, `deactivating`, `failed`
+  and a systemctl error into one "not active" answer. It now reads `ActiveState`
+  and the stop-wait requires the terminal `inactive` — `!isActive()` was
+  satisfied mid-shutdown and by a broken systemctl alike;
+- `systemctl stop`'s exit status was discarded. A stop that never ran (unknown
+  unit, dead user manager) would have left the assertions to certify a shutdown
+  nobody requested. It is asserted;
+- the respawn wait re-read `MainPID` a fourth time to assert on, so a second
+  respawn between the two reads would have made the assertions describe a
+  process the wait never saw. The value that satisfied the predicate is
+  captured and asserted instead;
+- the test's NAME said "restarted within RestartSec" while the wait allowed
+  25 s. `RestartSec=5` is a minimum retry delay, not a deadline systemd
+  promises to meet, and the respawn also cold-starts bun and replays every
+  migration. The name now claims only what the test checks — a fresh `MainPID`
+  under `Restart=always` — with the reasoning inline so it is not "fixed" back.
 
 #407 landed a narrower fix to the same flake while this branch was in review:
 wait for every migration on disk, then for the `[loop-registry]` composition
@@ -547,11 +600,31 @@ both, so it subsumes them and the sleep goes away. #407's disk-derived
 ASSERTION — a partial replay is now a named failure here rather than a confusing
 `applied !== []` on the re-open.
 
-Two smaller corrections: the SIGTERM subtest reaps its child in the `finally`
-(every readiness-timeout path previously leaked a live gateway, its watchdog
-interval and two stream readers onto a data dir the test then deleted), and its
-outer budget went 30 s → 45 s so a 19 s readiness still fails on the diagnostic
-throw that carries the child's stderr rather than on a bare runner timeout.
+Three smaller corrections to the SIGTERM subtest: it reaps its child in the
+`finally` (every readiness-timeout path previously leaked a live gateway, its
+watchdog interval and two stream readers onto a data dir the test then deleted);
+its outer budget went 30 s → 45 s so a 19 s readiness still fails on the
+diagnostic throw that carries the child's stderr rather than on a bare runner
+timeout; and the stdout/stderr drains are now awaited under a 2 s race rather
+than unbounded. Those promises end on pipe EOF, and EOF needs every holder of
+the write end closed — a gateway descendant that inherited the fds would hang
+the test with no diagnostic at all, which is a worse failure than the one being
+fixed.
+
+**One production change, flagged for deliberate acceptance rather than
+incidental merge:** `sdNotify('READY=1')` moves from the listener bind (`:917`
+on the base branch) to `:1102`, after the signal-handler binds — roughly 190
+lines later in `boot()`. It is safe by inspection and by test: there is no
+top-level `await` between the two positions, so it is the same synchronous tick;
+the later throw point is covered by `bootFailureCleanup`, with the two listeners
+explicitly retired first because that cleanup had no way to know they existed;
+and the boot-init-cleanup suite passes on both sides. It is still a change to
+production boot ordering made by a test-flake PR, so it should be accepted on
+purpose. The reason it is in scope: without it, `Type=notify` lets systemd queue
+a stop job the instant `READY=1` lands, so `active` meant "accepting traffic"
+and never "will handle a stop" — the sibling systemd test stopped the unit on
+exactly that proxy, and WAL recovery on the reopen is forgiving enough that its
+assertions would have certified a clean shutdown that never happened.
 
 ## 2026-08-17 — the migration tree is replayed once per PROCESS and copied per test, and the runner keeps a zero-line diff (#406)
 
