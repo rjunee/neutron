@@ -91,6 +91,8 @@ function buildHarness(opts: {
   on_terminal?: TridentTerminalHook
   /** null exercises production base detection instead of the usual deterministic test base. */
   base_branch?: string | null
+  /** Local build ref returned to launch's pre-fire leftover-branch probe; absent by default. */
+  local_branch_tip?: string | null
 }): Harness {
   const hostCalls: string[][] = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
@@ -105,6 +107,11 @@ function buildHarness(opts: {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
     if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+    if (joined.includes('rev-parse --verify --quiet refs/heads/')) {
+      return opts.local_branch_tip === undefined || opts.local_branch_tip === null
+        ? { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        : ok(opts.local_branch_tip)
+    }
     const stubbed = opts.hostResponder?.(cmd)
     if (
       stubbed !== undefined &&
@@ -1036,6 +1043,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         // Publisher's own head read (T1) before the rebase step's generic `--verify` probe.
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
@@ -1191,6 +1199,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1241,6 +1250,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1284,6 +1294,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1344,6 +1355,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         hostResponder: (cmd) => {
           const joined = cmd.join(' ')
           if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
           if (joined.includes('merge-base --is-ancestor')) return failWith('')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
           if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1548,6 +1560,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         hostResponder: (cmd) => {
           const joined = cmd.join(' ')
           if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
           if (joined.includes('merge-base --is-ancestor')) return failWith('')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
           if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1655,6 +1668,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1693,6 +1707,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1729,6 +1744,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1767,6 +1783,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1919,6 +1936,132 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
       expect(h.inputs).toHaveLength(1)
     }
+  })
+
+  test('first publish refuses a branch not cut from the pinned base', async () => {
+    const base = 'b'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: head,
+        },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok('')
+        if (joined.includes(`merge-base --is-ancestor ${base} ${head}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { base_sha: base })
+    const final = await runToTerminal(h, run.id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toBe(
+      `publish failed: branch feat-x does not contain the origin/main tip pinned at launch (${base.slice(0, 7)}) — not cut from origin/main; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
+    )
+    expect(final.failure_reason).toContain('not cut from origin/')
+    expect(final.failure_reason).toContain("refusing to publish work built on another lane's branch")
+    expect(final.failure_reason).toContain('Verify the card instead of rebuilding')
+    expect(final.failure_reason).toContain(base.slice(0, 7))
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr diff'))).toBe(false)
+    expect(calls.some((c) => c.includes('.trident-worktrees/rebase-'))).toBe(false)
+  })
+
+  test('first publish proceeds when the branch contains the pinned base', async () => {
+    const base = 'b'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    let fires = 0
+    let branchReads = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? {
+              result: {
+                verdict: 'REQUEST_CHANGES',
+                branch: 'feat-x',
+                checkpoint: 'forge-done',
+                publishRequested: true,
+                publishHead: head,
+              },
+            }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          branchReads += 1
+          return branchReads === 1 ? ok('') : ok(`${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes(`merge-base --is-ancestor ${base} ${head}`)) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { base_sha: base })
+    const final = await runToTerminal(h, run.id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls).toContain(`git -C /repo merge-base --is-ancestor ${base} ${head}`)
+    expect(calls.some((c) => c.includes(' push '))).toBe(true)
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a null base pin skips the first-publish cut assertion', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    let fires = 0
+    let branchReads = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? {
+              result: {
+                verdict: 'REQUEST_CHANGES',
+                branch: 'feat-x',
+                checkpoint: 'forge-done',
+                publishRequested: true,
+                publishHead: head,
+              },
+            }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          branchReads += 1
+          return branchReads === 1 ? ok('') : ok(`${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { inner_checkpoint: 'forge-done' })
+    const final = await runToTerminal(h, run.id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls.some((c) => c.includes('merge-base --is-ancestor'))).toBe(false)
+    expect(calls.some((c) => c.includes(' push '))).toBe(true)
   })
 
   test('a branch already fully on origin publishes as a NO-OP success — the work was simply already published', async () => {
@@ -3468,7 +3611,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(HEAD.toUpperCase())
-        if (joined.includes('rev-list --count')) return ok('16')
+        if (joined.includes('rev-list --count refs/heads/main..refs/remotes/origin/main')) return ok('16')
         return ok()
       },
     })
@@ -3485,6 +3628,113 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
     expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
       .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
+    expect(calls.some((c) => c.includes('rev-parse --verify --quiet refs/heads/trident/add-thing'))).toBe(true)
+  })
+
+  test("a fresh launch refuses another lane's local branch without firing", async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('already carries 3 commit(s) not on origin/')
+    expect(final.failure_reason).toContain("refusing to build on another lane's work")
+    expect(final.failure_reason).toContain('branch -D')
+  })
+
+  test('an ancestor-only local branch leftover proceeds', async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) return ok()
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test("this run's own crash-leftover branch proceeds from its prior pin", async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${BASE} ${TIP}`)) return ok()
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: BASE, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(BASE)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(BASE)
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('a checkpointed resume does not fetch or pin a base', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    const run = await resumeRun()
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBeNull()
+    expect(store.get(run.id)?.base_behind).toBeNull()
+  })
+
+  test('a pre-pinned relaunch keeps its original base without fetching again', async () => {
+    const PINNED = 'b'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: PINNED, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(PINNED)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(PINNED)
+    expect(store.get(run.id)?.base_behind).toBe(7)
   })
 
   test('a checkpointed resume does not fetch or pin a base', async () => {
