@@ -91,7 +91,12 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+      run_host: async (cmd) => ({
+        ok: true,
+        stdout: cmd.includes('refs/remotes/origin/main^{commit}') ? 'a'.repeat(40) : '',
+        stderr: '',
+        exit_code: 0,
+      }),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })

@@ -2120,8 +2120,8 @@ export function buildTridentOrchestrator(
       }
     }
 
-    const freshBuild = resume_checkpoint_name === '' && launchRun.branch === null
-    let base_sha: string | null = null
+    const freshBuild = launchRun.inner_checkpoint === null && launchRun.base_sha === null
+    let base_sha: string | null = launchRun.base_sha
     let base_behind: number | null = null
     if (freshBuild && launchRun.merge_mode === 'pr') {
       const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]

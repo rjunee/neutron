@@ -103,8 +103,24 @@ function buildHarness(opts: {
   const sim = buildSimFirer(store, opts.plan)
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
-    if (cmd.join(' ').includes('rev-parse --is-shallow-repository')) return ok('false')
-    return opts.hostResponder ? opts.hostResponder(cmd) : ok()
+    const joined = cmd.join(' ')
+    if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+    const stubbed = opts.hostResponder?.(cmd)
+    if (
+      stubbed !== undefined &&
+      (!joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}') ||
+        !stubbed.ok ||
+        stubbed.stdout.trim() !== '')
+    ) {
+      return stubbed
+    }
+    // Board-shaped PR runs now pin before every first fire. Most tests do not care
+    // which base commit was observed, so give the harness a valid fetched tip while
+    // preserving any explicit responder value (including failures) above.
+    if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) {
+      return ok('0'.repeat(40))
+    }
+    return stubbed ?? ok()
   }
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: sim.fire_workflow,
@@ -3393,7 +3409,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
   })
 
-  test('a FRESH pr launch fetches and pins origin/main before firing', async () => {
+  test('a FRESH board-shaped pr launch fetches and pins origin/main before firing', async () => {
     const HEAD = 'a'.repeat(40)
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
@@ -3404,7 +3420,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         return ok()
       },
     })
-    await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
+    await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
     await launchOnce(h)
 
     expect(h.inputs).toHaveLength(1)
@@ -3417,6 +3433,39 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
     expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
       .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
+  })
+
+  test('a checkpointed resume does not fetch or pin a base', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    const run = await resumeRun()
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBeNull()
+    expect(store.get(run.id)?.base_behind).toBeNull()
+  })
+
+  test('a pre-pinned relaunch keeps its original base without fetching again', async () => {
+    const PINNED = 'b'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: PINNED, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(PINNED)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(PINNED)
+    expect(store.get(run.id)?.base_behind).toBe(7)
   })
 
   test('two failed fresh-base fetches fail loudly without firing', async () => {
