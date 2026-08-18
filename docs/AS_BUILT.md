@@ -135,6 +135,52 @@ the ledger, provenance, ordinal identity, the rekey, the refusal paths — becau
 replays ARE the coverage that caught four boot-breaking defects. Sites inside otherwise
 converted files that pass a custom migrations directory or assert on the result object stay
 too; those files import both.
+## 2026-08-17 — CI caches the bun install, so a third party's outage stops redding this repo's PRs (#410)
+
+`.github/workflows/ci.yml` restores bun's global install cache before every
+`bun install --frozen-lockfile`, keyed on `bun.lock`.
+
+The install was never local work. `bun.lock` takes `gbrain` as a **git** dependency
+(`github:garrytan/gbrain#<sha>`), so resolving it is a network fetch from a third-party
+host rather than a registry read. It is SHA-pinned, so the content is deterministic — but
+availability is not. The eight-shard split in the entry below took that fetch to twelve
+occurrences per PR (8 shards + typecheck + lint + purity + layering), and there was no
+`actions/cache` anywhere in the file. On 2026-08-17 that URL answered `504` and redded
+**six jobs at once** on a PR whose only real defect was one type error, which presented as
+"9 failing checks" and cost a full review round to attribute.
+
+Measured on this tree, `bun install --frozen-lockfile` over 2501 packages:
+
+| run | outbound HTTP | time |
+|---|---|---|
+| cold, empty cache | allowed | 118.3 s |
+| warm cache, `node_modules` deleted | allowed | 35.8 s |
+| warm cache, `node_modules` deleted | **blackholed** | 21.7 s |
+| empty cache | **blackholed** | never installed a package; killed after 10 min |
+
+The last two rows are the point and the control for it. A warm cache needs **no network at
+all**; the same blackhole with an empty cache cannot proceed, which is what proves the
+blackhole was really blocking bun rather than the warm run merely being fast. Bun stores
+the git dependency in that cache as `@GH@garrytan-gbrain-<sha>@@@1`, so the cached artefact
+is the one the outage denied.
+
+Three properties the shape preserves. The jobs stay **independent** — a cache is not the
+shared-artifact handoff the header rules out, because a cache MISS still installs and still
+passes, so every gate remains runnable on its own. The build cannot go **wrong** —
+`--frozen-lockfile` means the cache supplies content while `bun.lock` still decides what may
+be installed, so a cached tree that disagrees fails the job instead of silently going stale.
+And the cached path cannot **drift** — `BUN_INSTALL_CACHE_DIR` is set explicitly at each
+install step to the same expression `actions/cache` saves, so the two are one string by
+construction rather than an inference about where bun defaults to. A cache that silently
+misses every run looks exactly like no cache at all, so that identity is asserted rather
+than assumed.
+
+`restore-keys` gives a lockfile change a partial hit: packages the change did not touch
+still come from the cache, so a one-line dependency bump costs one download rather than
+2500.
+
+Vendoring `gbrain` would remove the network dependency outright rather than caching around
+it, and is deliberately NOT done here — recorded in #410 rather than lost.
 
 ## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
 
