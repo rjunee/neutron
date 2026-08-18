@@ -24881,3 +24881,44 @@ path) stay green under the duplicate mutation, so the guard is not merely
 HTTP route, lifecycle behaviour, deploy step or env flag — `connectGlobal` gaining an
 optional argument and `CodexStatus` declaring fields the server already sent are
 widenings of existing contracts).
+
+### Follow-up, same day — the cross-model review found the fix reintroducing the defect
+
+Codex reviewed the change above and returned four findings. Two were P1 and one of
+them was the same bug one step later.
+
+**The pane stored the POST's own reply, which erased the pool it had just fixed.**
+`POST /api/app/codex-auth` answers `{ status, mode, scope, account }`; ONLY the GET
+enriches with `accounts` / `next` / `exhausted`. Saving the POST reply therefore
+dropped the seat list, turned `codexSeatNameRequired` back off, and re-armed the
+blank-name overwrite of `default`. The pane now re-reads `statusGlobal()` after a
+successful connect, which the per-seat remove already did.
+
+📌 **It survived the first review because THE TEST STUB WAS MORE GENEROUS THAN THE
+SERVER** — it returned the full two-seat body from the POST, a shape production
+never sends. A stub that answers better than reality does not merely fail to catch
+the bug; it certifies it. Both stubs are now the real shapes, and the older Codex
+test's GET is STATEFUL (not_connected until the POST lands) because a GET frozen at
+`not_connected` contradicts the POST it just accepted.
+
+**The duplicate-account guard asked the wrong store.** It scanned
+`rotation.listSlots()`, but a rotation row is not proof a seat exists and its absence
+is not proof one does not: on an upgraded install the legacy `codex` credential
+predates rotation, so the list answers EMPTY while the credential is real and in use.
+The guard would find nothing and admit the same account under a named seat. It now
+scans `syncSlots()`, which re-derives seats from the persisted credential rows.
+
+**Two more, both taken:** the pane derived its whole display from the legacy
+top-level `status`, which only inspects the bare `codex` row — so removing `default`
+while named seats remain, or naming a first seat, printed "Not connected" over a
+healthy pool AND hid every control for managing it; it now derives from the pool.
+And `connectAccount` is serialized per owner, because the duplicate check reads and
+then writes, so two concurrent connects for one account could both pass before either
+stored — a double-click on "Add seat" is enough, and the damage needs a fresh
+`codex login` on both machines to undo.
+
+**Mutations, three more reds:** drop the re-read → "RE-READS the pool after
+connecting" fails; derive from legacy status → "shows a NAMED-ONLY pool as connected"
+fails; scan rotation rows instead of syncing → "sees a LEGACY seat that has never been
+through rotation" fails. Restored: `integrations-tab.test.tsx` 25 pass / 0 fail,
+`codex-credential.test.ts` 33 pass / 0 fail, `bunx tsc --noEmit` 0 errors.

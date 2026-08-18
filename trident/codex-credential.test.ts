@@ -512,6 +512,23 @@ describe('one ChatGPT account cannot occupy two seats', () => {
     expect(svc.listAccounts(OWNER).some((a) => a.slot === 'work')).toBe(false)
   })
 
+  test('sees a LEGACY seat that has never been through rotation', async () => {
+    // A rotation row is not proof a seat exists, and its absence is not proof one
+    // does not. On an upgraded install the legacy `codex` credential predates
+    // rotation entirely, so `rotation.listSlots()` answers EMPTY while the
+    // credential is real and in use. A guard scanning that store would find
+    // nothing and admit the same account under a named seat — creating exactly the
+    // mutually-revoking pair it exists to prevent.
+    const svc = newService()
+    // `connect` is the LEGACY path: it writes the `codex` credential row WITHOUT
+    // any rotation bookkeeping, which is the pre-rotation install's state.
+    expect((await svc.connect(OWNER, authFor('acct-legacy'))).ok).toBe(true)
+
+    const dup = await svc.connectAccount(OWNER, authFor('acct-legacy'), { slot: 'work' })
+    expect(dup.ok).toBe(false)
+    expect(dup.code).toBe('duplicate_account')
+  })
+
   test('ALLOWS a genuinely different account, which is the whole point of seats', async () => {
     // The control that makes the refusal meaningful: if this also failed, the guard
     // would be "no second seat, ever" rather than "no DUPLICATE second seat".

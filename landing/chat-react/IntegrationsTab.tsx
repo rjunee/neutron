@@ -216,6 +216,21 @@ export function IntegrationsTab({
   const [codexBusy, setCodexBusy] = useState(false)
   const [codexError, setCodexError] = useState<string | null>(null)
 
+  /**
+   * The connected seats, and whether Codex is usable AT ALL — both asked of the
+   * POOL, not of the legacy top-level `status`.
+   *
+   * `status` only inspects the bare `codex` credential row (the DEFAULT seat). An
+   * owner who removes `default` while named seats remain, or who names their very
+   * first seat, gets `status: 'not_connected'` while `accounts` still holds healthy
+   * seats trident is actively rotating through. Gating the pane on `status` alone
+   * printed "Not connected" over a working pool and hid every control for managing
+   * it.
+   */
+  const codexPool = codexStatus?.accounts ?? []
+  const codexUsable =
+    codexPool.length > 0 || codexStatus?.status === 'connected' || codexStatus?.status === 'expired'
+
   const loadCodex = useCallback((): void => {
     void codexClient
       .statusGlobal()
@@ -237,6 +252,19 @@ export function IntegrationsTab({
     setCodexError(null)
     void codexClient
       .connectGlobal(codexAuth.trim(), codexAccount.trim().toLowerCase())
+      // RE-READ THE POOL; DO NOT TRUST THE POST'S OWN REPLY. The POST answers
+      // `{ status, mode, scope, account }` — only the GET enriches with
+      // `accounts` / `next` / `exhausted` (`gateway/http/codex-credential-surface.ts`,
+      // the isGlobal branch). Storing the POST reply therefore ERASES the seat
+      // pool: the seat list disappears, `codexSeatNameRequired` goes false, and
+      // the very next blank paste overwrites `default` — reintroducing, one step
+      // later, the exact defect this PR exists to fix.
+      //
+      // It survived review once because the TEST STUB was more generous than the
+      // server: it returned the full two-seat body from the POST, so the pane
+      // never saw the shape production actually sends. A stub that answers better
+      // than reality is worse than no stub — it certifies the bug.
+      .then(() => codexClient.statusGlobal())
       .then((s) => {
         if (!mountedRef.current) return
         setCodexStatus(s)
@@ -1150,17 +1178,19 @@ export function IntegrationsTab({
                 that project&rsquo;s Settings.)
               </p>
               <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
-                {codexStatus?.status === 'connected'
-                  ? '✓ Connected'
-                  : codexStatus?.status === 'expired'
-                    ? '⚠ Token expired — re-connect'
-                    : '○ Not connected'}
+                {codexPool.length > 0
+                  ? `✓ ${codexPool.length} seat${codexPool.length === 1 ? '' : 's'} connected`
+                  : codexStatus?.status === 'connected'
+                    ? '✓ Connected'
+                    : codexStatus?.status === 'expired'
+                      ? '⚠ Token expired — re-connect'
+                      : '○ Not connected'}
                 {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
               </p>
               {codexError !== null ? <div className="cdoc-comments-error">{codexError}</div> : null}
-              {(codexStatus?.accounts ?? []).length > 0 ? (
+              {codexPool.length > 0 ? (
                 <ul className="cint-codex-seats" aria-label="Connected Codex seats">
-                  {(codexStatus?.accounts ?? []).map((seat) => (
+                  {codexPool.map((seat) => (
                     <li key={seat.slot} className="cint-codex-seat" data-slot={seat.slot}>
                       <span className="cint-codex-seat-name">
                         {seat.slot}
@@ -1193,7 +1223,7 @@ export function IntegrationsTab({
                   error rather than silently dropping cross-model review.
                 </div>
               ) : null}
-              {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+              {codexUsable ? (
                 <div className="cint-key-actions">
                   <button
                     type="button"
@@ -1204,8 +1234,8 @@ export function IntegrationsTab({
                   >
                     {codexBusy
                       ? 'Working…'
-                      : (codexStatus?.accounts ?? []).length > 1
-                        ? `Disconnect all ${(codexStatus?.accounts ?? []).length} seats`
+                      : codexPool.length > 1
+                        ? `Disconnect all ${codexPool.length} seats`
                         : 'Disconnect Codex'}
                   </button>
                 </div>
@@ -1218,7 +1248,7 @@ export function IntegrationsTab({
                 }}
               >
                 <label className="cint-row-label" htmlFor="cint-codex-account">
-                  Seat name{(codexStatus?.accounts ?? []).length > 0 ? '' : ' (optional for your first)'}
+                  Seat name{codexPool.length > 0 ? '' : ' (optional for your first)'}
                 </label>
                 <input
                   id="cint-codex-account"
@@ -1247,12 +1277,12 @@ export function IntegrationsTab({
                     disabled={
                       codexBusy ||
                       codexAuth.trim().length === 0 ||
-                      ((codexStatus?.accounts ?? []).length > 0 && codexAccount.trim().length === 0)
+                      (codexPool.length > 0 && codexAccount.trim().length === 0)
                     }
                   >
                     {codexBusy
                       ? 'Connecting…'
-                      : (codexStatus?.accounts ?? []).length > 0
+                      : codexPool.length > 0
                         ? 'Add seat'
                         : 'Connect Codex'}
                   </button>

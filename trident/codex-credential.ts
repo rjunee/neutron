@@ -261,6 +261,22 @@ export interface CodexAccountSummary {
 }
 
 export class CodexCredentialService {
+  /**
+   * One in-flight `connectAccount` per owner, serialized.
+   *
+   * The duplicate-account guard reads the existing seats and THEN writes the new
+   * one. Two connects for the same ChatGPT account under different seat names can
+   * both pass the read before either reaches `store.set`, so both succeed and
+   * create exactly the mutually-revoking pair the guard exists to prevent — a
+   * check-then-act race, and the damage is unrecoverable without a fresh
+   * `codex login` on both machines.
+   *
+   * A double-click on "Add seat" is enough to hit it, so this is not theoretical
+   * even on a single-owner instance. An in-process chain is sufficient because a
+   * Neutron instance is one process per owner; it is NOT a distributed lock and
+   * does not pretend to be.
+   */
+  private readonly connectChain = new Map<string, Promise<unknown>>()
   private readonly store: ProjectCredentialStore
   private readonly codexHome: string
   private readonly rotation: CodexRotationStore
@@ -661,7 +677,15 @@ export class CodexCredentialService {
     if (!v.ok || v.normalized === undefined) return null
     const incoming = readAccountId(v.normalized)
     if (incoming === null) return null
-    for (const seat of this.rotation.listSlots(owner_slug)) {
+    // SYNC FIRST — a rotation row is not proof a seat exists, and its ABSENCE is
+    // not proof one does not. `syncSlots` re-derives the seat list from the
+    // persisted `project_credentials` rows, which is where a seat actually lives.
+    // On an upgraded install the legacy `codex` credential predates rotation
+    // entirely, so `listSlots` answers EMPTY while the credential is real and in
+    // use — and this guard, scanning nothing, would happily let the same ChatGPT
+    // account in under a named seat and create the mutually-revoking pair it
+    // exists to prevent. Asking the wrong store for existence is the whole defect.
+    for (const seat of this.syncSlots(owner_slug)) {
       if (seat.slot === requested) continue
       const stored = this.store.resolve(owner_slug, undefined, codexSlotService(seat.slot))
       if (stored === null) continue
@@ -671,6 +695,32 @@ export class CodexCredentialService {
   }
 
   async connectAccount(
+    owner_slug: OwnerHandle,
+    pasted: unknown,
+    opts?: { slot?: string; label?: string | null },
+  ): Promise<CodexConnectResult & { slot?: string }> {
+    // Serialize per owner so the duplicate check and the write that follows it
+    // cannot interleave with another connect. Chained rather than locked: the
+    // previous call's REJECTION must not poison the queue, hence the catch.
+    const key = String(owner_slug)
+    const prior = this.connectChain.get(key) ?? Promise.resolve()
+    // `.catch` before chaining: a PREVIOUS call's rejection must not poison the
+    // queue for everyone behind it.
+    const run = prior
+      .catch(() => undefined)
+      .then(() => this.connectAccountSerialized(owner_slug, pasted, opts))
+    const tail = run.catch(() => undefined)
+    this.connectChain.set(key, tail)
+    try {
+      return await run
+    } finally {
+      // Only the LAST caller clears the entry, so the map cannot grow for the life
+      // of the process and a queued caller cannot lose its predecessor.
+      if (this.connectChain.get(key) === tail) this.connectChain.delete(key)
+    }
+  }
+
+  private async connectAccountSerialized(
     owner_slug: OwnerHandle,
     pasted: unknown,
     opts?: { slot?: string; label?: string | null },

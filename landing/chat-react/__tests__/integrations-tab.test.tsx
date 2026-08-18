@@ -348,13 +348,21 @@ describe('IntegrationsTab render (happy-dom)', () => {
     const { container, root, act, calls } = await mount((url, init) => {
       if (url.endsWith('/api/cores/integrations')) return json(STATUS)
       if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
-      // Global codex status starts not_connected.
+      // STATEFUL, like the real server: not_connected until the POST lands, then
+      // connected. A GET frozen at not_connected would contradict the POST it just
+      // accepted, and the pane RE-READS after connecting (the POST reply carries no
+      // pool), so a frozen stub would assert on a state no server can produce.
       if (url.endsWith('/api/app/codex-auth') && (init?.method ?? 'GET') === 'GET') {
-        return json({ ok: true, status: 'not_connected', scope: null })
+        return json(
+          posted.length > 0
+            ? { ok: true, status: 'connected', scope: 'global', accounts: [], next: null }
+            : { ok: true, status: 'not_connected', scope: null },
+        )
       }
       if (url.endsWith('/api/app/codex-auth') && init?.method === 'POST') {
         posted.push({ url, body: JSON.parse(init.body as string) })
-        return json({ ok: true, status: 'connected', scope: 'global' }, 201)
+        // The server's real POST shape — no accounts/next/exhausted.
+        return json({ ok: true, status: 'connected', mode: 'subscription', scope: 'global' }, 201)
       }
       return null
     })
@@ -855,7 +863,13 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
       }
       if (url.includes('/api/app/codex-auth') && init?.method === 'POST') {
         onPost?.(JSON.parse(init.body as string))
-        return json(TWO_SEATS, 201)
+        // THE SERVER'S REAL POST SHAPE — `{ status, mode, scope, account }` and
+        // NOTHING ELSE. Only the GET enriches with accounts/next/exhausted
+        // (`gateway/http/codex-credential-surface.ts`, the isGlobal branch). This
+        // stub used to return the full pool, which is more generous than reality,
+        // and that generosity certified a real defect: the pane stored the POST
+        // reply, erased its own seat list, and re-armed the blank-name overwrite.
+        return json({ ok: true, status: 'connected', mode: 'subscription', scope: 'global', account: 'laptop' }, 201)
       }
       return null
     }
@@ -908,6 +922,89 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     })
     expect(deletes).toHaveLength(1)
     expect(deletes[0]).toContain('account=work')
+    root.unmount()
+  })
+
+  it('RE-READS the pool after connecting — the POST reply does not carry it', async () => {
+    // The server's POST answers { status, mode, scope, account } and nothing else;
+    // only the GET enriches with accounts/next/exhausted. Storing the POST reply
+    // ERASES the seat list, which turns the seat-name requirement back off and
+    // re-arms the blank-name overwrite this PR exists to stop — the same defect,
+    // one step later. The pane must re-read before updating state.
+    let gets = 0
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.includes('/api/app/codex-auth') && (init?.method ?? 'GET') === 'GET') {
+        gets += 1
+        return json(TWO_SEATS)
+      }
+      if (url.includes('/api/app/codex-auth') && init?.method === 'POST') {
+        // Deliberately the REAL shape: no accounts.
+        return json({ ok: true, status: 'connected', mode: 'subscription', scope: 'global', account: 'laptop' }, 201)
+      }
+      return null
+    })
+    const getsAfterMount = gets
+    const setValue = (el: HTMLTextAreaElement | HTMLInputElement, v: string): void => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el) as object, 'value')?.set
+      setter?.call(el, v)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await act(async () => {
+      setValue(container.querySelector('#cint-codex-auth') as HTMLTextAreaElement, '{"tokens":{}}')
+      setValue(container.querySelector('#cint-codex-account') as HTMLInputElement, 'laptop')
+      await tick()
+    })
+    await act(async () => {
+      ;(container.querySelector('[data-testid="cint-codex-connect"]') as HTMLButtonElement).click()
+      await tick()
+      await tick()
+    })
+    // It asked the server again rather than believing the POST…
+    expect(gets).toBeGreaterThan(getsAfterMount)
+    // …so the seat list is still on screen, and the seat-name gate is still armed.
+    expect(container.querySelector('[data-testid="cint-codex-seat-remove-work"]')).not.toBeNull()
+    root.unmount()
+  })
+
+  it('shows a NAMED-ONLY pool as connected, though legacy top-level status says otherwise', async () => {
+    // Top-level `status` only inspects the bare `codex` row (the DEFAULT seat). An
+    // owner who removed `default`, or who named his first seat, gets
+    // status:'not_connected' while `accounts` holds healthy seats trident is
+    // rotating through — so the pane claimed a working pool was absent AND hid
+    // every control for managing it.
+    const namedOnly = {
+      ok: true,
+      status: 'not_connected',
+      scope: null,
+      next: 'work',
+      accounts: [
+        {
+          slot: 'work',
+          label: null,
+          status: 'connected',
+          cooling: false,
+          cooling_until: null,
+          cooling_reason: null,
+          used_percent: 5,
+          window_minutes: 10080,
+          plan_type: 'pro',
+          active: true,
+        },
+      ],
+    }
+    const { container, root } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.includes('/api/app/codex-auth') && (init?.method ?? 'GET') === 'GET') return json(namedOnly)
+      return null
+    })
+    expect(container.textContent).toContain('1 seat connected')
+    expect(container.textContent).not.toContain('○ Not connected')
+    // And the management controls are reachable, which is the part that mattered.
+    expect(container.querySelector('[data-testid="cint-codex-disconnect-all"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="cint-codex-seat-remove-work"]')).not.toBeNull()
     root.unmount()
   })
 
