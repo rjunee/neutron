@@ -128,6 +128,12 @@ export const SCOPE_SWEEP_COLUMNS: readonly ScopedColumn[] = [
   { table: 'api_keys', column: 'project_slug' },
   { table: 'code_ritual_runs', column: 'project_slug' },
   { table: 'code_trident_runs', column: 'project_slug' },
+  // The owner boundary on Codex seat rotation. Stranding these on a rename would
+  // orphan every connected seat AND lose the active-slot pointer, so rotation
+  // would silently start over from the first seat — including re-selecting one
+  // that is still capped, with its recorded cooldown left behind.
+  { table: 'codex_rotation_active', column: 'owner_slug' },
+  { table: 'codex_rotation_slots', column: 'owner_slug' },
   { table: 'core_installations', column: 'project_slug' },
   { table: 'cores_oauth_broker_pending', column: 'project_slug' },
   { table: 'cores_oauth_pending', column: 'project_slug' },
