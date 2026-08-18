@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
 import { GENERAL_WORK_BOARD_PROJECT_ID, WorkBoardStore, type WorkBoardItem } from './store.ts'
@@ -29,8 +29,8 @@ function ctx(project_slug: string, project_id: string | null = null): ToolCallCo
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-work-board-tool-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   registry = new ToolRegistry()
   store = new WorkBoardStore(db)
   registerWorkBoardToolSurface(registry, store)

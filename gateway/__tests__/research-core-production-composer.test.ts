@@ -43,7 +43,7 @@ import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import { ChannelRouter } from '@neutronai/channels/router.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretAuditLog } from '@neutronai/cores-runtime'
 import { composeProductionGraph } from '../composition.ts'
@@ -126,8 +126,8 @@ interface Harness {
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-research-prodcomposer-'))
   const dbPath = join(tmp, 'owner.db')
+  seedMigratedDb(dbPath)
   const db = ProjectDb.open(dbPath)
-  applyMigrations(db.raw())
 
   const owner_home = join(tmp, 'home')
 

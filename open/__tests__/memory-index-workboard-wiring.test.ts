@@ -26,7 +26,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore, workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import { writeEntity, type EntityWriteInput } from '@neutronai/runtime/entity-writer.ts'
@@ -45,8 +45,8 @@ let db: ProjectDb
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-mi-wb-'))
   ownerDir = mkdtempSync(join(tmpdir(), 'neutron-mi-owner-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
 })
 afterEach(() => {
   db.close()

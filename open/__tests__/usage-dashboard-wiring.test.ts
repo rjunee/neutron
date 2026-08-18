@@ -38,7 +38,7 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
   CLIENT_POLL_BUDGET_MS,
@@ -136,8 +136,8 @@ beforeAll(async () => {
   // holds regardless of module import order.
   process.env['KIMI_BASE_URL'] = 'http://127.0.0.1:9/coding'
 
+  seedMigratedDb(process.env['NEUTRON_DB_PATH'])
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
   // A stored Kimi key — the same credential the Settings pane writes and the
   // review panel reads. This is what makes the Kimi card `connected`.
   const secrets = new SecretsStore({ data_dir: tmpDir, db })

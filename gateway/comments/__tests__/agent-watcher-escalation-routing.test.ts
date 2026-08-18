@@ -51,7 +51,7 @@ import { join } from 'node:path'
 
 import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CommentStore, type AppendEventInput } from '../comment-store.ts'
 import { AgentWatcher } from '../agent-watcher.ts'
@@ -97,8 +97,8 @@ function start(): Harness {
     )
   }
 
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const secrets = new SecretsStore({ data_dir: tmp, db })
   const apiKeys = new ApiKeyStore({ db, secrets })
 

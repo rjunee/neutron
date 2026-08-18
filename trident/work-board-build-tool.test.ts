@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { TridentRunStore } from './store.ts'
@@ -54,8 +54,8 @@ let runningRunId: string | null
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-wb-build-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   store = new TridentRunStore(db)
   attached = []
   runningRunId = null

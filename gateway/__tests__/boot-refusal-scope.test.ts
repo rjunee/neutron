@@ -28,10 +28,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SystemEventsStore } from '@neutronai/persistence/system-events.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { boot } from '../index.ts'
 import { DEFAULT_MAX_RECENT_EVENTS } from '../diagnostics/instance-sources.ts'
@@ -65,9 +64,7 @@ beforeEach(() => {
   process.env['NEUTRON_HOME'] = home
   // NO `.url_slug` and NO `NEUTRON_INSTANCE_SLUG`: the fallback is reached by
   // ABSENCE, which is what makes this boot anonymous.
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
 })
 
 afterEach(() => {

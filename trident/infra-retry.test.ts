@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
 import {
@@ -39,8 +39,8 @@ let clockMs: number
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'trident-infra-retry-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   clockMs = 0
   store = new TridentRunStore(db, () => new Date(clockMs).toISOString())
 })

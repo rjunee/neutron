@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
@@ -161,8 +161,8 @@ async function startHarness(
   phase_state: Record<string, unknown>,
   replyFor: (spec: AgentSpec) => string = () => 'ok',
 ): Promise<Harness> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
 
   const seedStore = new SqliteOnboardingStateStore({ db })
   await seedStore.upsert({
