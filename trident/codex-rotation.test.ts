@@ -30,10 +30,11 @@ import {
   classifyResetsAt,
   coolPercentFor,
   fallbackCooldownMs,
+  FAILURE_SHORT_COOLDOWN_MS,
   isCooling,
   MAX_FALLBACK_COOLDOWN_MS,
-  normalizeResetsAt,
   parseRolloutRateLimits,
+  RESET_JITTER_MS,
   selectNextSlot,
   shouldHarvestBack,
   signalToCooldown,
@@ -237,7 +238,7 @@ describe('threshold policy', () => {
       NOW,
     )
     // Cooling only until the session reset would rotate straight back into the weekly wall.
-    expect(cooled?.cooling_until).toBe(NOW + 7 * 86_400_000)
+    expect(cooled?.cooling_until).toBe(NOW + 7 * 86_400_000 + RESET_JITTER_MS)
     expect(cooled?.cooling_reason).toBe('long-window')
   })
 
@@ -247,16 +248,16 @@ describe('threshold policy', () => {
     expect(signalToCooldown({ kind: 'absent' }, NOW)).toBeNull()
   })
 
-  // MUTATION: drop the `* 1000` in `normalizeResetsAt`.
+  // MUTATION: drop the `* 1000` in `classifyResetsAt`.
   test('resets_at is converted from seconds to ms, and an implausible value is refused', () => {
     const secs = Math.floor(NOW / 1000) + 3600
-    expect(normalizeResetsAt(secs, NOW)).toBe(secs * 1000)
+    expect(classifyResetsAt(secs, NOW)).toEqual({ kind: 'future', ms: secs * 1000 })
     // Without the x1000 the reset lands in 1970 — in the PAST — which would read as
     // "already expired" and un-cool a capped seat immediately.
     expect(secs).toBeLessThan(NOW)
-    expect(normalizeResetsAt(Math.floor(NOW / 1000) - 3600, NOW)).toBeNull()
-    expect(normalizeResetsAt(NOW, NOW)).toBeNull() // ms passed in where secs belong
-    expect(normalizeResetsAt('soon', NOW)).toBeNull()
+    expect(classifyResetsAt(Math.floor(NOW / 1000) - 3600, NOW).kind).toBe('expired')
+    expect(classifyResetsAt(NOW, NOW).kind).toBe('absent') // ms passed in where secs belong
+    expect(classifyResetsAt('soon', NOW).kind).toBe('absent')
   })
 })
 
@@ -385,7 +386,7 @@ describe('a reading whose window has already reset', () => {
     // The unit guard still holds: a forgotten ×1000 lands in 1970, which reads
     // as expired — and an expired window is IGNORED, never trusted.
     expect(classifyResetsAt(1, NOW).kind).toBe('expired')
-    expect(normalizeResetsAt((NOW - 1000) / 1000, NOW)).toBeNull()
+    expect(classifyResetsAt((NOW - 1000) / 1000, NOW).kind).toBe('expired')
   })
 
   // Parsed end-to-end, so the flag cannot be lost between parser and policy.
@@ -533,7 +534,7 @@ describe('the CLI reporting that it HIT a limit', () => {
       NOW,
     )
     expect(cooled?.cooling_reason).toBe('long-window')
-    expect(cooled?.cooling_until).toBe(NOW + 86_400_000)
+    expect(cooled?.cooling_until).toBe(NOW + 86_400_000 + RESET_JITTER_MS)
   })
 
   // MUTATION: map every reached_type to the short class. A weekly cap would then
@@ -564,6 +565,131 @@ describe('the CLI reporting that it HIT a limit', () => {
       NOW,
     )
     expect(untouched).toBeNull()
+  })
+
+  // MUTATION: delete the `staleSnapshot` early return from `signalToCooldown`,
+  // so the reached_type arm runs against a snapshot whose every window has
+  // already reset.
+  //
+  // This is the bug that made the percentage guard useless. A rollout is a file:
+  // the harvest re-reads the same bytes on every resolve, and a seat that hit its
+  // weekly cap last week still has `weekly-limit` sitting in its last event next
+  // to the elapsed reset that proves the quota came back. Without the guard, no
+  // window matched (all expired), so the arm fell through to a BLIND seven days
+  // measured from now — and the cooled seat never ran, never wrote a newer
+  // rollout, and re-derived the same seven days on the next resolve. Permanent,
+  // self-renewing, and indistinguishable from a working cooldown.
+  test('a reached limit on a snapshot whose windows have ALL reset cools nothing', () => {
+    const stale = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 99.6, window_minutes: 10080, resets_at_ms: null, expired: true }],
+          plan_type: 'pro',
+          reached_type: 'weekly-limit',
+        },
+      },
+      NOW,
+    )
+    expect(stale).toBeNull()
+  })
+
+  // MUTATION: require the class match again — `windows.find(w => !w.expired &&
+  // isShortWindow(w.window_minutes) === (hit === 'short'))` with no anchor
+  // fallback — so a short-class hit falls through to `FAILURE_SHORT_COOLDOWN_MS`.
+  //
+  // The class match is not merely unreliable, it NEVER succeeds for a short hit:
+  // every window the CLI has been observed to report declares 10080 minutes, so
+  // `five-hour-limit` matches nothing. The blind five-hour constant then
+  // over-cooled a seat whose own snapshot named a reset three hours out, and
+  // never converged on it — five hours later the same file produced the same
+  // five hours again.
+  test('a five-hour hit uses the snapshot’s own reset, not a blind five hours', () => {
+    const cooled = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          // The measured shape: one weekly-length window, well under threshold,
+          // carrying the reset — and the CLI naming a SHORT limit as the one hit.
+          windows: [{ used_percent: 41, window_minutes: 10080, resets_at_ms: NOW + 3 * 3_600_000, expired: false }],
+          plan_type: 'pro',
+          reached_type: 'five-hour-limit',
+        },
+      },
+      NOW,
+    )
+    expect(cooled?.cooling_reason).toBe('short-window')
+    expect(cooled?.cooling_until).toBe(NOW + 3 * 3_600_000 + RESET_JITTER_MS)
+    // The point of the fix: NOT the five-hour constant, which is both longer than
+    // the seat's real cap and unable to ever converge on it.
+    expect(cooled?.cooling_until).not.toBe(NOW + FAILURE_SHORT_COOLDOWN_MS)
+  })
+
+  // MUTATION: drop the anchor entirely and keep only the class constant. With no
+  // window carrying a reset there is nothing better than the constant — and the
+  // constant must still be chosen by CLASS, or a weekly cap gets five hours.
+  test('with no reset anywhere in the snapshot the class constant still applies', () => {
+    const cooled = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 3, window_minutes: 10080, resets_at_ms: null, expired: false }],
+          plan_type: 'pro',
+          reached_type: 'weekly-limit',
+        },
+      },
+      NOW,
+    )
+    // Class-matched, so the window's own LENGTH is the fallback — a week.
+    expect(cooled?.cooling_until).toBe(NOW + 10080 * 60_000)
+    expect(cooled?.cooling_reason).toBe('long-window')
+  })
+})
+
+describe('the reset boundary is approached with tolerance, never equality', () => {
+  // MUTATION: return `resets_at_ms` unchanged from `coolUntil` (drop the
+  // `+ RESET_JITTER_MS`), which is an equality compare against the boundary.
+  //
+  // `isCooling` is a strict `cooling_until > now`, so a cooldown that ends at the
+  // reported instant makes the seat eligible at exactly that millisecond. The
+  // reported instant and the instant the quota is actually refunded are different
+  // clocks, so the run lands early, hits the same cap, and is spent for nothing.
+  test('a cooldown derived from a reset ends AFTER it, and the seat is still cooling at the boundary', () => {
+    const resets = NOW + 3_600_000
+    const cooled = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 99.9, window_minutes: 300, resets_at_ms: resets, expired: false }],
+          plan_type: 'pro',
+          reached_type: null,
+        },
+      },
+      NOW,
+    )
+    expect(cooled?.cooling_until).toBeGreaterThan(resets)
+    const state = slot({ slot: 'a', cooling_until: cooled?.cooling_until ?? 0, cooling_reason: 'short-window' })
+    expect(isCooling(state, resets)).toBe(true)
+    // …and it does clear, shortly after.
+    expect(isCooling(state, resets + RESET_JITTER_MS + 1)).toBe(false)
+  })
+
+  // MUTATION: pad the DURATION fallback too. A duration is already our own
+  // conservative guess; padding it compounds a guess instead of stepping over a
+  // real boundary, and it would make the window-length fallback assertions drift.
+  test('the tolerance rides the reset path only, not the duration fallback', () => {
+    const cooled = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 99.5, window_minutes: 300, resets_at_ms: null, expired: false }],
+          plan_type: 'pro',
+          reached_type: null,
+        },
+      },
+      NOW,
+    )
+    expect(cooled?.cooling_until).toBe(NOW + 300 * 60_000)
   })
 })
 
@@ -643,6 +769,51 @@ describe('the multi-seat credential service', () => {
     }
   })
 
+  // MUTATION: stop reporting `replaced`, or compute it AFTER the write (when
+  // every seat looks pre-existing and it is always true).
+  //
+  // `normalizeSlot` trims and lowercases, so `Work`, ` work ` and `work` are ONE
+  // seat. Typing any of them over a connected `work` overwrites a live
+  // subscription bundle — silently, and the owner cannot get it back without
+  // fetching auth.json from the other machine again. The overwrite itself is
+  // legitimate (it is how a revoked seat is repaired); what was missing was the
+  // instance being able to SAY which of the two it was about to do, so no control
+  // could tell him.
+  test('a paste that will REPLACE an existing seat says so, through aliased spellings too', async () => {
+    const svc = newService()
+    const first = await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    expect(first.ok).toBe(true)
+    expect(first.replaced).toBe(false)
+    for (const alias of ['work', 'Work', ' work ', 'WORK']) {
+      const again = await svc.connectAccount(OWNER, subscriptionAuth(), { slot: alias })
+      expect(again.ok).toBe(true)
+      expect(again.slot).toBe('work')
+      expect(again.replaced).toBe(true)
+    }
+    // One seat throughout — the aliases never created a second directory.
+    expect(svc.listAccounts(OWNER).map((a) => a.slot)).toEqual(['work'])
+  })
+
+  // MUTATION: drop the `label` argument from the `connect` delegation in
+  // `connectAccount`, or restore `syncSlots` passing `record.label` to
+  // `upsertSlot`.
+  //
+  // Two ways one name was lost. The first seat delegates to the legacy `connect`,
+  // which hardcoded a generic description — so seat one was the only seat that
+  // could not be named. And `syncSlots` copied the credential row's label back
+  // over the rotation row on EVERY status poll, so a name that did survive the
+  // write reverted the first time the pane refreshed.
+  test('a seat keeps the name the owner gave it, across a status poll', async () => {
+    const svc = newService()
+    await svc.connectAccount(OWNER, subscriptionAuth(), { label: 'Personal' })
+    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work', label: 'Company' })
+    // A poll runs syncSlots; the names must survive it.
+    svc.listAccounts(OWNER)
+    const byName = new Map(svc.listAccounts(OWNER).map((a) => [a.slot, a.label]))
+    expect(byName.get('default')).toBe('Personal')
+    expect(byName.get('work')).toBe('Company')
+  })
+
   // MUTATION: make the re-materialize write unconditional.
   test('resolving never overwrites an auth.json the CLI already owns', async () => {
     const svc = newService()
@@ -699,6 +870,102 @@ describe('the multi-seat credential service', () => {
     expect(spent?.cooling).toBe(true)
     expect(spent?.cooling_reason).toBe('long-window')
     expect(spent?.used_percent).toBe(99.7)
+  })
+
+  // MUTATION: delete the `setCooldown(..., null)` arm from `harvestSlot`, i.e.
+  // go back to doing nothing when `signalToCooldown` returns null.
+  //
+  // Cooling was one-way. The cooldown is set from a reset the CLI PREDICTED, and
+  // the window can reopen before it; the seat's own next snapshot showing it
+  // under threshold is the CLI itself withdrawing the prediction. With nothing
+  // acting on that, the stale timestamp remained the only thing that could
+  // release the seat, so a paid seat sat out the remainder of a cooldown the
+  // evidence in hand had already refuted.
+  test('a current healthy reading RELEASES a cooling seat', async () => {
+    let clock = NOW
+    const svc = newService(() => clock)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    const rotation = new SqliteCodexRotationStore(db)
+    svc.resolveActiveCodexHome(OWNER, 'proj')
+    rotation.setCooldown(OWNER, 'default', {
+      cooling_until: NOW + 6 * 86_400_000,
+      cooling_reason: 'long-window',
+    })
+    expect(svc.listAccounts(OWNER)[0]?.cooling).toBe(true)
+    // The seat runs again and reports itself well under its limit.
+    writeRollout(codexHome, 'rollout-healthy.jsonl', [tokenCountLine({ used_percent: 4, window_minutes: 10080 })], 1_800_000_000)
+    clock = NOW + 5 * 60_000
+    svc.resolveActiveCodexHome(OWNER, 'proj')
+    const seat = svc.listAccounts(OWNER)[0]
+    expect(seat?.cooling).toBe(false)
+    expect(seat?.cooling_until).toBeNull()
+  })
+
+  // MUTATION: drop the `fresh` check before clearing, so a stale snapshot's null
+  // decision reads as proof of health.
+  //
+  // The inverse error, and just as wrong: `signalToCooldown` also returns null
+  // for a snapshot whose windows have all reset, and treating THAT as evidence
+  // would release a genuinely capped seat on the strength of a week-old file.
+  test('a wholly stale reading does NOT release a cooling seat', async () => {
+    let clock = NOW
+    const svc = newService(() => clock)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    const rotation = new SqliteCodexRotationStore(db)
+    svc.resolveActiveCodexHome(OWNER, 'proj')
+    rotation.setCooldown(OWNER, 'default', {
+      cooling_until: NOW + 6 * 86_400_000,
+      cooling_reason: 'long-window',
+    })
+    writeRollout(
+      codexHome,
+      'rollout-stale.jsonl',
+      [tokenCountLine({ used_percent: 4, window_minutes: 10080, resets_at: Math.floor((NOW - 86_400_000) / 1000) })],
+      1_800_000_000,
+    )
+    clock = NOW + 5 * 60_000
+    svc.resolveActiveCodexHome(OWNER, 'proj')
+    expect(svc.listAccounts(OWNER)[0]?.cooling).toBe(true)
+  })
+
+  // MUTATION: remove the `harvestSlot` call from `accountsView`, i.e. go back to
+  // a status that only reads stored state.
+  //
+  // The owner opens the pane to find out whether Codex is working. Reading only
+  // what the last run happened to persist means a seat that capped itself an hour
+  // ago still shows healthy until some future run discovers it — the pane
+  // reports the past and looks current.
+  test('reading status HARVESTS, so a seat that capped since the last run shows cooling', async () => {
+    let clock = NOW
+    const svc = newService(() => clock)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    svc.resolveActiveCodexHome(OWNER, 'proj')
+    expect(svc.listAccounts(OWNER)[0]?.cooling).toBe(false)
+    writeRollout(codexHome, 'rollout-capped.jsonl', [tokenCountLine({ used_percent: 99.8, window_minutes: 10080 })], 1_800_000_000)
+    clock = NOW + 5 * 60_000
+    // No resolve in between — the status view is the only thing that runs.
+    const seat = svc.listAccounts(OWNER)[0]
+    expect(seat?.cooling).toBe(true)
+    expect(seat?.used_percent).toBe(99.8)
+  })
+
+  // MUTATION: make `accountsView` call `syncSlots` a second time for `next`, or
+  // have `nextSlot` re-select against freshly-read state.
+  //
+  // Two passes let the two halves answer different questions: the seat listed as
+  // `active` was chosen against state the first pass had already changed, so a
+  // status reply could name one seat as active and a different one as next.
+  test('the seat marked active and the seat reported next are the same seat', async () => {
+    let clock = NOW
+    const svc = newService(() => clock)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    svc.resolveActiveCodexHome(OWNER, 'proj')
+    writeRollout(codexHome, 'rollout-spent2.jsonl', [tokenCountLine({ used_percent: 99.9, window_minutes: 10080 })], 1_800_000_000)
+    clock = NOW + 5 * 60_000
+    const view = svc.accountsView(OWNER)
+    expect(view.next?.slot).toBe('work')
+    expect(view.accounts.filter((a) => a.active).map((a) => a.slot)).toEqual(['work'])
   })
 
   test('with every seat spent it keeps a seat and logs exhaustion rather than returning null', async () => {
