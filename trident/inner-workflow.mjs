@@ -904,7 +904,14 @@ const FORGE_SCHEMA = {
 const CODEX_FORGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: [...FORGE_SCHEMA.required, 'codexStatus', 'trailerComplete', 'wrapperExitCode', 'preservedWork'],
+  required: [
+    ...FORGE_SCHEMA.required,
+    'codexStatus',
+    'trailerComplete',
+    'wrapperExitCode',
+    'preservedWork',
+    'wrapperErrTail',
+  ],
   properties: {
     // `deviatedFromSpec` RIDES ALONG IN THE SPREAD BUT IS INERT ON THIS ROUTE, and
     // that is deliberate rather than an oversight. The agent filling THIS schema is
@@ -923,6 +930,11 @@ const CODEX_FORGE_SCHEMA = {
     trailerComplete: { type: 'boolean' },
     wrapperExitCode: { type: ['number', 'null'] },
     preservedWork: { type: 'boolean' },
+    wrapperErrTail: {
+      type: 'string',
+      description:
+        'verbatim bounded tail of the wrapper .err file when codexStatus !== connected; empty string "" when connected',
+    },
   },
 }
 
@@ -1535,6 +1547,17 @@ function codexBriefByPath(brief) {
   }
 }
 
+function wrapperErrTailInstruction(errFile) {
+  return `Whenever \`codexStatus !== 'connected'\`, run \`tail -c 400 ${shSingleQuote(errFile)} 2>/dev/null || true\` and copy its output VERBATIM into \`wrapperErrTail\`; when \`codexStatus === 'connected'\`, set \`wrapperErrTail\` to \`""\`.`
+}
+
+function codexDeferralMessage(label, codexStatus, wrapperErrTail) {
+  const tail = typeof wrapperErrTail === 'string' ? wrapperErrTail : ''
+  return tail.length > 0
+    ? `${label} deferred (codexStatus=${codexStatus}): ${tail}`
+    : `${label} deferred (codexStatus=${codexStatus}): wrapper stderr was empty.`
+}
+
 function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   const uniq = runId || slug
   const briefFile = `/tmp/trident-codex-build-${uniq}-${slot}.brief`
@@ -1670,6 +1693,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. ${corruptInstructions}, copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.${partMissingInstructions}
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
 For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
+${wrapperErrTailInstruction(errFile)}
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred', trailerComplete=false, wrapperExitCode=null, and report whether the current worktree has preserved work.`
 }
 
@@ -1689,6 +1713,7 @@ function codexCollectPrompt(slot) {
   const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
   const outFile = `/tmp/trident-codex-build-${uniq}-${slot}.out`
+  const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
   return `You are the CODEX BUILD COLLECT bridge for trident. The wrapper for this run ALREADY FINISHED and wrote its completion trailer at ${trailerFile}. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT launch anything. Do NOT build, edit, or rerun anything. Read ${trailerFile}, ${exitFile}, and only the bounded transcript tail needed from ${outFile}, then map the completed build exactly as EXIT 0 below. NEVER EXIT SILENTLY.
 - EXIT 0 → codexStatus='connected'. Set trailerComplete=true and preservedWork=false. Copy the integer in ${exitFile} to wrapperExitCode, or null when it is absent.
@@ -1700,6 +1725,7 @@ Do NOT launch anything. Do NOT build, edit, or rerun anything. Read ${trailerFil
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
   testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
+${wrapperErrTailInstruction(errFile)}
 Return via the schema.`
 }
 
@@ -1728,6 +1754,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → codexStatus='deferred'. Do not rewrite the brief or relaunch the wrapper from this wait bridge.
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
 For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values.
+${wrapperErrTailInstruction(errFile)}
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER EXIT SILENTLY.`
 }
 
@@ -1813,9 +1840,7 @@ async function forgeAgent(opts, tag, brief, slot) {
     // the owner moved this phase to protect and would do it invisibly. Stop instead:
     // the catch{} persists a terminal failure naming the status, and the operator
     // reconnects codex or moves the phase back themselves.
-    throw new Error(
-      `${opts.label} was routed to the codex executor and NO BUILD HAPPENED (codexStatus=${res.codexStatus}) — see the codex-build wrapper stderr. Refusing to continue: falling back to Claude would silently spend the quota this route exists to save.`,
-    )
+    throw new Error(codexDeferralMessage(opts.label, res.codexStatus, res.wrapperErrTail))
   }
   // THE MEASURED BRANCH IS CHECKED, NOT JUST CARRIED. The wrapper reports the branch it
   // was standing on (`git rev-parse --abbrev-ref HEAD`) and already blanks the sha when

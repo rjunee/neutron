@@ -22,6 +22,9 @@ import { TridentTickLoop } from './tick.ts'
 const INCIDENT_CAUSE =
   'forge:build was routed to the codex executor and NO BUILD HAPPENED ' +
   '(codexStatus=deferred) — Refusing to continue…'
+const WRAPPER_REFUSAL =
+  'CODEX_BUILD_BRIEF_PART_CORRUPT: brief part X measures 27893:ff41febe but its receipt is 28462:9f34d3b0'
+const WRAPPER_DEFERRAL_CAUSE = `forge:build deferred (codexStatus=deferred): ${WRAPPER_REFUSAL}`
 
 const infraResult = (cause = INCIDENT_CAUSE) => ({
   ok: false,
@@ -101,6 +104,7 @@ describe('measured-fields classifier is conservative and total', () => {
   test('recognises only explicit infra-only or closed executor/transport words', () => {
     expect(classify('REQUEST_CHANGES', 'infra-only', 'review service unavailable')).toBe('infrastructure')
     expect(classify('REQUEST_CHANGES', null, INCIDENT_CAUSE)).toBe('infrastructure')
+    expect(classify('REQUEST_CHANGES', null, WRAPPER_DEFERRAL_CAUSE)).toBe('infrastructure')
     expect(classify('REQUEST_CHANGES', null, 'upstream returned Bad Gateway')).toBe('infrastructure')
     expect(classify('REQUEST_CHANGES', null, 'tests failed: 3 failing')).toBe('genuine')
     expect(classify('REQUEST_CHANGES', null, null)).toBe('genuine')
