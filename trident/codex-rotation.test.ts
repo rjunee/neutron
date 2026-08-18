@@ -335,7 +335,7 @@ describe('failure classification', () => {
     expect(classifyCodexFailure("You've hit your session limit · resets 12am (UTC)", NOW)?.cooling_reason).toBe('short-window')
   })
 
-  test('a typographic apostrophe classifies identically to an ASCII one', () => {
+  test('a curly typographic quote classifies identically to a plain ASCII one', () => {
     expect(classifyCodexFailure('You’ve hit your usage limit', NOW)).not.toBeNull()
   })
 

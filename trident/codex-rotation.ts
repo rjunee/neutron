@@ -327,11 +327,11 @@ function findRateLimits(node: unknown): Record<string, unknown> | null {
  * search DOES return strings from that binary — a search that can only come back
  * empty is not evidence of absence.
  *
- * Apostrophes are deliberately NOT part of any pattern. The binary carries the
- * ASCII form, terminals and logs have been seen to carry the typographic one,
- * and a classifier that hinged on which quote character arrived would fail
- * open — silently declining to cool a capped seat, which is the failure mode
- * that makes the whole policy inert.
+ * The single-quote character is deliberately NOT part of any pattern. The binary
+ * carries the plain ASCII form, terminals and logs have been seen to carry the
+ * curly typographic one, and a classifier that hinged on which of the two
+ * arrived would fail OPEN — silently declining to cool a capped seat, which is
+ * the failure mode that makes the whole policy inert.
  */
 const RATE_LIMIT_PATTERNS: readonly RegExp[] = [
   /hit your usage limit/i,

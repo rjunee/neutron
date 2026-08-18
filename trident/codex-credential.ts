@@ -26,6 +26,7 @@ import { delimiter, join } from 'node:path'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import type { CredentialScope } from '@neutronai/project-credentials/store.ts'
 import type { OwnerHandle } from '@neutronai/persistence/index.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import {
   codexProjectHome,
   deriveCodexStatus,
@@ -226,8 +227,9 @@ export interface CodexCredentialServiceDeps {
   now?: () => number
   /** Structured log sink. Used to SURFACE exhaustion — a pool where every seat is
    *  capped must be loud, because the alternative is a review that quietly runs
-   *  without its cross-model seat. */
-  log?: (event: string, fields: Record<string, unknown>) => void
+   *  without its cross-model seat. Values are scalars only, matching the logger's
+   *  own field type, so nothing here can ever serialize a credential object. */
+  log?: (event: string, fields: Record<string, string | number | boolean | null | undefined>) => void
 }
 
 /** One seat as the owner sees it. Never carries token material. */
@@ -253,7 +255,10 @@ export class CodexCredentialService {
   private readonly codexHome: string
   private readonly rotation: CodexRotationStore
   private readonly now: () => number
-  private readonly log: (event: string, fields: Record<string, unknown>) => void
+  private readonly log: (
+    event: string,
+    fields: Record<string, string | number | boolean | null | undefined>,
+  ) => void
 
   constructor(deps: CodexCredentialServiceDeps) {
     this.store = deps.store
@@ -521,24 +526,31 @@ export class CodexCredentialService {
     // Fire-and-forget: the resolver is synchronous by contract (the orchestrator
     // calls it at fire time) and a failed re-encrypt must not fail a run — the
     // stored copy simply stays stale until the next resolve tries again.
-    void this.store
-      .set(owner_slug, {
-        service,
-        plaintext: validated.normalized,
-        scope: target.scope,
-        project_id: target.project_id,
-        label: null,
-        expires_at: null,
-      })
-      .then(() => {
-        this.log('codex_credential_harvested_back', { service, bytes: validated.normalized?.length ?? 0 })
-      })
-      .catch((err: unknown) => {
+    fireAndForget(
+      'codex_credential_harvest_back',
+      this.store
+        .set(owner_slug, {
+          service,
+          plaintext: validated.normalized,
+          scope: target.scope,
+          project_id: target.project_id,
+          label: null,
+          expires_at: null,
+        })
+        .then(() => {
+          // Length only — never the bundle, and never any field of it.
+          this.log('codex_credential_harvested_back', {
+            service,
+            bytes: validated.normalized?.length ?? 0,
+          })
+        }),
+      (err: unknown) => {
         this.log('codex_credential_harvest_back_failed', {
           service,
           error: err instanceof Error ? err.message : String(err),
         })
-      })
+      },
+    )
   }
 
   /**
