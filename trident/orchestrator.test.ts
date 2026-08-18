@@ -3331,14 +3331,57 @@ describe('orchestrator — the resume live head is read in code, never relayed b
           : ok(),
     })
 
-  test("a 'ralph-task-built' checkpoint is exempt — the fire still happens on an unreadable head", async () => {
-    const h = unreadable()
-    const run = await resumeRun({ inner_checkpoint: 'ralph-task-built' })
-    await launchOnce(h)
-    expect(h.inputs).toHaveLength(1)
-    expect(h.inputs[0]!.resume_live_head).toBe('')
-    expect(store.get(run.id)!.phase).not.toBe('failed')
-  })
+  test.each(['ralph-task-built', 'ralph-task-built-deviated'] as const)(
+    "a deferred '%s' re-fire reads the local branch tip and never asks stale origin",
+    async (checkpoint) => {
+      const localHead = 'b'.repeat(40)
+      const staleRemoteHead = 'c'.repeat(40)
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/heads/feat-x^{commit}')) return ok(localHead)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+            return ok(`${staleRemoteHead}\trefs/heads/feat-x\n`)
+          }
+          return ok()
+        },
+      })
+      seq += 1
+      const run = await createRun({
+        merge_mode: 'pr' as MergeMode,
+        slug: `deferred-refire-${seq}`,
+        ralph: true,
+      })
+      await store.update(run.id, {
+        subagent_run_id: 'stale-id-from-prior-process',
+        subagent_status: 'running',
+        pr: 42,
+        ralph_round: 1,
+        inner_checkpoint: checkpoint,
+        inner_checkpoint_head: localHead,
+      })
+
+      await launchOnce(h)
+
+      expect(h.hostCalls).toContainEqual([
+        'git',
+        '-C',
+        '/repo',
+        'rev-parse',
+        '--verify',
+        'refs/heads/feat-x^{commit}',
+      ])
+      expect(
+        h.hostCalls.some((cmd) =>
+          cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x'),
+        ),
+      ).toBe(false)
+      expect(h.inputs).toHaveLength(1)
+      expect(h.inputs[0]!.resume_live_head).toBe(localHead)
+      expect(store.get(run.id)!.phase).not.toBe('failed')
+    },
+  )
 
   test("a RALPH 'forge-done' is exempt too — its rebuild does not depend on the head", async () => {
     const h = unreadable()

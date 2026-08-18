@@ -2090,7 +2090,14 @@ export function buildTridentOrchestrator(
             {
               repo_path: run.repo_path,
               branch: run.branch,
-              merge_mode: run.merge_mode,
+              // Deferred Ralph waves deliberately leave origin stale. These checkpoints
+              // rebuild regardless of the head; the local match is planner-only, allowing
+              // the clean name to open plan:next through cleanContinuation.
+              merge_mode:
+                resume_checkpoint === 'ralph-task-built' ||
+                resume_checkpoint === 'ralph-task-built-deviated'
+                  ? 'local'
+                  : run.merge_mode,
             },
             // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
             // network call and the consequence of `''` is terminal, so the attempts are
