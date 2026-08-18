@@ -79,6 +79,7 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     [
       grabFunction('shSingleQuote'),
       grabFunction('wrapperErrTailInstruction'),
+      grabFunction('workflowStageStampCommand'),
       grabFunction('codexBuildPrompt'),
       grabFunction('codexCollectPrompt'),
       grabFunction('codexWaitMorePrompt'),
