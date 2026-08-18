@@ -132,6 +132,7 @@ import { WatchdogSupervisor } from '@neutronai/watchdog/supervisor.ts'
 import { type GatewayModule } from '../module-graph.ts'
 import type { CompositionInput } from './input/composition-input.ts'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const moduleLog = createLogger('core-modules')
 // Distinct subsystem tag for the tasks-composer wiring warnings (a boot-time
@@ -648,7 +649,10 @@ export function buildCoreModules(
         // rule and its known over-count live, and which is unit-tested behaviourally.
         orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
         orchestratorOpts.record_stage = (id, stage, meta) => {
-          void store.recordStageEvent(id, stage, meta ?? null).catch(() => {})
+          // The stamp is telemetry: a ledger failure must never hold up or fail
+          // the fire it is describing, so swallow — but through the sanctioned
+          // wrapper, which counts the rejection instead of dropping it silently.
+          fireAndForget('trident_record_stage', store.recordStageEvent(id, stage, meta ?? null))
         }
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {

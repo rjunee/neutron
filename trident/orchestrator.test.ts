@@ -2389,7 +2389,7 @@ describe('orchestrator — durable pre-build stage stamps', () => {
   test('a successful fire stamps launch, dispatch, and settle in order', async () => {
     const stamped: Array<{ run_id: string; stage: string; meta: string | null | undefined }> = []
     const h = buildHarness({
-      plan: () => ({ fire: { status: 'fired' } }),
+      plan: () => ({ fire: { status: 'fired', error: null } }),
       record_stage: (run_id, stage, meta) => stamped.push({ run_id, stage, meta }),
     })
     const created = await createRun()
@@ -2422,7 +2422,7 @@ describe('orchestrator — durable pre-build stage stamps', () => {
 
   test('a throwing record_stage seam cannot prevent the fire from advancing', async () => {
     const h = buildHarness({
-      plan: () => ({ fire: { status: 'fired' } }),
+      plan: () => ({ fire: { status: 'fired', error: null } }),
       record_stage: () => {
         throw new Error('ledger unavailable')
       },
@@ -2436,7 +2436,7 @@ describe('orchestrator — durable pre-build stage stamps', () => {
   })
 
   test('omitting record_stage preserves the existing successful fire path', async () => {
-    const h = buildHarness({ plan: () => ({ fire: { status: 'fired' } }) })
+    const h = buildHarness({ plan: () => ({ fire: { status: 'fired', error: null } }) })
     const run = await createRun()
 
     await h.loop.runOnce()
