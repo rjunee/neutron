@@ -154,6 +154,7 @@ describe('switch timing diagnostics', () => {
       marks: { vm_published: 5, frame_rendered: 8, transcript: 10, socket_open: 20 },
       total: 20,
       incomplete: false,
+      servedFromCache: false,
     }
 
     const report = buildSwitchReport(record, 123)
@@ -191,6 +192,7 @@ describe('switch timing diagnostics', () => {
       marks: { vm_published: 1 },
       total: 1,
       incomplete: true,
+      servedFromCache: false,
     }
 
     expect(() => emit(record)).not.toThrow()

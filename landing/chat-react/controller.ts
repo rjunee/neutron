@@ -866,7 +866,14 @@ export class NeutronChatController {
     // Reading an entry is USING it. Without this the ordering is by last write,
     // so the project the owner switches into constantly — and never writes to —
     // ages out behind one that took a single inbound message.
-    if (entering !== undefined) this.touchTranscript(enteringTopic, entering)
+    if (entering !== undefined) {
+      this.touchTranscript(enteringTopic, entering)
+      // The frame below will carry this topic's transcript, so the owner is looking at
+      // his messages before the store is asked anything. Tell the stopwatch, or it
+      // holds the record open for a background refresh nobody waited on and files an
+      // instant switch as a slow one blamed on the store.
+      this.switchTimer.servedFromCache()
+    }
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
     this.activeWorkBoardItems = null

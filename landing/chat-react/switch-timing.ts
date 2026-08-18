@@ -128,10 +128,45 @@ const ABSENCE_IS_NORMAL: ReadonlyMap<SwitchMark, string> = new Map<SwitchMark, s
 ])
 
 /**
+ * The same map for a switch whose first frame was PAINTED FROM CACHE.
+ *
+ * `setProject` reads the entered topic's last resolved transcript synchronously and
+ * publishes it, so the owner is looking at his messages before the store is asked
+ * anything. The read that follows is a BACKGROUND REFRESH of a screen already drawn
+ * — nobody is waiting on it. Holding the record open for it meant a switch the owner
+ * experienced as instant was filed as an eight-second switch, with the whole eight
+ * seconds attributed to the store.
+ *
+ * That is the ORIGINAL misattribution (see the `frame_rendered` note above) reappearing
+ * one level up, in the fix for it: the first version charged the store for the render;
+ * this version charged the switch for work that happened after the switch was over.
+ * Both come from the same reflex — treating "the last thing that finished" as "what the
+ * user waited for" — and both are only visible if you ask what the owner was actually
+ * looking at while the clock ran.
+ */
+const ABSENCE_IS_NORMAL_WHEN_CACHED: ReadonlyMap<SwitchMark, string> = new Map<SwitchMark, string>([
+  ...ABSENCE_IS_NORMAL,
+  ['transcript_read', 'refreshed'],
+  ['transcript', 'refreshed'],
+])
+
+/**
  * The marks whose absence IS a failure. Derived so that adding a mark to
  * {@link ABSENCE_IS_NORMAL} cannot leave a second list disagreeing with it.
  */
 const REQUIRED_MARKS: readonly SwitchMark[] = ALL_MARKS.filter((m) => !ABSENCE_IS_NORMAL.has(m))
+
+const REQUIRED_MARKS_WHEN_CACHED: readonly SwitchMark[] = ALL_MARKS.filter(
+  (m) => !ABSENCE_IS_NORMAL_WHEN_CACHED.has(m),
+)
+
+/**
+ * The marks a cache-served switch's `total` may come from — what the owner WAITED
+ * for, which is his frame being drawn. The background refresh's marks are still
+ * RECORDED when they arrive inside the flush window; they are simply not allowed to
+ * inflate the headline number, because he was already reading the screen.
+ */
+const WAITED_MARKS_WHEN_CACHED: readonly SwitchMark[] = ['vm_published', 'frame_rendered']
 
 export interface SwitchRecord {
   /** Project navigated FROM (`null` = General). */
@@ -140,10 +175,22 @@ export interface SwitchRecord {
   readonly to: string | null
   /** ms from click to each mark. A missing key means that mark never arrived. */
   readonly marks: Partial<Record<SwitchMark, number>>
-  /** ms from click to the last mark seen — the number the owner feels. */
+  /**
+   * ms from click to the last mark the owner WAITED for — the number he feels. For a
+   * cache-served switch that is the paint, not the background refresh that followed
+   * it; see {@link ABSENCE_IS_NORMAL_WHEN_CACHED}.
+   */
   readonly total: number
   /** True when the record was flushed by the deadline rather than by completing. */
   readonly incomplete: boolean
+  /**
+   * True when the first frame carried the entered topic's transcript from cache, so
+   * the owner never waited on the store. It changes which marks are REQUIRED and
+   * which may set `total` — and it is on the record, not just used inside the timer,
+   * because a reader comparing two samples cannot otherwise tell why one of them
+   * stopped at the paint.
+   */
+  readonly servedFromCache: boolean
 }
 
 export interface SwitchTimingOptions {
@@ -203,6 +250,9 @@ export class SwitchTimer {
   private timer: ReturnType<typeof setTimeout> | null = null
   private paintTimer: ReturnType<typeof setTimeout> | null = null
   private flushed = false
+  /** See {@link servedFromCache}. Decides which marks are required and which may
+   *  set `total`; never changes what is measured, only what it is called. */
+  private cached = false
 
   constructor(
     private readonly from: string | null,
@@ -218,6 +268,28 @@ export class SwitchTimer {
   }
 
   /**
+   * Declare that this switch's FIRST FRAME carried the entered topic's transcript,
+   * read from cache rather than awaited from the store.
+   *
+   * Called by `setProject` before it publishes, because the answer is known there and
+   * nowhere else: the timer cannot infer it from the marks — a cache-served switch and
+   * a store-served one stamp exactly the same five, in the same order. The difference
+   * is only WHAT THE OWNER WAS LOOKING AT while they were stamped, which is a fact
+   * about the frame, not about the clock.
+   */
+  servedFromCache(): void {
+    this.cached = true
+  }
+
+  private get requiredMarks(): readonly SwitchMark[] {
+    return this.cached ? REQUIRED_MARKS_WHEN_CACHED : REQUIRED_MARKS
+  }
+
+  private get absenceIsNormal(): ReadonlyMap<SwitchMark, string> {
+    return this.cached ? ABSENCE_IS_NORMAL_WHEN_CACHED : ABSENCE_IS_NORMAL
+  }
+
+  /**
    * Stamp a mark. The FIRST stamp of each mark wins — a reconnect that fires a
    * second `socket_open` must not overwrite the one the user actually waited for.
    */
@@ -225,7 +297,7 @@ export class SwitchTimer {
     if (this.flushed) return
     if (this.marks[mark] !== undefined) return
     this.marks[mark] = round(this.now() - this.startedAt)
-    if (!REQUIRED_MARKS.every((m) => this.marks[m] !== undefined)) return
+    if (!this.requiredMarks.every((m) => this.marks[m] !== undefined)) return
     // Every required mark is in. The paint is the one absence worth waiting on:
     // it necessarily arrives a frame AFTER `transcript`, so flushing here would
     // drop it from every switch — and waiting forever would report every hidden
@@ -255,13 +327,15 @@ export class SwitchTimer {
     this.flushed = true
     this.timer = this.cleared(this.timer)
     this.paintTimer = this.cleared(this.paintTimer)
-    const seen = ALL_MARKS.map((m) => this.marks[m]).filter((v): v is number => v !== undefined)
+    const waited = this.cached ? WAITED_MARKS_WHEN_CACHED : ALL_MARKS
+    const seen = waited.map((m) => this.marks[m]).filter((v): v is number => v !== undefined)
     this.emit({
       from: this.from,
       to: this.to,
       marks: { ...this.marks },
       total: seen.length > 0 ? Math.max(...seen) : 0,
-      incomplete: REQUIRED_MARKS.some((m) => this.marks[m] === undefined),
+      incomplete: this.requiredMarks.some((m) => this.marks[m] === undefined),
+      servedFromCache: this.cached,
     })
   }
 
@@ -311,7 +385,8 @@ function defaultEmit(r: SwitchRecord): void {
   // gets the word for WHY it is absent — a reused socket is `reused`, a hidden tab
   // is `not_painted` — because one symbol for "unnecessary" and "broken" is a lie
   // the reader cannot detect.
-  const missing = REQUIRED_MARKS.filter((m) => r.marks[m] === undefined)
+  const normal = r.servedFromCache ? ABSENCE_IS_NORMAL_WHEN_CACHED : ABSENCE_IS_NORMAL
+  const missing = ALL_MARKS.filter((m) => !normal.has(m) && r.marks[m] === undefined)
   const parts = [
     `to=${r.to ?? 'general'}`,
     `from=${r.from ?? 'general'}`,
@@ -322,7 +397,7 @@ function defaultEmit(r: SwitchRecord): void {
     `transcript=${fmt(tx)}`,
     `total=${fmt(r.total)}`,
   ]
-  for (const [mark, reason] of ABSENCE_IS_NORMAL) {
+  for (const [mark, reason] of normal) {
     if (r.marks[mark] === undefined) parts.push(`${reason}=${mark}`)
   }
   if (missing.length > 0) parts.push(`never_arrived=${missing.join(',')}`)
@@ -332,7 +407,14 @@ function defaultEmit(r: SwitchRecord): void {
 /**
  * Build the persisted perf report without ever accepting or embedding a bearer.
  *
- * `schema: 2` because `total` SILENTLY CHANGED MEANING. It is the largest mark
+ * `schema: 3` because `total` SILENTLY CHANGED MEANING — twice, for the same reason
+ * both times, which is why the id is bumped rather than reasoned about. v3 stops a
+ * CACHE-SERVED switch's `total` at the paint instead of at the background refresh that
+ * followed it, so a v2 sample and a v3 sample of the identical switch differ by
+ * seconds. A gap in the numbering is free; a collision is a wrong comparison nobody
+ * can detect afterwards, so the id moves whenever the definition does.
+ *
+ * The v2 rationale, which still holds: It is the largest mark
  * seen, and `frame_rendered` is normally the last one, so a v2 `total` includes
  * the paint where a v1 `total` stopped at `transcript`. The owner has a 47-sample
  * baseline stamped `1`; leaving the id alone would have let the two be averaged
@@ -342,7 +424,7 @@ function defaultEmit(r: SwitchRecord): void {
  */
 export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebClientReport {
   return {
-    schema: 2,
+    schema: 3,
     report_id: `web-switch-${createdAt}-${randomId()}`,
     created_at: createdAt,
     origin: globalThis.location?.origin ?? '',
@@ -360,6 +442,7 @@ export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebC
         marks: { ...r.marks },
         total: r.total,
         incomplete: r.incomplete,
+        served_from_cache: r.servedFromCache,
       },
     }],
   }
