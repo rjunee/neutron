@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
-import { applyMigrations } from '../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { changeSignatureEntries, COLS, TridentRunStore } from './store.ts'
 

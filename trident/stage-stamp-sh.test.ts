@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const SCRIPT = fileURLToPath(new URL('./stage-stamp.sh', import.meta.url))
 

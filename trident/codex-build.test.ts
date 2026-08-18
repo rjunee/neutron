@@ -45,7 +45,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
-import { applyMigrations } from '../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')

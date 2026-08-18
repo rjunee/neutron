@@ -55,6 +55,11 @@ const inputSchema: JsonSchemaDocument = {
         'The full build task / instructions. Forge builds it, Argus reviews, and it merges ' +
         'autonomously; the result is reported back here when it lands.',
     },
+    bound_pr: {
+      type: 'number',
+      description:
+        'REVIEW-ONLY MODE: the number of the EXISTING PR to review. When set, the run reviews that PR instead of building — it must never create a branch, a commit, or a new PR. REQUIRED for any task that asks to review an existing PR; a review-shaped task without it is refused.',
+    },
   },
   required: ['board_item_id', 'task'],
   additionalProperties: false,
@@ -75,6 +80,7 @@ const outputSchema: JsonSchemaDocument = {
 interface DispatchBuildArgs {
   board_item_id?: unknown
   task?: unknown
+  bound_pr?: unknown
 }
 
 /**
@@ -185,7 +191,8 @@ export function registerTridentBuildToolSurface(
       'shared code, anything that warrants code review, or large/risky work — and TELL the owner ' +
       'you are routing to trident and why. Build SIMPLE work (a single file, a quick script, a ' +
       'small self-contained edit) INLINE with your own Read/Write/Edit tools instead; do not ' +
-      'dispatch trivia here.',
+      'dispatch trivia here. To run a REVIEW round on an existing PR, set bound_pr to that PR ' +
+      'number — review-shaped tasks without bound_pr are refused.',
     input_schema: inputSchema,
     output_schema: outputSchema,
     capability_required: 'agent:dispatch_subagent',
@@ -198,6 +205,7 @@ export function registerTridentBuildToolSurface(
       const board_item_id_raw = typeof a.board_item_id === 'string' ? a.board_item_id.trim() : ''
       const board_item_id = board_item_id_raw.length > 0 ? board_item_id_raw : undefined
       const task = typeof a.task === 'string' ? a.task.trim() : ''
+      const bound_pr = typeof a.bound_pr === 'number' ? a.bound_pr : undefined
       if (task.length === 0) {
         return { ok: false, error: 'task is required and must be a non-empty string' }
       }
@@ -223,7 +231,10 @@ export function registerTridentBuildToolSurface(
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       }
-      const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
+      const result = await dispatchBoardBoundBuild(
+        { board_item_id, task, ...(bound_pr !== undefined ? { bound_pr } : {}) },
+        buildDeps,
+      )
       if (!result.ok) {
         return { ok: false, error: result.message }
       }
@@ -249,6 +260,7 @@ export function registerTridentBuildToolSurface(
     },
   })
 
+  // `work_board_start` deliberately has no bound_pr: saved-spec starts are builds; review rounds use work_board_dispatch_build.
   // `work_board_start` — the agent-native equivalent of the ▶ (play) button:
   // START (never-dispatched item) or RETRY (last run failed/stopped) a build
   // bound to a Plan item, using the item's PERSISTED spec (its design_doc_ref
