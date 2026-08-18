@@ -52,6 +52,19 @@ const planWith = (unchecked: number): string =>
 const COMMITTED_PLAN = planWith(2)
 /** …and what a probe measuring it with `grep -c` must report. */
 const COMMITTED_UNCHECKED = 2
+const DEFAULT_BRANCH_LOG = [
+  'COMMIT abc1234 2026-08-18 add the shared clamp',
+  'introduced clampFoo() in trident/foo.ts',
+  'rejected regex approach — lossy',
+  'trident/foo.ts',
+  'trident/foo.test.ts',
+].join('\n')
+const DEFAULT_BRANCH_BRIEF = [
+  'BUILT: clampFoo() in trident/foo.ts',
+  'SEAMS: use clampFoo',
+  'REJECTED: regex approach — lossy',
+  'SUITES: trident/foo.test.ts',
+].join('\n')
 
 /**
  * THE WORKFLOW'S OWN `cksumOf`, lifted out of the script it lives in.
@@ -71,6 +84,16 @@ const cksumOf = ((): ((s: string) => { crc: number; bytes: number }) => {
     crc: number
     bytes: number
   }
+})()
+
+const clampBranchBrief = ((): ((v: unknown) => string) => {
+  const start = SRC.indexOf('const BRANCH_BRIEF_MAX_BYTES = 4096')
+  const functionStart = SRC.indexOf('function clampBranchBrief(', start)
+  const end = SRC.indexOf('\n}\n\n// Appended to the forge:', functionStart) + 2
+  if (start < 0 || functionStart < 0 || end < 2) {
+    throw new Error('clampBranchBrief not found in inner-workflow.mjs')
+  }
+  return new Function(`${SRC.slice(start, end)}\nreturn clampBranchBrief`)() as (v: unknown) => string
 })()
 
 /** A probe answer that MEASURES the body it relays, the way the real seat does. */
@@ -100,6 +123,7 @@ type ProbeAnswer = {
   planBody: string
   planCksum?: number
   planBytes?: number
+  branchLog?: string | null
 } | null
 
 interface Opts {
@@ -120,6 +144,12 @@ interface Opts {
   probeThrows?: boolean
   /** `true` → the `plan:next` seat returns nothing (planner terminal error). */
   planNextDead?: boolean
+  /** The optional synthesis material returned by `plan:probe`. Undefined uses the
+   *  small default fixture; null exercises the fail-open missing-log path. */
+  probeBranchLog?: string | null
+  /** The optional executor brief returned by `plan:next`. Undefined uses the
+   *  default four-section fixture; null exercises the no-header path. */
+  planNextBrief?: string | null
   /** Overrides for what `plan:next` RELAYS BACK, so a test can express a planner
    *  that edited, truncated or miscounted the committed plan it was told to echo
    *  verbatim. Absent → a faithful relay. */
@@ -178,7 +208,15 @@ async function run(opts: Opts = {}): Promise<Out> {
       // match the body's own unchecked lines — the workflow now cross-checks the
       // two, so a harness that contradicted itself would make every test exercise
       // the escalation path instead of the path it names.
-      probeAnswer = opts.probe === undefined ? measured(COMMITTED_PLAN, COMMITTED_UNCHECKED) : opts.probe
+      const measuredAnswer = opts.probe === undefined
+        ? measured(COMMITTED_PLAN, COMMITTED_UNCHECKED)
+        : opts.probe
+      probeAnswer = measuredAnswer === null
+        ? null
+        : {
+            ...measuredAnswer,
+            branchLog: opts.probeBranchLog === undefined ? DEFAULT_BRANCH_LOG : opts.probeBranchLog,
+          }
       return probeAnswer
     }
     if (label === 'plan:next') {
@@ -197,6 +235,7 @@ async function run(opts: Opts = {}): Promise<Out> {
         // `probe`/`planNextRelay`.
         remainingTasks:
           opts.planNextRelay?.remainingTasks ?? Math.max(0, (probeAnswer?.uncheckedCount ?? 1) - 1),
+        branchBrief: opts.planNextBrief === undefined ? DEFAULT_BRANCH_BRIEF : opts.planNextBrief,
       }
     }
     if (label === 'plan:fable') {
@@ -438,6 +477,87 @@ describe('plan:next — a clean continuation plans from the committed plan', () 
       expect(out.labels).not.toContain('plan:next')
     })
   }
+})
+
+describe('plan:next — the branch-state brief', () => {
+  test('a continuation round hands Forge the branch-state brief the planner produced', async () => {
+    const out = await run(cleanHandoff(2))
+
+    const forge = promptFor(out, 'forge:build')
+    expect(forge).toContain('BRANCH-STATE BRIEF')
+    expect(forge).toContain(DEFAULT_BRANCH_BRIEF)
+
+    const next = promptFor(out, 'plan:next')
+    expect(next).toContain('branchBrief')
+    expect(next).toContain(DEFAULT_BRANCH_LOG)
+
+    const probe = promptFor(out, 'plan:probe')
+    expect(probe).toContain('git log')
+    expect(probe).toContain('head -c 12288')
+  })
+
+  test('clampBranchBrief enforces the 4096-byte boundary without splitting code points', () => {
+    const exact = 'x'.repeat(4096)
+    expect(clampBranchBrief(exact)).toBe(exact)
+
+    const marker = '\n[branch-state brief truncated at 4096 bytes]'
+    const over = clampBranchBrief('x'.repeat(4097))
+    expect(Buffer.byteLength(over, 'utf8')).toBeLessThanOrEqual(4096)
+    expect(over.endsWith(marker)).toBe(true)
+
+    const threeByte = clampBranchBrief('界'.repeat(1400))
+    expect(Buffer.byteLength(threeByte, 'utf8')).toBeLessThanOrEqual(4096)
+    expect(Buffer.from(threeByte, 'utf8').toString('utf8')).toBe(threeByte)
+    expect(threeByte.endsWith(marker)).toBe(true)
+
+    for (const empty of [null, undefined, 42, '   ']) expect(clampBranchBrief(empty)).toBe('')
+  })
+
+  test('an oversized planner brief is clamped before Forge consumes it', async () => {
+    const oversized = 'y'.repeat(10000)
+    const out = await run(cleanHandoff(2, { planNextBrief: oversized }))
+    const forge = promptFor(out, 'forge:build')
+
+    expect(forge).toContain('[branch-state brief truncated at 4096 bytes]')
+    expect(forge).toContain('y'.repeat(1000))
+    expect(forge).not.toContain(oversized)
+  })
+
+  test('round 5 carries round 5 brief only — no channel exists for round 2 superseded content', async () => {
+    const round2 = await run(cleanHandoff(1, {
+      planNextBrief: 'BRIEF-R2-ZZQ',
+      withDb: true,
+    }))
+    const round2Forge = promptFor(round2, 'forge:build')
+    const persistedPlanInstruction = round2Forge.split('- Persist the plan: write')[1] ?? ''
+
+    expect(persistedPlanInstruction).not.toContain('BRIEF-R2-ZZQ')
+    expect(COMMITTED_PLAN).not.toContain('BRIEF-R2-ZZQ')
+    const durablePrompts = round2.captured.filter(
+      ({ label }) => label.startsWith('checkpoint:') || label === 'terminal-result',
+    )
+    expect(durablePrompts.length).toBeGreaterThan(0)
+    for (const { prompt } of durablePrompts) expect(prompt).not.toContain('BRIEF-R2-ZZQ')
+
+    const round5 = await run(cleanHandoff(4, {
+      probe: measured(planWith(1), 1),
+      planNextBrief: 'BRIEF-R5-QQZ',
+    }))
+    const round5Forge = promptFor(round5, 'forge:build')
+    expect(round5Forge).toContain('BRIEF-R5-QQZ')
+    expect(round5Forge).not.toContain('BRIEF-R2-ZZQ')
+  })
+
+  test('missing branch material fails open without abandoning plan:next', async () => {
+    const out = await run(cleanHandoff(2, {
+      probeBranchLog: null,
+      planNextBrief: null,
+    }))
+
+    expect(out.labels).toContain('plan:next')
+    expect(promptFor(out, 'plan:next')).toContain('(unavailable — write the brief')
+    expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
+  })
 })
 
 describe('plan-stage stamps — existing planner turns only', () => {

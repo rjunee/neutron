@@ -968,6 +968,11 @@ const PLAN_SCHEMA = {
     },
     complexity: { type: 'string', enum: ['mechanical', 'reasoning'] },
     remainingTasks: { type: 'number', description: 'count of tasks still unchecked AFTER the top task' },
+    branchBrief: {
+      type: ['string', 'null'],
+      description:
+        'compact BRANCH-STATE BRIEF for the executor — regenerated each round from the branch log + plan; hard-capped in code before use',
+    },
   },
 }
 
@@ -1008,6 +1013,9 @@ const PLAN_PROBE_SCHEMA = {
     planBody: { type: 'string' },
     planCksum: { type: ['number', 'null'] },
     planBytes: { type: ['number', 'null'] },
+    // Optional by design: absence/emptiness must never abandon the cheap path.
+    // The brief is an optimisation on an optimisation.
+    branchLog: { type: ['string', 'null'] },
   },
 }
 
@@ -1947,6 +1955,7 @@ ${task}`
 // `plan:next` a plan whose tasks nobody has published or reviewed. Same authority
 // split as `readBranchHead`, for the same reason.
 const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
+const branchLogBase = isPr ? `origin/${baseBranch}` : baseBranch
 
 function planProbePrompt() {
   const planPath = `${planProbeRef}:.trident/plans/${forgeBranch}.md`
@@ -1954,13 +1963,14 @@ function planProbePrompt() {
   const stampStep = stampCommand === null ? '' : `0. \`${stampCommand}\`\n`
   return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
-${stampStep}1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
+${stampStep}1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} 2>/dev/null || true\`
 2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
-If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0}\` — that is a normal answer, not an error to retry around.
+If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0, "branchLog": ""}\` — that is a normal answer, not an error to retry around.
 Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:
 \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | grep -c '^[[:space:]]*- \\[ \\]'\`
 (\`grep -c\` exits 1 and prints 0 when nothing matches; that is \`uncheckedCount\` = 0, not a failure.)
 3. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | cksum\` — \`cksum\` prints TWO numbers, the CRC then the byte count: report them as \`planCksum\` and \`planBytes\`. The workflow RECOMPUTES that checksum over the \`planBody\` you report, so a body that lost a line, gained a word, re-ordered the checklist, or had a '- [ ] ' silently turned into '- [x] ' on the way into the schema is DETECTED and the whole cheap path is abandoned. Do not compute either number from what you copied, and do not omit them — report exactly what \`cksum\` printed.
+4. \`cd ${shSingleQuote(repoPath)} && git log --no-color --date=short --format='COMMIT %h %ad %s%n%b' --name-only ${shSingleQuote(branchLogBase)}..${shSingleQuote(planProbeRef)} | head -c ${BRANCH_LOG_MAX_BYTES}\` — report EXACTLY what it prints, verbatim, as \`branchLog\`. It is byte-bounded and newest commit first, so truncation drops the oldest history. If the command fails or prints nothing, report \`branchLog\` as \`""\` — that is a normal answer, not an error to retry. The branch log deliberately has no checksum: it is raw synthesis material, not a persisted relay, so a lossy copy can degrade brief quality but never correctness.
 NEVER EXIT SILENTLY.`
 }
 
@@ -1974,7 +1984,7 @@ NEVER EXIT SILENTLY.`
 // saving is the ABSENT SURVEY, not a cheaper model — the routing matches
 // `plan:fable` deliberately, because choosing the next task and writing its
 // execution spec is still the high-value thinking.
-function planNextPrompt(body, forgeBranch) {
+function planNextPrompt(body, forgeBranch, branchLog) {
   const planPath = `.trident/plans/${forgeBranch}.md`
   return `You are the CONTINUATION PLANNER for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 A PRIOR ITERATION of this same build regenerated ${planPath} below and committed it to branch ${forgeBranch} with the task it built already marked '- [x]'. That plan is CURRENT. Your job is to pick up where it left off — NOT to re-derive it.
@@ -1985,11 +1995,42 @@ A PRIOR ITERATION of this same build regenerated ${planPath} below and committed
 3. Return \`executionSpec\` for that ONE task: the exact TARGET FILES, the ACCEPTANCE CRITERION (what "done" means), and the TEST PLAN (which tests to write/run) — derived from that item's own text plus the TASK CONTEXT below. Make it precise enough that a cheaper model executes it WITHOUT re-reasoning the design.
 4. Tag \`complexity\`: 'mechanical' (boilerplate, tests, formatting, a single-file edit) vs 'reasoning' (multi-file, architecture-touching, tricky invariants). When genuinely uncertain choose 'reasoning' (Opus is the safer executor).
 5. Return \`remainingTasks\` = the count of unchecked items left AFTER the one you picked. A probe counted the unchecked '- [ ]' items in this body already, so this should be that count minus one.
+6. Return \`branchBrief\` = a BRANCH-STATE BRIEF for the executor — a compact digest of what THIS branch already carries, REGENERATED THIS ROUND from the BRANCH LOG and plan in this prompt (any prior round's brief is superseded; never carry one forward). HARD LIMITS: at most 4096 bytes (the workflow truncates anything larger), and ONLY facts evidenced by the material in this prompt — never invent a symbol, a rejection, or a suite. Four labelled sections, each OMITTED when there is no evidence for it: BUILT: what the previous tasks built on this branch, by symbol and file. SEAMS: the shapes/seams they introduced that the next task must USE rather than reinvent. REJECTED: approaches tried and deliberately rejected, each with its one-line reason. SUITES: which test suites cover the touched area. Return "" if the material supports none of them.
 Return via the schema. NEVER exit silently.
 COMMITTED PLAN (verbatim):
 ${body}
+BRANCH LOG (measured by a probe; newest first; may be truncated):
+${branchLog && branchLog.trim() !== '' ? branchLog : '(unavailable — write the brief from the plan body alone, or return an empty branchBrief)'}
 TASK CONTEXT:
 ${task}`
+}
+
+const BRANCH_BRIEF_MAX_BYTES = 4096
+const BRANCH_LOG_MAX_BYTES = 12288
+
+function clampBranchBrief(v) {
+  if (typeof v !== 'string') return ''
+  const brief = v.trim()
+  if (brief === '') return ''
+
+  const width = (cp) => cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+  let bytes = 0
+  for (const ch of brief) bytes += width(ch.codePointAt(0))
+  if (bytes <= BRANCH_BRIEF_MAX_BYTES) return brief
+
+  const marker = '\n[branch-state brief truncated at 4096 bytes]'
+  let markerBytes = 0
+  for (const ch of marker) markerBytes += width(ch.codePointAt(0))
+  const contentLimit = BRANCH_BRIEF_MAX_BYTES - markerBytes
+  let truncated = ''
+  let truncatedBytes = 0
+  for (const ch of brief) {
+    const charBytes = width(ch.codePointAt(0))
+    if (truncatedBytes + charBytes > contentLimit) break
+    truncated += ch
+    truncatedBytes += charBytes
+  }
+  return truncated + marker
 }
 
 // Appended to the forge:build/forge:fix prompt in Ralph mode. Forge is now a PURE
@@ -1997,10 +2038,14 @@ ${task}`
 // and PERSISTS the regenerated plan into its worktree (with the task checked off).
 function ralphExecuteNote(plan, forgeBranch) {
   const planPath = `.trident/plans/${forgeBranch}.md`
+  const brief = clampBranchBrief(plan && plan.branchBrief)
+  const briefNote = brief === ''
+    ? ''
+    : `\n- BRANCH-STATE BRIEF (regenerated THIS round from the branch; it supersedes any earlier brief; USE these shapes/seams rather than reinventing them, do NOT re-try what is listed as REJECTED, and run the SUITES listed for the touched area):\n${brief}`
   return `\n\nRALPH MODE — you are the EXECUTOR. The plan was authored by the Fable orchestrator; do NOT re-plan or redesign — implement it.
 - Implement ONLY this one task: ${plan.topTask}
 - EXECUTION SPEC (follow it exactly):
-${plan.executionSpec}
+${plan.executionSpec}${briefNote}
 - Persist the plan: write ${planPath} with EXACTLY this body, but with the task above marked '- [x]':
 ${plan.implementationPlan}
 - Commit ${planPath} together with your code + tests.
@@ -5634,6 +5679,8 @@ try {
       // must ESCALATE to the planner that can decide the card is done, never
       // silently build nothing — and an incoherent probe answer must never get to
       // pick which of its halves the workflow believes.
+      // A probe that omitted branchLog still takes this cheap path: the brief is an
+      // optional optimisation and never participates in planner selection.
       const bodyUnchecked = planProbe === null ? -1 : countUnchecked(planProbe.planBody)
       const usePlanNext =
         cleanContinuation &&
@@ -5667,7 +5714,11 @@ try {
       const plannerLabel = usePlanNext ? 'plan:next' : 'plan:fable'
       const plan = usePlanNext
         ? await agent(
-            planNextPrompt(planProbe.planBody, forgeBranch),
+            planNextPrompt(
+              planProbe.planBody,
+              forgeBranch,
+              typeof planProbe.branchLog === 'string' ? planProbe.branchLog : '',
+            ),
             withModel({ label: 'plan:next', phase: 'Build', schema: PLAN_SCHEMA }),
           )
         : await agent(
@@ -5700,6 +5751,9 @@ try {
       // transcript. (Same discipline as `briefIntegrity()`: compare against what
       // was measured, prefer the measurement, log the divergence.)
       if (usePlanNext) {
+        // branchBrief is deliberately NOT integrity-forced: it is synthesized
+        // judgment, not a relay of a measured artifact. clampBranchBrief() is its
+        // only code gate, at the consumption point below.
         if (plan.implementationPlan !== planProbe.planBody) {
           const relayed = typeof plan.implementationPlan === 'string' ? plan.implementationPlan.length : -1
           log(
