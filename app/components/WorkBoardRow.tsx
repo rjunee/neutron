@@ -43,14 +43,13 @@ import {
 
 import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import {
-  briefAlertText,
   canPlay,
   dotState,
-  failureReasonText,
   formatCompletedShort,
   isLinkedRunning,
   isRetry,
   roundText,
+  runNotice,
   statusLabel,
   stepTag,
   type DotColorKey,
@@ -132,9 +131,7 @@ function WorkBoardRowImpl({
   const dot = dotState(item);
   const tag = stepTag(item.run_progress);
   const round = roundText(item.run_progress);
-  const failReason = failureReasonText(item.run_progress);
-  const briefAlert = briefAlertText(item.run_progress);
-  const runNotice = briefAlert ?? failReason;
+  const notice = runNotice(item.run_progress);
   const docLabel = docLinkLabel(item.design_doc_ref);
   const showPlay = canPlay(item) && onPlay !== undefined;
   const retry = isRetry(item);
@@ -330,9 +327,12 @@ function WorkBoardRowImpl({
             </View>
           ) : null}
           {round !== null ? <Text style={styles.round}>{round}</Text> : null}
-          {runNotice !== null ? (
-            <Text style={styles.failReason} numberOfLines={1}>
-              {runNotice}
+          {notice !== null ? (
+            <Text
+              style={notice.tone === 'failure' ? styles.failReason : styles.briefAlert}
+              numberOfLines={1}
+            >
+              {notice.text}
             </Text>
           ) : null}
         </View>
@@ -513,6 +513,14 @@ const styles = StyleSheet.create({
   failReason: {
     flexShrink: 1,
     color: PHASE.failed.fg,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+  },
+  // A recovered integrity incident remains readable without painting a healthy
+  // or merged run as terminally failed.
+  briefAlert: {
+    flexShrink: 1,
+    color: THEME.text_muted,
     fontSize: TYPOGRAPHY.caption.fontSize,
     lineHeight: TYPOGRAPHY.caption.lineHeight,
   },

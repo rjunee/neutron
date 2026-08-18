@@ -224,6 +224,20 @@ export function briefAlertText(rp: RunProgress | undefined): string | null {
   return typeof alert === 'string' && alert.length > 0 ? alert : null;
 }
 
+export interface RunNotice {
+  text: string;
+  tone: 'failure' | 'alert';
+}
+
+/** Terminal failure is the card's outcome; a recovered brief alert is only the
+ * fallback notice while no terminal failure reason exists. */
+export function runNotice(rp: RunProgress | undefined): RunNotice | null {
+  const failure = failureReasonText(rp);
+  if (failure !== null) return { text: failure, tone: 'failure' };
+  const alert = briefAlertText(rp);
+  return alert === null ? null : { text: alert, tone: 'alert' };
+}
+
 /** The leading dot's color bucket, or 'upcoming' (faint gray outline, no fill). */
 export type DotColorKey = 'upcoming' | PhaseColorKey;
 

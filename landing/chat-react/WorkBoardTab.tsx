@@ -193,6 +193,18 @@ function briefAlertText(rp: RunProgress | undefined): string | null {
   return typeof alert === 'string' && alert.length > 0 ? alert : null
 }
 
+interface RunNotice {
+  text: string
+  tone: 'failure' | 'alert'
+}
+
+function runNotice(rp: RunProgress | undefined): RunNotice | null {
+  const failure = failureReasonText(rp)
+  if (failure !== null) return { text: failure, tone: 'failure' }
+  const alert = briefAlertText(rp)
+  return alert === null ? null : { text: alert, tone: 'alert' }
+}
+
 interface DotState {
   cls: string
   pulse: boolean
@@ -943,9 +955,7 @@ function WorkBoardRow({
   const dot = dotState(item)
   const tag = stepTag(item.run_progress)
   const round = roundText(item.run_progress)
-  const failReason = failureReasonText(item.run_progress)
-  const briefAlert = briefAlertText(item.run_progress)
-  const runNotice = briefAlert ?? failReason
+  const notice = runNotice(item.run_progress)
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
@@ -1086,9 +1096,12 @@ function WorkBoardRow({
         <div className="cwb-row-meta">
           {tag !== null ? <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span> : null}
           {round !== null ? <span className="cwb-round">{round}</span> : null}
-          {runNotice !== null ? (
-            <span className="cwb-fail-reason" title={runNotice}>
-              {runNotice}
+          {notice !== null ? (
+            <span
+              className={notice.tone === 'failure' ? 'cwb-fail-reason' : 'cwb-brief-alert'}
+              title={notice.text}
+            >
+              {notice.text}
             </span>
           ) : null}
         </div>

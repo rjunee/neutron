@@ -8,14 +8,14 @@ Migration 0136 adds the nullable `code_trident_runs.brief_alert` field. The Code
 wrapper writes the exact `_PART_MISSING`, `_PART_CORRUPT`, or whole-brief
 `_CORRUPT` refusal through the host checkpoint before retaining the same exit-3
 fail-closed behavior. Checkpoint diagnostics are suppressed so a SQLite error
-cannot leak the tenant DB path or displace the refusal tag from the bounded
+cannot leak the project database path or displace the refusal tag from the bounded
 wrapper-error tail; a short stable failure tag remains when recording itself fails.
 
 `deriveRunProgress` now carries the alert through the Work-board HTTP and live
-snapshot shape. Both web and mobile rows prefer it over a terminal failure reason,
-so a bridge retry that recovered and let the run continue still leaves the exact
-integrity reason readable on its card. Tests cover all three persisted refusal
-paths, the store and progress mapping, client parsing, and live web rendering.
+snapshot shape. Both web and mobile rows show it in a subdued style after a bridge
+retry recovers and lets the run continue; an actual terminal failure reason takes
+precedence as the card's outcome. Tests cover all three persisted refusal paths,
+the store and progress mapping, client parsing, and live web rendering.
 
 ## 2026-08-18 — Pre-build latency gets a durable append-only stage ledger
 

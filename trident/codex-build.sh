@@ -774,7 +774,7 @@ record_brief_alert() {
     && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
     && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
     # Best-effort observability must not weaken the refusal or leak the
-    # tenant-scoped DB path through sqlite diagnostics copied into failure_reason.
+    # project database path through sqlite diagnostics copied into failure_reason.
     bash "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT}" \
       "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" \
       "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" \
@@ -802,8 +802,8 @@ if [ -n "$BRIEF_PARTS" ]; then
     n=$((n + 1))
     if [ ! -s "$part" ]; then
       brief_alert_msg="CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED."
-      echo "$brief_alert_msg" >&2
       record_brief_alert "$brief_alert_msg"
+      echo "$brief_alert_msg" >&2
       exit 3
     fi
     receipt="$(printf '%s\n' "$PART_INTEGRITY" | sed -n "${n}p")"
@@ -814,8 +814,8 @@ if [ -n "$BRIEF_PARTS" ]; then
     measured="$(fnv_receipt "$part" 2>/dev/null || true)"
     if [ "$measured" != "$receipt" ]; then
       brief_alert_msg="CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote."
-      echo "$brief_alert_msg" >&2
       record_brief_alert "$brief_alert_msg"
+      echo "$brief_alert_msg" >&2
       exit 3
     fi
     cat "$part" >> "$BRIEF_FILE"
@@ -852,8 +852,8 @@ if [ -z "$BRIEF_PARTS" ]; then
   BRIEF_MEASURED="$(fnv_receipt "$BRIEF_FILE" 2>/dev/null || true)"
   if [ "$BRIEF_MEASURED" != "$BRIEF_INTEGRITY" ]; then
     brief_alert_msg="CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote."
-    echo "$brief_alert_msg" >&2
     record_brief_alert "$brief_alert_msg"
+    echo "$brief_alert_msg" >&2
     exit 3
   fi
 fi

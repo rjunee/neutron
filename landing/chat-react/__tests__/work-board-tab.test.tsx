@@ -283,7 +283,41 @@ describe('WorkBoardTab (happy-dom)', () => {
     ]
     const { container, root, act } = await mount(listOf(rows))
     expect(container.querySelector('.cwb-tag')?.textContent).toBe('Building')
-    expect(container.querySelector('.cwb-fail-reason')?.textContent).toBe(alert)
+    expect(container.querySelector('.cwb-brief-alert')?.textContent).toBe(alert)
+    expect(container.querySelector('.cwb-fail-reason')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('shows the terminal failure instead of an earlier recovered brief alert', async () => {
+    const rows = [
+      item({
+        id: 'failed-after-alert',
+        title: 'Publish failure',
+        status: 'failed',
+        linked_run_id: 'run_failed_after_alert',
+        run_progress: {
+          run_id: 'run_failed_after_alert',
+          phase_label: 'failed',
+          step_label: 'failed',
+          round: 1,
+          started_at: '2026-08-18T00:00:00Z',
+          last_advanced_at: '2026-08-18T00:02:00Z',
+          elapsed_ms: 120000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: 'REQUEST_CHANGES',
+          failure_reason: 'publish failed: outer publisher could not open a PR',
+          brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.',
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-fail-reason')?.textContent).toBe(
+      'publish failed: outer publisher could not open a PR',
+    )
+    expect(container.querySelector('.cwb-brief-alert')).toBeNull()
+    expect(container.textContent).not.toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     await act(async () => root.unmount())
   })
 

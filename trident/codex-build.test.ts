@@ -1298,19 +1298,21 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     const res = success(corrupted, {
       partIntegrity: intended.map(briefIntegrity),
       checkpointExit: 19,
-      checkpointStderr: 'sqlite: unable to open /tenant/private/project.db',
+      checkpointStderr: 'sqlite: unable to open /sensitive/project.db',
     })
     const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
 
     expect(res.status).toBe(3)
     expect(res.stderr).toBe(
-      `${sentence}\nCODEX_BUILD_BRIEF_ALERT_FAILED\n`,
+      `CODEX_BUILD_BRIEF_ALERT_FAILED\n${sentence}\n`,
     )
     expect(res.checkpointArgs.trim().split('\n')).toEqual([
       '/tmp/run.db', 'run-123', 'brief_alert', sentence,
     ])
-    expect(res.stderr).not.toContain('/tenant/private/project.db')
-    expect(res.stderr.slice(-400)).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+    expect(res.stderr).not.toContain('/sensitive/project.db')
+    expect(Buffer.from(res.stderr).subarray(-400).toString()).toContain(
+      'CODEX_BUILD_BRIEF_PART_CORRUPT',
+    )
     expect(res.codexArgv).toBe('')
   })
 
